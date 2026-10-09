@@ -1,6 +1,6 @@
 // Host test for App/drivers/http/kiln_cfg_http.c's apply_post_handler() --
 // POST /api/kiln_configs/apply. Added to close a known test gap named in
-// docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 4: this handler's
+// docs/SYSTEM_MODE_GATE.md section 3.6 slice 4: this handler's
 // system_mode_gate wiring (owner decision Q2, 2026-09-25) was verified only
 // by code-pattern review and an ESP-IDF target build, never a host-test
 // assertion. kiln_cfg_http.c has NO other host-test coverage at all today

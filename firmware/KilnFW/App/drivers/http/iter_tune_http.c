@@ -132,7 +132,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): this is a live PID-gain write into
      * zones_config (zones_config_set_pid() below, this file's "ONLY
      * sanctioned write path" per the header comment above) -- refuse it

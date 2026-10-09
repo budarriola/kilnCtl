@@ -247,7 +247,7 @@ static void io_bridge_task(void *arg)
                     break;
                 }
                 if (rr == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
-                    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25
+                    /* docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25
                      * (Q1): distinct from ERR_SAFETY above -- a firing or
                      * autotune run (or, since 2026-09-28, a backup restore)
                      * is active, not a live safety fault. The wire word stays

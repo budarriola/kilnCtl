@@ -8,7 +8,7 @@
 // comment). Adding a new action or tightening an existing rule means editing
 // exactly one case here, never hunting across callers.
 //
-// Owner decisions this pass encodes (docs/SYSTEM_MODE_GATE_PLAN.md section 5,
+// Owner decisions this pass encodes (docs/SYSTEM_MODE_GATE.md section 5,
 // 2026-09-25):
 //   Q1 -- manual relay writes: BLANKET-REFUSE (not claimed-relays-only) any
 //        manual relay write while a firing OR autotune session is active,
@@ -20,7 +20,7 @@
 //        apply), never zones_config_set_*()/zones_config_accessors.h
 //        themselves, because autotune_engine.c/adaptive_tune.c call those
 //        accessors directly while a run IS active and must keep working
-//        (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5 spec).
+//        (docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5 spec).
 //   Q3 -- factory reset / cfgfs format while running: refuse outright. Wired
 //        below for SYS_ACTION_FACTORY_RESET/SYS_ACTION_CFGFS_FORMAT, same
 //        two facts as Q1/Q2 -- PAUSED counts as running for both, same as Q2.
@@ -28,7 +28,7 @@
 //        (this module has no notion of HTTP), leaving OTA's existing 428
 //        untouched.
 //
-// Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6), 2026-09-27:
+// Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6), 2026-09-27:
 // SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule,
 // wired into profile_executor_run()'s and autotune_begin_run_locked()'s
 // choke points ahead of their readiness_gate_evaluate() call, and into

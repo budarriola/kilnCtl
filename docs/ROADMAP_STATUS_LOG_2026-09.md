@@ -62,7 +62,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 > call sites, so a start refused for recovery mode reads the same string on
 > HTTP/UART/LCD alike; `App/drivers/http/recovery_start_refusal.h` (the
 > HTTP-only wording it retired) is deleted. All five `docs/
-> SYSTEM_MODE_GATE_PLAN.md` slices are now LANDED — 2026-09-25 landed
+> SYSTEM_MODE_GATE.md` slices are now LANDED — 2026-09-25 landed
 > zone-config writes, factory reset, and cfgfs format (plan slices 4/5, on
 > top of plan slice 3's manual relay writes), two new bench MCP tools
 > (`control_set_zone_limits`, `safety_get_unset_commissioning_params`)
@@ -93,7 +93,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   `firmware/KilnFW/App/test/safety_fault_hold_mirror_drift_check.py`, which
 >   fails loudly if either constant changes without the other being revisited.
 > - **System-mode command gate, 2026-09-25 — owner decisions recorded, slices
->   2/3/4/5 LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE_PLAN.md`, answering
+>   2/3/4/5 LANDED, review fixes applied:** `docs/SYSTEM_MODE_GATE.md`, answering
 >   `firmware/KilnFW/TODO.md` 10.14's Phase 6 (a single owning function/table
 >   deciding whether a *class* of command is allowed given current system mode
 >   — firing/autotune/OTA/recovery/safety-tripped/readiness — composed with,
@@ -183,7 +183,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   `check_httpd_task_stack_budget.py`/`check_system_uart_bridge_stack_budget.py`
 >   pair (each walks its full call graph from one root rather than
 >   enumerating buffers by name) -- no new check needed. Full detail:
->   `docs/SYSTEM_MODE_GATE_PLAN.md` §3.6 slices 4/5/7/8.
+>   `docs/SYSTEM_MODE_GATE.md` §3.6 slices 4/5/7/8.
 >   **Closed 2026-09-28** (`a2bc530e`): `uart_bridge_ext_control.c`'s
 >   `SET_ZONE_PID`/`SET_ZONE_MODEL` gate now has its own host-test harness,
 >   `test_uart_bridge_ext_control_gate.c` -- the gate itself was already in

@@ -200,7 +200,7 @@ static SemaphoreHandle_t s_slot_lock;
  * never block on NVS I/O the way crash_report_get() would.
  *
  * out_mode_blocked works the same as out_updating/out_crash_unack above, for
- * the same reason: docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25
+ * the same reason: docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25
  * (Q1) -- BLANKET-refuse any manual relay-ON while a firing or autotune run
  * is active, on all three transports that reach this one choke point.
  * Checked LAST, after every gate above, so a more specific refusal (safety

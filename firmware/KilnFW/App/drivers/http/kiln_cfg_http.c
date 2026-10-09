@@ -362,7 +362,7 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * applying a saved kiln config is exactly that -- while a firing or
      * autotune run is active, PAUSED included. Checked HERE, right after the

@@ -152,7 +152,7 @@ bool relay_authority_manual_blocked_by_owner(uint8_t relay_index) { (void)relay_
 static bool s_stub_crash_unacked = false;
 bool crash_report_has_unacknowledged(void) { return s_stub_crash_unacked; }
 
-// docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
+// docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1):
 // relay_on_blocked() calls system_mode_gate_blocks_relay(), which reads
 // these two facts through relay_authority_heat_run_active() -- a leaf getter
 // (review fix, same day: the original version of this stub was for
@@ -374,7 +374,7 @@ static void test_relay_on_blocked_danger_mode_bypasses_every_gate(void)
     s_stub_crash_unacked = false;
 }
 
-// ---- Review fixes, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md) -------------
+// ---- Review fixes, 2026-09-25 (docs/SYSTEM_MODE_GATE.md) -------------
 // The four tests below are new: the original slice-3 landing left the mode
 // gate's actual integration with relay_on_blocked() completely untested --
 // s_stub_profile_running/s_stub_autotune_running above were hardcoded false,

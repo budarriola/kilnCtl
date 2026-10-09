@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for kilnctrl.info.InfoClient.wait_for_boot_push().
 
-Task 2 (docs/SYSTEM_MODE_GATE_PLAN.md): mcp_server_ui_test.py's
+Task 2 (docs/SYSTEM_MODE_GATE.md): mcp_server_ui_test.py's
 factory_default_then_load_preset() used to confirm a factory reset actually
 happened by calling get_fw_version() -- a plain QUERY that the device's
 always-alive INFO task answers whether or not it ever rebooted. That made it

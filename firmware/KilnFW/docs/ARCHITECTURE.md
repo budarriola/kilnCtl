@@ -234,7 +234,7 @@ choke point for Phase 6 (§3) — not a bug fix.
 
 ### Phase 6 — system-mode command gate
 
-**BUILT** (slices 1-7 of `docs/SYSTEM_MODE_GATE_PLAN.md` landed): `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`, HTTP wiring in `App/drivers/http/system_mode_gate_http.c`, call-site lint `tools/check_system_mode_gate_call_sites.ps1`. The text below is the original design sketch (policy layer name was TBD; it shipped as `system_mode_gate`), recorded in `TODO.md` §10.14 and the
+**BUILT** (slices 1-7 of `docs/SYSTEM_MODE_GATE.md` landed): `system_mode_gate_check()` in `App/drivers/safety/system_mode_gate.c`, HTTP wiring in `App/drivers/http/system_mode_gate_http.c`, call-site lint `tools/check_system_mode_gate_call_sites.ps1`. The text below is the original design sketch (policy layer name was TBD; it shipped as `system_mode_gate`), recorded in `TODO.md` §10.14 and the
 approved plan. Distinct question from single-writer ownership: not "can two
 writers race on this state" (which the owner tasks already answer) but "is
 this *class* of command allowed at all, given what the system is doing

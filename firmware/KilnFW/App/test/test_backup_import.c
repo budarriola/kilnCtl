@@ -76,7 +76,7 @@ void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 void test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test(void);
 
 // relay_authority.h -- backup_import.c's system_mode_gate wiring
-// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25). Defaults
+// (docs/SYSTEM_MODE_GATE.md, gate-slices-2/4/5, 2026-09-25). Defaults
 // idle so every pre-existing test in this file keeps exercising exactly the
 // scenario it did before; test_backup_import_refused_by_system_mode_gate()
 // below is the one test that sets this to prove the refusal is wired.
@@ -455,7 +455,7 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r)
     s_send_last_err_msg[0] = '\0';
     return ESP_FAIL;
 }
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the handler-level order
+// Task 1c (docs/SYSTEM_MODE_GATE.md known gap): the handler-level order
 // test below (test_backup_import_post_*) needs to see what status/body the
 // real backup_import_post_handler() actually sent for a refusal, so these two
 // capture their last argument into static buffers rather than discarding it.
@@ -588,7 +588,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
     return ESP_OK;
 }
 
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): backup_import_post_handler()
+// Task 1c (docs/SYSTEM_MODE_GATE.md known gap): backup_import_post_handler()
 // also checks http_async_job_busy() after the mode gate and the OTA
 // interlock, the same three-stage order zones_post_handler() uses. Unlike
 // the mode gate and the interlock, this symbol is NOT locally stubbed here --
@@ -2518,7 +2518,7 @@ static void test_malformed_body_writes_nothing(void)
 // mode-gate logic at all -- the old test here (asserting the sentinel
 // prefix) tested code that no longer exists and has been removed.
 //
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known test gaps): the handler-level
+// Task 1c (docs/SYSTEM_MODE_GATE.md known test gaps): the handler-level
 // harness this comment used to say was out of scope now exists, following
 // test_zones_http.c's run_zones_post() pattern exactly -- a staged
 // httpd_req_t driving the real backup_import_post_handler() (#included above)

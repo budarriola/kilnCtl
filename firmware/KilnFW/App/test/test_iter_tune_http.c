@@ -70,7 +70,7 @@ esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *r, const char *str);
 esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len);
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size);
 
-// system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slice-3-
+// system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md, gate-slice-3-
 // followup, 2026-09-25): iter_tune_restore_post_handler() now gates
 // restore_commissioned on SYS_ACTION_WRITE_ZONES_CONFIG. Fakes default idle
 // so every pre-existing test in this file keeps exercising exactly the

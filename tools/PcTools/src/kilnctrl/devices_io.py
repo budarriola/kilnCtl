@@ -111,7 +111,7 @@ class RelayRefusal(enum.Enum):
     SAFETY = "safety"
     UPDATING = "updating"
     DRIVER_ERROR = "driver error"
-    # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1/Q4):
+    # docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1/Q4):
     # KILN_IO_OWNER_RELAY_ERR_RUNNING's UART reject word (uart_bridge_io.c):
     # a firing or autotune run, or (2026-09-28) a backup restore, is active.
     RUNNING = "running"

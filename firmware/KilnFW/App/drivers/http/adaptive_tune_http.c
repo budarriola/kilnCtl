@@ -164,7 +164,7 @@ static esp_err_t enable_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): this is the operator's own external toggle of
      * adaptive tune (zones_config_set_adaptive_tune_enabled(), reached via
      * adaptive_tune_set_enabled() below) -- refuse it while a firing or
@@ -234,7 +234,7 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): revert is a live zones_config write
      * (adaptive_tune_revert() -> zones_config_set_*(), per this handler's own
      * header comment) -- refuse it while a firing or autotune run is active,

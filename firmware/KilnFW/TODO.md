@@ -2030,7 +2030,7 @@ suspected to be related to this work, was root-caused separately (also in
       e.g. while a profile is firing, stop/pause/modify-this-run is fine, but
       starting a *different* profile, running autotune, or a raw GPIO/SX1509
       debug write should be refused outright. **All five rollout slices
-      LANDED** (`docs/SYSTEM_MODE_GATE_PLAN.md` section 3.6, owner decisions
+      LANDED** (`docs/SYSTEM_MODE_GATE.md` section 3.6, owner decisions
       2026-09-25): `system_mode_gate.h`/`.c` (slice 1); manual relay writes
       via `kiln_io_owner.c`'s `relay_on_blocked()` (slice 3); recovery-mode
       start refusals shared across HTTP/UART/LCD, retiring the HTTP-only

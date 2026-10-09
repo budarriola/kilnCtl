@@ -230,7 +230,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * that guard is safe; readiness_gate.c documents the fail-safe direction
      * of every fact it reads on a board that has not finished starting.
      *
-     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): collects the
+     * Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6): collects the
      * readiness facts once and runs system_mode_gate_check()'s recovery-mode
      * rule against them BEFORE readiness_gate_evaluate() -- the same facts,
      * no second collect -- so the recovery-mode wording an operator sees here

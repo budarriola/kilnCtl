@@ -4205,7 +4205,7 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)
 {
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * restoring a backup is exactly that -- while a firing or autotune run
      * is active, PAUSED included. Checked HERE, at the very top of the

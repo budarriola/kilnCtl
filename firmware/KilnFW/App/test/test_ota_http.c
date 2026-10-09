@@ -402,7 +402,7 @@ static bool g_stub_autotune_active = false;
 bool autotune_engine_is_active(void) { return g_stub_autotune_active; }
 
 // relay_authority.h -- factory_reset.c's system_mode_gate wiring
-// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25) reads this
+// (docs/SYSTEM_MODE_GATE.md, gate-slices-2/4/5, 2026-09-25) reads this
 // same profile_running/autotune_running snapshot; derive it from the SAME
 // g_stub_profile_state/g_stub_autotune_active globals the fakes above use,
 // so a test that sets those up for the existing sw_reset refusal checks
@@ -1264,7 +1264,7 @@ static void assert_webauth12b_credential_survived(const char *scope_name)
               scope_name);
 }
 
-// Task 1d (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the UART path
+// Task 1d (docs/SYSTEM_MODE_GATE.md known gap): the UART path
 // (SYSTEM_CMD_FACTORY_RESET, uart_bridge_system.c) never goes through
 // reset_post_handler()'s HTTP auth/interlock gate above -- it calls
 // factory_reset_execute() directly and switches on ITS return code, per

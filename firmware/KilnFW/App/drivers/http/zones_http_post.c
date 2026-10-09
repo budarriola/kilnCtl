@@ -153,7 +153,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
      * a contact that stays closed because the code that owned it stopped
      * looking at it. See the ota_http_check_interlocks() call below for why
      * that shared gate, not a private profile-is-RUNNING check, is used. */
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * not scoped to which field changed -- while a firing or autotune run is
      * active, PAUSED included, distinct 409 from the OTA interlock's own

@@ -50,7 +50,7 @@ static esp_err_t format_confirm_post_handler(httpd_req_t *req)
     char ip[46];
     ota_http_get_client_ip(req, ip, sizeof(ip)); /* logging only -- ADMIN tier (route_tier_table.h) is the only gate, AP-password HMAC retired 2026-09-29 */
 
-    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q3 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse outright while a firing or autotune
      * run is active, PAUSED included -- the first thing this handler does
      * after auth, before touching cfg_fs at all. */

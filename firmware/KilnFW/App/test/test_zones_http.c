@@ -317,7 +317,7 @@ const uint8_t tuning_recommendations_json_end[1] = { 0 };
 // directly), but every symbol the file references must resolve at link time.
 // Returns OK so that if a future test ever does drive the handler, it is the
 // handler's own logic under test rather than this stand-in refusing first.
-/* Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+/* Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
  * spec): counts calls so a test can prove the system_mode_gate check runs
  * and refuses BEFORE this interlock is ever reached, same
  * !g_probe_interlock_called convention factory_reset.c's own test uses.
@@ -717,7 +717,7 @@ void relay_authority_heat_sweep_claim_end(void)
     s_test_heat_sweep_claim_end_calls++;
 }
 
-/* zones_post_handler() (system_mode_gate wiring, docs/SYSTEM_MODE_GATE_PLAN.md
+/* zones_post_handler() (system_mode_gate wiring, docs/SYSTEM_MODE_GATE.md
  * gate-slices-2/4/5, 2026-09-25) takes this same profile_running/
  * autotune_running snapshot before calling system_mode_gate_check() --
  * derived from the SAME s_test_profile_status/s_test_autotune_active globals
@@ -1565,7 +1565,7 @@ static void run_zones_post(const char *body)
     TEST_CHECK(err == ESP_OK, "zones_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
 }
 
-// Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+// Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
 // spec): zones_post_handler() used to call system_mode_gate_check() AFTER
 // ota_http_check_interlocks() -- which already refuses (409 "a profile is
 // running") for the exact same facts -- so the mode gate's own refusal body

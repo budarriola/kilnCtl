@@ -163,7 +163,7 @@ typedef enum {
      * numeric values and crosses neither the UART wire nor NVS" reasoning as
      * ERR_UPDATING's own comment above. */
     KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK,
-    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): refused
+    /* docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1): refused
      * because a firing or autotune run is currently active -- system_mode_
      * gate.h's SYS_ACTION_RAW_RELAY_DEBUG_WRITE, checked in relay_on_blocked()
      * below. BLANKET refusal, not scoped to relays the run actually claims

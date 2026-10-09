@@ -980,7 +980,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * refusal names recovery mode instead of "autotune engine not started".
      * Nothing here touches s_at, so running before that guard is safe.
      *
-     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): same
+     * Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6): same
      * collect-once-then-check pattern as profile_executor_run() -- runs
      * system_mode_gate_check()'s recovery-mode rule against the same facts
      * before readiness_gate_evaluate(), so the recovery-mode wording matches

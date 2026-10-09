@@ -16,7 +16,7 @@
  * Narrow endpoint versus the whole-page POST /api/zones submit: PID gain
  * (kp/ki/kd) edits ONLY.
  *
- * Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE_PLAN.md gate-slices-2/4/5
+ * Review fix, 2026-09-25 (docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
  * spec, owner decision Q2): this endpoint used to be a deliberate exception,
  * allowed even while a firing was RUNNING/PAUSED. That carve-out is REVOKED
  * -- owner decision Q2 is "refuse ALL zone/relay/guard config writes, not

@@ -3,7 +3,7 @@
 // which reach zones_config_set_pid()/set_model() and must be refused while a
 // firing or autotune run is active, same as the HTTP side
 // (zones_http_post.c's POST /api/zones/pid) per owner decision Q2
-// (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25, gate-slices-2/4/5 spec).
+// (docs/SYSTEM_MODE_GATE.md, 2026-09-25, gate-slices-2/4/5 spec).
 //
 // #includes uart_bridge_ext_control.c directly (same convention as
 // test_adaptive_tune_http_gate.c/test_adaptive_tune.c) to reach its static

@@ -1133,7 +1133,7 @@ def control_set_zone_coupling(
         control_set_zone_limits()/control_set_zone_type() respect, since
         POST /api/zones refuses EVERY zone/relay/guard config write while a
         firing or autotune run is active (owner decision Q2, 2026-09-25,
-        SYSTEM_MODE_GATE_PLAN.md).
+        SYSTEM_MODE_GATE.md).
 
     After a confirmed write, re-fetches GET /api/zones and FAILS LOUD unless
     the target cell reads back within 0.0005 (comfortably above GET's own

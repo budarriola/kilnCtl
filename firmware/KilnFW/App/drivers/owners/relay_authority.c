@@ -200,7 +200,7 @@ void relay_authority_heat_sweep_claim_end(void)
 }
 
 /* Leaf getter for kiln_io_owner.c's system_mode_gate_blocks_relay() --
- * docs/SYSTEM_MODE_GATE_PLAN.md review, 2026-09-25. Deliberately reads only
+ * docs/SYSTEM_MODE_GATE.md review, 2026-09-25. Deliberately reads only
  * these two bools under the existing s_heat_claim_mux spinlock, mirroring
  * the other accessors in this section: no call into profile_executor.c or
  * autotune_engine.c, and no FreeRTOS mutex. owner_task (kiln_io_owner.c) is

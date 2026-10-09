@@ -1303,7 +1303,7 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
                 snprintf(out->reason, sizeof(out->reason),
                          "zone %u energize refused: firmware update in progress", zi);
             } else if (refused_result == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
-                /* docs/SYSTEM_MODE_GATE_PLAN.md review, 2026-09-25: not
+                /* docs/SYSTEM_MODE_GATE.md review, 2026-09-25: not
                  * expected in practice -- relay_authority_heat_sweep_claim_
                  * begin() already refuses to start a sweep while a profile/
                  * autotune run holds the shared heat claim (B2's forward

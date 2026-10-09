@@ -866,7 +866,7 @@ function attachLongPress(el, onLongPress) {
 //
 // Correction, 2026-09-25 (system_mode_gate review): this endpoint's
 // carve-out -- letting a PID-only edit through even DURING a running
-// firing -- was revoked per owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md):
+// firing -- was revoked per owner decision Q2 (docs/SYSTEM_MODE_GATE.md):
 // zones_http_pid.c now runs the same system_mode_gate_check(
 // SYS_ACTION_WRITE_ZONES_CONFIG) every other zone/config writer runs, and
 // refuses (409) while a firing or autotune run is active, PAUSED included.

@@ -86,7 +86,7 @@ static size_t control_build_get_zones(uint8_t *out)
  * never on control_task itself: CONTROL_CMD_SET_ZONE_PID/MODEL both end in
  * zones_http.c's nvs_save(). `reply` is a local here on purpose -- that is
  * what moves the BRIDGE_REPLY_MAX buffer onto the worker's internal stack. */
-/* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+/* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
  * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes -- not
  * scoped to which field changed -- while a firing or autotune run is active,
  * PAUSED included. CONTROL_CMD_SET_ZONE_PID/SET_ZONE_MODEL were a real gap

@@ -1,7 +1,7 @@
 // system_mode_gate -- Phase 6's "is this CLASS of command allowed right now"
 // layer, sitting above kiln_io_owner/thermo_owner's race-arbitration locks
 // and above readiness_gate.h/ota_interlock.h's existing gates.
-// docs/SYSTEM_MODE_GATE_PLAN.md is the design doc this implements; section 5
+// docs/SYSTEM_MODE_GATE.md is the design doc this implements; section 5
 // there records the owner's 2026-09-25 decisions this table encodes.
 //
 // Same pure/host-testable layering discipline as ota_interlock.h/
@@ -9,7 +9,7 @@
 // no pointers back into profile_executor.h/autotune_engine.h/etc, none of
 // which are host-buildable) and answers one pure question -- does this
 // snapshot permit this class of action, and if not, why. No I/O, no locks
-// taken inside it (SYSTEM_MODE_GATE_PLAN.md 3.4 / CLAUDE.md's "cache a
+// taken inside it (SYSTEM_MODE_GATE.md 3.4 / CLAUDE.md's "cache a
 // snapshot outside the lock" note) -- the caller builds the snapshot from
 // each domain's existing cheap read accessor (profile_executor_get_status(),
 // autotune_engine_get_status(), etc.) BEFORE taking any lock of its own,
@@ -56,7 +56,7 @@
 // than a config write. revert_post_handler() is unaffected and still refuses
 // unconditionally while a run is active, same as every other wired writer.
 //
-// Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6), 2026-09-27: wired
+// Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6), 2026-09-27: wired
 // SYS_ACTION_START_PROFILE/SYS_ACTION_START_AUTOTUNE's recovery-mode rule and
 // called system_mode_gate_check() for it from profile_executor_run()'s and
 // autotune_begin_run_locked()'s existing single choke points, ahead of their
@@ -93,7 +93,7 @@ extern "C" {
 // /api/diagnostics/danger/relay, uart_bridge.c's SET_RELAY/SET_RELAY_MASK,
 // and the LCD's manual override alike, because kiln_io_owner.c's
 // relay_on_blocked() is the one choke point all three already funnel
-// through (docs/SYSTEM_MODE_GATE_PLAN.md section 2.5).
+// through (docs/SYSTEM_MODE_GATE.md section 2.5).
 typedef enum {
     SYS_ACTION_START_PROFILE = 0,   // wired -- recovery_mode only (slice 2); see rollout note
     SYS_ACTION_START_AUTOTUNE,      // wired -- recovery_mode only (slice 2); see rollout note
@@ -124,7 +124,7 @@ typedef enum {
 
 // Every board fact any action's rule needs, and nothing else -- passed by
 // value so the decision is pure and the full cross product is host-testable
-// (SYSTEM_MODE_GATE_PLAN.md section 3.5). Field meanings mirror
+// (SYSTEM_MODE_GATE.md section 3.5). Field meanings mirror
 // ota_interlock_snapshot_t / readiness_gate_facts_t's own convention of
 // naming the live accessor each field is filled from.
 typedef struct {

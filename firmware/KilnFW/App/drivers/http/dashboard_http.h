@@ -639,7 +639,7 @@ typedef enum {
      * fault. Same "must not read as ERR_SAFETY" reasoning as ERR_UPDATING
      * above; appended for the same reason. */
     DASHBOARD_RELAY_ERR_CRASH_UNACK,
-    /* docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1): mirrors
+    /* docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1): mirrors
      * kiln_io_owner.h's new KILN_IO_OWNER_RELAY_ERR_RUNNING -- refused
      * because a firing or autotune run is currently active, BLANKET (any
      * relay, whether or not the run claims it), not because of a live safety

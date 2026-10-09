@@ -386,7 +386,7 @@ try {
         (Join-Path $driversDir "control/firing_score.c"),
         (Join-Path $driversDir "control/firing_compare.c"),
         (Join-Path $driversDir "safety/safety_ceiling_policy.c"),
-        # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+        # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
         # gate-slices-2/4/5, 2026-09-25): backup_import.c (#included via
         # test_backup_import.c above) now calls system_mode_gate_check()/
         # system_mode_gate_http_send_refusal() -- link both real, pure,
@@ -732,7 +732,7 @@ try {
             # reasoning used everywhere else these four files travel together.
             "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
             "`"$(Join-Path $testDir 'stubs/http_auth_link_stub.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slices-2/4/5, 2026-09-25): zones_http_post.c (#included
             # above) now calls system_mode_gate_check()/
             # system_mode_gate_http_send_refusal() -- link both real, pure,
@@ -915,7 +915,7 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6, 2026-09-27):
             # profile_executor_run.c now calls system_mode_gate_check() ahead
             # of readiness_gate_evaluate() -- link the real, pure module in
             # (already host-tested for real by test_system_mode_gate.c, its
@@ -989,7 +989,7 @@ try {
             "`"$(Join-Path $driversDir 'control/thermo_combine.c')`" `"$(Join-Path $driversDir 'control/pid_autotune.c')`" " +
             "`"$(Join-Path $driversDir 'control/thermo_channel_read.c')`" " +
             "`"$(Join-Path $driversDir 'control/heat_enable.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            # Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6, 2026-09-27):
+            # Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6, 2026-09-27):
             # autotune_engine.c now calls system_mode_gate_check() ahead of
             # readiness_gate_evaluate() -- link the real, pure module in, same
             # reasoning as test_profile_executor_prestart.c's cmd4 above.
@@ -1247,7 +1247,7 @@ try {
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slices-2/4/5, 2026-09-25): factory_reset.c (#included
             # above) now calls system_mode_gate_check()/
             # system_mode_gate_http_send_refusal() -- link both real, pure,
@@ -1420,7 +1420,7 @@ try {
             "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
             # kiln_io_owner.c's relay writes feed relay_off_tracker (on/off min_off_s hold).
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
-    # docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25 (Q1):
+    # docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1):
     # kiln_io_owner.c's relay_on_blocked() now calls system_mode_gate_
     # blocks_relay(), which calls the real system_mode_gate_check() -- linked
     # here for the same reason every other real dependency of kiln_io_owner.c
@@ -1800,7 +1800,7 @@ try {
     Invoke-HostTestExe -Name "profiles_builtin" -ExePath $exe23 -BuildCmd $cmd23
 
     # ---- test_kiln_cfg_http.c: its own 24th, separate executable --------------
-    # Closes a docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice-4 known test gap:
+    # Closes a docs/SYSTEM_MODE_GATE.md section 3.6 slice-4 known test gap:
     # kiln_cfg_http.c's apply_post_handler() (POST /api/kiln_configs/apply) had
     # NO host-test coverage of any kind before this -- its refusal order (404
     # nonexistent id, then the system_mode_gate, then the OTA interlock, then
@@ -1822,7 +1822,7 @@ try {
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
 
     # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
-    # Task 1a (docs/SYSTEM_MODE_GATE_PLAN.md known gap): adaptive_tune_http.c's
+    # Task 1a (docs/SYSTEM_MODE_GATE.md known gap): adaptive_tune_http.c's
     # enable_post_handler()/revert_post_handler() system_mode_gate wiring
     # (owner decision 2026-09-25, narrowed same day: enable only gates
     # enabled=true, never enabled=false; revert has no such carve-out) was
@@ -2112,7 +2112,7 @@ try {
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 
     # ---- test_recovery_start_refusal.c retired 2026-09-27 (mode-gate slice
-    # 2, docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): its subject,
+    # 2, docs/SYSTEM_MODE_GATE.md section 3.6): its subject,
     # App/drivers/http/recovery_start_refusal.h, was deleted -- its two HTTP
     # call sites now go through system_mode_gate_check() instead
     # (dashboard_exec_http.c, dashboard_autotune_http.c), which shares its
@@ -2493,7 +2493,7 @@ try {
     Invoke-HostTestExe -Name "log_store_mount_littlefs" -ExePath $exe49 -BuildCmd $cmd49
 
     # ---- test_system_mode_gate.c: its own FIFTIETH, separate executable.
-    # docs/SYSTEM_MODE_GATE_PLAN.md's Phase 6 gate (2026-09-25) -- a small,
+    # docs/SYSTEM_MODE_GATE.md's Phase 6 gate (2026-09-25) -- a small,
     # fully self-contained pure module (no ESP-IDF dependency at all, unlike
     # ota_interlock.c/readiness_gate.c which pull in more), so like exe35's
     # s8_rate_guard_estimate there is nothing here to fake and no fake to
@@ -2879,7 +2879,7 @@ try {
             "`"$(Join-Path $driversDir 'control/firing_compare.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
-            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md,
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
             # gate-slice-3-followup, 2026-09-25): iter_tune_restore_post_
             # handler() now calls system_mode_gate_check()/system_mode_gate_
             # http_send_refusal() -- link both real, pure, leaf modules,
@@ -3075,7 +3075,7 @@ try {
     # call -- firing_compare()'s heap-allocation failure path
     # (ITER_TUNE_REDESIGN_PLAN.md step 8 review).
     # 61 -> 62: added test_system_mode_gate.c's own Invoke-HostTestExe call --
-    # docs/SYSTEM_MODE_GATE_PLAN.md Phase 6's pure gate module (owner decisions
+    # docs/SYSTEM_MODE_GATE.md Phase 6's pure gate module (owner decisions
     # 2026-09-25).
     # 62 -> 61 (2026-09-27, mode-gate slice 2): retired test_recovery_start_
     # refusal.c's Invoke-HostTestExe call along with its subject header,
@@ -3085,11 +3085,11 @@ try {
     # 61 -> 62: added test_kiln_cfg_http.c's own Invoke-HostTestExe call --
     # kiln_cfg_http.c's apply_post_handler() refusal order (404, then the
     # system mode gate, then the OTA interlock, then http_async_job_busy()),
-    # a known test gap named in docs/SYSTEM_MODE_GATE_PLAN.md section 3.6
+    # a known test gap named in docs/SYSTEM_MODE_GATE.md section 3.6
     # slice 4, previously untested at the handler level.
     # 62 -> 63: added test_adaptive_tune_http_gate.c's own Invoke-HostTestExe
     # call -- adaptive_tune_http.c's enable_post_handler()/revert_post_handler()
-    # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE_PLAN.md known
+    # system_mode_gate wiring (Task 1a, docs/SYSTEM_MODE_GATE.md known
     # gap), previously untested at the handler level.
     # 63 -> 64: added test_uart_bridge_ext_control_gate.c's own Invoke-HostTestExe
     # call -- uart_bridge_ext_control.c's CONTROL task 8

@@ -298,7 +298,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         out->refused_by_mode_gate = false;
         out->mode_reason[0] = '\0';
     }
-    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE_PLAN.md): accept
+    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE.md): accept
      * writes zone PID gains/max_ramp, so refuse while a firing or autotune
      * run is active, before any mutation. Single choke point for the HTTP
      * and UART-bridge callers. */
