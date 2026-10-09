@@ -67,5 +67,47 @@ class RegistryWiringTest(unittest.TestCase):
         self.assertIs(get_case("SP-06").judge, C._case_sp06)
 
 
+class Sp10Sp11Test(unittest.TestCase):
+    def _sp10(self, data=None, exc=None):
+        from unittest import mock
+        from kilnctrl import safety_cfg_http_client as S
+        m = mock.patch.object(S, "get_commissioning", side_effect=exc) if exc else \
+            mock.patch.object(S, "get_commissioning", return_value=data)
+        with m:
+            return C._case_sp10({"host": "h"})
+
+    FULL = {"params": [{"name": "i_normal_a0", "set": False}, {"name": "ct_installed", "set": True, "value": 1}]}
+
+    def test_sp10_inconclusive_records(self):
+        r = self._sp10(self.FULL)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("ct_installed", r.observed["recorded"])
+        self.assertIn("0.045", r.reason)
+
+    def test_sp10_read_error_fails(self):
+        self.assertEqual(self._sp10(exc=OSError("x")).verdict, Verdict.FAIL)
+
+    def test_sp10_missing_keys_fails(self):
+        self.assertEqual(self._sp10({"params": [{"name": "tc_type"}]}).verdict, Verdict.FAIL)
+
+    def _sp11(self, free):
+        from unittest import mock
+        from kilnctrl.bench_test import cases_smoke as SM
+        tasks = [{"name": "a", "stack_total_words": 100, "high_water_words": 50},
+                 {"name": "b", "stack_total_words": 100, "high_water_words": free}]
+        with mock.patch.object(SM, "_http_get_json", return_value=(200, {"tasks": tasks})):
+            return C._case_sp11({"host": "h"})
+
+    def test_sp11_pass(self):
+        self.assertEqual(self._sp11(25).verdict, Verdict.PASS)
+
+    def test_sp11_fail(self):
+        self.assertEqual(self._sp11(20).verdict, Verdict.FAIL)
+
+    def test_registered(self):
+        for cid in ("SP-10", "SP-11"):
+            self.assertIsNotNone(get_case(cid).judge)
+            self.assertNotEqual(getattr(get_case(cid), "not_implemented", None), True)
+
 if __name__ == "__main__":
     unittest.main()

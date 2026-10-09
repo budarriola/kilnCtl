@@ -137,12 +137,52 @@ def _case_sp04(ctx: dict) -> CaseResult:
     )
 
 
+def _case_sp10(ctx: dict) -> CaseResult:
+    """CT / S9 / S14 / S15: record the CT commissioning fields. INCONCLUSIVE
+    by design on this fixture (S14/S15 dormant, i_normal_a below floor);
+    FAIL only on a read error or missing fields."""
+    from .. import safety_cfg_http_client
+
+    try:
+        data = safety_cfg_http_client.get_commissioning(ctx["host"])
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.FAIL, reason=f"GET /api/safety/commissioning failed: {exc}", observed={})
+    params = data.get("params") if isinstance(data, dict) else None
+    if not isinstance(params, list):
+        return CaseResult(Verdict.FAIL, reason="commissioning response has no params list", observed={})
+    rec = {}
+    for p in params:
+        name = str(p.get("name", "")) if isinstance(p, dict) else ""
+        low = name.lower()
+        if (low.startswith("i_normal_a") or low.startswith("ct_")
+                or any(g in low for g in ("s9", "s14", "s15"))):
+            rec[name] = {"set": p.get("set"), "value": p.get("value")}
+    if not any(k.lower().startswith("i_normal_a") for k in rec) or "ct_installed" not in rec:
+        return CaseResult(Verdict.FAIL, reason="CT fields (i_normal_a, ct_installed) missing from commissioning",
+                          observed={"recorded": rec})
+    return CaseResult(
+        Verdict.INCONCLUSIVE,
+        reason="S14/S15 dormant, i_normal_a < 0.045 A floor on this fixture; fields recorded only",
+        observed={"recorded": rec})
+
+
+def _case_sp11(ctx: dict) -> CaseResult:
+    """Pico stack margins: SK-03's logic, relabelled."""
+    from .cases_smoke import _case_sk03
+
+    result = _case_sk03(ctx)
+    result.reason = f"SP-11 (= SK-03): {result.reason}" if result.reason else "SP-11 (= SK-03)"
+    return result
+
+
 _CASE_FUNCS = {
     "SP-03": _case_sp03,
     "SP-06": _case_sp06,
     "SP-04": _case_sp04,
     "SP-08": _case_sp08,
     "SP-09": _case_sp09,
+    "SP-10": _case_sp10,
+    "SP-11": _case_sp11,
 }
 for _cid, _fn in _CASE_FUNCS.items():
     get_case(_cid).judge = _fn
