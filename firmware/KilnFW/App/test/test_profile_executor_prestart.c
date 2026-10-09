@@ -10184,6 +10184,60 @@ static void test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries(void
     }
 }
 
+static void test_aux_fault_drop_covers_disabled_and_raw_spare_relays(void)
+{
+    TEST_SECTION("review 4 M1: fault-drop covers a disabled-while-ON aux and a raw spare-relay ON");
+    /* (a) aux relay 1 ON, then enabled=0, unclaimed, idle fault */
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    g_stub_aux[0].enabled = 0;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "disabled aux still ON in the shadow is driven OFF on a fault");
+    /* (b) a spare relay (bit 3) switched on via the raw dashboard path, no aux config at all */
+    aux_fd_setup(PROFILE_EXEC_IDLE, false, false);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_stub_relay_shadow = 0x08;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(aux_test_wrote(0x08, 0x00), "raw spare relay ON is driven OFF on a fault");
+    /* (c) a zone-owned relay is not touched by the aux fault-drop */
+    aux_fd_setup(PROFILE_EXEC_IDLE, false, false);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_stub_thermo_count = 1;
+    g_stub_relay_mask[0] = 0x01;
+    g_stub_relay_shadow = 0x01;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_aux_write_log_n == 0, "zone relay is left to the zone path");
+    g_stub_thermo_count = 0;
+    g_stub_relay_mask[0] = 0;
+    s_test_relay_authority_blocked = false;
+}
+
+static void test_aux_apply_relay_failed_write_is_not_a_transition(void)
+{
+    TEST_SECTION("review 4 L1: failed aux write -> no cycle, commanded_on kept, failure logged once");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, true);
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = 1;
+    g_relay_write_fail = true;
+    g_relay_cycles_calls = 0;
+    esp_log_test_capture_reset();
+    for (int i = 0; i < 5; i++) profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_relay_cycles_calls == 0, "no contact cycle counted for a failed OFF write");
+    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded_on not changed by a failed write");
+    int n = 0;
+    for (int i = 0; i < g_esp_log_capture_count; i++) {
+        if (strstr(g_esp_log_capture[i], "write failed")) n++;
+    }
+    TEST_CHECK(n <= 1, "write-failed warning is rate-limited across retry ticks");
+    g_relay_write_fail = false;
+    profile_executor_aux_fault_drop(false);
+    TEST_CHECK(g_relay_cycles_calls == 1 && !s_exec.aux[0].commanded_on, "successful OFF counts one cycle");
+    s_test_relay_authority_blocked = false;
+}
+
 static void test_on_off_zone_and_aux_input_builders_agree(void)
 {
     TEST_SECTION("on/off input: zone and aux producers share one builder (field-for-field equivalence)");
@@ -10677,7 +10731,7 @@ static void test_aux_switch_count_ignores_failed_write(void)
     s_exec.zones[0].actual_c = 50.0f; /* -> wants ON, but the write fails */
     aux_test_tick(2.0f);
     g_relay_write_fail = false;
-    TEST_CHECK(s_exec.aux[0].commanded_on, "commanded state still follows the rule");
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "commanded_on only follows a write that succeeded (review 4 L1)");
     TEST_CHECK(s_exec.aux[0].switch_count == 0, "failed write does not count as a switch");
     s_exec.zones[0].actual_c = 150.0f;
     aux_test_tick(2.0f);
@@ -11339,6 +11393,8 @@ static void run_test_on_off_actuation(void)
     test_paused_aux_on_no_fault_stays_on();
     test_idle_manual_aux_dropped_by_pico_trip_and_stays_off();
     test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries();
+    test_aux_fault_drop_covers_disabled_and_raw_spare_relays();
+    test_aux_apply_relay_failed_write_is_not_a_transition();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();

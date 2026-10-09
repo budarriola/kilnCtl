@@ -494,16 +494,25 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
                  (unsigned)sources);
         want_on = false;
     }
+    static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
     bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
         if (err != ESP_OK) {
             write_ok = false;
-            ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
-                     esp_err_to_name(err));
+            if (!(s_write_fail_logged_mask & mask)) {
+                ESP_LOGW(PE_TAG, "aux relay %u write failed: %s -- relay state is unknown", (unsigned)aux_idx + 1u,
+                         esp_err_to_name(err));
+                s_write_fail_logged_mask |= mask;
+            }
         } else {
+            s_write_fail_logged_mask &= (uint8_t)~mask;
             relay_off_tracker_note_write(mask, want_on ? mask : 0);
         }
+    }
+    /* Review 4 L1: a failed write is not a transition and commanded_on keeps its last confirmed value. */
+    if (!write_ok) {
+        return false;
     }
     if (s_exec.aux[aux_idx].commanded_on != want_on) {
         ESP_LOGI(PE_TAG, "aux relay %u -> %s", (unsigned)aux_idx + 1u, want_on ? "ON" : "OFF");
@@ -596,7 +605,17 @@ void profile_executor_aux_fault_drop(bool pico_tripped)
         s_last_logged_on_mask = 0;
         return;
     }
-    uint8_t cand = (uint8_t)(aux_outputs_cfg_enabled_mask() | s_exec.aux_claim_mask);
+    /* Review 4 M1: candidates are every non-zone relay, not only enabled/claimed
+     * aux ones: a disabled-while-ON aux or a raw dashboard spare-relay write
+     * leaves the shadow ON with no config bit. */
+    uint8_t zone_union = 0;
+    uint8_t zone_count = zones_config_get_thermo_count();
+    for (uint8_t zi = 0; zi < zone_count; zi++) {
+        uint8_t zm = 0;
+        if (zones_config_get_relay_mask(zi, &zm)) zone_union |= zm;
+    }
+    uint8_t cand = (uint8_t)(((1u << AUX_OUTPUTS_COUNT) - 1u) & ~zone_union);
+    cand |= s_exec.aux_claim_mask;
     uint8_t shadow = s_exec.io ? kiln_io_get_relay_shadow(s_exec.io) : 0;
     uint8_t on_mask = 0;
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
