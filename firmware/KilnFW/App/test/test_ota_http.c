@@ -1415,6 +1415,7 @@ static const char *const LEGACY_KILN_KEYS[] = { "zones_cfg", "run_state", "relay
 static const char *const LEGACY_PROFILE_KEYS[] = { "prof_used", "prof0", "prof3", "prof7" };
 
 extern void fake_kv_script_write_status_after(unsigned skip, hal_status_t status);
+extern bool fake_kv_has_uncommitted_writes(const char *partition);
 
 static void seed_legacy_default_keys(void)
 {
@@ -1533,6 +1534,8 @@ static void test_legacy_erase_mid_loop_and_commit_failures_are_reported(void)
         /* An armed fault that fires must surface as an error; a clean ESP_OK means the fault never fired
          * (skip beyond the last write-class call) and the erase fully landed. */
         TEST_CHECK(e != ESP_OK || !used_present, "ESP_OK only if the erase fully landed");
+        TEST_CHECK(e != ESP_OK || !fake_kv_has_uncommitted_writes(NULL),
+                   "ESP_OK only if the erase was committed (a swallowed commit failure leaves it pending)");
         if (e != ESP_OK) {
             TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
                        "a retry after the failure completes the reset");

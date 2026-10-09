@@ -125,7 +125,9 @@ The test `test_zones_post_refuses_lost_update_on_concurrent_generation_bump` (`t
 - Missing assertion: after the 409, the ceiling writer was called again with the old max, or the divergence latch reads clear.
 - Fix direction: call the same lower-to-live-max helper on the 409 path.
 
-### 4. MEDIUM: the wifi legacy migration failure branches are untested
+### 4. MEDIUM: the wifi legacy migration failure branches are untested (ADDRESSED)
+
+**Addressed 2026-10-09:** `test_wifi_prov.c` `test_legacy_migration_failures_never_lose_credential` (save failure, lossy read-back mismatch, legacy erase failure; credential never lost). Negative-tested: erase-legacy-despite-failed-save is CAUGHT.
 
 In `drivers/net/wifi_prov_nvs.c`, legacy keys are erased only after a verified copy:
 
@@ -155,7 +157,9 @@ Repeat with a lossy write (`s_silent_set_noops`) for the read-back path.
 
 Risk: loss of the Wi-Fi credential. A board that loses it falls back to AP mode and needs a site visit.
 
-### 5. MEDIUM: the CSRF pre-handler wiring has no host test
+### 5. MEDIUM: the CSRF pre-handler wiring has no host test (ADDRESSED)
+
+**Addressed 2026-10-09:** auth pre-handler wiring in `test_readiness_crash_disclosure.c` `test_csrf_prehandler_wiring` (cross-origin POST 403 and handler not run, same-origin passes, foreign-Origin GET passes). The recovery image has no host harness, so `tools/check_csrf_origin_wiring.ps1` checks the `origin_guard` wiring at source level instead. Negative-tested: dropped cross-origin check CAUGHT; unwrapped recovery routes and a guard that drops the check both CAUGHT by the script.
 
 The decision helpers are tested: `http_origin_is_cross_origin` and `http_origin_request_is_cross_origin` (`test/test_http_auth_enforce.c:614`, `:637`).
 
@@ -175,7 +179,9 @@ Missing tests:
 
 This needs header injection in the `esp_http_server` host stub.
 
-### 6. LOW-MEDIUM: backup import commit-phase preference setter failure
+### 6. LOW-MEDIUM: backup import commit-phase preference setter failure (ADDRESSED)
+
+**Addressed 2026-10-09:** `test_backup_import.c` `test_prefs_commit_failure_is_partial_write_profiles_untouched` (tz, hidden-builtin and relay-name setter failures; partial write, error text, no profile saved). Negative-tested: swallowed tz failure CAUGHT.
 
 `drivers/http/backup_import.c` (around lines 3296-3330) returns `"a preference could not be persisted -- the rest of the restore already landed"` (`:3329`) when one of these commit-time setters fails:
 
@@ -199,7 +205,9 @@ No test fails a preference setter at commit time.
 
 Missing test: inject a failure into one setter. Assert the 500, `partial_write`, that profiles are untouched, and the error text.
 
-### 7. LOW
+### 7. LOW (ADDRESSED)
+
+**Partly addressed 2026-10-09:** the `erase_keys()` mid-loop erase and commit failures (`test_ota_http.c` `test_legacy_erase_mid_loop_and_commit_failures_are_reported`) and the `rev_repair_junk` PSRAM refusal (`test_profiles_http.c` `test_pcfg_junk_rev_repair_refuses_on_external_ram_stack`) are covered and negative-tested (commit-swallow and guard-removal both CAUGHT). Still open: the `backup_import.c` PSRAM candidate-buffer allocation failures and the truncation/`thermo_count` cases (bullets 3 and 4); closing them needs edits near backup_import.c savers, which another agent owns.
 
 - `drivers/persist/legacy_default_nvs.c:41`/`:49`: in `erase_keys()`, a `hal_kv_erase_key` failure in mid-loop, or a `hal_kv_commit` failure, is not tested. An open failure is tested (`test_ota_http.c` around line 1507). Factory reset would report success or failure according to this path.
 - `drivers/http/profiles_http.c`: the `caller_stack_is_external()` PSRAM refusal in `rev_repair_junk` (commit `7d155f5a`) has no test. On the target it is a defensive refusal only.
