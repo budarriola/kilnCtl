@@ -2264,7 +2264,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       }
       var html = 'Saved.';
       if (result.data.warnings && result.data.warnings.length > 0) {
-        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + w + '</span>'; }).join('<br>');
+        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + window.kcEscapeHtml(w) + '</span>'; }).join('<br>');
       }
       msg.innerHTML = html;
       editingId = result.data.id;

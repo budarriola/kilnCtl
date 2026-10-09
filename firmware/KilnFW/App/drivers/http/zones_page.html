@@ -1044,7 +1044,7 @@ function drawKilnGraphic() {
   } catch (err) {
     if (window.console) console.error('kiln graphic render failed', err);
     el.innerHTML = kgPanel('this page failed to draw it (' +
-      (err && err.message ? err.message : String(err)) +
+      kgEsc(err && err.message ? err.message : String(err)) +
       '). Your stored configuration has NOT been changed.');
   }
 }
@@ -3656,7 +3656,7 @@ function renderRga(rga) {
      * zones fully measured yet" (expected, just keep autotuning) from
      * "singular" (a real finding about the kiln), and paraphrasing it here
      * would give a second place for that distinction to be got wrong. */
-    el.innerHTML = '<p class="empty">Not computable: ' + rga.reason + '</p>';
+    el.innerHTML = '<p class="empty">Not computable: ' + kgEsc(rga.reason) + '</p>';
     return;
   }
 
@@ -3920,7 +3920,7 @@ function pollFiringStatsHistory() {
       records.forEach(function (rec) {
         var when = rec.run_started_unix_s ? new Date(rec.run_started_unix_s * 1000).toLocaleString()
           : 'start time unknown (clock never synced)';
-        var caption = rec.profile_name + ' -- ' + when + ', ' + fmtStatsElapsed(rec.duration_s);
+        var caption = kgEsc(rec.profile_name) + ' -- ' + kgEsc(when) + ', ' + kgEsc(fmtStatsElapsed(rec.duration_s));
         var rows = (rec.zones || []).filter(function (z) { return z.active; })
           .map(function (z) { return { zone: z.zone, stats: z.stats, gains: { kp: z.kp, ki: z.ki, kd: z.kd } }; });
         html += renderFiringStatsTable(rows, caption, true);
@@ -4052,7 +4052,7 @@ function pollAdaptiveTune() {
                '<th>Coupled solve</th><th>Ki diagnosis</th><th>Revert</th></tr>';
     for (var i = 0; i < thermoCount && i < s.zones.length; i++) {
       var z = s.zones[i];
-      var name = (current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '';
+      var name = (current.zones[i] && current.zones[i].name) ? ' (' + kgEsc(current.zones[i].name) + ')' : '';
       var appliedHtml;
       if (z.has_applied) {
         var sign = z.delta_pct >= 0 ? '+' : '';

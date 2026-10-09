@@ -21,7 +21,7 @@ names, so a stored payload needs no credential at all.
 
 ## Findings
 
-### F1 (Medium) Stored XSS: profile name in the main-page feasibility popups
+### F1 (Medium) Stored XSS: profile name in the main-page feasibility popups -- FIXED (page side, see Fix status below)
 
 - `firmware/KilnFW/App/drivers/http/main_page.html:2881` (`'<h3>Configured-limit notice — ' + name`)
 - `main_page.html:2935` (`'<h3>Feasibility notice — ' + name`)
@@ -43,7 +43,7 @@ existing global, followed by a `//` comment, also fits.
 Fix: `window.kcEscapeHtml(name)` at all three sites, or build the `<h3>` with
 `textContent`.
 
-### F2 (Medium) Stored XSS: zone names in the adaptive-tune table
+### F2 (Medium) Stored XSS: zone names in the adaptive-tune table -- FIXED (page side, see Fix status below)
 
 - `zones_page.html:4055` (`' (' + current.zones[i].name + ')'`), used at line
   4072 (`'<tr><td>Zone ' + i + name + '</td>'`). The assembled `html` reaches
@@ -58,7 +58,7 @@ it through `POST /api/zones`.
 
 Fix: `kgEsc(current.zones[i].name)` or `window.kcEscapeHtml(...)`.
 
-### F3 (Medium) Stored XSS: profile name in the firing-stats caption
+### F3 (Medium) Stored XSS: profile name in the firing-stats caption -- FIXED (page side, see Fix status below)
 
 - `zones_page.html:3923` (`caption = rec.profile_name + ' -- ' + ...`),
   emitted unescaped at `zones_page.html:3833`
@@ -136,7 +136,7 @@ bytes below 0x20 (`profiles_http_json_escape()` already does this). Then
 reject control bytes in name writers at parse time, which also protects the
 LCD.
 
-### F6 (Low) Open-redirect bypass in `loginReturnPath()`
+### F6 (Low) Open-redirect bypass in `loginReturnPath()` -- FIXED (page side, see Fix status below)
 
 `login_page.html:67` accepts `return` when `charAt(0) === '/'` and
 `charAt(1)` is neither `/` nor `\`. The WHATWG URL parser strips ASCII tab,
@@ -163,7 +163,7 @@ Stop or a relay toggle.
 Fix: send `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`
 on every HTML response.
 
-### F8 (Low, defence in depth) Firmware-generated strings put into innerHTML unescaped
+### F8 (Low, defence in depth) Firmware-generated strings put into innerHTML unescaped -- FIXED (page side, see Fix status below)
 
 Not attacker-controlled today: each is a firmware constant, an enum name or
 numeric text. Each one is a latent XSS the moment any of those strings starts
@@ -248,3 +248,7 @@ non-literal", not "every value judged risky".
 | F6 | Low | open redirect via tab/newline in `return` |
 | F7 | Low | no anti-framing header |
 | F8 | Low | firmware strings in innerHTML unescaped |
+
+## Fix status (page side)
+
+F1, F2, F3, F6 and F8 are fixed in the page sources: every cited sink now goes through `kcEscapeHtml`/`kgEsc`, and `loginReturnPath()` rejects control characters and whitespace and requires a same-origin `new URL` result. Regression test: `firmware/KilnFW/App/test/test_web_xss_fixes.js`. F4, F5 and F7 are firmware-side and remain open.

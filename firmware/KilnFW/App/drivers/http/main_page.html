@@ -1002,7 +1002,7 @@ function renderPidPopup(z) {
   var atUsable = !!(at && at.zone === pidPopupZone && (at.state === 'done' || at.state === 'aborted') &&
     (at.method === 'relay' ? at.relay_valid : at.model_valid));
   var proposedHtml = atUsable
-    ? ('<div class="proposed">Last autotune this session proposed (' + at.state + '): ' +
+    ? ('<div class="proposed">Last autotune this session proposed (' + window.kcEscapeHtml(at.state) + '): ' +
        'Kp=' + at.proposed_kp.toFixed(4) + ' Ki=' + at.proposed_ki.toFixed(5) + ' Kd=' + at.proposed_kd.toFixed(4) +
        '<button type="button" id="pidPopupUseProposed">Use these</button></div>')
     : '<div class="proposed">No usable autotune result for this zone this session.</div>';
@@ -2279,7 +2279,7 @@ function renderLastRun(st) {
   var html = '<div class="banner' + (lr.interrupted ? ' interrupted' : '') + '">' +
     '<h3>' + (lr.interrupted
       ? 'Previous firing was interrupted &mdash; it never ended cleanly'
-      : 'Previous firing ended (' + lr.phase + ')') + '</h3>' +
+      : 'Previous firing ended (' + window.kcEscapeHtml(lr.phase) + ')') + '</h3>' +
     '<div class="row"><span>Profile</span><span>' +
       window.kcEscapeHtml(profileTitleById[lr.profile_id] || lr.profile_name || ('id ' + lr.profile_id)) +
       ' &mdash; ' + (names.join(', ') || 'no zones') + '</span></div>' +
@@ -2374,7 +2374,7 @@ function renderExec(st) {
   let html = '<div class="exec-card">' +
     '<div class="row"><span>' + window.kcEscapeHtml(profileTitleById[st.profile_id] || st.profile_name) +
     ' &mdash; ' + zoneNames.join(', ') + '</span>' +
-    '<span class="exec-state state-' + st.state + ' kc-live-value">' + st.state + '</span></div>' +
+    '<span class="exec-state state-' + window.kcEscapeHtml(st.state) + ' kc-live-value">' + window.kcEscapeHtml(st.state) + '</span></div>' +
     '<div class="row"><span>Segment</span><span class="kc-live-value">' + (st.segment_index + 1) + ' / ' + st.segment_count +
     ' (' + (st.dwelling ? 'dwelling' : 'ramping') + ')</span></div>' +
     '<div class="row"><span>Shared target</span><span class="kc-live-value">' + window.kcUnit.fmt(st.target_c) + '</span></div>';
@@ -2878,7 +2878,7 @@ function openLimitInfoPopup() {
   if (!summary) return;
   var name = profileTitleById[id] || ('profile ' + id);
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Configured-limit notice — ' + name + '</h3>' + limitBodyHtml(summary) +
+  box.innerHTML = '<h3>Configured-limit notice — ' + window.kcEscapeHtml(name) + '</h3>' + limitBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');
   document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
@@ -2932,7 +2932,7 @@ function openFeasInfoPopup() {
   if (!summary) return;
   var name = profileTitleById[id] || ('profile ' + id);
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Feasibility notice — ' + name + '</h3>' + feasBodyHtml(summary) +
+  box.innerHTML = '<h3>Feasibility notice — ' + window.kcEscapeHtml(name) + '</h3>' + feasBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCloseBtn">Close</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');
   document.getElementById('feasPopupCloseBtn').addEventListener('click', closeFeasPopup);
@@ -2944,7 +2944,7 @@ function openFeasInfoPopup() {
 // equivalent) leaves proceedToStart() uncalled, so no POST goes out.
 function openFeasStartPopup(name, summary, onProceed) {
   var box = document.getElementById('feasPopupBox');
-  box.innerHTML = '<h3>Start "' + name + '" anyway?</h3>' + feasBodyHtml(summary) +
+  box.innerHTML = '<h3>Start "' + window.kcEscapeHtml(name) + '" anyway?</h3>' + feasBodyHtml(summary) +
     '<div class="btnrow"><button type="button" id="feasPopupCancelBtn">Cancel</button>' +
     '<button type="button" id="feasPopupProceedBtn" class="primary">Start firing anyway</button></div>';
   document.getElementById('feasPopupOverlay').removeAttribute('hidden');

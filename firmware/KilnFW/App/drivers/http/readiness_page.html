@@ -170,7 +170,7 @@ but it will not stop you.</p>
       // holds those to each other). Without this the link lands at the top of
       // an eighteen-item list and the operator has to hunt for their own
       // refusal.
-      html += '<div class="item status-' + it.status + '" id="' + window.kcEscapeHtml(it.key || ('item' + i)) + '">' +
+      html += '<div class="item status-' + window.kcEscapeHtml(it.status) + '" id="' + window.kcEscapeHtml(it.key || ('item' + i)) + '">' +
               '<div class="mark kc-live-value">' + mark + '</div>' +
               '<div class="body">' +
               '<div class="label">' + window.kcEscapeHtml(it.label) + '</div>' +

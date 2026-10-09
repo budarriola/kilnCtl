@@ -1097,7 +1097,7 @@ function step8SweepVerdict(st) {
     return { resolved: true, text: 'Verification complete: a CT channel was resolved for all ' +
       total + ' zone(s).' };
   }
-  var why = st.ct_map_reason ? (' ' + st.ct_map_reason) : '';
+  var why = st.ct_map_reason ? (' ' + window.kcEscapeHtml(st.ct_map_reason)) : '';
   return { resolved: false, text: 'Sweep finished, but CT attribution was NOT resolved (' +
     resolved + ' of ' + total + ' zone(s) resolved).' + why +
     ' This step is not complete -- the result is inconclusive, not a pass.' };
@@ -1619,7 +1619,7 @@ function gRenderStepper() {
 function pillHtml(state) {
   var label = { pending: 'PENDING', done: 'DONE', skipped: 'SKIPPED', regressed: 'REGRESSED',
     unknown: 'UNKNOWN' }[state] || state;
-  return '<span class="pill pill-' + state + '">' + label + '</span>';
+  return '<span class="pill pill-' + window.kcEscapeHtml(state) + '">' + window.kcEscapeHtml(label) + '</span>';
 }
 
 function gRenderOverview() {

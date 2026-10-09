@@ -64,8 +64,19 @@ function loginReturnPath() {
   // attacker's host -- and slipped past a "//"-only guard. URLSearchParams has
   // already percent-decoded `ret` here, so "%2F%5Cevil.example" is checked in
   // its decoded form, not its literal one.
-  if (ret && ret.charAt(0) === '/' && ret.charAt(1) !== '/' && ret.charAt(1) !== '\\') {
-    return ret;
+  // Review fix, 2026-10-09 (WEB_UI_XSS_AUDIT F6): the URL parser also strips
+  // tab/LF/CR from anywhere in the input, so "/\t/evil.example" passed the
+  // charAt checks yet navigated to //evil.example. Reject any control
+  // character or whitespace outright, then resolve against our own origin and
+  // require the same origin back.
+  if (ret && !/[\u0000- \u007f-\u009f]/.test(ret) &&
+      ret.charAt(0) === '/' && ret.charAt(1) !== '/' && ret.charAt(1) !== '\\') {
+    try {
+      var u = new URL(ret, window.location.origin);
+      if (u.origin === window.location.origin) {
+        return u.pathname + u.search + u.hash;
+      }
+    } catch (e) { /* fall through to '/' */ }
   }
   return '/';
 }
