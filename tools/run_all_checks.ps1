@@ -317,6 +317,26 @@ if (Test-Path $stopPathNegativeTest) {
     Write-Host "         without it because -AllowFewerChecks was passed." -ForegroundColor Yellow
 }
 
+# test_check_duplicate_symbols.ps1 is a scratch-dir test of
+# check_duplicate_symbols.ps1's manifest selection, not a guard. Named test_*,
+# not check_*, so the glob above does not pick it up; wired explicitly here,
+# same pattern as the negative tests above.
+$dupSymbolsTest = Join-Path $repoRoot "tools\test_check_duplicate_symbols.ps1"
+if (Test-Path $dupSymbolsTest) {
+    $checks += Get-Item $dupSymbolsTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $dupSymbolsTest not found --" -ForegroundColor Red
+    Write-Host "        has it moved? A missing test must not read as a clean run." -ForegroundColor Red
+    Write-Host "        Pass -AllowFewerChecks if a partial tree is genuinely intended." -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+} else {
+    Write-Host ""
+    Write-Host "WARNING: expected test $dupSymbolsTest not found -- proceeding" -ForegroundColor Yellow
+}
+
 # test_check_lcd_home_nav_gated.ps1 is a negative test, not a guard -- it
 # proves check_lcd_home_nav_gated.ps1's scan (owner decision 2026-09-28: only
 # the LCD home/dashboard view stays reachable without a PIN) can actually
