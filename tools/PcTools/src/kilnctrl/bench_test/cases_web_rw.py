@@ -110,6 +110,12 @@ def _http_post_raw(host: str, path: str, fields: Dict[str, Any], timeout: float 
         return None, str(exc), None
 
 
+class BodyDecodeError(OSError):
+    """Content-Encoding said gzip but the body would not decode: a transport
+    problem, never a board verdict. Subclasses OSError so the GET seams map
+    it to ``(None, reason)`` (unreachable -> INCONCLUSIVE, not FAIL)."""
+
+
 def _decode_body(raw: bytes, headers) -> str:
     """Decode a response body, gunzipping when Content-Encoding says gzip."""
     enc = ""
@@ -120,8 +126,8 @@ def _decode_body(raw: bytes, headers) -> str:
     if enc.lower() == "gzip":
         try:
             raw = gzip.decompress(raw)
-        except (OSError, EOFError):
-            pass
+        except (OSError, EOFError, zlib.error) as exc:
+            raise BodyDecodeError(f"gzip decode failed: {exc}") from exc
     return raw.decode("utf-8", errors="replace")
 
 
@@ -144,6 +150,8 @@ def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[O
     except urllib.error.HTTPError as exc:
         try:
             detail = _decode_body(exc.read(), exc.headers) if exc.fp else None
+        except BodyDecodeError as dexc:
+            return None, str(dexc)
         except Exception:  # noqa: BLE001
             detail = None
         return exc.code, detail

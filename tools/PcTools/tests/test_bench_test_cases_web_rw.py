@@ -56,6 +56,22 @@ class _FakeHttpResponse:
         return False
 
 
+class DecodeBodyTest(unittest.TestCase):
+    def test_bad_gzip_raises_typed_error(self):
+        with self.assertRaises(C.BodyDecodeError):
+            C._decode_body(b"not gzip", {"Content-Encoding": "gzip"})
+
+    def test_authed_get_maps_bad_gzip_to_no_status(self):
+        resp = _FakeHttpResponse(200, b"not gzip", {"Content-Encoding": "gzip"})
+        with mock.patch.object(C.http_auth, "urlopen", return_value=resp):
+            status, text = C._http_get_raw_authed("1.2.3.4", "/x")
+        self.assertIsNone(status)
+        self.assertIn("gzip decode failed", text)
+
+    def test_good_gzip_still_decodes(self):
+        self.assertEqual(C._decode_body(gzip.compress(b"hi"), {"Content-Encoding": "gzip"}), "hi")
+
+
 class SecHttpClientGetTest(unittest.TestCase):
     def test_sends_accept_encoding_gzip(self):
         client = C._SecHttpClient("1.2.3.4")

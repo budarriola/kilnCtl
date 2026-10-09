@@ -16,11 +16,7 @@ scope**:
 - WEB-DASH-13, WEB-DIAG-07, WEB-DIAG-08, WEB-ZONE-14, WEB-SEC-03 and WEB-SEC-04
   (`cases_web_rw.py` `_CASE_FUNCS`).
 
-This doc specifies the other **93**. Twenty-three of them are already listed in `SUITES["nightly"]`
-(`registry.py` `_NIGHTLY_ORDER`). They have no judge yet, so the runner reports them as
-`NOT_RUN: not_implemented` (`runner.py` ~line 540):
-WEB-DASH-03/06/07/09, WEB-PROF-02..09, WEB-ZONE-02/03/05/09/12, WEB-BAK-02/03, WEB-KCFG-02/03,
-WEB-OTA-02 and WEB-X-02.
+This doc specifies the other **93**. All 93 now have judges (see Status); this doc remains the wire-contract spec.
 
 ## 2. Rules every judge in this doc follows
 
