@@ -13,6 +13,7 @@
 #include "backup_restore_state.h"
 #include "live_profile.h"
 #include "persist_scratch.h"
+#include "profiles_http.h"
 #include "profile_rule_target.h"
 #include "profiles_store.h"
 #include "relay_authority.h"
@@ -103,6 +104,7 @@ static void op_zone_done(void)
 static void op_busy(bool on)
 {
     backup_import_config_change_set(on);
+    profiles_http_set_convert_busy(on);
 }
 
 static bool op_verify_persisted(void)

@@ -734,12 +734,16 @@ void profiles_save_lock(void)
             }
         }
     }
-    (void)xSemaphoreTake(s_save_mutex, portMAX_DELAY);
+    (void)xSemaphoreTake(SAVE_MUTEX_LOAD(), portMAX_DELAY);
 }
+
+static volatile bool s_convert_busy = false;
+void profiles_http_set_convert_busy(bool busy) { s_convert_busy = busy; }
+bool profiles_http_convert_busy(void) { return s_convert_busy; }
 
 void profiles_save_unlock(void)
 {
-    (void)xSemaphoreGive(s_save_mutex);
+    (void)xSemaphoreGive(SAVE_MUTEX_LOAD());
 }
 
 /* Caller holds profiles_save_lock(). */
@@ -1738,7 +1742,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
      * builtin ids need no special case to land on the right behaviour, only
      * this note saying it is deliberate. The caller learns the real slot from
      * *out_id, so nothing is silent about it. */
-    profiles_save_lock(); /* slot allocation, duplicate-name check, assign and save: one section */
+    if (profiles_http_convert_busy()) {
+        snprintf(err_msg, err_cap, "busy: zone conversion running, retry");
+        return false;
+    }
+    profiles_save_lock(); /* slot allocation, duplicate-name check, validate, assign and save: one section */
     uint8_t target_id;
     if (requested_id < PROFILES_MAX_COUNT) {
         target_id = requested_id;
@@ -1779,6 +1787,13 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
                                     err_cap)) {
         profiles_save_unlock();
         return false; /* live_edit_name_collides_ex already filled err_msg */
+    }
+
+    /* Re-validate under the lock: a zone/aux conversion may have committed since
+     * the unlocked validation above. */
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        profiles_save_unlock();
+        return false;
     }
 
     s_profiles.profiles[target_id] = *candidate;
@@ -2152,7 +2167,8 @@ static uint16_t retarget_count_rules(const profile_t *p, uint8_t target)
 
 /* allow_dest: a resume, where an earlier run already moved some slots, so rules at the destination
  * are expected and not a refusal. */
-static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool allow_dest,
+static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool allow_dest, bool have_active,
+                          uint8_t active_id,
                           profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t c = {0};
@@ -2162,8 +2178,6 @@ static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool al
         if (counts) *counts = c;
         return false;
     }
-    uint8_t active_id = 0;
-    bool have_active = profile_executor_get_active_id(&active_id);
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (!profiles_slot_used(id)) {
             continue;
@@ -2216,7 +2230,9 @@ static bool retarget_plan(uint8_t zone, uint8_t relay, bool zone_has_tc, bool al
 bool profiles_retarget_zone_to_aux_plan(uint8_t zone, uint8_t relay, bool zone_has_tc,
                                         profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
-    return retarget_plan(zone, relay, zone_has_tc, false, counts, err, err_cap);
+    uint8_t active_id = 0;
+    bool have_active = profile_executor_get_active_id(&active_id);
+    return retarget_plan(zone, relay, zone_has_tc, false, have_active, active_id, counts, err, err_cap);
 }
 
 /* Read slot `id` back out of its cfg FILE (the only place nvs_save_slot() writes since the NVS
@@ -2268,8 +2284,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
      * section under the save mutex; only leaf locks are taken inside. The plan
      * refusals are re-run here, under the lock, so a slot changed since the
      * caller's own plan() cannot slip past them. */
+    /* Executor state is read BEFORE the save lock so no executor lock is taken under it. */
+    uint8_t active_id = 0;
+    bool have_active = profile_executor_get_active_id(&active_id);
     profiles_save_lock();
-    if (!retarget_plan(zone, relay, zone_has_tc, resume, &plan, err, err_cap)) {
+    if (!retarget_plan(zone, relay, zone_has_tc, resume, have_active, active_id, &plan, err, err_cap)) {
         profiles_save_unlock();
         free(trial);
         if (counts) *counts = plan;
