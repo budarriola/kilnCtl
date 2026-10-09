@@ -435,6 +435,7 @@ class BenchTestRunner:
         # and again below in report_mod.run_dir_path() for `outcome.run_dir`
         # always agrees.
         self.ctx["run_dir"] = report_mod.run_dir_path(self.logs_root, run_id)
+        self.ctx["suite"] = suite
         # Made available to case functions via ctx["allow_heat"] --
         # `spec.heat` gates a whole case (skipped outright above when
         # False), but LCD-19 is not `heat`-flagged (its other sub-checks --

@@ -1729,14 +1729,14 @@ recommended form unless the owner rules otherwise.
 | WEB-SAF-03 | It needs a pre-clear OT-B01 hook. The button's enable predicate is "trip seen this Pico boot". | Yes to the hook (the `otb01_tripped` probe). Otherwise judge only the pre-state half. |
 | WEB-COMM-03 | Any `commit=1` sends abs_max and the CT gains. | The read-only CRC-stability form. |
 | WEB-COMM-06 | "Channel 2 only" is a DOM claim. | Judge the inputs plus the static markers. |
-| WEB-DIAG-09 | May Danger Mode energize R0? | Read-only plus a 409 refusal probe. The full toggle only behind an explicit opt-in. |
-| WEB-DIAG-11 | The stale banner needs a browser. | A static presence check. |
-| WEB-OTA-03 | This is an OTA push through the DOM. | An alias of OT-E01 plus a static check. Never push. |
-| WEB-OTA-04 | This is a rollback through the DOM. | An alias of OT-E02 plus a static check. |
-| WEB-BAK-03 | It needs backup_import, which is forbidden. | Export determinism plus host-test coverage, or drop the case. |
-| WEB-BAK-04 | It needs an import POST during a firing. | Static page text plus host-test coverage, or drop the case. |
-| WEB-KCFG-03 | Self-apply writes abs_max, the CT keys, zones and Pico flash. | The read-only apply_status reduction. |
-| WEB-KCFG-04 | A live 428 probe risks a real swap. | The static reduction plus host-test coverage. |
+| WEB-DIAG-09 | May Danger Mode energize R0? | Read-only plus a 409 refusal probe. The full toggle only behind an explicit opt-in. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-DIAG-11 | The stale banner needs a browser. | A static presence check. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-OTA-03 | This is an OTA push through the DOM. | An alias of OT-E01 plus a static check. Never push. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-OTA-04 | This is a rollback through the DOM. | An alias of OT-E02 plus a static check. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-BAK-03 | It needs backup_import, which is forbidden. | Export determinism plus host-test coverage, or drop the case. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-BAK-04 | It needs an import POST during a firing. | Static page text plus host-test coverage, or drop the case. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-KCFG-03 | Self-apply writes abs_max, the CT keys, zones and Pico flash. | The read-only apply_status reduction. Resolved. Owner 2026-10-09: accepted recommendation. |
+| WEB-KCFG-04 | A live 428 probe risks a real swap. | The static reduction plus host-test coverage. Resolved. Owner 2026-10-09: accepted recommendation. |
 
 Owner 2026-10-09: every NEEDS OWNER row above takes its Recommended entry (WEB-STIM-02, WEB-ZONE-02, WEB-ZONE-03, WEB-ZONE-05: accepted recommendation). Still open for the owner:
 

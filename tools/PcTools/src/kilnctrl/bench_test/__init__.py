@@ -27,6 +27,8 @@ from . import cases_safety as _cases_safety  # noqa: F401 - import wires judge f
 from . import cases_fl as _cases_fl  # noqa: F401 - import wires judge functions into REGISTRY
 from . import cases_web_dash as _cases_web_dash  # noqa: F401 - WEB-DASH-02..12 judges
 from . import cases_web_rw as _cases_web_rw  # noqa: F401 - import wires WEB read/write round-trip judge functions into REGISTRY
+from . import cases_web_diag as _cases_web_diag  # noqa: F401 - import wires WEB-DIAG/OTA judges into REGISTRY
+from . import cases_web_misc as _cases_web_misc  # noqa: F401 - import wires WEB-WIFI/SEC/BAK/KCFG/LOG/X judges into REGISTRY
 from . import cases_ota as _cases_ota  # noqa: F401 - import wires OTA judge functions into REGISTRY
 from . import cases_autotune as _cases_autotune  # noqa: F401 - import wires AT-01..05 judge functions into REGISTRY
 from . import cases_aux as _cases_aux  # noqa: F401 - import wires AX-C01..R01 judge functions into REGISTRY
