@@ -14,7 +14,7 @@ the boards or the bench camera).
 - Never set `run_in_background`, never use Monitor, never spawn sub-agents unless your
   prompt explicitly grants it. Bash/PowerShell timeout 600000 ms; poll with foreground
   commands. You do the work yourself.
-- Verify the premise against `origin/main` first. If the feature or fix is already there,
+- Verify the premise against `origin/dev` first (the agent integration branch; main only holds promoted squashes). If the feature or fix is already there,
   or was rejected by design, report that and stop (an implementer closes the line
   docs-only). Plan-doc TODO lines and narrative lag the code; a plan's status block and the
   code itself are authoritative.
@@ -33,7 +33,7 @@ the boards or the bench camera).
 - Never delete worktrees you did not create, anything with uncommitted changes, anything
   modified in the last few minutes, `firmware/KilnFW/elf_archive/`, `logs/coupling/*`, or
   a tracked file with local modifications.
-- Landing (dev/main flow): branch from `origin/dev`, run the targeted tests for what you changed (not the full `run_all_checks`), then finish with `powershell -ExecutionPolicy Bypass -File tools\land.ps1` from your worktree (default `-Target dev`; add `-CheckLog <file> [-AllowFail <regex>]` if you have one, `-RestartMcp`, `-RemoveWorktree`, `-DryRun` as needed). It rebases onto origin/dev, re-checks narrowly, pushes to dev without force, and requires push_verify LANDED. Only the coordinator promotes dev to main (`tools\dev_promote.ps1`) after a full `run_all_checks` on the dev tip; never push to main yourself. See docs/MCP_SERVERS.md "Git workflow guards".
+- Landing (dev/main flow): branch from `origin/dev` (`tools\worktree_mint.ps1` defaults to it; `commit_guard`, `push_verify`, `wt_status` default to origin/dev), run the targeted tests for what you changed (not the full `run_all_checks`), then finish with `powershell -ExecutionPolicy Bypass -File tools\land.ps1` from your worktree (default `-Target dev`; add `-CheckLog <file> [-AllowFail <regex>]` if you have one, `-RestartMcp`, `-RemoveWorktree`, `-DryRun` as needed). It rebases onto origin/dev, re-checks narrowly, pushes to dev without force, and requires push_verify LANDED. Only the coordinator promotes dev to main (`tools\dev_promote.ps1`) after a full `run_all_checks` on the dev tip; never push to main yourself. See docs/MCP_SERVERS.md "Git workflow guards".
 - Never touch any `.kicad_*` file (reading is fine). Never commit `.claude/worktrees/`.
 - In PowerShell, .NET file APIs (`[IO.File]::ReadAllText`/`WriteAllText`, etc.) with a
   relative path resolve against the .NET process's current directory, not PowerShell's

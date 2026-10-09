@@ -97,6 +97,40 @@ try {
     Assert ($r.Code -eq 0) "accepted after main was merged into dev"
     Assert ((git -C $origin rev-parse "$(Rev main)^{tree}").Trim() -eq (git -C $origin rev-parse "$x4^{tree}").Trim()) "main tree == merged dev tree"
 
+    Write-Host "case: forged promote subject on main is an offender"
+    $forge = Join-Path $tmp "forge"
+    git clone $origin $forge *>$null
+    git -C $forge checkout main *>$null
+    # (a) subject names a dev sha, single parent, but tree differs from that sha
+    CommitFile $forge "forged.txt" "f" "Promote dev ${x4}: forged wrong tree"
+    git -C $forge push origin main *>$null
+    $forgedA = (git -C $forge rev-parse HEAD).Trim()
+    CommitFile $work "e.txt" "e" "dev change E"
+    git -C $work push origin dev *>$null
+    $x5 = (git -C $work rev-parse HEAD).Trim()
+    $r = Run @("-Commit", $x5, "-Push")
+    Assert ($r.Code -eq 1 -and $r.Out -match 'main-ahead-of-dev' -and $r.Out -match $forgedA) "forged promote (tree mismatch) refused and named"
+    # (b) subject names a sha that is not on origin/dev
+    git -C $forge reset --hard HEAD~1 *>$null
+    $bogus = "0123456789abcdef0123456789abcdef01234567"
+    git -C $forge commit --allow-empty -m "Promote dev ${bogus}: forged unknown sha" *>$null
+    git -C $forge push --force origin main *>$null
+    $r = Run @("-Commit", $x5, "-Push")
+    Assert ($r.Code -eq 1 -and $r.Out -match 'main-ahead-of-dev') "forged promote (sha not on dev) refused"
+    git -C $forge reset --hard HEAD~1 *>$null
+    # (c) names a real commit with an equal tree, but that commit is not on origin/dev
+    $mainSave = (git -C $forge rev-parse HEAD).Trim()
+    git -C $forge checkout -b side *>$null
+    CommitFile $forge "side.txt" "s" "side only"
+    git -C $forge push origin side *>$null
+    $side = (git -C $forge rev-parse HEAD).Trim()
+    git -C $forge checkout main *>$null
+    $fc = (git -C $forge commit-tree "$side^{tree}" -p $mainSave -m "Promote dev ${side}: forged off-dev").Trim()
+    git -C $forge push --force origin "${fc}:refs/heads/main" *>$null
+    $r = Run @("-Commit", $x5, "-Push")
+    Assert ($r.Code -eq 1 -and $r.Out -match 'main-ahead-of-dev') "forged promote (named sha not on dev) refused"
+    git -C $forge push --force origin "${mainSave}:refs/heads/main" *>$null
+
     Write-Host "case: nothing to promote"
     $r = Run @("-Commit", $x4, "-Push")
     Assert ($r.Code -eq 1) "re-promoting the same commit refused"

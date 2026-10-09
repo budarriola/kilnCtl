@@ -749,7 +749,7 @@ repository's current state, so none is wired into `run_all_checks.ps1` --
 they are invoked by hand at the workflow moment they apply.
 
 **`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
-`origin/main` under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
+`origin/dev` (default; `-Base <ref>` overrides, e.g. `-Base origin/main` for the coordinator) under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
 concurrent session on this machine, and two constraints have bitten
 repeatedly: the path must be SHORT (a nested `.claude/worktrees/...` path
 overflows the MSVC command line building SaftyFW host tests) and the name
@@ -757,7 +757,7 @@ must be UNIQUE (generic names collide between live sessions).
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\worktree_mint.ps1 -Label myfeature
-    # fetches origin, creates C:\wt\myfeature_<random> at origin/main,
+    # fetches origin, creates C:\wt\myfeature_<random> at origin/dev (or -Base),
     # refuses rather than reusing an existing directory, prints
     # "WORKTREE: <path>"
 
@@ -824,7 +824,7 @@ needed no equivalent change: it already runs `cmake .` (an unconditional
 reconfigure) on every invocation, never trusting a cached configure across runs.
 
 **`tools/push_verify.ps1`** -- verify a commit actually landed on
-`origin/main`, in one unambiguous verdict line. This project has produced
+`origin/dev` (default; `-Branch origin/main` for main), in one unambiguous verdict line. This project has produced
 four false "landed" reports from two specific causes: (1) running the
 ancestry check backwards -- `git merge-base --is-ancestor origin/main HEAD`
 asks "is origin/main an ancestor of my branch", which succeeds even for a
@@ -836,7 +836,7 @@ progress banner does that on a successful push. This script uses the correct
 argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/main]
+powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
     # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
     # and on NOT LANDED also names the local branch(es) the commit IS
     # reachable from, if any (the actual common root cause)
@@ -850,7 +850,7 @@ copy silently reverts everyone else's changes to that file. This has
 happened twice for real here: a stale doc commit reverted 113 lines of
 another session's work, and a bare `--amend` pushed a 1067-line revert of
 live work. The script compares `git hash-object <path>` against
-`git rev-parse origin/main:<path>` for each path about to be committed, shows
+`git rev-parse origin/dev:<path>` (`-Branch` overrides) for each path about to be committed, shows
 the diff, reports insertion/deletion counts, and refuses by default until
 the caller passes `-Confirm`. An optional `-ExpectedMaxLines` per path flags
 any path whose actual insertion+deletion count exceeds what the caller
@@ -867,7 +867,7 @@ powershell -ExecutionPolicy Bypass -File tools\commit_guard.ps1 -Path CLAUDE.md 
 **`tools/land.ps1`** -- the whole landing sequence in one command, composing the
 three guards above rather than reimplementing them. Run it from inside the
 worktree whose commits are ready (never the shared main tree; refused). It
-refuses on tracked modifications or no commits ahead of `origin/main`;
+refuses on tracked modifications or no commits ahead of the target branch;
 optionally waits (`-WaitPid`, `-CheckLog`, bounded, UTF-16-aware) for a
 `run_all_checks` run and refuses on any `FAIL`/`FAILED:`/BUSY not matched by
 `-AllowFail <regex>` (allowed FAILs are echoed loudly and listed in the result);
@@ -900,7 +900,7 @@ default; `-Target main` remains for the coordinator; the check-log gate is optio
 Only the coordinator promotes: after one full `run_all_checks` on the dev tip,
 `dev_promote.ps1 -Commit <dev commit> [-Push]` builds `commit-tree X^{tree} -p origin/main`
 with the message `Promote dev <X full sha>: <dev commit subjects since the previous promote>`,
-verifies tree == X's tree and a single parent, and pushes to main as a plain fast-forward
+verifies tree == X's tree and a single parent, and recognises a previous promote only if it is real: single parent, subject names a dev SHA D that is on origin/dev, and its tree equals D's tree (a lookalike subject is an offender), and pushes to main as a plain fast-forward
 (no tag). It refuses when X is not on origin/dev, when X is not ahead of the previous promote,
 and when origin/main holds commits that are neither in dev nor earlier promote commits (a
 direct push to main): it names them and says to merge main into dev first. Unit test:
@@ -909,7 +909,7 @@ direct push to main): it names them and says to merge main into dev first. Unit 
 **`tools/wt_status.ps1`** -- report on, and safely prune, `C:\wt` (added
 2026-10-08). `C:\wt` accumulates hundreds of directories (worktrees, orphan dirs,
 `*_logs`, loose files). Report mode (default) lists every directory: registered in
-`git worktree list`?, branch or HEAD sha, commits ahead of origin/main (each marked
+`git worktree list`?, branch or HEAD sha, commits ahead of origin/dev (`-Base` overrides) (each marked
 `[on-main]` or `[unlanded]` by `git cherry` patch-id, because many commits land under
 rebased shas), tracked-modified and untracked counts, idle time (newest file mtime,
 skipping `build\` and `.git`), and live processes whose command line references the

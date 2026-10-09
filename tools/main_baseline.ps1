@@ -44,7 +44,7 @@ if ($Show) {
 }
 
 if ($Record) {
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "worktree_mint.ps1") -Label mainbase 2>&1 | Out-String
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "worktree_mint.ps1") -Label mainbase -Base origin/main 2>&1 | Out-String
     $m = [regex]::Match($out, '(?m)^WORKTREE:\s*(.+?)\s*$')
     if (-not $m.Success) { Write-Host $out; Write-Host "worktree mint failed"; exit 1 }
     $wt = $m.Groups[1].Value

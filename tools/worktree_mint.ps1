@@ -1,5 +1,5 @@
 # worktree_mint.ps1 -- mint or remove a short-lived, collision-proof git
-# worktree at origin/main under C:\wt\.
+# worktree at origin/dev (default; -Base overrides) under C:\wt\.
 #
 # WHY THIS EXISTS. The shared main tree at C:\Users\...\kilnCtl normally
 # carries somewhere around a hundred dirty tracked paths belonging to other
@@ -67,7 +67,8 @@ param(
     [switch]$Force,
     [string]$WtRoot = "C:\wt",
     [switch]$RunSetup,
-    [switch]$NoSubmodules
+    [switch]$NoSubmodules,
+    [string]$Base = "origin/dev"
 )
 
 # SUBMODULES A FRESH WORKTREE NEEDS (2026-09-19). `git worktree add` does NOT
@@ -206,7 +207,7 @@ if (Test-Path $target) {
     exit 1
 }
 
-git -C $repoRoot worktree add --detach $target origin/main *>$null
+git -C $repoRoot worktree add --detach $target $Base *>$null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "ERROR: git worktree add failed for '$target'." -ForegroundColor Red
     exit 1

@@ -44,12 +44,23 @@ if ($rc -ne 0 -or -not $x) { Fail 'commit' "-Commit '$Commit' is not a commit." 
 
 if (-not (GOk merge-base --is-ancestor $x $devTip)) { Fail 'commit-on-origin-dev' "$x is not an ancestor of origin/dev." }
 
+# A real promote: single parent, subject names dev SHA D, D is on origin/dev, tree(commit) == tree(D).
+function Test-RealPromote([string]$c) {
+    $pm = [regex]::Match((G log -1 --format=%s $c), $PromoteRe)
+    if (-not $pm.Success) { return $false }
+    if (@((G rev-list --parents -n 1 $c) -split ' ').Count -ne 2) { return $false }
+    $d = $pm.Groups[1].Value
+    if (-not (GOk cat-file -e "$d^{commit}")) { return $false }
+    if (-not (GOk merge-base --is-ancestor $d $devTip)) { return $false }
+    return ((G rev-parse "$c^{tree}") -eq (G rev-parse "$d^{tree}"))
+}
+
 # main commits that dev does not contain: only earlier promote commits are allowed there.
 $offenders = New-Object System.Collections.Generic.List[string]
 foreach ($c in @(G rev-list "refs/remotes/origin/dev..refs/remotes/origin/main")) {
     if (-not $c) { continue }
     $subj = (G log -1 --format=%s $c)
-    if ($subj -match $PromoteRe -and @((G rev-list --parents -n 1 $c) -split ' ').Count -eq 2) { continue }
+    if (Test-RealPromote $c) { continue }
     $offenders.Add("$c $subj")
 }
 if ($offenders.Count -gt 0) {
@@ -61,8 +72,7 @@ if ($offenders.Count -gt 0) {
 # previous promote: newest first-parent main commit whose subject is "Promote dev <sha>:".
 $prevDev = $null
 foreach ($c in @(G rev-list --first-parent $mainTip)) {
-    $pm = [regex]::Match((G log -1 --format=%s $c), $PromoteRe)
-    if ($pm.Success) { $prevDev = $pm.Groups[1].Value; break }
+    if (Test-RealPromote $c) { $prevDev = [regex]::Match((G log -1 --format=%s $c), $PromoteRe).Groups[1].Value; break }
 }
 if ($prevDev) {
     if (-not (GOk cat-file -e "$prevDev^{commit}")) { Fail 'prev-promote-missing' "the previous promote names dev commit $prevDev, which is not in this clone." }
