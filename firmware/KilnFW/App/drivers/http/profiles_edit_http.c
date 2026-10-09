@@ -763,15 +763,14 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         return cfg_fs_http_persist_failed(req);
     }
     profiles_save_lock();
-    profiles_slot_clear(id);
-    memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
-    profiles_save_unlock();
     if (err == ESP_OK) {
-        err = firing_stats_erase((uint8_t)id); /* idempotent re-prune, outside the lock */
+        profiles_slot_clear(id);
+        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     }
+    profiles_save_unlock();
     if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- deleted live but may reappear after reboot", id,
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- slot kept, retry", id,
                  esp_err_to_name(err));
         return cfg_fs_http_persist_failed(req);
     }

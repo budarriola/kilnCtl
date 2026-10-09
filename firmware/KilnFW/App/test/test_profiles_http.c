@@ -3142,6 +3142,23 @@ static void test_retarget_commit_and_revert_hold_save_lock(void)
     }
 }
 
+static void test_retarget_commit_rechecks_plan_refusals(void)
+{
+    TEST_SECTION("retarget commit -- plan refusals are re-checked at commit: a slot changed after a passing plan makes the commit refuse");
+    rt_seed();
+    profiles_retarget_counts_t c;
+    char err[160] = "";
+    TEST_CHECK(profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), "plan passes");
+    rt_rule(&s_profiles.profiles[3], 0, RT_DEST, 0, 0, 0); /* changed between plan and commit */
+    profile_t before[4];
+    rt_snapshot(before);
+    TEST_CHECK(!profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   strstr(err, "already has a rule") != NULL,
+               "commit refuses on the changed slot");
+    TEST_CHECK(rt_unchanged_from(before), "refused commit changed no slot");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "lock released after the refusal");
+}
+
 static void test_retarget_resume_and_whole_blob_verify(void)
 {
     TEST_SECTION("profiles_retarget_zone_to_aux_resume -- finishes a half-done rewrite; slot verify compares the whole blob");
@@ -4423,6 +4440,7 @@ void run_test_profiles_http(void)
     test_retarget_plan_refusals();
     test_retarget_commit_rollback_at_every_write();
     test_retarget_commit_and_revert_hold_save_lock();
+    test_retarget_commit_rechecks_plan_refusals();
     test_retarget_resume_and_whole_blob_verify();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();

@@ -703,10 +703,19 @@ static SemaphoreHandle_t s_save_mutex = NULL;
 static portMUX_TYPE s_save_mutex_mux = portMUX_INITIALIZER_UNLOCKED;
 
 static bool s_save_mutex_claimed = false;
+/* Release/acquire publish of the handle (target GCC builds); the MSVC host test
+ * build is single-threaded and uses plain accesses. */
+#if defined(__GNUC__)
+#define SAVE_MUTEX_LOAD() __atomic_load_n(&s_save_mutex, __ATOMIC_ACQUIRE)
+#define SAVE_MUTEX_STORE(v) __atomic_store_n(&s_save_mutex, (v), __ATOMIC_RELEASE)
+#else
+#define SAVE_MUTEX_LOAD() (*(SemaphoreHandle_t volatile *)&s_save_mutex)
+#define SAVE_MUTEX_STORE(v) (*(SemaphoreHandle_t volatile *)&s_save_mutex = (v))
+#endif
 
 void profiles_save_lock(void)
 {
-    if (s_save_mutex == NULL) {
+    if (SAVE_MUTEX_LOAD() == NULL) {
         /* Same once-guard as profiles_storage_ensure(): only the claim is inside
          * the critical section; the create runs after it (no FreeRTOS object
          * creation with interrupts disabled). The loser waits for the winner. */
@@ -718,9 +727,9 @@ void profiles_save_lock(void)
         }
         portEXIT_CRITICAL(&s_save_mutex_mux);
         if (mine) {
-            s_save_mutex = xSemaphoreCreateMutexStatic(&s_save_mutex_storage);
+            SAVE_MUTEX_STORE(xSemaphoreCreateMutexStatic(&s_save_mutex_storage));
         } else {
-            while (s_save_mutex == NULL) {
+            while (SAVE_MUTEX_LOAD() == NULL) {
                 vTaskDelay(1);
             }
         }
@@ -1850,8 +1859,6 @@ bool profiles_http_delete(uint8_t id)
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
         return false;
     }
-    /* Stats were pruned above; this second prune is idempotent and outside the lock. */
-    (void)firing_stats_erase((uint8_t)id);
     return true;
 }
 
@@ -2233,18 +2240,16 @@ static bool retarget_verify_slot(uint8_t id)
 }
 
 /* Undo `from`->`to` on the first `n` journal entries, newest first. Returns
- * false if any slot could not be re-persisted. */
+ * false if any slot could not be re-persisted. CALLER HOLDS profiles_save_lock(). */
 static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uint8_t to)
 {
     bool clean = true;
     while (n > 0) {
         uint8_t id = journal[--n];
-        profiles_save_lock(); /* swap + save + verify of one slot is one section */
         (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
         if (nvs_save_slot_locked(id) != ESP_OK || !retarget_verify_slot(id)) {
             clean = false;
         }
-        profiles_save_unlock();
     }
     return clean;
 }
@@ -2253,7 +2258,20 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
                             profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t plan;
+    profile_t *trial = persist_scratch_alloc(sizeof(*trial));
+    if (!trial) {
+        snprintf(err, err_cap, "out of memory");
+        if (counts) memset(counts, 0, sizeof(*counts));
+        return false;
+    }
+    /* The whole retarget (plan re-check, swap, save, verify, revert) is ONE
+     * section under the save mutex; only leaf locks are taken inside. The plan
+     * refusals are re-run here, under the lock, so a slot changed since the
+     * caller's own plan() cannot slip past them. */
+    profiles_save_lock();
     if (!retarget_plan(zone, relay, zone_has_tc, resume, &plan, err, err_cap)) {
+        profiles_save_unlock();
+        free(trial);
         if (counts) *counts = plan;
         return false;
     }
@@ -2263,33 +2281,23 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     profiles_retarget_counts_t done = plan;
     done.profiles_affected = 0;
     done.rules_retargeted = 0;
-    profile_t *trial = persist_scratch_alloc(sizeof(*trial));
-    if (!trial) {
-        snprintf(err, err_cap, "out of memory");
-        if (counts) *counts = done;
-        return false;
-    }
     const char *fail = NULL;
     char why[96] = "";
     uint8_t fail_id = 0;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT && !fail; id++) {
-        profiles_save_lock(); /* read, swap, validate, assign and save of one slot is one section */
         if (!profiles_slot_used(id) || retarget_count_rules(&s_profiles.profiles[id], zone) == 0) {
-            profiles_save_unlock();
             continue;
         }
         *trial = s_profiles.profiles[id];
         uint16_t n = retarget_swap_rules(trial, zone, dest);
         fail_id = id;
         if (!validate_on_off_rules(trial, why, sizeof(why))) {
-            profiles_save_unlock();
             fail = "rewritten profile failed validation";
             break;
         }
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
         esp_err_t rt_save = nvs_save_slot_locked(id);
-        profiles_save_unlock();
         if (rt_save != ESP_OK) {
             fail = "persisting the rewritten profile failed";
             break;
@@ -2299,10 +2307,7 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     }
     free(trial);
     for (uint8_t k = 0; !fail && k < jn; k++) {
-        profiles_save_lock();
-        bool verified = retarget_verify_slot(journal[k]);
-        profiles_save_unlock();
-        if (!verified) {
+        if (!retarget_verify_slot(journal[k])) {
             fail = "read-back of a rewritten profile did not match";
             fail_id = journal[k];
         }
@@ -2311,9 +2316,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
         bool clean = retarget_revert(journal, jn, dest, zone);
         snprintf(err, err_cap, "profile slot %u: %s%s%s -- %s", fail_id, fail, why[0] ? ": " : "", why,
                  clean ? "all profiles restored" : "REVERT INCOMPLETE, profiles may be mixed");
+        profiles_save_unlock();
         if (counts) *counts = done;
         return false;
     }
+    profiles_save_unlock();
     if (counts) *counts = done;
     return true;
 }
@@ -2338,10 +2345,13 @@ bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
     }
     uint8_t journal[PROFILES_MAX_COUNT];
     uint8_t jn = 0;
+    profiles_save_lock(); /* journal build and the revert are one section */
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (profiles_slot_used(id) && retarget_count_rules(&s_profiles.profiles[id], dest) != 0) {
             journal[jn++] = id;
         }
     }
-    return retarget_revert(journal, jn, dest, zone);
+    bool clean = retarget_revert(journal, jn, dest, zone);
+    profiles_save_unlock();
+    return clean;
 }
