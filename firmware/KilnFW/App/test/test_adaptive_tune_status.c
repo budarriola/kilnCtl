@@ -640,3 +640,147 @@ static void test_revert_refuses_while_firing_active(void)
     TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_OK,
                "sanity: once idle again, the identical revert must succeed");
 }
+
+// ---------------------------------------------------------------------
+// F3 follow-up (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md):
+// adaptive_tune_run_end() writes the zones_config setters with
+// adaptive_tune_lock RELEASED, and adaptive_tune_revert() does the same. The
+// executor calls run_end with its state already DONE/FAULTED, so the HTTP
+// revert route is open during that window. These pin the per-zone
+// write_in_flight interlock between the two, using the setter fakes' one-shot
+// hooks to land the competing call inside the unlocked window.
+
+static void at_seed_zone1_for_refine(void)
+{
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].kp = 2.0f;
+    s_fake_zone_cfg[1].ki = 0.03f;
+    s_fake_zone_cfg[1].kd = 0.4f;
+    const float true_k = 15.0f, ambient = 22.3f;
+    const float duties[4] = {0.20f, 0.50f, 0.80f, 0.35f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + true_k * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+}
+
+static adaptive_tune_revert_result_t s_hook_revert_result;
+static void hook_revert_zone1(void)
+{
+    char reason[96];
+    s_hook_revert_result = adaptive_tune_revert(1, reason, sizeof(reason));
+}
+
+// MUST GO RED if adaptive_tune_revert() stops refusing while run_end's apply
+// pass is in flight: the revert would consume the snapshot plan just captured
+// and write the priors, run_end's set_pid would then overwrite them, and the
+// commit would mark the change applied with no revert left to offer.
+static void test_revert_during_run_end_apply_is_refused_busy(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    s_hook_revert_result = ADAPTIVE_TUNE_REVERT_OK;
+    s_set_model_hook = hook_revert_zone1; // fires between run_end's set_model and set_pid
+    profile_firing_run_record_t rec = make_clean_record(30, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+
+    TEST_CHECK(s_set_model_hook == NULL, "setup: the hook must have fired inside run_end's apply pass");
+    TEST_CHECK(s_hook_revert_result == ADAPTIVE_TUNE_REVERT_BUSY,
+               "a revert landing inside run_end's unlocked apply window must refuse BUSY, not report OK");
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "run_end's change landed and must be recorded as applied");
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "the refused revert must not consume the snapshot");
+    TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "commit must clear write_in_flight");
+
+    char reason[96];
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_OK,
+               "once run_end has committed, the revert must go through");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-5, "revert restores the prior K_dc");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 0.03f, 1e-5, "revert restores the prior Ki");
+    TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "a finished revert must clear write_in_flight");
+}
+
+static void hook_run_end_zone1(void)
+{
+    profile_firing_run_record_t rec2 = make_clean_record(32, 1, 900);
+    adaptive_tune_run_end(&rec2, true);
+}
+
+// MUST GO RED if run_end stops skipping a zone a revert is writing: run_end
+// would plan against the half-reverted config and its set_model would land
+// after the revert's, leaving the "reverted" zone on a fresh model.
+static void test_run_end_during_revert_write_skips_the_zone(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    profile_firing_run_record_t rec = make_clean_record(31, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "setup: a real applied change must be available to revert");
+
+    // A second run's worth of settled data at a different gain, so a run_end
+    // that is NOT skipped genuinely writes a new model.
+    const float ambient = 22.3f;
+    const float duties[4] = {0.25f, 0.55f, 0.75f, 0.40f};
+    for (int i = 0; i < 4; i++) {
+        feed_settled_dwell(1, ambient + 18.0f * duties[i], ambient, duties[i], SETTLE_TICKS, DT_S);
+    }
+
+    s_set_model_hook = hook_run_end_zone1; // fires between the revert's set_model and set_pid
+    char reason[96];
+    adaptive_tune_revert_result_t r = adaptive_tune_revert(1, reason, sizeof(reason));
+    TEST_CHECK(s_set_model_hook == NULL, "setup: the hook must have fired inside the revert's write");
+    TEST_CHECK(r == ADAPTIVE_TUNE_REVERT_OK, "the revert itself must succeed");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-5,
+                    "a run_end landing inside the revert's write must not leave its own model behind");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kp, 2.0f, 1e-5, "revert restores the prior Kp");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 0.03f, 1e-5, "revert restores the prior Ki");
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "the reverted zone must not read as applied");
+    TEST_CHECK(!adaptive_tune_zones[1].revert_available, "the revert consumed the snapshot");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "revert") != NULL,
+               "run_end must record why it skipped the zone");
+    TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "a finished revert must clear write_in_flight");
+}
+
+static float s_hook_simc_ki;
+static uint8_t s_hook_clear_zone;
+static void hook_accept_clears_baseline(void)
+{
+    s_hook_simc_ki = s_fake_zone_cfg[1].ki; // what run_end's set_pid just wrote
+    if (s_hook_clear_zone == 1) {
+        s_fake_zone_cfg[1].ki = 0.05f; // a UART Accept on zone 1 rewrites its live PID ...
+    }
+    adaptive_tune_clear_ki_baseline(s_hook_clear_zone); // ... then clears that zone's baseline
+}
+
+// MUST GO RED if adaptive_tune_ki_clear_gen goes back to one global counter:
+// an Accept on zone 0 inside zone 1's apply window would then stop zone 1 from
+// re-latching its fresh SIMC Ki. The second pass pins the guard itself: an
+// Accept on zone 1 must stop the commit latching the SIMC Ki that Accept has
+// already replaced in the live config.
+static void test_ki_clear_gen_is_per_zone(void)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        reset_module_state();
+        at_mount_scratch();
+        adaptive_tune_zones[1].enabled = true;
+        at_seed_zone1_for_refine();
+        adaptive_tune_zones[1].ki_baseline_valid = true;
+        adaptive_tune_zones[1].ki_baseline = 0.03f;
+        s_hook_simc_ki = -1.0f;
+        s_hook_clear_zone = (pass == 0) ? 0 : 1;
+        s_set_pid_hook = hook_accept_clears_baseline;
+        profile_firing_run_record_t rec = make_clean_record(33, 1, 900);
+        adaptive_tune_run_end(&rec, true);
+        TEST_CHECK(s_set_pid_hook == NULL && s_hook_simc_ki > 0.0f, "setup: the hook must have fired after set_pid");
+        TEST_CHECK(fabsf(s_hook_simc_ki - 0.03f) > 1e-6f, "setup: SIMC's fresh Ki must differ from the prior");
+        TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the refinement must genuinely apply");
+        bool latched_simc = adaptive_tune_zones[1].ki_baseline_valid &&
+                            fabsf(adaptive_tune_zones[1].ki_baseline - s_hook_simc_ki) < 1e-6f;
+        if (pass == 0) {
+            TEST_CHECK(latched_simc, "an Accept on ANOTHER zone must not stop zone 1 re-latching its fresh SIMC Ki");
+        } else {
+            TEST_CHECK(!latched_simc, "an Accept on zone 1 inside its apply window must stop the commit latching "
+                                      "the SIMC Ki the Accept already replaced");
+        }
+    }
+}

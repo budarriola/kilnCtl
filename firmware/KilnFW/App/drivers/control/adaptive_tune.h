@@ -305,6 +305,8 @@ typedef enum {
     ADAPTIVE_TUNE_REVERT_INVALID_ZONE,
     ADAPTIVE_TUNE_REVERT_WRITE_FAILED,       // the zone-config write itself was rejected -- see
                                               // zones_config_set_model()/set_pid()'s own validation
+    ADAPTIVE_TUNE_REVERT_BUSY,               // refused: run_end's unlocked apply pass (or another revert)
+                                              // is writing this zone right now -- retry (F3 follow-up)
 } adaptive_tune_revert_result_t;
 
 // Restores zone zone_index's Kp/Ki/Kd, K_dc/tau/dead_time, AND the Ki-

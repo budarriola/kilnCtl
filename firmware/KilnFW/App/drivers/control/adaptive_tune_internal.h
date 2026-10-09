@@ -580,6 +580,15 @@ typedef struct {
     bool     revert_ki_baseline_valid;
     float    revert_ki_baseline;
 
+    // F3 follow-up (FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09): true while a
+    // zones_config write for this zone runs with adaptive_tune_lock RELEASED --
+    // adaptive_tune_run_end()'s apply pass (set at plan, cleared at commit) or
+    // adaptive_tune_revert()'s write. Each refuses to start while the other has
+    // it set, so a revert can never consume a snapshot whose change has not
+    // landed yet (and be silently overwritten by it), and a run-end commit can
+    // never latch has_applied/ki_baseline over gains a revert just restored.
+    bool     write_in_flight;
+
     // ---------------------------------------------------------------------
     // ADAPTIVE_FUZZY_EVALUATION.md sec 3: the fuzzy confidence gate's
     // cross-firing "c" counter (0..PID_FUZZY_CONFIDENCE_MAX_C), consulted by
@@ -662,7 +671,7 @@ typedef struct {
     bool have_model, model_ok, pid_ok;
     float k_dc, k_blended, tau_s, dead_time_s, kp, ki, kd;
     uint8_t profile_id;
-    uint32_t clear_gen; // adaptive_tune_ki_clear_gen at plan time
+    uint32_t clear_gen; // adaptive_tune_ki_clear_gen[zi] at plan time
 } adaptive_tune_zone_plan_t;
 
 typedef struct {
@@ -675,8 +684,10 @@ typedef struct {
     } cells[MAX31856_CHANNEL_COUNT];
 } adaptive_tune_coupled_plan_t;
 
-// Bumped (under adaptive_tune_lock) by adaptive_tune_clear_ki_baseline().
-extern uint32_t adaptive_tune_ki_clear_gen;
+// Bumped per zone (under adaptive_tune_lock) by adaptive_tune_clear_ki_baseline().
+// Per zone, so an Accept on one zone does not stop another zone's commit from
+// re-latching its own fresh SIMC Ki.
+extern uint32_t adaptive_tune_ki_clear_gen[MAX31856_CHANNEL_COUNT];
 
 bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tune_zone_plan_t *plan);
 void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan);

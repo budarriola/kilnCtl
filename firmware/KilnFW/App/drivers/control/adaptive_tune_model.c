@@ -50,7 +50,7 @@ bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tun
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
     memset(plan, 0, sizeof(*plan));
     plan->profile_id = profile_id;
-    plan->clear_gen = adaptive_tune_ki_clear_gen;
+    plan->clear_gen = adaptive_tune_ki_clear_gen[zi];
 
     if (z->ring_count < ADAPTIVE_TUNE_MIN_OBSERVATIONS) {
         adaptive_tune_set_refusal(z, "only %u/%u dwell observations", (unsigned)z->ring_count,
@@ -314,7 +314,7 @@ bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_
     // F3: the lock was dropped for the setters; an UART Accept that cleared
     // this zone's baseline in that window also rewrote the live PID, so the SIMC
     // Ki planned above is stale -- do not re-latch it.
-    if (adaptive_tune_ki_clear_gen == plan->clear_gen) {
+    if (adaptive_tune_ki_clear_gen[zi] == plan->clear_gen) {
         z->ki_baseline = gains.ki;
         z->ki_baseline_valid = true;
     }

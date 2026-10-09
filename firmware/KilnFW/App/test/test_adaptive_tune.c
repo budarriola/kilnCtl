@@ -104,6 +104,19 @@ static int g_setter_calls = 0;
 static int g_setter_max_lock_depth = 0;
 #define SETTER_LOCK_PROBE()     do {         g_setter_calls++;         if (g_test_stub_lock_depth > g_setter_max_lock_depth) g_setter_max_lock_depth = g_test_stub_lock_depth;     } while (0)
 
+// F3 follow-up race tests: a one-shot hook run AFTER a successful
+// zones_config_set_model()/set_pid() write, i.e. inside the window where the
+// caller has adaptive_tune_lock released. Cleared before it runs, so a hook
+// that re-enters a setter cannot recurse.
+static void (*s_set_model_hook)(void) = NULL;
+static void (*s_set_pid_hook)(void) = NULL;
+static void run_setter_hook(void (**hook)(void))
+{
+    void (*h)(void) = *hook;
+    *hook = NULL;
+    if (h) h();
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
@@ -119,6 +132,7 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
     s_fake_zone_cfg[zone_index].k_dc = k_dc;
     s_fake_zone_cfg[zone_index].tau_s = tau_s;
     s_fake_zone_cfg[zone_index].dead_time_s = dead_time_s;
+    run_setter_hook(&s_set_model_hook);
     return true;
 }
 // docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md's fix: the
@@ -174,6 +188,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_fake_zone_cfg[zone_index].kp = kp;
     s_fake_zone_cfg[zone_index].ki = ki;
     s_fake_zone_cfg[zone_index].kd = kd;
+    run_setter_hook(&s_set_pid_hook);
     return true;
 }
 
@@ -411,6 +426,9 @@ static void reset_module_state(void)
     s_fake_fuzzy_pct_fail = false;
     memset(s_stub_zone_is_on_off, 0, sizeof(s_stub_zone_is_on_off));
     memset(s_stub_zone_is_monitor_only, 0, sizeof(s_stub_zone_is_monitor_only));
+    memset(adaptive_tune_ki_clear_gen, 0, sizeof(adaptive_tune_ki_clear_gen));
+    s_set_model_hook = NULL;
+    s_set_pid_hook = NULL;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -642,6 +660,11 @@ void run_test_adaptive_tune(void)
     test_revert_restores_exact_prior_gains_and_ki_baseline();
     test_revert_refuses_when_nothing_to_revert();
     test_revert_refuses_while_firing_active();
+
+    TEST_SECTION("adaptive_tune: F3 follow-up -- revert vs run_end's unlocked apply window");
+    test_revert_during_run_end_apply_is_refused_busy();
+    test_run_end_during_revert_write_skips_the_zone();
+    test_ki_clear_gen_is_per_zone();
 }
 
 // ---------------------------------------------------------------------

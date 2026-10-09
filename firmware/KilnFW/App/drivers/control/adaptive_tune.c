@@ -625,7 +625,7 @@ static void save_kibase_job(void *arg)
                                      "adaptive-tune ki baseline");
 }
 
-uint32_t adaptive_tune_ki_clear_gen = 0;
+uint32_t adaptive_tune_ki_clear_gen[MAX31856_CHANNEL_COUNT];
 
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 {
@@ -665,6 +665,11 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             // says nothing about its plant model; the masked (all-zero)
             // coupling row must not be blended into the stored one either.
             skip_reason = "monitor-only zone (no heater relay) -- not used as training data";
+        } else if (z->write_in_flight) {
+            // F3 follow-up: adaptive_tune_revert() is writing this zone's gains
+            // with the lock released; planning against them now would capture a
+            // revert snapshot and commit a result its write then undoes.
+            skip_reason = "a revert of this zone was in progress at run end -- not used as training data";
         } else if (!zr->active) {
             skip_reason = "zone not active in this profile's zone mask -- not used as training data";
         } else if (!clean) {
@@ -723,6 +728,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         baseline_before_a[zi] = z->ki_baseline;
         zone_planned[zi] = adaptive_tune_plan_zone_locked(zi, rec->profile_id, &zone_plans[zi]);
         adaptive_tune_plan_coupled_locked(zi, &coupled_plans[zi]);
+        z->write_in_flight = true; // F3 follow-up: a revert refuses until the commit pass clears this
     }
 
     // F3: the zones setters end in the zones NVS save, which dispatches onto the
@@ -748,6 +754,7 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         const profile_firing_zone_record_t *zr = &rec->zones[zi];
         bool baseline_was_valid = baseline_was_valid_a[zi];
         float baseline_before = baseline_before_a[zi];
+        z->write_in_flight = false;
         bool model_refined = adaptive_tune_commit_zone_locked(zi, &zone_plans[zi]);
         adaptive_tune_commit_coupled_locked(zi, &coupled_plans[zi]);
         if (!model_refined) {
@@ -1053,7 +1060,7 @@ void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zones[zone_index].ki_baseline_valid = false;
     adaptive_tune_zones[zone_index].ki_baseline = 0.0f;
-    adaptive_tune_ki_clear_gen++; // F3: invalidates any in-flight run_end plan's baseline re-latch
+    adaptive_tune_ki_clear_gen[zone_index]++; // F3: invalidates an in-flight run_end plan's re-latch for this zone
 
     kibase_job_t job = {.result = ESP_FAIL};
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -1222,6 +1229,16 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     adaptive_tune_ensure_lock();
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zone_index];
+    if (z->write_in_flight) {
+        // F3 follow-up: run_end's apply pass (or another revert) is writing this
+        // zone with the lock released. Its snapshot may describe a change that
+        // has not landed yet; reverting now would be overwritten by it.
+        xSemaphoreGive(adaptive_tune_lock);
+        if (reason) {
+            snprintf(reason, reason_cap, "an adaptive-tune write to this zone is in progress -- retry");
+        }
+        return ADAPTIVE_TUNE_REVERT_BUSY;
+    }
     if (!z->revert_available) {
         xSemaphoreGive(adaptive_tune_lock);
         if (reason) {
@@ -1229,6 +1246,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
         }
         return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
     }
+    z->write_in_flight = true;
     float kp = z->revert_kp, ki = z->revert_ki, kd = z->revert_kd;
     float k_dc = z->revert_k_dc, tau_s = z->revert_tau_s, dead_time_s = z->revert_dead_time_s;
     bool base_valid = z->revert_ki_baseline_valid;
@@ -1244,6 +1262,9 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     bool ok = zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) &&
               zones_config_set_pid(zone_index, kp, ki, kd);
     if (!ok) {
+        xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+        z->write_in_flight = false;
+        xSemaphoreGive(adaptive_tune_lock);
         if (reason) {
             snprintf(reason, reason_cap, "zone config write rejected the reverted gains");
         }
@@ -1251,6 +1272,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     }
 
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    z->write_in_flight = false;
     // One-shot: consume the snapshot so a second press without a fresh
     // applied change in between reports NOTHING_TO_REVERT honestly, rather
     // than silently reapplying the same old values again.
