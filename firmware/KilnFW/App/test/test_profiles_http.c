@@ -1557,6 +1557,81 @@ static void test_pcfg_files_only_junk_rev_is_repaired(void)
     TEST_CHECK(s_profile_rev[3] == 5, "slot 3 floor = max observed file rev");
 }
 
+/* Save mutex (coordinator 2026-10-09): the rev read, file write and rev bump
+ * happen under profiles_save_lock(). The host semaphore stub is
+ * single-threaded, so this proves lock ownership at the write seam
+ * (g_test_stub_lock_depth > 0); it does not exercise a real race. */
+static int s_sm_depth_at_write[16];
+static unsigned s_sm_writes;
+static esp_err_t sm_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_sm_writes < 16) {
+        s_sm_depth_at_write[s_sm_writes] = g_test_stub_lock_depth;
+    }
+    s_sm_writes++;
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
+static void test_save_mutex_serializes_rev_write_bump(void)
+{
+    TEST_SECTION("nvs_save_slot -- the cfg file write runs with the save mutex held");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    s_sm_writes = 0;
+    memset(s_sm_depth_at_write, 0, sizeof(s_sm_depth_at_write));
+    profiles_cfg_fs_set_write_fn(sm_write_fn);
+    for (int i = 0; i < 3; i++) {
+        TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    }
+    TEST_CHECK(s_sm_writes == 3, "three file writes");
+    TEST_CHECK(s_sm_depth_at_write[0] > 0 && s_sm_depth_at_write[1] > 0 && s_sm_depth_at_write[2] > 0,
+               "the file write ran with the save mutex held");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "mutex released after the saves");
+    profiles_cfg_fs_reset_write_fn_for_test();
+}
+/* Delete and retarget seams (Opus review of 0880162b): the erase / rewrite must
+ * run with the save mutex held. */
+static int s_dl_depth_at_delete;
+static unsigned s_dl_deletes;
+static esp_err_t dl_delete_fn(const char *rel_path)
+{
+    s_dl_depth_at_delete = g_test_stub_lock_depth;
+    s_dl_deletes++;
+    return cfg_fs_delete(rel_path);
+}
+
+static void test_delete_paths_hold_save_lock_at_erase_seam(void)
+{
+    TEST_SECTION("profiles_http_delete / nvs_erase_slot_locked -- the cfg file delete runs with the save mutex held");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[8] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
+    TEST_CHECK(nvs_save_slot(8) == ESP_OK, "save slot 8");
+    s_dl_deletes = 0;
+    s_dl_depth_at_delete = 0;
+    profiles_cfg_fs_set_delete_fn(dl_delete_fn);
+    TEST_CHECK(profiles_http_delete(8), "delete slot 8");
+    TEST_CHECK(s_dl_deletes >= 1 && s_dl_depth_at_delete > 0, "profiles_http_delete: file delete under the lock");
+    TEST_CHECK(!profiles_slot_used(8), "slot cleared");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "lock released");
+
+    s_profiles.profiles[9] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x200);
+    TEST_CHECK(nvs_save_slot(9) == ESP_OK, "save slot 9");
+    s_dl_deletes = 0;
+    s_dl_depth_at_delete = 0;
+    profiles_save_lock();
+    TEST_CHECK(nvs_erase_slot_locked(9) == ESP_OK, "erase_locked slot 9");
+    profiles_save_unlock();
+    TEST_CHECK(s_dl_deletes >= 1 && s_dl_depth_at_delete > 0, "nvs_erase_slot_locked: delete under the lock");
+    profiles_cfg_fs_reset_delete_fn_for_test();
+}
+
 static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
 {
     TEST_SECTION("nvs_erase_slot -- unreadable rev array is refused, other slots' floors not zeroed");
@@ -3030,6 +3105,60 @@ static void test_retarget_commit_rollback_at_every_write(void)
     TEST_CHECK(succeeded, "the sweep reached a point past every write");
 }
 
+static int s_rv_min_depth;
+static unsigned s_rv_writes;
+static unsigned s_rv_fail_at;
+static esp_err_t rv_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    if (s_rv_writes == 0 || g_test_stub_lock_depth < s_rv_min_depth) {
+        s_rv_min_depth = g_test_stub_lock_depth;
+    }
+    unsigned i = s_rv_writes++;
+    if (s_rv_fail_at != 0 && i + 1 == s_rv_fail_at) {
+        return ESP_FAIL;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
+static void test_retarget_commit_and_revert_hold_save_lock(void)
+{
+    TEST_SECTION("retarget commit and revert -- every cfg write runs with the save mutex held");
+    int pass;
+    for (pass = 0; pass < 2; pass++) {
+        rt_seed();
+        profiles_retarget_counts_t c;
+        char err[160] = "";
+        s_rv_writes = 0;
+        s_rv_min_depth = 0;
+        /* pass 0: clean commit. pass 1: 2nd write fails, so the revert writes too. */
+        s_rv_fail_at = (pass == 0) ? 0 : 2;
+        profiles_cfg_fs_set_write_fn(rv_write_fn);
+        bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        profiles_cfg_fs_reset_write_fn_for_test();
+        TEST_CHECK(ok == (pass == 0), pass == 0 ? "clean commit succeeds" : "injected failure fails the commit");
+        TEST_CHECK(s_rv_writes >= (pass == 0 ? 2u : 3u), pass == 0 ? "commit wrote slots" : "revert wrote after the failure");
+        TEST_CHECK(s_rv_min_depth > 0, pass == 0 ? "commit writes ran under the lock" : "commit and revert writes ran under the lock");
+        TEST_CHECK(g_test_stub_lock_depth == 0, "lock released");
+    }
+}
+
+static void test_retarget_commit_rechecks_plan_refusals(void)
+{
+    TEST_SECTION("retarget commit -- plan refusals are re-checked at commit: a slot changed after a passing plan makes the commit refuse");
+    rt_seed();
+    profiles_retarget_counts_t c;
+    char err[160] = "";
+    TEST_CHECK(profiles_retarget_zone_to_aux_plan(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)), "plan passes");
+    rt_rule(&s_profiles.profiles[3], 0, RT_DEST, 0, 0, 0); /* changed between plan and commit */
+    profile_t before[4];
+    rt_snapshot(before);
+    TEST_CHECK(!profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err)) &&
+                   strstr(err, "already has a rule") != NULL,
+               "commit refuses on the changed slot");
+    TEST_CHECK(rt_unchanged_from(before), "refused commit changed no slot");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "lock released after the refusal");
+}
+
 static void test_retarget_resume_and_whole_blob_verify(void)
 {
     TEST_SECTION("profiles_retarget_zone_to_aux_resume -- finishes a half-done rewrite; slot verify compares the whole blob");
@@ -4310,6 +4439,8 @@ void run_test_profiles_http(void)
     test_retarget_commit_success();
     test_retarget_plan_refusals();
     test_retarget_commit_rollback_at_every_write();
+    test_retarget_commit_and_revert_hold_save_lock();
+    test_retarget_commit_rechecks_plan_refusals();
     test_retarget_resume_and_whole_blob_verify();
     test_profiles_list_marks_exceeds_ceiling();
     test_validate_candidate_hard_mode_refuses_target_above_zone_ceiling();
@@ -4351,6 +4482,8 @@ void run_test_profiles_http(void)
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
+    test_save_mutex_serializes_rev_write_bump();
+    test_delete_paths_hold_save_lock_at_erase_seam();
     test_pcfg_junk_repair_load_error_fails_closed();
     test_pcfg_junk_rev_repair_deferred_without_cfg();
     test_pcfg_truncated_rev_blob_not_known_lengths();

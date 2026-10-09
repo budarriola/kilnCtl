@@ -66,7 +66,7 @@ target build and host-test build now goes through `tools/build_gate.ps1` (or
 directly outside `check_00_*.ps1`, `build_host_tests.ps1`, or the
 `build_kilnfw`/`build_saftyfw*` MCP tools. Prefer
 `run_all_checks.ps1 -Fast -Only <regex>` while iterating and run the full
-suite once per commit, not once per edit (with no other session holding a
+suite once per commit, not once per edit (agents run targeted host tests with `build_host_tests.ps1 -Only <name>`; the full suite is the coordinator's batched dev run) (with no other session holding a
 build slot, a full run finishes in under 3 minutes on this 24-core machine --
 one that is waiting on a slot takes longer, not longer than expected). The
 rule covers every full target build and every host-test build, including

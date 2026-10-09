@@ -22,7 +22,11 @@
 # ESP-IDF export script has already rewritten PATH in this same shell. Fix:
 # prepend `C:\Program Files (x86)\Microsoft Visual Studio\Installer` to PATH
 # before running this script.
-param([string]$OutDir = "")
+# -Only <regex> builds and runs only the executables whose name, output .exe
+# name, build command (test source names) or, for "main", source list matches
+# the regex (e.g. -Only test_update_stage). Selected ones are printed; a regex
+# matching none is an error. Absent = full run, behavior unchanged.
+param([string]$OutDir = "", [string]$Only = "")
 $ErrorActionPreference = "Stop"
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -501,6 +505,7 @@ try {
     $script:builtExes = @()
     $script:buildFailures = @()
     $script:failedExes = @()
+    $script:onlySelected = @()
 
     # Parallel compile, serial run. KILNCTL_HOST_BUILD_JOBS (default 4; 1 = the
     # old fully serial behaviour) bounds how many compiles run at once. Each
@@ -555,6 +560,13 @@ try {
             [Parameter(Mandatory)][string]$ExePath,
             [Parameter(Mandatory)][string]$BuildCmd
         )
+        if ($Only) {
+            $hay = $Name + ' ' + (Split-Path -Leaf $ExePath) + ' ' + $BuildCmd
+            if ($Name -eq 'main') { $hay += ' ' + (($sources | ForEach-Object { Split-Path -Leaf $_ }) -join ' ') }
+            if ($hay -notmatch $Only) { return }
+            $script:onlySelected += $Name
+            Write-Host "-Only selected: $Name"
+        }
         if (Test-Path $ExePath) {
             Remove-Item -Force $ExePath
         }
@@ -3100,6 +3112,13 @@ try {
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
     Complete-HostTestQueue
     $totalExpected = 69
+    if ($Only) {
+        if ($script:onlySelected.Count -eq 0) {
+            Write-Host "-Only '$Only' matched no host-test executable"
+            exit 1
+        }
+        $totalExpected = $script:onlySelected.Count
+    }
     Write-Host ""
     if ($script:simCredibilityGateLine) {
         # Non-blocking, but its verdict must not scroll off above the
