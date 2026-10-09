@@ -5,6 +5,7 @@
 // commit that relocated these functions, and append_zone_status_json()'s
 // truncation path has since been changed to log and still close the array
 // (see its doc comment in dashboard_json.h) instead of bailing silently.
+#include "../common/json_escape_ctl.h"
 #include "dashboard_json.h"
 
 #include <stdarg.h>
@@ -95,17 +96,7 @@ size_t json_append_clamped(char *json, size_t cap, size_t o, const char *fmt, ..
 
 void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* Shared by both handlers below: one JSON object per active zone. Appends

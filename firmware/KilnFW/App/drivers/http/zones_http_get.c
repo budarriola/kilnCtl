@@ -6,6 +6,7 @@
 // zones_http.c's route table and zones_http_post_parse.c's
 // zones_json_escape() caller keep reaching them the same way.
 
+#include "../common/json_escape_ctl.h"
 #include "zones_http_internal.h"
 
 #include <math.h>
@@ -58,17 +59,7 @@ esp_err_t page_get_handler(httpd_req_t *req)
  * collide at link time. */
 void zones_json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 esp_err_t safety_config_page_get_handler(httpd_req_t *req)

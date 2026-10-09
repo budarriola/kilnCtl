@@ -13,6 +13,8 @@
 
 #include "../drivers/http/http_auth_enforce.h"
 #include "../drivers/http/http_origin_check.h"
+#include "../drivers/common/json_escape_ctl.h"
+#include "../drivers/common/http_form.h"
 
 static void test_lookup_tier_real_routes(void) {
     TEST_SECTION("http_auth_lookup_tier -- against the real route_tier_table.h, not a mirror");
@@ -652,8 +654,58 @@ static void test_origin_check(void) {
     TEST_CHECK(http_origin_is_cross_origin("garbage", NULL, "192.168.1.50", false), "unparseable Origin refused");
 }
 
+static void test_host_allowlist(void) {
+    TEST_SECTION("http_origin_request_host_refused -- F4 DNS-rebinding Host allow-list");
+    fake_hdrs_t f = {NULL, NULL, "192.168.1.50"};
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "IPv4 host passes");
+    f.host = "192.168.4.1:80";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "AP IP with port passes");
+    f.host = "kilnctl.local";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mDNS name passes");
+    f.host = "KilnCtl.Local:80";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mDNS name case-insensitive");
+    f.host = "kiln.local";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kiln"), "kiln.local passes when it is the name");
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "other .local refused");
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, NULL), ".local refused with no mdns name");
+    f.host = "localhost:8080";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, NULL), "localhost passes");
+    f.host = "evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "evil.example refused");
+    f.host = "192.168.1.50.evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "IP-prefixed hostname refused");
+    f.host = "1.2.3";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "3-octet refused");
+    f.host = "kilnctl.local.evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mdns-prefixed hostname refused");
+    f.host = NULL;
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "missing Host not refused here");
+    /* The attack: matching evil Origin + Host passes the Origin compare, not the Host gate. */
+    fake_hdrs_t atk = {"http://rebind.attacker.example", NULL, "rebind.attacker.example"};
+    TEST_CHECK(!http_origin_request_is_cross_origin(&atk, fake_len, fake_str), "matching evil Origin+Host passes origin compare");
+    TEST_CHECK(http_origin_request_host_refused(&atk, fake_len, fake_str, "kilnctl"), "matching evil Origin+Host refused by Host gate");
+}
+
+static void test_f5_shared_helpers(void) {
+    TEST_SECTION("F5 -- kiln_json_escape_ctl and http_form_value_has_ctl");
+    char o[40];
+    kiln_json_escape_ctl("x\"\\\n\t\x1f\x7f", o, sizeof(o));
+    TEST_CHECK(strcmp(o, "x\\\"\\\\\\u000a\\u0009\\u001f\\u007f") == 0, "quote, backslash, controls, DEL");
+    char t[4];
+    kiln_json_escape_ctl("\x01", t, sizeof(t));
+    TEST_CHECK(t[0] == '\0', "escape that does not fit is dropped whole");
+    TEST_CHECK(http_form_value_has_ctl("a\nb", 3), "newline detected");
+    TEST_CHECK(http_form_value_has_ctl("a\x7f", 2), "DEL detected");
+    TEST_CHECK(!http_form_value_has_ctl("Zone 1 (top)", 12), "ordinary name clean");
+    char dec[16];
+    int n = http_form_find_field("name=a%00b", "name", dec, sizeof(dec));
+    TEST_CHECK(n == 3 && http_form_value_has_ctl(dec, n), "%00 decodes to NUL and is detected via length");
+}
+
 void run_test_http_auth_enforce(void) {
+    test_f5_shared_helpers();
     test_origin_check();
+    test_host_allowlist();
     test_origin_glue();
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();

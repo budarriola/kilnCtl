@@ -53,6 +53,10 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         *err_reason = "zone name too long";
         return false;
     }
+    if (name_len > 0 && http_form_value_has_ctl(name, name_len)) {
+        *err_reason = "zone name contains a control character";
+        return false;
+    }
     if (name_len < 0) {
         /* Omitted: preserve the currently-stored name rather than blanking
          * it. In practice zones_page.html always sends z%u_name for every

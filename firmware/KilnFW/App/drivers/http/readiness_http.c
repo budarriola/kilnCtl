@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "readiness_http.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
@@ -64,17 +65,7 @@ static const char *status_name(readiness_status_t s)
 
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* Bytes held back from the item loop so that, however full the buffer gets,

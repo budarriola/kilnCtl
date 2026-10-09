@@ -6,6 +6,7 @@
 #define HTTP_FORM_H
 
 #include <ctype.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,6 +41,20 @@ static inline int http_form_url_decode(const char *src, size_t src_len, char *ou
     }
     out[o] = '\0';
     return (int)o;
+}
+
+/* F5 (WEB_UI_XSS_AUDIT_2026-10-09): true when the first len decoded bytes of v hold
+ * a control byte (< 0x20, which includes a %00 NUL) or DEL (0x7f). Name writers
+ * refuse such values with 400 so they cannot be stored and re-emitted. */
+static inline bool http_form_value_has_ctl(const char *v, int len)
+{
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)v[i];
+        if (c < 0x20 || c == 0x7f) {
+            return true;
+        }
+    }
+    return false;
 }
 
 /* Finds "key=" as a whole &-delimited field in body and decodes its value

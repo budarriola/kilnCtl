@@ -15,6 +15,7 @@
 // kiln_cfg_http.c for two other files carrying their own static copy of the
 // same helper for the same reason).
 
+#include "../common/json_escape_ctl.h"
 #include "backup_http.h"
 #include "backup_http_internal.h"
 
@@ -163,17 +164,7 @@ static void backup_stream_printf(backup_stream_t *s, const char *fmt, ...)
  * profile name came from a POST body at some point, so it's untrusted-ish. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* httpd-stack-budget fix (2026-09-09, check_httpd_task_stack_budget RED at

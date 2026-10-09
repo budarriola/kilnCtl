@@ -3849,17 +3849,21 @@ static void test_profile_post_handler_collision_response_escapes_newline_in_name
                  "when the colliding name contains a raw newline AND a '\"' (Opus review finding 3)");
     memset(&s_profiles, 0, sizeof(s_profiles));
 
-    char body1[256];
-    build_minimal_post_body(body1, sizeof(body1), "A%0A%22B");
-    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save (name containing newline+'\"') must succeed");
+    /* F5 (WEB_UI_XSS_AUDIT_2026-10-09): such a name can no longer be CREATED over HTTP --
+     * the parse layer refuses a control byte with 400. The escaper itself is
+     * covered for control bytes by test_dashboard_json.c / test_http_auth_enforce.c. */
+    char body0[256];
+    build_minimal_post_body(body0, sizeof(body0), "A%0A%22B");
+    s_resp_capture[0] = '\0';
+    (void)run_profile_post(body0);
+    TEST_CHECK(strstr(s_resp_capture, "control character") != NULL,
+              "a new profile whose name carries a newline is refused as a control character");
 
-    char body2[256];
-    build_minimal_post_body(body2, sizeof(body2), "A%0A%22B");
-    TEST_CHECK(run_profile_post(body2) == ESP_OK, "handler must still return ESP_OK on a refusal");
-    TEST_CHECK(json_is_well_formed(s_resp_capture),
-              "a collision response embedding a name with a raw newline must still be well-formed JSON");
-    TEST_CHECK(strstr(s_resp_capture, "\\u000a") != NULL,
-              "the newline must be escaped as \\u00XX, not left as a raw control byte");
+    char body1[256];
+    build_minimal_post_body(body1, sizeof(body1), "Aplain");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "setup: the first save must succeed");
+    TEST_CHECK(run_profile_post(body1) == ESP_OK, "handler must still return ESP_OK on a refusal");
+    TEST_CHECK(json_is_well_formed(s_resp_capture), "collision response is well-formed JSON");
 }
 
 // ---------------------------------------------------------------------------

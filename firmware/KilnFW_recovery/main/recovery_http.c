@@ -270,7 +270,8 @@ static esp_err_t origin_guard(httpd_req_t *req)
 {
     esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
     if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
-        if (http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
+        if (http_origin_request_host_refused(req, origin_hdr_len, origin_hdr_str, NULL) ||
+            http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
             ESP_LOGW(TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, req->uri);
             httpd_resp_set_status(req, "403 Forbidden");
             httpd_resp_set_type(req, "application/json");
@@ -285,6 +286,8 @@ static esp_err_t root_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'");
     size_t len = (size_t)(recovery_page_html_end - recovery_page_html_start);
     return httpd_resp_send(req, (const char *)recovery_page_html_start, (ssize_t)len);
 }

@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "wifi_provision_http.h"
 
 #include <stdatomic.h>
@@ -224,17 +225,7 @@ static const char *ip_mode_name(wifi_prov_ip_mode_t m)
  * one with unusual characters. out_cap includes the closing NUL. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)

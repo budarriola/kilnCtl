@@ -72,7 +72,7 @@ Several records render into the same view.
 Fix: escape `rec.profile_name` when building `caption`, or set the caption
 with `textContent`.
 
-### F4 (Medium, auth OFF only) DNS rebinding defeats the CSRF origin check
+### F4 (Medium, auth OFF only) DNS rebinding defeats the CSRF origin check -- FIXED (see Fix status)
 
 `http_origin_check.h` (called from `http_auth_http.c:314` for every
 non-GET/HEAD request) compares the Origin (or Referer) host:port with the
@@ -92,7 +92,7 @@ STA IP, the AP IP `192.168.4.1`, and the mDNS hostname if one is advertised.
 Apply this to all methods, at least while web auth is off. This closes
 rebinding for GETs too, which the origin check never covered.
 
-### F5 (Low-Medium) Narrow JSON escapers let control characters through, which breaks pages (stored DoS)
+### F5 (Low-Medium) Narrow JSON escapers let control characters through, which breaks pages (stored DoS) -- FIXED (see Fix status)
 
 Several emitters use a "quote and backslash only" escaper:
 
@@ -152,7 +152,7 @@ Fix: strip `[\t\n\r]` before the checks, or resolve with
 `new URL(ret, location.origin)` and require
 `u.origin === location.origin`, then navigate to `u.pathname + u.search + u.hash`.
 
-### F7 (Low) No anti-framing header (clickjacking, auth OFF)
+### F7 (Low) No anti-framing header (clickjacking, auth OFF) -- FIXED (see Fix status)
 
 No response sets `X-Frame-Options` or a CSP `frame-ancestors`. With auth on,
 the `SameSite=Strict` session cookie (`web_auth_login_http.c:556`) is not sent
@@ -252,3 +252,9 @@ non-literal", not "every value judged risky".
 ## Fix status (page side)
 
 F1, F2, F3, F6 and F8 are fixed in the page sources: every cited sink now goes through `kcEscapeHtml`/`kgEsc`, and `loginReturnPath()` rejects control characters and whitespace and requires a same-origin `new URL` result. Regression test: `firmware/KilnFW/App/test/test_web_xss_fixes.js`. F4, F5 and F7 are firmware-side and remain open.
+
+## Fix status (firmware side)
+
+- F4 fixed: `http_origin_check.h` now also validates the Host header (IPv4 literal, bracketed IPv6, `localhost`, `<mdns name>.local`; anything else gets 403 `bad_host`). `http_auth_http.c` applies it to every state-changing request and to GET of `/api/*` while web auth is off; the recovery image's `origin_guard` applies it too. Host tests in `test_http_auth_enforce.c`.
+- F5 fixed: one shared escaper, `drivers/common/json_escape_ctl.h`, now backs dashboard_json, zones_http_get, backup_export, wifi_provision_http, diagnostics_http, kiln_cfg_http and readiness_http; control bytes (< 0x20, 0x7f) become `\u00xx`. Zone, relay, profile and kiln-config name writers refuse control characters with 400. Host tests in test_dashboard_json, test_zones_http, test_profiles_http, test_http_auth_enforce.
+- F7 fixed: HTML responses (non-`/api/` GET/HEAD in the prehandler, and the recovery `root_get`) send `X-Frame-Options: DENY` and `Content-Security-Policy: frame-ancestors 'none'`.

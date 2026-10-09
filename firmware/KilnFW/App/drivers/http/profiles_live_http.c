@@ -726,7 +726,11 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
     }
 
     char name[PROFILE_NAME_MAX_LEN + 1] = {0};
-    bool have_name = http_form_find_field(body, "name", name, sizeof(name)) > 0;
+    int name_len = http_form_find_field(body, "name", name, sizeof(name));
+    if (name_len > 0 && http_form_value_has_ctl(name, name_len)) {
+        return send_bad_request(req, "name contains a control character");
+    }
+    bool have_name = name_len > 0;
     char confirm[4];
     bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 && strcmp(confirm, "1") == 0;
 

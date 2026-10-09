@@ -14,6 +14,7 @@
 #include "http_origin_check.h"
 #include "http_auth_policy_iface.h"
 #include "http_session_iface.h"
+#include "mdns.h" // mdns_hostname_get() -- F4 Host allow-list
 #include "wifi_prov.h" // wifi_prov_request_arrived_on_ap() -- 2026-09-29 via_ap tagging
 // ota_http_get_client_ip() -- same client-IP extraction helper ota_http.c's
 // own authenticated routes already use (no reason for a second one to
@@ -296,6 +297,17 @@ static bool request_is_cross_origin(httpd_req_t *req) {
     return http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str);
 }
 
+// F4 (WEB_UI_XSS_AUDIT_2026-10-09): DNS-rebinding Host check. The mDNS hostname is
+// read live (falls back to the boot-time name when the mdns service is down).
+static bool request_host_refused(httpd_req_t *req) {
+    char mdns_host[MDNS_NAME_BUF_LEN];
+    const char *name = "kilnctl";
+    if (mdns_hostname_get(mdns_host) == ESP_OK && mdns_host[0] != '\0') {
+        name = mdns_host;
+    }
+    return http_origin_request_host_refused(req, origin_hdr_len, origin_hdr_str, name);
+}
+
 static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
     kiln_http_route_ctx_t *ctx = (kiln_http_route_ctx_t *)req->user_ctx;
     // Defensive: a NULL ctx can only happen if this function were ever
@@ -317,6 +329,27 @@ static esp_err_t kiln_http_prehandler(httpd_req_t *req) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_send(req, "{\"error\":\"cross_origin\"}", HTTPD_RESP_USE_STRLEN);
         return refusal_result(req);
+    }
+
+    // F7: anti-framing on every HTML (non-/api/) response, refusals and redirects
+    // included, so no page-serving site has to remember it (clickjacking, auth off).
+    if ((req->method == HTTP_GET || req->method == HTTP_HEAD) && strncmp(ctx->uri, "/api/", 5) != 0) {
+        httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+        httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'");
+    }
+
+    // F4: Host must be one of the board's own names. Every state-changing request,
+    // plus GET/HEAD of /api/* while web auth is off (reads are exposed to rebinding too).
+    {
+        bool is_read = req->method == HTTP_GET || req->method == HTTP_HEAD;
+        bool check_host = !is_read || (strncmp(ctx->uri, "/api/", 5) == 0 && !http_auth_policy_web_enabled());
+        if (check_host && request_host_refused(req)) {
+            ESP_LOGW(AUTH_HTTP_TAG, "foreign Host refused: method=%d uri=%s", (int)req->method, ctx->uri);
+            httpd_resp_set_status(req, "403 Forbidden");
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_send(req, "{\"error\":\"bad_host\"}", HTTPD_RESP_USE_STRLEN);
+            return refusal_result(req);
+        }
     }
 
     bool web_enabled = http_auth_policy_web_enabled();

@@ -36,3 +36,12 @@ bool wifi_prov_request_arrived_on_ap(int sockfd) {
     (void)sockfd;
     return false;
 }
+
+// F4 (WEB_UI_XSS_AUDIT_2026-10-09): http_auth_http.c reads the mDNS hostname for its
+// Host allow-list. Every executable that links this stub reports the boot name.
+#include <string.h>
+#include "mdns.h"
+esp_err_t mdns_hostname_get(char *hostname) {
+    strcpy(hostname, "kilnctl");
+    return ESP_OK;
+}

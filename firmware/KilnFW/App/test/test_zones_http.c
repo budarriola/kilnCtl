@@ -1250,6 +1250,34 @@ static void test_out_of_range_zone_preserves_stored_fields(void)
     TEST_CHECK(out.tc_type == current.tc_type, "tc_type preserved when the submission omits z1_tctype entirely");
 }
 
+// F5 (WEB_UI_XSS_AUDIT_2026-10-09): a zone name with a control byte is refused at parse
+// time (the HTTP layer answers 400 with this reason), and the zones emitter escapes it.
+static void test_zone_name_control_chars_refused(void)
+{
+    TEST_SECTION("parse_zone_fields -- control character in z%u_name refused; zones_json_escape escapes controls");
+    zone_cfg_t current = make_stored_zone();
+    const char *bodies[] = {
+        "z0_name=a%0Ab&z0_tctype=2", "z0_name=a%01b&z0_tctype=2",
+        "z0_name=a%7Fb&z0_tctype=2", "z0_name=a%00b&z0_tctype=2",
+    };
+    for (size_t k = 0; k < sizeof(bodies) / sizeof(bodies[0]); k++) {
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(bodies[k], 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(!ok, "control-character zone name refused");
+        TEST_CHECK(strstr(err_reason, "control") != NULL, "reason names the control character");
+    }
+    zone_cfg_t out2;
+    memset(&out2, 0, sizeof(out2));
+    const char *er2 = "unset";
+    (void)zones_http_parse_zone_fields("z0_name=Top%20Zone&z0_tctype=2", 0, 1, 4, 1, &current, &out2, &er2);
+    TEST_CHECK(er2 == NULL || strstr(er2, "control") == NULL, "ordinary name (space) is not refused as control");
+    char esc[32];
+    zones_json_escape("a\nb", esc, sizeof(esc));
+    TEST_CHECK(strcmp(esc, "a\\u000ab") == 0, "zones_json_escape emits \\u000a for newline");
+}
+
 // ZONES_CFG_VERSION 12->13: the whole-page POST /api/zones path is a SECOND
 // gain-writing path (zones_http_parse_zone_fields() writes z->pid_kp/ki/kd directly,
 // never through zones_config_set_pid()'s choke point -- see this function's
@@ -16186,6 +16214,7 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 
 void run_test_zones_http(void)
 {
+    test_zone_name_control_chars_refused();
     // cfg is the only save target now, so every handler test that commits a
     // config needs it mounted: a save with cfg unmounted is refused (503).
     zh_cfg_remount_fresh();

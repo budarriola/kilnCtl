@@ -7,6 +7,7 @@
 // host[:port] must equal the Host header's (host case-insensitive, missing port
 // = 80). Origin absent -> Referer's scheme://host[:port] gets the same compare.
 // Both absent -> allowed (MCP tools, curl and the LCD send neither).
+// Separately (F4) the Host itself must be an IP literal, localhost or <mdns>.local.
 #ifndef KILNCTL_HTTP_ORIGIN_CHECK_H
 #define KILNCTL_HTTP_ORIGIN_CHECK_H
 
@@ -158,6 +159,76 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
         }
     }
     return http_origin_is_cross_origin(o, r, h, overlong);
+}
+
+// ---- F4 (WEB_UI_XSS_AUDIT_2026-10-09): Host allow-list against DNS rebinding ----
+// A rebinding page carries its own attacker hostname in BOTH Origin and Host, so the
+// Origin==Host compare above passes. Refusing any Host that is not one of the board's
+// own names closes it: an attacker needs a DNS name, an IP literal is never theirs.
+// Allowed: IPv4 literal (a.b.c.d, optional :port), bracketed IPv6 literal,
+// "localhost", and "<mdns_name>.local" when mdns_name != NULL. Missing Host -> allowed
+// (HTTP/1.0 non-browser clients; a browser always sends one).
+static inline bool http_origin_host_is_ipv4_literal_(const char *h) {
+    int dots = 0, digits = 0;
+    for (const char *p = h; *p != '\0'; p++) {
+        if (*p == '.') {
+            if (digits == 0 || digits > 3) {
+                return false;
+            }
+            dots++;
+            digits = 0;
+        } else if (*p >= '0' && *p <= '9') {
+            digits++;
+        } else {
+            return false;
+        }
+    }
+    return dots == 3 && digits >= 1 && digits <= 3;
+}
+
+// host: lower-cased bare host as produced by http_origin_parse_authority_.
+static inline bool http_origin_host_name_allowed(const char *host, const char *mdns_name) {
+    if (host == NULL) {
+        return true;
+    }
+    http_origin_hp_t hp;
+    if (!http_origin_parse_authority_(host, &hp)) {
+        return false;
+    }
+    if (hp.host[0] == '[' || http_origin_host_is_ipv4_literal_(hp.host)) {
+        return true;
+    }
+    if (strcmp(hp.host, "localhost") == 0) {
+        return true;
+    }
+    if (mdns_name != NULL && mdns_name[0] != '\0') {
+        size_t n = strlen(mdns_name);
+        if (n + 6 <= sizeof(hp.host) && strlen(hp.host) == n + 6 &&
+            strcmp(hp.host + n, ".local") == 0) {
+            for (size_t i = 0; i < n; i++) {
+                if (http_origin_lc_(mdns_name[i]) != hp.host[i]) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+// Header glue: true = REFUSE (Host present and not one of the board's names).
+static inline bool http_origin_request_host_refused(void *c, http_origin_hdr_len_fn len_fn,
+                                                    http_origin_hdr_str_fn get_fn,
+                                                    const char *mdns_name) {
+    char host[HTTP_ORIGIN_HDR_BUF];
+    size_t n = len_fn(c, "Host");
+    if (n == 0) {
+        return false;
+    }
+    if (n >= sizeof(host) || get_fn(c, "Host", host, sizeof(host)) != 0) {
+        return true;
+    }
+    return !http_origin_host_name_allowed(host, mdns_name);
 }
 
 #ifdef __cplusplus

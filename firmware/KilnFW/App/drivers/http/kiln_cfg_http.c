@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "kiln_cfg_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
@@ -97,17 +98,7 @@ static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
  * json_escape -- a config name came from a POST body at some point. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* Parses a required "id=<int>" form field, 0..INT32_MAX. Returns false (body
@@ -137,7 +128,7 @@ static bool parse_required_id(const char *body, const char *key, int32_t *out_id
 static bool parse_required_name(const char *body, char *out, size_t out_cap)
 {
     int len = http_form_find_field(body, "name", out, out_cap);
-    return len > 0;
+    return len > 0 && !http_form_value_has_ctl(out, len);
 }
 
 /* ---- GET /api/kiln_configs -------------------------------------------------

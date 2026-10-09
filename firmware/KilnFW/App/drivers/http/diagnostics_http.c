@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "diagnostics_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
@@ -365,17 +366,7 @@ overflow:
  * for one tiny helper. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* True from the moment crash_report_clear_post_handler() admits a job until
@@ -1954,15 +1945,7 @@ static void nvs_keys_json_escape(const char *in, char *out, size_t out_cap)
      * '\\' possible in a valid NVS name), but this route echoes attacker-
      * controlled query values back into JSON, so escape defensively rather
      * than trust that constraint holds forever. */
-    size_t o = 0;
-    for (size_t i = 0; in[i] != '\0' && o + 2 < out_cap; ++i) {
-        char c = in[i];
-        if (c == '"' || c == '\\') {
-            out[o++] = '\\';
-        }
-        out[o++] = c;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(in, out, out_cap);
 }
 
 static const char *nvs_type_name(nvs_type_t t)

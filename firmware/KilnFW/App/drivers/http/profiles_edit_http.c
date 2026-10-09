@@ -49,6 +49,10 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
         snprintf(err_msg, err_cap, "name missing");
         return false;
     }
+    if (http_form_value_has_ctl(name, name_len)) {
+        snprintf(err_msg, err_cap, "name contains a control character");
+        return false;
+    }
     strncpy(p->name, name, PROFILE_NAME_MAX_LEN);
     p->name[PROFILE_NAME_MAX_LEN] = '\0';
 

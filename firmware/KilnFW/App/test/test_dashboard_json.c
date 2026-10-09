@@ -387,6 +387,21 @@ static void test_json_escape_doubles_every_quote_and_backslash(void)
     TEST_CHECK(strlen(tiny) < sizeof(tiny), "must truncate, never overflow, a too-small buffer");
 }
 
+/* F5 (WEB_UI_XSS_AUDIT_2026-10-09): control bytes must become \u00XX, never ride raw. */
+static void test_json_escape_control_bytes(void)
+{
+    TEST_SECTION("json_escape() -- control bytes and DEL are \\u00XX-escaped, truncation never splits an escape");
+    char out[32];
+    json_escape("a\nb\x01" "c\x7f", out, sizeof(out));
+    TEST_CHECK(strcmp(out, "a\\u000ab\\u0001c\\u007f") == 0, "newline, 0x01 and DEL escaped");
+    char tiny[8];
+    json_escape("\x01\x01", tiny, sizeof(tiny));
+    TEST_CHECK(strcmp(tiny, "\\u0001") == 0, "second escape does not fit: dropped whole, not half-written");
+    for (const char *q = out; *q; q++) {
+        TEST_CHECK((unsigned char)*q >= 0x20 && (unsigned char)*q != 0x7f, "no raw control byte in output");
+    }
+}
+
 /* Item 2, firmware cleanup pass: truncation used to bail silently -- the
  * array was left open, and the caller's own trailing '}' turned that into
  * unparseable JSON served with HTTP 200 and no error anywhere. Proves the
@@ -1456,6 +1471,7 @@ static void test_etag_if_none_match_decision(void)
 static void run_test_dashboard_json(void)
 {
     test_json_escape_doubles_every_quote_and_backslash();
+    test_json_escape_control_bytes();
     test_control_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_is_complete_and_well_formed_at_3_zones();
     test_exec_status_json_carries_aux_array();

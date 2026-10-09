@@ -500,6 +500,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
             free(body);
             return ESP_OK;
         }
+        if (rlen > 0 && http_form_value_has_ctl(rval, rlen)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay name contains a control character");
+            free(body);
+            return ESP_OK;
+        }
         if (rlen >= 0) {
             strncpy(tmp_relay_names.names[r - 1], rval, RELAY_NAME_MAX_LEN);
             tmp_relay_names.names[r - 1][RELAY_NAME_MAX_LEN] = '\0';
