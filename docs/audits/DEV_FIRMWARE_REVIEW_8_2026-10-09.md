@@ -13,19 +13,19 @@ High: none. Medium: none.
 
 ## Low
 
-**L1 (2841144c). Dev boards on the v2-only gate cannot take the new image over GitHub.**
+**L1 [Fixed in 523ba6dc] (2841144c). Dev boards on the v2-only gate cannot take the new image over GitHub.**
 Code: `firmware/KilnFW/App/drivers/update/update_fetch.c:296` places v2 at offset 308. `update_stage.h:47` sets the head length to 344.
 Builds from `dcd67f54` up to `2841144c^` have a 328-byte head and scan only for the v2 magic, at offsets up to 292. They never look for v1. Such a board finds no record in any image from `2841144c` on. Every GitHub fetch is refused as POLICY, and a hand upload needs force plus the typed confirm. No single layout serves both old gates: v1 must start by 300 and v2 by 292, so the two records would overlap. This is the same class as review 7 L4, now on dev-only boards. Fix: document that the first update from those builds is a forced hand upload.
 
-**L2 (2841144c). A v1-only image skips the commit binding.**
+**L2 [Fixed in 523ba6dc] (2841144c). A v1-only image skips the commit binding.**
 Code: `update_stage.c:388` skips the commit-prefix check when `id->magic == UPDATE_IMAGE_ID_MAGIC_V1`. `update_policy.c:270` provides the v1 fallback.
 Scenario: a release whose manifest names commit X but whose asset is an older build. That build is any image from `735875b6` up to `dcd67f54^`, which carries only v1. If its schema versions match, the gate accepts it with no commit check. This reopens review 5 M1 for that image class. Fix: refuse a v1 record when the manifest commit is non-empty. Otherwise, accept the gap and document it.
 
-**L3 (6afbcb6f). The OOM fallback at boot erases the rev-unknown marks.**
+**L3 [Fixed in 523ba6dc] (6afbcb6f). The OOM fallback at boot erases the rev-unknown marks.**
 Code: `firmware/KilnFW/App/drivers/http/profiles_http.c:1815`, with the memset at `:933`.
 When `nvs_load_all_from` returns NO_MEM, `profiles_boot_load` falls back to `nvs_load_files_only`. That function first clears `s_profile_rev_unknown`, so the marks pass 1 set are lost. If the allocation succeeds on the retry, a slot whose only copy is the legacy NVS profile (no file) reads as free and saveable. A save there writes rev floor+1, the new file wins on every later boot, and the NVS profile is gone. The new OOM test calls `nvs_load_all_from` directly and does not cover this path. Fix: on NO_MEM, return the error without the files-only fallback, or keep the marks across it.
 
-**L4 (6afbcb6f). Review 7 L3 is only partly fixed: junk repair still uses the error-blind load.**
+**L4 [Fixed in 523ba6dc] (6afbcb6f). Review 7 L3 is only partly fixed: junk repair still uses the error-blind load.**
 Code: `profiles_http.c:875`, where `rev_repair_junk` calls `profiles_cfg_fs_load_raw` and not `_ex`.
 Scenario: the rev array is junk, and the scratch allocation fails inside this load. A live file then reads as fileless. Its floor is raised to maxrev and persisted. On the next boot `resolve` sees `nvs_valid` false and deletes the live file as stale (`persist/profiles_cfg_fs.c:241-262`). Or, if a differing legacy NVS copy is valid, NVS wins and overwrites the file. Either way the profile is lost silently. Fix: use `load_raw_ex` here and return false, failing closed, on error.
 
