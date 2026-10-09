@@ -1257,6 +1257,15 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         return false;
     }
 
+    /* Update-in-flight, second look (review 3 MED-1): same pairing as
+     * profile_executor_run()'s identical check; the early check precedes slow
+     * baseline reads, so re-test now that the heat claim is published. */
+    if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        return false;
+    }
     /* Restore-in-flight, second look -- same pairing as profile_executor_run()'s
      * identical check after its heat claim: the gate check near the top of this
      * function ran before the lock/validation work, so re-read the flag now that

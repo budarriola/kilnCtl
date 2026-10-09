@@ -1333,6 +1333,19 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* Update-in-flight, second look (review 3 MED-1): the early check at the
+     * top of this function precedes slow baseline reads, so an update claim
+     * could be taken after it. Re-test now that the heat claim is published.
+     * Pairs with update_http.c claim_refuses(): that side takes the update
+     * claim and THEN re-reads the heat run state; this side publishes the
+     * heat claim and THEN re-reads the update claim -- at least one refuses. */
+    if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        return false;
+    }
+
     /* Restore-in-flight, second look (A4 review follow-up A, reviewer fix):
      * the gate check at the top of this function reads the flag long before
      * this commit (baseline SPI reads, config reads in between), so a restore

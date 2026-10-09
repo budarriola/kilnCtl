@@ -320,9 +320,16 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     return OTA_INTERLOCK_OK;
 }
 
+static int g_heat_zone_claim_begin_calls;
+/* MED-1 (review 3): models an update claim taken AFTER the early check: blocks only once the heat claim has been published. */
+static bool s_test_update_claim_after_heat_claim = false;
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
+    if (s_test_update_claim_after_heat_claim && g_heat_zone_claim_begin_calls > 0) {
+        if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
+        return true;
+    }
     return false;
 }
 
@@ -2681,6 +2688,41 @@ static void test_run_refuses_at_atomic_heat_claim_gate(void)
     s_test_heat_zone_claim_refused = false;
 }
 
+// MED-1 (review 3): an update claim taken between the early check and the heat
+// claim publish must be caught by the recheck after the claim; claims released.
+static void test_run_refuses_when_update_claims_after_early_check(void)
+{
+    TEST_SECTION("profile_executor_run() -- update claim taken after the early check refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_update_claim_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_update_claim_after_heat_claim = false;
+    TEST_CHECK(!ok, "an update claim taken after the early check must refuse the start");
+    TEST_CHECK(strstr(err, "update") != NULL, "the refusal names the update");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
 // HP-02 (bench, 2026-09-25..27, ESP 0fb8ad98): zone 2 had been left typed
 // on/off (zone_type 1) by an earlier HP-03/HP-07 preset, and the 3-zone
 // profile carried no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md sec 3 rule 6
@@ -11494,6 +11536,7 @@ void run_test_profile_executor_prestart(void)
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
+    test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();
