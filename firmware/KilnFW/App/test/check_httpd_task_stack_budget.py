@@ -43,7 +43,7 @@ the worst case happened to measure at last time it was set.
 and `zone_candidate_t zone_candidates[MAX31856_CHANNEL_COUNT]`. Fixed by
 splitting the function: the two-pass validate-then-commit logic moved
 unchanged (every `return false`/`return true` untouched, same all-or-
-nothing ordering) into a new `backup_import_apply_locked()` that takes the
+nothing ordering) into a new `backup_import_apply_two_pass()` that takes the
 two arrays as pointers, and the renamed `backup_import_apply()` is now a
 thin wrapper that heap-allocates both (PSRAM preferred via
 `MALLOC_CAP_SPIRAM`, same convention already used for this handler's own

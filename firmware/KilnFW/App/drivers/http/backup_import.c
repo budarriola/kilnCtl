@@ -102,7 +102,7 @@
  * convention backup_import_post_handler already uses for its own `body`
  * buffer just below) via the backup_import_apply() wrapper: it allocates
  * both, calls the actual two-pass validate-then-commit logic (renamed
- * backup_import_apply_locked(), otherwise byte-for-byte identical, EVERY
+ * backup_import_apply_two_pass(), otherwise byte-for-byte identical, EVERY
  * `return false`/`return true` untouched), then frees both on every path.
  * An allocation failure here happens strictly BEFORE either array is
  * touched or any profile/zone config is read -- it returns false with an
@@ -360,7 +360,7 @@ typedef struct {
 
 // ---- kiln_configs[] restore (KILN_PROFILES_PLAN.md item 17 follow-up) -----
 //
-// Deliberately NOT folded into backup_import_apply_locked()'s own two-pass
+// Deliberately NOT folded into backup_import_apply_two_pass()'s own two-pass
 // body above: kiln config slots are validated and committed via
 // kiln_cfg_store.h's own API (kiln_cfg_store_validate_package_json()/
 // kiln_cfg_store_import_package_json_as()/_rename()/_delete()/
@@ -368,10 +368,10 @@ typedef struct {
 // zones_config_set_*() calls that function's pass 2 uses -- a different
 // commit surface entirely. Kept as its own small pair of functions
 // (validate/plan-only vs. commit) called from backup_import_apply() around
-// backup_import_apply_locked(), same "validate everything, THEN apply"
+// backup_import_apply_two_pass(), same "validate everything, THEN apply"
 // discipline, just sequenced as its own step rather than interleaved with
 // the profile/zone candidate arrays. No httpd_req_t anywhere in this pair --
-// host-testable exactly like backup_import_apply_locked() itself.
+// host-testable exactly like backup_import_apply_two_pass() itself.
 //
 // Absent "kiln_configs" key entirely = pre-item-17 backup: do nothing, in
 // either mode, exactly today's behaviour (old backups must keep restoring
@@ -842,9 +842,9 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
 }
 
 /* check_httpd_task_stack_budget.py: scratch for the profile-slot-simulation
- * block inside backup_import_apply_locked() below -- see that block's own
+ * block inside backup_import_apply_two_pass() below -- see that block's own
  * comment. Heap-allocated (PSRAM preferred) rather than a plain local so it
- * does not add to backup_import_apply_locked()'s own httpd_worker frame. */
+ * does not add to backup_import_apply_two_pass()'s own httpd_worker frame. */
 typedef struct {
     bool slot_used_sim[PROFILES_MAX_COUNT];
     bool write_ids[PROFILES_MAX_COUNT];
@@ -867,7 +867,7 @@ typedef struct {
 #endif
 
 /* One segment's seg_kind and RELAY_IO fields (io_target/io_state/io_blocking/io_leave_on_at_end), absent =
- * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_locked() and the pass-1
+ * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_two_pass() and the pass-1
  * candidate-state check backup_import_profiles_precheck(), so both read the same fields the same way.
  * `entry` and `seg_i` are 0-based and only feed the error text. */
 static BACKUP_IMPORT_NOINLINE bool backup_import_parse_seg_kind_io(const char *se, size_t entry, uint8_t seg_i,
@@ -964,7 +964,7 @@ static bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *
 static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
                                              size_t err_cap);
 
-static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
+static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates,
                                         bool *zones_landed_out, bool *aux_wrote_out)
@@ -1188,7 +1188,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * bool arrays plus the per-candidate coll_err[128] below used to be
          * plain locals of this block, contributing to this function's own
          * frame on the httpd_worker path (backup_import_post_handler ->
-         * backup_import_apply_locked). Bundled into one heap allocation,
+         * backup_import_apply_two_pass). Bundled into one heap allocation,
          * freed on every return out of this block, same "malloc + free on
          * every return path, 500-equivalent refusal on OOM" convention this
          * file already uses for candidates/zone_candidates/
@@ -2945,7 +2945,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
  * zones_http_post.c's post-commit apply_lower block. NOINLINE: inlined, its
  * locals (the reason buffer and the per-zone array) land in
  * backup_import_apply()'s own frame, which sits under the much deeper
- * backup_import_apply_locked() chain, and push http_async_job's measured
+ * backup_import_apply_two_pass() chain, and push http_async_job's measured
  * depth over its check_all_task_stack_budgets.py ceiling (4784 B vs 4528 B,
  * measured). Kept out of line its frame is a sibling of that chain, not
  * stacked under it. */
@@ -3585,6 +3585,10 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
     memset(sc, 0, sizeof(*sc));
     bool ok = false;
     profile_validate_state_t *st = &sc->st;
+    /* Live count is correct here (review L6): a backup import cannot change thermo_count. It restores
+     * only per-zone tuning entries, and the apply pass rejects any entry with index >= the live
+     * zones_config_get_thermo_count(); backup_export emits no thermo_count and the whole-blob
+     * zones_config_import_blob() path is not used by backups. */
     st->zone_count = zones_config_get_thermo_count();
     if (st->zone_count > MAX31856_CHANNEL_COUNT) {
         st->zone_count = MAX31856_CHANNEL_COUNT;
@@ -3787,7 +3791,7 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
 
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
  * this file's header comment above profile_candidate_t) and hands them to
- * backup_import_apply_locked(), which is otherwise byte-for-byte the
+ * backup_import_apply_two_pass(), which is otherwise byte-for-byte the
  * previous backup_import_apply() body. An allocation failure here is
  * reported exactly like any other pass-1 validation failure -- false plus an
  * err_msg, nothing touched -- so backup_import_post_handler's existing
@@ -3917,10 +3921,10 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
 
     bool zones_landed = false;
-    bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
+    bool ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates,
                                          timing_profile_candidates, &zones_landed, &aux_wrote);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
-     * exit from backup_import_apply_locked(), success or failure. Two cases
+     * exit from backup_import_apply_two_pass(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
      * zones_http_post.c's POST handler already tracks that with
      * safety_ceiling_sync_apply_lower() after its commit, and this path
@@ -3949,7 +3953,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(zone_candidates);
     free(candidates);
     // update_repo and aux_outputs phase 2 (the entries that ENABLE a relay) now run inside
-    // backup_import_apply_locked(), after the zones landed and before the profiles are committed.
+    // backup_import_apply_two_pass(), after the zones landed and before the profiles are committed.
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
         // partial write, not the clean "nothing changed" a 400 implies.
