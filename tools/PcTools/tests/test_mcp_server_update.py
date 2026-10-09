@@ -210,6 +210,21 @@ class DowngradeGateTest(_Base):
         self.assertIn("force=True", out)
         self.assertIn("already up to date", out)
 
+    def test_needs_force_with_typed_confirm_names_versions(self):
+        self.board.refuse = (409, "needs_force",
+                             {"reason": "image carries no schema identity record", "needs_typed_confirm": True,
+                              "candidate_version": "1.3.0", "running_version": "1.2.0"})
+        out = msu.update_stage_upload(self.write_image(_image()), version="1.3.0", confirm=True)
+        self.assertIn("confirm_downgrade=1.3.0", out)
+        self.assertIn("candidate 1.3.0, running 1.2.0", out)
+        self.assertIn("force=True", out)
+
+    def test_version_mismatch_409_reported(self):
+        self.board.refuse = (409, "version_mismatch", {})
+        out = msu.update_stage_upload(self.write_image(_image()), version="99.0.0", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("differs from the version inside the image", out)
+
 
 class StatusTest(_Base):
     def test_status_reports_blank_then_staged(self):

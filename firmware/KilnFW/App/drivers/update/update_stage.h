@@ -34,13 +34,16 @@
 #include <stdint.h>
 
 #include "stage_header.h"
+#include "update_policy.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #define UPDATE_STAGE_ERASE_UNIT 65536u   // erase-ahead granularity (multiple of the 4 KB sector)
-#define UPDATE_STAGE_HEAD_LEN 112u       // image bytes buffered before the first flash write (through app_desc project_name)
+#define UPDATE_STAGE_HEAD_LEN 320u       // image bytes buffered before the first flash write (through app_desc and the identity record after it)
+#define UPDATE_STAGE_APP_DESC_SIZE 256u
+#define UPDATE_STAGE_IMAGE_ID_FROM (UPDATE_STAGE_APP_DESC_OFFSET + UPDATE_STAGE_APP_DESC_SIZE) // identity record scan start
 #define UPDATE_STAGE_ESP32S3_CHIP_ID 9u
 #define UPDATE_STAGE_ESP_IMAGE_MAGIC 0xE9u
 #define UPDATE_STAGE_APP_DESC_OFFSET 32u // image header (24) + first segment header (8)
@@ -97,6 +100,7 @@ typedef enum {
     UPDATE_STAGE_ERR_HEADER,      // header write/readback failed
     UPDATE_STAGE_ERR_STATE,       // call out of sequence
     UPDATE_STAGE_ERR_WRONG_PROJECT, // app descriptor project_name is not UPDATE_STAGE_EXPECTED_PROJECT
+    UPDATE_STAGE_ERR_VERSION_MISMATCH, // declared version differs from the image descriptor's valid semver
     UPDATE_STAGE_ERR_POLICY,        // the install gate (update_stage_set_gate) refused the resolved version
 } update_stage_err_t;
 
@@ -105,7 +109,9 @@ typedef enum {
 // leading v stripped) and commit. Return UPDATE_STAGE_OK to proceed or UPDATE_STAGE_ERR_POLICY to refuse
 // (the upload fails like any other and the stage stays blank). NULL = no gate (the GitHub fetch path
 // decides before it downloads).
-typedef update_stage_err_t (*update_stage_gate_fn)(void *ctx, const char *semver, const char *commit);
+// `id` is the identity record read from the held-back head, NULL when the image carries none.
+typedef update_stage_err_t (*update_stage_gate_fn)(void *ctx, const char *semver, const char *commit,
+                                                   const update_image_id_t *id);
 
 typedef struct {
     update_stage_io_t io;

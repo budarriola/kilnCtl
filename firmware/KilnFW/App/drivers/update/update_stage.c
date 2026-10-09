@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "ota_esp_image_header.h"
+#include "update_semver.h"
 
 static void lk(update_stage_t *st)
 {
@@ -241,10 +242,18 @@ static update_stage_err_t flush_head(update_stage_t *st)
             return UPDATE_STAGE_ERR_WRONG_PROJECT;
         }
     }
-    if (!st->semver_given) {
-        char v[STAGE_SEMVER_FIELD_LEN + 1];
-        memcpy(v, st->head + UPDATE_STAGE_APP_DESC_VERSION_OFFSET, STAGE_SEMVER_FIELD_LEN);
-        v[STAGE_SEMVER_FIELD_LEN] = '\0';
+    char v[STAGE_SEMVER_FIELD_LEN + 1];
+    memcpy(v, st->head + UPDATE_STAGE_APP_DESC_VERSION_OFFSET, STAGE_SEMVER_FIELD_LEN);
+    v[STAGE_SEMVER_FIELD_LEN] = '\0';
+    if (st->semver_given) {
+        // A declared version may not override a valid one in the descriptor (else 99.0.0 on an old image
+        // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one. Only gated (hand-upload) stagers
+        // check: the release fetch's tag is not necessarily the build's descriptor string.
+        update_semver_t dv;
+        if (st->gate != NULL && update_semver_parse(strip_v(v), &dv) && strcmp(strip_v(v), st->semver) != 0) {
+            return UPDATE_STAGE_ERR_VERSION_MISMATCH;
+        }
+    } else {
         const char *s = strip_v(v);
         if (strlen(s) >= sizeof(st->semver) || s[0] == '\0') {
             return UPDATE_STAGE_ERR_BAD_VERSION;
@@ -256,7 +265,9 @@ static update_stage_err_t flush_head(update_stage_t *st)
         }
     }
     if (st->gate != NULL) {
-        update_stage_err_t g = st->gate(st->gate_ctx, st->semver, st->commit);
+        update_image_id_t id;
+        const bool have_id = update_image_id_find(st->head, UPDATE_STAGE_HEAD_LEN, UPDATE_STAGE_IMAGE_ID_FROM, &id);
+        update_stage_err_t g = st->gate(st->gate_ctx, st->semver, st->commit, have_id ? &id : NULL);
         if (g != UPDATE_STAGE_OK) {
             return UPDATE_STAGE_ERR_POLICY;
         }
@@ -533,6 +544,7 @@ const char *update_stage_err_name(update_stage_err_t e)
     case UPDATE_STAGE_ERR_HEADER: return "header_write_failed";
     case UPDATE_STAGE_ERR_STATE: return "out_of_sequence";
     case UPDATE_STAGE_ERR_WRONG_PROJECT: return "wrong_project";
+    case UPDATE_STAGE_ERR_VERSION_MISMATCH: return "version_mismatch";
     case UPDATE_STAGE_ERR_POLICY: return "policy_refused";
     }
     return "unknown";

@@ -533,7 +533,7 @@ static void test_interrupted_and_blank(void)
                "progress reported");
     TEST_CHECK(g_fl.read_ops == reads && g_fl.mut_ops == muts, "busy status touched no flash");
     TEST_CHECK(update_stage_clear(&g_st) == UPDATE_STAGE_ERR_BUSY, "clear refused while uploading");
-    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 200, NULL, NULL, STAGE_SOURCE_UPLOAD) ==
+    TEST_CHECK(update_stage_upload_begin(&g_st, g_scratch, sizeof(g_scratch), 50000, NULL, NULL, STAGE_SOURCE_UPLOAD) ==
                    UPDATE_STAGE_ERR_BUSY,
                "second begin refused while uploading");
     TEST_CHECK(g_fl.mut_ops == muts, "refusals touched no flash");
@@ -837,13 +837,19 @@ typedef struct {
     int calls;
     char semver[STAGE_SEMVER_FIELD_LEN + 1];
     update_stage_err_t verdict;
+    bool have_id;
+    update_image_id_t id;
 } gate_rec_t;
 
-static update_stage_err_t rec_gate(void *ctx, const char *semver, const char *commit)
+static update_stage_err_t rec_gate(void *ctx, const char *semver, const char *commit, const update_image_id_t *id)
 {
     gate_rec_t *r = ctx;
     (void)commit;
     r->calls++;
+    r->have_id = id != NULL;
+    if (id != NULL) {
+        r->id = *id;
+    }
     strncpy(r->semver, semver, STAGE_SEMVER_FIELD_LEN);
     r->semver[STAGE_SEMVER_FIELD_LEN] = '\0';
     return r->verdict;
@@ -872,7 +878,8 @@ static void test_install_gate(void)
 {
     TEST_SECTION("update_stage -- install gate (downgrade policy hook)");
     reset_board();
-    gate_rec_t r = { 0, "", UPDATE_STAGE_OK };
+    gate_rec_t r;
+    memset(&r, 0, sizeof(r));
     make_image(30000, "v1.2.3");
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK, "gate OK: staged");
     TEST_CHECK(r.calls == 1 && strcmp(r.semver, "1.2.3") == 0, "gate called once with the image's own version, v stripped");
@@ -881,7 +888,7 @@ static void test_install_gate(void)
     reset_board();
     r.calls = 0;
     r.verdict = UPDATE_STAGE_ERR_POLICY;
-    make_image(30000, "v1.2.3");
+    make_image(30000, "v9.9.9");
     TEST_CHECK(upload_gated(30000, 7, "v9.9.9", rec_gate, &r) == UPDATE_STAGE_ERR_POLICY, "gate refusal surfaces as policy");
     TEST_CHECK(r.calls == 1 && strcmp(r.semver, "9.9.9") == 0, "gate saw the declared version once, even with 7-byte writes");
     TEST_CHECK(!is_staged() && g_st.phase == UPDATE_STAGE_IDLE && !g_fl.sha_open, "refused: nothing staged, idle, hash closed");
@@ -895,6 +902,46 @@ static void test_install_gate(void)
     memcpy(g_img + 80, "OtherProject", 12);
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_ERR_WRONG_PROJECT && r.calls == 0,
                "wrong project refused before the gate");
+
+    // F1: the identity record is read from the held-back head and handed to the gate; absent = NULL.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && !r.have_id,
+               "image without a record: gate gets NULL");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.2.3");
+    {
+        update_image_id_t id;
+        update_image_id_make(&id, 24, 16, 13);
+        memcpy(g_img + UPDATE_STAGE_IMAGE_ID_FROM, &id, sizeof(id));
+    }
+    TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.have_id &&
+                   r.id.zones_cfg_version == 24 && r.id.kilnlink_version == 16 && r.id.uart_version == 13,
+               "record straight after the app descriptor is read and passed to the gate");
+
+    // F2: a declared version may not override a valid descriptor version (gated uploads).
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 4096, "99.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_VERSION_MISMATCH && r.calls == 0,
+               "F2: declared 99.0.0 on a 1.2.3 image: mismatch, gate never reached");
+    TEST_CHECK(!is_staged() && g_fl.mem[STAGE_IMAGE_OFFSET] == 0xFF, "F2: nothing written");
+    TEST_CHECK(strcmp(update_stage_err_name(UPDATE_STAGE_ERR_VERSION_MISMATCH), "version_mismatch") == 0, "F2: error name");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.2.3", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1,
+               "F2: declared equal to the descriptor (v ignored): fine");
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "not-a-version");
+    TEST_CHECK(upload_gated(30000, 4096, "2.0.0", rec_gate, &r) == UPDATE_STAGE_OK && r.calls == 1,
+               "F2: an invalid descriptor version leaves the declared one in force");
+    reset_board();
+    make_image(30000, "v1.2.3");
+    TEST_CHECK(upload(30000, 4096, "99.0.0", NULL) == UPDATE_STAGE_OK, "F2: ungated (fetch) path is not subject to the check");
 
     // A later ungated upload is unaffected (begin clears the gate).
     r.calls = 0;

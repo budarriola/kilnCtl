@@ -189,13 +189,16 @@ _AUX_OPS_TARGETS = (
     "op_live_uses_zone", "op_verify_persisted", "op_busy", "op_scratch_alloc",
 )
 EXTRA_EDGES = (
-    [("zones_post_handler", "move_handler"), ("move_handler", "zone_aux_convert_run")]
+    [("zones_post_handler", "move_handler"), ("move_handler", "zone_aux_convert_run"),
+     # update_stage_upload_write -> flush_head calls the policy gate through st->gate (a function pointer the
+     # call-graph walk cannot see); flush_head is usually inlined into the writer.
+     ("flush_head", "policy_gate"), ("update_stage_upload_write", "policy_gate")]
     + [(c, t) for c in _AUX_CORE_FNS for t in _AUX_OPS_TARGETS]
 )
 # Names the compiler may legitimately fold away (static helpers): only these may be absent from
 # the ELF, as caller or callee, without failing.
 _EDGE_MAY_BE_INLINED = frozenset(
-    _AUX_CORE_FNS[1:] + ("op_busy", "op_scratch_alloc", "op_verify_persisted", "op_zone_done",
+    ("flush_head", "policy_gate") + _AUX_CORE_FNS[1:] + ("op_busy", "op_scratch_alloc", "op_verify_persisted", "op_zone_done",
                          "op_zones_union", "op_mode_blocked", "op_zone_get", "op_zone_free",
                          "op_zone_restore", "op_live_uses_zone", "aux_outputs_cfg_quarantined",
                          "aux_outputs_cfg_get", "aux_outputs_cfg_get_raw"))

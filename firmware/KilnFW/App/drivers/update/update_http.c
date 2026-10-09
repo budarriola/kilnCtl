@@ -3,6 +3,7 @@
 // three ADMIN routes.
 #include "update_http.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -130,6 +131,7 @@ static const char *http_status_for(update_stage_err_t e)
     switch (e) {
     case UPDATE_STAGE_OK: return "200 OK";
     case UPDATE_STAGE_ERR_BUSY:
+    case UPDATE_STAGE_ERR_VERSION_MISMATCH:
     case UPDATE_STAGE_ERR_POLICY: return "409 Conflict";
     case UPDATE_STAGE_ERR_OVERSIZE: return "413 Payload Too Large";
     case UPDATE_STAGE_ERR_FLASH:
@@ -205,43 +207,65 @@ static bool hdr_flag(httpd_req_t *req, const char *name)
     return hdr_text(req, name, v, sizeof(v)) && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0);
 }
 
-static uint32_t hdr_u32(httpd_req_t *req, const char *name)
+// Optional unsigned header: 0 = absent, 1 = parsed into *out, -1 = present but malformed (not a plain
+// decimal, trailing junk, zero or out of range). Never fails open to "absent".
+static int hdr_u32(httpd_req_t *req, const char *name, uint32_t *out)
 {
     char v[12];
-    return hdr_text(req, name, v, sizeof(v)) ? (uint32_t)strtoul(v, NULL, 10) : 0u;
+    *out = 0;
+    if (httpd_req_get_hdr_value_len(req, name) == 0) {
+        return 0;
+    }
+    return hdr_text(req, name, v, sizeof(v)) && update_policy_parse_hdr_u32(v, out) ? 1 : -1;
 }
 
 // Downgrade gate (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 6) for the hand upload, applied once
 // the image head is in (so a version taken from the image's own app descriptor is covered too), before any
-// image byte is written. On refusal the 409 is sent here and UPDATE_STAGE_ERR_POLICY returned. The raw image has no manifest, so the policy
-// sees what the uploader declared in X-Stage-Version / X-Stage-Commit / X-Stage-Zones-Cfg /
-// X-Stage-Kilnlink / X-Stage-Uart; overrides are X-Stage-Force, X-Stage-Allow-Downgrade and
-// X-Stage-Confirm (typed: equal to the version). The project-identity check is not part of this.
+// image byte is written. On refusal the 409 (400 for a malformed header) is sent here and
+// UPDATE_STAGE_ERR_POLICY returned. The schema versions come from the identity record embedded in the
+// image (update_image_id_t); X-Stage-Zones-Cfg / X-Stage-Kilnlink / X-Stage-Uart are advisory and must agree
+// with it. Overrides are X-Stage-Force, X-Stage-Allow-Downgrade and X-Stage-Confirm (typed: equal to the
+// version). The project-identity check is not part of this.
 typedef struct {
     httpd_req_t *req;
     const char *ip;
 } policy_gate_ctx_t;
 
-static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit)
+// Gate scratch lives here, not on the httpd stack (the handler sits at its stack ceiling). Safe because
+// ota_http_update_try_begin() admits one upload at a time.
+static struct {
+    char confirm[STAGE_SEMVER_FIELD_LEN + 1];
+    update_upload_request_t ur;
+    update_identity_t run;
+    char cand[STAGE_SEMVER_FIELD_LEN + 1];
+    char json[512];
+} s_gate;
+
+static update_stage_err_t policy_gate(void *vctx, const char *semver, const char *commit, const update_image_id_t *id)
 {
     const policy_gate_ctx_t *gc = vctx;
     httpd_req_t *req = gc->req;
     const char *ip = gc->ip;
-    char confirm[STAGE_SEMVER_FIELD_LEN + 1];
-    (void)hdr_text(req, "X-Stage-Confirm", confirm, sizeof(confirm));
-    update_upload_request_t ur = {
-        .version = semver,
-        .commit = commit,
-        .zones_cfg_version = hdr_u32(req, "X-Stage-Zones-Cfg"),
-        .kilnlink_version = hdr_u32(req, "X-Stage-Kilnlink"),
-        .uart_version = hdr_u32(req, "X-Stage-Uart"),
-        .force = hdr_flag(req, "X-Stage-Force"),
-        .allow_downgrade = hdr_flag(req, "X-Stage-Allow-Downgrade"),
-        .confirm = confirm,
-    };
-    update_identity_t run;
-    update_fetch_running_identity(&run, commit);
-    update_decision_t d = update_policy_decide_upload(&run, &ur);
+    (void)hdr_text(req, "X-Stage-Confirm", s_gate.confirm, sizeof(s_gate.confirm));
+    memset(&s_gate.ur, 0, sizeof(s_gate.ur));
+    s_gate.ur.version = semver;
+    s_gate.ur.commit = commit;
+    s_gate.ur.have_image_id = id != NULL;
+    if (id != NULL) {
+        s_gate.ur.image_id = *id;
+    }
+    if (hdr_u32(req, "X-Stage-Zones-Cfg", &s_gate.ur.zones_cfg_version) < 0 ||
+        hdr_u32(req, "X-Stage-Kilnlink", &s_gate.ur.kilnlink_version) < 0 ||
+        hdr_u32(req, "X-Stage-Uart", &s_gate.ur.uart_version) < 0) {
+        ESP_LOGW(TAG, "stage upload from %s: malformed X-Stage schema header", ip);
+        (void)send_error_json(req, "400 Bad Request", "bad_schema_header");
+        return UPDATE_STAGE_ERR_POLICY;
+    }
+    s_gate.ur.force = hdr_flag(req, "X-Stage-Force");
+    s_gate.ur.allow_downgrade = hdr_flag(req, "X-Stage-Allow-Downgrade");
+    s_gate.ur.confirm = s_gate.confirm;
+    update_fetch_running_identity(&s_gate.run, commit);
+    update_decision_t d = update_policy_decide_upload(&s_gate.run, &s_gate.ur);
     ESP_LOGW(TAG, "stage upload from %s: policy %s (%s)", ip, update_verdict_name(d.verdict), d.reason ? d.reason : "");
     if (d.allowed) {
         return UPDATE_STAGE_OK;
@@ -250,15 +274,23 @@ static update_stage_err_t policy_gate(void *vctx, const char *semver, const char
                        : (d.verdict == UPDATE_VERDICT_REFUSE_NEEDS_FORCE || d.verdict == UPDATE_VERDICT_UP_TO_DATE)
                            ? "needs_force"
                            : update_verdict_name(d.verdict);
-    char json[320];
-    snprintf(json, sizeof(json),
+    // reason strings are static and quote-free; the candidate version may come from the image, so filter it.
+    size_t ci = 0;
+    for (; semver[ci] != '\0' && ci < sizeof(s_gate.cand) - 1; ci++) {
+        char ch = semver[ci];
+        bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '.' || ch == '-' || ch == '+';
+        s_gate.cand[ci] = ok ? ch : '?';
+    }
+    s_gate.cand[ci] = '\0';
+    snprintf(s_gate.json, sizeof(s_gate.json),
              "{\"ok\":false,\"error\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\","
-             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
+             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s,"
+             "\"candidate_version\":\"%s\",\"running_version\":\"%s\"}",
              name, update_verdict_name(d.verdict), d.reason ? d.reason : "", d.needs_typed_confirm ? "true" : "false",
-             d.zones_cfg_lower ? "true" : "false");
+             d.zones_cfg_lower ? "true" : "false", s_gate.cand, s_gate.run.version);
     httpd_resp_set_status(req, "409 Conflict");
     httpd_resp_set_type(req, "application/json");
-    (void)httpd_resp_sendstr(req, json);
+    (void)httpd_resp_sendstr(req, s_gate.json);
     return UPDATE_STAGE_ERR_POLICY;
 }
 

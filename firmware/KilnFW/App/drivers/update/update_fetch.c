@@ -274,6 +274,19 @@ static void json_safe_copy(char *dst, size_t cap, const char *src)
     dst[i] = '\0';
 }
 
+// ---- embedded identity record ----------------------------------------------------------------
+// The linker places .rodata_custom_desc directly after esp_app_desc_t (first DROM segment), so a hand
+// upload's stager reads the schema versions out of the image head (update_image_id_find) instead of
+// trusting headers. Needs `used`: nothing references it.
+__attribute__((section(".rodata_custom_desc"), used, aligned(4)))
+const update_image_id_t g_update_image_id = {
+    .magic = UPDATE_IMAGE_ID_MAGIC,
+    .zones_cfg_version = ZONES_CFG_VERSION,
+    .kilnlink_version = KILNLINK_PROTOCOL_VERSION,
+    .uart_version = UART_PROTOCOL_VERSION,
+    .check = UPDATE_IMAGE_ID_MAGIC ^ ZONES_CFG_VERSION ^ KILNLINK_PROTOCOL_VERSION ^ UART_PROTOCOL_VERSION ^ 0xA5A5A5A5u,
+};
+
 // ---- running identity ------------------------------------------------------------------------
 #ifndef FW_RELEASE_VERSION
 #define FW_RELEASE_VERSION ""
@@ -680,7 +693,7 @@ static const char *run_job(work_t *w)
     // whether the release is a downgrade (update_policy_decide_typed).
     update_identity_t run;
     running_identity(&run, &w->man.identity);
-    const bool typed_ok = strcmp(w->p.confirm, w->info.tag) == 0;
+    const bool typed_ok = update_policy_typed_confirm_ok(w->p.confirm, w->info.tag);
     update_policy_flags_t flags = {
         .allow_prerelease = w->p.allow_prerelease,
         .allow_downgrade = w->p.allow_downgrade && typed_ok,

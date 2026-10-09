@@ -37,6 +37,7 @@
 #define KILNCTL_UPDATE_POLICY_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -108,10 +109,38 @@ update_decision_t update_policy_decide_typed(const update_identity_t *running, c
 // prerelease versions are allowed (no channel), and the dirty/floor rules do not apply. The typed
 // confirm is `confirm` equal to `version` exactly; allow_downgrade only counts with it. A missing
 // version is treated as unknown and needs force plus confirm == "unversioned". Signing plays no part.
+// Identity record the firmware embeds in its own image (a const in .rodata_custom_desc, the section the
+// linker places directly after esp_app_desc_t), so a hand upload's schema versions come from the image
+// itself rather than from headers the uploader may omit. check = magic ^ the three versions ^ 0xA5A5A5A5.
+#define UPDATE_IMAGE_ID_MAGIC 0x4B494449u
+#define UPDATE_IMAGE_ID_SIZE 20u
 typedef struct {
-    const char *version;   // as declared; NULL/"" = none
+    uint32_t magic;
+    uint32_t zones_cfg_version;
+    uint32_t kilnlink_version;
+    uint32_t uart_version;
+    uint32_t check;
+} update_image_id_t;
+
+uint32_t update_image_id_check(const update_image_id_t *id);
+void update_image_id_make(update_image_id_t *id, uint32_t zones, uint32_t kl, uint32_t uart);
+// Scans head[from .. len) at 4-byte steps for a valid record (little-endian words). false = none.
+bool update_image_id_find(const uint8_t *head, size_t len, size_t from, update_image_id_t *out);
+
+// One typed-confirm rule for every install path: `confirm` equals `version`, ignoring one leading v/V
+// on either side; empty never matches.
+bool update_policy_typed_confirm_ok(const char *confirm, const char *version);
+
+// Strict header number: plain decimal digits only (no sign, space or trailing junk), 1..0xFFFFFFFE.
+// true and *out set when valid; false (and *out 0) for anything else, including "" and "0".
+bool update_policy_parse_hdr_u32(const char *text, uint32_t *out);
+
+typedef struct {
+    const char *version;   // the resolved version (declared, which the stager has checked equals the image's)
     const char *commit;    // as declared; NULL/"" = none (non-40-hex is ignored)
-    uint32_t zones_cfg_version; // 0 = not declared
+    bool have_image_id;    // the image carries an identity record
+    update_image_id_t image_id;
+    uint32_t zones_cfg_version; // header-declared, advisory: 0 = not declared; must equal the record when both
     uint32_t kilnlink_version;
     uint32_t uart_version;
     bool force;
@@ -119,6 +148,8 @@ typedef struct {
     const char *confirm;   // typed confirm text, NULL/"" = none
 } update_upload_request_t;
 
+// An image without the record has an unknown schema: it needs force AND the typed confirm, on top of
+// whatever the version comparison demands. A missing version is MALFORMED (the stager never passes one).
 update_decision_t update_policy_decide_upload(const update_identity_t *running, const update_upload_request_t *req);
 
 const char *update_verdict_name(update_verdict_t v);

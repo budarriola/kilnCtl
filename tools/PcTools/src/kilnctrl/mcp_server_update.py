@@ -126,7 +126,9 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
     hazard: an older firmware runs on default PID gains after a zones_cfg
     schema bump, so read back control_get_zones before heating). The only
     override is ``allow_downgrade=True`` together with ``confirm_downgrade``
-    equal to the image's version (typed confirm); the flags must be exactly
+    equal to the image's version (typed confirm). An image without the
+    embedded schema identity record also needs ``force=True`` plus the typed
+    confirm; a declared ``version`` must equal the image's own. The flags must be exactly
     True and still sit behind ``confirm=True``. A refused upload may already
     have erased the previous stage."""
     if not isinstance(image_path, str) or not os.path.isabs(image_path):
@@ -185,11 +187,21 @@ def update_stage_upload(image_path: str, version: str = "", commit: str = "", co
                     "that you choose for this image; a previously staged image may have been "
                     f"erased (host={resolved})")
         if exc.status == 409 and name in ("downgrade_refused", "needs_force"):
+            body = uhc.refusal_body(exc)
+            cand = body.get("candidate_version") or "?"
+            run = body.get("running_version") or "?"
+            if body.get("needs_typed_confirm") is True:
+                hint = (f"Override needs the typed confirm: confirm_downgrade={cand}, plus force=True "
+                        "(unknown schema / unknown running version) or allow_downgrade=True (downgrade); "
+                        "after any downgrade read back control_get_zones before heating.")
+            else:
+                hint = "Override with force=True (no typed confirm needed)."
             return (f"FAILED: board refused the upload by the downgrade gate: {name} -- "
-                    f"{uhc.refusal_reason(exc)}. Override only with allow_downgrade=True plus "
-                    "confirm_downgrade=<image version> (downgrade) or force=True (same commit); "
-                    "after any downgrade read back control_get_zones before heating. "
-                    f"A previously staged image may have been erased (host={resolved})")
+                    f"{uhc.refusal_reason(exc)} (candidate {cand}, running {run}). {hint} "
+                    f"The previous stage may have been erased (host={resolved})")
+        if exc.status == 409 and name == "version_mismatch":
+            return ("FAILED: the declared version differs from the version inside the image; omit version= "
+                    f"or pass the image's own (host={resolved})")
         return (f"FAILED: board refused the upload: HTTP {exc.status} {name or exc.detail!r}; "
                 f"a previously staged image may have been erased (host={resolved})")
     try:

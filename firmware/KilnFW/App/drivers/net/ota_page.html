@@ -771,11 +771,13 @@ function stageRefusalText(e) {
   try { b = JSON.parse(e.message); } catch (x) { /* not JSON */ }
   if (!b || typeof b.reason !== 'string') return e.message;
   var t = b.reason;
+  var cv = typeof b.candidate_version === 'string' ? ' (image ' + b.candidate_version + ')' : '';
   if (b.error === 'downgrade_refused') {
-    t += ' To override: tick "Allow downgrade", type the image version, upload again. Export a backup first, and ' +
-         'read back the zones before heating.';
+    t += cv + ' To override: tick "Allow downgrade", type the image version, upload again. Export a backup first, ' +
+         'and read back the zones before heating.';
   } else if (b.error === 'needs_force') {
-    t += ' To override: tick "Force" (and type the version if asked), upload again.';
+    t += cv + (b.needs_typed_confirm ? ' To override: tick "Force", type the image version, upload again.'
+                                     : ' To override: tick "Force", upload again.');
   }
   return t;
 }
@@ -861,7 +863,11 @@ document.getElementById('stageUploadBtn').addEventListener('click', function () 
   }).catch(function (e) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Stage upload failed: ' + stageRefusalText(e);
-    if (e.status === 409) document.getElementById('stageTypedWrap').style.display = '';
+    if (e.status === 409) {
+      var nb = null;
+      try { nb = JSON.parse(e.message); } catch (x) { /* not JSON */ }
+      if (!nb || nb.needs_typed_confirm !== false) document.getElementById('stageTypedWrap').style.display = '';
+    }
     loadStageStatus();
   }).then(function () {
     btn.disabled = false;

@@ -178,6 +178,15 @@ def upload_stage(host: str, image: bytes, version: str = "", commit: str = "",
     return _request(req, STAGE_PATH, timeout)
 
 
+def refusal_body(exc: "UpdateHttpError") -> dict:
+    """The board's gate 409 body as a dict ({} when it is not JSON)."""
+    try:
+        body = json.loads(exc.detail)
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 def refusal_reason(exc: "UpdateHttpError") -> str:
     """The board's gate ``reason`` text from a 409 body, else ''."""
     try:
