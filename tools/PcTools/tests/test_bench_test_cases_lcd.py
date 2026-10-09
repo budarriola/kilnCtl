@@ -1248,7 +1248,7 @@ class ClickThenPageTest(unittest.TestCase):
         # LCD-22 deliberately does NOT route "Edit" through _click_then_page:
         # on a PIN-locked panel Edit raises the keypad while the page still
         # reads "home", so a retry would tap the keypad. It clicks Edit once.
-        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics"})
+        self.assertEqual(literals, {"settings", "Profiles", "Temperature", "Diagnostics", "Segments"}  # Segments (LCD-13): pure nav to the read-only segments page)
         unsafe = ("start", "stop", "confirm", "pin", "toggle", "cancel", "ack", "reset", "clear", "ok")
         for title in literals:
             words = re.findall(r"[a-z]+", title.lower())

@@ -5767,7 +5767,256 @@ def _case_lcd26(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, observed=observed)
 
 
+# ---------------------------------------------------------------------------
+# LCD-05 / LCD-06 / LCD-13 -- brightness, blanking, segments paging.
+# Display settings go through GET/POST /api/settings/display_power (the same
+# route WEB-DISP-02 uses; fields brightness_percent, timeout_setting ordinal
+# 0=1min..5=Never, keep_on_while_firing, display_on_error, brightness_inert).
+# Every setting changed is restored in `finally`.
+# ---------------------------------------------------------------------------
+
+_DISPLAY_POWER_PATH = "/api/settings/display_power"
+_LCD05_MIN_DROP_FRACTION = 0.25
+_LCD05_TEST_BRIGHTNESS = 50
+_LCD06_TIMEOUT_1MIN = 0
+_LCD06_WAIT_S = 70.0
+#: Panel-interior box in the 1280x720 camera frame (inside lcd_sampler's
+#: FRAME_CORNERS), sampled as the "whole panel" mean.
+_LCD06_PANEL_BOX = (400, 250, 400, 250)
+_LCD13_ROWS_PER_PAGE = 4
+
+
+def _luminance(rgb) -> float:
+    return 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+
+
+def _display_power_read(ctx: dict) -> "Optional[dict]":
+    from . import cases_web_rw as _web
+    status, body = _web._get_json(ctx, _DISPLAY_POWER_PATH)
+    if status != 200 or not isinstance(body, dict):
+        return None
+    return body
+
+
+def _display_power_write(ctx: dict, cfg: dict, brightness: int, timeout: int) -> bool:
+    from . import cases_web_rw as _web
+    status, _ = _web._post_json(ctx, _DISPLAY_POWER_PATH, {
+        "brightness": str(int(brightness)),
+        "timeout": str(int(timeout)),
+        "keep_on_while_firing": "1" if cfg.get("keep_on_while_firing") else "0",
+        "display_on_error": "1" if cfg.get("display_on_error") else "0",
+    })
+    return status == 200
+
+
+def _display_power_restore(ctx: dict, orig: dict, observed: dict) -> None:
+    try:
+        ok = _display_power_write(ctx, orig, orig["brightness_percent"], orig["timeout_setting"])
+    except Exception as exc:  # noqa: BLE001
+        ok = False
+        observed["restore_error"] = type(exc).__name__
+    observed["restored"] = ok
+    if not ok:
+        logging.getLogger(__name__).error("display_power restore failed: %s", observed)
+
+
+def _judge_lcd05(lum_full: float, lum_dim: float, inert: bool) -> CaseResult:
+    obs = {"luminance_100": round(lum_full, 2), "luminance_50": round(lum_dim, 2),
+           "min_drop_fraction": _LCD05_MIN_DROP_FRACTION}
+    if inert:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="brightness_inert: this build has no backlight control line", observed=obs)
+    if lum_full <= 0:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="100% reference region reads black", observed=obs)
+    drop = (lum_full - lum_dim) / lum_full
+    obs["drop_fraction"] = round(drop, 3)
+    if drop >= _LCD05_MIN_DROP_FRACTION:
+        return CaseResult(Verdict.PASS, observed=obs)
+    return CaseResult(Verdict.FAIL, reason=f"luminance dropped only {drop:.1%} at 50% brightness (need >= {_LCD05_MIN_DROP_FRACTION:.0%})", observed=obs)
+
+
+def _lcd05_sample_lum(ctx: dict, name: str, target: dict) -> "Optional[float]":
+    path = _capture(ctx, name)
+    if not path:
+        return None
+    try:
+        sample = lcd_sampler.sample_widget_body(path, target["cx"], target["cy"], repo_root=ctx.get("repo_root"))
+    except lcd_sampler.LcdCaptureError:
+        return None
+    return _luminance(sample.region)
+
+
+def _case_lcd05(ctx: dict) -> CaseResult:
+    orig = _display_power_read(ctx)
+    if orig is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"could not read {_DISPLAY_POWER_PATH}")
+    if orig.get("brightness_inert"):
+        return _judge_lcd05(0.0, 0.0, True)
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    sleep = ctx.get("_sleep", time.sleep)
+    observed: Dict[str, Any] = {}
+    try:
+        targets = srv._ui_test.list_tap_targets().get("targets", [])
+        # Text-bearing home widget (label drawn in TEXT_PRIMARY); any visible
+        # named target works since only the relative drop is judged.
+        target = next((t for t in targets if t.get("name") == "start" and not t.get("hidden")), None) \
+            or next((t for t in targets if t.get("name") and not t.get("hidden")), None)
+        if target is None:
+            return CaseResult(Verdict.INCONCLUSIVE, reason="no visible text target to sample")
+        if not _display_power_write(ctx, orig, 100, orig["timeout_setting"]):
+            return CaseResult(Verdict.INCONCLUSIVE, reason="could not set brightness 100")
+        sleep(1.0)
+        lum_full = _lcd05_sample_lum(ctx, "lcd05_100.jpg", target)
+        if not _display_power_write(ctx, orig, _LCD05_TEST_BRIGHTNESS, orig["timeout_setting"]):
+            return CaseResult(Verdict.INCONCLUSIVE, reason="could not set brightness 50")
+        sleep(1.0)
+        lum_dim = _lcd05_sample_lum(ctx, "lcd05_50.jpg", target)
+        if lum_full is None or lum_dim is None:
+            return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture/sample failed")
+        after = _display_power_read(ctx) or {}
+        return _judge_lcd05(lum_full, lum_dim, bool(after.get("brightness_inert", orig.get("brightness_inert"))))
+    finally:
+        _display_power_restore(ctx, orig, observed)
+
+
+def _judge_lcd06(panel_rgb, bezel_rgb, woke: "Optional[bool]") -> CaseResult:
+    obs = {"panel_rgb": list(panel_rgb) if panel_rgb else None,
+           "bezel_rgb": list(bezel_rgb) if bezel_rgb else None, "woke": woke}
+    if panel_rgb is None or bezel_rgb is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no panel/bezel sample", observed=obs)
+    if not lcd_sampler.is_off(panel_rgb, bezel_rgb):
+        return CaseResult(Verdict.FAIL, reason="panel still lit after the 1 min blank timeout + 70 s", observed=obs)
+    if woke is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="touch state unreadable after wake tap", observed=obs)
+    if not woke:
+        return CaseResult(Verdict.FAIL, reason="touch_inject did not wake the blanked panel (touch_get_state not on)", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _case_lcd06(ctx: dict) -> CaseResult:
+    orig = _display_power_read(ctx)
+    if orig is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"could not read {_DISPLAY_POWER_PATH}")
+    srv = _srv(ctx)
+    touch = getattr(srv, "_touch", None)
+    if touch is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no touch client: cannot wake or read screen state")
+    _wake_and_home(ctx)
+    sleep = ctx.get("_sleep", time.sleep)
+    observed: Dict[str, Any] = {}
+    try:
+        if not _display_power_write(ctx, orig, orig["brightness_percent"], _LCD06_TIMEOUT_1MIN):
+            return CaseResult(Verdict.INCONCLUSIVE, reason="could not set 1 min timeout")
+        sleep(_LCD06_WAIT_S)
+        path = _capture(ctx, "lcd06_blank.jpg")
+        if not path:
+            return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
+        try:
+            x, y, w, h = _LCD06_PANEL_BOX
+            sample = lcd_sampler.sample_region(path, x, y, w, h, repo_root=ctx.get("repo_root"))
+        except lcd_sampler.LcdCaptureError:
+            return CaseResult(Verdict.INCONCLUSIVE, reason="panel sample failed")
+        woke: "Optional[bool]" = None
+        try:
+            wx, wy = _WAKE_TOUCH_XY
+            touch.inject(wx, wy, True)
+            touch.inject(wx, wy, False)
+            deadline = time.monotonic() + _WAKE_SCREEN_ON_TIMEOUT_S + 2.0
+            while True:
+                woke = bool(touch.get_state().screen_on)
+                if woke or time.monotonic() >= deadline:
+                    break
+                time.sleep(_WAKE_SCREEN_ON_POLL_S)
+        except Exception:  # noqa: BLE001
+            woke = None
+        result = _judge_lcd06(sample.region, sample.bezel, woke)
+        result.evidence = [path]
+        return result
+    finally:
+        _display_power_restore(ctx, orig, observed)
+
+
+def _judge_lcd13(expected_pages: int, pages_seen: int, first_page_next: bool) -> CaseResult:
+    obs = {"expected_pages": expected_pages, "pages_seen": pages_seen, "next_on_first_page": first_page_next}
+    if expected_pages > 1 and not first_page_next:
+        return CaseResult(Verdict.FAIL, reason="no Next control on segments page 1 of a >4-segment profile", observed=obs)
+    if pages_seen != expected_pages:
+        return CaseResult(Verdict.FAIL, reason=f"paged through {pages_seen} pages, expected {expected_pages} at {_LCD13_ROWS_PER_PAGE} rows/page", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _lcd13_tap(touch, t: dict) -> None:
+    touch.inject(int(t["cx"]), int(t["cy"]), True)
+    touch.inject(int(t["cx"]), int(t["cy"]), False)
+    time.sleep(_LCD26_TAP_SETTLE_S)
+
+
+def _case_lcd13(ctx: dict) -> CaseResult:
+    _wake_and_home(ctx)
+    srv = _srv(ctx)
+    ui = srv._ui_test
+    touch = getattr(srv, "_touch", None)
+    if touch is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no touch client: cannot press Next")
+    try:
+        cands = [p for p in srv._profiles.list_all() if p.builtin and p.segment_count > _LCD13_ROWS_PER_PAGE]
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles list failed: {type(exc).__name__}")
+    if not cands:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no builtin profile with more than 4 segments")
+    prof = cands[0]
+    expected_pages = (prof.segment_count + _LCD13_ROWS_PER_PAGE - 1) // _LCD13_ROWS_PER_PAGE
+    outcome: Optional[CaseResult] = None
+    try:
+        fail = _click_then_page(ui, "settings", "config")[0] or _click_then_page(ui, "Profiles", "profiles")[0]
+        if fail is not None:
+            outcome = fail
+            return outcome
+        # Page the picker until the chosen profile's row shows.
+        found = None
+        for _ in range(12):
+            tap, _b = _list_tap_targets_resolving_busy(ui)
+            targets = tap.get("targets", [])
+            found = next((r for r in _profile_rows_by_position(targets) if r.get("name") == prof.name), None)
+            nxt = _diagnostics_next_target(targets)
+            if found is not None or nxt is None:
+                break
+            _lcd13_tap(touch, nxt)
+        if found is None:
+            outcome = CaseResult(Verdict.INCONCLUSIVE, reason=f"profile {prof.name!r} row not found on the picker")
+            return outcome
+        rows = [found]  # profile-picker row label, same allowed non-literal form as LCD-09
+        fail = _click_then_page(ui, rows[0]["name"], "profile_detail")[0] or _click_then_page(ui, "Segments", "profile_segments")[0]
+        if fail is not None:
+            outcome = fail
+            return outcome
+        pages = 1
+        first_next = False
+        for _ in range(expected_pages + 3):
+            tap, _b = _list_tap_targets_resolving_busy(ui)
+            nxt = _diagnostics_next_target(tap.get("targets", []))
+            if pages == 1:
+                first_next = nxt is not None
+            if nxt is None:
+                break
+            _lcd13_tap(touch, nxt)
+            pages += 1
+        outcome = _judge_lcd13(expected_pages, pages, first_next)
+        outcome.observed = dict(outcome.observed or {})
+        outcome.observed["profile"] = prof.name
+        outcome.observed["segment_count"] = prof.segment_count
+        return outcome
+    finally:
+        nav = _navigate_home(ui)
+        if outcome is not None and not nav["ok"]:
+            outcome.observed = dict(outcome.observed or {})
+            outcome.observed["navigate_home"] = nav
+
+
 _CASE_FUNCS = {
+    "LCD-05": _case_lcd05,
+    "LCD-06": _case_lcd06,
+    "LCD-13": _case_lcd13,
     "LCD-01": _case_lcd01,
     "LCD-02": _case_lcd02,
     "LCD-03": _case_lcd03,
