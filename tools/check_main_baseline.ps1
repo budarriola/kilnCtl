@@ -287,7 +287,7 @@ try {
     function Run-Land([string[]]$more) {
         Push-Location $lc
         try {
-            $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -DryRun -CheckLog $log @more 2>&1 | Out-String
+            $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -AllowStandaloneClone -DryRun -CheckLog $log @more 2>&1 | Out-String
             $line = ($o -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
             $j = $null; if ($line) { try { $j = $line | ConvertFrom-Json } catch {} }
             return [pscustomobject]@{ Code = $LASTEXITCODE; Json = $j; Out = $o }
@@ -349,10 +349,10 @@ try {
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1')) "known failure matched against the FETCHED origin/main (stale ref refreshed first)"
     $argsFile = Join-Path $tmp "stub_args.txt"
-    $stub = Join-Path $tmp "stub_checks.ps1"
+    $stub = [IO.Path]::Combine($tmp, "stub_checks.ps1")   # scratch file; not a repo path (source_path_drift)
     Set-Content -LiteralPath $stub -Encoding ascii -Value @("param([string]`$Only,[switch]`$AllowFewerChecks,[switch]`$FailOnlyOnNew)", "Add-Content -LiteralPath '$argsFile' -Value ('ONLY=' + `$Only + ' FOON=' + `$FailOnlyOnNew)", "exit 0")
     Push-Location $lc
-    try { $lo = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone -CheckLog $log -AllowKnownFailures -ChecksScript $stub 2>&1 | Out-String; $lcode = $LASTEXITCODE } finally { Pop-Location }
+    try { $lo = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -AllowStandaloneClone -CheckLog $log -AllowKnownFailures -ChecksScript $stub 2>&1 | Out-String; $lcode = $LASTEXITCODE } finally { Pop-Location }
     $sa = if (Test-Path $argsFile) { Get-Content -Raw $argsFile } else { "" }
     Assert ($lcode -eq 0) "land with a known failure lands (exit $lcode)"
     Assert ($sa -match 'check_known' -and $sa -match 'FOON=True') "post-rebase run re-runs the known-failing check under -FailOnlyOnNew (stub saw: $($sa.Trim()))"
