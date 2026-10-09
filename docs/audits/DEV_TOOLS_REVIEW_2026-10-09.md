@@ -28,7 +28,7 @@ through `_exit_only`.
 Fix: return FAIL whenever `word == "FAILED"`, whatever the exit code.
 
 ### MEDIUM-1: release gate bench-evidence can pass vacuously, and can never pass for the safety suite (215ef8e2, 4be2ab67, 36d9f6a9)
-**Status: fixed in tools/release_gates.py (full-suite coverage, per-case verdicts, EXPECTED_INCONCLUSIVE allowlist, tagged dirs); wired into make_release.ps1 in d1751b0d.**
+**Status: fixed in tools/release_gates.py (full-suite coverage, per-case verdicts, EXPECTED_INCONCLUSIVE allowlist, tagged dirs); wired into make_release.ps1 in 9e664dfb.**
 `tools/release_gates.py:217-237,247`.
 - Line 227 requires `exit_code == 0`. The runner returns exit 3 for any
   SKIP/INCONCLUSIVE/NOT_RUN result, so the `"SKIP"` allowance on that line is dead code.
@@ -60,7 +60,7 @@ Fix: return INCONCLUSIVE unless at least one row is PASS and none are INCONCLUSI
 (or report the INCONCLUSIVE rows by name).
 
 ### LOW-1: lone-comma line nests "zone_sweep" in an array (latent; whole-file EOL churn in a62d5c42)
-**Status: Fixed in b4a31302** (comma restored; check now throws on any non-string $requiredNames entry; .gitattributes `*.ps1 text eol=crlf`).
+**Status: Fixed in c231c97c** (comma restored; check now throws on any non-string $requiredNames entry; .gitattributes `*.ps1 text eol=crlf`).
 `tools/check_stack_margin_registration.ps1:177-178`. The old blob had
 `"kiln_cfg_swap"\r,\r\n`. PowerShell treats the bare CR as a newline, so the comma
 starts its own line and becomes a unary comma. As a result `zone_sweep` is stored as a
@@ -84,12 +84,12 @@ still be running. The write is refused by the MCP mid-run precheck and by the fi
 Fix: skip mutating hooks when `teardown_executor` is set.
 
 ### LOW-3: make_release.ps1 Test-DramBssBudget has no test (c712ca2c)
-**Status: Fixed in b4a31302** (check_release_manifest.ps1 asserts Test-DramBssBudget refuses an unmeasurable ELF).
+**Status: Fixed in c231c97c** (check_release_manifest.ps1 asserts Test-DramBssBudget refuses an unmeasurable ELF).
 The gate itself is correct: it reuses `check_kilnfw_dram_bss_budget.py` and fails on any
 nonzero exit. No test proves that it fails a release.
 
 ### LOW-4: route-tier stale-row check may flag routes with a null Method (7ff9bf71)
-**Status: Fixed in b4a31302** (unparsed-method routes no longer make their rows stale, test_check_route_tier_coverage.ps1 2c; test_check_uri_handler_cap_max_routes.ps1 covers KILN_HTTP_MAX_ROUTES).
+**Status: Fixed in c231c97c** (unparsed-method routes no longer make their rows stale, test_check_route_tier_coverage.ps1 2c; test_check_uri_handler_cap_max_routes.ps1 covers KILN_HTTP_MAX_ROUTES).
 `tools/check_route_tier_coverage.ps1`. A route with no parsed Method is left out of
 `registeredKeys`, so its tier row can be reported as stale. Neither this check nor
 `check_uri_handler_cap.ps1`'s new `KILN_HTTP_MAX_ROUTES` (192,
