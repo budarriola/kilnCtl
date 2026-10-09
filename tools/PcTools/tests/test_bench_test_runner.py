@@ -365,6 +365,26 @@ class RunnerLifecycleTest(unittest.TestCase):
         runner.teardown()
         self.assertTrue(self.fake_srv.profiles_stop_called)
 
+    def test_teardown_stops_a_paused_run(self):
+        self.fake_srv.exec_status = _FakeExecStatus("paused")
+        self.ctx["teardown_idle_poll_s"] = 0
+        BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertTrue(self.fake_srv.profiles_stop_called)
+
+    def test_teardown_reports_executor_not_idle(self):
+        self.fake_srv.exec_status = _FakeExecStatus("running")  # stop does not take effect
+        self.ctx["teardown_idle_poll_s"] = 0
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertIn("not confirmed idle", after["teardown_executor"])
+
+    def test_teardown_hook_error_reported(self):
+        def boom(ctx):
+            raise RuntimeError("restore failed")
+        self.ctx["teardown_hooks"] = [boom]
+        after = BenchTestRunner(self.ctx, logs_root=self.tmpdir).teardown()
+        self.assertIn("restore failed", after["teardown_hook_errors"][0])
+        self.assertTrue(self.ctx["_tainted"])
+
 
 class _FwSrv(_FakeSrv):
     """_FakeSrv plus the MCP get_fw_version tool, counting calls."""

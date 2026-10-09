@@ -153,7 +153,10 @@ def _exec(ctx: dict) -> Optional["tuple[str, int]"]:
 
 def _slot_exists(ctx: dict) -> Optional[bool]:
     try:
-        return BENCH_PROFILE_NAME in _srv(ctx).profiles_list()
+        out = _srv(ctx).profiles_list()
+        if isinstance(out, str) and out.lstrip().lower().startswith(("error", "refused")):
+            return None
+        return BENCH_PROFILE_NAME in out
     except Exception:  # noqa: BLE001
         return None
 
@@ -350,6 +353,13 @@ def aux_teardown_hook(ctx: dict) -> None:
     """Runner teardown: restore relay 4 if AX-C01 mutated it and AX-R01 never ran/finished."""
     if ctx.get("_aux_dirty") and _restore(ctx):
         ctx["_tainted"] = True
+    # Saved BENCH_AUX_RULE slots must not outlive an aborted run (later runs would skip at _slot_exists).
+    for pid in list(ctx.get("_aux_profile_ids", [])):
+        out = _srv(ctx).profiles_delete(pid)
+        if isinstance(out, str) and out.startswith(("error", "refused")):
+            ctx["_tainted"] = True
+            raise RuntimeError(f"profiles_delete({pid}): {out[:80]}")
+        ctx["_aux_profile_ids"] = [p for p in ctx.get("_aux_profile_ids", []) if p != pid]
 
 
 def _case_ax_c01(ctx: dict) -> CaseResult:

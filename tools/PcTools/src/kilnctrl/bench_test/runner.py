@@ -369,13 +369,24 @@ class BenchTestRunner:
             ok, exec_status = _safe_call(srv._profiles.get_exec_status)
             # An abandoned worker must never issue a mutating call: check the
             # stall flag immediately before each one.
-            if ok and exec_status.state_name == "running" and not stalled.is_set():
+            if ok and exec_status.state_name in ("running", "paused") and not stalled.is_set():
                 _safe_call(srv.profiles_stop)
+                # Poll (bounded) until the executor actually reads idle before restore hooks run.
+                for _ in range(int(ctx.get("teardown_idle_polls", 10))):
+                    ok2, st2 = _safe_call(srv._profiles.get_exec_status)
+                    if ok2 and st2.state_name == "idle":
+                        break
+                    (ctx.get("sleep_fn") or time.sleep)(float(ctx.get("teardown_idle_poll_s", 0.5)))
+                else:
+                    board_after["teardown_executor"] = "executor not confirmed idle after stop"
             # Suite-registered restore hooks (e.g. AX relay-4 aux entry) run even
             # when the run aborted between the mutating case and its restore case.
             for hook in list(ctx.get("teardown_hooks") or []):
                 if not stalled.is_set():
-                    _safe_call(hook, ctx)
+                    hok, herr = _safe_call(hook, ctx)
+                    if not hok:
+                        board_after.setdefault("teardown_hook_errors", []).append(str(herr))
+                        ctx["_tainted"] = True
             ok, at_status = _safe_call(srv._autotune.get_status)
             if ok and at_status.state_name in ("settling", "stepping", "relay_approach", "relay_cycling")                     and not stalled.is_set():
                 _safe_call(srv.autotune_abort)

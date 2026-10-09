@@ -460,6 +460,19 @@ class Finding4FirmwareRefusalTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.PASS)
         self.assertEqual(r.observed["firmware_status"], 409)
 
+    def test_teardown_hook_deletes_saved_profiles(self):
+        srv = FakeSrv()
+        srv.saved[7] = {}
+        ctx = _ctx(srv, _aux_profile_ids=[7])
+        C.aux_teardown_hook(ctx)
+        self.assertNotIn(7, srv.saved)
+        self.assertEqual(ctx["_aux_profile_ids"], [])
+
+    def test_slot_exists_error_text_is_unreadable(self):
+        srv = FakeSrv()
+        srv.profiles_list = lambda: "error: link down"
+        self.assertIsNone(C._slot_exists({"srv": srv}))
+
     def test_409_for_wrong_reason_fails(self):
         r = C._case_ax_c02(_ctx(FakeSrv(), aux_post_fn=lambda relay, en, tc: (409, False, "a firing is active")))
         self.assertEqual(r.verdict, Verdict.FAIL)
