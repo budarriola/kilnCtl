@@ -104,6 +104,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NEGATIVE-TESTED | rest-10-08 | baseline comparison disabled | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-08 | `return ($viaGate -and -not $direct)` -> `return $viaGate` in check_lcd_home_nav_gated.ps1 was MISSED (assertion 7 also removed the gated callback); added assertion 7b (gate kept + direct kiln_ui_show) | CAUGHT after fix (negtest -IncludeDirty); restored |
 | `firmware/KilnFW/App/test/test_check_route_tier_coverage.ps1` | NEGATIVE-TESTED | rest-10-08 | missing-route branch disabled in the check | RED; hand-restored; PASS |
+| `firmware/KilnFW/App/test/test_check_uri_handler_cap_max_routes.ps1` | NEGATIVE-TESTED | uricapreg-10-09 | KILN_HTTP_MAX_ROUTES=1 passed to check_uri_handler_cap.ps1 | RED (refused); baseline PASS; wired into run_all_checks.ps1 |
 | `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` | NEGATIVE-TESTED | rest-10-08 | StopBranchGated forced true (same redo) | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1` | NEGATIVE-TESTED | rest-10-08 | harness-error regex replaced by false in ui_responsive_sweep.mjs | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_sdkconfig_sibling_pair_guard.py` | NEGATIVE-TESTED | rest-10-08 | sibling/parent diff comparison disabled | RED; hand-restored |
