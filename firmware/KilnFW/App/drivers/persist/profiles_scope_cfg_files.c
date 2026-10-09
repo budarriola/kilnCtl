@@ -11,6 +11,7 @@
 #include "cfg_fs.h"
 #include "firing_stats_cfg_fs.h"
 #include "live_profile.h"
+#include "persist_scratch.h"
 #include "profiles_cfg_fs.h"
 #include "profiles_favorites.h"
 
@@ -76,7 +77,7 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
 {
     esp_err_t first_err = ESP_OK;
     int deleted = 0;
-    cfg_fs_entry_t *ents = malloc(PSCF_LIST_MAX * sizeof(*ents));
+    cfg_fs_entry_t *ents = persist_scratch_alloc(PSCF_LIST_MAX * sizeof(*ents));
     if (!ents) {
         if (out_deleted) {
             *out_deleted = 0;

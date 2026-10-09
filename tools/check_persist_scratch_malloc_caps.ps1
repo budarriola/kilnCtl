@@ -99,20 +99,8 @@ $allow = @(
       "boot-time partition scan chunk (4096 B) on main_boot_early, deliberately heap-not-stack per docs/audits/boot_hang_2026-09-08.md; runs before PSRAM scratch policy matters and degrades to ESP_ERR_NO_MEM")
     ,@("firmware/KilnFW/App/drivers/persist/cfg_fs_mount.c", "malloc(sizeof(*gate))", 1,
       "boot-time format-gate scratch, heap-not-stack for the main-task stack budget; failure refuses auto-format, never crashes")
-    ,@("firmware/KilnFW/App/drivers/persist/live_profile.c", "malloc(cap)", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
-    ,@("firmware/KilnFW/App/drivers/persist/live_profile.c", "malloc(PROFILE_BLOB_MAX_SIZE)", 2,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
     ,@("firmware/KilnFW/App/drivers/persist/log_store.c", "calloc(1, sizeof(*rd))", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
-    ,@("firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c", "malloc(b->cap)", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
-    ,@("firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c", "malloc(item_size)", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
-    ,@("firmware/KilnFW/App/drivers/persist/profiles_scope_cfg_files.c", "malloc(PSCF_LIST_MAX * sizeof(*ents))", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
-    ,@("firmware/KilnFW/App/drivers/persist/setup_wizard_progress.c", "malloc(sizeof(*w))", 1,
-      "GRANDFATHERED 2026-10-08 (surfaced when the file list became directory discovery): pre-existing plain malloc, not yet reviewed for persist_scratch_alloc(); convert or replace this reason with a real one")
+      "log_store_reader_t is a small (about 24 B) open-to-close handle that owns a FILE*; calloc gives the zeroing the reader relies on, and PSRAM buys nothing at that size")
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v1))", 1,
       "v1 migration buffer: bounded legacy schema struct, once-per-board migration at boot, never on the import path")
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,

@@ -14,6 +14,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "persist_scratch.h"
 #include "profiles_builtin.h" /* live_edit_name_collides() also scans the read-only catalogue -- LOW review item */
 
 /* profile_encode_current_blob()/profile_decode_blob() live in
@@ -400,7 +401,7 @@ static bool caller_stack_is_external(void)
 
 static uint32_t next_rev_for(const char *path, size_t cap)
 {
-    uint8_t *tmp = (uint8_t *)malloc(cap);
+    uint8_t *tmp = (uint8_t *)persist_scratch_alloc(cap);
     if (tmp == NULL) {
         return 1;
     }
@@ -498,7 +499,7 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
         return false;
     }
-    uint8_t *buf = (uint8_t *)malloc(PROFILE_BLOB_MAX_SIZE);
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(PROFILE_BLOB_MAX_SIZE);
     if (buf == NULL) {
         if (err) snprintf(err, err_cap, "live_profile: out of memory");
         return false;
@@ -790,7 +791,7 @@ void live_profile_start(void)
             }
         }
     }
-    uint8_t *buf = (uint8_t *)malloc(PROFILE_BLOB_MAX_SIZE);
+    uint8_t *buf = (uint8_t *)persist_scratch_alloc(PROFILE_BLOB_MAX_SIZE);
     if (buf == NULL) {
         return;
     }

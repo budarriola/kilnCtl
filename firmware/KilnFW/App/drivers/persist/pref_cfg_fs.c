@@ -7,6 +7,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "persist_scratch.h"
 
 static const char *PREF_FS_TAG = "pref_cfg_fs";
 
@@ -57,7 +58,7 @@ static bool raw_buf_get(raw_buf_t *b, size_t item_size)
         b->p = b->stack;
         return true;
     }
-    b->p = (uint8_t *)malloc(b->cap);
+    b->p = (uint8_t *)persist_scratch_alloc(b->cap);
     return b->p != NULL;
 }
 
@@ -326,7 +327,7 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
     uint8_t file_stack[PREF_CFG_FS_MAX_ITEM];
     uint8_t *file_bytes = file_stack;
     if (item_size > PREF_CFG_FS_MAX_ITEM) {
-        file_bytes = (uint8_t *)malloc(item_size);
+        file_bytes = (uint8_t *)persist_scratch_alloc(item_size);
         if (!file_bytes) {
             return false;
         }
