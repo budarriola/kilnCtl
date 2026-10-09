@@ -101,6 +101,10 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
 // pulled in here, same convention as before the split (backup_import_apply()
 // is `static` with no public seam, and the other three still have to
 // compile and link even though these tests only ever call it).
+#include "profiles_builtin.h"
+/* Mutable stand-in for the const catalogue width so a test can outgrow the hidden mask. */
+size_t g_test_builtin_count = 28;
+#define g_builtin_profile_count g_test_builtin_count
 #include "../drivers/persist/backup_json.c"
 #include "../drivers/http/backup_export.c"
 // The REAL save-time validators (validate_io_segment/validate_on_off_rules and their *_in_state forms), not a
@@ -244,7 +248,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 #include "ramp_assist_cfg.h"
 #include "display_power_cfg.h"
 #include "time_sync.h"
-const size_t g_builtin_profile_count = 28; /* real catalogue width; hidden mask is 32 bits */
+/* g_builtin_profile_count: see g_test_builtin_count above (real width 28; hidden mask is 32 bits) */
 static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
 void time_sync_get_status(time_sync_status_t *out)
 {
@@ -6864,8 +6868,32 @@ static void test_prefs_export_round_trip(void)
     pf_reset();
 }
 
+static void test_prefs_hidden_catalogue_overflow_refused_before_writes(void)
+{
+    TEST_SECTION("backup_import_apply -- builtin catalogue wider than the hidden mask refuses before any write");
+    reset_stub_state();
+    pf_reset();
+    char err[200] = "";
+    (void)unit_pref_set(UNIT_PREF_FAHRENHEIT);
+    g_pf_hidden[1] = true;
+    strcpy(g_pf_tz, "JST-9");
+    unit_pref_t unit0 = unit_pref_get();
+    bool hidden0[32];
+    memcpy(hidden0, g_pf_hidden, sizeof(hidden0));
+    char tz0[sizeof(g_pf_tz)];
+    memcpy(tz0, g_pf_tz, sizeof(tz0));
+    g_test_builtin_count = 33;
+    bool ok = wp9_import_with(",\"unit\":0,\"hidden_builtin_profiles\":[128],\"tz\":\"UTC0\"", err, sizeof(err));
+    g_test_builtin_count = 28;
+    TEST_CHECK(!ok, "oversized catalogue with hidden data is refused");
+    TEST_CHECK(unit_pref_get() == unit0 && memcmp(hidden0, g_pf_hidden, sizeof(hidden0)) == 0 &&
+                   memcmp(tz0, g_pf_tz, sizeof(tz0)) == 0,
+               "prefs byte-identical to before (nothing written)");
+}
+
 void run_test_backup_import(void)
 {
+    test_prefs_hidden_catalogue_overflow_refused_before_writes();
     test_prefs_import_applies_each_key();
     test_prefs_hidden_past_eighth_builtin();
     test_prefs_absent_keys_preserve();

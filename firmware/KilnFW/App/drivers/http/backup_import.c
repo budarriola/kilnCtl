@@ -3280,6 +3280,12 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool co
     if (!backup_prefs_parse(body, &p, err_msg, err_cap)) {
         return false;
     }
+    if (p.has_hidden && g_builtin_profile_count > BACKUP_HIDDEN_MASK_BITS) {
+        /* Catalogue outgrew the 32-bit mask: refuse in pass 1 (before any write), never skip entries. */
+        snprintf(err_msg, err_cap, "hidden_builtin_profiles: built-in catalogue is wider than the %u-bit mask",
+                 (unsigned)BACKUP_HIDDEN_MASK_BITS);
+        return false;
+    }
     if (!commit) {
         if (plan != NULL && (p.has_unit || p.has_ramp || p.has_display || p.has_hidden || p.has_tz || p.has_names)) {
             kiln_cfg_plan_add(plan, "preferences in this backup (unit/ramp_assist/display_power/hidden profiles/tz/"
@@ -3298,9 +3304,6 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_prefs(const char *body, bool co
         ok = false;
     }
     if (p.has_hidden) {
-        if (g_builtin_profile_count > BACKUP_HIDDEN_MASK_BITS) {
-            ok = false; /* catalogue outgrew the 32-bit mask: never silently skip entries */
-        }
         for (size_t i = 0; i < g_builtin_profile_count && i < BACKUP_HIDDEN_MASK_BITS; i++) {
             uint8_t id = (uint8_t)(PROFILE_BUILTIN_ID_BASE + i);
             if (profiles_builtin_is_hidden(id) != p.hidden[i] &&
