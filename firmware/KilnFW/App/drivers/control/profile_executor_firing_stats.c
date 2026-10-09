@@ -807,7 +807,15 @@ void firing_stats_persist(const profile_firing_run_record_t *rec)
                  (unsigned)rec->profile_id, (unsigned)sizeof(*blob));
         return;
     }
-    firing_stats_load(rec->profile_id, blob); /* empty blob on any failure -- still safe to prepend into */
+    /* False means malloc failure or an unreadable/corrupt record (absent is
+     * true + empty). Prepending into the zeroed blob would replace the whole
+     * history ring with one entry (audit L3): skip the write instead. */
+    if (!firing_stats_load(rec->profile_id, blob)) {
+        ESP_LOGE(PE_TAG, "firing_stats_persist(%u): existing history unreadable -- this run's history was not saved",
+                 (unsigned)rec->profile_id);
+        free(blob);
+        return;
+    }
 
     uint8_t keep = (blob->count < PROFILE_EXECUTOR_FIRING_HISTORY_DEPTH)
                        ? blob->count

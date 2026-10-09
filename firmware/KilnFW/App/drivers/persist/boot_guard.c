@@ -241,7 +241,11 @@ static hal_status_t persist_count(uint32_t count)
             == HAL_OK) {
             hal_status_t lerr = hal_kv_erase_key(&lh, NVS_KEY_REC_LEGACY);
             if (lerr == HAL_OK) {
-                (void)hal_kv_commit(&lh);
+                hal_status_t cerr = hal_kv_commit(&lh);
+                if (cerr != HAL_OK) {
+                    ESP_LOGW(TAG, "legacy boot-guard key erase commit failed: %s -- migration repeats next boot (idempotent)",
+                             hal_status_to_name(cerr));
+                }
             } else if (lerr != HAL_NOT_FOUND) {
                 ESP_LOGW(TAG, "could not erase the legacy boot-guard record '%s'/'%s': %s -- "
                               "harmless, nothing reads it once '%s'/'%s' exists",

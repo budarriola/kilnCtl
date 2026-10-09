@@ -63,7 +63,7 @@ void autotune_dispatch_coupling_persist(coupling_persist_job_t *job)
         ESP_LOGW(AT_TAG, "autotune zone %u: could not submit %u coupling cell(s) to the flash worker: %s",
                  job->stepped_zone, (unsigned)job->count, esp_err_to_name(submit_err));
     } else if (job->fail_count > 0) {
-        ESP_LOGW(AT_TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist", job->stepped_zone,
+        ESP_LOGE(AT_TAG, "autotune zone %u: %u of %u coupling cell(s) failed to persist (RAM only until reboot)", job->stepped_zone,
                  (unsigned)job->fail_count, (unsigned)job->count);
     }
 }

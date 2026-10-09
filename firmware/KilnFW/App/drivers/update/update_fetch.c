@@ -386,7 +386,10 @@ static void wr_task(void *arg)
             // a valid stage behind: undo a late finish (clear) or begin/write (abort). The abort is scoped
             // to the fetch's own upload (review 5 L3) so it cannot kill a newer hand upload.
             if (c->cmd == WR_FINISH && c->res == UPDATE_STAGE_OK) {
-                (void)update_stage_clear(st);
+                int clr = (int)update_stage_clear(st);
+                if (clr != (int)UPDATE_STAGE_OK) {
+                    ESP_LOGW(TAG, "abandoned fetch: late-finish stage clear failed (%d) -- a valid staged image remains", clr);
+                }
             } else if (c->cmd == WR_BEGIN || c->cmd == WR_WRITE) {
                 update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB);
             }

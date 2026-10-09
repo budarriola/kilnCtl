@@ -182,11 +182,16 @@ static hal_status_t favorites_read_nvs(profiles_slot_bitmap_t *user, uint32_t *b
     return HAL_OK;
 }
 
+/* Set when RAM was changed but the write failed (audit L1): a retry that finds
+ * "no change" against RAM must still write. Guarded by s_save_lock. */
+static bool s_fav_dirty = false;
+
 esp_err_t profiles_favorites_start(void)
 {
     profiles_slot_bitmap_from_u32(&s_fav_user, 0);
     s_fav_builtin = 0;
     s_fav_rev = 0;
+    s_fav_dirty = false;
 
     /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
      * rev; otherwise the legacy NVS copy stands and, when cfg is mounted, is
@@ -260,7 +265,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         s_fav_builtin = updated;
     }
 
-    if (!changed) {
+    if (!changed && !s_fav_dirty) {
         /* No change -- nothing to write. Saying OK here keeps an unfavorite
          * of something that was never favorited from reporting a failure. */
         cfg_save_lock_give(&s_save_lock);
@@ -276,6 +281,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     if (err == ESP_OK) {
         s_fav_rev = new_rev;
     }
+    s_fav_dirty = (err != ESP_OK);
     cfg_save_lock_give(&s_save_lock);
     return err;
 }

@@ -148,7 +148,11 @@ static void system_bridge_task(void *arg)
                     break;
                 }
                 bool disabled = msg->payload[1] != 0;
-                watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
+                esp_err_t perr = watchdog_cfg_set_panic_disabled(disabled, "UART SYSTEM_CMD_SET_WATCHDOG_PANIC_DISABLED");
+                if (perr != ESP_OK) {
+                    ESP_LOGW(TAG, "system: SET_WATCHDOG_PANIC_DISABLED did not persist: %s (setting lost at reboot)",
+                             esp_err_to_name(perr));
+                }
                 break;
             }
             case SYSTEM_CMD_SET_TELEMETRY_ENABLED: {

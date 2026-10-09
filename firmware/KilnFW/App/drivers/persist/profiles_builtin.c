@@ -104,6 +104,9 @@ static hal_status_t nvs_partition_init(const char *partition)
  * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
  * reserves the flash worker first -- see cfg_save_lock.h. */
 static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+/* RAM mask changed but the save failed (audit L1): a retry must still write.
+ * Guarded by s_save_lock. */
+static bool s_hidden_dirty = false;
 
 /* Persists the mask at the next rev to the cfg file ONLY (docs/CONFIG_FILESYSTEM.md,
  * "Dual-write window: closed"). s_hidden_rev advances only once the verified
@@ -123,6 +126,7 @@ esp_err_t profiles_builtin_start(void)
 {
     s_hidden_mask = 0;
     s_hidden_rev = 0;
+    s_hidden_dirty = false;
 
     hal_status_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != HAL_OK) {
@@ -307,12 +311,13 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
     }
     cfg_save_lock_take(&s_save_lock);
     uint32_t updated = hidden ? (s_hidden_mask | (1u << idx)) : (s_hidden_mask & ~(1u << idx));
-    if (updated == s_hidden_mask) {
+    if (updated == s_hidden_mask && !s_hidden_dirty) {
         cfg_save_lock_give(&s_save_lock);
         return ESP_OK; /* already in the requested state -- no flash write */
     }
     s_hidden_mask = updated;
     esp_err_t err = hidden_mask_save();
+    s_hidden_dirty = (err != ESP_OK);
     cfg_save_lock_give(&s_save_lock);
     return err;
 }
@@ -320,12 +325,13 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
 esp_err_t profiles_builtin_restore_all(void)
 {
     cfg_save_lock_take(&s_save_lock);
-    if (s_hidden_mask == 0) {
+    if (s_hidden_mask == 0 && !s_hidden_dirty) {
         cfg_save_lock_give(&s_save_lock);
         return ESP_OK;
     }
     s_hidden_mask = 0;
     esp_err_t err = hidden_mask_save();
+    s_hidden_dirty = (err != ESP_OK);
     cfg_save_lock_give(&s_save_lock);
     return err;
 }

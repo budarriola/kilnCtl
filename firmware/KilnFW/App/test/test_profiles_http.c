@@ -1956,6 +1956,9 @@ static void test_favorites_refused_when_unmounted(void)
     TEST_CHECK(e == ESP_ERR_INVALID_STATE, "set returns the unmounted error");
     TEST_CHECK(!fav_nvs_has_keys(), "and nothing was written to NVS as a fallback");
     TEST_CHECK(profiles_favorites_is(2), "the change still applies live for this boot");
+    // Audit L1: RAM already holds the change, so a retry sees "no change" -- it must still try the write.
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_ERR_INVALID_STATE,
+               "retry after a failed save is not a silent ESP_OK no-op");
     nvs_stub_reset();
     TEST_CHECK(!profiles_favorites_is(2), "and is gone after a restart (never persisted)");
 }

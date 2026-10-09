@@ -8531,6 +8531,30 @@ static void test_firing_stats_load_discards_unknown_size_blob(void)
     fake_kv_reset_all();
 }
 
+static void test_firing_stats_persist_skips_write_when_load_fails(void)
+{
+    TEST_SECTION("firing_stats_persist() -- an unreadable existing record is NOT replaced by a one-entry "
+                 "history (audit L3)");
+    fs_fresh_mounted();
+    uint8_t garbage[PROFILE_FIRING_HISTORY_BLOB_SIZE_V1 - 4];
+    memset(garbage, 0x5A, sizeof(garbage));
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, FIRING_STATS_NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, FIRING_STATS_NVS_PARTITION)
+                   == HAL_OK, "setup: open");
+    TEST_CHECK(hal_kv_set_blob(&h, "fs_13", garbage, sizeof(garbage)) == HAL_OK, "setup: garbage blob");
+    hal_kv_close(&h);
+
+    profile_firing_run_record_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.profile_id = 13;
+    rec.duration_s = 777;
+    firing_stats_persist(&rec);
+
+    profile_firing_history_blob_t out;
+    TEST_CHECK(!firing_stats_load(13, &out), "the unreadable record was left alone, not overwritten with one entry");
+    fake_kv_reset_all();
+}
+
 // ---- last-run-started RAM cache (PROFILE_SLOTS_100.md review LOW,
 // "list perf") -- profile_executor_last_run_started_unix_s()'s O(1)-per-
 // request fix. Each test below uses a profile id nothing else in this file
@@ -11831,6 +11855,7 @@ void run_test_profile_executor_prestart(void)
     test_firing_stats_persist_load_round_trip_and_ring_depth();
     test_firing_stats_load_migrates_known_old_size_blob();
     test_firing_stats_load_discards_unknown_size_blob();
+    test_firing_stats_persist_skips_write_when_load_fails();
     test_firing_stats_last_run_cache_hit_avoids_nvs_reads();
     test_firing_stats_last_run_cache_first_miss_then_hit();
     test_firing_stats_last_run_cache_invalidated_on_persist_and_erase();

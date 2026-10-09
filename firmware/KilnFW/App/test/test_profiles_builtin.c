@@ -376,14 +376,18 @@ static void test_hidden_cfg_write_failure_is_loud_and_rev_unadvanced(void)
     pref_cfg_fs_set_write_fn(pb_failing_write_fn);
     TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
                "set_hidden reports the cfg write failure");
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
+               "retry of the same change still reports the failure (audit L1: no silent no-op)");
     pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) == ESP_OK,
+               "retry after the fault clears writes and succeeds");
+    TEST_CHECK(s_hidden_rev == rev_before + 1, "the retry actually wrote (rev advanced)");
     TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "applied live");
-    TEST_CHECK(s_hidden_rev == rev_before, "rev did not advance without a verified write");
     uint32_t n_mask = 0, n_rev = 0;
     TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "nothing fell back to NVS");
     pb_reboot();
     TEST_CHECK(profiles_builtin_start() == ESP_OK, "next boot resolves cleanly");
-    TEST_CHECK(!profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "the unsaved change is gone after a reboot");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "the retried change survived the reboot");
     cfg_fs_deinit();
 }
 
