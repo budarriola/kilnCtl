@@ -164,6 +164,8 @@ findings.
 
 ## Verdict
 
+**Status (2026-10-09): all findings above fixed in 89901ab6 (LCD-10/11/12, OT-E11, plus DEV_REVIEW_9 LCD-07/12/15/18/20 and OT-E11 host split); LCD-07 aux-pill exclusion needs ctx lcd07_aux_pills.**
+
 Do not run LCD-10 or LCD-11 on the bench until CRITICAL-1 and HIGH-1 are fixed: each can
 destroy user profiles it did not create. LCD-10 also needs HIGH-2 and HIGH-3 before it
 counts as heat-safe. LCD-12 is safe to run, with the LOW provenance caveat. OT-E11 is
