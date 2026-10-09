@@ -113,3 +113,33 @@ scope lists. Backup import writes cfg files only, so no NVS writer can race it.
    bitmap floors only. They keep the NVS fallback alive for profiles.
 3. `persist/touch_cal_store.c`: user calibration, NVS-only, absent from the owner close list.
    Probably intentional (hardware calibration); confirm.
+
+## Follow-up 2026-10-09: factory_reset vs legacy NVS read fallbacks
+
+Question: does factory_reset (kiln, profiles, all) erase the legacy NVS copy
+that a load fallback or boot migration would read back?
+
+- Fallback keys in `kiln_nvs` / `profiles_nvs`: erased. The scopes erase those
+  partitions wholesale, and the cfg files are deleted by the scope lists (or
+  the cfg format for `all`). No change needed.
+- Pre-split legacy copies in the DEFAULT `nvs` partition, namespace `kiln_cfg`
+  (`zones_cfg`, `run_state`, `relay_cyc`; `prof_used`, `prof0..7`): NOT erased
+  before this change. The boot migrations (`migrate_from_default_partition`)
+  copy them back into the just-erased partition, so a never-migrated board
+  resurrected old data after a reset. The default partition is shared with
+  `kiln_auth`, TOTP and the Wi-Fi driver, so it cannot be erased wholesale.
+  Fixed: new `persist/legacy_default_nvs.c` erases exactly those keys
+  (erase-first, HAL_NOT_FOUND tolerated, commit checked, first error returned).
+  `kiln` scope erases the kiln set, `profiles` the profile set, `all` both,
+  `wifi` neither; any failure fails the reset loudly.
+- `persist/relay_cycles.c` migration: after the copy commits it now reads the
+  kiln_nvs blob back, and only if it matches erases the old default-partition
+  copy (result checked and logged). On mismatch the old copy is kept.
+- Wi-Fi default-partition legacy copy (`wifi_prov_nvs.c`): unchanged, out of
+  scope.
+
+Tests: `test_ota_http.c` (key-level, per scope, kiln_auth survives, failure
+path), `test_relay_cycles.c` (migration erases the old copy and does not
+re-run after a kiln_nvs erase; reset erase defeats the unmigrated fallback),
+`test_run_state.c` (run_state resurrects without the legacy erase, not with).
+Zones and profiles are covered at key level only, not through their loaders.

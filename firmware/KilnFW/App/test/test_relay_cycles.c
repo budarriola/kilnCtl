@@ -371,6 +371,55 @@ static void test_migration_skipped_when_kiln_partition_already_has_blob(void)
     fake_kv_reset_all();
 }
 
+static bool default_partition_cycles_present(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) != HAL_OK) {
+        return false;
+    }
+    uint8_t buf[sizeof(relay_cycles_blob_t) + 8];
+    size_t len = sizeof(buf);
+    hal_status_t st = hal_kv_get_blob(&h, NVS_KEY_CYCLES, buf, &len);
+    hal_kv_close(&h);
+    return st == HAL_OK;
+}
+
+static void test_migration_erases_old_default_copy_and_does_not_rerun(void)
+{
+    TEST_SECTION("relay_cycles_init -- after a verified migration the old default-partition copy is erased; "
+                 "a later kiln_nvs + cfg erase does not re-seed from it");
+    mount_cfg_fresh();
+    write_default_partition_v1(111, 222);
+    TEST_CHECK(default_partition_cycles_present(), "setup: stale default-partition copy present");
+
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(s_rc.counts[0] == 111 && s_rc.counts[1] == 222, "counts migrated");
+    TEST_CHECK(!default_partition_cycles_present(), "the old default-partition copy was erased after the copy");
+
+    // Simulate a kiln-scope factory reset: kiln_nvs erased, cfg file deleted.
+    TEST_CHECK(hal_kv_erase_partition("kiln_nvs") == HAL_OK, "erase kiln_nvs");
+    TEST_CHECK(cfg_fs_delete(RELAY_CYCLES_FILE_PATH) == ESP_OK, "delete the cfg file");
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init after reset succeeds");
+    TEST_CHECK(s_rc.counts[0] == 0 && s_rc.counts[1] == 0,
+               "counts are defaults: the migration did not re-run from a stale copy");
+    fake_kv_reset_all();
+}
+
+static void test_reset_legacy_erase_defeats_unmigrated_fallback(void)
+{
+    TEST_SECTION("relay_cycles_init -- never-migrated board: legacy_default_nvs_erase_kiln() (kiln reset) "
+                 "leaves defaults, not the stale default-partition counts");
+    mount_cfg_fresh();
+    write_default_partition_v1(111, 222);
+    TEST_CHECK(legacy_default_nvs_erase_kiln() == ESP_OK, "legacy erase succeeds");
+    memset(&s_rc, 0, sizeof(s_rc));
+    TEST_CHECK(relay_cycles_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(s_rc.counts[0] == 0 && s_rc.counts[1] == 0, "fallback loads defaults after the reset erase");
+    fake_kv_reset_all();
+}
+
 static void test_migration_still_runs_on_fresh_kiln_partition(void)
 {
     TEST_SECTION("relay_cycles_init -- kiln partition empty, default partition holds v1: still migrates");
@@ -1466,6 +1515,8 @@ void run_test_relay_cycles(void)
     test_v1_blob_migrates_to_v2();
     test_migration_skipped_when_kiln_partition_already_has_blob();
     test_migration_still_runs_on_fresh_kiln_partition();
+    test_migration_erases_old_default_copy_and_does_not_rerun();
+    test_reset_legacy_erase_defeats_unmigrated_fallback();
     test_reset_zeroes_count_and_persists();
     test_reset_rejects_out_of_range_relay();
     test_reset_snapshot_refuses_out_of_range_relay();

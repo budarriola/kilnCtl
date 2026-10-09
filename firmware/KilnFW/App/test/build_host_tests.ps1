@@ -1199,6 +1199,7 @@ try {
             "`"$(Join-Path $testDir 'test_ota_http.c')`" " +
             "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
             "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
             # PICO_AUTO_UPDATE_PLAN.md G1: ota_http_pico.c (#included into
             # test_ota_http.c above) now records what it staged, so a later
             # boot can re-use the image. Linked in for REAL rather than faked,
@@ -1644,7 +1645,8 @@ try {
             "`"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
             "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`""
     # 2026-09-08: flash_worker_wait.c linked in -- relay_cycles_init() now
     # calls flash_worker_wait_default() before its migrate-on-load
     # pref_cfg_fs_resolve() write (same boot-ordering fix as adaptive_tune.c's

@@ -30,6 +30,7 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 #include "../drivers/control/run_state.c"
+#include "../drivers/persist/legacy_default_nvs.h"
 
 static run_state_record_t make_sample_record(void)
 {
@@ -130,10 +131,51 @@ static void test_persist_locked_proceeds_normally_on_an_internal_ram_stack(void)
                "the persisted bytes are the record that was passed in, unmodified");
 }
 
+static void stage_default_run_record(void)
+{
+    hal_kv_init_partition(NULL);
+    run_state_record_t rec = make_sample_record();
+    hal_kv_handle_t hw;
+    TEST_CHECK(hal_kv_open(&hw, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK, "open default partition");
+    TEST_CHECK(hal_kv_set_blob(&hw, NVS_KEY_RUN, &rec, sizeof(rec)) == HAL_OK, "stage legacy record");
+    TEST_CHECK(hal_kv_commit(&hw) == HAL_OK, "commit legacy record");
+    hal_kv_close(&hw);
+}
+
+static bool kiln_run_record_present(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    run_state_record_t rb;
+    size_t len = sizeof(rb);
+    hal_status_t st = hal_kv_get_blob(&h, NVS_KEY_RUN, &rb, &len);
+    hal_kv_close(&h);
+    return st == HAL_OK;
+}
+
+static void test_migration_resurrects_without_legacy_erase_and_not_with(void)
+{
+    TEST_SECTION("run_state migrate_from_default_partition -- a kiln reset's legacy erase stops the "
+                 "stale default-partition record being copied back");
+    reset_all();
+    stage_default_run_record();
+    migrate_from_default_partition();
+    TEST_CHECK(kiln_run_record_present(), "control: without the erase the stale record is migrated in");
+
+    reset_all();
+    stage_default_run_record();
+    TEST_CHECK(legacy_default_nvs_erase_kiln() == ESP_OK, "legacy erase succeeds");
+    migrate_from_default_partition();
+    TEST_CHECK(!kiln_run_record_present(), "after the legacy erase nothing is migrated: fallback yields defaults");
+}
+
 void run_test_run_state(void)
 {
     test_persist_locked_refuses_when_calling_stack_is_external_ram();
     test_persist_locked_proceeds_normally_on_an_internal_ram_stack();
+    test_migration_resurrects_without_legacy_erase_and_not_with();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }
