@@ -693,6 +693,15 @@ uint32_t zones_config_generation(void)
     return 0;
 }
 
+// HTTP audit E1 finding 1: a POST /api/zones commit landing after the heat claim is published is
+// modeled by the generation reading changed only once the claim has been taken.
+static bool s_test_zones_gen_bump_after_heat_claim = false;
+bool zones_config_changed_since(uint32_t gen_snapshot)
+{
+    (void)gen_snapshot;
+    return s_test_zones_gen_bump_after_heat_claim && g_heat_zone_claim_begin_calls > 0;
+}
+
 // live_profile.c/profiles_http.c are the http/persist tier, deliberately not
 // linked into this control-tier host executable (same reasoning as
 // profiles_http_get() above) -- fixed at 0 by default so reload_live_profile_
@@ -2734,6 +2743,41 @@ static void test_run_refuses_when_update_claims_after_early_check(void)
     s_test_update_claim_after_heat_claim = false;
     TEST_CHECK(!ok, "an update claim taken after the early check must refuse the start");
     TEST_CHECK(strstr(err, "update") != NULL, "the refusal names the update");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// HTTP audit E1 finding 1: a POST /api/zones commit that lands after the early config reads but
+// before the heat claim was visible to it must refuse the start, with every claim released.
+static void test_run_refuses_when_zones_config_changes_during_start(void)
+{
+    TEST_SECTION("profile_executor_run() -- zones config changed during the start refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_zones_gen_bump_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_zones_gen_bump_after_heat_claim = false;
+    TEST_CHECK(!ok, "a zones config commit during the start must refuse the start");
+    TEST_CHECK(strstr(err, "zones configuration changed") != NULL, "the refusal names the config change");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
     TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
     TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
@@ -11666,6 +11710,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();
+    test_run_refuses_when_zones_config_changes_during_start();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();

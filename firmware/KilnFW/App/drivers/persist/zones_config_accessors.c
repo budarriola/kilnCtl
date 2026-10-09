@@ -154,6 +154,14 @@ uint32_t zones_config_generation(void)
     return s_config_generation;
 }
 
+bool zones_config_changed_since(uint32_t gen_snapshot)
+{
+    zones_cfg_lock();
+    uint32_t gen = s_config_generation;
+    zones_cfg_unlock();
+    return gen != gen_snapshot;
+}
+
 /* Whole-struct snapshot/restore pair for a caller (backup_import.c) that
  * batches many _no_save() setter calls together and needs to roll RAM back
  * atomically if one of them fails partway through, without ever calling

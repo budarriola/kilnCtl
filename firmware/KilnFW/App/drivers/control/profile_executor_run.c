@@ -205,6 +205,10 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
 
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
+    /* Zones config generation before ANY config read below; re-checked under zones_cfg_lock()
+     * after the heat claim is published (see the "zones config changed" late check). */
+    const uint32_t gen_at_entry = zones_config_generation();
+
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h
      * has the full rationale and the standing "NO OVERRIDE" instruction).
      *
@@ -1364,6 +1368,25 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         late_snap.restore_in_flight = true;
         (void)system_mode_gate_check(SYS_ACTION_START_PROFILE, &late_snap, err_msg, err_cap);
         ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    /* Zones config changed, second look (HTTP audit E1 finding 1): POST /api/zones gates on the
+     * heat claim at entry, then does a slow Pico ceiling raise before committing, so it could commit
+     * a new config between this function's config reads above and the RUNNING commit below -- and
+     * the executor would then re-read that config mid-run. The POST re-reads the heat claim inside
+     * its commit critical section; this side publishes the heat claim (above) and then reads the
+     * generation under that same lock. Either the POST sees the claim and refuses 409, or this sees
+     * its bump and refuses here; the operator retries against the new config. */
+    if (zones_config_changed_since(gen_at_entry)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "the zones configuration changed while the firing was starting -- start it again");
+        }
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: zones config changed meanwhile",
                  (unsigned)profile_id);
         return false;
     }

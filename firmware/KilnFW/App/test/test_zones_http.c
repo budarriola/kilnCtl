@@ -1865,6 +1865,66 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     test_cfg_rows_reset();
 }
 
+/* HTTP audit E1 finding 1: a firing or autotune that starts DURING the slow Pico ceiling raise
+ * (after the entry mode gate passed) must not get the config committed under it: the commit
+ * re-reads the heat claim under zones_cfg_lock(), refuses 409 and restores the Pico ceiling. */
+static int s_run_start_kind = 0; /* 1 = profile, 2 = autotune */
+static void test_ceiling_write_starts_a_run(float value)
+{
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, value, true);
+    if (s_run_start_kind == 1) {
+        s_test_profile_status.state = PROFILE_EXEC_RUNNING;
+    } else if (s_run_start_kind == 2) {
+        s_test_autotune_active = true;
+    }
+}
+
+static void zones_post_run_start_in_ceiling_window_case(int kind, const char *what)
+{
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    seed_two_zone_pid_baseline();
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* below the body's max, so the commit path raises the Pico ceiling */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
+    uint32_t gen_before = s_config_generation;
+    zones_cfg_t before = s_zones.cfg;
+    s_ceiling_writer_calls = 0;
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs */
+    test_cfg_rows_reset();
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
+    s_run_start_kind = kind;
+    s_ceiling_writer_on_write = test_ceiling_write_starts_a_run;
+    run_zones_post(body);
+    s_ceiling_writer_on_write = NULL;
+    s_run_start_kind = 0;
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_autotune_active = false;
+    s_hw_safety = NULL;
+    TEST_CHECK(s_ceiling_writer_calls >= 1, what);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "a run started during the ceiling raise: 409");
+    TEST_CHECK(!s_test_ok_called, "no success reported");
+    TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
+               "refusal carries the mode gate's discriminator marker");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched (no commit)");
+    TEST_CHECK(s_config_generation == gen_before, "generation not bumped (no commit)");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+    TEST_CHECK(s_ceiling_writer_calls == 2, "the 409 wrote the Pico ceiling a second time (the restore)");
+    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 100.0, 1e-6, "restore targets exactly the live zone max");
+    float pico_after = 0.0f;
+    TEST_CHECK(safety_ceiling_sync_get_current_pico_ceiling(&pico_after), "Pico ceiling known after the 409");
+    TEST_CHECK_NEAR(pico_after, 100.0, 1e-6, "Pico ceiling back in sync with the unchanged zone max");
+    test_cfg_rows_reset();
+}
+
+static void test_zones_post_refuses_run_started_during_ceiling_raise(void)
+{
+    TEST_SECTION("POST /api/zones -- a firing or autotune started during the ceiling raise (after the "
+                 "entry gate) makes the commit refuse 409, commit nothing and restore the Pico ceiling "
+                 "(HTTP audit E1 finding 1)");
+    zones_post_run_start_in_ceiling_window_case(1, "test setup: the ceiling write ran (profile start window)");
+    zones_post_run_start_in_ceiling_window_case(2, "test setup: the ceiling write ran (autotune start window)");
+    seed_two_zone_pid_baseline();
+}
+
 static void test_zones_cfg_lock_covers_commit_and_setters(void)
 {
     TEST_SECTION("zones config lock -- the POST commit and every field setter's mutate-and-bump take "
@@ -16582,6 +16642,7 @@ void run_test_zones_http(void)
     test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
+    test_zones_post_refuses_run_started_during_ceiling_raise();
     test_zones_post_refused_while_async_job_busy();
 }
 

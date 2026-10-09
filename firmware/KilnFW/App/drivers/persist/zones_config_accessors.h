@@ -1623,6 +1623,14 @@ bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_d
  * operator edits) and harmless in principle, since != is the only test. */
 uint32_t zones_config_generation(void);
 
+/* True when the generation now differs from gen_snapshot. Reads it UNDER zones_cfg_lock(), so the
+ * answer is serialized against POST /api/zones' commit critical section (heat-claim re-check, struct
+ * copy, generation bump). A run starter (profile executor, autotune) snapshots the generation before
+ * its config reads, publishes its heat claim, then calls this and refuses on true: either the POST's
+ * commit-time re-check sees the claim and refuses 409, or this sees the commit's bump (HTTP audit E1
+ * finding 1). Spinlock only, never blocks, safe under the starter's own module mutex. */
+bool zones_config_changed_since(uint32_t gen_snapshot);
+
 /* Applies this zone's cal_offset_c to a raw reading -- the "applied in
  * firmware" half of TODO.md section 3's calibration item, at last wired to
  * an actual consumer. Returns raw_c unchanged if zone_index is out of range

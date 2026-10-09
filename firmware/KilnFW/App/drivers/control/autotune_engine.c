@@ -979,6 +979,10 @@ esp_err_t autotune_engine_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_
  * the lock NOT held on failure. */
 bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap)
 {
+    /* Zones config generation before ANY config read below; re-checked under zones_cfg_lock()
+     * after the heat claim is published (see the "zones config changed" late check). */
+    const uint32_t gen_at_entry = zones_config_generation();
+
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h has
      * the full rationale and the standing "NO OVERRIDE" instruction). Extended
      * to autotune the same day, same owner decision: autotune commands heat
@@ -1307,6 +1311,21 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         late_snap.restore_in_flight = true;
         (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
         ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)zone_index);
+        return false;
+    }
+    /* Zones config changed, second look (HTTP audit E1 finding 1) -- same pairing as
+     * profile_executor_run()'s identical check: POST /api/zones re-reads the heat claim inside its
+     * commit critical section, this side publishes the claim and then reads the generation under
+     * that lock, so either the POST refuses 409 or this refuses rather than run on stale config. */
+    if (zones_config_changed_since(gen_at_entry)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "the zones configuration changed while autotune was starting -- start it again");
+        }
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: zones config changed meanwhile",
                  (unsigned)zone_index);
         return false;
     }

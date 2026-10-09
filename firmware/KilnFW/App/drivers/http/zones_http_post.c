@@ -59,6 +59,20 @@ static ZONES_POST_NOINLINE void zones_post_track_ceiling_lower(const float *live
     }
 }
 
+/* The commit-time mode-gate refusal (a firing/autotune started during the ceiling raise): undo the
+ * raise to the unchanged live maxima, exactly as the lost-update 409 does, then answer the same 409
+ * the entry gate sends. NOINLINE: keeps the reason buffer off zones_post_apply()'s frame. */
+static ZONES_POST_NOINLINE esp_err_t zones_post_refuse_run_started(httpd_req_t *req, const sys_mode_snapshot_t *snap,
+                                                                   const float *live_max_temp_c)
+{
+    zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones run-started 409");
+    char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
+    mode_reason[0] = '\0';
+    (void)system_mode_gate_check(SYS_ACTION_WRITE_ZONES_CONFIG, snap, mode_reason, sizeof(mode_reason));
+    ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused at commit: a run started meanwhile: %s", mode_reason);
+    return system_mode_gate_http_send_refusal(req, mode_reason);
+}
+
 /* ---- move_zone_to_aux hook and the zone free/restore it drives ---- */
 static zones_move_to_aux_handler_t s_move_to_aux_handler;
 static zones_move_to_aux_is_request_t s_move_to_aux_is_request;
@@ -689,6 +703,23 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * cannot interleave with a concurrent setter. The lock is dropped before the 409 reply and held
      * across no producer call -- everything slow (ceiling write, parsing) happened above on `tmp`. */
     zones_cfg_lock();
+    /* Mode gate, second look (HTTP audit E1 finding 1): the entry gate ran before the slow ceiling
+     * raise above, and a firing or autotune start does not touch the generation, so one could begin
+     * in that window and have its config rewritten mid-run. Re-read the heat claim inside the commit
+     * critical section. Pairs with the starters' zones_config_changed_since() check, which publishes
+     * the heat claim and then reads the generation under this same lock: either this read sees the
+     * claim, or the starter sees this commit's bump and refuses. Leaf spinlock read, nothing else. */
+    sys_mode_snapshot_t late_mode = { 0 };
+    relay_authority_heat_run_active(&late_mode.profile_running, &late_mode.autotune_running);
+    if (late_mode.profile_running || late_mode.autotune_running) {
+        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
+        zones_cfg_unlock();
+        free(body);
+        return zones_post_refuse_run_started(req, &late_mode, live_max_temp_c);
+    }
     if (s_config_generation != gen_at_snapshot) {
         /* The raise above may already have widened the Pico for `tmp`, which is now never
          * committed: snapshot the live maxima under the lock, and lower back to them below. */
