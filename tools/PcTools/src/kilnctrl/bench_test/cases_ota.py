@@ -2470,7 +2470,137 @@ def _case_otb02(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, reason=f"{len(rows)} OT cases, none FAIL/ERROR/INCONCLUSIVE",
                       observed=observed, evidence=table)
 
+# ---------------------------------------------------------------------------
+# OT-E11 -- recovery image receives an app image (BENCH_TEST_SYSTEM_PLAN 3.4).
+# ---------------------------------------------------------------------------
+
+OTE11_RECOVERY_WAIT_S = 60.0
+OTE11_POLL_S = 2.0
+
+
+def _tool_ok(text: object) -> bool:
+    return isinstance(text, str) and text.lstrip().lower().startswith("ok")
+
+
+def _ote11_tool(mod: str, name: str):
+    import importlib
+    return getattr(importlib.import_module(f"kilnctrl.{mod}"), name)
+
+
+def _ote11_in_recovery(text: object) -> bool:
+    return isinstance(text, str) and text.lstrip().startswith("recovery image")
+
+
+def _ote11_wait_recovery(ctx: dict, status_fn, timeout_s: float) -> bool:
+    import time
+    sleep = ctx.get("_sleep") or time.sleep
+    waited = 0.0
+    while True:
+        try:
+            if _ote11_in_recovery(status_fn()):
+                return True
+        except Exception:
+            pass
+        if waited >= timeout_s:
+            return False
+        sleep(OTE11_POLL_S)
+        waited += OTE11_POLL_S
+
+
+def _case_ote11(ctx: dict) -> CaseResult:
+    """OT-E11: recovery_enter, confirm the recovery image answers, run LCD-20's
+    observation while there, push the app image with recovery_push_esp_image,
+    confirm RUNNING == app. Teardown attempts recovery_exit whenever the board
+    is not confirmed back in the application and reports if it is still stuck
+    in recovery (observed["left_in_recovery"], run taint)."""
+    host = ctx.get("host")
+    idle, reason = _is_idle(ctx)
+    if not idle:
+        return CaseResult(Verdict.SKIP, reason=reason)
+    image_path = ctx.get("ota_image_path")
+    if not image_path:
+        return CaseResult(Verdict.SKIP, reason="ota_image_path not provided for OT-E11")
+    if not (ctx.get("_isfile_fn") or os.path.isfile)(image_path):
+        return CaseResult(Verdict.SKIP, reason=f"ota_image_path is not a file: {image_path!r}")
+    ok, ireason = _interlock_ok(ctx, host)
+    if not ok:
+        return CaseResult(Verdict.SKIP, reason=f"OTA interlock not ok, refusing to enter recovery: {ireason}")
+
+    enter_fn = ctx.get("_recovery_enter_fn") or (
+        lambda: _ote11_tool("mcp_server_ota", "recovery_enter")(host=host, confirm=True))
+    status_fn = ctx.get("_recovery_status_fn") or (
+        lambda: _ote11_tool("mcp_server_recovery", "recovery_status")(host=host))
+    push_fn = ctx.get("_recovery_push_fn") or (
+        lambda: _ote11_tool("mcp_server_recovery", "recovery_push_esp_image")(
+            image_path=image_path, confirm=True, host=host))
+    exit_fn = ctx.get("_recovery_exit_fn") or (
+        lambda: _ote11_tool("mcp_server_recovery", "recovery_exit")(confirm=True, host=host))
+
+    observed: dict = {}
+    entered = False
+    pushed_ok = False
+    try:
+        try:
+            entered_text = enter_fn()
+        except Exception as exc:
+            return CaseResult(Verdict.FAIL, reason=f"recovery_enter raised {type(exc).__name__}: {exc}")
+        observed["recovery_enter"] = str(entered_text)[:300]
+        if not _tool_ok(entered_text):
+            return CaseResult(Verdict.INCONCLUSIVE, reason="recovery_enter refused or failed; board unchanged",
+                              observed=observed)
+        entered = True
+        if not _ote11_wait_recovery(ctx, status_fn, ctx.get("ote11_recovery_wait_s", OTE11_RECOVERY_WAIT_S)):
+            return CaseResult(Verdict.FAIL, reason="recovery image never answered recovery_status after recovery_enter",
+                              observed=observed)
+        # LCD-20 only ever runs here, while the recovery image is up.
+        lcd20 = ctx.get("_lcd20_fn")
+        if lcd20 is None:
+            from . import cases_lcd
+            lcd20 = cases_lcd.observe_recovery_idle
+        try:
+            ctx["_lcd20_result"] = lcd20(ctx)
+        except Exception as exc:
+            ctx["_lcd20_result"] = CaseResult(Verdict.INCONCLUSIVE,
+                                              reason=f"LCD-20 observation raised {type(exc).__name__}: {exc}")
+        try:
+            push_text = push_fn()
+        except Exception as exc:
+            observed["push_error"] = f"{type(exc).__name__}: {exc}"
+            return CaseResult(Verdict.FAIL, reason="recovery_push_esp_image raised", observed=observed)
+        observed["recovery_push"] = str(push_text)[:400]
+        pushed_ok = _tool_ok(push_text)
+        running = _settled_running(ctx, host)
+        observed["running_after"] = running
+        if not pushed_ok:
+            return CaseResult(Verdict.FAIL, reason="recovery_push_esp_image did not report ok", observed=observed)
+        if running != "app":
+            return CaseResult(Verdict.FAIL, reason=f"after the push RUNNING is {running!r}, expected 'app'",
+                              observed=observed)
+        safety_fn = ctx.get("_safety_status_fn")
+        if safety_fn is not None:
+            try:
+                observed["safety_after"] = str(safety_fn())[:300]
+            except Exception as exc:
+                observed["safety_after"] = f"unreadable: {type(exc).__name__}"
+        return CaseResult(Verdict.PASS, reason="recovery image accepted the app image; RUNNING == app",
+                          observed=observed)
+    finally:
+        if entered and not (pushed_ok and observed.get("running_after") == "app"):
+            try:
+                observed["teardown_exit"] = str(exit_fn())[:300]
+            except Exception as exc:
+                observed["teardown_exit"] = f"raised {type(exc).__name__}: {exc}"
+            try:
+                still = _ote11_in_recovery(status_fn())
+            except Exception:
+                still = False
+            observed["left_in_recovery"] = still
+            if still:
+                ctx.setdefault("_taint", []).append("OT-E11: board left in the recovery image")
+
+
 _CASE_FUNCS = {
+    "OT-E11": _case_ote11,
     "OT-B01": _case_otb01,
     "OT-B02": _case_otb02,
     "OT-E01": _case_ote01,

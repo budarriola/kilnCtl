@@ -249,9 +249,7 @@ _KNOWN_UNIMPLEMENTED = frozenset({
     "LCD-15",
     "LCD-17",
     "LCD-18",
-    "LCD-20",
     "OT-B02",
-    "OT-E11",
     "WEB-ZONE-11",
 })
 

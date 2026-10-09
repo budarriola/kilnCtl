@@ -6013,7 +6013,44 @@ def _case_lcd13(ctx: dict) -> CaseResult:
             outcome.observed["navigate_home"] = nav
 
 
+
+_LCD20_WAIT_S = 70.0
+
+
+def observe_recovery_idle(ctx: dict) -> CaseResult:
+    """LCD-20: runs only inside OT-E11, while the recovery image is up. The
+    recovery image's screen_idle recovery flag means the panel must not blank:
+    wait past the default blank timeout, sample the panel against the bezel.
+    Lit -> PASS; dark -> FAIL; no capture/sample -> INCONCLUSIVE."""
+    sleep = ctx.get("_sleep", time.sleep)
+    sleep(ctx.get("lcd20_wait_s", _LCD20_WAIT_S))
+    path = _capture(ctx, "lcd20_recovery_idle.jpg")
+    if not path:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
+    try:
+        x, y, w, h = _LCD06_PANEL_BOX
+        sample = lcd_sampler.sample_region(path, x, y, w, h, repo_root=ctx.get("repo_root"))
+    except lcd_sampler.LcdCaptureError:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="panel sample failed", evidence=[path])
+    obs = {"panel_rgb": list(sample.region) if sample.region else None,
+           "bezel_rgb": list(sample.bezel) if sample.bezel else None}
+    if sample.region is None or sample.bezel is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no panel/bezel sample", observed=obs, evidence=[path])
+    if lcd_sampler.is_off(sample.region, sample.bezel):
+        return CaseResult(Verdict.FAIL, reason="panel blanked in the recovery image", observed=obs, evidence=[path])
+    return CaseResult(Verdict.PASS, reason="panel stayed lit in the recovery image", observed=obs, evidence=[path])
+
+
+def _case_lcd20(ctx: dict) -> CaseResult:
+    """Reports what OT-E11 observed this run; NOT_RUN if OT-E11 never reached recovery."""
+    res = ctx.get("_lcd20_result")
+    if res is None:
+        return CaseResult(Verdict.NOT_RUN, reason="LCD-20 only runs inside OT-E11 (recovery image up)")
+    return res
+
+
 _CASE_FUNCS = {
+    "LCD-20": _case_lcd20,
     "LCD-05": _case_lcd05,
     "LCD-06": _case_lcd06,
     "LCD-13": _case_lcd13,
