@@ -523,29 +523,50 @@ def test_hard_ceiling_config_and_clamp(monkeypatch):
 
 
 def test_max_hold_kills_only_registered_tree_not_sibling(monkeypatch):
+    # Soft limit is generous (5 s) so that, under heavy CPU load, both Popen calls and the
+    # register finish before the watchdog fires. The gate body then WAITS (up to 90 s) for the
+    # registered child to die instead of sleeping a fixed time: the exception is only raised on
+    # gate exit, so a fixed sleep shorter than a starved watchdog silently produced no output.
     _prefixes(monkeypatch, heavy=1)
-    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "1.5")
-    bystander = subprocess.Popen([_PY, "-c", "import time; time.sleep(30)"])
-    code = ("import subprocess,sys,time\nfrom mcpkit import buildgate as b\n"
-            "c = s = None\n"
-            "try:\n"
-            "  with b.kiln_build_gate('overrun2', log=lambda m: None):\n"
-            "    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-            "    s = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
-            "    b.register_compile_pid(c.pid)\n"
-            "    print(c.pid, s.pid, flush=True)\n    time.sleep(5)\n"
-            "except RuntimeError as e:\n"
-            "  for _ in range(50):\n"
-            "    if not b.pid_alive(c.pid): break\n"
-            "    time.sleep(0.1)\n"
-            "  print('RESULT', b.pid_alive(c.pid), b.pid_alive(s.pid), 'max hold' in str(e), flush=True)\n"
-            "  b._kill_pid(s.pid)\n")
+    monkeypatch.setenv("KILNCTL_BUILD_GATE_MAX_HOLD_SEC", "5")
+    bystander = subprocess.Popen([_PY, "-c", "import time; time.sleep(60)"])
+    code = "\n".join([
+        "import subprocess,sys,time",
+        "from mcpkit import buildgate as b",
+        "c = s = None",
+        "err = None",
+        "try:",
+        "  with b.kiln_build_gate('overrun2', log=lambda m: print('LOG', m, flush=True)):",
+        "    c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+        "    s = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+        "    b.register_compile_pid(c.pid)",
+        "    print('PIDS', c.pid, s.pid, flush=True)",
+        "    for _ in range(900):",
+        "      if not b.pid_alive(c.pid): break",
+        "      time.sleep(0.1)",
+        "except RuntimeError as e:",
+        "  err = e",
+        "finally:",
+        "  if c is not None:",
+        "    for _ in range(100):",
+        "      if not b.pid_alive(c.pid): break",
+        "      time.sleep(0.1)",
+        "    print('RESULT', b.pid_alive(c.pid), b.pid_alive(s.pid),"
+        " err is not None and 'max hold' in str(err), flush=True)",
+        "    b._kill_pid(s.pid)",
+        "    b._kill_pid(c.pid)",
+        "",
+    ])
     holder = _child(code)
     sibling = 0
     try:
-        cpid, sibling = (int(x) for x in holder.stdout.readline().split())
-        out, err = holder.communicate(timeout=90)
-        assert "RESULT False True True" in out, (out, err)  # compile killed, sibling alive, failed loud
+        out, err = holder.communicate(timeout=180)
+        lines = out.splitlines()
+        pids = [l for l in lines if l.startswith("PIDS ")]
+        if pids:
+            sibling = int(pids[0].split()[2])
+        assert "RESULT False True True" in out, (
+            f"holder rc={holder.returncode} stdout={out!r} stderr={err!r}")  # compile killed, sibling alive, failed loud
         assert bystander.poll() is None  # unrelated process untouched
     finally:
         bystander.kill()
