@@ -140,10 +140,7 @@ route.</p>
 <div id="espPicker" style="display:none">
   <label for="espFile">New ESP image (.bin)</label>
   <input type="file" id="espFile" accept=".bin">
-  <div>
-    <button id="espUpdateBtn" type="button" class="primary">Update ESP</button>
-    <button id="espRollbackBtn" type="button" class="danger">Roll back ESP to previous image</button>
-  </div>
+  <p>Direct ESP upload and rollback are retired under the single-slot layout. Use the &quot;Stage an update&quot; / GitHub card on this page, then the Install button, to update the ESP.</p>
 </div>
 <!-- Only shown when GET /api/ota/esp/status reports recovery_mode:true --
      see renderEspInfo() below. POST /api/ota/esp/recovery_exit is
@@ -482,46 +479,6 @@ function pollPicoStatus() {
 }
 
 /* ---- Button wiring -------------------------------------------------------- */
-document.getElementById('espUpdateBtn').addEventListener('click', function () {
-  var msg = document.getElementById('espMsg');
-  msg.textContent = 'Reading file…';
-  readFileBytes(document.getElementById('espFile')).then(function (bytes) {
-    msg.textContent = 'Uploading ' + bytes.length + ' bytes…';
-    return pushImage('/api/ota/esp', bytes);
-  }).then(function (body) {
-    msg.textContent = 'ESP update accepted: ' + body.bytes + ' bytes written to ' + body.partition +
-      ', version ' + body.version + '. Reboot the board to run it (stays PENDING_VERIFY until confirmed).';
-    pollEspStatus();
-  }).catch(function (e) {
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'ESP update failed: ' + e.message;
-  });
-});
-
-document.getElementById('espRollbackBtn').addEventListener('click', function () {
-  var msg = document.getElementById('espMsg');
-  window.kcConfirm('Roll back the ESP to its previous image and reboot now?').then(function (ok) {
-    if (!ok) throw { __kcHandled: true };
-    msg.textContent = 'Requesting rollback…';
-    return window.kcOtaAuthedFetch('/api/ota/esp/rollback', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: new Uint8Array(0),
-    });
-  }).then(function (r) {
-    return r.text().then(function (text) {
-      if (!r.ok) throw new Error(text || ('HTTP ' + r.status));
-      return JSON.parse(text);
-    });
-  }).then(function (body) {
-    msg.textContent = 'Rollback accepted (was running ' + body.version_before + ') -- board is rebooting now.';
-  }).catch(function (e) {
-    if (e && e.__kcHandled) return;
-    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Rollback failed: ' + e.message;
-  });
-});
-
 // opus-review finding 3: POST /api/ota/pico/rollback used to block for up
 // to ~6.3s (App/drivers/http/ota_http.c's own comment on ota_pico_rollback_task()
 // explains why -- one httpd worker, a multi-second send-burst/reply-window

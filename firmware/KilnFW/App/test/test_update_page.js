@@ -110,5 +110,9 @@ const UH = fs.readFileSync(resolveDriverFile(DRIVERS_DIR, 'update_http.c'), 'utf
 ['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(UH.indexOf('"' + h + '"') >= 0, 'firmware reads ' + h));
 assert(/update_stage_set_gate\(&s_stage, policy_gate/.test(UH), 'upload handler installs the policy gate');
 
+assert(SRC.indexOf('espUpdateBtn') < 0 && SRC.indexOf('espRollbackBtn') < 0, 'retired single-slot ESP buttons are gone');
+assert(!/pushImage\(\s*'\/api\/ota\/esp'/.test(SRC), 'page has no push call to /api/ota/esp');
+assert(SRC.indexOf('/api/ota/esp/rollback') < 0, 'page does not reference /api/ota/esp/rollback');
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed');
 process.exit(failed ? 1 : 0);
