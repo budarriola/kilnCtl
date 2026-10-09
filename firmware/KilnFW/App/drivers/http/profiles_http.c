@@ -843,6 +843,12 @@ static rev_state_t rev_read(hal_kv_handle_t *h, uint32_t *floors)
  * Boot-only; `used` is the post-resolve bitmap. */
 static bool rev_repair_junk(const char *partition, const profiles_slot_bitmap_t *used)
 {
+    if (caller_stack_is_external()) {
+        ESP_LOGE(PROFILES_TAG, "rev_repair_junk: REFUSING -- calling task's stack is in external RAM "
+                      "(PSRAM); an NVS write from here would abort the whole board. See "
+                      "DRAM_PSRAM_PLAN.md section 7.2.");
+        return false; /* fail closed, same as a failed repair */
+    }
     uint32_t maxrev = 0;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         if (s_profile_rev[id] > maxrev) {
