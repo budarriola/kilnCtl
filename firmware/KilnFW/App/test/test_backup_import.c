@@ -103,6 +103,12 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
 // compile and link even though these tests only ever call it).
 #include "../drivers/persist/backup_json.c"
 #include "../drivers/http/backup_export.c"
+// The REAL save-time validators (validate_io_segment/validate_on_off_rules and their *_in_state forms), not a
+// stub: backup_import.c's pass 1 calls the *_in_state forms, and profiles_http_save() below calls the live forms
+// the way production does, so a restore that pass 1 accepted but the commit would refuse fails these tests.
+#include "profile_rule_target.h"
+#include "profiles_http_internal.h"
+#include "../drivers/http/profiles_validate.c"
 #include "../drivers/http/backup_import.c"
 
 // backup_import_apply() gained mode/dry_run/ack_delete_count/
@@ -698,6 +704,7 @@ static int g_apply_lower_calls;
 static float g_apply_lower_last_max[STUB_ZONE_COUNT];
 static int g_total_write_calls;
 static int g_profile_save_calls;
+static int g_profile_save_refusals; /* live validator refused inside the profiles_http_save stub */
 static uint8_t g_last_saved_profile_id;
 static profile_t g_last_saved_profile;
 
@@ -2334,8 +2341,22 @@ bool profiles_http_get(uint8_t id, profile_t *out)
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
-    (void)err_msg;
-    (void)err_cap;
+    char local_err[160];
+    if (err_msg == NULL || err_cap == 0) {
+        err_msg = local_err;
+        err_cap = sizeof(local_err);
+    }
+    for (uint8_t si = 0; si < candidate->segment_count; si++) {
+        if (candidate->segments[si].seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
+            !validate_io_segment(&candidate->segments[si], (uint8_t)(si + 1u), err_msg, err_cap)) {
+            g_profile_save_refusals++;
+            return false;
+        }
+    }
+    if (!validate_on_off_rules(candidate, err_msg, err_cap)) {
+        g_profile_save_refusals++;
+        return false;
+    }
     g_profile_save_calls++;
     g_total_write_calls++;
     uint8_t id = (requested_id < PROFILES_MAX_COUNT) ? requested_id : 0;
@@ -2647,12 +2668,13 @@ static void test_unknown_version_refused(void)
      * this test moved to version 5, the new too-new boundary. Task 9
      * (bkfinish_assessment.md): BACKUP_FORMAT_VERSION moved 4 -> 5 (top-level
      * kiln_configs[] array, safety_tc_type key), so 5 is now real/supported
-     * too -- this test moves again, to version 6, the new too-new boundary. */
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}";
+     * too -- this test moves again, to version 6, the new too-new boundary.
+     * 5 -> 6 (profile segment kinds, io fields, on_off_rules): the boundary is now 7. */
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = test_backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 6 is newer than this firmware's BACKUP_FORMAT_VERSION (5) -- must be refused");
+    TEST_CHECK(!ok, "version 7 is newer than this firmware's BACKUP_FORMAT_VERSION (6) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -3123,8 +3145,8 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
         "{",
         // wrong "kind"
         "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
-        // version newer than this firmware's BACKUP_FORMAT_VERSION (5)
-        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (6)
+        "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
         // a version number "from the future", far past anything ever issued
         "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
         // valid JSON, in-range "kind"/"version", but a value outside the
@@ -3760,86 +3782,6 @@ static esp_err_t run_export(void)
     return backup_export_get_handler(&req);
 }
 
-// Backup carries segment kinds / io_* and on_off_rules (incl. an aux target 8+).
-static void test_export_import_roundtrips_relay_io_segments_and_onoff_rules(void)
-{
-    TEST_SECTION("backup export->import: RELAY_IO segments and on/off rules (aux target) round-trip byte-identically");
-    reset_stub_state();
-    TEST_CHECK(zones_config_set_pid(0, 5.0f, 0.6f, 0.02f), "seed zone 0");
-
-    profile_t p;
-    memset(&p, 0, sizeof(p));
-    strncpy(p.name, "IoRules", PROFILE_NAME_MAX_LEN);
-    p.zone_mask = 0x01;
-    p.segment_count = 2;
-    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
-    p.segments[0].target_c = 500.0f;
-    p.segments[0].ramp_c_per_hr = 100.0f;
-    p.segments[0].dwell_min = 5;
-    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
-    p.segments[1].dwell_min = 3;
-    p.segments[1].io_target = 9;
-    p.segments[1].io_state = 1;
-    p.segments[1].io_blocking = 1;
-    p.segments[1].io_leave_on_at_end = 1;
-    p.on_off_rule_count = 2;
-    p.on_off_rules[0].zone_index = 0;
-    p.on_off_rules[0].segment_index = 0;
-    p.on_off_rules[0].enable = 1;
-    p.on_off_rules[0].phase_mask = 3;
-    p.on_off_rules[0].direction_mask = 1;
-    p.on_off_rules[0].temp_source = 1;
-    p.on_off_rules[0].temp_cmp = 1;
-    p.on_off_rules[0].temp_threshold_c = 123.5f;
-    p.on_off_rules[0].time_start_s = 10;
-    p.on_off_rules[0].time_stop_s = 600;
-    p.on_off_rules[0].invert = 1;
-    p.on_off_rules[1] = p.on_off_rules[0];
-    p.on_off_rules[1].zone_index = 8; /* aux relay 1 */
-    p.on_off_rules[1].segment_index = 1;
-    p.on_off_rules[1].invert = 0;
-    test_stub_profiles_set(0, &p);
-
-    TEST_CHECK(run_export() == ESP_OK, "export ok");
-    char *first = strdup(s_export_body);
-    TEST_CHECK(first != NULL, "copy export");
-    TEST_CHECK(strstr(first, "\"seg_kind\":1") != NULL, "RELAY_IO seg_kind emitted");
-    TEST_CHECK(strstr(first, "\"zone\":8,") != NULL, "aux rule target emitted");
-
-    g_profile_save_calls = 0;
-    memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
-    char err[256];
-    bool ok = test_backup_import_apply(first, err, sizeof(err));
-    if (!ok) printf("    refusal: %s\n", err);
-    TEST_CHECK(ok, "import accepts it");
-    TEST_CHECK(g_profile_save_calls == 1, "profile committed");
-    TEST_CHECK(g_last_saved_profile.segments[1].seg_kind == PROFILE_SEG_KIND_RELAY_IO, "seg_kind restored");
-    TEST_CHECK(g_last_saved_profile.segments[1].io_target == 9 && g_last_saved_profile.segments[1].io_state == 1 &&
-                   g_last_saved_profile.segments[1].io_blocking == 1 &&
-                   g_last_saved_profile.segments[1].io_leave_on_at_end == 1,
-               "io_* restored");
-    TEST_CHECK(g_last_saved_profile.on_off_rule_count == 2, "both rules restored");
-    TEST_CHECK(g_last_saved_profile.on_off_rules[1].zone_index == 8, "aux target restored");
-
-    /* Re-export the restored profile: bodies must be byte-identical. */
-    test_stub_profiles_set(0, &g_last_saved_profile);
-    TEST_CHECK(run_export() == ESP_OK, "re-export ok");
-    TEST_CHECK(strcmp(first, s_export_body) == 0, "re-export is byte-identical to the first export");
-    free(first);
-
-    /* Older backup: no seg_kind, io_ or on_off_rules keys -> plain ramp, zero rules. */
-    const char *old_body =
-        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[{\"id\":0,\"name\":\"Old\",\"zone_mask\":1,"
-        "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5}]}],\"zones\":[]}";
-    g_profile_save_calls = 0;
-    ok = test_backup_import_apply(old_body, err, sizeof(err));
-    if (!ok) printf("    old refusal: %s\n", err);
-    TEST_CHECK(ok, "old-format import still accepted");
-    TEST_CHECK(g_last_saved_profile.segments[0].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP &&
-                   g_last_saved_profile.on_off_rule_count == 0,
-               "old backup: ZONE_RAMP, zero rules");
-}
-
 static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
 {
     TEST_SECTION("backup_export_get_handler -- emits the expected top-level shape, a known profile, "
@@ -3888,7 +3830,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
 
     TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
-    TEST_CHECK(strstr(s_export_body, "\"version\":5") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (5)");
+    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (6)");
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");
@@ -5998,7 +5940,7 @@ static void test_update_repo_persist_failure_is_partial_write(void)
     TEST_CHECK(!ok, "a failed update_repo persist fails the restore");
     TEST_CHECK(partial, "it is reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "update_repo") != NULL, "the error names update_repo");
-    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+    TEST_CHECK(g_profile_save_calls == 0, "profiles are committed LAST: the zones had landed (hence partial) but no profile was written");
 }
 
 static void test_update_repo_pass1_refusal_skips_kiln_configs_commit(void)
@@ -6224,6 +6166,268 @@ static void test_aux_outputs_zone_and_aux_swap_applies_in_either_direction(void)
     TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "aux relay 3 is disabled");
 }
 
+/* ---- RELAY_IO segments / on_off_rules: pass-1 validation against the post-import state ---- */
+
+/* Aux relay 1 enabled with a thermocouple zone: the live state a rule aimed at target 8 needs. */
+static void bi_seed_aux_relay1_enabled(void)
+{
+    aux_bk_fresh();
+    aux_output_entry_t e = aux_bk_entry(true, 1, 2.0f, 10, 10);
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) == ESP_OK, "seed aux relay 1 enabled");
+}
+
+// Backup carries segment kinds / io_* and on_off_rules (incl. an aux target 8+).
+static void test_export_import_roundtrips_relay_io_segments_and_onoff_rules(void)
+{
+    TEST_SECTION("backup export->import: RELAY_IO segments and on/off rules (aux target) round-trip byte-identically");
+    reset_stub_state();
+    TEST_CHECK(zones_config_set_pid(0, 5.0f, 0.6f, 0.02f), "seed zone 0");
+    TEST_CHECK(zones_config_set_zone_type(0, ZONE_TYPE_ON_OFF), "zone 0 is an on/off device (rule target)");
+    bi_seed_aux_relay1_enabled();
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    strncpy(p.name, "IoRules", PROFILE_NAME_MAX_LEN);
+    p.zone_mask = 0x01;
+    p.segment_count = 2;
+    p.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    p.segments[0].target_c = 500.0f;
+    p.segments[0].ramp_c_per_hr = 100.0f;
+    p.segments[0].dwell_min = 5;
+    p.segments[1].seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    p.segments[1].dwell_min = 3;
+    p.segments[1].target_c = 250.0f;     /* not meaningful for RELAY_IO, but the slot keeps it: round trip must too */
+    p.segments[1].ramp_c_per_hr = 60.0f;
+    p.segments[1].io_target = 2;         /* relay 2: not zone-owned, not bound to an aux output */
+    p.segments[1].io_state = 1;
+    p.segments[1].io_blocking = 1;
+    p.on_off_rule_count = 2;
+    p.on_off_rules[0].zone_index = 0;
+    p.on_off_rules[0].segment_index = 0;
+    p.on_off_rules[0].enable = 1;
+    p.on_off_rules[0].phase_mask = 3;
+    p.on_off_rules[0].direction_mask = 1;
+    p.on_off_rules[0].temp_source = 1;
+    p.on_off_rules[0].temp_cmp = 1;
+    p.on_off_rules[0].temp_threshold_c = 123.5f;
+    p.on_off_rules[0].time_start_s = 10;
+    p.on_off_rules[0].time_stop_s = 600;
+    p.on_off_rules[0].invert = 1;
+    p.on_off_rules[1] = p.on_off_rules[0];
+    p.on_off_rules[1].zone_index = 8; /* aux relay 1 */
+    p.on_off_rules[1].segment_index = 1;
+    p.on_off_rules[1].invert = 0;
+    test_stub_profiles_set(0, &p);
+
+    TEST_CHECK(run_export() == ESP_OK, "export ok");
+    char *first = strdup(s_export_body);
+    TEST_CHECK(first != NULL, "copy export");
+    TEST_CHECK(strstr(first, "\"seg_kind\":1") != NULL, "RELAY_IO seg_kind emitted");
+    TEST_CHECK(strstr(first, "\"zone\":8,") != NULL, "aux rule target emitted");
+
+    g_profile_save_calls = 0;
+    memset(&g_last_saved_profile, 0, sizeof(g_last_saved_profile));
+    char err[256];
+    bool ok = test_backup_import_apply(first, err, sizeof(err));
+    if (!ok) printf("    refusal: %s\n", err);
+    TEST_CHECK(ok, "import accepts it");
+    TEST_CHECK(g_profile_save_calls == 1, "profile committed (the real validators accepted it)");
+    TEST_CHECK(g_last_saved_profile.segments[1].seg_kind == PROFILE_SEG_KIND_RELAY_IO, "seg_kind restored");
+    TEST_CHECK(g_last_saved_profile.segments[1].io_target == 2 && g_last_saved_profile.segments[1].io_state == 1 &&
+                   g_last_saved_profile.segments[1].io_blocking == 1,
+               "io_* restored");
+    TEST_CHECK(g_last_saved_profile.segments[1].target_c == 250.0f &&
+                   g_last_saved_profile.segments[1].ramp_c_per_hr == 60.0f,
+               "RELAY_IO target_c/ramp_c_per_hr kept, as profiles_export_http.c keeps them");
+    TEST_CHECK(g_last_saved_profile.on_off_rule_count == 2, "both rules restored");
+    TEST_CHECK(g_last_saved_profile.on_off_rules[1].zone_index == 8, "aux target restored");
+
+    /* Re-export the restored profile: bodies must be byte-identical. */
+    test_stub_profiles_set(0, &g_last_saved_profile);
+    TEST_CHECK(run_export() == ESP_OK, "re-export ok");
+    TEST_CHECK(strcmp(first, s_export_body) == 0, "re-export is byte-identical to the first export");
+    free(first);
+
+    /* Older backup: no seg_kind, io_ or on_off_rules keys -> plain ramp, zero rules. */
+    const char *old_body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[{\"id\":0,\"name\":\"Old\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5}]}],\"zones\":[]}";
+    g_profile_save_calls = 0;
+    ok = test_backup_import_apply(old_body, err, sizeof(err));
+    if (!ok) printf("    old refusal: %s\n", err);
+    TEST_CHECK(ok, "old-format import still accepted");
+    TEST_CHECK(g_last_saved_profile.segments[0].seg_kind == PROFILE_SEG_KIND_ZONE_RAMP &&
+                   g_last_saved_profile.on_off_rule_count == 0,
+               "old backup: ZONE_RAMP, zero rules");
+}
+
+static char s_bi_body[3072];
+
+/* A one-profile backup: segment 0 a ZONE_RAMP, segment 1 `seg1`; `rules` is the on_off_rules array body. */
+static const char *bi_profile_backup(const char *seg1, const char *rules, const char *zones, const char *aux)
+{
+    snprintf(s_bi_body, sizeof(s_bi_body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"profiles\":[{\"id\":0,\"name\":\"P\",\"zone_mask\":1,"
+             "\"segments\":[{\"target_c\":500,\"ramp_c_per_hr\":100,\"dwell_min\":5},%s],\"on_off_rules\":[%s]}],"
+             "\"zones\":[%s]%s%s}",
+             BACKUP_FORMAT_VERSION, seg1, rules, zones, aux[0] ? ",\"aux_outputs\":[" : "", aux);
+    if (aux[0]) {
+        size_t n = strlen(s_bi_body);
+        s_bi_body[n - 1] = '\0'; /* the closing } */
+        snprintf(s_bi_body + n - 1, sizeof(s_bi_body) - n + 1, "]}");
+    }
+    return s_bi_body;
+}
+
+#define BI_IO_SEG(target) "{\"seg_kind\":1,\"io_target\":" #target ",\"io_state\":1,\"io_blocking\":0,\"dwell_min\":3}"
+#define BI_RULE(zone) "{\"zone\":" #zone ",\"segment\":1,\"enable\":1,\"phase_mask\":3,\"direction_mask\":1,\"time_stop_s\":600}"
+
+static void bi_expect_pass1_refusal(const char *label, const char *body, const char *needle)
+{
+    char err[256] = "";
+    g_total_write_calls = 0;
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(!ok, label);
+    TEST_CHECK(strstr(err, needle) != NULL, "refusal names the reason");
+    if (strstr(err, needle) == NULL) printf("    got: %s\n", err);
+    TEST_CHECK(g_total_write_calls == 0, "pass 1 refusal: NOTHING was written (no zone, profile or kiln write)");
+    TEST_CHECK(g_profile_save_calls == 0 && g_profile_save_refusals == 0,
+               "pass 1 refusal: the profile commit was never reached (not a half-restore)");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "pass 1 refusal: the aux store is untouched");
+}
+
+static void test_profile_validators_run_in_pass_1_against_the_post_import_state(void)
+{
+    TEST_SECTION("backup_import_apply -- the real RELAY_IO/on_off validators refuse in pass 1, against the "
+                 "post-import config, before any commit");
+    char err[256] = "";
+    const char *zone0 = "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}";
+
+    /* 1. A rule aimed at aux relay 1 (target 8) while the same backup does NOT enable it. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("rule on a disabled aux relay is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(8), zone0, ""), "aux relay");
+
+    /* 2. io_target 9 is in the dead gap between the relay and IO ranges. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("io_target 9 is refused", bi_profile_backup(BI_IO_SEG(9), "", zone0, ""), "io_target 9");
+
+    /* 3. A rule aimed at a HEATER zone (the dangerous direction). */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("rule aimed at a heater zone is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(1), zone0, ""), "on/off device");
+
+    /* 4. A RELAY_IO segment on a relay the same backup still gives to a zone. */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("RELAY_IO segment on a zone-owned relay (per the backup) is refused",
+                            bi_profile_backup(BI_IO_SEG(3), "",
+                                              "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,"
+                                              "\"relay_mask\":4,\"settings_source\":255}",
+                                              ""),
+                            "assigned to zone");
+
+    /* 5. Duplicate rule (same segment and target). */
+    reset_stub_state();
+    aux_bk_fresh();
+    bi_expect_pass1_refusal("duplicate (segment, target) rule is refused",
+                            bi_profile_backup(BI_IO_SEG(2), BI_RULE(1) "," BI_RULE(1),
+                                              "{\"index\":1,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"zone_type\":1,"
+                                              "\"settings_source\":255}",
+                                              ""),
+                            "duplicates rule");
+
+    /* 6. Aux rule with a reserved temp_source. */
+    reset_stub_state();
+    bi_seed_aux_relay1_enabled();
+    {
+        const char *rule = "{\"zone\":8,\"segment\":1,\"enable\":1,\"phase_mask\":3,\"direction_mask\":1,"
+                           "\"temp_source\":2,\"time_stop_s\":600}";
+        char label_err[256] = "";
+        g_total_write_calls = 0;
+        g_profile_save_calls = 0;
+        TEST_CHECK(!test_backup_import_apply(bi_profile_backup(BI_IO_SEG(2), rule, zone0, ""), label_err,
+                                             sizeof(label_err)),
+                   "aux rule with temp_source 2 is refused");
+        TEST_CHECK(strstr(label_err, "temp_source") != NULL, "refusal names temp_source");
+        TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, "nothing written");
+    }
+
+    /* 7. The accepted cases: the dependency arrives in the SAME backup and is live by the profile commit. */
+    reset_stub_state();
+    aux_bk_fresh();
+    g_total_write_calls = 0;
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(2), BI_RULE(8), zone0,
+                                     "{\"relay\":1,\"enabled\":true,\"tc_zone\":0}"),
+                   err, sizeof(err)),
+               "rule on aux relay 1 imports when the same backup enables it");
+    if (err[0]) printf("    refusal: %s\n", err);
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0,
+               "profile committed with no live-validator refusal (aux enable landed BEFORE the profile)");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "aux relay 1 enabled");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(2), BI_RULE(1),
+                                     "{\"index\":1,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"zone_type\":1,"
+                                     "\"settings_source\":255}",
+                                     ""),
+                   err, sizeof(err)),
+               "rule on zone 1 imports when the same backup types zone 1 ON_OFF");
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0,
+               "profile committed after the zone landed (never a rule stored aimed at a HEATER)");
+
+    reset_stub_state();
+    aux_bk_fresh();
+    TEST_CHECK(zones_config_set_relay_mask(0, 0x04), "live zone 0 owns relay 3");
+    g_profile_save_calls = 0;
+    g_profile_save_refusals = 0;
+    TEST_CHECK(test_backup_import_apply(
+                   bi_profile_backup(BI_IO_SEG(3), "",
+                                     "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"relay_mask\":1,"
+                                     "\"settings_source\":255}",
+                                     ""),
+                   err, sizeof(err)),
+               "RELAY_IO segment on relay 3 imports when the same backup frees it from zone 0");
+    TEST_CHECK(g_profile_save_calls == 1 && g_profile_save_refusals == 0, "profile committed after the zone freed it");
+
+    /* 8. A dry run reports the same refusal and writes nothing. */
+    reset_stub_state();
+    aux_bk_fresh();
+    memset(&s_test_backup_plan, 0, sizeof(s_test_backup_plan));
+    bool partial = false;
+    g_total_write_calls = 0;
+    TEST_CHECK(!backup_import_apply(bi_profile_backup(BI_IO_SEG(9), "", zone0, ""), KILN_CFG_RESTORE_MERGE, true, -1,
+                                    true, &s_test_backup_plan, &partial, err, sizeof(err)),
+               "dry run refuses an invalid io_target too");
+    TEST_CHECK(g_total_write_calls == 0 && !partial, "dry run wrote nothing");
+}
+
+static void test_backup_format_version_is_6_and_5_still_imports(void)
+{
+    TEST_SECTION("backup format version is 6 (seg_kind/io_*/on_off_rules); a version-5 file is still accepted");
+    reset_stub_state();
+    TEST_CHECK(BACKUP_FORMAT_VERSION == 6, "BACKUP_FORMAT_VERSION is 6");
+    TEST_CHECK(run_export() == ESP_OK, "export ok");
+    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "export stamps version 6");
+    char err[200] = "";
+    const char *v5 = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(test_backup_import_apply(v5, err, sizeof(err)), "a version-5 backup is still accepted");
+    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 6 is refused");
+}
+
 static void test_aux_outputs_dry_run_and_partial_write(void)
 {
     TEST_SECTION("backup_import_apply -- aux_outputs dry run writes nothing; a failed persist is a partial write");
@@ -6249,7 +6453,7 @@ static void test_aux_outputs_dry_run_and_partial_write(void)
     TEST_CHECK(!ok, "a failed aux persist fails the restore");
     TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
     TEST_CHECK(strstr(err, "aux_outputs") != NULL, "the error names aux_outputs");
-    TEST_CHECK(g_profile_save_calls > 0, "the profiles had already been written (hence partial)");
+    TEST_CHECK(g_profile_save_calls == 0, "profiles are committed LAST: the zones had landed (hence partial) but no profile was written");
 }
 
 static void test_aux_outputs_phase1_reverted_when_zones_fail(void)
@@ -6369,6 +6573,8 @@ void run_test_backup_import(void)
     test_aux_outputs_quarantined_store_refuses_import();
     test_aux_outputs_conflict_with_zone_relay_refused_in_pass_1();
     test_aux_outputs_zone_and_aux_swap_applies_in_either_direction();
+    test_profile_validators_run_in_pass_1_against_the_post_import_state();
+    test_backup_format_version_is_6_and_5_still_imports();
     test_aux_outputs_dry_run_and_partial_write();
     test_aux_outputs_export_round_trip();
     test_aux_outputs_phase1_reverted_when_zones_fail();

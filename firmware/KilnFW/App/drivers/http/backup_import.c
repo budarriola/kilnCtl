@@ -850,10 +850,115 @@ typedef struct {
     profile_t tmp_slot_check;
 } backup_import_slot_scratch_t;
 
+/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
+ * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
+ * Only the Xtensa GCC target build's stack depth is measured. */
+#if defined(_MSC_VER)
+#define BACKUP_IMPORT_NOINLINE
+#else
+#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
+#endif
+
+/* One segment's seg_kind and RELAY_IO fields (io_target/io_state/io_blocking/io_leave_on_at_end), absent =
+ * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_locked() and the pass-1
+ * candidate-state check backup_import_profiles_precheck(), so both read the same fields the same way.
+ * `entry` and `seg_i` are 0-based and only feed the error text. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_seg_kind_io(const char *se, size_t entry, uint8_t seg_i,
+                                                                   profile_segment_t *sg, char *err_msg,
+                                                                   size_t err_cap)
+{
+    double dkind = 0.0, dio = 0.0;
+    bool has_kind = false, hv = false;
+    if (!backup_json_field_opt_num(se, "seg_kind", 0, 1, &dkind, &has_kind, "seg_kind", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: seg_kind out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    sg->seg_kind = has_kind ? (uint8_t)dkind : PROFILE_SEG_KIND_ZONE_RAMP;
+    sg->io_target = sg->io_state = sg->io_blocking = sg->io_leave_on_at_end = 0;
+    if (!backup_json_field_opt_num(se, "io_target", 0, 255, &dio, &hv, "io_target", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_target out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_target = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_state", 0, 1, &dio, &hv, "io_state", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_state out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_state = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_blocking", 0, 1, &dio, &hv, "io_blocking", NULL, 0, seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_blocking out of range", (unsigned)entry,
+                 (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_blocking = (uint8_t)dio;
+    hv = false;
+    if (!backup_json_field_opt_num(se, "io_leave_on_at_end", 0, 1, &dio, &hv, "io_leave_on_at_end", NULL, 0,
+                                   seg_i)) {
+        snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_leave_on_at_end out of range",
+                 (unsigned)entry, (unsigned)(seg_i + 1));
+        return false;
+    }
+    if (hv) sg->io_leave_on_at_end = (uint8_t)dio;
+    return true;
+}
+
+/* One on_off_rules[] entry. Same fields/ranges as profiles_export_http.c's importer; the target/segment/aux
+ * checks are validate_on_off_rules_in_state()'s job. Shared with backup_import_profiles_precheck(). */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_rule(const char *re, size_t entry, uint8_t rule_i,
+                                                            profile_on_off_rule_t *r, char *err_msg, size_t err_cap)
+{
+    double dz = 0.0, dsg = 0.0, dv = 0.0;
+    bool hv = false;
+    if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255 ||
+        !backup_json_field_num(re, "segment", &dsg) || dsg < 0 || dsg > 255) {
+        snprintf(err_msg, err_cap, "profile entry %u, rule %u: zone/segment missing or invalid", (unsigned)entry,
+                 (unsigned)(rule_i + 1));
+        return false;
+    }
+    r->zone_index = (uint8_t)dz;
+    r->segment_index = (uint8_t)dsg;
+#define BK_RULE_NUM(dst, key, lo, hi, cast)                                                                    \
+    do {                                                                                                       \
+        dst = 0;                                                                                               \
+        hv = false;                                                                                            \
+        if (!backup_json_field_opt_num(re, key, lo, hi, &dv, &hv, key, NULL, 0, rule_i)) {                     \
+            snprintf(err_msg, err_cap, "profile entry %u, rule %u: " key " out of range", (unsigned)entry,     \
+                    (unsigned)(rule_i + 1));                                                                   \
+            return false;                                                                                      \
+        }                                                                                                      \
+        if (hv) dst = (cast)dv;                                                                                \
+    } while (0)
+    BK_RULE_NUM(r->enable, "enable", 0, 1, uint8_t);
+    BK_RULE_NUM(r->phase_mask, "phase_mask", 0, 255, uint8_t);
+    BK_RULE_NUM(r->direction_mask, "direction_mask", 0, 255, uint8_t);
+    BK_RULE_NUM(r->temp_source, "temp_source", 0, 3, uint8_t);
+    BK_RULE_NUM(r->temp_cmp, "temp_cmp", 0, 255, uint8_t);
+    BK_RULE_NUM(r->temp_threshold_c, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX, float);
+    BK_RULE_NUM(r->time_start_s, "time_start_s", 0, 65535, uint16_t);
+    BK_RULE_NUM(r->time_stop_s, "time_stop_s", 0, 65535, uint16_t);
+    BK_RULE_NUM(r->invert, "invert", 0, 1, uint8_t);
+#undef BK_RULE_NUM
+    return true;
+}
+
+/* Defined below with the update_repo/aux code; apply_locked() runs them between the zone commit and the
+ * profile commit (see its commit-order comment). */
+static bool backup_import_update_repo(const char *body, bool commit, kiln_cfg_plan_t *plan, char *err_msg,
+                                      size_t err_cap);
+static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
+                                             size_t err_cap);
+
 static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
-                                        timing_profile_candidate_t *timing_profile_candidates)
+                                        timing_profile_candidate_t *timing_profile_candidates,
+                                        bool *zones_landed_out, bool *aux_wrote_out)
 {
+    *zones_landed_out = false;
     double dver;
     char kind[24];
     if (!backup_json_field_str(body, "kind", kind, sizeof(kind)) || strcmp(kind, "kilnctl_backup") != 0) {
@@ -944,14 +1049,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 return false;
             }
             double dt = 0.0, dr = 0.0, dd;
-            double dkind = 0.0;
-            bool has_kind = false;
-            if (!backup_json_field_opt_num(se, "seg_kind", 0, 1, &dkind, &has_kind, "seg_kind", NULL, 0, seg_i)) {
-                snprintf(err_msg, err_cap, "profile entry %u, segment %u: seg_kind out of range",
-                        (unsigned)candidate_count, (unsigned)(seg_i + 1));
+            profile_segment_t *sg = &c->p.segments[seg_i];
+            if (!backup_import_parse_seg_kind_io(se, candidate_count, seg_i, sg, err_msg, err_cap)) {
                 return false;
             }
-            uint8_t kind = has_kind ? (uint8_t)dkind : PROFILE_SEG_KIND_ZONE_RAMP;
+            uint8_t kind = sg->seg_kind;
             if (kind == PROFILE_SEG_KIND_ZONE_RAMP &&
                 (!backup_json_field_num(se, "target_c", &dt) || dt < bound_target_min || dt > bound_target_max)) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: target_c missing or out of range",
@@ -964,45 +1066,22 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
             }
+            if (kind == PROFILE_SEG_KIND_RELAY_IO) {
+                /* Not meaningful for this kind, but profiles_export_http.c keeps whatever the slot holds, so
+                 * keep it here too: the backup round trip stays byte-identical. Absent = 0, as before. */
+                double dkeep = 0.0;
+                if (backup_json_field_num(se, "target_c", &dkeep) && isfinite(dkeep)) {
+                    dt = dkeep;
+                }
+                dkeep = 0.0;
+                if (backup_json_field_num(se, "ramp_c_per_hr", &dkeep) && isfinite(dkeep)) {
+                    dr = dkeep;
+                }
+            }
             if (!backup_json_field_num(se, "dwell_min", &dd) || dd < 0 || dd > bound_dwell_max) {
                 snprintf(err_msg, err_cap, "profile entry %u, segment %u: dwell_min missing or out of range",
                         (unsigned)candidate_count, (unsigned)(seg_i + 1));
                 return false;
-            }
-            {
-                profile_segment_t *sg = &c->p.segments[seg_i];
-                double dio = 0.0;
-                bool hv = false;
-                sg->seg_kind = kind;
-                sg->io_target = sg->io_state = sg->io_blocking = sg->io_leave_on_at_end = 0;
-                if (!backup_json_field_opt_num(se, "io_target", 0, 255, &dio, &hv, "io_target", NULL, 0, seg_i)) {
-                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_target out of range",
-                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
-                    return false;
-                }
-                if (hv) sg->io_target = (uint8_t)dio;
-                hv = false;
-                if (!backup_json_field_opt_num(se, "io_state", 0, 1, &dio, &hv, "io_state", NULL, 0, seg_i)) {
-                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_state out of range",
-                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
-                    return false;
-                }
-                if (hv) sg->io_state = (uint8_t)dio;
-                hv = false;
-                if (!backup_json_field_opt_num(se, "io_blocking", 0, 1, &dio, &hv, "io_blocking", NULL, 0, seg_i)) {
-                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_blocking out of range",
-                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
-                    return false;
-                }
-                if (hv) sg->io_blocking = (uint8_t)dio;
-                hv = false;
-                if (!backup_json_field_opt_num(se, "io_leave_on_at_end", 0, 1, &dio, &hv, "io_leave_on_at_end", NULL, 0, seg_i)) {
-                    snprintf(err_msg, err_cap, "profile entry %u, segment %u: io_leave_on_at_end out of range",
-                            (unsigned)candidate_count, (unsigned)(seg_i + 1));
-                    return false;
-                }
-                if (hv) sg->io_leave_on_at_end = (uint8_t)dio;
-                hv = false;
             }
             c->p.segments[seg_i].target_c = (float)dt;
             c->p.segments[seg_i].ramp_c_per_hr = (float)dr;
@@ -1025,39 +1104,10 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                     snprintf(err_msg, err_cap, "profile entry %u: too many on_off_rules", (unsigned)candidate_count);
                     return false;
                 }
-                profile_on_off_rule_t *r = &c->p.on_off_rules[rule_i];
-                double dz = 0.0, dsg = 0.0, dv = 0.0;
-                bool hv = false;
-                if (!backup_json_field_num(re, "zone", &dz) || dz < 0 || dz > 255 ||
-                    !backup_json_field_num(re, "segment", &dsg) || dsg < 0 || dsg > 255) {
-                    snprintf(err_msg, err_cap, "profile entry %u, rule %u: zone/segment missing or invalid",
-                            (unsigned)candidate_count, (unsigned)(rule_i + 1));
+                if (!backup_import_parse_rule(re, candidate_count, rule_i, &c->p.on_off_rules[rule_i], err_msg,
+                                              err_cap)) {
                     return false;
                 }
-                r->zone_index = (uint8_t)dz;
-                r->segment_index = (uint8_t)dsg;
-#define BK_RULE_NUM(dst, key, lo, hi, cast)                                                                    \
-    do {                                                                                                       \
-        dst = 0;                                                                                               \
-        hv = false;                                                                                            \
-        if (!backup_json_field_opt_num(re, key, lo, hi, &dv, &hv, key, NULL, 0, rule_i)) {                     \
-            snprintf(err_msg, err_cap, "profile entry %u, rule %u: " key " out of range",                     \
-                    (unsigned)candidate_count, (unsigned)(rule_i + 1));                                        \
-            return false;                                                                                      \
-        }                                                                                                      \
-        if (hv) dst = (cast)dv;                                                                                \
-    } while (0)
-                BK_RULE_NUM(r->enable, "enable", 0, 1, uint8_t);
-                BK_RULE_NUM(r->phase_mask, "phase_mask", 0, 255, uint8_t);
-                BK_RULE_NUM(r->direction_mask, "direction_mask", 0, 255, uint8_t);
-                BK_RULE_NUM(r->temp_source, "temp_source", 0, 3, uint8_t);
-                BK_RULE_NUM(r->temp_cmp, "temp_cmp", 0, 255, uint8_t);
-                BK_RULE_NUM(r->temp_threshold_c, "temp_c", (double)PROFILE_TARGET_C_MIN, (double)PROFILE_TARGET_C_MAX,
-                            float);
-                BK_RULE_NUM(r->time_start_s, "time_start_s", 0, 65535, uint16_t);
-                BK_RULE_NUM(r->time_stop_s, "time_stop_s", 0, 65535, uint16_t);
-                BK_RULE_NUM(r->invert, "invert", 0, 1, uint8_t);
-#undef BK_RULE_NUM
                 rule_i++;
             }
             c->p.on_off_rule_count = rule_i;
@@ -2158,23 +2208,6 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         return false;
     }
 
-    /* ---- Pass 2: everything validated -- commit ---- */
-    for (size_t i = 0; i < candidate_count; i++) {
-        profile_candidate_t *c = &candidates[i];
-        uint8_t out_id = 0;
-        char save_err[96];
-        if (!profiles_http_save(c->has_id ? c->id : PROFILES_MAX_COUNT, &c->p, &out_id, NULL, save_err,
-                                sizeof(save_err))) {
-            /* Should not happen -- pass 1 already checked everything
-             * profiles_http_save() itself checks -- but if it does (a race
-             * with a concurrent change to zone config between pass 1 and
-             * pass 2, say), report exactly which entry and why rather than a
-             * generic failure. Any candidates before this one in the loop
-             * are already committed -- see this function's header comment. */
-            snprintf(err_msg, err_cap, "profile entry %u rejected at commit: %s", (unsigned)i, save_err);
-            return false;
-        }
-    }
     /* opus review finding (LOW-MEDIUM), originally closed with a narrow
      * settings_source[]-only snapshot/restore here: superseded below by
      * zones_snapshot, a whole-zones_cfg_t snapshot taken right before the
@@ -2852,18 +2885,44 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             }
         }
     }
+    /* From here on the zones are persisted: a failure below is a partial write and must NOT put the
+     * phase-1 aux disables back (the caller keys that off zones_landed_out). */
+    *zones_landed_out = true;
 
+    /* ---- Commit order: kiln_configs, aux phase 1 (disables), zones, update_repo, aux phase 2 (enables),
+     * profiles LAST. profiles_http_save() re-runs validate_io_segment()/validate_on_off_rules() against
+     * the LIVE config, and a profile in this backup can depend on that config as the same backup
+     * leaves it: an on/off rule aimed at an aux relay this backup enables (target 8..11), a rule aimed at
+     * a zone this backup types ON_OFF, a RELAY_IO segment on a relay this backup frees from a zone's
+     * relay_mask. Committing profiles before those landed made the save refuse mid-loop and left a
+     * half-restored board. Safety of the order: every dependency a rule has (zone typed ON_OFF, aux
+     * enabled) is persisted before a rule that relies on it, so a rule can never be stored aimed at
+     * a HEATER zone or an unconfigured aux output; if any earlier step fails no profile has been written
+     * at all. backup_import_profiles_precheck() already proved the post-import state accepts every
+     * profile, so the live re-validation below passing is expected -- it stays as the last guard. ---- */
+    if (!backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
+        return false; // zones already landed: reported as a partial write by the caller
+    }
+    if (!backup_import_aux_outputs_commit(body, true, aux_wrote_out, err_msg, err_cap)) {
+        return false;
+    }
+    /* ---- Pass 2: everything validated -- commit profiles ---- */
+    for (size_t i = 0; i < candidate_count; i++) {
+        profile_candidate_t *c = &candidates[i];
+        uint8_t out_id = 0;
+        char save_err[96];
+        if (!profiles_http_save(c->has_id ? c->id : PROFILES_MAX_COUNT, &c->p, &out_id, NULL, save_err,
+                                sizeof(save_err))) {
+            /* Should not happen -- pass 1 (including backup_import_profiles_precheck()) already checked
+             * everything profiles_http_save() itself checks -- but if it does (a race with a concurrent
+             * change to zone config, say), report exactly which entry and why. Candidates before this one
+             * are already committed. */
+            snprintf(err_msg, err_cap, "profile entry %u rejected at commit: %s", (unsigned)i, save_err);
+            return false;
+        }
+    }
     return true;
 }
-
-/* Portable noinline -- same guard as kiln_cfg_swap.c's KILN_CFG_SWAP_NOINLINE:
- * MSVC (host tests) rejects GCC's __attribute__((noinline)) syntax outright.
- * Only the Xtensa GCC target build's stack depth is measured. */
-#if defined(_MSC_VER)
-#define BACKUP_IMPORT_NOINLINE
-#else
-#define BACKUP_IMPORT_NOINLINE __attribute__((noinline))
-#endif
 
 /* See the call site in backup_import_apply() below for why. Mirrors
  * zones_http_post.c's post-commit apply_lower block. NOINLINE: inlined, its
@@ -3166,6 +3225,148 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
     return true;
 }
 
+/* Pass 1 for the profiles' RELAY_IO segments and on_off_rules: run the REAL save-time validators
+ * (validate_io_segment_in_state()/validate_on_off_rules_in_state(), profiles_validate.c) against the
+ * configuration this import WILL produce -- candidate zone_type and relay_mask per zone, and the aux
+ * entries as the backup leaves them -- instead of the live one. profiles_http_save() runs the same
+ * validators against the live config during the profile commit, which is too late to refuse cleanly;
+ * with this check every refusal happens before anything is written (including in a dry run). Absent
+ * keys keep the live value, exactly as the commit passes treat them. The scratch (state plus one
+ * profile_t) lives on the heap: no new buffer on the async-job stack. */
+typedef struct {
+    profile_validate_state_t st;
+    profile_t p;
+} backup_import_precheck_scratch_t;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body, char *err_msg, size_t err_cap)
+{
+    const char *profiles_arr = backup_json_obj_find(body, "profiles");
+    if (profiles_arr == NULL || backup_json_arr_first(profiles_arr) == NULL) {
+        return true;
+    }
+    backup_import_precheck_scratch_t *sc = heap_caps_malloc(sizeof(*sc), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (sc == NULL) {
+        sc = malloc(sizeof(*sc));
+    }
+    if (sc == NULL) {
+        snprintf(err_msg, err_cap, "out of memory (profile validation scratch)");
+        return false;
+    }
+    memset(sc, 0, sizeof(*sc));
+    bool ok = false;
+    profile_validate_state_t *st = &sc->st;
+    st->zone_count = zones_config_get_thermo_count();
+    if (st->zone_count > MAX31856_CHANNEL_COUNT) {
+        st->zone_count = MAX31856_CHANNEL_COUNT;
+    }
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        zone_type_t zt = ZONE_TYPE_HEATER;
+        if (zones_config_get_zone_type(zi, &zt)) {
+            st->zone_type[zi] = (uint8_t)zt;
+        } else {
+            st->zone_type[zi] = (uint8_t)ZONE_TYPE_HEATER;
+        }
+        uint8_t m = 0;
+        (void)zones_config_get_relay_mask(zi, &m);
+        st->zone_relay_mask[zi] = m;
+    }
+    for (const char *ze = backup_json_arr_first(backup_json_obj_find(body, "zones")); ze;
+         ze = backup_json_arr_next(ze)) {
+        double di = 0.0, dv = 0.0;
+        bool hv = false;
+        if (!backup_json_field_num(ze, "index", &di) || di < 0 || di >= MAX31856_CHANNEL_COUNT) {
+            continue; // pass 1b refuses a malformed zone entry; nothing to validate against here
+        }
+        unsigned zi = (unsigned)di;
+        if (backup_json_field_opt_num(ze, "relay_mask", 0, 255, &dv, &hv, "relay_mask", NULL, 0, zi) && hv) {
+            st->zone_relay_mask[zi] = (uint8_t)dv;
+        }
+        hv = false;
+        if (backup_json_field_opt_num(ze, "zone_type", 0, (double)ZONE_TYPE_ON_OFF, &dv, &hv, "zone_type", NULL, 0,
+                                      zi) &&
+            hv) {
+            st->zone_type[zi] = (uint8_t)dv;
+        }
+    }
+    for (uint8_t relay = 1; relay <= AUX_OUTPUTS_COUNT; relay++) {
+        aux_output_t cur;
+        memset(&cur, 0, sizeof(cur));
+        (void)aux_outputs_cfg_get(relay, &cur);
+        st->aux[relay - 1u] = cur;
+    }
+    {
+        backup_aux_import_t a;
+        if (!backup_import_aux_parse(body, &a, err_msg, err_cap)) {
+            goto done; // already refused by the aux pass; kept so this function is safe on its own
+        }
+        if (a.present) {
+            for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
+                if (!a.has[i]) {
+                    continue;
+                }
+                aux_output_t *o = &st->aux[i];
+                o->enabled = a.entry[i].enabled != 0;
+                o->conflicted = false;
+                o->tc_zone = a.entry[i].tc_zone_plus1 == 0 ? (uint8_t)AUX_TC_ZONE_NONE
+                                                          : (uint8_t)(a.entry[i].tc_zone_plus1 - 1u);
+                o->hyst_c = a.entry[i].hyst_c;
+                o->min_on_s = a.entry[i].min_on_s;
+                o->min_off_s = a.entry[i].min_off_s;
+            }
+        }
+    }
+    size_t entry = 0;
+    for (const char *pe = backup_json_arr_first(profiles_arr); pe; pe = backup_json_arr_next(pe), entry++) {
+        profile_t *p = &sc->p;
+        memset(p, 0, sizeof(*p));
+        uint8_t seg_i = 0;
+        for (const char *se = backup_json_arr_first(backup_json_obj_find(pe, "segments")); se;
+             se = backup_json_arr_next(se)) {
+            if (seg_i >= PROFILE_MAX_SEGMENTS) {
+                snprintf(err_msg, err_cap, "profile entry %u: more than %u segments", (unsigned)entry,
+                         (unsigned)PROFILE_MAX_SEGMENTS);
+                goto done;
+            }
+            profile_segment_t *sg = &p->segments[seg_i];
+            if (!backup_import_parse_seg_kind_io(se, entry, seg_i, sg, err_msg, err_cap)) {
+                goto done;
+            }
+            if (sg->seg_kind == PROFILE_SEG_KIND_RELAY_IO &&
+                !validate_io_segment_in_state(sg, (uint8_t)(seg_i + 1u), st, err_msg, err_cap)) {
+                char why[160];
+                snprintf(why, sizeof(why), "%s", err_msg);
+                snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)entry, why);
+                goto done;
+            }
+            seg_i++;
+        }
+        p->segment_count = seg_i;
+        uint8_t rule_i = 0;
+        for (const char *re = backup_json_arr_first(backup_json_obj_find(pe, "on_off_rules")); re;
+             re = backup_json_arr_next(re)) {
+            if (rule_i >= PROFILE_MAX_ON_OFF_RULES) {
+                snprintf(err_msg, err_cap, "profile entry %u: too many on_off_rules", (unsigned)entry);
+                goto done;
+            }
+            if (!backup_import_parse_rule(re, entry, rule_i, &p->on_off_rules[rule_i], err_msg, err_cap)) {
+                goto done;
+            }
+            rule_i++;
+        }
+        p->on_off_rule_count = rule_i;
+        if (!validate_on_off_rules_in_state(p, st, err_msg, err_cap)) {
+            char why[160];
+            snprintf(why, sizeof(why), "%s", err_msg);
+            snprintf(err_msg, err_cap, "profile entry %u: %s", (unsigned)entry, why);
+            goto done;
+        }
+    }
+    ok = true;
+done:
+    free(sc);
+    return ok;
+}
+
 static uint8_t backup_import_aux_zones_union_live(void)
 {
     uint8_t zones_union = 0;
@@ -3301,6 +3502,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
     }
+    if (!backup_import_profiles_precheck(body, err_msg, err_cap)) {
+        return false; // pass 1: a profile the post-import config would refuse; nothing written
+    }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
     }
@@ -3380,8 +3584,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
 
+    bool zones_landed = false;
     bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
-                                         timing_profile_candidates);
+                                         timing_profile_candidates, &zones_landed, &aux_wrote);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
      * exit from backup_import_apply_locked(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
@@ -3404,20 +3609,15 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
      * same as the POST handler: a failure is logged, never this request's
      * own failure. */
     backup_import_track_ceiling_lower();
-    if (!ok) {
-        backup_import_aux_outputs_revert_phase1(); // profiles/zones failed: put the phase-1 aux disables back
+    if (!ok && !zones_landed) {
+        backup_import_aux_outputs_revert_phase1(); // zones not persisted: put the phase-1 aux disables back
     }
 
     free(timing_profile_candidates);
     free(zone_candidates);
     free(candidates);
-    if (ok && !backup_import_update_repo(body, true, NULL, err_msg, err_cap)) {
-        ok = false; // profiles/zones already landed: reported as a partial write below
-    }
-    // aux_outputs phase 2 (the entries that ENABLE a relay) against the zones union as committed.
-    if (ok && !backup_import_aux_outputs_commit(body, true, &aux_wrote, err_msg, err_cap)) {
-        ok = false;
-    }
+    // update_repo and aux_outputs phase 2 (the entries that ENABLE a relay) now run inside
+    // backup_import_apply_locked(), after the zones landed and before the profiles are committed.
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
         // partial write, not the clean "nothing changed" a 400 implies.

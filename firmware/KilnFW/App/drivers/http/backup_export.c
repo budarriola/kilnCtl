@@ -128,7 +128,15 @@ static void backup_stream_printf(backup_stream_t *s, const char *fmt, ...)
     if (n < 0) {
         return;
     }
-    size_t tn = (size_t)n < sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1;
+    if ((size_t)n >= sizeof(tmp)) {
+        /* A fragment that does not fit tmp[] would be emitted TRUNCATED -- a silently corrupt backup that
+         * only fails (or worse, imports short) on restore. Fail the export loudly instead. */
+        ESP_LOGE(BACKUP_TAG, "backup export: JSON fragment of %d bytes exceeds the %u-byte buffer -- aborting", n,
+                 (unsigned)sizeof(tmp));
+        s->err = ESP_ERR_INVALID_SIZE;
+        return;
+    }
+    size_t tn = (size_t)n;
     size_t off = 0;
     while (off < tn) {
         size_t space = BACKUP_STREAM_BUF - s->len;

@@ -15,7 +15,7 @@ migration code untouched. This module never runs on the board and never
 changes firmware migration behaviour.
 
 SCOPE. The document this module converts is the BACKUP document -- the
-top-level "version" field is BACKUP_FORMAT_VERSION (currently 5, see
+top-level "version" field is BACKUP_FORMAT_VERSION (currently 6, see
 backup_http_internal.h), not ZONES_CFG_VERSION (the on-flash per-zone schema
 version, currently 26). The two are different numbers for a reason: most of
 the fields ZONES_CFG_VERSION bumps added to the on-flash struct were folded
@@ -106,7 +106,7 @@ from typing import Any, Optional
 # drift check (see module docstring) is what keeps them honest, not an
 # import-time reach into firmware/.
 # ---------------------------------------------------------------------------
-BACKUP_FORMAT_VERSION = 5
+BACKUP_FORMAT_VERSION = 6
 BACKUP_FORMAT_VERSION_MIN = 1
 
 # Every zone-level key this module knows firmware can emit/read today, by the
@@ -402,9 +402,22 @@ def _convert_zone(zone: dict, source_version: int, target_version: int,
 
 def _convert_profile(profile: dict, source_version: int, target_version: int,
                       report: ConversionReport, scope: str) -> dict:
-    # No profile-level field has ever been gated on BACKUP_FORMAT_VERSION;
-    # profiles carry through unchanged at every version.
-    return copy.deepcopy(profile)
+    # BACKUP_FORMAT_VERSION 6 added profile segment kinds (seg_kind/io_*) and
+    # on_off_rules[]. A v5 reader ignores them and would restore a RELAY_IO
+    # segment as a ZONE_RAMP, so a target below 6 DROPS them, loudly, instead
+    # of carrying keys the target cannot represent. Everything else carries
+    # through unchanged at every version.
+    out = copy.deepcopy(profile)
+    if target_version < 6:
+        if out.pop("on_off_rules", None) is not None:
+            report.add(scope, "on_off_rules", "dropped", "not representable below BACKUP_FORMAT_VERSION 6")
+        for i, seg in enumerate(out.get("segments", [])):
+            for k in ("seg_kind", "io_target", "io_state", "io_blocking", "io_leave_on_at_end"):
+                if k in seg:
+                    del seg[k]
+                    report.add(f"{scope} segment {i}", k, "dropped",
+                               "not representable below BACKUP_FORMAT_VERSION 6")
+    return out
 
 
 def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":

@@ -58,7 +58,11 @@ extern const char *BACKUP_TAG;
 // absent = today's pre-item-17 behaviour, exactly); BACKUP_FORMAT_VERSION_MIN
 // stays 1 for that reason -- only the WRITER (export) advanced, the READER
 // (import) remains backward-compatible all the way down.
-#define BACKUP_FORMAT_VERSION 5
+// 5 -> 6: profiles[].segments[] carry seg_kind/io_target/io_state/io_blocking/io_leave_on_at_end and
+// profiles[] carry on_off_rules[]. A v5 reader ignores those keys, so it would restore a RELAY_IO segment as
+// a ZONE_RAMP at 0 C and drop every rule; bumping makes older firmware refuse the file instead. This
+// firmware still reads v5 (it carries none of the new keys, which are all optional).
+#define BACKUP_FORMAT_VERSION 6
 #define BACKUP_FORMAT_VERSION_MIN 1
 
 // Generous headroom over a legitimate full backup -- see backup_http.c's own
