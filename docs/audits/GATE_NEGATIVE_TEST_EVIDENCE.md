@@ -27,10 +27,10 @@ Gate rows: 186.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 169 |
+| NEGATIVE-TESTED | 170 |
 | PARTIAL | 2 |
 | REVIEWED, NOT MUTATED | 14 |
-| NOT AUDITED | 1 |
+| NOT AUDITED | 0 |
 | NOT AUDITED (pass 12 pending) | 0 |
 
 ## Table
@@ -47,8 +47,8 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/check_00_kilnfw_host_tests.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy aggregator; runs the host tests individually audited elsewhere | see audit |
 | `firmware/KilnFW/App/test/check_00_kilnfw_recovery_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
 | `firmware/KilnFW/App/test/check_00_kilnfw_target_build.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy target build; compile failure is the check | see audit |
-| `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | PARTIAL | 09-18 | cannot be driven locally (builds origin/main in a throwaway worktree); 09-16e saw it genuinely FAIL on a real -Werror=format-truncation defect on origin/main | FAIL path propagated incidentally; no deliberate mutation |
-| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | PARTIAL | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | real ELFs from existing checkbuilds; check-input mutation via its own -ForceCeiling zone_sweep=1000 (no source mutation) | RED on the real ELFs (bx_flash_worker 3808 B > 3792 B ceiling, a genuine finding); -ForceCeiling adds zone_sweep to the failing set. No source mutation of a measured task was run |
+| `firmware/KilnFW/App/test/check_01_kilnfw_pushed_build.ps1` | PARTIAL | 09-18 | cannot be driven locally (builds origin/main in a throwaway worktree); 09-16e saw it genuinely FAIL on a real -Werror=format-truncation defect on origin/main | FAIL path propagated incidentally; no deliberate mutation. Re-examined 2026-10-09: still not completable without a target build -- it runs `idf.py build` on a fresh origin/main worktree (needs the ESP-IDF toolchain and submodules; a synthetic fixture would bypass the build, i.e. the whole check), so no honest local mutation exists. Missing: a deliberate break pushed to origin/main (or a stubbed build step) with the FAIL propagation observed |
+| `firmware/KilnFW/App/test/check_all_task_stack_budgets.ps1` | PARTIAL | docs/audits/release_gate_vacuity_audit_hwfw_2026-10-08.md | real ELFs from existing checkbuilds; check-input mutation via its own -ForceCeiling zone_sweep=1000 (no source mutation) | RED on the real ELFs (bx_flash_worker 3808 B > 3792 B ceiling, a genuine finding); -ForceCeiling adds zone_sweep to the failing set. No source mutation of a measured task was run. Re-examined 2026-10-09: still PARTIAL -- a source mutation changes the measured stack only through a rebuilt KilnCtrl.elf (Xtensa toolchain/target build, forbidden here), and no Xtensa objdump or ELF is available in this worktree for a synthetic fixture. Missing: one injected-local mutation of a measured task plus forced full rebuild, as done for the dedicated per-task checks |
 | `firmware/KilnFW/App/test/check_approach_rate_cap_mirror_drift.ps1` | NEGATIVE-TESTED | 09-16 | production divisor 3600.0f changed to 1800.0f in the real cap loop | RED, both fragments shown; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_boot_guard_reset_reachability.ps1` | NEGATIVE-TESTED | rest-10-08 | added a boot_guard_reset_counter() call in boot_guard.c | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/check_cfg_convert_field_mirror_drift.ps1` | NEGATIVE-TESTED | rest-10-08 | BACKUP_FORMAT_VERSION 5 to 6 | RED; hand-restored; PASS |
@@ -104,7 +104,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW/App/test/test_check_hal_include_boundary.ps1` | NEGATIVE-TESTED | rest-10-08 | baseline comparison disabled | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-08 | `return ($viaGate -and -not $direct)` -> `return $viaGate` in check_lcd_home_nav_gated.ps1 was MISSED (assertion 7 also removed the gated callback); added assertion 7b (gate kept + direct kiln_ui_show) | CAUGHT after fix (negtest -IncludeDirty); restored |
 | `firmware/KilnFW/App/test/test_check_route_tier_coverage.ps1` | NEGATIVE-TESTED | rest-10-08 | missing-route branch disabled in the check | RED; hand-restored; PASS |
-| `firmware/KilnFW/App/test/test_check_uri_handler_cap_max_routes.ps1` | NOT AUDITED | no audit names it (the earlier source cell "uricapreg-10-09" matched no audit or negtest record) | - | added by c231c97c; no recorded mutation run |
+| `firmware/KilnFW/App/test/test_check_uri_handler_cap_max_routes.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (hand mutation, worktree off origin/dev) | tools/check_uri_handler_cap.ps1 line 168: `if ($maxRoutes -lt $capValue -or $maxRoutes -lt $totalRoutes) {` -> `if ($false -and (...)) {` (the rule this test guards disabled); ran only this test | RED: `lowered KILN_HTTP_MAX_ROUTES was not refused (exit 0)`, test exit 1 (inner check printed `175 route(s)... passed: 9 spare slot(s)`); restored by hand (git diff empty); baseline and restored runs PASS (`baseline passes, KILN_HTTP_MAX_ROUTES=1 refused`, exit 0) |
 | `firmware/KilnFW/App/test/test_check_stop_path_requires_pin.ps1` | NEGATIVE-TESTED | rest-10-08 | StopBranchGated forced true (same redo) | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_check_ui_responsive_sweep.ps1` | NEGATIVE-TESTED | rest-10-08 | harness-error regex replaced by false in ui_responsive_sweep.mjs | RED; hand-restored; PASS |
 | `firmware/KilnFW/App/test/test_sdkconfig_sibling_pair_guard.py` | NEGATIVE-TESTED | rest-10-08 | sibling/parent diff comparison disabled | RED; hand-restored |
