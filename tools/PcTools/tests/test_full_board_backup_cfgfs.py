@@ -78,7 +78,7 @@ def _make_fake_urlopen(files: dict, post_log: list):
             method = req_or_url.get_method()
             body = req_or_url.data
         assert "/api/cfgfs/file?name=" in url, f"unexpected URL in test: {url}"
-        name = url.split("name=")[1]
+        name = url.split("name=")[1].split("&raw=1")[0]  # POST adds raw=1 except for zones.json (audit M7)
         import urllib.parse
 
         name = urllib.parse.unquote(name)

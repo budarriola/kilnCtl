@@ -40,6 +40,7 @@
                                       * defined by zones_http.c's textual #include of
                                       * zones_config_accessors.c in test_zones_http.c, this TU's
                                       * link-mate in the same executable. */
+#include "cfgfs_file_validate.h"
 #include "zones_config_cfg_fs.h"
 #include "zones_http.h"
 #include "zones_http_internal.h" /* s_zones, nvs_load()/nvs_save() */
@@ -1272,8 +1273,52 @@ static void test_save_persists_locked_snapshot(void)
     TEST_CHECK(!zones_config_persisted_equals_ram(), "an unsaved RAM edit is detected");
 }
 
+// ---------------------------------------------------------------------
+// POST /api/cfgfs/file content gate (audit M7): cfgfs_file_check_write().
+// ---------------------------------------------------------------------
+static void test_cfgfs_file_post_validation(void)
+{
+    TEST_SECTION("cfgfs file POST: body validated by the loader; unknown names need raw=1");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    stage("m7", 2.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "save a real zones.json");
+    static uint8_t good[4 + sizeof(zones_cfg_t)];
+    size_t glen = 0;
+    TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, good, sizeof(good), &glen) == ESP_OK && glen > 4,
+               "read the real file bytes back");
+
+    const char *why = "";
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, good, glen, &why) == CFGFS_FILE_CHECK_OK,
+               "valid zones.json body accepted");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, true, good, glen, &why) == CFGFS_FILE_CHECK_OK,
+               "valid zones.json body accepted with raw=1");
+
+    /* The handler writes only on OK, so INVALID == nothing written. */
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, "garbage", 7, &why) == CFGFS_FILE_CHECK_INVALID,
+               "garbage zones.json refused");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, true, "garbage", 7, &why) == CFGFS_FILE_CHECK_INVALID,
+               "raw=1 does not waive an existing validator");
+    static uint8_t bad[4 + sizeof(zones_cfg_t)];
+    memcpy(bad, good, glen);
+    bad[glen - 1] ^= 0xFF;
+    bad[10] ^= 0x55;
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, bad, glen, &why) == CFGFS_FILE_CHECK_INVALID,
+               "corrupted (CRC-failing) zones.json refused");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, good, 3, &why) == CFGFS_FILE_CHECK_INVALID,
+               "truncated zones.json refused");
+
+    TEST_CHECK(cfgfs_file_check_write("mystery.dat", false, "abc", 3, &why) == CFGFS_FILE_CHECK_NO_VALIDATOR,
+               "unknown file without raw=1 refused");
+    TEST_CHECK(cfgfs_file_check_write("mystery.dat", true, "abc", 3, &why) == CFGFS_FILE_CHECK_OK,
+               "unknown file with raw=1 accepted");
+    cfg_fs_deinit();
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
+    test_cfgfs_file_post_validation();
     test_save_persists_locked_snapshot();
     test_save_crc_writeback_skipped_when_ram_changed();
     test_partition_absent_falls_through_to_nvs_only();

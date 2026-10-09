@@ -238,6 +238,10 @@ def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry
 
     for name, raw in decoded.items():
         url = f"http://{host}/api/cfgfs/file?name={urllib.parse.quote(name)}"
+        if name != "zones.json":
+            # Audit M7: firmware validates zones.json content; every other file has no
+            # validator and needs the explicit raw=1 opt-in.
+            url += "&raw=1"
         req = urllib.request.Request(url, data=raw, method="POST")
         try:
             with http_auth.urlopen(req, timeout=timeout) as resp:

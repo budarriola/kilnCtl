@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfgfs_file_validate.h"
 #include "esp_heap_caps.h" /* heap_caps_malloc() -- cfgfs_file_get_handler()/cfgfs_file_post_handler() below */
 #include "esp_littlefs.h"
 #include "esp_log.h"
@@ -1842,6 +1843,20 @@ static void cfgfs_file_write_job(void *arg)
 extern esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 extern bool uart_bridge_ext_is_on_flash_worker(void);
 
+/* POST /api/cfgfs/file?name=<file>[&raw=1] (ROUTE_TIER_ADMIN, restore primitive).
+ * Audit M7: the body is validated by the firmware's own loader for that file
+ * (cfgfs_file_check_write) BEFORE anything is written; a failure answers 400
+ * and writes nothing. A name with no validator is refused with 400 unless the
+ * request carries raw=1, which writes the bytes unchecked (full_board_backup.py
+ * sends it for every file but zones.json). raw=1 never waives a validator that
+ * exists. */
+static bool cfgfs_file_raw_flag(httpd_req_t *req)
+{
+    char query[96], v[4];
+    return httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+           httpd_query_key_value(query, "raw", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
+}
+
 static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
 {
     char name[CFGFS_FILE_NAME_MAX];
@@ -1884,6 +1899,15 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
         received += (size_t)ret;
+    }
+
+    const char *why = "";
+    cfgfs_file_check_t chk = cfgfs_file_check_write(name, cfgfs_file_raw_flag(req), body, received, &why);
+    if (chk != CFGFS_FILE_CHECK_OK) {
+        free(body);
+        httpd_resp_send_err(req, chk == CFGFS_FILE_CHECK_OOM ? HTTPD_500_INTERNAL_SERVER_ERROR : HTTPD_400_BAD_REQUEST,
+                            why);
+        return ESP_OK;
     }
 
     /* Same flash-worker dispatch shape relay_cycles_reset()/factory_reset.c
