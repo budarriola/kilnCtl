@@ -554,3 +554,113 @@ def test_sample_once_flags_fault_guard_and_crash_and_low_heap(monkeypatch):
     assert "UNACKNOWLEDGED CRASH" in joined
     assert "below floor" in joined
     assert "fault_guard=7" in joined
+
+
+# ------------------------------------------------------- pico reboot mid-firing
+import bench_pico_reboot_midfiring as pr  # noqa: E402
+
+
+class FakeRebootBoard:
+    """2 s link-down window after reset, then recovery (scriptable)."""
+
+    def __init__(self, clk, running=True, down_s=2.0, recover=True,
+                 relay_refused=True, firing_faults_at=None, trip_after=0,
+                 relays=(1,)):
+        self.clk, self.running, self.down_s, self.recover = clk, running, down_s, recover
+        self.relay_refused, self.firing_faults_at = relay_refused, firing_faults_at
+        self.trip_after, self.relays = trip_after, list(relays)
+        self.t_reset = None
+        self.resets = 0
+
+    def _since(self):
+        return None if self.t_reset is None else self.clk.t - self.t_reset
+
+    def connect(self):
+        return "connected"
+
+    def exec_status(self):
+        s = self._since()
+        if not self.running:
+            state = 0
+        elif s is not None and self.firing_faults_at is not None and s >= self.firing_faults_at:
+            state = pr.PROFILE_EXEC_FAULTED
+        else:
+            state = pr.PROFILE_EXEC_RUNNING
+        return {"state": state, "segment": 1, "segment_elapsed_s": 5, "zone_temps": [500.0]}
+
+    def link(self):
+        s = self._since()
+        if s is not None and s < self.down_s or (s is not None and not self.recover):
+            return {"link_up": False, "age_ms": 3000}
+        return {"link_up": True, "age_ms": 100}
+
+    def pico_version(self):
+        s = self._since()
+        if s is None:
+            return {"known": True, "commit": "abc", "boot_id": 1}
+        if s < self.down_s or not self.recover:
+            return {"known": False, "commit": "", "boot_id": 1}
+        return {"known": True, "commit": "abc", "boot_id": 2}
+
+    def counters(self):
+        s = self._since()
+        tr = self.trip_after if (s is not None and s >= self.down_s) else 0
+        return {"trip_reason": tr, "trip_mask": 0}
+
+    def relays_on(self):
+        return self.relays
+
+    def relay_on_refused(self, relay):
+        return self.relay_refused
+
+    def reset_pico(self):
+        self.resets += 1
+        self.t_reset = self.clk.t
+        return "reset ok"
+
+
+def run_reboot_main(board, clk, argv=("--i-am-rebooting-the-pico-mid-firing",)):
+    return pr.main(list(argv), board=board, clock=clk.now, sleep=clk.sleep)
+
+
+def test_pico_reboot_happy_path(tmp_path):
+    clk = FakeClock()
+    b = FakeRebootBoard(clk)
+    out = tmp_path / "ev.json"
+    rc = run_reboot_main(b, clk, ("--i-am-rebooting-the-pico-mid-firing", "--out", str(out)))
+    assert rc == 0 and b.resets == 1
+    assert out.exists()
+
+
+def test_pico_reboot_requires_confirm_flag():
+    clk = FakeClock()
+    b = FakeRebootBoard(clk)
+    assert run_reboot_main(b, clk, ()) == 2
+    assert b.resets == 0
+
+
+def test_pico_reboot_refuses_without_running_firing():
+    clk = FakeClock()
+    b = FakeRebootBoard(clk, running=False)
+    assert run_reboot_main(b, clk) == 2
+    assert b.resets == 0
+
+
+def test_pico_reboot_link_never_recovers_fails():
+    clk = FakeClock()
+    assert run_reboot_main(FakeRebootBoard(clk, recover=False), clk) == 1
+
+
+def test_pico_reboot_firing_aborts_fails():
+    clk = FakeClock()
+    assert run_reboot_main(FakeRebootBoard(clk, firing_faults_at=1.0), clk) == 1
+
+
+def test_pico_reboot_relay_accepted_while_down_fails():
+    clk = FakeClock()
+    assert run_reboot_main(FakeRebootBoard(clk, relay_refused=False), clk) == 1
+
+
+def test_pico_reboot_new_trip_fails():
+    clk = FakeClock()
+    assert run_reboot_main(FakeRebootBoard(clk, trip_after=7), clk) == 1
