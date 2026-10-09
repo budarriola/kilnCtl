@@ -562,8 +562,15 @@ class DisplayTest(unittest.TestCase):
 class AuditTwoSafetyTests(unittest.TestCase):
     def test_l4_ignored_brightness_field_fails_even_at_50(self):
         st = dict(DP, brightness_percent=50)
+
+        def ignore_brightness(f):
+            st["timeout_setting"] = int(f["timeout"])
+            st["keep_on_while_firing"] = f["keep_on_while_firing"] == "1"
+            st["display_on_error"] = f["display_on_error"] == "1"
+            return 200, {"ok": True}
         b = Board(gets={"/api/settings/display_power": lambda: dict(st)},
-                  posts={"/api/settings/display_power": lambda f: (200, {"ok": True})})  # ignores every field
+                  posts={"/api/settings/display_power": ignore_brightness})
+
         self.assertEqual(V(run("WEB-DISP-02", b.ctx())), Verdict.FAIL)
 
     def test_l3_empty_zones_array_does_not_pass_wiz06(self):

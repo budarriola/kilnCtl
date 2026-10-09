@@ -415,6 +415,7 @@ class AuditTwoProfTests(unittest.TestCase):
 
     def _zone09(self, warn):
         st = {"en": False}
+        n = {"posts": 0}
 
         def get(p):
             if p == "/api/adaptive_tune":
@@ -425,7 +426,8 @@ class AuditTwoProfTests(unittest.TestCase):
 
         def post(p, f):
             st["en"] = f["enabled"] == "1"
-            return 200, ({"ok": True, "warning": "applied live, save failed"} if warn else {"ok": True})
+            n["posts"] += 1
+            return 200, ({"ok": True, "warning": "applied live, save failed"} if warn and n["posts"] == 1 else {"ok": True})
         return {"suite": "web", "http_get_json": get, "http_post_json": post}
 
     def test_l8_persist_warning_fails_zone09(self):
