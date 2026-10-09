@@ -381,5 +381,72 @@ class ZoneTests(unittest.TestCase):
         self.assertEqual(run("WEB-ZONE-12", c).verdict, Verdict.FAIL)
 
 
+class AuditTwoProfTests(unittest.TestCase):
+    """Web judge contract audit 2: L2, L7, L8, L9, M1 wrap."""
+
+    def _z09_with_autotune(self, state):
+        c = self._zone09(False)
+        base = c["http_get_json"]
+        c["http_get_json"] = lambda p: (200, {"state": state}) if p == "/api/autotune" else base(p)
+        return c
+
+    def test_l2_done_autotune_does_not_block_mutating_gate(self):
+        for st in ("done", "aborted"):
+            r = run("WEB-ZONE-09", self._z09_with_autotune(st))
+            self.assertNotEqual(r.verdict, Verdict.SKIP, r.reason)
+
+    def test_l2_running_autotune_still_blocks(self):
+        self.assertEqual(run("WEB-ZONE-09", self._z09_with_autotune("relay_cycling")).verdict, Verdict.SKIP)
+
+    def test_l7_live_blocks_do_not_fail_zone05(self):
+        n = {"i": 0}
+
+        def get(p):
+            if p == "/api/zones":
+                n["i"] += 1
+                zz = zones_body()
+                zz["safety_ceiling"]["pico_current_c"] = 1300 + n["i"]
+                return 200, zz
+            return 200, {"state": "idle"}
+        c = {"suite": "web", "http_get_json": get, "http_post_json": lambda p, f: (200, {"ok": True}),
+             "web_client": Web("")}
+        r = run("WEB-ZONE-05", c)
+        self.assertNotEqual(r.verdict, Verdict.FAIL, r.reason)
+
+    def _zone09(self, warn):
+        st = {"en": False}
+
+        def get(p):
+            if p == "/api/adaptive_tune":
+                return 200, {"zones": [{"zone": 0, "enabled": st["en"]}]}
+            if p == "/api/zones":
+                return 200, zones_body()
+            return 200, {"state": "idle"}
+
+        def post(p, f):
+            st["en"] = f["enabled"] == "1"
+            return 200, ({"ok": True, "warning": "applied live, save failed"} if warn else {"ok": True})
+        return {"suite": "web", "http_get_json": get, "http_post_json": post}
+
+    def test_l8_persist_warning_fails_zone09(self):
+        self.assertEqual(run("WEB-ZONE-09", self._zone09(True)).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-ZONE-09", self._zone09(False)).verdict, Verdict.PASS)
+
+    def test_l9_sweep_started_between_reads_is_not_aborted(self):
+        reads = {"n": 0}
+        posted = []
+
+        def get(p):
+            if p == "/api/zones/current_sweep/status":
+                reads["n"] += 1
+                return 200, {"state": "idle" if reads["n"] == 1 else "running"}
+            return 200, {"state": "idle"}
+        c = {"suite": "web", "http_get_json": get, "http_post_json": lambda p, f: posted.append(p) or (200, {"ok": True}),
+             "web_client": Web("sweepStartBtn sweepAbortBtn")}
+        r = run("WEB-ZONE-10", c)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, r.reason)
+        self.assertEqual(posted, [])
+
+
 if __name__ == "__main__":
     unittest.main()

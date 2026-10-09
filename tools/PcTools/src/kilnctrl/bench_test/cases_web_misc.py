@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .cases_web import _web_client
 from .cases_web_diag import _html, _missing, mutating_gate
 from .cases_web_rw import (_WIFI_WRITE_DENYLIST, ForbiddenWrite, _get_json, _get_text, _policy_from_config,
-                           _post_json, _post_json_body, _post_raw, _sec_client)
+                           _post_json, _post_json_body, _post_raw, _sec_client, cfg_guarded, policy_unstored)
 from .registry import CaseResult, Verdict, get_case
 
 _R = CaseResult
@@ -578,6 +578,11 @@ def _auth_case_prelude(ctx: dict):
     st, cfg = client.get_config()
     if st != 200 or not isinstance(cfg, dict):
         return None, _R(Verdict.INCONCLUSIVE, reason=f"GET /api/auth/config failed (status={st})")
+    if policy_unstored(cfg):
+        # L10: no clear-policy route exists, so the restore would store an
+        # explicit policy where the board had none.
+        return None, _R(Verdict.INCONCLUSIVE, reason="board shows no stored auth policy (false/false/-1/-1); "
+                        "a restore cannot put 'none' back, so nothing was written")
     return (client, user, pw, _policy_from_config(cfg)), None
 
 
@@ -702,7 +707,7 @@ _CASE_FUNCS = {
     "WEB-WIFI-02": _case_wifi02, "WEB-WIFI-03": _case_wifi03, "WEB-WIFI-04": _case_wifi04,
     "WEB-WIFI-05": _case_wifi05, "WEB-SEC-02": _case_sec02, "WEB-SEC-06": _case_sec06,
     "WEB-BAK-02": _case_bak02, "WEB-BAK-03": _case_bak03, "WEB-BAK-04": _case_bak04,
-    "WEB-KCFG-02": _case_kcfg02, "WEB-KCFG-03": _case_kcfg03, "WEB-KCFG-04": _case_kcfg04,
+    "WEB-KCFG-02": cfg_guarded(_case_kcfg02), "WEB-KCFG-03": _case_kcfg03, "WEB-KCFG-04": _case_kcfg04,
     "WEB-KCFG-05": _case_kcfg05, "WEB-LOG-02": _case_log02, "WEB-LOG-03": _case_log03,
     "WEB-X-02": _case_x02,
 }

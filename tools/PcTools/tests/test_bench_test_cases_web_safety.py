@@ -559,5 +559,20 @@ class DisplayTest(unittest.TestCase):
         self.assertEqual(V(run("WEB-DISP-03", b.ctx())), Verdict.FAIL)
 
 
+class AuditTwoSafetyTests(unittest.TestCase):
+    def test_l4_ignored_brightness_field_fails_even_at_50(self):
+        st = dict(DP, brightness_percent=50)
+        b = Board(gets={"/api/settings/display_power": lambda: dict(st)},
+                  posts={"/api/settings/display_power": lambda f: (200, {"ok": True})})  # ignores every field
+        self.assertEqual(V(run("WEB-DISP-02", b.ctx())), Verdict.FAIL)
+
+    def test_l3_empty_zones_array_does_not_pass_wiz06(self):
+        gets = dict(ZONES_GOOD)
+        gets["/api/zones"] = {"thermo_count": 3, "zones": []}
+        b = Board(gets=dict(gets, **RDY_GOOD, **{"/api/setup/progress": progress()}))
+        res = run("WEB-WIZ-06", b.ctx())
+        self.assertNotEqual(V(res), Verdict.PASS, res.reason)
+
+
 if __name__ == "__main__":
     unittest.main()

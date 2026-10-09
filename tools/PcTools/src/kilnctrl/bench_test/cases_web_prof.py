@@ -74,7 +74,9 @@ def _mutating_gate(ctx: dict, need_autotune_idle: bool) -> Optional[CaseResult]:
             "refusing to write while a firing may be running"))
     if need_autotune_idle:
         s, body = _GET(ctx, "/api/autotune")
-        if s != 200 or not _is_idle_state(body):
+        # L2: autotune keeps reporting done/aborted after a tune ends; only an
+        # unknown or active state means a tune may be running.
+        if s != 200 or not (isinstance(body, dict) and str(body.get("state", "")).lower() in ("idle", "done", "aborted")):
             state = body.get("state") if isinstance(body, dict) else None
             return CaseResult(Verdict.SKIP, reason=(
                 f"gate: autotune not confirmed idle (status={s}, state={state!r})"))
@@ -772,7 +774,11 @@ def _case_zone05(ctx: dict) -> CaseResult:
     fields = {"zone": "0", "kp": "%.9g" % z0["pid_kp"], "ki": "%.9g" % z0["pid_ki"], "kd": "%.9g" % z0["pid_kd"]}
 
     def _strip(cfg):
-        return {k: v for k, v in cfg.items() if k != "generation"} if isinstance(cfg, dict) else cfg
+        # L7: drop generation and the live-reading blocks (thermocouple temp,
+        # link/relay state, CT warn mask, Pico ceiling reading) that move
+        # between two GETs without any config change.
+        return ({k: v for k, v in cfg.items() if k not in ("generation", "safety_wiring", "safety_ceiling", "ct_warn_mask")}
+                if isinstance(cfg, dict) else cfg)
 
     obs: Dict[str, Any] = {"posted": fields}
     posted = False
@@ -913,7 +919,7 @@ def _case_zone09(ctx: dict) -> CaseResult:
         zs = body.get("zones") if isinstance(body, dict) else None
         if not isinstance(zs, list):
             return None
-        z = next((x for x in zs if isinstance(x, dict) and x.get("index", 0) == 0), None) or (zs[0] if zs else None)
+        z = next((x for x in zs if isinstance(x, dict) and x.get("zone", x.get("index", 0)) == 0), None) or (zs[0] if zs else None)
         return bool(z.get("enabled")) if isinstance(z, dict) and "enabled" in z else None
 
     def gains():
@@ -936,15 +942,20 @@ def _case_zone09(ctx: dict) -> CaseResult:
         wrote = True
         if ws != 200 or not isinstance(wb, dict) or wb.get("ok") is not True:
             verdict = CaseResult(Verdict.FAIL, reason=f"enable POST not ok: status={ws} body={wb}", observed=obs)
+        elif wb.get("warning"):
+            # L8: ok:true with a warning means applied live but the NVS save failed.
+            verdict = CaseResult(Verdict.FAIL, reason=f"enable POST reported a persist warning: {wb.get('warning')!r}", observed=obs)
         else:
             _s, b2 = _GET(ctx, "/api/adaptive_tune")
             if en(b2) != (not orig):
                 verdict = CaseResult(Verdict.FAIL, reason=f"read-back enabled={en(b2)}, expected {not orig}", observed=obs)
     finally:
         if wrote:
-            _POST(ctx, "/api/adaptive_tune/enable", {"zone": "0", "enabled": "1" if orig else "0"})
+            _rs, rb = _POST(ctx, "/api/adaptive_tune/enable", {"zone": "0", "enabled": "1" if orig else "0"})
             _s, b3 = _GET(ctx, "/api/adaptive_tune")
-            if en(b3) != orig:
+            if isinstance(rb, dict) and rb.get("warning"):
+                verdict = CaseResult(Verdict.FAIL, reason=f"ERROR: adaptive_tune restore reported a persist warning: {rb.get('warning')!r}", observed=obs)
+            elif en(b3) != orig:
                 verdict = CaseResult(Verdict.FAIL, reason=f"ERROR: adaptive_tune enabled restore mismatch: expected {orig}, read {en(b3)}", observed=obs)
     if verdict is None:
         if gains() != g0:
@@ -957,6 +968,9 @@ def _case_zone10(ctx: dict) -> CaseResult:
     refusal = board_lock.write_refusal(ctx)
     if refusal:
         return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
+    idle = W.idle_gate_reason(ctx)
+    if idle:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {idle}; no write attempted")
     miss = _missing_tokens(_html(ctx, "/settings/zones"), ["sweepStartBtn", "sweepAbortBtn"])
     s, st = _GET(ctx, "/api/zones/current_sweep/status")
     state = st.get("state") if isinstance(st, dict) else None
@@ -966,6 +980,11 @@ def _case_zone10(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.FAIL, reason=f"served /settings/zones HTML missing {miss}")
     if state == "running":
         return CaseResult(Verdict.INCONCLUSIVE, reason="a sweep is already running; not aborting another owner's sweep")
+    # L9: re-read right before the abort so a sweep an operator started since
+    # the first read is never aborted (the abort itself is unconditional).
+    s_b, st_b = _GET(ctx, "/api/zones/current_sweep/status")
+    if s_b != 200 or not isinstance(st_b, dict) or st_b.get("state") == "running":
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"sweep status unreadable or running just before the abort (status={s_b}); not aborting")
     # Never POST start: the sweep derives and pushes k_ct (CT calibration).
     ps, pb = _POST(ctx, "/api/zones/current_sweep/abort", {})
     if ps != 200 or not isinstance(pb, dict) or pb.get("ok") is not True:
@@ -1095,9 +1114,10 @@ def _case_zone13(ctx: dict) -> CaseResult:
 
 
 _CASE_FUNCS = {
-    "WEB-PROF-02": _case_prof02, "WEB-PROF-03": _case_prof03, "WEB-PROF-04": _case_prof04,
-    "WEB-PROF-05": _case_prof05, "WEB-PROF-06": _case_prof06, "WEB-PROF-07": _case_prof07,
-    "WEB-PROF-08": _case_prof08, "WEB-PROF-09": _case_prof09, "WEB-PROF-10": _case_prof10,
+    "WEB-PROF-02": W.cfg_guarded(_case_prof02), "WEB-PROF-03": W.cfg_guarded(_case_prof03),
+    "WEB-PROF-04": W.cfg_guarded(_case_prof04), "WEB-PROF-05": W.cfg_guarded(_case_prof05),
+    "WEB-PROF-06": W.cfg_guarded(_case_prof06), "WEB-PROF-07": W.cfg_guarded(_case_prof07),
+    "WEB-PROF-08": W.cfg_guarded(_case_prof08), "WEB-PROF-09": _case_prof09, "WEB-PROF-10": _case_prof10,
     "WEB-PROF-11": _case_prof11, "WEB-STIM-02": _case_stim02,
     "WEB-ZONE-02": _case_zone02, "WEB-ZONE-03": _case_zone03, "WEB-ZONE-04": _case_zone04,
     "WEB-ZONE-05": _case_zone05, "WEB-ZONE-06": _case_zone06, "WEB-ZONE-07": _case_zone07,
