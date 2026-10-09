@@ -35,7 +35,7 @@ Context that shapes the findings:
 | L8 | INFO | timers | Page refresh timers are created once at build and never deleted; they keep running while the page is hidden. |
 | L9 | HIGH | auth | First boot with no stored touch calibration returns from `kiln_ui_init()` before the LCD lock is initialised, so every gate (Clear Trip included) is open until reboot. **FIXED in ef99c327.** |
 | L10 | MED | auth | The Network Manage Forget dialog is a raw `lv_msgbox`, not `ui_confirm`, so it survives an LCD relock and stays tappable. **FIXED in ef99c327.** |
-| L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. **FIXED in ef99c327.** |
+| L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. **FIXED in ef99c327.** Follow-up LOW (crash-ack and profile Delete PIN success callbacks were no-ops, forcing a second tap): FIXED, the callbacks now run the arm step (SHA below). |
 | L12 | MED | touch | Topbar touch-group registry holds 4 groups and drops the rest silently; 21 topbar call sites, so pages visited after the 4th lose nearest-center arbitration. |
 | L13 | MED | layout | Builder slot grid creates 100 slot cells in a 2-row box with scrolling removed; only 8 are reachable, and each build makes 100 profile reads. |
 | L14 | MED | churn | Network Manage saved list is cleaned and rebuilt every second, even when hidden. **FIXED in ef99c327.** |
