@@ -207,7 +207,8 @@ try {
     $sharedFiles = @(
         "update\stage_header.c", "update\stage_header.h",
         "update\update_semver.c", "update\update_semver.h",
-        "http\ota_image_crc.c", "http\ota_image_crc.h"
+        "http\ota_image_crc.c", "http\ota_image_crc.h",
+        "http\http_origin_check.h"
     )
     $appDriversSrc = Join-Path $repoRoot "firmware\KilnFW\App\drivers"
     $appDriversDst = Join-Path $WorktreePath "KilnFW\App\drivers"
