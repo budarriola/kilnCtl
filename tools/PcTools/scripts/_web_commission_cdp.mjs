@@ -854,10 +854,17 @@ async function main() {
     try {
       // Hard deadline: a non-unref'd timer exits even if rm() hangs on a held
       // handle (these used to leak forever); the rm callback exits early.
-      const rmScript = "setTimeout(()=>process.exit(0),30000);require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>process.exit(0))";
+      const rmScript = "setTimeout(()=>process.exit(0),30000);if(process.platform==='win32'){try{require('child_process').spawnSync('icacls',[process.argv[1],'/grant',require('os').userInfo().username+':(OI)(CI)F','/T','/C','/Q'],{stdio:'ignore',timeout:15000})}catch(e){}}require('fs').rm(process.argv[1],{recursive:true,force:true,maxRetries:10,retryDelay:500},()=>process.exit(0))";
       spawn(process.execPath, ['-e', rmScript, userDataDir], { detached: true, stdio: 'ignore' }).unref();
     } catch { /* best effort */ }
   }
+}
+
+// Chrome's sandbox adds AppContainer ACEs the user cannot delete; grant
+// ourselves full control first (win32 only, failure ignored).
+function grantProfileDirAcl(p) {
+  if (process.platform !== 'win32') return;
+  try { spawnSync('icacls', [p, '/grant', `${os.userInfo().username}:(OI)(CI)F`, '/T', '/C', '/Q'], { stdio: 'ignore', timeout: 5000 }); } catch { /* best effort */ }
 }
 
 // Best-effort sweep of leftover kc-web-commission-* dirs older than 1 h
@@ -872,6 +879,7 @@ function sweepStaleProfileDirs() {
       const p = path.join(tmp, name);
       try {
         if (Date.now() - statSync(p).mtimeMs < 3600 * 1000) continue;
+        grantProfileDirAcl(p);
         rmSync(p, { recursive: true, force: true, maxRetries: 2, retryDelay: 50 });
       } catch { /* best effort */ }
     }

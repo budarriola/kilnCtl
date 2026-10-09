@@ -119,5 +119,12 @@ if ([int]$Matches[2] -lt 14) {
     throw "check_web_commission_cdp_driver.ps1: only $($Matches[2]) assertions ran (expected at least 14) -- assertions have been removed or the test returned early. Lower this floor deliberately if that was intended."
 }
 
+# Chrome's sandbox leaves AppContainer ACEs on profile dirs; both the sweep and
+# the detached rm must icacls-grant the user (win32 only) before removing.
+$driverSrc = Get-Content -Raw (Join-Path $PSScriptRoot "..\scripts\_web_commission_cdp.mjs")
+if ([regex]::Matches($driverSrc, "icacls").Count -lt 2 -or -not [regex]::IsMatch($driverSrc, "grantProfileDirAcl\(p\);\s*rmSync") -or -not [regex]::IsMatch($driverSrc, "platform==='win32'\)\{try\{require\('child_process'\)\.spawnSync\('icacls'")) {
+    throw "check_web_commission_cdp_driver.ps1: _web_commission_cdp.mjs lacks the win32 icacls grant before profile-dir removal (sweep and detached rm)."
+}
+
 Write-Host "check_web_commission_cdp_driver.ps1: driver test passed ($($Matches[2]) assertions)."
 exit 0
