@@ -120,6 +120,12 @@ void ui_home_refresh_cb(lv_timer_t *timer)
     /* Same plain-C getters dashboard_http.c's GET /api/status and
      * GET /api/profile_exec handlers call -- TODO.md 10.1a's shared-backend
      * rule, not a reimplementation. */
+    /* Audit L21: the heavy producer reads below (SPI, queue wait, heap walks)
+     * are skipped while Home is not the active screen. The cheap RAM reads
+     * above (topbar warning tier, wifi text) stay live. */
+    if (lv_obj_get_screen(s_ui_home_status_label) != lv_screen_active()) {
+        return;
+    }
     dashboard_status_t ds;
     dashboard_get_status(&ds);
     /* ui_home_refresh_cb runs on the LVGL task's 1 Hz timer and is already
@@ -464,6 +470,19 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
         }
 lag_notice_done:;
+    }
+
+    /* Audit L15 visibility rule (pinned by the _Static_asserts in
+     * ui_page_home.c): the lag notice yields to the trip strip, and the
+     * progress wrap hides while either strip shows, so the rail never shares
+     * the column with more than one extra block. */
+    if (s_ui_home_trip_strip != NULL && s_ui_home_lag_notice != NULL &&
+        !lv_obj_has_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
+    }
+    if ((s_ui_home_trip_strip != NULL && !lv_obj_has_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN)) ||
+        (s_ui_home_lag_notice != NULL && !lv_obj_has_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN))) {
+        lv_obj_add_flag(s_ui_home_progress_wrap, LV_OBJ_FLAG_HIDDEN);
     }
 
     /* Compact home chart -- see this file's header comment ("DESIRED SERIES

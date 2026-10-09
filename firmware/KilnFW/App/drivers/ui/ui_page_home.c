@@ -673,6 +673,7 @@ lv_obj_t *ui_page_home_build(void)
     lv_obj_set_style_text_color(s_ui_home_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_obj_set_width(s_ui_home_status_label, status_label_max_w);
     lv_label_set_long_mode(s_ui_home_status_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_ui_home_status_label, UI_THEME_FONT_LINE_HEIGHT_PX); /* audit L20 */
     lv_label_set_text(s_ui_home_status_label, "WiFi: --");
     /* Anchor to s_ui_home_topbar.icons (the FLOATING proxy ui_topbar.c builds), not
      * any individual icon button -- the proxy is the wider box and the one
@@ -730,7 +731,11 @@ lv_obj_t *ui_page_home_build(void)
      *
      * First child, above the chart, so a trip reads at the top of the screen
      * rather than displacing the button at the bottom. */
+    /* One line: 16 px font + 2 * 3 px pad. Fixed height makes LONG_DOT truncate
+     * instead of wrapping (audit L20). */
+#define UI_PAGE_HOME_STRIP_HEIGHT_PX (16 + 6)
     s_ui_home_trip_strip = lv_label_create(content);
+    lv_obj_set_height(s_ui_home_trip_strip, UI_PAGE_HOME_STRIP_HEIGHT_PX);
     lv_obj_add_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_width(s_ui_home_trip_strip, lv_pct(100));
     lv_label_set_long_mode(s_ui_home_trip_strip, LV_LABEL_LONG_DOT);
@@ -764,6 +769,7 @@ lv_obj_t *ui_page_home_build(void)
      * sentence) -- a glance must read this as a status readout, not a
      * fault banner. */
     s_ui_home_lag_notice = lv_label_create(content);
+    lv_obj_set_height(s_ui_home_lag_notice, UI_PAGE_HOME_STRIP_HEIGHT_PX);
     lv_obj_add_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
     lv_obj_set_width(s_ui_home_lag_notice, lv_pct(100));
     lv_label_set_long_mode(s_ui_home_lag_notice, LV_LABEL_LONG_DOT);
@@ -1096,7 +1102,8 @@ lv_obj_t *ui_page_home_build(void)
 
         lv_obj_t *name = lv_label_create(zrow);
         lv_obj_set_width(name, lv_pct(100));
-        lv_label_set_long_mode(name, LV_LABEL_LONG_CLIP);
+        lv_label_set_long_mode(name, LV_LABEL_LONG_DOT);
+        lv_obj_set_height(name, 11); /* one 10 pt line; audit L20 */
         lv_obj_set_style_text_color(name, UI_THEME_COLOR_TEXT_SECONDARY, 0);
         lv_obj_set_style_bg_opa(name, LV_OPA_TRANSP, 0);
         lv_obj_set_style_text_font(name, &lv_font_montserrat_10, 0);
@@ -1144,12 +1151,37 @@ lv_obj_t *ui_page_home_build(void)
      * gaps (4 each = 8) + gap(4) + watts line (14, zero when hidden) = 208,
      * against the row's own height (228, itself
      * UI_THEME_PAGE_CONTENT_BUDGET_PX(268) - action_row(36) - gap(4)). */
-#define UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX (14 + 4 + 22 + 4 + (3 * 46) + (2 * 4) + 4 + 14)
+/* Audit L15 (2026-10-09): the old assert compared the rail against the whole
+ * content height and ignored the trip strip, lag notice and progress bar that
+ * share the column with the graph row. Real LVGL line heights: montserrat_10
+ * = 11 px, montserrat_14 = 16 px. Rail = pad 2*4 + caption 11 + relay row 18
+ * + 3 zone blocks (11 + 2 + 16 + 2 + 8 = 39) + watts 11 + 5 inter-child gaps
+ * of 4. The one-line strips are pinned to UI_PAGE_HOME_STRIP_HEIGHT_PX below
+ * and the progress wrap is 4 + 8 + 2 + 16. ui_home_refresh_cb() enforces the
+ * visibility rule these asserts rely on: the lag notice yields to the trip
+ * strip, and the progress wrap hides whenever either strip shows, so at most
+ * one of {strip, progress wrap} is ever in the column with the graph row. */
+#define UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX \
+    ((2 * UI_THEME_SPACE_1) + 11 + 18 + (3 * (11 + 2 + 16 + 2 + 8)) + 11 + (5 * UI_THEME_SPACE_1))
+#define UI_PAGE_HOME_ACTION_ROW_PX 36
+#define UI_PAGE_HOME_PROGRESS_WRAP_PX (UI_THEME_PADDING_PX / 2 + 8 + 2 + 16)
+#define UI_PAGE_HOME_CONTENT_GAP_PX (UI_THEME_PADDING_PX / 2)
+/* graph_row + action_row + one optional block = 3 children = 2 gaps. */
 _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
-                   (UI_THEME_PAGE_CONTENT_BUDGET_PX - 36 - UI_THEME_SPACE_1),
-               "ui_page_home.c: dashboard rail no longer fits its column of the "
-               "action_row-height-reduced content budget -- split across more pages, don't scroll");
+                   (UI_THEME_PAGE_CONTENT_BUDGET_PX - UI_PAGE_HOME_ACTION_ROW_PX -
+                    UI_PAGE_HOME_STRIP_HEIGHT_PX - (2 * UI_PAGE_HOME_CONTENT_GAP_PX)),
+               "ui_page_home.c: dashboard rail no longer fits beside a visible trip strip / lag notice -- "
+               "split across more pages, don't scroll");
+_Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
+                   (UI_THEME_PAGE_CONTENT_BUDGET_PX - UI_PAGE_HOME_ACTION_ROW_PX -
+                    UI_PAGE_HOME_PROGRESS_WRAP_PX - (2 * UI_PAGE_HOME_CONTENT_GAP_PX)),
+               "ui_page_home.c: dashboard rail no longer fits beside the visible progress bar -- "
+               "split across more pages, don't scroll");
 #undef UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX
+#undef UI_PAGE_HOME_ACTION_ROW_PX
+#undef UI_PAGE_HOME_PROGRESS_WRAP_PX
+#undef UI_PAGE_HOME_CONTENT_GAP_PX
+#undef UI_PAGE_HOME_STRIP_HEIGHT_PX
 
     /* Progress bar -- see s_ui_home_progress_wrap's own static-declaration comment.
      * Sits directly under the chart, above action_row (the Start/Stop
@@ -1204,6 +1236,7 @@ _Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=
     s_ui_home_progress_label = lv_label_create(s_ui_home_progress_wrap);
     lv_obj_set_width(s_ui_home_progress_label, lv_pct(100));
     lv_label_set_long_mode(s_ui_home_progress_label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(s_ui_home_progress_label, 16); /* one 14 pt line; audit L20 */
     /* No explicit font: LV_FONT_MONTSERRAT_12 is not confirmed enabled in
      * this build's lv_conf (only checked-in for CI/example configs, not this
      * app's), so this stays on LV_FONT_DEFAULT (montserrat_14, ui_theme.h)

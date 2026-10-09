@@ -68,6 +68,13 @@ static lv_obj_t *s_peak_label;
 
 static lv_obj_t *s_slot_modal;
 static lv_obj_t *s_slot_grid;
+/* Audit L13: the grid shows SLOT_CELLS_PER_PAGE cells (2 rows x 4 cols, the
+ * only ones that fit the no-scroll box) and pages through all
+ * PROFILES_MAX_COUNT slots; only the visible page's slots are read. */
+#define SLOT_CELLS_PER_PAGE 8
+#define SLOT_PAGE_COUNT ((PROFILES_MAX_COUNT + SLOT_CELLS_PER_PAGE - 1) / SLOT_CELLS_PER_PAGE)
+static uint8_t s_slot_page;
+static lv_obj_t *s_slot_page_label;
 
 static profile_t *draft(void)
 {
@@ -173,7 +180,20 @@ static void slot_cancel_cb(lv_event_t *e)
 static void render_slot_grid(void)
 {
     lv_obj_clean(s_slot_grid);
-    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+    if (s_slot_page >= SLOT_PAGE_COUNT) {
+        s_slot_page = 0;
+    }
+    if (s_slot_page_label) {
+        char pg[16];
+        snprintf(pg, sizeof(pg), "%u/%u", (unsigned)(s_slot_page + 1), (unsigned)SLOT_PAGE_COUNT);
+        lv_label_set_text(s_slot_page_label, pg);
+    }
+    for (unsigned n = 0; n < SLOT_CELLS_PER_PAGE; n++) {
+        unsigned slot = (unsigned)s_slot_page * SLOT_CELLS_PER_PAGE + n;
+        if (slot >= PROFILES_MAX_COUNT) {
+            break;
+        }
+        uint8_t id = (uint8_t)slot;
         profile_t existing;
         bool used = profiles_http_get(id, &existing);
 
@@ -203,9 +223,24 @@ static void render_slot_grid(void)
     }
 }
 
+static void slot_prev_cb(lv_event_t *e)
+{
+    (void)e;
+    s_slot_page = (uint8_t)((s_slot_page + SLOT_PAGE_COUNT - 1) % SLOT_PAGE_COUNT);
+    render_slot_grid();
+}
+
+static void slot_next_cb(lv_event_t *e)
+{
+    (void)e;
+    s_slot_page = (uint8_t)((s_slot_page + 1) % SLOT_PAGE_COUNT);
+    render_slot_grid();
+}
+
 static void save_btn_cb(lv_event_t *e)
 {
     (void)e;
+    s_slot_page = 0;
     render_slot_grid();
     lv_obj_remove_flag(s_slot_modal, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_slot_modal);
@@ -243,17 +278,38 @@ static void build_slot_picker(lv_obj_t *scr)
     lv_obj_set_style_pad_gap(s_slot_grid, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_slot_grid, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *cancel_btn = lv_button_create(s_slot_modal);
-    lv_obj_set_size(cancel_btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
-    lv_obj_set_style_bg_color(cancel_btn, UI_THEME_COLOR_CARD, 0);
-    lv_obj_set_style_radius(cancel_btn, UI_THEME_CORNER_RADIUS_PX, 0);
-    lv_obj_add_event_cb(cancel_btn, slot_cancel_cb, LV_EVENT_CLICKED, NULL);
-    lv_obj_t *cancel_label = lv_label_create(cancel_btn);
-    lv_obj_set_style_text_color(cancel_label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
-    lv_label_set_text(cancel_label, "Cancel");
-    lv_obj_center(cancel_label);
-    lv_obj_update_layout(cancel_btn);
-    ui_theme_apply_touch_area(cancel_btn, false);
+    /* Footer: Prev / Cancel / Next with the page counter (same 44 px row the
+     * lone Cancel button used, so the overlay arithmetic above is unchanged). */
+    lv_obj_t *footer = lv_obj_create(s_slot_modal);
+    lv_obj_set_width(footer, lv_pct(100));
+    lv_obj_set_height(footer, 44);
+    lv_obj_set_style_bg_opa(footer, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(footer, 0, 0);
+    lv_obj_set_style_pad_all(footer, 0, 0);
+    lv_obj_set_flex_flow(footer, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(footer, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_style_pad_column(footer, UI_THEME_PADDING_PX, 0);
+    lv_obj_remove_flag(footer, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const struct { const char *text; lv_event_cb_t cb; } k_btns[3] = {
+        { "Prev", slot_prev_cb }, { "Cancel", slot_cancel_cb }, { "Next", slot_next_cb },
+    };
+    for (int i = 0; i < 3; i++) {
+        lv_obj_t *btn = lv_button_create(footer);
+        lv_obj_set_size(btn, UI_THEME_MIN_TOUCH_TARGET_PX + UI_THEME_PADDING_PX * 2, 44);
+        lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
+        lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+        lv_obj_add_event_cb(btn, k_btns[i].cb, LV_EVENT_CLICKED, NULL);
+        lv_obj_t *bl = lv_label_create(btn);
+        lv_obj_set_style_text_color(bl, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_label_set_text(bl, k_btns[i].text);
+        lv_obj_center(bl);
+        lv_obj_update_layout(btn);
+        ui_theme_apply_touch_area(btn, false);
+    }
+    s_slot_page_label = lv_label_create(footer);
+    lv_obj_set_style_text_color(s_slot_page_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_slot_page_label, "1/1");
 }
 
 void ui_page_profile_builder_review_prepare(void)

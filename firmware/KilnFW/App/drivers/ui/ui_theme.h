@@ -391,7 +391,9 @@ void ui_theme_apply_touch_area(lv_obj_t *widget, bool compact_layout);
 /* Registry capacity. Small and fixed on purpose -- this is meant for one or
  * two genuinely-dense clusters (a keypad, a tightly packed settings row),
  * not a general-purpose replacement for LVGL's own tree search. */
-#define UI_THEME_TOUCH_GROUP_MAX_GROUPS    4
+/* Sized for every ui_topbar_create() call site (21 as of 2026-10-09) plus
+ * headroom; overflow is logged and asserts in debug builds (audit L12). */
+#define UI_THEME_TOUCH_GROUP_MAX_GROUPS    32
 #define UI_THEME_TOUCH_GROUP_MAX_WIDGETS   16
 
 /**

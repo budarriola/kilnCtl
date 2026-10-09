@@ -467,8 +467,8 @@ static void edit_btn_cb(lv_event_t *e)
     (void)e;
     /* Editing a BUILT-IN must mean "save a copy" -- profiles_http_save()
      * treats requested_id >= PROFILES_MAX_COUNT as "first free slot" and
-     * ui_page_profile_builder_review.c's slot picker only ever offers the 8
-     * real user slots either way, so a builtin id (>= PROFILE_BUILTIN_ID_BASE)
+     * ui_page_profile_builder_review.c's slot picker pages through the
+     * real user slots (8 per page) either way, so a builtin id (>= PROFILE_BUILTIN_ID_BASE)
      * structurally cannot be the save target -- see
      * ui_page_profile_builder_zones.h's header comment. */
     ui_page_profile_builder_start_edit(s_profile_id);

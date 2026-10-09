@@ -387,6 +387,13 @@ void ui_lcd_lock_run_gated(const char *prompt, lcd_pin_role_t min_role, ui_lcd_l
         return;
     }
 
+    // A keypad is already open for an earlier request: refuse this one rather
+    // than overwrite the single global gate context (audit L19). The earlier
+    // request keeps its action; the new one is dropped (never run ungated).
+    if (ui_lcd_keypad_is_open()) {
+        return;
+    }
+
     // has_role() just returned false, for one of exactly two reasons: the
     // panel is locked (or a lock is pending), or a session is genuinely
     // active but its role is too low for this action. Only the first is

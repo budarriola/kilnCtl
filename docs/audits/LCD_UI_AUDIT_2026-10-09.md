@@ -231,7 +231,7 @@ Same class as L1-L3. Web equivalents are ADMIN.
 Fix: ADMIN role for each, with a role re-check inside the action as
 `ui/ui_page_safety.c:210` does.
 
-### L12 (MED) Topbar touch groups capped at 4, overflow silent
+### L12 (MED) **FIXED 2026-10-09 (topbar touch-group cap 32, loud overflow)** Topbar touch groups capped at 4, overflow silent
 
 `ui/ui_theme.h:394` sets `UI_THEME_TOUCH_GROUP_MAX_GROUPS` to 4;
 `ui/ui_theme.c:96` returns silently when full. Each topbar with two or more
@@ -247,7 +247,7 @@ Fix: raise the cap to cover every topbar (or give the topbar its own
 arbitration), log on overflow, and add a check counting call sites against
 the cap.
 
-### L13 (MED) Builder slot grid: 100 cells, 8 reachable
+### L13 (MED) **FIXED 2026-10-09 (slot grid paged 8 per page)** Builder slot grid: 100 cells, 8 reachable
 
 `ui/ui_page_profile_builder_review.c:165` loops to `PROFILES_MAX_COUNT` (100,
 `persist/profiles_types.h:30`), creating one cell per slot inside a grid
@@ -267,7 +267,7 @@ Fix: page the grid like the picker, and read slot state once per page.
 
 Fix: rebuild only when the saved set changes, and skip while hidden.
 
-### L15 (MED) Home rail can be clipped when status strips show
+### L15 (MED) **FIXED 2026-10-09 (rail asserted against strip/progress; progress hides while a strip shows)** Home rail can be clipped when status strips show
 
 `ui/ui_page_home.c` (rail `_Static_assert` near `:1120`, strips near
 `:725`-`:760`): the rail budget (208 px needed, 228 px allowed) assumes the
@@ -308,7 +308,7 @@ can change what the in-flight worker writes.
 
 Fix: check busy first, copy under the job mutex.
 
-### L18 (LOW) ui_confirm context handling
+### L18 (LOW) **FIXED 2026-10-09 (ui_confirm ctx freed in DELETE handler, NULL-checked)** ui_confirm context handling
 
 `ui/ui_confirm.c:98` does not NULL-check `lv_malloc()`, and the context is
 freed only in the yes/cancel callbacks (`:20`, `:65`), not in the
@@ -317,7 +317,7 @@ freed only in the yes/cancel callbacks (`:20`, `:65`), not in the
 
 Fix: NULL-check and bail; free only in the delete handler.
 
-### L19 (LOW) Keypad callback overwrite
+### L19 (LOW) **FIXED 2026-10-09 (second keypad show refused/cancelled)** Keypad callback overwrite
 
 `ui/ui_lcd_keypad.c:286`-`:296`: `ui_lcd_keypad_show()` overwrites the pending
 callback and user data while the keypad is open, and `ui/ui_lcd_lock.c:358`
@@ -327,7 +327,7 @@ needs a programmatic caller; not confirmed reachable.
 
 Fix: finish the previous request as cancelled, or refuse the second.
 
-### L20 (LOW) Labels wrap instead of truncating; Trip detail has no budget
+### L20 (LOW) **FIXED 2026-10-09 (fixed-height DOT labels, Trip detail line-budget assert)** Labels wrap instead of truncating; Trip detail has no budget
 
 In LVGL v9, LONG_DOT/LONG_CLIP truncate only with a fixed height
 (`ui/ui_page_safety.c:108` says so). The home trip strip and lag notice
@@ -341,7 +341,7 @@ all five filled likely exceed the 268 px content height and the bottom rows clip
 Fix: fixed one-line heights on those labels; pin line counts on Trip detail
 as `ui/ui_page_safety.c:277`/`:279` does, and shorten the latch text.
 
-### L21 (LOW) Hidden pages keep doing heavy reads
+### L21 (LOW) **FIXED 2026-10-09 (hidden Home/Diagnostics refresh skips heavy reads)** Hidden pages keep doing heavy reads
 
 `ui_home_refresh_cb` (`ui/ui_page_home_refresh.c` near `:124`) and the
 Diagnostics `refresh_cb` have no "page not active" early return, so they call

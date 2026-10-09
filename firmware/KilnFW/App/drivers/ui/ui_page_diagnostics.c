@@ -303,6 +303,25 @@ _Static_assert(UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX <= UI_THEME_PA
                "cold-junction rows exceed UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink "
                "a row or move content to another paged screen, don't widen the budget to match.");
 
+/* Trip Detail (audit L20): five rows, each pinned to a line budget and
+ * truncated with LONG_DOT. Worst case = rows * (pad 2 * 4) + pinned lines *
+ * line height + inter-row gaps. */
+#define UI_PAGE_DIAGNOSTICS_TD_REASON_LINES 1
+#define UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES  3
+#define UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES 3
+#define UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES 1
+#define UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES  2
+#define UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT    5
+#define UI_PAGE_DIAGNOSTICS_TD_WORST_CASE_HEIGHT_PX \
+    (((UI_PAGE_DIAGNOSTICS_TD_REASON_LINES + UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES + \
+       UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES + UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES + \
+       UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES) * UI_THEME_FONT_LINE_HEIGHT_PX) + \
+     (UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT * (UI_THEME_PADDING_PX / 2) * 2) + \
+     ((UI_PAGE_DIAGNOSTICS_TD_ROW_COUNT - 1) * (UI_THEME_PADDING_PX / 2)))
+_Static_assert(UI_PAGE_DIAGNOSTICS_TD_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
+               "ui_page_diagnostics.c: Trip Detail pinned rows exceed UI_THEME_PAGE_CONTENT_BUDGET_PX "
+               "-- cut a line budget, don't scroll.");
+
 /* Thermocouple Faults: MAX31856_CHANNEL_COUNT flex_grow(1) rows sharing one
  * page. Each row's own worst-case CONTENT (not its rendered flex-grow share)
  * is a wrapped fault line (up to
@@ -711,6 +730,12 @@ static void refresh_cb(lv_timer_t *timer)
 {
     (void)timer;
 
+    /* Audit L21: skip every heavy read (dashboard_get_status, thermo
+     * read-all) while Diagnostics is not the active screen. */
+    if (s_uptime_label == NULL || lv_obj_get_screen(s_uptime_label) != lv_screen_active()) {
+        return;
+    }
+
     char buf[48];
 
     /* Shared by the Safety Processor block below -- same plain-C getter
@@ -1055,9 +1080,8 @@ static void refresh_cb(lv_timer_t *timer)
          * reported one this boot. Only meaningful once a trip is actually
          * on record. */
         lv_label_set_text(s_td_latch_label,
-                           "This trip is LATCHED -- it does not clear on its own, and starting "
-                           "a new firing will NOT clear it. Only Clear Trip does, and it is "
-                           "refused while the cause is still present.");
+                           "LATCHED: a new firing will not clear it. Only Clear Trip does, "
+                           "once the cause is gone.");
     }
 
     /* ---- Board Health (folded from ui_page_board_health.c; the ESP32-S3
@@ -1342,6 +1366,17 @@ static lv_obj_t *build_full_text_row_accent(lv_obj_t *parent, const char *initia
     lv_label_set_long_mode(label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
     lv_label_set_text(label, initial_text);
+    return label;
+}
+
+/* Trip Detail row: fixed line budget with LONG_DOT so an over-long string is
+ * truncated rather than wrapping past the page (audit L20). LONG_DOT only
+ * truncates with a definite height. */
+static lv_obj_t *build_pinned_text_row(lv_obj_t *parent, const char *initial_text, int lines)
+{
+    lv_obj_t *label = build_full_text_row_accent(parent, initial_text, UI_THEME_COLOR_CARD);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);
+    lv_obj_set_height(label, lines * UI_THEME_FONT_LINE_HEIGHT_PX);
     return label;
 }
 
@@ -1670,11 +1705,11 @@ lv_obj_t *ui_page_diagnostics_build(void)
      * UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL comment). 5 wrapped full-text
      * rows, same shape as the Safety Processor page's own rows. */
     lv_obj_t *trip_detail_page = s_pages[UI_PAGE_DIAGNOSTICS_PAGE_TRIP_DETAIL];
-    s_td_reason_label = build_full_text_row(trip_detail_page, "Reason: --");
-    s_td_cause_label = build_full_text_row(trip_detail_page, "Detected: --");
-    s_td_remedy_label = build_full_text_row(trip_detail_page, "To clear: --");
-    s_td_source_label = build_full_text_row(trip_detail_page, "Fault source: --");
-    s_td_latch_label = build_full_text_row(trip_detail_page, "--");
+    s_td_reason_label = build_pinned_text_row(trip_detail_page, "Reason: --", UI_PAGE_DIAGNOSTICS_TD_REASON_LINES);
+    s_td_cause_label = build_pinned_text_row(trip_detail_page, "Detected: --", UI_PAGE_DIAGNOSTICS_TD_CAUSE_LINES);
+    s_td_remedy_label = build_pinned_text_row(trip_detail_page, "To clear: --", UI_PAGE_DIAGNOSTICS_TD_REMEDY_LINES);
+    s_td_source_label = build_pinned_text_row(trip_detail_page, "Fault source: --", UI_PAGE_DIAGNOSTICS_TD_SOURCE_LINES);
+    s_td_latch_label = build_pinned_text_row(trip_detail_page, "--", UI_PAGE_DIAGNOSTICS_TD_LATCH_LINES);
 
     /* Page 5: Thermocouple Faults -- back to ONE page for all
      * MAX31856_CHANNEL_COUNT channels as of 2026-09-04 (see this file's
