@@ -15,11 +15,13 @@ degrades, to INCONCLUSIVE, when no frame could be captured.
 from __future__ import annotations
 
 import math
+import re
 import os
 import tempfile
 import time
 from typing import Any, Dict, Optional
 
+from . import board_lock
 from . import judgments as J
 from . import lcd_sampler
 from .registry import CaseResult, Verdict, get_case
@@ -6047,6 +6049,479 @@ def _case_lcd20(ctx: dict) -> CaseResult:
     if res is None:
         return CaseResult(Verdict.NOT_RUN, reason="LCD-20 only runs inside OT-E11 (recovery image up)")
     return res
+# ---------------------------------------------------------------------------
+# LCD-10 / LCD-11 / LCD-12 -- the writing profile pages (start/stop confirm,
+# two-tap delete, builder save). Every one goes through the suite's
+# fail-closed write gate (board_lock.write_refusal), works ONLY on a
+# transient free USER slot it picks and records itself (never slot 7, the
+# hidden bench slot), and deletes what it created in `finally`. LCD-10 starts
+# a real firing for a few seconds and therefore also needs allow_heat.
+# ---------------------------------------------------------------------------
+
+_LCDWR_SLOT_RANGE = range(0, 16)
+_LCDWR_NAMES_WAIT_S = 5.0
+_LCDWR_DELETE_DEBOUNCE_S = 0.4
+_LCDWR_STALE_WAIT_S = 6.0
+_LCDWR_RUN_WAIT_S = 12.0
+_LCDWR_FREE_CELL_RE = re.compile(r"^(\d+) - free$")
+
+
+def _lcdwr_gate(ctx: dict) -> Optional[CaseResult]:
+    refusal = board_lock.write_refusal(ctx)
+    if refusal:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
+    return None
+
+
+def _lcdwr_env(ctx: dict) -> dict:
+    srv = _srv(ctx)
+    return {"ctx": ctx, "srv": srv, "ui": srv._ui_test, "now": ctx.get("_now", time.monotonic),
+            "sleep": ctx.get("_sleep", time.sleep), "observed": {}}
+
+
+def _lcdwr_free_slot(srv) -> "tuple[Optional[int], set]":
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    try:
+        used = {p.id for p in srv._profiles.list_all()}
+    except Exception:  # noqa: BLE001
+        return None, set()
+    for sid in _LCDWR_SLOT_RANGE:
+        if sid not in used and sid != _heat.BENCH_PROFILE_SLOT_ID:
+            return sid, used
+    return None, used
+
+
+def _lcdwr_save_tmp(env: dict, name: str, target_c: float) -> "tuple[Optional[int], Optional[CaseResult], set]":
+    """Save a one-segment transient profile into the first free user slot.
+    Returns (slot, None, ids_before) or (None, INCONCLUSIVE, ids_before)."""
+    from .. import devices
+    srv = env["srv"]
+    slot, used = _lcdwr_free_slot(srv)
+    if slot is None:
+        return None, CaseResult(Verdict.INCONCLUSIVE, reason="no free user profile slot; nothing written"), used
+    seg = [devices.ProfileSegment(target_c=target_c, ramp_c_per_hr=100.0, dwell_min=1)]
+    env["created"] = slot  # may exist from here on: the finally deletes it
+    try:
+        res = srv._profiles.save(slot, name, 1, seg)
+    except Exception as exc:  # noqa: BLE001
+        return None, CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save raised {type(exc).__name__}"), used
+    if not res.ok:
+        return None, CaseResult(Verdict.INCONCLUSIVE, reason=f"profiles.save refused: {res.error}"), used
+    env["observed"]["slot"] = slot
+    return slot, None, used
+
+
+def _lcdwr_delete_new(env: dict, ids_before: set) -> dict:
+    """Delete every user slot that appeared since `ids_before` (the run's own
+    creations only) and report whether the list is back to what it was."""
+    srv = env["srv"]
+    out: Dict[str, Any] = {}
+    extra = set()
+    if env.get("created") is not None and env["created"] not in ids_before:
+        extra.add(env["created"])
+    try:
+        extra |= {p.id for p in srv._profiles.list_all()} - ids_before
+    except Exception:  # noqa: BLE001
+        out["list_error"] = True
+    for sid in sorted(extra):
+        try:
+            srv._profiles.delete(sid)
+        except Exception as exc:  # noqa: BLE001
+            out[f"delete_{sid}"] = type(exc).__name__
+    try:
+        after = {p.id for p in srv._profiles.list_all()}
+        out["restored"] = after == ids_before
+    except Exception:  # noqa: BLE001
+        out["restored"] = None
+    return out
+
+
+def _lcdwr_open_picker(env: dict) -> "Optional[CaseResult]":
+    ui = env["ui"]
+    fail = _click_then_page(ui, "settings", "config")[0]
+    if fail is not None:
+        return fail
+    return _click_then_page(ui, "Profiles", "profiles")[0]
+
+
+def _lcdwr_find_row(env: dict, name: str) -> "Optional[dict]":
+    ui, touch = env["ui"], getattr(env["srv"], "_touch", None)
+    for _ in range(12):
+        tap, _b = _list_tap_targets_resolving_busy(ui)
+        targets = tap.get("targets", [])
+        row = next((r for r in _profile_rows_by_position(targets) if r.get("name") == name), None)
+        if row is not None:
+            return row
+        nxt = _diagnostics_next_target(targets)
+        if nxt is None or touch is None:
+            return None
+        _lcd13_tap(touch, nxt)
+    return None
+
+
+def _lcdwr_exec_state(srv) -> Optional[str]:
+    ex = _lcd22_exec_dict(srv)
+    return ex["state_name"] if ex else None
+
+
+def _lcdwr_finish(env: dict, result: Optional[CaseResult], ids_before: set) -> None:
+    """Common teardown tail: dismiss any leftover popup, go home, delete only
+    this run's own slots; a restore that did not verify turns a PASS into a
+    FAIL (never leaves a PASS standing over a dirty board)."""
+    ui = env["ui"]
+    cleanup: Dict[str, Any] = {}
+    try:
+        cleanup["dismiss"] = _dismiss_lcd19_overlay(env["ctx"], ui)
+    except Exception as exc:  # noqa: BLE001
+        cleanup["dismiss_error"] = type(exc).__name__
+    try:
+        cleanup["navigate_home"] = _navigate_home(ui)
+    except Exception as exc:  # noqa: BLE001
+        cleanup["navigate_error"] = type(exc).__name__
+    cleanup.update(_lcdwr_delete_new(env, ids_before))
+    env["observed"]["cleanup"] = cleanup
+    if result is not None:
+        result.observed = dict(result.observed or {})
+        result.observed.update(env["observed"])
+        if cleanup.get("restored") is not True and result.verdict == Verdict.PASS:
+            result.verdict = Verdict.FAIL
+            result.reason = "teardown could not verify the profile list was restored"
+
+
+# -- LCD-10 ----------------------------------------------------------------
+
+def _judge_lcd10(opened: bool, cancel_kept_idle: bool, start_ran: bool, stop_dialog: bool,
+                 stop_cancel_kept_running: bool, stopped: bool) -> CaseResult:
+    obs = {"start_opens_confirm": opened, "cancel_kept_idle": cancel_kept_idle,
+           "confirm_started": start_ran, "stop_opens_confirm": stop_dialog,
+           "stop_cancel_kept_running": stop_cancel_kept_running, "stopped": stopped}
+    steps = (("Start did not open the confirm dialog", opened),
+             ("Cancel on the Start confirm still started or left the dialog", cancel_kept_idle),
+             ("confirming Start did not start the firing", start_ran),
+             ("Stop from home did not open a confirm dialog", stop_dialog),
+             ("Cancel on the Stop confirm stopped the firing", stop_cancel_kept_running),
+             ("confirming Stop did not stop the firing", stopped))
+    for why, ok in steps:
+        if not ok:
+            return CaseResult(Verdict.FAIL, reason=why, observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _case_lcd10(ctx: dict) -> CaseResult:
+    gate = _lcdwr_gate(ctx)
+    if gate is not None:
+        return gate
+    if ctx.get("allow_heat") is not True:
+        return CaseResult(Verdict.NOT_RUN, reason="allow_heat=False: LCD-10 starts a real (seconds-long, low) firing")
+    host = ctx.get("host")
+    if not host:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no host in ctx; no action taken")
+    from . import cases_heat as _heat  # local import: avoids a module-load cycle
+    env = _lcdwr_env(ctx)
+    srv, ui, now, sleep, observed = env["srv"], env["ui"], env["now"], env["sleep"], env["observed"]
+    state = _lcdwr_exec_state(srv)
+    if state not in ("idle", "done", "faulted"):
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"executor not idle (state={state}); no action taken")
+    ok, why = _heat._capability_preflight_ok(ctx)
+    if not ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{why}; no action taken")
+    temps = _heat._zone_temps(ctx)
+    if not temps:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no valid thermo reading; no action taken")
+    target = min(temps.values()) + 15.0
+    ceil_ok, ceil_why = _heat._check_zone_ceilings(ctx, 1, target)
+    if not ceil_ok:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"{ceil_why}; no action taken")
+    _wake_and_home(ctx)
+
+    name = "LCD10_TMP"
+    result: Optional[CaseResult] = None
+    ids_before: set = set()
+    started = False
+    try:
+        slot, fail, ids_before = _lcdwr_save_tmp(env, name, target)
+        if fail is not None:
+            result = fail
+            return result
+        fail = _lcdwr_open_picker(env)
+        if fail is not None:
+            result = fail
+            return result
+        row = _lcdwr_find_row(env, name)
+        if row is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"row {name!r} not found on the picker")
+            return result
+        ui.click_by_name(row["name"])
+        if not _wait_for_page(ui, "profile_detail"):
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="profile row did not open the detail page")
+            return result
+
+        def names_with(*want):
+            return _lcd25_wait_names(env, lambda n: all(w in n for w in want), _LCDWR_NAMES_WAIT_S)
+
+        click = ui.click_by_name("Start")
+        observed["start_click"] = click.get("result")
+        n1, t1 = names_with("Start", "Cancel")
+        opened = n1 is not None and not t1 and click.get("result") in ("ok", "verdict_unknown")
+        if not opened:
+            result = _judge_lcd10(False, True, False, False, True, False)
+            return result
+        ui.click_by_name("Cancel")
+        sleep(1.0)
+        n2, _t2 = _lcd25_names(ui)
+        cancel_ok = _lcdwr_exec_state(srv) in ("idle", "done", "faulted") and n2 is not None and "Cancel" not in n2
+        if not cancel_ok:
+            result = _judge_lcd10(True, False, False, False, True, False)
+            return result
+        # Confirm path: from here a firing may exist; the finally stops it.
+        started = True
+        ui.click_by_name("Start")
+        names_with("Start", "Cancel")
+        ui.click_by_name("Start")
+        deadline = now() + _LCDWR_RUN_WAIT_S
+        while _lcdwr_exec_state(srv) != "running" and now() < deadline:
+            sleep(0.5)
+        start_ran = _lcdwr_exec_state(srv) == "running"
+        observed["running_seen"] = start_ran
+        stop_dialog = stop_cancel_kept = stopped = False
+        if start_ran:
+            observed["navigate_home"] = _navigate_home(ui)
+            observed["home_settled"] = _wait_for_home_settled(
+                ctx, ui, "start", min_wait_s=0.0, timeout_s=_LCDWR_NAMES_WAIT_S, log=[])
+            ui.click_by_name("start")
+            ns, ts = names_with("Stop", "Cancel")
+            stop_dialog = ns is not None and not ts
+            if stop_dialog:
+                ui.click_by_name("Cancel")
+                sleep(1.0)
+                stop_cancel_kept = _lcdwr_exec_state(srv) == "running"
+                if stop_cancel_kept:
+                    ui.click_by_name("start")
+                    names_with("Stop", "Cancel")
+                    ui.click_by_name("Stop")
+                    deadline = now() + _LCDWR_RUN_WAIT_S
+                    while _lcdwr_exec_state(srv) not in ("idle", "done") and now() < deadline:
+                        sleep(0.5)
+                    stopped = _lcdwr_exec_state(srv) in ("idle", "done")
+        result = _judge_lcd10(True, True, start_ran, stop_dialog, stop_cancel_kept, stopped)
+        return result
+    finally:
+        # Heat is stopped FIRST, unconditionally once a Start could have landed.
+        stop_err = None
+        if started or _lcdwr_exec_state(srv) == "running":
+            try:
+                srv._profiles.stop()
+            except Exception as exc:  # noqa: BLE001
+                stop_err = type(exc).__name__
+        deadline = now() + 15.0
+        while _lcdwr_exec_state(srv) not in ("idle", "done", "faulted") and now() < deadline:
+            sleep(0.5)
+        final_state = _lcdwr_exec_state(srv)
+        energized = _heat._read_energized(ctx)
+        observed["final_exec_state"] = final_state
+        observed["final_energized"] = energized
+        if stop_err:
+            observed["stop_error"] = stop_err
+        _lcdwr_finish(env, result, ids_before)
+        if result is not None and (final_state not in ("idle", "done", "faulted") or energized is not False):
+            result.verdict = Verdict.FAIL
+            result.reason = (f"cleanup not verified: executor={final_state!r}, energized={energized!r}; "
+                             "the firing may still be running")
+
+
+# -- LCD-11 ----------------------------------------------------------------
+
+def _judge_lcd11(armed_label: bool, first_tap_kept: bool, stale_kept: bool, second_tap_deleted: bool) -> CaseResult:
+    obs = {"armed_label_seen": armed_label, "first_tap_kept_profile": first_tap_kept,
+           "stale_tap_kept_profile": stale_kept, "second_tap_deleted": second_tap_deleted}
+    if not first_tap_kept:
+        return CaseResult(Verdict.FAIL, reason="a single Delete tap deleted the profile", observed=obs)
+    if not armed_label:
+        return CaseResult(Verdict.FAIL, reason="first Delete tap did not relabel the button 'Confirm?'", observed=obs)
+    if not stale_kept:
+        return CaseResult(Verdict.FAIL, reason="a tap after the 5 s window lapsed deleted the profile", observed=obs)
+    if not second_tap_deleted:
+        return CaseResult(Verdict.FAIL, reason="the second tap within 5 s did not delete the profile", observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _lcdwr_delete_btn(targets: "list[dict]", row_cy: float, labels=("Delete",)) -> Optional[dict]:
+    cands = [t for t in targets if t.get("name") in labels and not t.get("hidden")
+             and abs(float(t.get("cy", -1000)) - row_cy) <= 20]
+    return cands[0] if cands else None
+
+
+def _case_lcd11(ctx: dict) -> CaseResult:
+    gate = _lcdwr_gate(ctx)
+    if gate is not None:
+        return gate
+    env = _lcdwr_env(ctx)
+    srv, ui, sleep, observed = env["srv"], env["ui"], env["sleep"], env["observed"]
+    touch = getattr(srv, "_touch", None)
+    if touch is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no touch client; no action taken")
+    _wake_and_home(ctx)
+    name = "LCD11_TMP"
+    result: Optional[CaseResult] = None
+    ids_before: set = set()
+    try:
+        slot, fail, ids_before = _lcdwr_save_tmp(env, name, 50.0)
+        if fail is not None:
+            result = fail
+            return result
+        fail = _lcdwr_open_picker(env)
+        if fail is not None:
+            result = fail
+            return result
+        row = _lcdwr_find_row(env, name)
+        if row is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason=f"row {name!r} not found on the picker")
+            return result
+        tap, _b = _list_tap_targets_resolving_busy(ui)
+        btn = _lcdwr_delete_btn(tap.get("targets", []), float(row["cy"]))
+        if btn is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="no Delete button on the transient row")
+            return result
+
+        def exists() -> Optional[bool]:
+            try:
+                return slot in {p.id for p in srv._profiles.list_all()}
+            except Exception:  # noqa: BLE001
+                return None
+
+        def armed() -> bool:
+            t2, _ = _list_tap_targets_resolving_busy(ui)
+            return _lcdwr_delete_btn(t2.get("targets", []), float(row["cy"]), labels=("Confirm?",)) is not None
+
+        _lcd13_tap(touch, btn)  # arm
+        armed_label = armed()
+        first_kept = exists() is True
+        sleep(_LCDWR_STALE_WAIT_S)  # window lapses; the stale tap must only disarm
+        _lcd13_tap(touch, btn)
+        stale_kept = exists() is True
+        sleep(_LCDWR_DELETE_DEBOUNCE_S)
+        _lcd13_tap(touch, btn)  # arm again
+        sleep(_LCDWR_DELETE_DEBOUNCE_S)
+        _lcd13_tap(touch, btn)  # confirm within the window
+        sleep(1.0)
+        deleted = exists() is False
+        result = _judge_lcd11(armed_label, first_kept, stale_kept, deleted)
+        return result
+    finally:
+        _lcdwr_finish(env, result, ids_before)
+
+
+# -- LCD-12 ----------------------------------------------------------------
+
+_LCD12_TARGET_DIGITS = "80"
+
+
+def _judge_lcd12(page_zones: bool, page_segment: bool, page_review: bool, free_cell: Optional[str],
+                 saved: bool, target_ok: bool) -> CaseResult:
+    obs = {"zones_page": page_zones, "segment_page": page_segment, "review_page": page_review,
+           "free_cell": free_cell, "saved": saved, "saved_target_matches": target_ok}
+    for why, ok in (("New did not open the zones step", page_zones),
+                    ("Next did not open the segment step", page_segment),
+                    ("Next did not open the review step", page_review),
+                    ("review offered no free slot to save into", free_cell is not None),
+                    ("the profile did not appear in the profile list after Save", saved),
+                    ("the saved profile's target does not match the digits entered on the num pad", target_ok)):
+        if not ok:
+            return CaseResult(Verdict.FAIL, reason=why, observed=obs)
+    return CaseResult(Verdict.PASS, observed=obs)
+
+
+def _lcd12_step(env: dict, name: str, page: str) -> bool:
+    ui = env["ui"]
+    click = ui.click_by_name(name)
+    env["observed"].setdefault("clicks", {})[name] = click.get("result")
+    if click.get("result") not in ("ok", "verdict_unknown"):
+        return False
+    return bool(_wait_for_page(ui, page))
+
+
+def _case_lcd12(ctx: dict) -> CaseResult:
+    gate = _lcdwr_gate(ctx)
+    if gate is not None:
+        return gate
+    env = _lcdwr_env(ctx)
+    srv, ui, observed = env["srv"], env["ui"], env["observed"]
+    touch = getattr(srv, "_touch", None)
+    if touch is None:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no touch client; no action taken")
+    _wake_and_home(ctx)
+    result: Optional[CaseResult] = None
+    try:
+        ids_before = {p.id for p in srv._profiles.list_all()}
+    except Exception as exc:  # noqa: BLE001
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"could not list profiles ({type(exc).__name__}); no action taken")
+    try:
+        fail = _lcdwr_open_picker(env)
+        if fail is not None:
+            result = fail
+            return result
+        tap, _b = _list_tap_targets_resolving_busy(ui)
+        targets = tap.get("targets", [])
+        back, home = _find(targets, "back"), _find(targets, "home")
+        if not _profiles_topbar_icons(targets)["add"] or back is None or home is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="New icon not located on the profiles topbar")
+            return result
+        pitch = float(home["cx"]) - float(back["cx"])
+        _lcd13_tap(touch, {"cx": float(home["cx"]) + 3 * pitch, "cy": home["cy"]})
+        page_zones = bool(_wait_for_page(ui, "profile_builder_zones"))
+        if not page_zones:
+            result = _judge_lcd12(False, False, False, None, False, False)
+            return result
+        zt, _b = _list_tap_targets_resolving_busy(ui)
+        chip = next((t for t in zt.get("targets", []) if isinstance(t.get("name"), str)
+                     and t["name"].lower().startswith("zone") and not t.get("hidden")), None)
+        if chip is None:
+            result = CaseResult(Verdict.INCONCLUSIVE, reason="no zone chip target on the zones step",
+                                observed={"names": sorted(str(t.get("name")) for t in zt.get("targets", []))})
+            return result
+        ui.click_by_name(chip["name"])
+        if not _lcd12_step(env, "Next", "profile_builder_segment"):
+            result = _judge_lcd12(True, False, False, None, False, False)
+            return result
+        ui.click_by_name("Target C")
+        for ch in _LCD12_TARGET_DIGITS:
+            click = ui.click_by_name(ch)
+            if click.get("result") not in ("ok", "verdict_unknown"):
+                ui.click_by_name("Cancel")
+                result = CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                    reason=f"num pad key {ch!r} not tappable ({click.get('result')!r})")
+                return result
+        ui.click_by_name("Done")
+        if not _lcd12_step(env, "Next", "profile_builder_review"):
+            result = _judge_lcd12(True, True, False, None, False, False)
+            return result
+        ui.click_by_name("Save")
+        names, trunc = _lcd25_wait_names(
+            env, lambda n: any(_LCDWR_FREE_CELL_RE.match(str(x)) for x in n), _LCDWR_NAMES_WAIT_S)
+        free = None
+        if names is not None and not trunc:
+            for x in sorted(str(x) for x in names):
+                m = _LCDWR_FREE_CELL_RE.match(x)
+                if m and int(m.group(1)) != 7:
+                    free = x
+                    break
+        observed["slot_names"] = sorted(str(x) for x in (names or []))
+        if free is None:
+            result = _judge_lcd12(True, True, True, None, False, False)
+            return result
+        env["created"] = int(_LCDWR_FREE_CELL_RE.match(free).group(1))
+        ui.click_by_name(free)
+        env["sleep"](1.0)
+        saved = env["created"] in ({p.id for p in srv._profiles.list_all()} - ids_before)
+        target_ok = False
+        if saved:
+            detail = srv._profiles.get(env["created"])
+            segs = _lcd25_segs(detail) if detail is not None else None
+            target_ok = bool(segs) and len(segs) == 1 and segs[0][0] == float(_LCD12_TARGET_DIGITS)
+        result = _judge_lcd12(True, True, True, free, saved, target_ok)
+        return result
+    finally:
+        _lcdwr_finish(env, result, ids_before)
 
 
 _CASE_FUNCS = {
@@ -6069,6 +6544,9 @@ _CASE_FUNCS = {
     "LCD-24": _case_lcd24,
     "LCD-25": _case_lcd25,
     "LCD-26": _case_lcd26,
+    "LCD-10": _case_lcd10,
+    "LCD-11": _case_lcd11,
+    "LCD-12": _case_lcd12,
 }
 
 for _cid, _fn in _CASE_FUNCS.items():
