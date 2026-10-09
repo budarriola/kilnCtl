@@ -11,6 +11,7 @@
 
 #include "kiln_ui.h" /* kiln_ui_show("network_manage") -- manage_btn_cb() below */
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_prov.h"
@@ -281,7 +282,11 @@ static lv_obj_t *s_ap_section;
 static lv_obj_t *s_ap_ssid_label;
 static lv_obj_t *s_ap_password_label;
 static lv_obj_t *s_ap_qr;
-static char s_ap_qr_last[16 + WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN];
+/* L16: worst case every SSID/password character is escaped (2 bytes each) plus
+ * the "WIFI:T:WPA;S:" / ";P:" / ";;" framing and the NUL. */
+#define UI_PAGE_NETWORK_AP_QR_MAX (2 * (WIFI_PROV_SSID_MAX_LEN + WIFI_PROV_PASSWORD_MAX_LEN) + 32)
+static char s_ap_qr_last[UI_PAGE_NETWORK_AP_QR_MAX];
+static char s_ap_qr_uri[UI_PAGE_NETWORK_AP_QR_MAX]; /* static: keeps the lvgl task stack small */
 
 /* ---- AP identity edit modal -- see this file's 2026-08-21 header comment.
  * A "full-screen overlay built once, toggled hidden" shape, same pattern
@@ -305,6 +310,10 @@ typedef struct {
 } ap_identity_job_t;
 
 static ap_identity_job_t s_ap_identity_job;
+/* L17: validated values wait here until the busy check passes; only then are
+ * they copied into the job buffers the running worker reads. */
+static char s_ap_pending_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
+static char s_ap_pending_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
 static char s_ap_identity_job_ssid[WIFI_PROV_SSID_MAX_LEN + 1];
 static char s_ap_identity_job_password[WIFI_PROV_PASSWORD_MAX_LEN + 1];
 
@@ -358,6 +367,14 @@ static void apply_mode_button_style(lv_obj_t *btn, bool active)
     lv_obj_set_style_bg_color(btn, active ? UI_THEME_ACCENT_3 : UI_THEME_COLOR_CARD, 0);
 }
 
+/* L1 (LCD UI audit 2026-10-09): wifi_prov_set_mode() and the AP identity
+ * setters are ROUTE_TIER_ADMIN on the web (/provision), so every Wi-Fi write
+ * here runs through the admin gate (open when LCD auth is off). */
+static void mode_change_gated(void *user_data)
+{
+    request_mode_change((wifi_prov_mode_t)(intptr_t)user_data);
+}
+
 static void mode_home_btn_cb(lv_event_t *e)
 {
     (void)e;
@@ -365,13 +382,15 @@ static void mode_home_btn_cb(lv_event_t *e)
      * longer repaint themselves immediately (there is nothing confirmed yet
      * to repaint); refresh_cb()'s normal 1s poll picks up the real mode
      * once wifi_prov_set_mode() actually finishes. */
-    request_mode_change(WIFI_PROV_MODE_HOME);
+    ui_lcd_lock_run_gated("Admin PIN to change Wi-Fi mode", LCD_PIN_ROLE_ADMIN, mode_change_gated,
+                          (void *)(intptr_t)WIFI_PROV_MODE_HOME);
 }
 
 static void mode_ap_btn_cb(lv_event_t *e)
 {
     (void)e;
-    request_mode_change(WIFI_PROV_MODE_AP);
+    ui_lcd_lock_run_gated("Admin PIN to change Wi-Fi mode", LCD_PIN_ROLE_ADMIN, mode_change_gated,
+                          (void *)(intptr_t)WIFI_PROV_MODE_AP);
 }
 
 /* ---- "Manage networks" nav button -- navigates to ui_page_network_manage.c
@@ -397,6 +416,34 @@ static void update_qr_if_changed(lv_obj_t *qr, char *last, size_t last_cap, cons
     }
     snprintf(last, last_cap, "%s", new_data);
     lv_qrcode_update(qr, new_data, strlen(new_data));
+}
+
+/* L16: WIFI: QR payload. Per the ZXing/Android WIFI: spec, the characters
+ * \ ; , : " in SSID/password are backslash-escaped; an open AP (blank
+ * password) uses T:nopass with no P: field. */
+static size_t qr_escape_append(char *out, size_t cap, size_t pos, const char *in)
+{
+    for (; *in; in++) {
+        bool esc = (*in == '\\' || *in == ';' || *in == ',' || *in == ':' || *in == '"');
+        if (pos + (esc ? 2 : 1) >= cap) break;
+        if (esc) out[pos++] = '\\';
+        out[pos++] = *in;
+    }
+    out[pos] = '\0';
+    return pos;
+}
+
+static void build_wifi_qr_uri(char *out, size_t cap, const char *ssid, const char *password)
+{
+    size_t pos = 0;
+    const char *head = password[0] ? "WIFI:T:WPA;S:" : "WIFI:T:nopass;S:";
+    pos = (size_t)snprintf(out, cap, "%s", head);
+    pos = qr_escape_append(out, cap, pos, ssid);
+    if (password[0]) {
+        pos += (size_t)snprintf(out + pos, cap - pos, ";P:");
+        pos = qr_escape_append(out, cap, pos, password);
+    }
+    snprintf(out + pos, cap - pos, ";;");
 }
 
 /* ---- Refresh ---- */
@@ -495,14 +542,20 @@ static void refresh_cb(lv_timer_t *timer)
         const char *ap_ssid = wifi_prov_get_ap_ssid();
         const char *ap_password = wifi_prov_get_ap_password();
         lv_label_set_text(s_ap_ssid_label, ap_ssid);
+        /* L6: the AP password (and the QR code, which encodes it) is shown
+         * only to an admin session (or with LCD auth off). */
+        bool show_secret = ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN);
+        if (!show_secret) {
+            lv_label_set_text(s_ap_password_label, ap_password[0] ? "******** (admin)" : "(open network)");
+            lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN);
+            s_ap_qr_last[0] = '\0';
+            return;
+        }
+        lv_obj_remove_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN);
         lv_label_set_text(s_ap_password_label, ap_password[0] ? ap_password : "(open network)");
 
-        char uri[sizeof(s_ap_qr_last)];
-        /* WIFI:T:WPA;S:<ssid>;P:<password>;; -- password may be empty per
-         * an open AP, T:nopass is not used since section 1's AP password is
-         * never optional today (see this file's header comment). */
-        snprintf(uri, sizeof(uri), "WIFI:T:WPA;S:%s;P:%s;;", ap_ssid, ap_password);
-        update_qr_if_changed(s_ap_qr, s_ap_qr_last, sizeof(s_ap_qr_last), uri);
+        build_wifi_qr_uri(s_ap_qr_uri, sizeof(s_ap_qr_uri), ap_ssid, ap_password);
+        update_qr_if_changed(s_ap_qr, s_ap_qr_last, sizeof(s_ap_qr_last), s_ap_qr_uri);
     }
 }
 
@@ -563,7 +616,14 @@ static void ap_edit_password_focus_cb(lv_event_t *e)
  * dialog (see ap_edit_save_cb() below) -- ssid/password have already been
  * validated and copied into the job's module buffers by then, so this only
  * has to kick off the worker task. */
+static void ap_edit_apply_gated(void *user_data);
+
 static void ap_edit_confirm_apply_cb(void *user_data)
+{
+    ui_lcd_lock_run_gated("Admin PIN to change AP identity", LCD_PIN_ROLE_ADMIN, ap_edit_apply_gated, user_data);
+}
+
+static void ap_edit_apply_gated(void *user_data)
 {
     (void)user_data;
     if (!s_ap_identity_job.lock) {
@@ -580,6 +640,8 @@ static void ap_edit_confirm_apply_cb(void *user_data)
     xSemaphoreGive(s_ap_identity_job.lock);
     if (already_busy) return;
 
+    snprintf(s_ap_identity_job_ssid, sizeof(s_ap_identity_job_ssid), "%s", s_ap_pending_ssid);
+    snprintf(s_ap_identity_job_password, sizeof(s_ap_identity_job_password), "%s", s_ap_pending_password);
     lv_label_set_text(s_ap_edit_status_label, "Applying...");
 
     BaseType_t created = xTaskCreate(ap_identity_worker_task, "wifi_ap_id_ui", 4096, NULL, 5, NULL);
@@ -619,8 +681,8 @@ static void ap_edit_save_cb(lv_event_t *e)
         return;
     }
 
-    snprintf(s_ap_identity_job_ssid, sizeof(s_ap_identity_job_ssid), "%s", ssid);
-    snprintf(s_ap_identity_job_password, sizeof(s_ap_identity_job_password), "%s", password);
+    snprintf(s_ap_pending_ssid, sizeof(s_ap_pending_ssid), "%s", ssid);
+    snprintf(s_ap_pending_password, sizeof(s_ap_pending_password), "%s", password);
     lv_label_set_text(s_ap_edit_status_label, "");
 
     ui_confirm_params_t confirm = {
@@ -641,13 +703,20 @@ static void ap_edit_save_cb(lv_event_t *e)
  * (wifi_prov_get_ap_ssid()/_get_ap_password(), the same values this page
  * already shows in plain text just above the button) rather than opening to
  * blank fields the operator would have to re-type from scratch. */
-static void ap_edit_open_cb(lv_event_t *e)
+static void ap_edit_open_apply(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     lv_textarea_set_text(s_ap_edit_ssid_ta, wifi_prov_get_ap_ssid());
     lv_textarea_set_text(s_ap_edit_password_ta, wifi_prov_get_ap_password());
     lv_label_set_text(s_ap_edit_status_label, "");
     lv_obj_remove_flag(s_ap_edit_modal, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* L1/L6: opening the editor pre-fills the clear password, so it is admin-gated. */
+static void ap_edit_open_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Admin PIN to edit AP identity", LCD_PIN_ROLE_ADMIN, ap_edit_open_apply, NULL);
 }
 
 /* Same full-screen-overlay shape as ui_page_network_manage.c's connect

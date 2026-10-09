@@ -13,6 +13,7 @@
 #include "ui_page_profile_detail.h"
 #include "ui_page_profile_picker_format.h"
 #include "ui_profile_list_order.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
@@ -142,8 +143,20 @@ static void render(picker_ctx_t *ctx);
  * with the web (UI_PLAN.md 6.2): profiles_http_delete() THEN
  * profiles_favorites_set(id, false), in that order, so no dangling favorite
  * survives. */
+/* L11 (LCD UI audit 2026-10-09): the matching web route is ROUTE_TIER_ADMIN.
+ * Pressing the button without an admin session only raises the PIN keypad;
+ * the user taps again once authenticated (role re-checked at that tap). */
+static void admin_unlock_noop_cb(void *user_data)
+{
+    (void)user_data;
+}
+
 static void delete_btn_clicked_cb(lv_event_t *e)
 {
+    if (!ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        ui_lcd_lock_run_gated("Admin PIN to delete profile", LCD_PIN_ROLE_ADMIN, admin_unlock_noop_cb, NULL);
+        return;
+    }
     row_ud_t *ud = (row_ud_t *)lv_event_get_user_data(e);
     if (!ud || !ud->ctx) {
         return;

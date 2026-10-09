@@ -91,6 +91,13 @@ static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
     return found;
 }
 
+/* L22 (LCD UI audit 2026-10-09): Start runs the profile the Confirm Start
+ * dialog NAMED, not whatever the fallback chain resolves to a few seconds
+ * later (the running/last-boot profile can change while the dialog is open). */
+static uint8_t s_confirmed_start_id;
+static bool s_confirmed_start_valid;
+static bool s_confirmed_start_pending;
+
 static void ui_home_do_start(void)
 {
     /* Same action function dashboard_http.c's POST /api/profile_exec/start
@@ -102,7 +109,15 @@ static void ui_home_do_start(void)
      * who wants a *different* profile than either of those has to use the
      * web dashboard's picker. */
     uint8_t id = 0;
-    if (!ui_home_resolve_start_profile_id(&id)) {
+    bool have = false;
+    if (s_confirmed_start_pending) {
+        s_confirmed_start_pending = false;
+        have = s_confirmed_start_valid;
+        id = s_confirmed_start_id;
+    } else {
+        have = ui_home_resolve_start_profile_id(&id);
+    }
+    if (!have) {
         ESP_LOGW(UI_HOME_TAG, "Start pressed with no known profile id -- nothing has run this boot "
                       "and no picker on this page (TODO.md 10.3's no-scroll rewrite)");
         return;
@@ -196,6 +211,9 @@ static void ui_home_show_start_confirm(void)
 {
     uint8_t id = 0;
     bool have_id = ui_home_resolve_start_profile_id(&id);
+    s_confirmed_start_id = id;
+    s_confirmed_start_valid = have_id;
+    s_confirmed_start_pending = true;
 
     profile_t prof;
     bool have_prof = have_id && profiles_http_get(id, &prof);
@@ -382,7 +400,7 @@ void ui_home_edit_btn_cb(lv_event_t *e)
     /* Owner decision 2026-09-28: every LCD action other than viewing the
      * dashboard needs the PIN. tools/check_lcd_home_nav_gated.ps1 enforces
      * this mechanically. */
-    ui_lcd_lock_run_gated("Enter PIN to edit firing", LCD_PIN_ROLE_USER,
+    ui_lcd_lock_run_gated("Enter admin PIN to edit firing", LCD_PIN_ROLE_ADMIN,
                            ui_home_edit_btn_gated_cb, NULL);
 }
 

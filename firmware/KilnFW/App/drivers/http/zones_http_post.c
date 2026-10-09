@@ -35,30 +35,6 @@ static esp_err_t zones_post_body(httpd_req_t *req);
 #endif
 static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *body);
 
-/* Tracks the Pico ceiling DOWN to `live_max_temp_c` (the zone maxima now live in RAM, i.e. the
- * persisted ones), best-effort. Two callers: the post-commit LOWER below, and the lost-update 409,
- * which must undo the raise it already confirmed (HOST_TEST_GAP_AUDIT_2026-10-09.md gap 3: the
- * divergence check needs an exact match, so a raise left behind forces relays off until the next
- * save, and link-up reconcile only ever raises). apply_lower() targets exactly the maximum of the
- * array and only ever lowers, so the Pico never ends up tighter than the live zone maxima.
- * NOINLINE: keeps the reason buffer off zones_post_apply()'s frame (httpd stack blob class). */
-static ZONES_POST_NOINLINE void zones_post_track_ceiling_lower(const float *live_max_temp_c, const char *why)
-{
-    safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
-    char ceiling_reason[192];
-    ceiling_reason[0] = '\0';
-    safety_ceiling_sync_apply_lower(s_hw_safety, live_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
-                                     ceiling_reason, sizeof(ceiling_reason));
-    if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
-        ESP_LOGW(ZONES_HTTP_TAG,
-                 "%s: safety processor ceiling not lowered to track the live zone max -- %s -- "
-                 "Pico ceiling stays wider than the live max, which is safe, just not tight",
-                 why, ceiling_reason);
-    } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
-        ESP_LOGI(ZONES_HTTP_TAG, "%s: safety processor ceiling lowered to track the live zone max", why);
-    }
-}
-
 /* ---- move_zone_to_aux hook and the zone free/restore it drives ---- */
 static zones_move_to_aux_handler_t s_move_to_aux_handler;
 static zones_move_to_aux_is_request_t s_move_to_aux_is_request;
@@ -685,14 +661,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
      * across no producer call -- everything slow (ceiling write, parsing) happened above on `tmp`. */
     zones_cfg_lock();
     if (s_config_generation != gen_at_snapshot) {
-        /* The raise above may already have widened the Pico for `tmp`, which is now never
-         * committed: snapshot the live maxima under the lock, and lower back to them below. */
-        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
-        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
-            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
-        }
         zones_cfg_unlock();
-        zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones lost-update 409");
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: zones config changed concurrently (generation %u -> %u)",
                  (unsigned)gen_at_snapshot, (unsigned)s_config_generation);
         httpd_resp_set_status(req, "409 Conflict");
@@ -758,7 +727,18 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
             new_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
         }
-        zones_post_track_ceiling_lower(new_max_temp_c, "POST /api/zones");
+        safety_ceiling_sync_result_t ceiling_result = SAFETY_CEILING_SYNC_NONE;
+        char ceiling_reason[192];
+        safety_ceiling_sync_apply_lower(s_hw_safety, new_max_temp_c, MAX31856_CHANNEL_COUNT, &ceiling_result,
+                                         ceiling_reason, sizeof(ceiling_reason));
+        if (ceiling_result == SAFETY_CEILING_SYNC_LOWER_FAILED) {
+            ESP_LOGW(ZONES_HTTP_TAG,
+                     "safety processor ceiling not lowered to track the new (lower) zone max -- %s -- "
+                     "Pico ceiling stays wider than the new max, which is safe, just not tight",
+                     ceiling_reason);
+        } else if (ceiling_result == SAFETY_CEILING_SYNC_LOWERED) {
+            ESP_LOGI(ZONES_HTTP_TAG, "safety processor ceiling lowered to track the new zone max");
+        }
     }
 
     free(body);

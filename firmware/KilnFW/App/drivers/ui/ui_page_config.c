@@ -6,6 +6,8 @@
 
 #include "kiln_ui.h"
 #include "lvgl_port.h" /* lvgl_port_touch_cal_support() -- gates the Touch Calibration cell */
+#include "touch_cal_store.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_profiles.h"
 #include "ui_page_safety.h"
 #include "ui_theme.h"
@@ -74,10 +76,23 @@ static void network_nav_cb(lv_event_t *e)
     kiln_ui_show("network");
 }
 
+static void touch_cal_open_apply(void *user_data)
+{
+    (void)user_data;
+    kiln_ui_show("touch_cal");
+}
+
+/* L11: re-calibrating overwrites the saved calibration (admin on the web
+ * side). A never-calibrated board stays open: the PIN keypad itself needs
+ * working touch, so gating first-boot calibration would lock the board out. */
 static void touch_cal_nav_cb(lv_event_t *e)
 {
     (void)e;
-    kiln_ui_show("touch_cal");
+    if (!touch_cal_store_is_calibrated()) {
+        kiln_ui_show("touch_cal");
+        return;
+    }
+    ui_lcd_lock_run_gated("Admin PIN to recalibrate touch", LCD_PIN_ROLE_ADMIN, touch_cal_open_apply, NULL);
 }
 
 static void diagnostics_nav_cb(lv_event_t *e)
@@ -124,9 +139,12 @@ static void units_cell_set_label(void)
     lv_label_set_text(s_units_cell_label, buf);
 }
 
-static void units_toggle_cb(lv_event_t *e)
+static void units_toggle_apply(void *user_data)
 {
-    (void)e;
+    (void)user_data;
+    if (!ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        return;
+    }
     unit_pref_t next =
         unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
     esp_err_t err = unit_pref_set(next);
@@ -139,6 +157,13 @@ static void units_toggle_cb(lv_event_t *e)
         ESP_LOGW(TAG, "unit preference applied but not persisted -- will not survive a reboot");
     }
     units_cell_set_label();
+}
+
+/* L11: unit preference is an ADMIN web write. */
+static void units_toggle_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Admin PIN to change units", LCD_PIN_ROLE_ADMIN, units_toggle_apply, NULL);
 }
 
 static ui_topbar_t s_topbar;

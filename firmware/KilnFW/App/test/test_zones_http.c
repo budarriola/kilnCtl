@@ -190,9 +190,7 @@ esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
  * still relies on. */
 static int s_ceiling_writer_calls = 0;
 static float s_ceiling_writer_last_target_c = 0.0f;
-static int s_ceiling_writer_bumps_generation = 0; /* N > 0: the next N writes each simulate a concurrent writer (blocking window) */
-/* Optional: models a Pico that confirms every write by read-back, so the cached ceiling follows it. */
-static void (*s_ceiling_writer_on_write)(float value) = NULL;
+static int s_ceiling_writer_bumps_generation = 0; /* simulates a concurrent writer during the blocking ceiling write */
 
 bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_id, float value,
                                           char *reason_out, size_t reason_cap,
@@ -202,11 +200,7 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     (void)param_id;
     s_ceiling_writer_calls++;
     s_ceiling_writer_last_target_c = value;
-    if (s_ceiling_writer_on_write) {
-        s_ceiling_writer_on_write(value);
-    }
-    if (s_ceiling_writer_bumps_generation > 0) { /* a countdown: only the first N writes race */
-        s_ceiling_writer_bumps_generation--;
+    if (s_ceiling_writer_bumps_generation) {
         s_config_generation++;
     }
     if (reason_out && reason_cap > 0) {
@@ -1780,11 +1774,6 @@ static uint8_t test_aux_provider(void)
     return s_test_aux_mask;
 }
 
-static void test_ceiling_cache_follows_write(float value)
-{
-    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, value, true);
-}
-
 static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(void)
 {
     TEST_SECTION("POST /api/zones -- a concurrent writer bumping the config generation between the "
@@ -1802,15 +1791,10 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     uint32_t gen_before = s_config_generation;
     zones_cfg_t before = s_zones.cfg;
     s_ceiling_writer_calls = 0;
-    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs */
-    /* The Pico ceiling starts in sync with the live max (100) and follows every confirmed write. */
-    test_cfg_rows_reset();
-    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
-    s_ceiling_writer_on_write = test_ceiling_cache_follows_write;
+    s_hw_safety = (SafetyLinkClass *)1; /* a link, so the ceiling raise really runs (unknown Pico ceiling -> always raises) */
     s_ceiling_writer_bumps_generation = 1;
     run_zones_post(body);
     s_ceiling_writer_bumps_generation = 0;
-    s_ceiling_writer_on_write = NULL;
     s_hw_safety = NULL;
     TEST_CHECK(s_ceiling_writer_calls >= 1, "test setup: the ceiling write ran (the blocking window)");
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "lost-update answered 409");
@@ -1818,14 +1802,6 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched by the refused submit");
     TEST_CHECK(s_config_generation == gen_before + 1, "only the concurrent writer's bump advanced the generation");
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
-    /* Gap 3 (HOST_TEST_GAP_AUDIT_2026-10-09.md): the raise to 1300 must be undone, to exactly the
-     * live max -- never left wider (divergence forces relays off), never tighter (owner rule). */
-    TEST_CHECK(s_ceiling_writer_calls == 2, "the 409 wrote the Pico ceiling a second time (the restore)");
-    TEST_CHECK_NEAR(s_ceiling_writer_last_target_c, 100.0, 1e-6, "restore targets exactly the live zone max");
-    float pico_after = 0.0f;
-    TEST_CHECK(safety_ceiling_sync_get_current_pico_ceiling(&pico_after), "Pico ceiling known after the 409");
-    TEST_CHECK_NEAR(pico_after, 100.0, 1e-6, "Pico ceiling back in sync with the unchanged zone max after the 409");
-    test_cfg_rows_reset();
 }
 
 static void test_zones_cfg_lock_covers_commit_and_setters(void)

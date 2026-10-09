@@ -10,6 +10,7 @@
 #include "profile_feasibility.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profiles.h"
 #include "ui_theme.h"
@@ -73,8 +74,9 @@ static profile_t *draft(void)
     return ui_page_profile_builder_draft();
 }
 
-static void do_save(uint8_t slot)
+static void do_save_apply(void *user_data)
 {
+    uint8_t slot = (uint8_t)(uintptr_t)user_data;
     profile_t *d = draft();
     char err_msg[64] = "";
     uint8_t out_id = 0;
@@ -122,6 +124,15 @@ static void do_save(uint8_t slot)
      * show the pre-save list. */
     ui_page_profiles_refresh();
     kiln_ui_show("profiles");
+}
+
+/* L2 (LCD UI audit 2026-10-09): POST /api/profile is ROUTE_TIER_ADMIN, so a
+ * save/overwrite from the LCD needs the same admin gate (open when LCD auth
+ * is off). Every save path funnels through here. */
+static void do_save(uint8_t slot)
+{
+    ui_lcd_lock_run_gated("Admin PIN to save profile", LCD_PIN_ROLE_ADMIN, do_save_apply,
+                          (void *)(uintptr_t)slot);
 }
 
 static void confirm_overwrite_cb(void *user_data)

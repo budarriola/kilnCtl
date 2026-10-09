@@ -9,6 +9,9 @@
 #include "freertos/task.h"
 
 #include "kiln_ui.h"
+#include "ui_confirm.h"
+#include "ui_lcd_lock.h"
+#include "ui_page_profile_picker_format.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 #include "wifi_prov.h"
@@ -43,21 +46,32 @@ static const char *TAG __attribute__((unused)) = "ui_page_network_manage";
  * -- keep this arithmetic and those calls in sync. */
 #define UI_PAGE_NETWORK_MANAGE_TOGGLE_ROW_HEIGHT_PX 36
 #define UI_PAGE_NETWORK_MANAGE_SCAN_BTN_HEIGHT_PX   44
-#define UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX       70
+/* L4 (LCD UI audit 2026-10-09): the Scan and Saved lists page (fixed rows per
+ * page with prev/next, like the profile picker) instead of scrolling. Both
+ * list containers have LV_OBJ_FLAG_SCROLLABLE cleared. */
+#define UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE        2
+#define UI_PAGE_NETWORK_MANAGE_ROW_HEIGHT_PX        40
+#define UI_PAGE_NETWORK_MANAGE_PAGER_HEIGHT_PX      36
+#define UI_PAGE_NETWORK_MANAGE_ROW_GAP_PX           4
+#define UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX \
+    ((UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE * UI_PAGE_NETWORK_MANAGE_ROW_HEIGHT_PX) + \
+     ((UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE - 1) * UI_PAGE_NETWORK_MANAGE_ROW_GAP_PX))
 
 /* toggle_row + scan_btn + scan_status_label(1 line) + saved_title(1 line) +
- * saved_list, plus one UI_THEME_PADDING_PX/2 inter-child gap after each of
- * the 5 `content` children (4 gaps). */
+ * list + pager row, plus one UI_THEME_PADDING_PX/2 inter-child gap after each
+ * of the 6 `content` children (5 gaps). */
 #define UI_PAGE_NETWORK_MANAGE_WORST_CASE_HEIGHT_PX \
     (UI_PAGE_NETWORK_MANAGE_TOGGLE_ROW_HEIGHT_PX + UI_PAGE_NETWORK_MANAGE_SCAN_BTN_HEIGHT_PX + \
      UI_THEME_FONT_LINE_HEIGHT_PX + UI_THEME_FONT_LINE_HEIGHT_PX + UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX + \
-     (4 * (UI_THEME_PADDING_PX / 2)))
+     UI_PAGE_NETWORK_MANAGE_PAGER_HEIGHT_PX + (5 * (UI_THEME_PADDING_PX / 2)))
 
 _Static_assert(UI_PAGE_NETWORK_MANAGE_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,
                "ui_page_network_manage.c: the Scan/Saved list block exceeds "
                "UI_THEME_PAGE_CONTENT_BUDGET_PX (ui_theme.h) -- shrink "
-               "UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX or the toggle/Scan button heights, don't "
+               "UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE or the toggle/Scan button heights, don't "
                "widen the budget to match.");
+_Static_assert(UI_PAGE_NETWORK_MANAGE_SCAN_MAX <= 255 && UI_PAGE_NETWORK_MANAGE_SAVED_MAX <= 255,
+               "page helpers take uint8_t counts");
 
 /* ---- Scan/Saved toggle (mutually exclusive) ---- */
 static lv_obj_t *s_scan_toggle_btn;
@@ -67,6 +81,13 @@ static lv_obj_t *s_scan_status_label;
 static lv_obj_t *s_scan_list;
 static lv_obj_t *s_saved_title;
 static lv_obj_t *s_saved_list;
+static lv_obj_t *s_pager_prev_btn;
+static lv_obj_t *s_pager_next_btn;
+static lv_obj_t *s_pager_label;
+static uint8_t s_scan_page;
+static uint8_t s_saved_page;
+static size_t s_scan_count;
+static size_t s_saved_count;
 static bool s_list_showing_saved = true; /* which of Scan/Saved is visible -- default Saved */
 
 /* Last wifi_prov_scan() results -- kept alive as long as s_scan_list's
@@ -91,6 +112,7 @@ typedef struct {
 static scan_job_t s_scan_job;
 
 static void scan_row_clicked_cb(lv_event_t *e);
+static void render_scan_page(void);
 
 static void scan_worker_task(void *arg)
 {
@@ -112,6 +134,37 @@ static void scan_worker_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* Renders the current page of s_scan_results into s_scan_list (L4). */
+static void render_scan_page(void)
+{
+    lv_obj_clean(s_scan_list);
+    s_scan_page = ui_page_profile_picker_format_clamp_page(s_scan_page, (uint8_t)s_scan_count,
+                                                           UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE);
+    for (size_t slot = 0; slot < UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE; slot++) {
+        size_t i = ui_page_profile_picker_format_row_index(s_scan_page, (uint8_t)slot,
+                                                            UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE);
+        if (i >= s_scan_count) break;
+        /* Explicit %.*s width -- see ui_page_network.c's original comment on
+         * this exact snprintf() for why (-Wformat-truncation/-Werror). */
+        char text[WIFI_PROV_SSID_MAX_LEN + 16];
+        snprintf(text, sizeof(text), "%.*s%s  %d dBm", WIFI_PROV_SSID_MAX_LEN, s_scan_results[i].ssid,
+                 s_scan_results[i].secure ? " *" : "", (int)s_scan_results[i].rssi);
+        lv_obj_t *btn = lv_button_create(s_scan_list);
+        lv_obj_set_width(btn, lv_pct(100));
+        lv_obj_set_height(btn, UI_PAGE_NETWORK_MANAGE_ROW_HEIGHT_PX);
+        lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
+        lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+        lv_obj_remove_flag(btn, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(btn, scan_row_clicked_cb, LV_EVENT_CLICKED, &s_scan_results[i]);
+        lv_obj_t *label = lv_label_create(btn);
+        lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+        lv_label_set_text(label, text);
+        lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+        lv_obj_update_layout(btn);
+        ui_theme_apply_touch_area(btn, true);
+    }
+}
+
 static void apply_scan_job_result(void)
 {
     esp_err_t err;
@@ -130,6 +183,8 @@ static void apply_scan_job_result(void)
     if (!done) return;
 
     lv_obj_clean(s_scan_list);
+    s_scan_count = 0;
+    s_scan_page = 0;
 
     if (err == ESP_ERR_NOT_SUPPORTED) {
         lv_label_set_text(s_scan_status_label, "Scanning disabled in AP mode");
@@ -148,17 +203,9 @@ static void apply_scan_job_result(void)
     snprintf(status, sizeof(status), "%u network%s found", (unsigned)count, count == 1 ? "" : "s");
     lv_label_set_text(s_scan_status_label, status);
 
-    for (size_t i = 0; i < count; i++) {
-        /* Explicit %.*s width -- see ui_page_network.c's original comment on
-         * this exact snprintf() for why (-Wformat-truncation/-Werror). */
-        char text[WIFI_PROV_SSID_MAX_LEN + 16];
-        snprintf(text, sizeof(text), "%.*s%s  %d dBm", WIFI_PROV_SSID_MAX_LEN, s_scan_results[i].ssid,
-                 s_scan_results[i].secure ? " *" : "", (int)s_scan_results[i].rssi);
-        lv_obj_t *btn = lv_list_add_button(s_scan_list, NULL, text);
-        lv_obj_add_event_cb(btn, scan_row_clicked_cb, LV_EVENT_CLICKED, &s_scan_results[i]);
-        lv_obj_update_layout(btn);
-        ui_theme_apply_touch_area(btn, true);
-    }
+    s_scan_count = count;
+    s_scan_page = 0;
+    render_scan_page();
 }
 
 /* ---- Connect modal (scan-tap -> password entry -> wifi_prov_add_network()) ----
@@ -316,9 +363,11 @@ static void connect_cancel_cb(lv_event_t *e)
     connect_modal_close();
 }
 
-static void connect_submit_cb(lv_event_t *e)
+/* L1: wifi_prov_add_network() is ROUTE_TIER_ADMIN on the web (/provision), so
+ * the LCD needs the same admin gate (open when LCD auth is off). */
+static void connect_submit_apply(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     if (!s_connect_job.lock) {
         lv_label_set_text(s_connect_status_label, "Could not save credentials");
         return;
@@ -347,19 +396,31 @@ static void connect_submit_cb(lv_event_t *e)
     }
 }
 
+static void connect_submit_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Admin PIN to add network", LCD_PIN_ROLE_ADMIN, connect_submit_apply, NULL);
+}
+
+static void scan_row_open_apply(void *user_data)
+{
+    wifi_prov_scan_result_t *result = (wifi_prov_scan_result_t *)user_data;
+    connect_modal_open(result->ssid);
+}
+
 static void scan_row_clicked_cb(lv_event_t *e)
 {
-    wifi_prov_scan_result_t *result = (wifi_prov_scan_result_t *)lv_event_get_user_data(e);
-    connect_modal_open(result->ssid);
+    /* Gate before the operator types a password, not only at submit. */
+    ui_lcd_lock_run_gated("Admin PIN to add network", LCD_PIN_ROLE_ADMIN, scan_row_open_apply,
+                          lv_event_get_user_data(e));
 }
 
 /* ---- Forget confirmation ---- */
 
-static void forget_confirm_yes_cb(lv_event_t *e)
+/* L1: wifi_prov_forget_network() is ROUTE_TIER_ADMIN on the web (/forget). */
+static void forget_apply(void *user_data)
 {
-    lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
-    lv_msgbox_close(mbox);
-
+    (void)user_data;
     if (!s_forget_job.lock) {
         ESP_LOGW(TAG, "wifi_prov_forget_network(%s) not started: no job lock", s_pending_forget_ssid);
         return;
@@ -388,11 +449,15 @@ static void forget_confirm_yes_cb(lv_event_t *e)
     }
 }
 
-static void forget_confirm_no_cb(lv_event_t *e)
+/* L10: the Forget dialog is a ui_confirm so ui_confirm_close_open() closes it
+ * when the LCD session relocks (a raw msgbox would stay tappable). */
+static void forget_confirm_yes_cb(void *user_data)
 {
-    lv_obj_t *mbox = (lv_obj_t *)lv_event_get_user_data(e);
-    lv_msgbox_close(mbox);
+    (void)user_data;
+    ui_lcd_lock_run_gated("Admin PIN to forget network", LCD_PIN_ROLE_ADMIN, forget_apply, NULL);
 }
+
+static char s_forget_body[96];
 
 static void forget_row_clicked_cb(lv_event_t *e)
 {
@@ -405,18 +470,21 @@ static void forget_row_clicked_cb(lv_event_t *e)
     size_t saved_count = 0;
     wifi_prov_get_saved_networks_cached(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &saved_count);
 
-    lv_obj_t *mbox = lv_msgbox_create(NULL);
-    lv_msgbox_add_title(mbox, "Forget network");
     if (saved_count <= 1) {
-        lv_msgbox_add_text(mbox, "This is the last saved network. Forgetting it will switch this "
-                                  "board to Access Point mode. Continue?");
+        snprintf(s_forget_body, sizeof(s_forget_body),
+                 "This is the last saved network. Forgetting it will switch this board to Access Point mode. Continue?");
     } else {
-        lv_msgbox_add_text_fmt(mbox, "Forget \"%s\"?", s_pending_forget_ssid);
+        snprintf(s_forget_body, sizeof(s_forget_body), "Forget \"%s\"?", s_pending_forget_ssid);
     }
-    lv_obj_t *yes = lv_msgbox_add_footer_button(mbox, "Forget");
-    lv_obj_add_event_cb(yes, forget_confirm_yes_cb, LV_EVENT_CLICKED, mbox);
-    lv_obj_t *no = lv_msgbox_add_footer_button(mbox, "Cancel");
-    lv_obj_add_event_cb(no, forget_confirm_no_cb, LV_EVENT_CLICKED, mbox);
+    ui_confirm_params_t p = {
+        .title = "Forget network",
+        .body = s_forget_body,
+        .confirm_label = "Forget",
+        .confirm_color = UI_THEME_ACCENT_5,
+        .on_confirm = forget_confirm_yes_cb,
+        .user_data = NULL,
+    };
+    ui_confirm_show(&p);
 }
 
 /* ---- Scan ---- */
@@ -452,10 +520,14 @@ static void scan_btn_cb(lv_event_t *e)
 
 /* ---- Saved networks ---- */
 
+/* L14: signature of what the saved list last rendered; the list is rebuilt
+ * only when it changes (and only while the Saved view is showing), so a tap on
+ * a row is never destroyed under the finger by a periodic rebuild. */
+static uint32_t s_saved_sig;
+static bool s_saved_sig_valid;
+
 static void refresh_saved_list(void)
 {
-    lv_obj_clean(s_saved_list);
-
     static wifi_prov_saved_network_t saved[UI_PAGE_NETWORK_MANAGE_SAVED_MAX];
     /* Copies of each SSID that outlive this function -- see
      * ui_page_network.c's original comment on this exact array for why. */
@@ -471,15 +543,44 @@ static void refresh_saved_list(void)
      * see wifi_prov.h's wifi_prov_get_saved_networks_cached() doc comment. */
     wifi_prov_get_saved_networks_cached(saved, UI_PAGE_NETWORK_MANAGE_SAVED_MAX, &count);
 
+    s_saved_count = count;
     if (count == 0) {
-        lv_list_add_text(s_saved_list, "No saved networks");
+        s_saved_page = 0;
+    } else {
+        s_saved_page = ui_page_profile_picker_format_clamp_page(s_saved_page, (uint8_t)count,
+                                                               UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE);
+    }
+    const char *sig_active = wifi_prov_get_saved_ssid();
+    bool sig_connected = wifi_prov_is_sta_connected();
+    uint32_t sig = 2166136261u;
+    sig = (sig ^ (uint32_t)count) * 16777619u;
+    sig = (sig ^ s_saved_page) * 16777619u;
+    sig = (sig ^ (sig_connected ? 1u : 0u)) * 16777619u;
+    for (const char *c = sig_active ? sig_active : ""; *c; c++) sig = (sig ^ (uint8_t)*c) * 16777619u;
+    for (size_t k = 0; k < count; k++) {
+        sig = (sig ^ 0xFFu) * 16777619u;
+        for (const char *c = saved[k].ssid; *c; c++) sig = (sig ^ (uint8_t)*c) * 16777619u;
+    }
+    if (s_saved_sig_valid && sig == s_saved_sig) {
+        return;
+    }
+    s_saved_sig = sig;
+    s_saved_sig_valid = true;
+    lv_obj_clean(s_saved_list);
+    if (count == 0) {
+        lv_obj_t *none = lv_label_create(s_saved_list);
+        lv_obj_set_style_text_color(none, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+        lv_label_set_text(none, "No saved networks");
         return;
     }
 
     const char *active_ssid = wifi_prov_get_saved_ssid();
     bool sta_connected = wifi_prov_is_sta_connected();
 
-    for (size_t i = 0; i < count; i++) {
+    for (size_t slot = 0; slot < UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE; slot++) {
+        size_t i = ui_page_profile_picker_format_row_index(s_saved_page, (uint8_t)slot,
+                                                            UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE);
+        if (i >= count) break;
         snprintf(ssid_ctx[i], sizeof(ssid_ctx[i]), "%s", saved[i].ssid);
 
         bool connected = sta_connected && strcmp(saved[i].ssid, active_ssid) == 0;
@@ -488,7 +589,8 @@ static void refresh_saved_list(void)
 
         lv_obj_t *row = lv_obj_create(s_saved_list);
         lv_obj_set_width(row, lv_pct(100));
-        lv_obj_set_height(row, LV_SIZE_CONTENT);
+        lv_obj_set_height(row, UI_PAGE_NETWORK_MANAGE_ROW_HEIGHT_PX);
+        lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_set_style_bg_color(row, UI_THEME_COLOR_CARD, 0);
         lv_obj_set_style_radius(row, 0, 0);
         lv_obj_set_style_pad_all(row, UI_THEME_PADDING_PX / 2, 0);
@@ -500,6 +602,7 @@ static void refresh_saved_list(void)
         lv_label_set_text(label, text);
 
         lv_obj_t *forget_btn = lv_button_create(row);
+        lv_obj_set_height(forget_btn, UI_PAGE_NETWORK_MANAGE_ROW_HEIGHT_PX - UI_THEME_PADDING_PX);
         lv_obj_set_style_bg_color(forget_btn, UI_THEME_ACCENT_5, 0);
         lv_obj_set_style_radius(forget_btn, UI_THEME_CORNER_RADIUS_PX, 0);
         lv_obj_add_event_cb(forget_btn, forget_row_clicked_cb, LV_EVENT_CLICKED, ssid_ctx[i]);
@@ -511,6 +614,38 @@ static void refresh_saved_list(void)
         ui_theme_apply_touch_area(forget_btn, true);
     }
 }
+
+/* ---- Pager (L4) ---- */
+
+static void update_pager(void)
+{
+    size_t count = s_list_showing_saved ? s_saved_count : s_scan_count;
+    uint8_t page = s_list_showing_saved ? s_saved_page : s_scan_page;
+    uint8_t pages = ui_page_profile_picker_format_page_count((uint8_t)count, UI_PAGE_NETWORK_MANAGE_ROWS_PER_PAGE);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u / %u", (unsigned)page + 1u, (unsigned)pages);
+    lv_label_set_text(s_pager_label, buf);
+    if (page == 0) lv_obj_add_state(s_pager_prev_btn, LV_STATE_DISABLED);
+    else lv_obj_remove_state(s_pager_prev_btn, LV_STATE_DISABLED);
+    if ((uint8_t)(page + 1u) >= pages) lv_obj_add_state(s_pager_next_btn, LV_STATE_DISABLED);
+    else lv_obj_remove_state(s_pager_next_btn, LV_STATE_DISABLED);
+}
+
+static void pager_step(int step)
+{
+    if (s_list_showing_saved) {
+        int p = (int)s_saved_page + step;
+        s_saved_page = (uint8_t)(p < 0 ? 0 : p);
+    } else {
+        int p = (int)s_scan_page + step;
+        s_scan_page = (uint8_t)(p < 0 ? 0 : p);
+        render_scan_page();
+    }
+    refresh_cb(NULL);
+}
+
+static void pager_prev_cb(lv_event_t *e) { (void)e; pager_step(-1); }
+static void pager_next_cb(lv_event_t *e) { (void)e; pager_step(+1); }
 
 /* ---- Refresh ---- */
 
@@ -534,10 +669,59 @@ static void refresh_cb(lv_timer_t *timer)
     apply_toggle_style(s_scan_toggle_btn, !s_list_showing_saved);
     apply_toggle_style(s_saved_toggle_btn, s_list_showing_saved);
 
-    /* Cheap (<=8 rows), gated on nothing -- same reasoning as
-     * ui_page_network.c's original: keeps the "connected" highlight and any
-     * web-side change in sync every tick. */
-    refresh_saved_list();
+    /* L14: rebuild only while the Saved view shows, and only on change. */
+    if (s_list_showing_saved) {
+        refresh_saved_list();
+    }
+    update_pager();
+}
+
+/* Fixed-height, non-scrolling row container (L4). */
+static lv_obj_t *build_page_list(lv_obj_t *parent)
+{
+    lv_obj_t *list = lv_obj_create(parent);
+    lv_obj_set_width(list, lv_pct(100));
+    lv_obj_set_height(list, UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX);
+    lv_obj_set_style_bg_opa(list, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(list, 0, 0);
+    lv_obj_set_style_pad_all(list, 0, 0);
+    lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_style_pad_gap(list, UI_PAGE_NETWORK_MANAGE_ROW_GAP_PX, 0);
+    lv_obj_remove_flag(list, LV_OBJ_FLAG_SCROLLABLE);
+    return list;
+}
+
+static lv_obj_t *build_pager_btn(lv_obj_t *row, const char *text, lv_event_cb_t cb)
+{
+    lv_obj_t *btn = lv_button_create(row);
+    lv_obj_set_size(btn, 80, UI_PAGE_NETWORK_MANAGE_PAGER_HEIGHT_PX);
+    lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);
+    lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_set_style_text_color(label, UI_THEME_COLOR_TEXT_PRIMARY, 0);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    lv_obj_update_layout(btn);
+    ui_theme_apply_touch_area(btn, true);
+    return btn;
+}
+
+static void build_pager(lv_obj_t *parent)
+{
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_width(row, lv_pct(100));
+    lv_obj_set_height(row, UI_PAGE_NETWORK_MANAGE_PAGER_HEIGHT_PX);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    lv_obj_remove_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    s_pager_prev_btn = build_pager_btn(row, "Prev", pager_prev_cb);
+    s_pager_label = lv_label_create(row);
+    lv_obj_set_style_text_color(s_pager_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
+    lv_label_set_text(s_pager_label, "1 / 1");
+    s_pager_next_btn = build_pager_btn(row, "Next", pager_next_cb);
 }
 
 /* ---- Build ---- */
@@ -705,17 +889,16 @@ lv_obj_t *ui_page_network_manage_build(void)
     lv_obj_set_style_text_color(s_scan_status_label, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_scan_status_label, "Tap Scan to search for networks");
 
-    s_scan_list = lv_list_create(content);
-    lv_obj_set_width(s_scan_list, lv_pct(100));
-    lv_obj_set_height(s_scan_list, UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX);
+    s_scan_list = build_page_list(content);
 
     s_saved_title = lv_label_create(content);
     lv_obj_set_style_text_color(s_saved_title, UI_THEME_COLOR_TEXT_SECONDARY, 0);
     lv_label_set_text(s_saved_title, "Saved networks:");
 
-    s_saved_list = lv_list_create(content);
-    lv_obj_set_width(s_saved_list, lv_pct(100));
-    lv_obj_set_height(s_saved_list, UI_PAGE_NETWORK_MANAGE_LIST_HEIGHT_PX);
+    s_saved_list = build_page_list(content);
+    s_saved_sig_valid = false; /* new list object: force the first fill (L14) */
+
+    build_pager(content);
 
     ui_topbar_raise(&tb);
 

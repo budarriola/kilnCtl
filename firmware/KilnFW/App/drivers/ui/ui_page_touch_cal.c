@@ -8,6 +8,7 @@
 #include "kiln_ui.h"
 #include "lvgl_port.h"
 #include "touch_cal_store.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 
 // 2026-08-19 no-scroll audit (UI_PLAN.md section 3, LCD item 4): this page
@@ -174,6 +175,13 @@ static void finish_calibration(void)
         return;
     }
 
+    /* L11: overwriting an existing calibration is an admin write; a first-boot
+     * (never calibrated) save stays open since the PIN keypad needs touch. */
+    if (touch_cal_store_is_calibrated() && !ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        ESP_LOGW(TAG, "calibration not saved: admin session required");
+        kiln_ui_show("config");
+        return;
+    }
     err = touch_cal_store_save(&cal);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "calibration computed but not saved (%s) -- will need to be redone after reboot",

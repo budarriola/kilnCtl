@@ -27,6 +27,7 @@
 #include "thermo_owner.h"
 #include "unit_pref.h"
 #include "kiln_ui.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
@@ -1447,9 +1448,21 @@ static void build_relay_life_row(lv_obj_t *parent, unsigned relay, const char *n
  * flash-worker jobs normally take (a single NVS blob write/read) but short
  * enough that a genuine freeze reads as a momentary pause, not a hang. */
 #define UI_PAGE_DIAGNOSTICS_CRASH_ACK_WAIT_MS 300u
+/* L11 (LCD UI audit 2026-10-09): the matching web route is ROUTE_TIER_ADMIN.
+ * Pressing the button without an admin session only raises the PIN keypad;
+ * the user taps again once authenticated (role re-checked at that tap). */
+static void admin_unlock_noop_cb(void *user_data)
+{
+    (void)user_data;
+}
+
 static void crash_ack_btn_clicked_cb(lv_event_t *e)
 {
     (void)e;
+    if (!ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
+        ui_lcd_lock_run_gated("Admin PIN to acknowledge crash", LCD_PIN_ROLE_ADMIN, admin_unlock_noop_cb, NULL);
+        return;
+    }
     int64_t now = (int64_t)hal_time_now_us();
     /* LOW-4 debounce: ignore a confirm tap that arrives less than DEBOUNCE_US
      * after the arm tap, so a touch bounce cannot arm-and-confirm from one

@@ -11,6 +11,7 @@
 #include "safety_trip_words.h" /* safety_fault_source_words() -- decode the safety fault-source
                                  * mask instead of showing the operator a bare hex value
                                  * (ROADMAP.md M13). */
+#include "ui_lcd_lock.h"
 #include "ui_page_temperature_safety.h" /* UI_PLAN.md 6.3: the K4 safety-relay label text, pure
                                           * and host-testable -- see that file's header comment. */
 #include "ui_theme.h"
@@ -111,13 +112,10 @@ static const char *TAG = "ui_page_temperature";
 #define UI_PAGE_TEMPERATURE_ZONE_ROW_HEIGHT_PX \
     (((UI_THEME_PADDING_PX / 2) * 2) + UI_THEME_FONT_LINE_HEIGHT_PX)
 
-/* Relay button row -- fixed height + internally scrollable beyond that, same
- * sanctioned "small internally-scrollable list, not page-level scrolling"
- * pattern ui_page_network.c's saved-network list uses (fixed lv_obj height,
- * LV_OBJ_FLAG_SCROLLABLE left set). KILN_IO_RELAY_COUNT buttons at
- * UI_THEME_MIN_TOUCH_TARGET_PX*2 wide comfortably wrap to 2 rows within one
- * button row's worth of height on a 480px-wide panel; a future relay count
- * that needs more rows scrolls inside this box rather than growing the page. */
+/* Relay button row -- fixed height, NOT scrollable (L5, LCD UI audit
+ * 2026-10-09). The KILN_IO_RELAY_COUNT buttons share one non-wrapping row
+ * (each flex-grows to an equal share of the width), so the row is exactly one
+ * button tall and never overflows. */
 #define UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX 40
 
 /* Board-wide relay ceiling a single zone (or the flat Relays section) can
@@ -325,9 +323,9 @@ static void refresh_cb(lv_timer_t *timer)
     }
 }
 
-static void relay_toggle_cb(lv_event_t *e)
+static void relay_toggle_apply(void *user_data)
 {
-    relay_ctx_t *ctx = (relay_ctx_t *)lv_event_get_user_data(e);
+    relay_ctx_t *ctx = (relay_ctx_t *)user_data;
 
     /* Second, independent gate against a zone-owned relay -- the button is
      * LV_STATE_DISABLED (refresh_cb() above) whenever this is true, which
@@ -432,6 +430,16 @@ static void relay_toggle_cb(lv_event_t *e)
     refresh_cb(NULL); /* repaint immediately instead of waiting one tick */
 }
 
+/* L3 (LCD UI audit 2026-10-09): the web paths that call dashboard_set_relay()
+ * (/api/aux_outputs/manual, /api/diagnostics/danger/relay) are
+ * ROUTE_TIER_ADMIN, so the LCD toggle needs the same admin gate (open when
+ * LCD auth is off). */
+static void relay_toggle_cb(lv_event_t *e)
+{
+    ui_lcd_lock_run_gated("Admin PIN to switch relay", LCD_PIN_ROLE_ADMIN, relay_toggle_apply,
+                          lv_event_get_user_data(e));
+}
+
 /* Zone row: name + live temperature only -- no relay content any more (see
  * this file's header comment for why relay buttons moved to one flat
  * "Relays" section below). */
@@ -488,22 +496,19 @@ static void build_relays_section(lv_obj_t *parent)
 
     lv_obj_t *relay_row = lv_obj_create(card);
     lv_obj_set_width(relay_row, lv_pct(100));
-    /* Fixed height + left scrollable, NOT LV_SIZE_CONTENT + SCROLLABLE
-     * cleared -- see UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's header
-     * comment. Same sanctioned internally-scrollable-list pattern as
-     * ui_page_network.c's lists. */
+    /* Fixed height, scrolling disabled -- see
+     * UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX's header comment. */
     lv_obj_set_height(relay_row, UI_PAGE_TEMPERATURE_RELAY_ROW_HEIGHT_PX);
-    lv_obj_set_scroll_dir(relay_row, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(relay_row, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_remove_flag(relay_row, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_bg_opa(relay_row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(relay_row, 0, 0);
     lv_obj_set_style_pad_all(relay_row, 0, 0);
-    lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW_WRAP);
+    lv_obj_set_flex_flow(relay_row, LV_FLEX_FLOW_ROW);
     lv_obj_set_style_pad_gap(relay_row, UI_THEME_PADDING_PX / 2, 0);
 
     for (uint8_t r = 0; r < KILN_IO_RELAY_COUNT; r++) {
         lv_obj_t *btn = lv_button_create(relay_row);
-        lv_obj_set_width(btn, UI_THEME_MIN_TOUCH_TARGET_PX * 2);
+        lv_obj_set_flex_grow(btn, 1);
         lv_obj_set_height(btn, 36);
         lv_obj_set_style_bg_color(btn, UI_THEME_COLOR_CARD, 0);
         lv_obj_set_style_radius(btn, UI_THEME_CORNER_RADIUS_PX, 0);

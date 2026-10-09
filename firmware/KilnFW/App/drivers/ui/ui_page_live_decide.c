@@ -7,6 +7,7 @@
 #include "kiln_ui.h"
 #include "profiles_live_http.h" /* profiles_live_decide_apply()/_status()/_default_name() -- the ONLY decision logic */
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_theme.h"
 #include "ui_topbar.h"
 
@@ -118,8 +119,29 @@ void ui_page_live_decide_prepare(void)
  * ui_page_profile_builder_review.c's do_save() and ui_page_edit_firing.c's
  * apply_cb(). No new task is created, so nothing to register for stack
  * margin. */
+static void run_decision_apply(void *user_data);
+
+/* L2 (LCD UI audit 2026-10-09): /api/profile/live/decide is ROUTE_TIER_ADMIN,
+ * so every decision (discard / save as / overwrite) needs the admin gate
+ * (open when LCD auth is off). The pending decision is held in statics because
+ * the PIN keypad is asynchronous and `name` may be a caller stack buffer. */
+static live_edit_decision_kind_t s_pending_kind;
+static char s_pending_name[PROFILE_NAME_MAX_LEN + 1];
+static bool s_pending_has_name;
+
 static void run_decision(live_edit_decision_kind_t kind, const char *name)
 {
+    s_pending_kind = kind;
+    s_pending_has_name = (name != NULL);
+    snprintf(s_pending_name, sizeof(s_pending_name), "%s", name ? name : "");
+    ui_lcd_lock_run_gated("Admin PIN to keep/discard edit", LCD_PIN_ROLE_ADMIN, run_decision_apply, NULL);
+}
+
+static void run_decision_apply(void *user_data)
+{
+    (void)user_data;
+    live_edit_decision_kind_t kind = s_pending_kind;
+    const char *name = s_pending_has_name ? s_pending_name : NULL;
     char err[96] = {0};
     uint8_t id = 0;
     profiles_live_decide_result_t r =
@@ -187,10 +209,11 @@ static void overwrite_cb(lv_event_t *e)
 }
 
 /* No text entry on the LCD, so the name is generated and shown in the status
- * line afterwards. Non-destructive (adds a profile), so no confirm dialog. */
-static void save_cb(lv_event_t *e)
+ * line afterwards. L22: a confirm like Overwrite/Discard -- one stray tap must
+ * not add a profile slot. */
+static void save_confirmed_cb(void *ud)
 {
-    (void)e;
+    (void)ud;
     if (!s_pg) {
         return;
     }
@@ -200,6 +223,21 @@ static void save_cb(lv_event_t *e)
         return;
     }
     run_decision(LIVE_EDIT_DECISION_SAVE_AS, name);
+}
+
+static void save_cb(lv_event_t *e)
+{
+    (void)e;
+    if (!s_pg) {
+        return;
+    }
+    ui_confirm_show(&(ui_confirm_params_t){
+        .title = "Save as new",
+        .body = "Save the edited version as a new auto-named profile?",
+        .confirm_label = "Save",
+        .confirm_color = UI_THEME_ACCENT_4,
+        .on_confirm = save_confirmed_cb,
+    });
 }
 
 static void screen_event_cb(lv_event_t *e)

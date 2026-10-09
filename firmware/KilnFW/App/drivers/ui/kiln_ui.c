@@ -333,6 +333,16 @@ esp_err_t kiln_ui_init(void)
      * (see its comment); only a genuinely SUPPORTED controller is forced
      * into calibration, and the other two cases are logged by name rather
      * than silently treated alike. */
+    /* docs/WEB_AUTH_PLAN.md section 7/8 (LCD half): one-time setup for the
+     * PIN keypad's inactivity lock (tick timer, touch-activity hook), then
+     * wire both its seams to the real credential store (persist/
+     * web_auth_store.h). Must run after lvgl_port's indev is up (used by
+     * ui_lcd_lock_init()) and before ANY page can be shown (L9: including the touch_cal boot path below), so a gated
+     * Start button never fires before the lock exists. */
+    ui_lcd_lock_init();
+    ui_lcd_lock_set_relock_cb(handle_lcd_relock_to_home);
+    lcd_credential_bridge_init();
+
     const touch_cal_support_t cal_support = lvgl_port_touch_cal_support();
     if (touch_cal_support_is_offerable(cal_support) && !touch_cal_store_is_calibrated()) {
         ESP_LOGI(TAG, "no touch calibration on file -- starting calibration instead of home");
@@ -344,16 +354,6 @@ esp_err_t kiln_ui_init(void)
         ESP_LOGW(TAG, "no touch controller detected -- touch calibration is not being offered, "
                       "and the LCD will not respond to taps this boot");
     }
-
-    /* docs/WEB_AUTH_PLAN.md section 7/8 (LCD half): one-time setup for the
-     * PIN keypad's inactivity lock (tick timer, touch-activity hook), then
-     * wire both its seams to the real credential store (persist/
-     * web_auth_store.h). Must run after lvgl_port's indev is up (used by
-     * ui_lcd_lock_init()) and before any page can be shown, so a gated
-     * Start button never fires before the lock exists. */
-    ui_lcd_lock_init();
-    ui_lcd_lock_set_relock_cb(handle_lcd_relock_to_home);
-    lcd_credential_bridge_init();
 
     return kiln_ui_show("home");
 }
