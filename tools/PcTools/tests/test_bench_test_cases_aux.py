@@ -67,7 +67,9 @@ class FakeSrv:
         return "\n".join(names) or "no saved profiles"
 
     def profiles_get_exec_status(self):
-        return f"state={self.exec_state} profile=#{self.exec_pid} 'x' segment=0/2"
+        # Real MCP text prints the raw int enum, not the name.
+        n = {"idle": 0, "running": 1, "paused": 2, "done": 3, "faulted": 4}[self.exec_state]
+        return f"state={n} profile=#{self.exec_pid} 'x' segment=0/2"
 
     def control_set_aux_output(self, relay, enabled, tc_zone=None, confirm=False, **kw):
         self.calls.append(("set_aux", relay, enabled, confirm))
@@ -165,7 +167,7 @@ def _ctx(srv, **kw):
     ctx = {"srv": srv, "aux_confirm": True, "allow_heat": True, "sleep_fn": lambda s: None,
            "aux_window_s": 6.0, "aux_idle_fn": lambda: srv.exec_idle,
            "aux_relay_fn": lambda r: srv.relay4_shadow,
-           "aux_post_fn": lambda relay, en, tc: (400, False)}
+           "aux_post_fn": lambda relay, en, tc: (409, False, "HTTP 409 that relay is claimed by a zone relay_mask -- remove it")}
     ctx.update(kw)
     return ctx
 
@@ -453,10 +455,24 @@ class Finding4FirmwareRefusalTest(unittest.TestCase):
         self.assertEqual(r.verdict, Verdict.FAIL)
         self.assertIn("firmware", r.reason)
 
-    def test_firmware_400_and_precheck_pass(self):
+    def test_firmware_409_zone_conflict_and_precheck_pass(self):
         r = C._case_ax_c02(_ctx(FakeSrv()))
         self.assertEqual(r.verdict, Verdict.PASS)
-        self.assertEqual(r.observed["firmware_status"], 400)
+        self.assertEqual(r.observed["firmware_status"], 409)
+
+    def test_409_for_wrong_reason_fails(self):
+        r = C._case_ax_c02(_ctx(FakeSrv(), aux_post_fn=lambda relay, en, tc: (409, False, "a firing is active")))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_plain_400_fails(self):
+        r = C._case_ax_c02(_ctx(FakeSrv(), aux_post_fn=lambda relay, en, tc: (400, False, "hyst_c out of range")))
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_exec_numeric_state_parsed_and_garbage_rejected(self):
+        ctx = {"srv": type("S", (), {"profiles_get_exec_status": lambda self: "state=1 profile=#3 'x'"})()}
+        self.assertEqual(C._exec(ctx), ("running", 3))
+        ctx = {"srv": type("S", (), {"profiles_get_exec_status": lambda self: "state=9 profile=#3 'x'"})()}
+        self.assertIsNone(C._exec(ctx))
 
     def test_precheck_not_refusing_fails_separately(self):
         srv = FakeSrv()
