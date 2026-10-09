@@ -23,11 +23,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 187.
+Gate rows: 189.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 173 |
+| NEGATIVE-TESTED | 175 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
@@ -160,6 +160,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_iter_tune_write_surface.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both; check returned to PASS on restore |
 | `tools/check_kiln_auth_config_isolation.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added identifier `web_auth` (a first try with web_auth_zz is GREEN by design, word-boundary match) | RED; check returned to PASS on restore; 10-08 hardening: header leak `#define LCD_AUTH_LEAK lcd_auth` in backup_http.h PASSED (scan was *.c only), now *.c and *.h, negtest CAUGHT |
 | `tools/check_kiln_scope_cfg_mirrors.ps1` | NEGATIVE-TESTED | 10-07 | scope-list vs cfg-mirror drift in kiln_scope_cfg_files.c, unit_pref.[ch], kiln_package.c, cfg_fs.c | each RED, names the item; restored |
+| `tools/check_lcd_admin_gates.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `Admin PIN to switch relay` -> `Pin to switch relay` in ui_page_temperature.c | CAUGHT (exit 1, `FAIL: L3 relay: ... lacks an admin gate`); negtest copy removed, real tree unchanged |
 | `tools/check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-02 | nav ungated in ui_page_home_actions.c | RED; restored |
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_mcp_facade_coverage.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] uncovered @_srv._tool() negtest function added to mcp_server_io.py; the documented plant_sim_compare example found stale ; [09-16f] ramp_assist_set_enabled KEYWORDS entry removed (replaces the stale documented example) | [09-16e] RED naming the tool; hand-restored; docstring example fixed in 09-16f ; [09-16f] RED naming the tool; hand-restored; PASS |
@@ -185,6 +186,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_relay_writes_through_owner.ps1` | NEGATIVE-TESTED | 09-16 | unauthorized set_relay_mask call added in main.c | RED at that line; hand-restored; PASS |
 | `tools/check_release_branch.ps1` | NEGATIVE-TESTED | 10-08 | scratch bare-clone repo: direct commit, tree mismatch, untagged release commit, two-parent commit, named commit off main, non-ascending named SHAs, non-empty root, root with a parent | all RED on the mutated release ref, GREEN after restoring it; SKIP when origin/release is absent |
 | `tools/check_release_manifest.ps1` | NEGATIVE-TESTED | 10-07 | size gate 0x400000 -> 0x500000; dirty-tree refusal off; sha256 compare off; draft flag off; open gates not refused; provenance refusal off; token forwarded on hop 2; semver gate off | all RED except semver gate off, which PASSED (a later gate also exits 1): WEAK, fixed by requiring the is-not-semver text; now RED |
+| `tools/check_release_merge.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `(Compare-Semver $Tag $t) -le 0` -> `-le -999` in release_merge.ps1 (semver-newer gate off) | CAUGHT (exit 1, `FAIL: non-newer tag refused`); negtest copy removed, real tree unchanged |
 | `tools/check_release_version_regex.ps1` | NEGATIVE-TESTED | 10-07 | cap 32 -> 33; cap dropped; - dropped from the prerelease charset; leading-zero reject neutralised; + allowed in the prerelease charset; badtag[] edits; table renamed | all RED except the + charset, which PASSED: WEAK (minor), fixed by pinning v1.2.3-rc+1 on both sides; now RED |
 | `tools/check_route_tier_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added `.uri = "/api/zz_new_route"` with no tier row ; [2026-10-09 stale-row branch] temp copy of route_tier_table.h with an extra row `/zz_stale` passed via -TableFile | RED, row named; check returned to PASS on restore (fixture only; test_check_route_tier_coverage.ps1 assertion 2b pins it) |
 | `tools/check_safe_remove_junction.ps1` | NEGATIVE-TESTED | 10-07 | unlink skipped in Remove-TreeSafe; no descent in Remove-ReparsePointsUnder; unlink dropped at both call sites; site pattern made blind; an unguarded $r = & git ... worktree remove site | skip-unlink and blind mutants PASSED: WEAK, fixed (unlink report required, command-line site pattern); the $r = & git site PASSED that fix too and is caught after the opus review reordered the pattern; all RED; recursive-delete mutant equivalent on this PowerShell |
