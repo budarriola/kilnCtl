@@ -1,5 +1,5 @@
 // Host tests for cfg_fs_status.c -- the /api/cfgfs JSON builder
-// (docs/FILESYSTEM_USER_DATA_PLAN.md observability pass). Same real-temp-
+// (docs/FILESYSTEM_USER_DATA.md observability pass). Same real-temp-
 // directory approach as test_cfg_fs.c: cfg_fs_status_build_json() is pure
 // stdio + cfg_fs.h's public API, so this exercises the exact code that
 // runs on-device against "/cfg" -- only the base directory string differs.
@@ -222,7 +222,7 @@ static void test_mounted_with_files(void)
                "lists but left per-item detail zones-only; this is the widened per-bridge picture");
     TEST_CHECK(json_has(json, "\"nvs_only\":[]"),
                "nvs_only is EMPTY -- 762bb29e gave relay_cycles/adaptive_tune/firing_stats real cfg_fs "
-               "bridges too (the last three items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked), "
+               "bridges too (the last three items docs/FILESYSTEM_USER_DATA.md section 5 tracked), "
                "so nothing remains genuinely NVS-only; see test_all_17_items_report_dualwrite_state() below "
                "for the full per-item picture");
     TEST_CHECK(json_has(json, "\"nvs_permanent\":["), "nvs_permanent section present");

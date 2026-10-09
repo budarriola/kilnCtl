@@ -6,7 +6,7 @@
 > it must be validated in simulation first. This brief's §4 recommendation
 > ("wire it as-is") is therefore withdrawn: the whole-firing `iae_normalized`
 > score and the 2.0 °C start-temperature comparability window are exactly what
-> the redesign removes. See **`docs/ITER_TUNE_REDESIGN_PLAN.md`**.
+> the redesign removes. See **`docs/ITER_TUNE_REDESIGN.md`**.
 >
 > Still accurate and still worth reading here: §1's map of the integration
 > point, §3's record that `fs_start_temp_c` capture already landed, and §2's

@@ -1,6 +1,6 @@
 // dualwrite_window_http -- GET /api/dualwrite_window: the owner-approved
 // dual-write closure criterion's live progress (see
-// drivers/persist/dualwrite_window.h and docs/FILESYSTEM_PLAN.md's
+// drivers/persist/dualwrite_window.h and docs/FILESYSTEM.md's
 // "Dual-write window" section) -- "14 of 20 clean boots, firing not yet
 // done, restore verified" as one small JSON body, so an operator does not
 // have to read flash or logs to answer "can this window close yet".

@@ -452,14 +452,14 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 #   partition without another restructure.
 
 # --- `cfg` partition, added 2026-09-07 (user runtime state moves onto a
-#     filesystem -- docs/FILESYSTEM_PLAN.md, docs/FILESYSTEM_USER_DATA_PLAN.md)
+#     filesystem -- docs/FILESYSTEM.md, docs/FILESYSTEM_USER_DATA.md)
 #
 # Owner decision 2026-09-07: user-changeable runtime state (zone/PID config,
 # user-created fire profiles, named kiln-config slots, preferences) moves off
 # NVS blobs and onto a filesystem, and "do the best option for flash space and
 # organization; ignore implementation time". This row is the flash-layout half
 # of that decision. NOTHING IS IMPLEMENTED AGAINST IT YET -- no mount call, no
-# reader, no writer; see FILESYSTEM_USER_DATA_PLAN.md section 5 step 1.
+# reader, no writer; see FILESYSTEM_USER_DATA.md section 5 step 1.
 #
 # APPEND-ONLY CHANGE, same discipline as every revision since the OTA pass:
 # nothing above this line moved, resized, or changed subtype. Diff the CSV
@@ -532,7 +532,7 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # even though the table is being edited anyway. The subtype row and
 # log_store_mount.c's register call have to land together, so bundling them
 # makes one flash a flag day for two filesystems at once, and
-# FILESYSTEM_PLAN.md's trigger for that swap has not fired (retention moved
+# FILESYSTEM.md's trigger for that swap has not fired (retention moved
 # DOWN, 1 MiB -> 256 KiB/kind, 2026-09-02). The saving from bundling is small:
 # a logs subtype change moves no offsets and needs no otadata erase either, so
 # the second table revision costs one more ordinary flash_firmware(), not a
@@ -559,7 +559,7 @@ cfg,          data, littlefs,  0xDB0000, 0x250000,
 # against the NEW table; that is harmless for an append-only revision like
 # this one, but it means the new `cfg` row is live before any firmware knows
 # about it. `ota_rollback_esp()` restores the factory boot target. See
-# docs/FILESYSTEM_PLAN.md "Applying the table change" for the ordered
+# docs/FILESYSTEM.md "Applying the table change" for the ordered
 # procedure and the mandatory pre-change backup.
 #
 # --- single application slot + recovery image, added 2026-09-16

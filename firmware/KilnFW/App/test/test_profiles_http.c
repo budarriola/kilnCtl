@@ -830,7 +830,7 @@ static void assert_profiles_equal(const profile_t *a, const profile_t *b, const 
 }
 
 // ---------------------------------------------------------------------------
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 (user-profiles
+// docs/FILESYSTEM_USER_DATA.md section 5 step 4 (user-profiles
 // filesystem move) -- tests for profiles_cfg_fs.c's per-slot read-through/
 // dual-write bridge, added here (rather than a separate TU) because
 // nvs_load_all_from() is `static` -- the exact reason this whole file is its

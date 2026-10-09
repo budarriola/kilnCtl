@@ -7,7 +7,7 @@
 // underlying HAZARD this sidesteps.
 //
 // The `cfg` partition does not exist in partitions.csv yet (a separate,
-// owner-gated step per docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 1 --
+// owner-gated step per docs/FILESYSTEM_USER_DATA.md section 5 step 1 --
 // adding it requires an otadata erase + bootloader reflash and is out of
 // scope for this pass). esp_vfs_littlefs_register() below is written to
 // FAIL GRACEFULLY when the partition is absent (ESP_ERR_NOT_FOUND, handled
@@ -52,11 +52,11 @@ esp_err_t cfg_fs_mount_device(void);
  * HAZARD: never call this from a handler already running ON the flash
  * worker task -- that deadlocks the board (project_flash_worker_reentrancy).
  * No caller does that today; this module has no callers yet at all (this
- * pass is the foundation only -- see docs/FILESYSTEM_USER_DATA_PLAN.md
+ * pass is the foundation only -- see docs/FILESYSTEM_USER_DATA.md
  * section 5, steps 3+ move real data through this entry point). */
 esp_err_t cfg_fs_write_atomic_device(const char *rel_path, const void *data, size_t len);
 
-/* AUTO-FORMAT / ASK-FIRST (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step
+/* AUTO-FORMAT / ASK-FIRST (docs/FILESYSTEM_USER_DATA.md section 5 step
  * 1, owner decision 2026-09-07): cfg_fs_mount_device() no longer just reports
  * a mount failure and stops. When esp_vfs_littlefs_register() fails, it reads
  * the raw partition back (cfg_fs_format_gate.h, host-tested) and:

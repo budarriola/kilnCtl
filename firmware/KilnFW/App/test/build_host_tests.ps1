@@ -298,7 +298,7 @@ try {
         (Join-Path $driversDir "persist/cfg_fs_format_gate.c"),
         (Join-Path $driversDir "persist/cfg_fs_status.c"),
         (Join-Path $driversDir "persist/pref_cfg_fs.c"),
-        # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA_PLAN.md
+        # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA.md
         # section 5) -- kiln_cfg_store.c (#included directly by
         # test_kiln_cfg_store.c above) now calls into
         # kiln_cfg_store_cfg_fs.c's whole-document read-through/dual-write
@@ -646,7 +646,7 @@ try {
     $exe2 = Join-Path $outDir "kilnctl_host_tests_zones.exe"
     $exe2ObjDir = Join-Path $outDir "zones_obj\"
     if (-not (Test-Path $exe2ObjDir)) { New-Item -ItemType Directory -Path $exe2ObjDir | Out-Null }
-    # test_zones_config_cfg_fs.c (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    # test_zones_config_cfg_fs.c (docs/FILESYSTEM_USER_DATA.md section 5
     # step 5, zones-config-move task): a separate TU in this same executable
     # exercising zones_config_cfg_fs.c's read-through/dual-write policy
     # through the REAL nvs_load()/nvs_save() (defined in
@@ -905,7 +905,7 @@ try {
             # fakes of this same module's surface (live_profile.c itself is
             # tested for real by test_live_profile.c, its own executable).
             "`"$(Join-Path $driversDir 'control/profile_executor_live_pickup.c')`" " +
-            # ITER_TUNE_REDESIGN_PLAN.md step 8: profile_executor_firing_stats.c
+            # ITER_TUNE_REDESIGN.md step 8: profile_executor_firing_stats.c
             # (#included above via profile_executor.c's multi-#include block)
             # now calls firing_shadow_zone_tick()/firing_shadow_finish_firing() --
             # link the real module (already host-tested by test_firing_shadow.c,
@@ -1025,7 +1025,7 @@ try {
     # header comment. Own executable so that stub, and this file's fake bodies
     # for zones_http.h/profile_feasibility.h/profiles_builtin.h, never collide
     # with any other test file's definitions of those same symbols.
-    # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4 (user-profiles
+    # docs/FILESYSTEM_USER_DATA.md section 5 step 4 (user-profiles
     # filesystem move): profiles_http.c (#included directly above) now calls
     # into profiles_cfg_fs.c's per-slot read-through/dual-write bridge, so
     # this executable needs cfg_fs.c/profiles_cfg_fs.c linked in as plain
@@ -1665,7 +1665,7 @@ try {
     # calls flash_worker_wait_default() before its migrate-on-load
     # pref_cfg_fs_resolve() write (same boot-ordering fix as adaptive_tune.c's
     # exe17, hardware verification 3e226f28).
-    # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+    # relay_cycles cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA.md
     # section 5 step 6): relay_cycles.c (#included directly by test_relay_cycles.c
     # above) now also calls into pref_cfg_fs.c, which needs cfg_fs.c's real
     # mount/write-atomic/read/delete against a temp directory -- same convention
@@ -1785,7 +1785,7 @@ try {
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`""
     # cfg_fs.c/pref_cfg_fs.c/cfg_fs_status.c: the hidden-mask file dual-write
-    # (docs/FILESYSTEM_USER_DATA_PLAN.md item 6) goes through pref_cfg_fs.
+    # (docs/FILESYSTEM_USER_DATA.md item 6) goes through pref_cfg_fs.
     # fake_kv.c/hal_status.c added HW_ABSTRACTION.md Phase 3 item 3 (nvs.h ->
     # hal_kv.h migration): profiles_builtin.c's hidden-mask persistence now calls
     # hal_kv_get_u32()/hal_kv_set_u32()/hal_kv_init_partition() instead of
@@ -2039,7 +2039,7 @@ try {
     Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
 
     # ---- test_time_sync.c: its own THIRTY-FIRST, separate executable ---------
-    # docs/FILESYSTEM_USER_DATA_PLAN.md item 14 (TZ) close-out: this file used
+    # docs/FILESYSTEM_USER_DATA.md item 14 (TZ) close-out: this file used
     # to live in the "main" executable's $sources list, testing only
     # time_sync_tz.c's pure validation logic -- time_sync.c itself was
     # untested because it pulls in esp_netif_sntp.h with no host stub
@@ -2160,7 +2160,7 @@ try {
     # Found completely unwired 2026-09-10 (opus review): it has its own
     # main(), was never named in this script, and the only reference
     # anywhere in the tracked tree was a prose mention in
-    # docs/FILESYSTEM_PLAN.md. Own executable because it hand-declares
+    # docs/FILESYSTEM.md. Own executable because it hand-declares
     # uart_bridge_ext_flash_worker_started() itself (see the file's own
     # header comment) -- that would collide at link time with the real
     # uart_bridge.c body, or with exe17/exe19/exe20's own fakes of the same
@@ -2462,7 +2462,7 @@ try {
     Invoke-HostTestExe -Name "wifi_prov_status_disclosure" -ExePath $exe47 -BuildCmd $cmd47
 
     # ---- test_log_store_mount.c: its own 48th AND 49th executables --------
-    # docs/FILESYSTEM_PLAN.md step 2. log_store_mount.c was "not part of any
+    # docs/FILESYSTEM.md step 2. log_store_mount.c was "not part of any
     # host test build" (its own header comment) -- stubs/esp_spiffs.h (new,
     # this change) plus the existing stubs/esp_littlefs.h close that gap.
     # Built TWICE from the SAME test source, once per CONFIG_KILNCTL_LOGS_
@@ -2554,7 +2554,7 @@ try {
     Complete-HostTestQueue
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
-    # harnesses (ITER_TUNE_REDESIGN_PLAN.md sec 6/7), not TEST_CHECK
+    # harnesses (ITER_TUNE_REDESIGN.md sec 6/7), not TEST_CHECK
     # pass/fail suites -- their stdout is the evidence for the audit docs
     # they feed, not a verdict. Until 2026-09-10 NEITHER had any build
     # recipe anywhere in the tree (confirmed by grep) -- both were edited by
@@ -2595,7 +2595,7 @@ try {
         Write-Host "sim_wide_temp_sweep: BUILD OK (data-generating harness, not run automatically -- see file header for usage)"
     }
 
-    # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN_PLAN.md sec 6.5's
+    # ---- sim_credibility_gate.exe: ITER_TUNE_REDESIGN.md sec 6.5's
     # model credibility gate (docs/audits/sim_credibility_gate_real_cause_2026-09-10.md).
     # Not run through Invoke-HostTestExe and NOT counted in $totalExpected /
     # buildFailures / failedExes below -- two reasons, both deliberate:
@@ -2847,7 +2847,7 @@ try {
     Invoke-HostTestExe -Name "fuzzy_nine_cell_probe" -ExePath $exeFuzzyCell -BuildCmd $cmdFuzzyCell
 
     # ---- test_iter_tune_http.c: its own 59th, separate executable ------------
-    # step 7 review, 2026-09-23 (docs/ITER_TUNE_REDESIGN_PLAN.md step 7), finding
+    # step 7 review, 2026-09-23 (docs/ITER_TUNE_REDESIGN.md step 7), finding
     # 2 + advisory A1: proves iter_tune_restore_post_handler() (POST
     # /api/iter_tune/restore_commissioned) (a) persists the RESTORED baseline
     # (not the stale pre-restore one) on a successful restore, (b) leaves the
@@ -2870,7 +2870,7 @@ try {
     $cmdIth = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$ithObjDir\\`" /Fe:`"$exeIth`" `"$(Join-Path $testDir 'test_iter_tune_http.c')`" " +
             "`"$(Join-Path $driversDir 'control/iter_tune.c')`" " +
-            # ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_http.c's status
+            # ITER_TUNE_REDESIGN.md step 8: iter_tune_http.c's status
             # handler now calls firing_shadow_get_status() -- link the real
             # module (already host-tested by test_firing_shadow.c, its own
             # executable) plus its hal_kv dependency chain, same reasoning as
@@ -2890,7 +2890,7 @@ try {
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 
     # ---- test_firing_compare_alloc.c: its own SEPARATE executable ---------
-    # ITER_TUNE_REDESIGN_PLAN.md step 8 review: firing_compare() now heap-
+    # ITER_TUNE_REDESIGN.md step 8 review: firing_compare() now heap-
     # allocates raw[]/norm[]/in_band[] (reachable from the profile_executor
     # task stack via firing_shadow_finish_firing()). This #includes
     # firing_compare.c with malloc/free redirected to counting fakes to prove
@@ -2921,7 +2921,7 @@ try {
 
     Invoke-HostTestExe -Name "recovery_switch" -ExePath $exeRsw -BuildCmd $cmdRsw
 
-    # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN_PLAN.md sec
+    # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
     # per-tick data into the PRODUCTION firing_score.c/firing_compare.c
     # (linked as-is, same convention as sim_iter_tune above) so Bar 2's
@@ -3073,7 +3073,7 @@ try {
     # (docs/PICO_AUTO_UPDATE_PLAN.md).
     # 60 -> 61: added test_firing_compare_alloc.c's own Invoke-HostTestExe
     # call -- firing_compare()'s heap-allocation failure path
-    # (ITER_TUNE_REDESIGN_PLAN.md step 8 review).
+    # (ITER_TUNE_REDESIGN.md step 8 review).
     # 61 -> 62: added test_system_mode_gate.c's own Invoke-HostTestExe call --
     # docs/SYSTEM_MODE_GATE.md Phase 6's pure gate module (owner decisions
     # 2026-09-25).

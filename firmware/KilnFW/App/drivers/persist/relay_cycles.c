@@ -62,7 +62,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES);
 #define KILN_NVS_PARTITION "kiln_nvs"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 6 (relay cycle counters,
+/* docs/FILESYSTEM_USER_DATA.md section 5 step 6 (relay cycle counters,
  * scheduled LAST -- "MOVE, but last, after everything else has flown"): the
  * cfg-filesystem dual-write bridge for this module. Same generic bridge
  * unit_pref.c/ramp_assist_cfg.c/display_power_cfg.c/relay_names use
@@ -432,7 +432,7 @@ esp_err_t relay_cycles_init(void)
         hal_kv_close(&h);
     }
 
-    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA.md section
      * 5 step 6): build the NVS candidate blob s_rc currently holds (zeroed
      * if nvs_have_value is false) and let pref_cfg_fs_resolve() decide
      * whether the file or the NVS side wins -- same policy every other

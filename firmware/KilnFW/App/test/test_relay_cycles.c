@@ -39,7 +39,7 @@
 #define RCCF_RMDIR(p) rmdir(p)
 #endif
 
-#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA.md
                        * section 5 step 6's cfg-filesystem dual-write bridge for THIS module, see the
                        * new tests appended near the bottom of this file. */
 
@@ -745,7 +745,7 @@ static void test_maybe_persist_skips_without_blocking_when_persist_lock_is_busy(
     g_test_stub_semaphore_take_default = 1; // restore pdTRUE for every test after this one
 }
 
-// --- backup-gate pass (docs/FILESYSTEM_PLAN.md, 2026-09-07):
+// --- backup-gate pass (docs/FILESYSTEM.md, 2026-09-07):
 // relay_cycles_restore_all() -- the counterpart to relay_cycles_reset()
 // above, restoring all RELAY_CYCLES_COUNT counts from a backup archive
 // (full_board_backup.py's /api/status.relay_counts) rather than zeroing one.
@@ -955,7 +955,7 @@ static void test_restore_all_allow_lower_mask_overrides_one_relay_only(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA_PLAN.md
+// cfg-filesystem dual-write bridge (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 6, "MOVE, but last, after everything else has flown").
 // Uses the real relay_cycles_init()/relay_cycles_flush()/relay_cycles_reset()/
 // relay_cycles_restore_all() public API (never pokes s_rc directly except to

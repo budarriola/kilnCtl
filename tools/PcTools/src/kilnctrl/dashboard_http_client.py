@@ -160,7 +160,7 @@ def get_event_log_bytes(host: str, kind: str, timeout: float = DASHBOARD_HTTP_TI
 def get_cfgfs_status(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/cfgfs and return the full decoded JSON object
     (diagnostics_http.c: cfgfs_status_get_handler()) -- observability for the
-    `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md): mounted/
+    `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA.md): mounted/
     status/reason, capacity, the file list with sizes, how many entries are
     currently sitting in .tmp/ (see cfg_fs_status.c's own doc comment on why
     this is a live snapshot, not the historical at-mount reap count), and the

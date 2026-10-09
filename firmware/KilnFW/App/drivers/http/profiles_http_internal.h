@@ -215,7 +215,7 @@ void profiles_slot_set(uint8_t id);
 void profiles_slot_clear(uint8_t id);
 
 /* ---- shared on-flash blob encode/decode (profiles_http.c) -----------------
- * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+ * Widened non-static (2026-09-07, docs/FILESYSTEM_USER_DATA.md section 5
  * step 4, user-profiles filesystem move) so profiles_cfg_fs.c's read-through/
  * dual-write bridge can validate and produce a `cfg`-partition file using the
  * EXACT SAME version-1/2/3 migration chain and CRC check the NVS path already

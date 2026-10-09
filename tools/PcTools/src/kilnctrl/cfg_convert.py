@@ -5,7 +5,7 @@ produces and POST /api/backup/import accepts -- see
 firmware/KilnFW/App/drivers/http/backup_export.c/backup_import.c/
 backup_http_internal.h).
 
-WHY THIS EXISTS (see docs/CONFIG_MIGRATION_CHAIN_PLAN.md and CLAUDE.md's
+WHY THIS EXISTS (see docs/CONFIG_MIGRATION_CHAIN.md and CLAUDE.md's
 pointer to it): the board's own firmware is deliberately kept to one
 migration step -- N-1 to N -- so a board more than one release behind cannot
 read its own on-flash config and falls back to firmware defaults, silently

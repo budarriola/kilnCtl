@@ -45,7 +45,7 @@ extern bool profiles_validate_candidate(const profile_t *candidate, int mode, ch
 #include "relay_authority.h"
 #include "relay_cycles.h"
 #include "run_state.h"
-#include "dualwrite_window.h" /* FILESYSTEM_PLAN.md dual-write window: note a completed firing
+#include "dualwrite_window.h" /* FILESYSTEM.md dual-write window: note a completed firing
                                 * that ran with cfg_fs live, toward the "one complete firing run
                                 * file-backed" exit criterion -- see the two call sites below */
 #include "cfg_fs.h" /* cfg_fs_is_available() -- gates the note above on the filesystem
@@ -1075,7 +1075,7 @@ void executor_task_entry(void *arg)
                     xSemaphoreGive(s_exec.lock);
                     run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
                     if (cfg_fs_is_available()) {
-                        /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                        /* FILESYSTEM.md dual-write window: this run reached a genuine
                          * completion with cfg_fs live -- counts toward the exit criterion's
                          * "one complete firing run file-backed" leg. Sticky/idempotent. */
                         dualwrite_window_note_firing_complete();
@@ -1204,7 +1204,7 @@ void executor_task_entry(void *arg)
                         xSemaphoreGive(s_exec.lock);
                         run_state_note(RUN_STATE_PHASE_DONE, &done_snap.snap);
                         if (cfg_fs_is_available()) {
-                            /* FILESYSTEM_PLAN.md dual-write window: this run reached a genuine
+                            /* FILESYSTEM.md dual-write window: this run reached a genuine
                              * completion with cfg_fs live -- counts toward the exit criterion's
                              * "one complete firing run file-backed" leg. Sticky/idempotent. */
                             dualwrite_window_note_firing_complete();

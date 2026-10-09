@@ -11,7 +11,7 @@ consuming one of the 3 thermocouple-backed zone slots.
 
 Background read: `docs/audits/on_off_spare_relay_binding_2026-09-14.md`
 (why widening zones[] is L), `docs/ON_OFF_ZONE_PLAN.md` (the evaluator and
-rules this plan reuses), `docs/CONFIG_MIGRATION_CHAIN_PLAN.md`,
+rules this plan reuses), `docs/CONFIG_MIGRATION_CHAIN.md`,
 `docs/CONFIG_FILESYSTEM.md`.
 
 ## 1. Design in one page
@@ -349,7 +349,7 @@ ZERO new routes:
   zone/aux double owner). Tests: `test_backup_import.c`
   (`test_aux_outputs_*`).
 - Migration chain: the new store is governed by
-  `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` from its first release. v1 has no
+  `docs/CONFIG_MIGRATION_CHAIN.md` from its first release. v1 has no
   step (nothing older). Add a row to that plan's 0.1 governed-store table and
   the mechanical enforcement in its sec 5 (version symbol
   `AUX_OUTPUTS_CFG_VERSION`). Reader refuses newer-than-known (quarantine
@@ -569,7 +569,7 @@ earlier one merges.
 - **WP-8 DONE (docs 2026-10-06; bench steps 2/3/4/6/7 PASS 2026-10-06, BENCH_TEST_LOG; never run on a board: step 5 zone-relay_mask-contains-4 refusal, zone-guard-trip-keeps-R4, the convert).** Original scope: `docs/SAFETY_CASE.md` rows (aux relay: no welded
   detection; aux not behind K4 wiring note; no guard change),
   `docs/ON_OFF_ZONE_PLAN.md` cross-link, `docs/CONFIG_FILESYSTEM.md`,
-  `docs/CONFIG_MIGRATION_CHAIN_PLAN.md` governed-store row, `ROADMAP.md` row
+  `docs/CONFIG_MIGRATION_CHAIN.md` governed-store row, `ROADMAP.md` row
   (mark D1 overturned, link here), supersede note on the two 2026-09-14
   audits, bench session sec 12. Owns those docs.
 - **WP-9 ESP strips aux relay bits from the masks sent to the Pico (S, ESP only). DONE 2026-10-04.**

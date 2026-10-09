@@ -1,5 +1,5 @@
 # test_check_config_migration_steps.ps1 -- negative test for
-# tools/check_config_migration_steps.ps1 (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+# tools/check_config_migration_steps.ps1 (docs/CONFIG_MIGRATION_CHAIN.md
 # section 5).
 #
 # Proves Test-ZonesMigrationSteps (the PRODUCTION function, the same one
@@ -255,7 +255,7 @@ if (-not $r9.Ok) {
 
 # ---------------------------------------------------------------------
 # Assertions 10-15: the follow-up rules for the other three governed
-# stores (docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5's later revision).
+# stores (docs/CONFIG_MIGRATION_CHAIN.md sec 5's later revision).
 # Each store gets one FAIL (a version bump with no matching step, in
 # synthetic scratch text) and one PASS (against the real production tree,
 # which is already compliant with the narrower rule this script enforces
@@ -364,7 +364,7 @@ if ($r18.Ok) {
 
 # ---------------------------------------------------------------------
 # Assertions 19-20: fire profiles' frozen-input-struct extension
-# (2026-09-19, docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 5.1). A correctly
+# (2026-09-19, docs/CONFIG_MIGRATION_CHAIN.md sec 5.1). A correctly
 # named convert_profile_v<N-1>(...) converter exists in both cases -- these
 # prove the NEW struct-discipline checks fire independently of the
 # pre-existing converter-existence check.

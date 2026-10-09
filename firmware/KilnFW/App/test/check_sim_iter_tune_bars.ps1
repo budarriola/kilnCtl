@@ -1,5 +1,5 @@
 # check_sim_iter_tune_bars.ps1 -- enforces sim_iter_tune.exe's A1/A2/A5/A6
-# and A8-A2-half statistical acceptance bars (ITER_TUNE_REDESIGN_PLAN.md sec
+# and A8-A2-half statistical acceptance bars (ITER_TUNE_REDESIGN.md sec
 # 6/7). A8's A1-half (cross-profile false-accept rate) is measured and
 # printed every run but deliberately NOT enforced here -- see the "A8
 # (profile independence)" note near this script's PASS message and
@@ -232,7 +232,7 @@ echo BUILD_EXIT=%ERRORLEVEL%
     Write-Host "      A8 (profile independence) has TWO halves. The A1-half is measured every run and"
     Write-Host "      printed above but NOT gated into this exit code -- it genuinely FAILS (45/660,"
     Write-Host "      6.82%, against a 38.4-count 3-sd-widened ceiling around A1's own pinned rate). See"
-    Write-Host "      sim_iter_tune.c's A8 comment and ITER_TUNE_REDESIGN_PLAN.md sec 8 step 6 for why"
+    Write-Host "      sim_iter_tune.c's A8 comment and ITER_TUNE_REDESIGN.md sec 8 step 6 for why"
     Write-Host "      this is reported, not gated or worked around. The A2-half (never-worse, gain sets"
     Write-Host "      found tuning on one profile evaluated on a different one) IS gated into this exit"
     Write-Host "      code -- it measures a genuine, reproduced PASS (0/660 worse, well inside the <= 1%"

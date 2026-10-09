@@ -581,12 +581,12 @@ void run_state_note_progress(const run_state_snapshot_t *snap)
     (void)snap;
 }
 
-/* Fakes for FILESYSTEM_PLAN.md's dual-write window (drivers/persist/
+/* Fakes for FILESYSTEM.md's dual-write window (drivers/persist/
  * dualwrite_window.h/cfg_fs.h): profile_executor.c's PROFILE_EXEC_DONE
  * transitions call cfg_fs_is_available() to gate a
  * dualwrite_window_note_firing_complete() call. cfg_fs_is_available() USED
  * to be a fake here (always false) -- now the REAL cfg_fs.c is linked in
- * instead (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 9: adaptive_
+ * instead (docs/FILESYSTEM_USER_DATA.md section 5 item 9: adaptive_
  * tune.c, also linked into this executable, now calls into pref_cfg_fs.c,
  * which needs cfg_fs_write_atomic()/cfg_fs_read()/cfg_fs_is_available() for
  * real -- a second fake definition of just cfg_fs_is_available() here would
@@ -1267,7 +1267,7 @@ bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
 #include "fake_kv.h" /* fake_kv_reset_all()/fake_kv_set_write_safe_here() -- the firing-stats
                         * tests below call these directly. Was relying on an implicit
                         * declaration (C4013); now an error. */
-#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "cfg_fs.h" /* real mount/write-atomic/read/delete against a temp dir -- docs/FILESYSTEM_USER_DATA.md
                        * section 5 item 7's firing-stats cfg-filesystem bridge tests, appended near the
                        * bottom of this file. */
 
@@ -11408,7 +11408,7 @@ static void run_test_on_off_actuation(void)
     run_test_on_off_log_transition();
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8 (review add): firing_stats_zone_tick()
+// ITER_TUNE_REDESIGN.md step 8 (review add): firing_stats_zone_tick()
 // recovers the shadow-mode zone index from `z`'s ADDRESS within
 // s_exec.zones (uintptr_t range compare, profile_executor_firing_stats.c).
 // Proves (a) a real &s_exec.zones[1] tick reaches firing_shadow as zone 1 --
@@ -11777,7 +11777,7 @@ void run_test_profile_executor_prestart(void)
 
 // ---------------------------------------------------------------------
 // cfg-filesystem dual-write bridge for firing stats/history
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 7). Uses the real
+// (docs/FILESYSTEM_USER_DATA.md section 5, item 7). Uses the real
 // firing_stats_load()/firing_stats_persist() public entry points plus a
 // real cfg_fs.c against a temp directory -- same convention as
 // test_relay_names_cfg_fs.c/test_relay_cycles.c's own cfg_fs sections.

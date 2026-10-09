@@ -1,7 +1,7 @@
 // pref_cfg_fs -- generic read-through/dual-write bridge between a small
 // scalar/struct NVS preference (unit_pref.c, control/ramp_assist_cfg.c,
 // display_power_cfg.c today) and the `cfg` LittleFS partition
-// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA.md section 5
 // step 3 ("Migrate prefs (10,11,12,14) -- the lowest-stakes items").
 //
 // WHY GENERIC: unlike zones config (zones_config_cfg_fs.c/.h, a single
@@ -52,7 +52,7 @@ extern "C" {
 #endif
 
 // Generous upper bound on any one preference item's raw byte size --
-// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA_PLAN.md item 3, 1 + 4*16 + 4
+// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA.md item 3, 1 + 4*16 + 4
 // types + 4 crc = 73 bytes of fields, 76 with alignment padding as of
 // RELAY_NAMES_CFG_VERSION 2; it was 69/72 at v1) is the largest today,
 // previously display_power_cfg_blob_t
@@ -167,7 +167,7 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
 // No-op returning ESP_ERR_INVALID_STATE if cfg_fs never mounted -- callers
 // must treat that as expected on every board today, not a surfaced error
 // beyond a debug log (mount-failure contract,
-// docs/FILESYSTEM_USER_DATA_PLAN.md). ESP_ERR_INVALID_SIZE if item_size
+// docs/FILESYSTEM_USER_DATA.md). ESP_ERR_INVALID_SIZE if item_size
 // exceeds PREF_CFG_FS_MAX_ITEM.
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev);
 

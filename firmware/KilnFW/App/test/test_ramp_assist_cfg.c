@@ -189,7 +189,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA.md section 5
 // step 3, "Migrate prefs"). Everything above this point already proves the
 // partition-absent path (cfg_fs is never mounted in those tests, so
 // pref_cfg_fs_resolve() is always a pass-through to the NVS candidate) --

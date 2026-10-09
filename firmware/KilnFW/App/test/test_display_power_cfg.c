@@ -237,7 +237,7 @@ static void test_out_of_range_field_in_wellformed_blob_falls_back_to_defaults(vo
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA.md section 5
 // step 3). Everything above already proves the partition-absent path
 // (cfg_fs is never mounted there) -- this exercises the file mounted.
 // ---------------------------------------------------------------------

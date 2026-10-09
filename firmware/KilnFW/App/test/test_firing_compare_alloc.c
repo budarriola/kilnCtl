@@ -1,5 +1,5 @@
 // Host test for firing_compare()'s heap-allocation failure path
-// (ITER_TUNE_REDESIGN_PLAN.md step 8 follow-up: raw[]/norm[]/in_band[] moved
+// (ITER_TUNE_REDESIGN.md step 8 follow-up: raw[]/norm[]/in_band[] moved
 // off the profile_executor task's stack into one malloc each, because
 // firing_shadow_finish_firing() made firing_compare() reachable from that
 // stack). Proves, for a failure at EACH of the three allocations:

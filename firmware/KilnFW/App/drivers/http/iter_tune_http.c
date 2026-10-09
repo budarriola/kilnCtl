@@ -9,7 +9,7 @@
 
 #include "autotune_engine.h" // autotune_engine_reserve_zone_for_external_write()
 #include "cfg_fs_refusal_http.h" // cfg_fs_http_refuse_if_unmounted(), cfg_fs_http_persist_failed()
-#include "firing_shadow.h"   // ITER_TUNE_REDESIGN_PLAN.md step 8 -- read-only status only
+#include "firing_shadow.h"   // ITER_TUNE_REDESIGN.md step 8 -- read-only status only
 #include "iter_tune.h"
 #include "iter_tune_store.h"
 #include "relay_authority.h"        // relay_authority_heat_run_active() -- system_mode_gate snapshot
@@ -32,7 +32,7 @@ static esp_err_t iter_tune_status_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
 
-    // Shadow mode (ITER_TUNE_REDESIGN_PLAN.md step 8): one whole-firing-set
+    // Shadow mode (ITER_TUNE_REDESIGN.md step 8): one whole-firing-set
     // summary, not per-zone data, so it is its own top-level object rather
     // than forced into the per-zone loop below. READ-ONLY -- firing_shadow
     // never writes a gain, this handler never calls anything that would.
@@ -266,7 +266,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
 esp_err_t iter_tune_http_start(void)
 {
     iter_tune_store_start();
-    // ITER_TUNE_REDESIGN_PLAN.md step 8: load shadow mode's verdict-summary
+    // ITER_TUNE_REDESIGN.md step 8: load shadow mode's verdict-summary
     // counters once here, at boot, so the status GET handler never has to
     // load them lazily from the httpd task (see firing_shadow_get_status()).
     firing_shadow_store_start();

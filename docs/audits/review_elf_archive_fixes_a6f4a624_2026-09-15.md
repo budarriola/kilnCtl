@@ -150,5 +150,5 @@ so reading from `prov_path` returns None), `test_wired_into_archive_kiln_elf_aut
   moved for both firmwares" applies only to KilnFW. Worth a roadmap item,
   since SaftyFW safety code is the most sensitive dirty-tree case.
 - Docs (M2): CLAUDE.md, MCP_SERVERS.md and BRINGUP_HAZARDS.md are updated.
-  `docs/FILESYSTEM_PLAN.md:833,979` still name `build/elf_archive/`, but as
+  `docs/FILESYSTEM.md:833,979` still name `build/elf_archive/`, but as
   historical records, which is acceptable.

@@ -1,4 +1,4 @@
-// sim_iter_tune -- ITER_TUNE_REDESIGN_PLAN.md sec 6/7: runs the REDESIGNED
+// sim_iter_tune -- ITER_TUNE_REDESIGN.md sec 6/7: runs the REDESIGNED
 // iter_tune decision core (iter_tune.c + firing_score.c + firing_compare.c)
 // closed-loop against the maintained sim_plant.c kiln model, from several
 // DIFFERENT starting gain sets, and reports whether tracking error against
@@ -561,7 +561,7 @@ static void report_run(const start_set_t *ss, const run_report_t *r)
 }
 
 // ------------------------------------------------------------------- step 4
-// ITER_TUNE_REDESIGN_PLAN.md step 4: "Null-experiment noise-floor estimation
+// ITER_TUNE_REDESIGN.md step 4: "Null-experiment noise-floor estimation
 // in the simulator; floors emitted as a DATA ARTIFACT, not compiled
 // constants." Gate: "floors within 2x of noise_floor.json where the keys
 // correspond."
@@ -942,7 +942,7 @@ int main(int argc, char **argv)
     nf_accum_free(&nf_accum);
 
     // A1_DESIGN_TARGET_PCT is the plan's original aspirational bar
-    // (ITER_TUNE_REDESIGN_PLAN.md sec 7, A1). It is NOT the pass/fail
+    // (ITER_TUNE_REDESIGN.md sec 7, A1). It is NOT the pass/fail
     // threshold below, and per the 2026-09-14 root-cause audit
     // (docs/audits/a1_false_accept_root_cause_2026-09-14.md) it is NOT
     // currently reachable on this plant model -- see ROOT CAUSE below for
@@ -1273,7 +1273,7 @@ int main(int argc, char **argv)
     // A8 is measured and printed above but deliberately kept OUT of
     // all_pass, the same "informational, non-blocking" treatment this
     // plan's own sec 6.5 credibility gate got while its own bars were open
-    // (ITER_TUNE_REDESIGN_PLAN.md's 2026-09-10 status block). A8 genuinely
+    // (ITER_TUNE_REDESIGN.md's 2026-09-10 status block). A8 genuinely
     // FAILS on this plant (45/660, 6.82%, against a 38.4-count ceiling) --
     // per plan sec 8 step 6 ("all eight criteria met... any miss ends the
     // plan at this line with a report, not a workaround"), folding it into
@@ -1284,7 +1284,7 @@ int main(int argc, char **argv)
     // false-accept rate under a different profile shape, not an already-
     // understood, previously-defended tradeoff the way A1's pin is. The
     // finding stands as reported, blocking for the PLAN (not the build) --
-    // see ITER_TUNE_REDESIGN_PLAN.md sec 8, step 6.
+    // see ITER_TUNE_REDESIGN.md sec 8, step 6.
     // A8's A2-half (Part 5) is DIFFERENT from the A1-half above: it is a
     // genuine, reproduced PASS (0/660 cross-profile worse, well inside the
     // <= 1% bar -- see PART 5's own printf), not a newly-discovered

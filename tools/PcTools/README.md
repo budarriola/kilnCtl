@@ -272,7 +272,7 @@ accepts (`firmware/KilnFW/App/drivers/http/backup_export.c`/
 `backup_import.c`) -- from any `BACKUP_FORMAT_VERSION` to any other, in
 either direction, best effort. This is entirely a PC-side tool: the board
 itself keeps its firmware migration limited to exactly one step, the version
-it was built against minus one (`docs/CONFIG_MIGRATION_CHAIN_PLAN.md`), so a
+it was built against minus one (`docs/CONFIG_MIGRATION_CHAIN.md`), so a
 board more than one release behind cannot read its own on-flash config and
 would fall back to firmware defaults on its own. `cfg_convert` closes that
 gap off-board: it produces a package already expressed in the shape the

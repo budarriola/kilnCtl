@@ -46,7 +46,7 @@ esp_partition_write()/esp_partition_erase_range() directly has, by
 definition, not been through that reasoning -- it fails this lint naming
 the exact file:line, rather than shipping a fourth hardware incident.
 
-EXTENDED 2026-09-07 (filesystem write paths): the FILESYSTEM_PLAN.md work
+EXTENDED 2026-09-07 (filesystem write paths): the FILESYSTEM.md work
 added a second write surface, `cfg_fs` (LittleFS-backed, cfg_fs.c), sitting
 ON TOP of the flash worker rather than replacing it -- cfg_fs_write_atomic()/
 cfg_fs_delete()/cfg_fs_format() are themselves just filesystem calls, so a
@@ -163,7 +163,7 @@ ALLOWLIST = {
     # the PSRAM-stack restriction explicitly, so a future second caller has
     # to confront it rather than discover it on hardware.
     "ct_verify_store.c",
-    # docs/FILESYSTEM_USER_DATA_PLAN.md section 5 item 7 (firing stats/
+    # docs/FILESYSTEM_USER_DATA.md section 5 item 7 (firing stats/
     # history cfg-filesystem bridge, 2026-09-08): firing_stats_cfg_fs_
     # write_rev()'s hal_kv_set_u32()/hal_kv_commit() calls are this file's
     # ONLY write call site, and its ONLY caller anywhere in the codebase is
@@ -275,7 +275,7 @@ ALLOWLIST = {
     # own comment mirroring kiln_cfg_store.c's.
     "profile_executor_firing_stats.c",
     # Pattern 2, borrowed rather than duplicated: firing_shadow_finish_firing()
-    # (ITER_TUNE_REDESIGN_PLAN.md step 8) has no caller_stack_is_external()
+    # (ITER_TUNE_REDESIGN.md step 8) has no caller_stack_is_external()
     # check of its own -- its one call site, profile_executor_firing_stats.c's
     # firing_stats_persist(), already refuses and returns BEFORE calling it
     # when the calling task's stack is external (see that function's own
@@ -433,7 +433,7 @@ ALLOWLIST = {
 }
 
 # ---- cfg_fs (LittleFS-backed) write/delete/format surface -------------
-# Extended 2026-09-07 (FILESYSTEM_PLAN.md's `cfg_fs` write paths) -- see
+# Extended 2026-09-07 (FILESYSTEM.md's `cfg_fs` write paths) -- see
 # this file's module banner "EXTENDED" section for the full story. Kept as
 # its own regex/allowlist pair, not folded into WRITE_CALL_RE/ALLOWLIST
 # above, because the two surfaces have different definers: nvs_set_*()/

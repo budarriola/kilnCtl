@@ -10,7 +10,7 @@
 #include "freertos/portmacro.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
-#include "pref_cfg_fs.h" /* item 14 (TZ), docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+#include "pref_cfg_fs.h" /* item 14 (TZ), docs/FILESYSTEM_USER_DATA.md section 5
                             * step 3 close-out: TZ is a small fixed-CAPACITY string
                             * (<=TIME_SYNC_TZ_MAX_LEN bytes) with no migration chain of
                             * its own -- reuses the SAME generic bridge unit_pref.c/

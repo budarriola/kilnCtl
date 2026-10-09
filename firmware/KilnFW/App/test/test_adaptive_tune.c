@@ -632,7 +632,7 @@ void run_test_adaptive_tune(void)
 
 // ---------------------------------------------------------------------
 // cfg-filesystem dual-write bridge for the Ki baseline blob
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 -- "adaptive-tune
+// (docs/FILESYSTEM_USER_DATA.md section 5, item 9 -- "adaptive-tune
 // state", the simplified/re-derivable treatment). Uses the real
 // adaptive_tune_init()/adaptive_tune_clear_ki_baseline() public entry
 // points plus a real cfg_fs.c against a temp directory.

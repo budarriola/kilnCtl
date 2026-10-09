@@ -27,7 +27,7 @@
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
                             * below. */
-#include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5:
+#include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA.md section 5 step 5:
                             * read-through/dual-write bridge to the `cfg` LittleFS
                             * partition -- see that header for the full design. */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- zone_normals_get_dualwrite_status() */
@@ -375,7 +375,7 @@ static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *ou
          * Nothing worth protecting was found here, so a caller (the
          * legacy-partition migration) is free to look elsewhere. This bucket
          * also covers a version this firmware's migration chain does not
-         * reach back far enough to consume (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's
+         * reach back far enough to consume (docs/CONFIG_MIGRATION_CHAIN.md's
          * one-step-at-a-time policy) -- there is no separate decode outcome
          * for that case today, so it is reported as UNREADABLE, same as any
          * other undecodable blob. */
@@ -592,7 +592,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
         return err;
     }
 
-    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
+    /* docs/FILESYSTEM_USER_DATA.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
      * decoded. zones_config_cfg_fs_resolve() never touches NVS itself -- it
      * only decides whether the file or the NVS candidate above wins, per

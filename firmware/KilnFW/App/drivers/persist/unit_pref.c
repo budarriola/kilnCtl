@@ -18,7 +18,7 @@ static const char *TAG = "unit_pref";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_UNIT_PREF  "unit_pref"
-// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA_PLAN.md
+// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 3) -- a SEPARATE key, same pattern zones_config_cfg_fs.c's
 // "zones_rev" key uses rather than a field on the value itself, so the rev
 // survives independently of whatever shape unit_pref_t ever takes.
@@ -28,7 +28,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF);
 NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF_REV);
 
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 (prefs move): the file
+// docs/FILESYSTEM_USER_DATA.md section 5 step 3 (prefs move): the file
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.

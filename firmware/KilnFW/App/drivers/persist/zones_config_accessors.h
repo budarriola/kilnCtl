@@ -539,7 +539,7 @@ bool zones_config_is_valid(void);
  * into a trustworthy zones_cfg_t -- either because the blob's own version is
  * NEWER than ZONES_CFG_VERSION (a rollback past a schema bump, or newer
  * firmware than this build), or because it is OLDER than this firmware can
- * migrate forward (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's one-step-at-a-time
+ * migrate forward (docs/CONFIG_MIGRATION_CHAIN.md's one-step-at-a-time
  * policy: a future build carrying only the N-1->N step cannot consume a
  * blob more than one step behind). Never cleared by a later in-RAM event --
  * like recovery_mode, this is fixed for the boot; only a fresh boot (after a

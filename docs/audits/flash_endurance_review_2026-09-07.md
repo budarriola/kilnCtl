@@ -204,7 +204,7 @@ margin of roughly 100x-1000x.**
 reasonable.**
 
 A filesystem provides wear levelling **inside its own partition only**. The
-proposed change (`FILESYSTEM_PLAN.md`) swaps SPIFFS -> LittleFS on `logs`.
+proposed change (`FILESYSTEM.md`) swaps SPIFFS -> LittleFS on `logs`.
 Consequences for the writers actually identified above:
 
 - `run_state`, `relay_cycles`, `firing_stats`, zones/rules/profiles/Wi-Fi —
@@ -242,7 +242,7 @@ What *would* address wear levelling, if it were needed (it is not):
 The decision stands, but on *this* basis, which the prior assessment did not
 establish: measured write rates give 100x-1000x endurance margin, and the
 proposed change does not reach any of the identified writers. Keep
-`FILESYSTEM_PLAN.md`'s retention-driven trigger as the only reason to
+`FILESYSTEM.md`'s retention-driven trigger as the only reason to
 revisit; that trigger has still not fired.
 
 **R2 — Fix the RP2040 config store's real defect, which is *atomicity*, not
@@ -279,7 +279,7 @@ is mirrored there, and updating one side and not the other is exactly the
 (cost: minutes, risk: 0)** `run_state.c:47-58` already carries this
 arithmetic and is correct; `relay_cycles.h:20` gestures at it. Nothing states
 the *whole-partition* figure. Point `LITTLEFS_ASSESSMENT.md` and
-`FILESYSTEM_PLAN.md` at this file so the endurance question is not
+`FILESYSTEM.md` at this file so the endurance question is not
 re-litigated from the retention document a third time.
 
 **R4 — Explicitly rejected: raising `RUN_STATE_REFRESH_INTERVAL_S`, enlarging

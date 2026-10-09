@@ -7,7 +7,7 @@ numbers hold at both commits.
 
 ## Question
 
-The A8 acceptance criterion of `docs/ITER_TUNE_REDESIGN_PLAN.md` sec 7
+The A8 acceptance criterion of `docs/ITER_TUNE_REDESIGN.md` sec 7
 ("profile independence") fails on its A1 half: re-running the A1 null
 experiment with the baseline firing on one profile and the trial firing on a
 second, class-matched profile measures 45 false accepts of 660 (6.82%)
@@ -97,7 +97,7 @@ and not a fixture defect. The mechanism is the one named in
 `docs/audits/a1_false_accept_root_cause_2026-09-14.md` (raw single-sample
 entry peak, coupling by raw relay duty, median over three pairs), excited a
 second time by the profile shape difference. The closure is recorded in
-`docs/ITER_TUNE_REDESIGN_PLAN.md`'s status block ("the A1-half of A8's
+`docs/ITER_TUNE_REDESIGN.md`'s status block ("the A1-half of A8's
 cross-profile miss ... is accepted as a known gap, not made green. Do not
 re-dispatch work to close it."), and `docs/audits/release_gate_vacuity_audit_2026-09-18.md:195-197`
 independently re-examined the bar's exclusion from the exit code and left it

@@ -269,13 +269,13 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
      * ADAPTIVE_TUNE_KIBASE_FILE_PATH/pref_cfg_fs_resolve() call, and
      * firing_stats_cfg_fs.c/.h existing as a real bridge module, not against
      * the prior report alone. This list is empty by construction now: every
-     * item docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracks as "MOVE" has
+     * item docs/FILESYSTEM_USER_DATA.md section 5 tracks as "MOVE" has
      * a bridge module AND a dual_write.items[] row. cfgfs_nvs_only_drift_
      * check.py fails the moment a new persist/'*'_cfg_fs.c bridge appears
      * without a matching row, so this list cannot go stale the same way a
      * third time without the check catching it. */
     APPEND(",\"nvs_only\":[]");
-    /* Distinct from the above: items docs/FILESYSTEM_USER_DATA_PLAN.md's
+    /* Distinct from the above: items docs/FILESYSTEM_USER_DATA.md's
      * "KEEP in NVS" section says stay in NVS FOREVER, by design, for boot-
      * ordering or safety-isolation reasons -- not "not migrated yet". Listed
      * separately so an operator reading /api/cfgfs cannot mistake "working

@@ -16,7 +16,7 @@ a separate call nobody remembers to make):
   * unacknowledged_crash / reset_reason      -- CLAUDE.md's crash-report gap
   * heap_internal free / min_free            -- 11.9 kB free is the
     documented HTTP-socket-reset failure threshold (docs/bench_snapshots/
-    2026-09-04.md, docs/FILESYSTEM_PLAN.md); this script's floor is set with
+    2026-09-04.md, docs/FILESYSTEM.md); this script's floor is set with
     headroom above that measured failure point, not a guess
   * per-task stack margin (level, hwm_bytes) -- firmware's own
     StackMarginLevel classification against each task's *configured* size
@@ -94,7 +94,7 @@ from kilnctrl.protocol import StackMarginLevel  # noqa: E402
 
 # 11.9 kB free heap_internal is the measured, documented failure point where
 # HTTP sockets started resetting (docs/bench_snapshots/2026-09-04.md,
-# docs/FILESYSTEM_PLAN.md). This floor sits at 3x that with a round number,
+# docs/FILESYSTEM.md). This floor sits at 3x that with a round number,
 # not at the failure point itself -- the goal is a working margin, not a
 # threshold that only fires after the board has already started misbehaving.
 HEAP_INTERNAL_FLOOR_BYTES = 36_000

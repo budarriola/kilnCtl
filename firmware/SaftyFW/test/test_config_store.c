@@ -1212,7 +1212,7 @@ static void test_v1_migration(void)
 }
 
 // ---------------------------------------------------------------------------
-// Frozen-input migration fixtures (docs/CONFIG_MIGRATION_CHAIN_PLAN.md).
+// Frozen-input migration fixtures (docs/CONFIG_MIGRATION_CHAIN.md).
 //
 // FROZEN_V1_BLOB / FROZEN_V2_BLOB are byte-exact records, committed as
 // literals. NEVER REGENERATE THEM from today's config_store_pack(): that would

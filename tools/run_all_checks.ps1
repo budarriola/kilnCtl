@@ -286,7 +286,7 @@ if (Test-Path $uriCapNegativeTest) {
 }
 
 # test_check_config_migration_steps.ps1 is a negative test, not a guard -- it
-# proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+# proves check_config_migration_steps.ps1's scan (docs/CONFIG_MIGRATION_CHAIN.md
 # section 5) can actually detect a version bump with no matching step, plus
 # every other rule shape it claims to enforce. Named test_*, not check_*, so
 # the glob above does not pick it up; wired explicitly here, same pattern as

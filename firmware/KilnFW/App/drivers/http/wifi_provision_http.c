@@ -1197,7 +1197,7 @@ esp_err_t wifi_provision_http_start(void)
      *
      * Bumped 165 -> 170, 2026-09-23: iter_tune_http.c added two routes
      * (GET /api/iter_tune/status, POST /api/iter_tune/restore_commissioned,
-     * ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7), which would have left only 5
+     * ITER_TUNE_REDESIGN.md sec 8 row 7), which would have left only 5
      * spare against the 165 cap. Set to 170 for the same ~9-slot headroom
      * convention as every bump above.
      *

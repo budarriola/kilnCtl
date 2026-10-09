@@ -94,7 +94,7 @@ typedef struct {
      * an accident of storage layout, and re-syncs the RAM copy. */
     bool restore_builtin_profiles;
 
-    /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+    /* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA.md section 5
      * step 1, "The reset section of the webpage should format when
      * reseting"): "all" is the one scope that also erases and reformats the
      * `cfg` LittleFS partition -- the same partition zones_config_cfg_fs.c/
@@ -372,7 +372,7 @@ static void execute_scope_job(void *arg)
      * inline instead of dispatching again -- calling it from here, rather
      * than from execute_scope() before dispatch, is what makes that
      * same-worker fast path apply. This IS the explicit operator action the
-     * mount-failure contract requires (docs/FILESYSTEM_USER_DATA_PLAN.md
+     * mount-failure contract requires (docs/FILESYSTEM_USER_DATA.md
      * section 3 point 4) -- clicking "Factory default" already carries the
      * same confirm-dialog the danger-zone buttons all require
      * (settings_page.html's kcConfirm()), so this never goes through the

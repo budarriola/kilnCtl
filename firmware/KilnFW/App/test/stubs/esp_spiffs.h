@@ -1,5 +1,5 @@
 // Host-test stub for esp_spiffs.h -- ESP-IDF's SPIFFS VFS wrapper. Added for
-// docs/FILESYSTEM_PLAN.md step 2's log_store_mount.c host test
+// docs/FILESYSTEM.md step 2's log_store_mount.c host test
 // (test_log_store_mount.c), which needs log_store_mount.c to compile/link on
 // the host for BOTH its SPIFFS branch (CONFIG_KILNCTL_LOGS_LITTLEFS off,
 // default) and its LittleFS branch (CONFIG_KILNCTL_LOGS_LITTLEFS on) -- see

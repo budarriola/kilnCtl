@@ -193,7 +193,7 @@ number can never ship to a real kiln (`zones_config_json.h`). That decision was
 correct and should be extended, not relaxed.
 
 Worth noting for (b): worse conditioning makes the "one parameter, one zone, per
-firing" rule in `docs/ITER_TUNE_REDESIGN_PLAN.md` **more** necessary at
+firing" rule in `docs/ITER_TUNE_REDESIGN.md` **more** necessary at
 temperature, not less. Simultaneous perturbation is unattributable when zones
 are near-isothermal.
 
@@ -855,7 +855,7 @@ question), E8 (guards), then the rest.
 `tools/PcTools/config_presets/noise_floor.json`;
 `docs/bench_snapshots/2026-09-04.md`;
 `docs/audits/firing_preflight_2026-09-07.md`;
-`docs/ITER_TUNE_REDESIGN_PLAN.md`.
+`docs/ITER_TUNE_REDESIGN.md`.
 Commits cited: `78f2134` (adopt the re-solved 3x3 coupling matrix), `c84abff`
 (relay-step PWM window restart), `17e67ee` (relay setpoint headroom), `813ad90`
 (a refused tune looked like a successful one) — all verified to resolve.

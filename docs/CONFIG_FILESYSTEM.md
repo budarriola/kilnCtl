@@ -2,7 +2,7 @@
 
 Operator-facing reference for the LittleFS migration in progress on KilnFW.
 For the design rationale and remaining implementation steps, see
-`docs/FILESYSTEM_USER_DATA_PLAN.md`; for why LittleFS was adopted at all
+`docs/FILESYSTEM_USER_DATA.md`; for why LittleFS was adopted at all
 after twice being assessed and declined, see `docs/LITTLEFS_ASSESSMENT.md`
 and `docs/audits/flash_endurance_review_2026-09-07.md`.
 
@@ -32,7 +32,7 @@ are the only thing standing between a bricked board and a recoverable one:
   its own 4 K record store. The ESP filesystem cannot reach it and never
   will.
 
-See `docs/FILESYSTEM_USER_DATA_PLAN.md` §2 for the full item-by-item
+See `docs/FILESYSTEM_USER_DATA.md` §2 for the full item-by-item
 MOVE/KEEP table (24 items).
 
 ## What the `cfg` partition is
@@ -475,7 +475,7 @@ and 1 (23) is on the separate `logs` track.
 
 The "Dual-write window" open item above previously had nothing checking
 whether its three conditions were actually met — see
-`docs/FILESYSTEM_PLAN.md`'s "Closing-criterion measurement added,
+`docs/FILESYSTEM.md`'s "Closing-criterion measurement added,
 2026-09-07" section for the full design. Summary for anyone landing here
 first: `firmware/KilnFW/App/drivers/persist/dualwrite_window.{c,h}` counts
 consecutive clean boots (reset on an unclean reset reason, a pending

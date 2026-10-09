@@ -244,7 +244,7 @@ read-back after the POST still shows the record unacknowledged. The one
 before it was `convert_config`, same day -- the MCP surface for
 `tools/PcTools/src/kilnctrl/config_convert.py`, the PC-side best-effort
 config-version converter (file-only, never writes to a board; see
-`docs/CONFIG_MIGRATION_CHAIN_PLAN.md`). The one before that was
+`docs/CONFIG_MIGRATION_CHAIN.md`). The one before that was
 `safety_set_log_level`, same day -- an HTTP client for POST
 /api/safety/log_level, which had no caller anywhere. The one before that was
 `saleae_decode_kilnlink`, same day --

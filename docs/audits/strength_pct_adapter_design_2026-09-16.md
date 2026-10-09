@@ -44,7 +44,7 @@ A **cross-firing scalar hill-climb over `strength_pct`**, using
 `firing_compare`'s existing Bar 1 / Bar 2 machinery to accept, reject, or
 declare insufficient each proposed step, with a hard revert on any reject.
 It is deliberately as small as `iter_tune.c`'s own accept/reject shape
-(`ITER_TUNE_REDESIGN_PLAN.md`) already establishes for PID gains -- this
+(`ITER_TUNE_REDESIGN.md`) already establishes for PID gains -- this
 design reuses that same posture for one more scalar rather than inventing a
 new mechanism.
 

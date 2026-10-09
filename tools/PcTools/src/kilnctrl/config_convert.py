@@ -12,7 +12,7 @@ PROFILE_VERSION). It never writes to a board -- see CLAUDE.md's "the tool
 converts files, it never writes to a board" rule, restated here because it
 is the whole reason this module exists on the PC side rather than as a
 firmware migration step: firmware itself is deliberately kept to a single
-N-1 -> N migration (docs/CONFIG_MIGRATION_CHAIN_PLAN.md), so a board more
+N-1 -> N migration (docs/CONFIG_MIGRATION_CHAIN.md), so a board more
 than one release behind cannot read its own on-flash config. Moving the
 *arbitrary* version-to-version conversion burden here, where it is cheap,
 lets an operator convert an exported/backed-up file to whatever version a

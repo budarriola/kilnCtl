@@ -1,4 +1,4 @@
-// iter_tune.c -- ITER_TUNE_REDESIGN_PLAN.md step 5. See iter_tune.h for
+// iter_tune.c -- ITER_TUNE_REDESIGN.md step 5. See iter_tune.h for
 // the design rationale, especially why the old whole-firing IAE path is
 // deleted rather than kept alongside.
 

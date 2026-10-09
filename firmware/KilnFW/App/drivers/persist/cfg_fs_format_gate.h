@@ -1,6 +1,6 @@
 // cfg_fs_format_gate -- pure, host-testable decision of whether a `cfg`
 // LittleFS partition that failed to mount is safe to auto-format, per the
-// owner decision (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 1) as
+// owner decision (docs/FILESYSTEM_USER_DATA.md section 5 step 1) as
 // refined 2026-09-07: "The auto check should be looking to see if it is a
 // valid file system, not just data. If it is just data and not file system
 // then just format it."

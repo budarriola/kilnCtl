@@ -481,7 +481,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/zones_config_cfg_fs.c"
                        "persist/profiles_cfg_fs.c"
                        # profiles filesystem move, 2026-09-07
-                       # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4)
+                       # (docs/FILESYSTEM_USER_DATA.md section 5 step 4)
                        # -- read-through/dual-write bridge to the `cfg`
                        # LittleFS partition, one file per profile slot. See
                        # that file's header comment.
@@ -539,11 +539,11 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "persist/profiles_scope_cfg_files.c"
                        "persist/iter_tune_store.c"
                        # iter_tune redesign plan step 7 persistence
-                       # (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7): own
+                       # (docs/ITER_TUNE_REDESIGN.md sec 8 row 7): own
                        # NVS namespace + cfg LittleFS dual-write.
                        "http/iter_tune_http.c"
                        # kiln config slots filesystem move, 2026-09-07
-                       # (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln
+                       # (docs/FILESYSTEM_USER_DATA.md section 5, "kiln
                        # config slots" item) -- read-through/dual-write
                        # bridge to the `cfg` LittleFS partition for the
                        # whole saved-configs store (one document, unlike

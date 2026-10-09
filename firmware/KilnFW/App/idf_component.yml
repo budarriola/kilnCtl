@@ -2,7 +2,7 @@ dependencies:
   # mDNS: advertises this board as kiln.local so the web UI/pc_tools don't
   # need the raw station IP -- see mdns_init()/mdns_hostname_set() in main.c.
   espressif/mdns: "^1"
-  # LittleFS for the `logs` partition, staged per docs/FILESYSTEM_PLAN.md
+  # LittleFS for the `logs` partition, staged per docs/FILESYSTEM.md
   # step 2 landed (b039d5ee): log_store_mount.c mounts logs with this component
   # when CONFIG_KILNCTL_LOGS_LITTLEFS is set (default off, SPIFFS path otherwise).
   joltwallet/littlefs: "^1"

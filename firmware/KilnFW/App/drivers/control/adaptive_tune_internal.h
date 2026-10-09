@@ -266,7 +266,7 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED);
 #define ADAPTIVE_TUNE_NVS_KEY_KIBASE "ki_base"
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 (adaptive-tune state):
+// docs/FILESYSTEM_USER_DATA.md section 5, item 9 (adaptive-tune state):
 // this task's own audit (ada18d3262, "adaptive-tune state was judged
 // re-derivable over one firing") licenses a SIMPLER treatment than zones
 // config/relay cycles get -- no per-zone divergence forensics, just the same

@@ -879,7 +879,7 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 #undef RELAY_CYCLES_RESET_BODY_MAX
 
 /* POST /api/relay_cycles/restore c0=N&c1=N&c2=N&c3=N&c4=N[&allow_lower=M] --
- * backup-gate pass 2026-09-07 (docs/FILESYSTEM_PLAN.md runbook). full_board_
+ * backup-gate pass 2026-09-07 (docs/FILESYSTEM.md runbook). full_board_
  * backup.py already captures these five counts as /api/status's `relay_life`
  * array (NOT a `relay_counts` array -- there is no such key in that
  * response; this comment used to say otherwise, fixed 2026-09-20); this is
@@ -1386,7 +1386,7 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
 #undef DANGER_ENABLE_BODY_MAX
 
 /* GET /api/cfgfs -- observability for the `cfg` LittleFS partition
- * (docs/FILESYSTEM_USER_DATA_PLAN.md). The `cfg` partition is invisible
+ * (docs/FILESYSTEM_USER_DATA.md). The `cfg` partition is invisible
  * otherwise: mounted or not, how full, what's on it, and whether the
  * zones-config dual-write's file and NVS copies agree are all things that
  * were previously only findable by grepping the boot log. Most of the work
@@ -1537,7 +1537,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
      * bridge (70ed6514 fixed /api/cfgfs's stale lists but left this detail
      * wired up for zones only -- widened here; 2026-09-08 widened again to
      * cover relay_cycles/adaptive_tune/firing_stats, the last three items
-     * docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked). Each bridge's
+     * docs/FILESYSTEM_USER_DATA.md section 5 tracked). Each bridge's
      * own module reads its OWN NVS rev key and computes `diverged` itself
      * via cfg_fs_status_item_diverged() (a real decoded-content compare, not
      * a rev-only guess) -- this handler just collects what they report. */
@@ -1764,7 +1764,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
 }
 
 /* GET /api/cfgfs/file?name=<name> and POST /api/cfgfs/file?name=<name> --
- * full_board_backup.py's filesystem-coverage addition (docs/FILESYSTEM_PLAN.md
+ * full_board_backup.py's filesystem-coverage addition (docs/FILESYSTEM.md
  * "Add filesystem coverage to the backup"). /api/cfgfs above already lists
  * every file cfg_fs holds, with sizes -- this pair is deliberately NOT a
  * second listing surface, just the one primitive that was missing: fetch (or

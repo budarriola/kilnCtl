@@ -1322,7 +1322,7 @@ static void test_nvs_load_store_migrates_v1_blob_at_full_size(void)
 }
 
 // ---------------------------------------------------------------------------
-// FROZEN-INPUT migration fixtures (docs/CONFIG_MIGRATION_CHAIN_PLAN.md
+// FROZEN-INPUT migration fixtures (docs/CONFIG_MIGRATION_CHAIN.md
 // follow-up). Unlike build_v1_blob()/build_v2_blob() above, which fill the
 // CURRENT private struct definitions, these are literal byte images of what
 // real old firmware wrote, so a later edit to kiln_cfg_entry_v1_t/_v2_t

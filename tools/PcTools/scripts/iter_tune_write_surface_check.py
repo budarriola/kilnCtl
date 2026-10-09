@@ -3,7 +3,7 @@
 not supposed to have, and against it getting silently wired into the
 firing pipeline before the owner has signed off on that.
 
-Background: docs/ITER_TUNE_REDESIGN_PLAN.md sec 5 ("Safety and
+Background: docs/ITER_TUNE_REDESIGN.md sec 5 ("Safety and
 containment"). The module's ONLY sanctioned write path into board state is
 the caller invoking `zones_config_set_pid(zone, kp, ki, kd)` with the gains
 `iter_tune_active_gains()` returned -- `iter_tune.c` itself never calls any
@@ -86,7 +86,7 @@ def _load_decision_core_funcs(repo_root: Path) -> tuple[str, ...]:
     names = sorted(set(_ITER_TUNE_DECL_RE.findall(stripped)))
     return tuple(names)
 
-# Plan step 7 (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7) deliberately adds
+# Plan step 7 (docs/ITER_TUNE_REDESIGN.md sec 8 row 7) deliberately adds
 # ONE production caller: the persistence + HTTP surface, which needs to call
 # a narrow, non-proposing subset of iter_tune_* to implement the "restore
 # commissioned gains" control and status reporting. It must NOT be able to
@@ -177,7 +177,7 @@ def check_no_write_surface(repo_root: Path) -> list[str]:
                     failures.append(
                         f"{rel}:{lineno}: forbidden write-surface call {pattern.pattern!r} -- "
                         "iter_tune.c must never call a setter/persistence/hardware API itself "
-                        "(ITER_TUNE_REDESIGN_PLAN.md sec 5)"
+                        "(ITER_TUNE_REDESIGN.md sec 5)"
                     )
     return failures
 
@@ -208,7 +208,7 @@ def check_unwired(repo_root: Path) -> list[str]:
                     failures.append(
                         f"{rel}:{lineno}: calls {name}() -- this function proposes/scores/arms a "
                         "trial and must never be called outside iter_tune.c/.h or the host tests "
-                        "(ITER_TUNE_REDESIGN_PLAN.md sec 9.3)"
+                        "(ITER_TUNE_REDESIGN.md sec 9.3)"
                     )
                     continue
                 if not is_allowed_caller:

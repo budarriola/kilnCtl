@@ -1,5 +1,5 @@
 // Host tests for time_sync_tz.c (the pure, dependency-free TZ
-// validation/degrade logic) AND, as of docs/FILESYSTEM_USER_DATA_PLAN.md
+// validation/degrade logic) AND, as of docs/FILESYSTEM_USER_DATA.md
 // item 14's close-out, time_sync.c itself: an esp_netif_sntp.h host stub
 // (test/stubs/esp_netif_sntp.h) now exists, closing the gap time_sync_tz.h's
 // header comment used to document ("no host stub written for it in this
@@ -94,7 +94,7 @@ static void ts_fresh_mounted(void)
 
 // ---------------------------------------------------------------------
 // time_sync.c: NVS load/dual-write/tie-break coverage
-// (docs/FILESYSTEM_USER_DATA_PLAN.md item 14 close-out).
+// (docs/FILESYSTEM_USER_DATA.md item 14 close-out).
 // ---------------------------------------------------------------------
 
 static void test_ts_default_is_utc_on_empty_nvs(void)

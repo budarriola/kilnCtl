@@ -5,7 +5,7 @@ backup_import.c/backup_http_internal.h's field vocabulary and version
 constants (see that module's own docstring for why: the PC-side converter
 must know the same shape firmware's backup format uses, but must not
 duplicate the ON-BOARD migration semantics CLAUDE.md/
-docs/CONFIG_MIGRATION_CHAIN_PLAN.md keep to one step). A hand-maintained
+docs/CONFIG_MIGRATION_CHAIN.md keep to one step). A hand-maintained
 second copy with no drift check is exactly the class of defect this repo's
 existing *_mirror_drift_check.py scripts (approach_rate_cap_mirror_drift_
 check.py, power_diag_flag_mirror_drift_check.py, ...) exist to catch --

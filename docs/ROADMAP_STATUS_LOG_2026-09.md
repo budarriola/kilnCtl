@@ -979,8 +979,8 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 > - **cfg-partition mount-status doc correction landed everywhere it was
 >   stale** (`33bf8578`, follow-up `21c1669e`): `CLAUDE.md`,
 >   `COMMISSIONING_BACKEND_RUNBOOK.md`, `RELEASE_HARDENING_PLAN.md`,
->   `WEB_AUTH_PLAN.md`, `FILESYSTEM_PLAN.md`,
->   `FILESYSTEM_USER_DATA_PLAN.md`, and `CONFIG_MIGRATION_CHAIN_PLAN.md` all
+>   `WEB_AUTH_PLAN.md`, `FILESYSTEM.md`,
+>   `FILESYSTEM_USER_DATA.md`, and `CONFIG_MIGRATION_CHAIN.md` all
 >   now note the bench board (`8ab3b81a`) has `cfg` mounted and populated
 >   with 7 files, confirmed via `GET /api/cfgfs` — NVS stays authoritative.
 > - **M18 read-only sweeps run and PASS**, 2026-09-21, against ESP
@@ -1954,7 +1954,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   common mode. This was the real cause behind the credibility gate's ramp
 >   MAE bar failing outright; after the fix, ramp MAE passes on 5 of 6
 >   zone-runs against the 3 C bar (`docs/audits/sim_credibility_gate_real_cause_2026-09-10.md`,
->   confirmed current in `docs/ITER_TUNE_REDESIGN_PLAN.md`'s own live status
+>   confirmed current in `docs/ITER_TUNE_REDESIGN.md`'s own live status
 >   block, itself already updated by a concurrent pass this sweep — re-read
 >   that doc directly rather than trusting a fixed number here, since a
 >   further rebuild during this same day moved the count from da9f3775's
@@ -1963,7 +1963,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   `b351edf0`): previously-vacuous dwell-entry-peak passes fixed, ambient
 >   leakage in the state stated. Gate overall verdict remains **GATE FAILS**
 >   — dwell offset and dwell-entry peak are the open bars, per
->   `docs/ITER_TUNE_REDESIGN_PLAN.md`'s live status.
+>   `docs/ITER_TUNE_REDESIGN.md`'s live status.
 > - **Second-order plant hypothesis for the dwell-entry-peak bar: refuted as
 >   tested** (`4f26a7f7`). **Closed-loop replay (candidate 3) explains dwell
 >   offset but not the peak residual** (`170f4b75`). All three investigated
@@ -2182,7 +2182,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   review and fixed same day: `249ce287`, `ce55440d`) plus a new write-
 >   surface guard and its own negative test (`f3fcd597`). Steps 1, 2 and 5
 >   of the plan's 9 steps landed; 3-4 and 6-9 remain open/design-only — see
->   `docs/ITER_TUNE_REDESIGN_PLAN.md` itself for current step status (it is
+>   `docs/ITER_TUNE_REDESIGN.md` itself for current step status (it is
 >   being edited by another pass concurrently with this sweep; re-read it
 >   rather than trusting a stale summary here).
 > - Simulation harness gaps G1-G4 promoted out of `sim_iter_tune.c`

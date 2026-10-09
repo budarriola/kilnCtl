@@ -196,7 +196,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_set_pid_result;
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_status_get_handler() now
+// ITER_TUNE_REDESIGN.md step 8: iter_tune_status_get_handler() now
 // calls firing_shadow_get_status(), and firing_shadow.c is linked into this
 // executable for real (build_host_tests.ps1's $cmdIth) -- but firing_shadow.c
 // itself calls zone_model_at()/zones_config_get_progress_band_c() (real
@@ -642,7 +642,7 @@ static void test_status_reports_schema_refused_version(void)
                "status JSON omits schema_refused_version entirely when nothing was refused");
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8: the status body opens with a top-level
+// ITER_TUNE_REDESIGN.md step 8: the status body opens with a top-level
 // "shadow" object -- null until firing_shadow_store_start() has run (the
 // handler never loads it lazily from the httpd task), the counters after.
 // Both shapes must still be one well-formed object continuing into "zones".

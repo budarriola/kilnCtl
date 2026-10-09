@@ -1337,7 +1337,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     """Report the `cfg` LittleFS partition's live state, over HTTP GET
     /api/cfgfs (diagnostics_http.c: cfgfs_status_get_handler()).
 
-    docs/FILESYSTEM_USER_DATA_PLAN.md's user-data-on-a-filesystem migration
+    docs/FILESYSTEM_USER_DATA.md's user-data-on-a-filesystem migration
     left the `cfg` partition otherwise invisible -- mounted or not, how full,
     what files exist, and whether the zones-config dual-write's file and NVS
     copies agree were only findable by grepping the boot log. This is the
@@ -1349,7 +1349,7 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     why this is a live snapshot, not the historical count reaped at mount),
     and dual_write.zones (file_backed/file_rev/nvs_rev/diverged -- diverged
     means a prior file write failed and only NVS advanced) plus nvs_only, the
-    list of items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 has not yet
+    list of items docs/FILESYSTEM_USER_DATA.md section 5 has not yet
     migrated off NVS.
 
     Same host-resolution order as get_heap_status()."""

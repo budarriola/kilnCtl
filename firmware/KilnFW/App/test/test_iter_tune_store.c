@@ -1,4 +1,4 @@
-// Host tests for iter_tune_store.c (docs/ITER_TUNE_REDESIGN_PLAN.md sec 8
+// Host tests for iter_tune_store.c (docs/ITER_TUNE_REDESIGN.md sec 8
 // row 7): round-trip, wrong-version reject, truncated-blob reject, and the
 // cfg LittleFS read-through, same conventions test_kiln_cfg_store.c uses for
 // its own store. Since the dual-write window closed (owner decision

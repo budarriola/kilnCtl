@@ -47,7 +47,7 @@
 
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
-#include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4:
+#include "profiles_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA.md section 5 step 4:
                                 * read-through/dual-write bridge to the `cfg`
                                 * LittleFS partition, one file per slot. See
                                 * that header for the full policy. */
@@ -65,7 +65,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_USED);
 
 /* Per-slot rev counter, PROFILES_MAX_COUNT uint32_t, one blob -- see
  * profiles_http_internal.h's s_profile_rev doc comment for why this must be
- * bumped on delete too, not just save (docs/FILESYSTEM_USER_DATA_PLAN.md
+ * bumped on delete too, not just save (docs/FILESYSTEM_USER_DATA.md
  * section 5 step 4, user-profiles filesystem move). Separate key from
  * NVS_KEY_USED, same reasoning zones_http.c's NVS_KEY_ZONES_REV split from
  * its cfg blob: a rev counter is bookkeeping for the file/NVS bridge, not
@@ -541,7 +541,7 @@ size_t profile_encode_current_blob(const profile_t *profile, void *out, size_t c
 }
 
 /* profile_decode_result_t is now declared in profiles_http_internal.h
- * (widened non-static, docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4)
+ * (widened non-static, docs/FILESYSTEM_USER_DATA.md section 5 step 4)
  * so profiles_cfg_fs.c can share this exact decode path for the `cfg`
  * filesystem file, not just the NVS blob -- see that header's comment. */
 
@@ -1161,7 +1161,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
 
     hal_kv_close(&h);
 
-    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 4: read-through/
+    /* docs/FILESYSTEM_USER_DATA.md section 5 step 4: read-through/
      * dual-write resolve against the `cfg` filesystem, one slot at a time.
      * Only meaningful for the real profiles partition -- this function is
      * never actually called with any other partition today (the pre-split

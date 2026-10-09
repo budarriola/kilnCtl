@@ -359,7 +359,7 @@ static bool resolve_with_file_buf(const zones_cfg_t *nvs_cfg, bool nvs_valid, ui
      *
      * `>=` here silently discarded every edit made on rolled-back firmware
      * and then overwrote it on the next save -- exactly the downgrade
-     * hazard docs/FILESYSTEM_USER_DATA_PLAN.md section 4 introduced the rev
+     * hazard docs/FILESYSTEM_USER_DATA.md section 4 introduced the rev
      * counter to close. Fixed 2026-09-07
      * (docs/audits/filesystem_migration_review_2026-09-07.md), pinned by
      * check_cfg_fs_tie_break.ps1 and by

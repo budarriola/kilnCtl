@@ -45,7 +45,7 @@ correct. No firmware was flashed, no heating run was performed, and no
    confirmed `e0d2e006`, `225d4b91`, `f3fcd597` all exist; `git show --stat`
    confirmed their content (sim-harness G1/G3/G4 gaps, sec 6.5 credibility
    gate reporting FAIL, `check_iter_tune_write_surface.ps1`).
-   `docs/ITER_TUNE_REDESIGN_PLAN.md` itself already carries a 2026-09-10
+   `docs/ITER_TUNE_REDESIGN.md` itself already carries a 2026-09-10
    "steps 1, 2, 3, 4, 5 ... landed" status update. Corrected ROADMAP's two
    stale rows (both said "steps 3-4 ... open/design-only") and consolidated
    the second into a pointer to the first (see Duplicates below) since they
@@ -60,7 +60,7 @@ correct. No firmware was flashed, no heating run was performed, and no
    `firmware/SaftyFW/TODO.md` line 189 checkbox was the only place this
    closure was never recorded — checked it off with a citation.
 
-6. **The boot-hang blocker is resolved.** `docs/FILESYSTEM_PLAN.md` itself
+6. **The boot-hang blocker is resolved.** `docs/FILESYSTEM.md` itself
    documents, further down the same file ("`cfg` partition re-flashed after
    stack-overflow fix, 2026-09-07"), that `3c36b7e1` was built and flashed
    from a clean detached worktree, host tests 31/31 passed, and the board
@@ -84,7 +84,7 @@ correct. No firmware was flashed, no heating run was performed, and no
    review). The original conclusion is left intact below the marker as
    history.
 
-8. **`FILESYSTEM_USER_DATA_PLAN.md`** said "nothing below is implemented."
+8. **`FILESYSTEM_USER_DATA.md`** said "nothing below is implemented."
    `docs/CONFIG_FILESYSTEM.md` documents zones/profiles/prefs dual-writing
    to the `cfg` partition live today (NVS stays authoritative). Added a
    stale-marker to the plan doc pointing at `CONFIG_FILESYSTEM.md` as the

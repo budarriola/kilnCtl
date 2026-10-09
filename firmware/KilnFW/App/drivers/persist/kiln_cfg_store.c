@@ -78,7 +78,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_STORE_REV);
  * kiln_cfg_entry_t/kiln_cfg_store_blob_t layout now live in
  * kiln_cfg_store_internal.h, shared with kiln_cfg_store_cfg_fs.c (the `cfg`
  * LittleFS dual-write bridge for this whole store, docs/
- * FILESYSTEM_USER_DATA_PLAN.md section 5's "kiln config slots" item) -- see
+ * FILESYSTEM_USER_DATA.md section 5's "kiln config slots" item) -- see
  * that header for the version-bump/migration discipline this mirrors from
  * zones_http.c's ZONES_CFG_VERSION. The frozen v1 layout below stays
  * private here: nothing outside this file's own migration path ever needs
@@ -569,7 +569,7 @@ static uint32_t kiln_cfg_rev_load(void)
 }
 
 /* Wraps nvs_load_store() with the `cfg` LittleFS read-through/dual-write
- * policy (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, "kiln config slots"
+ * policy (docs/FILESYSTEM_USER_DATA.md section 5, "kiln config slots"
  * item) -- exactly the shape zones_config_store.c's nvs_load() wraps
  * nvs_load_from() with. kiln_cfg_store_cfg_fs_resolve() never touches NVS
  * itself; it only decides whether the file or the NVS candidate above wins,

@@ -251,7 +251,7 @@ void firing_stats_cache_invalidate_all(void) {}
 
 // ---------------------------------------------------------------------------
 // cfg_fs_mount.h (2026-09-07) -- factory_reset.c's "all" scope now also
-// formats the `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md
+// formats the `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 1, owner decision). Never actually exercised by any test in
 // this file (same "the interlock check always refuses first" note above --
 // no test here reaches a scope's actual execute_scope_job()), but the symbol

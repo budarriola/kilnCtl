@@ -1,5 +1,5 @@
 // cfg_fs -- foundation storage module for the `cfg` LittleFS partition
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 3/5, step 1-2). Provides
+// (docs/FILESYSTEM_USER_DATA.md section 3/5, step 1-2). Provides
 // mount/unmount, read-to-buffer, atomic write, delete, exists, and list --
 // the primitives every later user-data migration step (zones, profiles,
 // kiln-config slots, prefs, ...) builds on. This file does NOT itself move
@@ -13,7 +13,7 @@
 // routing writes through the flash worker -- lives in cfg_fs_mount.c/.h,
 // which this file's tests never link.
 //
-// MOUNT POLICY (docs/FILESYSTEM_USER_DATA_PLAN.md "mount-failure contract",
+// MOUNT POLICY (docs/FILESYSTEM_USER_DATA.md "mount-failure contract",
 // non-negotiable, mirrors log_store's "degrade, don't wedge" discipline but
 // with the OPPOSITE format-on-failure choice):
 //   - format_if_mount_failed = FALSE on the device side (cfg_fs_mount.c).
@@ -29,7 +29,7 @@
 //     for boot_guard_is_recovery_mode(); the device glue in cfg_fs_mount.c
 //     is the only place that reads the real boot_guard state).
 //
-// ATOMICITY (docs/FILESYSTEM_USER_DATA_PLAN.md section 3, "one helper, no
+// ATOMICITY (docs/FILESYSTEM_USER_DATA.md section 3, "one helper, no
 // exceptions"): cfg_fs_write_atomic() writes to `<base>/.tmp/<name>`, fsyncs
 // it, then renames it onto the final path. An interrupted write leaves
 // either the old file (rename never happened) or the new one (rename

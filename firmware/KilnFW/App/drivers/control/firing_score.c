@@ -1,5 +1,5 @@
 // firing_score.c -- see firing_score.h for the design rationale.
-// ITER_TUNE_REDESIGN_PLAN.md sec 2.1-2.2, step 1.
+// ITER_TUNE_REDESIGN.md sec 2.1-2.2, step 1.
 
 #include "firing_score.h"
 

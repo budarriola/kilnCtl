@@ -7,7 +7,7 @@
 > This plan starts once `docs/KILN_PROFILES_PLAN.md` is finished. It does not
 > re-plan anything that plan, `docs/SETUP_WIZARD.md`,
 > `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md`, `docs/ON_OFF_ZONE_PLAN.md`
-> or `docs/ITER_TUNE_REDESIGN_PLAN.md` already owns; where release depends on
+> or `docs/ITER_TUNE_REDESIGN.md` already owns; where release depends on
 > one of those, it is named as a dependency rather than duplicated.
 
 ## 0. What "release" means here, and why that changes the bar
@@ -1447,7 +1447,7 @@ the live bench board rather than assumed:
   hardware.
 - "Finish it" in the sense this section originally meant — exercise the
   tie-break and fallback paths for real — requires reflashing the bench board
-  and then meeting `docs/FILESYSTEM_PLAN.md`'s own closing criterion (20
+  and then meeting `docs/FILESYSTEM.md`'s own closing criterion (20
   consecutive clean boots, one complete file-backed firing, one verified
   backup/restore round trip). That is bench time and an owner-visible,
   by-hand step (`docs/CONFIG_FILESYSTEM.md`'s "Dual-write window" section is

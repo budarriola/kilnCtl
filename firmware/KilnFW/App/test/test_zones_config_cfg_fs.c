@@ -1,6 +1,6 @@
 // Host tests for zones_config_cfg_fs.c -- the read-through/dual-write
 // bridge between zones config's NVS blob and the `cfg` LittleFS partition
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5). See that file's
+// (docs/FILESYSTEM_USER_DATA.md section 5 step 5). See that file's
 // header comment for the full policy this exercises.
 //
 // Linked as a SEPARATE translation unit into the "zones_http" host-test
@@ -629,7 +629,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
 //    simplest case -- NVS has nothing trustworthy at all) carrying an
 //    OLD-VERSION blob that only migrates in RAM during decode. Before this
 //    fix, nvs_load() discarded the NVS side unconditionally whenever the
-//    file won (CLAUDE.md/CONFIG_MIGRATION_CHAIN_PLAN.md section 1.5's
+//    file won (CLAUDE.md/CONFIG_MIGRATION_CHAIN.md section 1.5's
 //    "used_file is unreachable in practice" gap) and never wrote the
 //    migrated struct back anywhere -- both NVS (still empty/stale) and the
 //    file (still holding the old-version bytes) would diverge from what

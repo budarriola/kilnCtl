@@ -94,7 +94,7 @@ design**, not held in reserve accidentally.
   `zone_coupling_solve.c`) recover cleanly, or was `cplval70` just a mild
   case that happened to be recoverable?). A capture with PC-side tracking
   attached (`run_queue.py`) would produce the ramp-lag/dwell-overshoot/
-  steady-error triple the `ITER_TUNE_REDESIGN_PLAN.md` scoring scheme uses,
+  steady-error triple the `ITER_TUNE_REDESIGN.md` scoring scheme uses,
   bucketed at the 60-70-80 °C temperature buckets it already defines.
 - **Whether the coupling matrix still tracks at 70-75 °C.** The matrix's
   own-diagonal terms were fit below ~60-65 °C
@@ -165,7 +165,7 @@ prohibition on altering builtin `target_c`/`ramp_c_per_hr`/`dwell_min`/
 
 Rationale for stepped dwells rather than one long ramp: each dwell gives a
 scoreable segment at a distinct 25 °C-bucket boundary consistent with
-`ITER_TUNE_REDESIGN_PLAN.md` §2.1's segment-class scheme (`temperature_bucket`
+`ITER_TUNE_REDESIGN.md` §2.1's segment-class scheme (`temperature_bucket`
 at 25 °C granularity), and each is long enough to clear the
 `MIN_SCORED_TICKS`/capture-transient exclusion (60 s settle window is the
 floor; 45-60 min dwells give a genuinely settled steady-state read, not just
@@ -253,7 +253,7 @@ Concretely, this means:
 - `logs/coupling/hightemp_validation_proposal_20260904.md` §0, §1, §2
 - `firmware/KilnFW/docs/PID_EXPANSION_PLAN.md` §3.6i (lines ~5744-5796),
   §3.2/§3.6c (lines 157-168, 1178-1205)
-- `docs/ITER_TUNE_REDESIGN_PLAN.md` §2.1 (segment-class buckets)
+- `docs/ITER_TUNE_REDESIGN.md` §2.1 (segment-class buckets)
 - `firmware/SaftyFW/docs/CT_COMMISSIONING_PLAN.md` (step 6a family,
   S3 root-cause and clear, CT gain-cal outstanding)
 - Commits: `94b1a2a486cc05b33e5224ef0e3a147060d69d13` (cplval70 record),

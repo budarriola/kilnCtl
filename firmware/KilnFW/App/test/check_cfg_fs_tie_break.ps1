@@ -23,7 +23,7 @@
 # So `file_rev >= nvs_rev` in the winner-selection branch is always a defect:
 # it silently discards the edit made on rolled-back firmware and then
 # overwrites it on the next save -- exactly the downgrade hazard
-# docs/FILESYSTEM_USER_DATA_PLAN.md section 4 introduced the rev counter to
+# docs/FILESYSTEM_USER_DATA.md section 4 introduced the rev counter to
 # close. Found in `zones_config_cfg_fs.c` by
 # docs/audits/filesystem_migration_review_2026-09-07.md.
 #
@@ -55,7 +55,7 @@ if (-not (Test-Path $bridgeDir)) {
 $bridges = @(Get-ChildItem -Path $bridgeDir -Filter '*_cfg_fs.c' -File |
              Where-Object { $_.Name -ne 'cfg_fs.c' })
 
-# iter_tune_store.c (docs/ITER_TUNE_REDESIGN_PLAN.md step 7) dual-writes NVS
+# iter_tune_store.c (docs/ITER_TUNE_REDESIGN.md step 7) dual-writes NVS
 # and the cfg LittleFS partition with the exact same file_rev/nvs_rev
 # tie-break every *_cfg_fs.c bridge uses, but keeps its plan-mandated name
 # (iter_tune_store.h's own header comment: "SAME shape kiln_cfg_store_cfg_fs.c/

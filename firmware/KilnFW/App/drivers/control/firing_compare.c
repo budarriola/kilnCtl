@@ -1,4 +1,4 @@
-// firing_compare.c -- see firing_compare.h. ITER_TUNE_REDESIGN_PLAN.md
+// firing_compare.c -- see firing_compare.h. ITER_TUNE_REDESIGN.md
 // sec 2.3 + sec 3, step 2.
 
 #include "firing_compare.h"
@@ -61,7 +61,7 @@ firing_compare_verdict_t firing_compare(const firing_score_set_t *baseline, cons
     firing_compare_result_t r;
     memset(&r, 0, sizeof(r));
 
-    // ITER_TUNE_REDESIGN_PLAN.md step 8 follow-up (check_executor_task_stack_
+    // ITER_TUNE_REDESIGN.md step 8 follow-up (check_executor_task_stack_
     // budget.ps1): firing_shadow_finish_firing() now reaches this function
     // from the profile_executor task's stack (6144 B) (previously only
     // iter_tune.c called it, off that stack). raw[]/norm[]/in_band[] heap-

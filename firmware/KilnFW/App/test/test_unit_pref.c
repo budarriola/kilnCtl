@@ -6,7 +6,7 @@
 // No host test existed for this module before this pass (unit_pref.c had
 // no test file at all -- grepped and confirmed absent from
 // build_host_tests.ps1's $sources). Added alongside the docs/
-// FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 dual-write work so the
+// FILESYSTEM_USER_DATA.md section 5 step 3 dual-write work so the
 // module's pre-existing NVS behavior (default/round-trip/corrupt-value
 // fallback) is proven, not just the new file-backed path this pass adds.
 #include <stdio.h>
@@ -158,7 +158,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA.md section 5
 // step 3). Everything above already proves the partition-absent path.
 // ---------------------------------------------------------------------
 

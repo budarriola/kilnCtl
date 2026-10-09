@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for full_board_backup.py's cfg-filesystem coverage (docs/FILESYSTEM_PLAN.md
+"""Tests for full_board_backup.py's cfg-filesystem coverage (docs/FILESYSTEM.md
 "Add filesystem coverage to the backup").
 
 Context: user data is moving from NVS to files on the `cfg` LittleFS
@@ -127,7 +127,7 @@ def test_capture_then_restore_round_trips_file_backed_board_byte_for_byte():
 
 
 def test_unmounted_cfg_partition_is_empty_not_an_error():
-    """Today's live-board reality (docs/FILESYSTEM_PLAN.md: `cfg` is
+    """Today's live-board reality (docs/FILESYSTEM.md: `cfg` is
     UNFORMATTED) -- must not be reported as a failure."""
     cfgfs_files, errors = fbb._capture_cfgfs_files("10.0.0.5", 5.0, {"mounted": False, "reason": "not mounted"})
     assert cfgfs_files == {}

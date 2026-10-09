@@ -149,7 +149,7 @@ extern zones_state_t s_zones;
 #define NVS_KEY_RELAY_NAMES "relay_names_cfg"
 NVS_KEY_LEN_CHECK(NVS_KEY_RELAY_NAMES);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md item 3 (relay names), section 5 step 5
+/* docs/FILESYSTEM_USER_DATA.md item 3 (relay names), section 5 step 5
  * close-out: separate tiny NVS key for the dual-write rev counter, same
  * reasoning as NVS_KEY_ZONES_REV in zones_config_store.c -- a rev counter has
  * nothing to do with the operator-entered labels themselves, so it is not a

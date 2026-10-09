@@ -1,7 +1,7 @@
 // zones_config_cfg_fs -- read-through/dual-write bridge between zones
 // config's existing NVS blob (zones_config_store.c's nvs_load()/nvs_save())
 // and the `cfg` LittleFS partition (cfg_fs.h/cfg_fs_mount.h), per
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5 -- the highest-risk
+// docs/FILESYSTEM_USER_DATA.md section 5 step 5 -- the highest-risk
 // data move in that plan (PID gains, coupling matrix, guard limits,
 // progress_band_c).
 //
@@ -132,7 +132,7 @@ bool zones_config_cfg_fs_resolve(const zones_cfg_t *nvs_cfg, bool nvs_valid, uin
  * function does not validate) to the file at `rev`. No-op returning
  * ESP_ERR_INVALID_STATE if cfg_fs never mounted -- callers must treat that
  * as expected on every board today, not as a surfaced error beyond a debug
- * log (mount-failure contract, docs/FILESYSTEM_USER_DATA_PLAN.md). */
+ * log (mount-failure contract, docs/FILESYSTEM_USER_DATA.md). */
 esp_err_t zones_config_cfg_fs_save(const zones_cfg_t *cfg, uint32_t rev);
 
 /* Reads and decodes the file only, without any NVS comparison -- used by

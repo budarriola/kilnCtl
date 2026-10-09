@@ -67,7 +67,7 @@
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- adaptive_tune_get_kibase_dualwrite_status() below */
 #include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see adaptive_tune_init()'s
                                  * kibase resolve call site below and flash_worker_wait.h's header comment */
-#include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA.md
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
                              (re-derivable) treatment this item gets. */
@@ -1332,7 +1332,7 @@ void adaptive_tune_init(void)
     // to whatever the file alone can offer (a fresh board with no NVS
     // namespace yet can still have a valid file from a prior boot's save).
 
-    // cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+    // cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA.md section
     // 5 item 9) -- see adaptive_tune_internal.h's ADAPTIVE_TUNE_KIBASE_FILE_PATH
     // comment for why this item gets the simplified generic-bridge treatment
     // rather than zones config's bespoke divergence forensics.
@@ -1407,7 +1407,7 @@ bool adaptive_tune_kibase_migration_worker_wait_deferred(void)
 
 // GET /api/cfgfs dual-write picture for the Ki-baseline blob -- 2026-09-08,
 // moving this item's reporting out of cfg_fs_status.c's stale "nvs_only"
-// hardcoded list (docs/FILESYSTEM_USER_DATA_PLAN.md's Ki-baseline bridge,
+// hardcoded list (docs/FILESYSTEM_USER_DATA.md's Ki-baseline bridge,
 // step 9, landed in 762bb29e). Read-only: unlike adaptive_tune_init()'s
 // boot-time load, this does NOT call pref_cfg_fs_resolve() (no resync
 // write) -- same "a status GET must never heal or mask a divergence"

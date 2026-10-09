@@ -33,7 +33,7 @@ esp_err_t log_store_mount(void)
 #if CONFIG_KILNCTL_LOGS_LITTLEFS
     /* partitions.csv's `logs` line subtype must be `littlefs`, not `spiffs`,
      * for this to mount a filesystem that was actually formatted for it --
-     * see this option's Kconfig help. Step 4 (docs/FILESYSTEM_PLAN.md) is
+     * see this option's Kconfig help. Step 4 (docs/FILESYSTEM.md) is
      * what flips that subtype; this branch alone does not. */
     esp_vfs_littlefs_conf_t conf = {
         .base_path = "/logs",

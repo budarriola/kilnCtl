@@ -163,7 +163,7 @@ static void test_every_rising_segment_has_bounded_positive_ramp(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write of the hidden-builtin mask (docs/FILESYSTEM_USER_DATA_PLAN.md
+// cfg_fs dual-write of the hidden-builtin mask (docs/FILESYSTEM_USER_DATA.md
 // item 6, /cfg/profiles/hidden.json via pref_cfg_fs). Same shape as
 // test_unit_pref.c's dual-write cases.
 // ---------------------------------------------------------------------

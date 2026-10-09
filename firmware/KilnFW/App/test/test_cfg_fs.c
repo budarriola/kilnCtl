@@ -1,5 +1,5 @@
 // Host tests for cfg_fs.c -- the foundation storage module for the `cfg`
-// LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md sections 3/5, step
+// LittleFS partition (docs/FILESYSTEM_USER_DATA.md sections 3/5, step
 // 1-2). Same reasoning as test_log_store.c: cfg_fs.c is pure stdio with no
 // ESP-IDF/FreeRTOS dependency, so these tests run it against a REAL temp
 // directory on disk -- no filesystem stub needed, and this is exactly the
@@ -161,7 +161,7 @@ static void test_overwrite_replaces_old_content(void)
 //    still read back correctly, byte for byte, and cfg_fs_init()'s .tmp/
 //    sweep must remove the orphaned temp file and report it reaped.
 //
-//    This is the test the FILESYSTEM_USER_DATA_PLAN.md task explicitly
+//    This is the test the FILESYSTEM_USER_DATA.md task explicitly
 //    calls out to run against a DELIBERATELY BROKEN cfg_fs_write_atomic()
 //    (see the accompanying negative-test note in the commit/report) --
 //    the assertions below are written against the real production

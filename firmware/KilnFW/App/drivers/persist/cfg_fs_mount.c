@@ -351,7 +351,7 @@ static bool start_deferred_auto_format(void)
     return true;
 }
 
-/* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+/* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA.md section 5
  * step 1): "Auto format, dont require all ff, search for valid files/
  * partitions ask the user if it is ok to overwright if partitions/files
  * found." Called only after esp_vfs_littlefs_register() has already failed
@@ -473,7 +473,7 @@ esp_err_t cfg_fs_mount_device(void)
         if (auto_fmt_err != ESP_OK) {
             /* Every cfg_fs_*() call fails clean with ESP_ERR_INVALID_STATE
              * from here on this boot; every caller degrades to firmware
-             * defaults (docs/FILESYSTEM_USER_DATA_PLAN.md's mount-failure
+             * defaults (docs/FILESYSTEM_USER_DATA.md's mount-failure
              * contract). maybe_auto_format_and_remount() has already logged
              * the specific reason (absent partition, refused-pending-
              * confirmation, or a format/re-register failure). */

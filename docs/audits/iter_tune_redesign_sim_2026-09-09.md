@@ -1,6 +1,6 @@
 # `iter_tune` redesign — simulation results, 2026-09-09
 
-Evidence record for `docs/ITER_TUNE_REDESIGN_PLAN.md` steps 1, 2 and 5.
+Evidence record for `docs/ITER_TUNE_REDESIGN.md` steps 1, 2 and 5.
 Harness: `firmware/KilnFW/App/test/sim_iter_tune.c`, linking the real
 `pid.c`, `heater_output.c` (the 60 s PWM window, gap G2),
 `zone_coupling_solve.c`, `sim_plant.c`, and the three modules under test

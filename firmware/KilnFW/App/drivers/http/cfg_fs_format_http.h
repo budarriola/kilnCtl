@@ -1,6 +1,6 @@
 // cfg_fs_format_http -- the web-facing half of the "ask the user" leg of the
 // owner decision on cfg_fs_mount.c's auto-format gate
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 1, 2026-09-07): when the
+// (docs/FILESYSTEM_USER_DATA.md section 5 step 1, 2026-09-07): when the
 // `cfg` partition failed to mount AND the content scan found evidence of
 // real data, cfg_fs_mount_device() refuses to format on its own and sets
 // cfg_fs_mount_format_confirmation_pending() -- this file is how an operator

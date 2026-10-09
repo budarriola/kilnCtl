@@ -40,7 +40,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_HIDDEN);
 NVS_KEY_LEN_CHECK(NVS_KEY_HIDDEN_REV);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md section 3 item 6: the hidden-builtin mask
+/* docs/FILESYSTEM_USER_DATA.md section 3 item 6: the hidden-builtin mask
  * lives at /cfg/profiles/hidden.json, next to the profiles/prof<id>.json slot
  * files (profiles_cfg_fs.c). Same deviation those files carry: the ".json"
  * name is the plan's path, the content is pref_cfg_fs.h's rev-prefixed binary
