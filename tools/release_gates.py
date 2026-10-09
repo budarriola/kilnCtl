@@ -295,6 +295,10 @@ def main(argv=None):
     b.add_argument("--max-age-days", type=float, default=7)
     b.add_argument("--suites", default="ota,lcd,safety")
     a = ap.parse_args(argv)
+    if a.cmd == "bench-evidence":
+        code, out = bench_evidence(a.logs_dir, a.fw_build, [s for s in a.suites.split(",") if s], a.max_age_days)
+        print(chr(10).join(out))
+        return code
     try:
         if a.cmd == "status":
             gates = load_gates(a.file)

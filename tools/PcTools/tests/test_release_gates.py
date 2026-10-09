@@ -275,6 +275,29 @@ class BenchEvidence(unittest.TestCase):
             code, _ = self._go(d)
             self.assertEqual(code, 0)
 
+    def test_cli_main_end_to_end(self):
+        import io, contextlib, time
+        with tempfile.TemporaryDirectory() as d:
+            now = time.time()
+            for s in ("ota", "lcd"):
+                dd = os.path.join(d, "20261001T000000Z_" + s)
+                os.makedirs(dd)
+                with open(os.path.join(dd, "summary.json"), "w") as f:
+                    json.dump({"suite": s, "run_id": "r_" + s, "tainted": False, "exit_code": 0, "ended": now - 3600,
+                               "board_before": {"esp_fw_build": "B1"}, "cases": {"C": {"verdict": "PASS"}}}, f)
+            def run(suites):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    code = rg.main(["bench-evidence", "--fw-build", "B1", "--logs-dir", d, "--suites", suites])
+                return code, buf.getvalue()
+            code, out = run("ota,lcd")
+            self.assertEqual(code, 0)
+            self.assertIn("r_ota", out)
+            self.assertIn("r_lcd", out)
+            code, out = run("ota,safety")
+            self.assertEqual(code, 1)
+            self.assertIn("no runs found", out)
+
 
 if __name__ == "__main__":
     unittest.main()
