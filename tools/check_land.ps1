@@ -143,6 +143,24 @@ try {
     $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "green log lands"
 
+    Write-Host "case: log held open by a writer (FileShare.ReadWrite) is still read; exclusive lock fails fast"
+    $c = New-Clone "c_log3"
+    Commit-File $c "log3.txt" "x" "log3"
+    $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::ReadWrite)
+    try {
+        $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "0.05", "-ChecksScript", $okStub)
+        Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "log held open with ReadWrite share lands"
+    } finally { $hold.Dispose() }
+    $c = New-Clone "c_log4"
+    Commit-File $c "log4.txt" "x" "log4"
+    $hold = New-Object System.IO.FileStream($log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+    try {
+        $t0 = Get-Date
+        $r = Run-Land $c @("-CheckLog", $log, "-WaitTimeoutMin", "5", "-ChecksScript", $okStub)
+        Assert ($r.Code -eq 1 -and $r.Json.error -match 'cannot read check log' -and $r.Json.error -match 'run\.log') "exclusively locked log fails fast naming file"
+        Assert (((Get-Date) - $t0).TotalSeconds -lt 120) "fail-fast well before the wait deadline"
+    } finally { $hold.Dispose() }
+
     Write-Host "case: failing post-rebase check blocks push"
     $c = New-Clone "c_post"
     Commit-File $c "post.txt" "x" "post"

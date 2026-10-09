@@ -106,7 +106,11 @@ function Step([string]$s) { [void]$script:steps.Add($s); Write-Host "[step] $s" 
 
 function Read-TextAuto([string]$path) {
     # UTF-8 / UTF-16 LE / BE (BOM or NUL-heavy heuristic) tolerant read.
-    $b = [System.IO.File]::ReadAllBytes($path)
+    # FileShare.ReadWrite|Delete so a log still held open by the writer (run_all_checks
+    # tee, an editor) can be read; ReadAllBytes uses FileShare.Read and fails on it.
+    $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    try { $b = New-Object byte[] ([int]$fs.Length); $off = 0; while ($off -lt $b.Length) { $n0 = $fs.Read($b, $off, $b.Length - $off); if ($n0 -le 0) { break }; $off += $n0 } }
+    finally { $fs.Dispose() }
     if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) { return [Text.Encoding]::Unicode.GetString($b, 2, $b.Length - 2) }
     if ($b.Length -ge 2 -and $b[0] -eq 0xFE -and $b[1] -eq 0xFF) { return [Text.Encoding]::BigEndianUnicode.GetString($b, 2, $b.Length - 2) }
     if ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF) { return [Text.Encoding]::UTF8.GetString($b, 3, $b.Length - 3) }
@@ -172,9 +176,18 @@ if ($WaitPid -gt 0 -or $CheckLog) {
     }
     if (-not $CheckLog) { Finish 1 "-WaitPid given without -CheckLog; there is no summary to parse" }
     $text = $null
+    $readFailSince = $null
     while ($true) {
         if (Test-Path -LiteralPath $CheckLog) {
-            try { $text = Read-TextAuto $CheckLog } catch { $text = $null }
+            try { $text = Read-TextAuto $CheckLog; $readFailSince = $null }
+            catch {
+                $text = $null
+                # Fail fast on a persistent read error instead of retrying to the deadline.
+                if (-not $readFailSince) { $readFailSince = Get-Date }
+                if (((Get-Date) - $readFailSince).TotalSeconds -ge 30) {
+                    Finish 1 "cannot read check log '$CheckLog' for 30 s: $($_.Exception.Message)"
+                }
+            }
             if ($text -and $text -match $SummaryRe) { break }
         }
         if ($WaitPid -gt 0) { break }   # process already exited: no summary will appear
@@ -327,6 +340,9 @@ if ($RemoveWorktree) {
         # worktree_mint -Remove child) kept an OS directory handle on the worktree: git
         # deleted the contents and unregistered it, then RemoveDirectory failed, leaving an
         # empty unregistered dir (and a second -Remove then failed "not a git worktree").
+        if (((Get-Location).Path.TrimEnd('\') + '\') -like (($top.TrimEnd('\')) + '\*') -or ([Environment]::CurrentDirectory.TrimEnd('\') + '\') -like (($top.TrimEnd('\')) + '\*')) {
+            Write-Host "NOTE: the current directory is inside the worktree being removed ($top); moving to $mainRoot. A *calling* shell whose cwd is inside it will still hold the directory: cd out of it." -ForegroundColor Yellow
+        }
         Set-Location $mainRoot
         [Environment]::CurrentDirectory = $mainRoot
         & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "worktree_mint.ps1") -Remove -Path $top
