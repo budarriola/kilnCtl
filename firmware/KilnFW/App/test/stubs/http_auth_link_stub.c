@@ -22,10 +22,15 @@ size_t httpd_req_get_hdr_value_len(httpd_req_t *r, const char *field)
     return 0;
 }
 
+/* Optional per-test header hook (NULL = no headers present, the old behaviour). */
+esp_err_t (*g_test_get_hdr_hook)(const char *field, char *val, size_t val_size) = NULL;
+
 esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *val, size_t val_size)
 {
     (void)r;
-    (void)field;
+    if (g_test_get_hdr_hook) {
+        return g_test_get_hdr_hook(field, val, val_size);
+    }
     if (val && val_size > 0) {
         val[0] = '\0';
     }

@@ -85,6 +85,16 @@ extern "C" {
  * fit can ever collide with it. */
 #define ZONE_MODEL_FIT_TEMP_UNKNOWN (-273.15f)
 
+/* Shared by zones_config_set_model_fit_context_no_save() and backup import
+ * pass 1: sentinel always legal, else finite and in (-50, 1300) degC. */
+static inline bool zones_config_model_fit_temp_valid(float v)
+{
+    if (v == ZONE_MODEL_FIT_TEMP_UNKNOWN) {
+        return true;
+    }
+    return isfinite(v) && v > -50.0f && v < 1300.0f;
+}
+
 /* Every bound below moved out of zones_http.c (2026-08-21, backup-widening
  * pass) for the identical reason ZONE_MODEL_K_MAX/ZONE_MODEL_TIME_MAX_S moved
  * here first: backup_http.c's import validation pass must reject an
@@ -952,6 +962,15 @@ bool zones_config_get_tuning_quality(uint8_t zone_index, zone_tuning_quality_t *
 bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q);
 
 bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuning_quality_t *q);
+
+/* Shared enum/finite check used by the no_save setter and backup import pass 1. */
+static inline bool zones_config_tuning_quality_fields_valid(unsigned method, unsigned rule, float baseline_c,
+                                                            float step_ambient_c, float raw_rise_c,
+                                                            float rise_inf_c)
+{
+    return isfinite(baseline_c) && isfinite(step_ambient_c) && isfinite(raw_rise_c) && isfinite(rise_inf_c) &&
+           method <= 1 && rule <= 3;
+}
 
 /* Sets zone_cfg_t::tuning_valid back to 1 WITHOUT touching any other tuning_*
  * field or tuning_seq. Only for undoing zones_config_set_pid_no_save()'s

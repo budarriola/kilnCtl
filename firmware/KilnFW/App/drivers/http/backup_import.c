@@ -1350,6 +1350,14 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                     (unsigned)zone_candidate_count);
             return false;
         }
+        /* Mirror zones_config_set_pid_no_save(): finite float, <= ZONE_PID_GAIN_MAX, so
+         * pass 2 can never fail on a gain after other stores are committed. */
+        if (!isfinite(dkp) || !isfinite(dki) || !isfinite(dkd) || dkp > (double)ZONE_PID_GAIN_MAX ||
+            dki > (double)ZONE_PID_GAIN_MAX || dkd > (double)ZONE_PID_GAIN_MAX) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u: pid_kp/pid_ki/pid_kd exceed the gain ceiling",
+                    (unsigned)zone_candidate_count);
+            return false;
+        }
         zc->kp = (float)dkp;
         zc->ki = (float)dki;
         zc->kd = (float)dkd;
@@ -1919,6 +1927,13 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                         (unsigned)zone_candidate_count);
                 return false;
             }
+            if (!isfinite(dfittemp) || !isfinite(dfitambient) || fabs(dfittemp) > 1e6 || fabs(dfitambient) > 1e6 ||
+                !zones_config_model_fit_temp_valid((float)dfittemp) ||
+                !zones_config_model_fit_temp_valid((float)dfitambient)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: model_fit_temp_c/model_fit_ambient_c out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
             zc->has_model_fit_context = true;
             zc->model_fit_temp_c = (float)dfittemp;
             zc->model_fit_ambient_c = (float)dfitambient;
@@ -1975,6 +1990,14 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                 !backup_json_field_num(ze, "tuning_rise_inf_c", &dtriseinf)) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u: tuning_valid present but one or more tuning_* fields missing",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (!(dtmethod >= 0 && dtmethod <= 1) || !(dtrule >= 0 && dtrule <= 3) || fabs(dtbaseline) > 1e6 ||
+                fabs(dtstepamb) > 1e6 || fabs(dtrawrise) > 1e6 || fabs(dtriseinf) > 1e6 ||
+                !zones_config_tuning_quality_fields_valid((unsigned)dtmethod, (unsigned)dtrule, (float)dtbaseline,
+                                                          (float)dtstepamb, (float)dtrawrise, (float)dtriseinf)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: tuning_* field out of range",
                         (unsigned)zone_candidate_count);
                 return false;
             }
@@ -3146,13 +3169,21 @@ static bool backup_prefs_int(const char *v, double lo, double hi, double *out)
     return true;
 }
 
+/* v points into raw JSON, so the literal is followed by a delimiter, never more
+ * identifier characters ("trueXYZ" is not true). */
+static bool backup_prefs_literal(const char *v, const char *lit)
+{
+    size_t n = strlen(lit);
+    return strncmp(v, lit, n) == 0 && !isalnum((unsigned char)v[n]) && v[n] != '_';
+}
+
 static bool backup_prefs_bool(const char *v, bool *out)
 {
-    if (v != NULL && strncmp(v, "true", 4) == 0) {
+    if (v != NULL && backup_prefs_literal(v, "true")) {
         *out = true;
         return true;
     }
-    if (v != NULL && strncmp(v, "false", 5) == 0) {
+    if (v != NULL && backup_prefs_literal(v, "false")) {
         *out = false;
         return true;
     }
@@ -4298,15 +4329,28 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
      * a real restore would do before they commit to it. */
     kiln_cfg_restore_mode_t mode = KILN_CFG_RESTORE_MERGE;
     char mode_val[8];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val)) == ESP_OK &&
-        backup_names_equal_ci(mode_val, "mirror")) {
+    esp_err_t mode_err = httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val));
+    if (mode_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Mode value too long");
+        return ESP_OK;
+    }
+    if (mode_err == ESP_OK && backup_names_equal_ci(mode_val, "mirror")) {
         mode = KILN_CFG_RESTORE_MIRROR;
     }
     bool dry_run = false;
     char dry_run_val[8];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Dry-Run", dry_run_val, sizeof(dry_run_val)) == ESP_OK &&
-        dry_run_val[0] == '1') {
-        dry_run = true;
+    esp_err_t dry_err = httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Dry-Run", dry_run_val, sizeof(dry_run_val));
+    if (dry_err == ESP_OK) {
+        if (strcmp(dry_run_val, "1") == 0) {
+            dry_run = true;
+        } else if (strcmp(dry_run_val, "0") != 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run must be 1 or 0");
+            return ESP_OK;
+        }
+    } else if (dry_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        /* fail closed: a truncated value must never fall through to a real import */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run value too long");
+        return ESP_OK;
     }
 
     /* X-Kiln-Config-Ack-Delete: <count> (task 8/11): a non-dry-run MIRROR
@@ -4320,13 +4364,17 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
      * missing value. */
     int32_t ack_delete_count = -1;
     char ack_delete_val[16];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Ack-Delete", ack_delete_val, sizeof(ack_delete_val)) ==
-        ESP_OK) {
+    esp_err_t ack_err =
+        httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Ack-Delete", ack_delete_val, sizeof(ack_delete_val));
+    if (ack_err == ESP_OK) {
         char *endp = NULL;
         long parsed = strtol(ack_delete_val, &endp, 10);
-        if (endp != ack_delete_val && parsed >= 0 && parsed <= INT32_MAX) {
+        if (endp != ack_delete_val && *endp == '\0' && parsed >= 0 && parsed <= INT32_MAX) {
             ack_delete_count = (int32_t)parsed;
         }
+    } else if (ack_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Ack-Delete value too long");
+        return ESP_OK;
     }
 
     /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): hand the body

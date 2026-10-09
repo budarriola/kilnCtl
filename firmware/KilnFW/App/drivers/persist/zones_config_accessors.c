@@ -2187,13 +2187,7 @@ bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float d
  * other value must be finite and inside a generous physically-plausible
  * kiln range, wide enough to never reject a real measurement while still
  * catching a typo/garbage value. */
-static bool zone_model_fit_temp_valid(float v)
-{
-    if (v == ZONE_MODEL_FIT_TEMP_UNKNOWN) {
-        return true;
-    }
-    return isfinite(v) && v > -50.0f && v < 1300.0f;
-}
+#define zone_model_fit_temp_valid zones_config_model_fit_temp_valid
 
 bool zones_config_get_model_fit_context(uint8_t zone_index, float *out_fit_temp_c, float *out_fit_ambient_c)
 {
@@ -2311,8 +2305,8 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
     if (!q || !q->valid || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
-    if (!isfinite(q->baseline_c) || !isfinite(q->step_ambient_c) || !isfinite(q->raw_rise_c) ||
-        !isfinite(q->rise_inf_c) || q->method > 1 || q->rule > 3) {
+    if (!zones_config_tuning_quality_fields_valid(q->method, q->rule, q->baseline_c, q->step_ambient_c,
+                                                  q->raw_rise_c, q->rise_inf_c)) {
         return false;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];

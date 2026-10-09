@@ -2573,6 +2573,110 @@ static void test_backup_import_post_refused_by_mode_gate_before_interlock(void)
     reset_backup_import_post_stubs();
 }
 
+/* HTTP audit group A findings 1-4. */
+static bool backup_zone_refused(const char *entry_tail, const char *needle)
+{
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,%s}]}", entry_tail);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    if (ok || g_total_write_calls != 0) {
+        return false;
+    }
+    return needle == NULL || strstr(err, needle) != NULL;
+}
+
+static void test_group_a_pass1_range_checks(void)
+{
+    TEST_SECTION("backup_import_apply -- non-finite/over-ceiling gains and tuning fields refuse in pass 1");
+    reset_stub_state();
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1e300,\"pid_ki\":0,\"pid_kd\":0", "gain ceiling"), "kp 1e300 refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":1001,\"pid_kd\":0", "gain ceiling"), "ki > max refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":2000000", "gain ceiling"), "kd > max refused");
+    const char *tv = "\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"tuning_valid\":1,\"tuning_settled\":1,"
+                     "\"tuning_extrapolation_converged\":1,\"tuning_tau_consistent\":1,";
+    char tail[600];
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":256,\"tuning_rule\":0,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_method 256 refused (no uint8 wrap)");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":4,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_rule 4 refused");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":0,\"tuning_baseline_c\":1e300,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_baseline_c 1e300 refused");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":0,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":1e39", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_rise_inf_c beyond float range refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"model_fit_temp_c\":1e300,"
+                                   "\"model_fit_ambient_c\":20", "model_fit"), "model_fit_temp_c 1e300 refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"model_fit_temp_c\":500,"
+                                   "\"model_fit_ambient_c\":5000", "model_fit"), "model_fit_ambient_c 5000 refused");
+}
+
+static void test_group_a_prefs_bool_exact(void)
+{
+    TEST_SECTION("backup_prefs_bool -- exact match only");
+    bool b = false;
+    TEST_CHECK(!backup_prefs_bool("trueXYZ,", &b), "trueXYZ refused");
+    TEST_CHECK(!backup_prefs_bool("falsey", &b), "falsey refused");
+    TEST_CHECK(backup_prefs_bool("true}", &b) && b, "true accepted");
+    TEST_CHECK(backup_prefs_bool("false,", &b) && !b, "false accepted");
+}
+
+static const char *s_hdr_dry = NULL, *s_hdr_mode = NULL, *s_hdr_ack = NULL;
+static bool s_hdr_dry_trunc = false, s_hdr_mode_trunc = false, s_hdr_ack_trunc = false;
+extern esp_err_t (*g_test_get_hdr_hook)(const char *field, char *val, size_t val_size);
+static esp_err_t test_hdr_hook(const char *field, char *val, size_t n)
+{
+    const char *v = NULL;
+    bool trunc = false;
+    if (strcmp(field, "X-Kiln-Config-Dry-Run") == 0) {
+        v = s_hdr_dry; trunc = s_hdr_dry_trunc;
+    } else if (strcmp(field, "X-Kiln-Config-Mode") == 0) {
+        v = s_hdr_mode; trunc = s_hdr_mode_trunc;
+    } else if (strcmp(field, "X-Kiln-Config-Ack-Delete") == 0) {
+        v = s_hdr_ack; trunc = s_hdr_ack_trunc;
+    }
+    if (!v) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(val, n, "%s", v);
+    return trunc ? ESP_ERR_HTTPD_RESULT_TRUNC : ESP_OK;
+}
+
+static bool header_case_refused_400(void)
+{
+    reset_backup_import_post_stubs();
+    g_total_write_calls = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 10;
+    g_test_get_hdr_hook = test_hdr_hook;
+    esp_err_t err = backup_import_post_handler(&req);
+    g_test_get_hdr_hook = NULL;
+    bool r = err == ESP_OK && strncmp(s_send_last_err_msg, "X-Kiln-Config-", 14) == 0 &&
+             g_total_write_calls == 0;
+    s_hdr_dry = s_hdr_mode = s_hdr_ack = NULL;
+    s_hdr_dry_trunc = s_hdr_mode_trunc = s_hdr_ack_trunc = false;
+    reset_backup_import_post_stubs();
+    return r;
+}
+
+static void test_group_a_header_fail_closed(void)
+{
+    TEST_SECTION("backup_import_post_handler -- Dry-Run/Mode/Ack-Delete headers fail closed");
+    s_hdr_dry = "1234567"; s_hdr_dry_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Dry-Run header refused 400, nothing written");
+    s_hdr_dry = "yes";
+    TEST_CHECK(header_case_refused_400(), "Dry-Run value other than 1/0 refused 400");
+    s_hdr_mode = "mirrorx"; s_hdr_mode_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Mode header refused 400 (no merge fallback)");
+    s_hdr_ack = "123456789012345"; s_hdr_ack_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Ack-Delete header refused 400");
+}
+
 // Proves the interlock IS reached once the mode gate passes (so the fix
 // didn't just move the dead-code problem one level down).
 static void test_backup_import_post_refused_by_interlock_after_mode_gate_passes(void)
@@ -7034,6 +7138,9 @@ void run_test_backup_import(void)
     test_backup_import_job_clears_restore_in_flight_flag();
 
     test_malformed_body_writes_nothing();
+    test_group_a_pass1_range_checks();
+    test_group_a_prefs_bool_exact();
+    test_group_a_header_fail_closed();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_version1_body_imports_under_v2_reader();
