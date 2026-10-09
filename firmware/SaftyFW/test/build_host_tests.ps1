@@ -166,6 +166,8 @@ try {
         # update_task_flash_guard.h).
         (Join-Path $srcDir "tasks\update_task_flash_guard.c"),
         (Join-Path $testDir "test_update_task_flash_guard.c"),
+        (Join-Path $srcDir "tasks\update_task_metadata_write.c"),
+        (Join-Path $testDir "test_update_task_metadata_write.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
         (Join-Path $testDir "test_clear_trip_diag_codec.c"),
         (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),

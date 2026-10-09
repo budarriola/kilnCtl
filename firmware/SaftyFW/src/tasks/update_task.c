@@ -109,6 +109,7 @@
 #include "received_ranges.h" // src/update/
 #include "update_receiver.h" // src/update/
 
+#include "update_task_metadata_write.h" // audit L4: erased check + read-back
 #include "update_task_flash_guard.h" // 2026-09-21 -- see this file's own header comment
                                       // on update_task_running_image_flash_range() below
 
@@ -531,21 +532,44 @@ typedef struct {
                           // success up the call chain).
 } update_metadata_write_args_t;
 
+static bool update_meta_io_erase(void *ctx)
+{
+    (void)ctx;
+    return hal_flash_erase(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
+                           BOOTLOADER_METADATA_FLASH_SIZE) == HAL_OK;
+}
+
+static bool update_meta_io_read(void *ctx, uint32_t offset, uint8_t *buf, size_t len)
+{
+    (void)ctx;
+    return hal_flash_read(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET + offset, buf,
+                          len) == HAL_OK;
+}
+
+static bool update_meta_io_program(void *ctx, uint32_t offset, const uint8_t *data, size_t len)
+{
+    (void)ctx;
+    return hal_flash_program(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET + offset, data,
+                             len) == HAL_OK;
+}
+
+// Audit L4 (UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09): erase, erased-slot
+// check, program and byte-for-byte read-back all live in
+// update_task_metadata_write_verified() (host-tested); a failed step maps to
+// HAL_IO here so the caller never reports COMPLETE.
 static void update_metadata_write_cb(void *param)
 {
     update_metadata_write_args_t *a = (update_metadata_write_args_t *)param;
-    a->result = HAL_OK;
-    if (a->needs_erase) {
-        a->result = hal_flash_erase(&s_flash_region, BOOTLOADER_METADATA_FLASH_OFFSET,
-                                     BOOTLOADER_METADATA_FLASH_SIZE);
-        if (a->result != HAL_OK) {
-            return; // do not attempt the program half over a failed erase
-        }
-    }
-    a->result = hal_flash_program(&s_flash_region,
-                                   BOOTLOADER_METADATA_FLASH_OFFSET +
-                                       (uint32_t)a->next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
-                                   a->record, BOOTLOADER_METADATA_RECORD_LEN);
+    const update_metadata_write_io_t io = {
+        .erase = update_meta_io_erase,
+        .read = update_meta_io_read,
+        .program = update_meta_io_program,
+        .ctx = NULL,
+    };
+    update_metadata_write_result_t r = update_task_metadata_write_verified(
+        &io, a->needs_erase, (uint32_t)a->next_write_slot * BOOTLOADER_METADATA_RECORD_LEN,
+        a->record, BOOTLOADER_METADATA_RECORD_LEN);
+    a->result = (r == UPDATE_METADATA_WRITE_OK) ? HAL_OK : HAL_IO;
 }
 
 // Mirrors bootloader/main.c's persist_metadata(meta, latest_slot) exactly in

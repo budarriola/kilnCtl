@@ -197,6 +197,7 @@ set(SAFTYFW_APP_SOURCES
     # update_task_slot_linkage.c/update_task_erase_plan.c are -- see
     # update_task_flash_guard.h.
     src/tasks/update_task_flash_guard.c
+    src/tasks/update_task_metadata_write.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and
