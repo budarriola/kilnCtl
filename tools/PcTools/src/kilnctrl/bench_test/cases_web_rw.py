@@ -137,6 +137,7 @@ def _http_post_raw_authed(host: str, path: str, fields: Dict[str, Any],
                            timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
     """Authenticated POST counterpart to :func:`_http_get_raw_authed` -- see
     that function's docstring."""
+    _check_write_allowed(path, fields)
     url = f"http://{host}{path}"
     body = urllib.parse.urlencode(fields).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
@@ -173,7 +174,33 @@ def _get_json(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[dict]]":
     return status, _parse_json(text)
 
 
+#: Wi-Fi provisioning and credential-clearing writes no WEB case may ever make
+#: (plan doc BENCH_TEST_WEB_JUDGES_PLAN section 3 item 5; BENCH_TEST_SYSTEM_PLAN
+#: section 6 rule 4). Path suffixes are matched on the query-stripped path; the
+#: field entry is (name, value) matched against form fields / a JSON body.
+_WIFI_WRITE_DENYLIST = {
+    "path_suffixes": ("/provision", "/forget", "/ip_config"),
+    "fields": (("cmd", "clear_credentials"),),
+}
+
+
+class ForbiddenWrite(RuntimeError):
+    """Raised by every WEB POST seam for a deny-listed Wi-Fi/credential write."""
+
+
+def _check_write_allowed(path: str, fields: Any) -> None:
+    bare = path.split("?", 1)[0].rstrip("/")
+    for suffix in _WIFI_WRITE_DENYLIST["path_suffixes"]:
+        if bare.endswith(suffix):
+            raise ForbiddenWrite(f"POST {path} is on the Wi-Fi/credential write deny-list")
+    if isinstance(fields, dict):
+        for name, value in _WIFI_WRITE_DENYLIST["fields"]:
+            if str(fields.get(name)) == value:
+                raise ForbiddenWrite(f"POST {path} with {name}={value} is on the credential write deny-list")
+
+
 def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[int], Optional[dict]]":
+    _check_write_allowed(path, fields)
     fn = ctx.get("http_post_json")
     if fn is not None:
         return fn(path, fields)
@@ -182,6 +209,61 @@ def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[
         return None, None
     status, text = _http_post_raw_authed(host, path, fields)
     return status, _parse_json(text)
+
+
+def _get_text(ctx: dict, path: str) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed text GET (e.g. /api/history.csv). Fake: ctx["http_get_text"]."""
+    fn = ctx.get("http_get_text")
+    if fn is not None:
+        return fn(path)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_get_raw_authed(host, path)
+
+
+def _post_raw(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed form POST returning the raw reply text (plain ``ok`` replies).
+    Fake: ctx["http_post_raw"]."""
+    _check_write_allowed(path, fields)
+    fn = ctx.get("http_post_raw")
+    if fn is not None:
+        return fn(path, fields)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_post_raw_authed(host, path, fields)
+
+
+def _http_post_json_body_authed(host: str, path: str, body: Any,
+                                timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
+    url = f"http://{host}{path}"
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST",
+                                  headers={"Content-Type": "application/json"})
+    try:
+        with http_auth.urlopen(req, timeout=timeout) as resp:
+            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+        except Exception:  # noqa: BLE001
+            detail = None
+        return exc.code, detail
+    except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
+        return None, str(exc)
+
+
+def _post_json_body(ctx: dict, path: str, body: Any) -> "Tuple[Optional[int], Optional[str]]":
+    """Authed JSON-body POST (/api/profile/import). Fake: ctx["http_post_json_body"]."""
+    _check_write_allowed(path, body)
+    fn = ctx.get("http_post_json_body")
+    if fn is not None:
+        return fn(path, body)
+    host = ctx.get("host")
+    if not host:
+        return None, None
+    return _http_post_json_body_authed(host, path, body)
 
 
 # ---------------------------------------------------------------------------

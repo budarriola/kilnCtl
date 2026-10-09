@@ -12,7 +12,7 @@ wave 0's slice of it.
 from __future__ import annotations
 
 import dataclasses
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 
 class Verdict:
@@ -71,6 +71,8 @@ class CaseSpec:
     depends_on: Optional[str] = None
     est_duration_s: float = 5.0
     operator_only: bool = False
+    #: Optional (window name, probe fn) -- see bench_test/windows.py.
+    window_probe: Optional[Tuple[str, Callable[[dict], dict]]] = None
 
 
 def _c(id: str, area: str, description: str, **kw) -> CaseSpec:
@@ -339,6 +341,14 @@ _ORDER_RANK = {"ST": 0, "FL": 1, "SK": 2, "SP": 3}
 #: new general rule -- exactly one case gets this treatment.
 _ALWAYS_LAST = "WEB-SEC-05"
 
+# Observers follow their hosts (docs/BENCH_TEST_WEB_JUDGES_PLAN.md section 3 item 6).
+get_case("WEB-DASH-03").depends_on = "HP-01"
+get_case("WEB-DASH-09").depends_on = "HP-01"
+get_case("WEB-OTA-02").depends_on = "HP-01"
+get_case("WEB-DASH-06").depends_on = "HP-04"
+# Post-run alias of the pinned-last lockout case (_ALWAYS_LAST).
+get_case("WEB-LOG-03").depends_on = "WEB-SEC-05"
+
 #: TP-M01 (when its env credentials are set) changes the admin password and
 #: does not restore it, so every later re-login in the same run would use a
 #: stale KILNCTL_WEB_PASSWORD (cases_totp.py's module docstring). It sorts
@@ -485,27 +495,27 @@ _NIGHTLY_ORDER: List[str] = [
     # WEB-DASH-13 is not in the plan's own §5.1 nightly bullet list but is
     # the same read/write-round-trip shape and is implemented in this wave,
     # so it rides along with the other WEB-DASH round trips.
-    "WEB-DASH-03", "WEB-DASH-06", "WEB-DASH-07", "WEB-DASH-09", "WEB-DASH-13",
+    "WEB-DASH-07", "WEB-DASH-13",
     "WEB-PROF-02", "WEB-PROF-03", "WEB-PROF-04", "WEB-PROF-05",
     "WEB-PROF-06", "WEB-PROF-07", "WEB-PROF-08", "WEB-PROF-09",
     "WEB-ZONE-02", "WEB-ZONE-03", "WEB-ZONE-05", "WEB-ZONE-09", "WEB-ZONE-12",
     "WEB-BAK-02", "WEB-BAK-03",
     "WEB-KCFG-02", "WEB-KCFG-03",
     "WEB-DIAG-07", "WEB-DIAG-08",
-    # WEB-OTA-01 and WEB-X-01 are already in `_WEB_SMOKE_IDS` above (both
-    # end in "-01", same as every WEB render case) -- only WEB-OTA-02 and
-    # WEB-X-02 are new to nightly.
-    "WEB-OTA-02",
-    "WEB-X-02",
+    # WEB-OTA-02, WEB-X-02 and the DASH observers moved below (observers
+    # follow their hosts; WEB-X-02 joins the auth-on group) --
+    # docs/BENCH_TEST_WEB_JUDGES_PLAN.md section 3 item 6.
     # Only the LCD captures with no dependency can run here; LCD-02
     # (depends_on HP-01), LCD-03 (HP-04) and LCD-04 (OT-B01) are observers
     # and must follow the case they read, same as the SP observers.
     "LCD-09", "LCD-14", "LCD-16",
-    "HP-01", "SP-06", "LCD-02",
+    # WEB-DASH-09 directly after HP-01, before HP-02: a new run clears the
+    # history ring.
+    "HP-01", "SP-06", "LCD-02", "WEB-DASH-09", "WEB-DASH-03", "WEB-OTA-02",
     "HP-02", "SP-03",
-    "HP-04", "LCD-03", "HP-05", "HP-06", "HP-08",
+    "HP-04", "LCD-03", "WEB-DASH-06", "HP-05", "HP-06", "HP-08",
     "SK-02",
-    "WEB-SEC-03",
+    "WEB-SEC-03", "WEB-LOG-02", "WEB-X-02",
     # SP-04 is a pure observer of OT-B01's already-collected trip/clear data
     # (cases_safety._case_sp04, depends_on="OT-B01"), so it follows it directly.
     "OT-B01", "SP-04", "LCD-04",
@@ -525,8 +535,12 @@ def _enforce_always_last() -> None:
     project_login_lockout_saturation_accepted). Anything that appends a new
     suite below this call must call it again."""
     for name, ids in SUITES.items():
-        if _ALWAYS_LAST in ids and ids[-1] != _ALWAYS_LAST:
-            SUITES[name] = [c for c in ids if c != _ALWAYS_LAST] + [_ALWAYS_LAST]
+        if _ALWAYS_LAST in ids:
+            # Post-run aliases of the pinned-last case (WEB-LOG-03) trail it.
+            aliases = [c for c in ids if REGISTRY[c].depends_on == _ALWAYS_LAST]
+            tail = [_ALWAYS_LAST] + aliases
+            if ids[-len(tail):] != tail:
+                SUITES[name] = [c for c in ids if c not in tail] + tail
 
 
 _enforce_always_last()

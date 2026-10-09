@@ -29,6 +29,7 @@ from typing import Any, Optional
 
 from .. import web_auth_setup_http_client as _wac
 from . import judgments as J
+from . import windows
 from .registry import CaseResult, Verdict, get_case
 
 
@@ -468,6 +469,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
             observed=data,
         )
 
+    windows.fire_window(ctx, "otb01_before_reset", once=True)
     try:
         sw_reset_fn()
     except Exception as exc:
@@ -595,6 +597,7 @@ def _case_otb01(ctx: dict) -> CaseResult:
         link_up and trip_reason == 6 and trip_mask == (1 << (6 - 1))
     )
     if clear_allowed:
+        windows.fire_window(ctx, "otb01_tripped", once=True)
         try:
             clear_trip_fn()
         except Exception as exc:
@@ -611,6 +614,8 @@ def _case_otb01(ctx: dict) -> CaseResult:
             sleep(1.0)
         if clear_ok is None:
             clear_ok = False
+        elif clear_ok:
+            windows.fire_window(ctx, "otb01_cleared", once=True)
         try:
             readiness_trip_ok = readiness_trip_ok_fn()
         except Exception as exc:

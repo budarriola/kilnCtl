@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from .registry import REGISTRY, CaseResult, Verdict, get_case, suite_case_ids
 from . import board_lock
+from . import windows
 from . import report as report_mod
 
 
@@ -520,6 +521,9 @@ class BenchTestRunner:
         results: Dict[str, CaseResult] = {}
         # Read-only view for summary cases (OT-B02): the live results dict.
         self.ctx["_run_results"] = results
+        # Same dict object, for alias judges (WEB-LOG-03): plan section 2 rule 7.
+        self.ctx["_results"] = results
+        windows.register_probes(self.ctx, requested, get_case)
         executed: List[str] = []
 
         if not preflight_ok:

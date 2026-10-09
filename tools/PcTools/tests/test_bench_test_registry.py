@@ -124,7 +124,10 @@ class SuiteTest(unittest.TestCase):
         runs -- never leave anything, heat cases included, behind it."""
         ids = R.SUITES["full"]
         self.assertIn("WEB-SEC-05", ids)
-        self.assertEqual(ids[-1], "WEB-SEC-05")
+        # Only its post-run aliases (depends_on WEB-SEC-05, e.g. WEB-LOG-03) may trail it.
+        tail = ids[ids.index("WEB-SEC-05"):]
+        for cid in tail[1:]:
+            self.assertEqual(R.get_case(cid).depends_on, "WEB-SEC-05")
 
     def test_nightly_suite_excludes_web_sec_05(self):
         """Owner decision: nightly never runs the lockout case at all."""
@@ -204,7 +207,7 @@ class SuiteTest(unittest.TestCase):
             "WEB-DASH-13",
             "WEB-DIAG-07", "WEB-DIAG-08",
             "WEB-OTA-01", "WEB-OTA-02",
-            "WEB-SEC-03",
+            "WEB-SEC-03", "WEB-LOG-02",
             "WEB-X-01", "WEB-X-02",
             "LCD-02", "LCD-03", "LCD-04", "LCD-09", "LCD-14", "LCD-16",
             "OT-B01", "OT-E01", "OT-E02", "OT-E03", "OT-E12",
