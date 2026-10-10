@@ -359,7 +359,7 @@ static void test_touch_cal_exit_and_safety_strip(void)
 {
     TEST_SECTION("lcd_touch_cal_exit_target / lcd_safety_strip_needs_pin (LCD review N1, N5)");
     TEST_CHECK(strcmp(lcd_touch_cal_exit_target(false, "config"), "home") == 0, "no role: config -> home");
-    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(false, "touch_test"), "home") == 0, "no role: touch_test -> home");
+    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(false, "touch_test"), "touch_test") == 0, "no role: touch_test still opens (R6)");
     TEST_CHECK(strcmp(lcd_touch_cal_exit_target(true, "config"), "config") == 0, "role held: config kept");
     TEST_CHECK(strcmp(lcd_touch_cal_exit_target(true, NULL), "home") == 0, "NULL target -> home");
     TEST_CHECK(lcd_safety_strip_needs_pin(false), "no USER role: trip strip needs the PIN");

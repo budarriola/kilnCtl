@@ -48,6 +48,8 @@
 
 static uint8_t s_cur_seg;
 
+static lv_obj_t *s_target_cap_label;
+static lv_obj_t *s_ramp_cap_label;
 static lv_obj_t *s_target_val_label;
 static lv_obj_t *s_ramp_val_label;
 static lv_obj_t *s_dwell_val_label;
@@ -83,21 +85,22 @@ static void refresh(void)
     }
     profile_segment_t *seg = &d->segments[s_cur_seg];
 
-    /* LCD item 2 (2026-08-21): these three value labels are pure READ-ONLY
-     * display of the draft's already-Celsius fields -- the cards below
-     * (target_card_cb/ramp_card_cb) are what let a user CHANGE the values,
-     * and those deliberately stay Celsius end to end (see their own
-     * comments) rather than round-tripping through the display unit, so
-     * converting only these labels cannot desync a stored value from what
-     * gets typed. Target is ABSOLUTE (a real setpoint); ramp is RATE
-     * (magnitude only, no +32) with its unit label changed alongside the
-     * number ("C/hr" -> "F/hr") -- unit_pref.h's own warning against
-     * scaling a rate's number without updating its label. Dwell is a
-     * duration (minutes), never a temperature -- not converted. */
+    /* Value labels show the draft's Celsius fields in the display unit. The
+     * cards below (target_card_cb/ramp_card_cb) edit in the same unit and
+     * convert back to Celsius via ui_unit_entry_to_celsius(). Target is
+     * ABSOLUTE; ramp is a RATE (no +32) with its unit label changed alongside
+     * the number. Dwell is minutes, never converted. */
     unit_pref_t pref = unit_pref_get();
     char buf[24];
     snprintf(buf, sizeof(buf), "%.0f %s", (double)unit_pref_convert(seg->target_c, pref, UNIT_PREF_KIND_ABSOLUTE),
              unit_pref_suffix(pref));
+    if (s_target_cap_label && s_ramp_cap_label) {
+        char cap[24];
+        snprintf(cap, sizeof(cap), "Target %s", unit_pref_suffix(pref));
+        lv_label_set_text(s_target_cap_label, cap);
+        snprintf(cap, sizeof(cap), "Ramp %s/hr", unit_pref_suffix(pref));
+        lv_label_set_text(s_ramp_cap_label, cap);
+    }
     lv_label_set_text(s_target_val_label, buf);
     snprintf(buf, sizeof(buf), "%.0f %s/hr", (double)unit_pref_convert(seg->ramp_c_per_hr, pref, UNIT_PREF_KIND_RATE),
              unit_pref_suffix(pref));
@@ -217,6 +220,11 @@ static void del_cb(lv_event_t *e)
     refresh();
 }
 
+/* Unit the open pad was rendered in (R4): the done callbacks convert back with
+ * THIS, never a fresh unit_pref_get(), so a unit change while the pad is open
+ * cannot reinterpret the typed number. */
+static unit_pref_t s_pad_pref = UNIT_PREF_CELSIUS;
+
 static void target_done_cb(bool accepted, const char *text, float value, void *user_data)
 {
     (void)text;
@@ -224,7 +232,7 @@ static void target_done_cb(bool accepted, const char *text, float value, void *u
     if (!accepted) return;
     float min_c, max_c;
     profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
-    draft()->segments[s_cur_seg].target_c = ui_unit_entry_to_celsius(value, unit_pref_get(), UNIT_PREF_KIND_ABSOLUTE, min_c, max_c);
+    draft()->segments[s_cur_seg].target_c = ui_unit_entry_to_celsius(value, s_pad_pref, UNIT_PREF_KIND_ABSOLUTE, min_c, max_c);
     refresh();
 }
 
@@ -235,7 +243,7 @@ static void ramp_done_cb(bool accepted, const char *text, float value, void *use
     if (!accepted) return;
     float min_r, max_r;
     profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
-    draft()->segments[s_cur_seg].ramp_c_per_hr = ui_unit_entry_to_celsius(value, unit_pref_get(), UNIT_PREF_KIND_RATE, min_r, max_r);
+    draft()->segments[s_cur_seg].ramp_c_per_hr = ui_unit_entry_to_celsius(value, s_pad_pref, UNIT_PREF_KIND_RATE, min_r, max_r);
     refresh();
 }
 
@@ -248,22 +256,8 @@ static void dwell_done_cb(bool accepted, const char *text, float value, void *us
     refresh();
 }
 
-/* LCD item 2 (2026-08-21): deliberately left in CELSIUS end to end --
- * caption, bounds, initial value, and the value target_done_cb() stores are
- * all Celsius regardless of unit_pref_get(), even though the card's own
- * VALUE LABEL above it (refresh()) now shows the display-unit conversion.
- * This is the "if in doubt, leave it in Celsius with a Celsius label" case
- * this pass's own instructions call for: converting an EDITABLE numeric
- * pad correctly means converting min_c/max_c, the initial value shown in
- * the pad, AND converting the typed-in-Fahrenheit result back to Celsius
- * before storing -- getting any one of those three wrong on a real kiln
- * setpoint is a hazard (a cone-6 target read/stored in the wrong unit runs
- * the load hundreds of degrees over target), and ui_num_pad_params_t has no
- * separate "caption says C but bounds/value are F" mode to lean on for a
- * partial fix. The caption stays "Target C" so what the user is about to
- * type is never ambiguous, at the cost of the number they just tapped (in
- * F) not matching the number the pad now shows (in C) -- a visible seam,
- * not a wrong setpoint. */
+/* Target pad: caption, bounds and initial value are in the display unit; the
+ * unit is captured in s_pad_pref so target_done_cb() converts back with it. */
 static void target_card_cb(lv_event_t *e)
 {
     (void)e;
@@ -271,6 +265,7 @@ static void target_card_cb(lv_event_t *e)
     profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
     /* LCD review N8: the pad is in the display unit; target_done_cb() converts back to Celsius. */
     const unit_pref_t pref = unit_pref_get();
+    s_pad_pref = pref;
     static char s_target_caption[16];
     snprintf(s_target_caption, sizeof(s_target_caption), "Target %s", unit_pref_suffix(pref));
     ui_num_pad_params_t params = {
@@ -285,16 +280,14 @@ static void target_card_cb(lv_event_t *e)
     ui_num_pad_show(&params);
 }
 
-/* Same deliberate Celsius-only choice as target_card_cb() above, and for
- * ramp specifically -- doubly so, since a rate would ALSO need
- * UNIT_PREF_KIND_RATE's no-offset math applied correctly at both the bounds
- * and the stored value, not just ABSOLUTE's +32. Caption stays "Ramp C/hr". */
+/* Ramp pad: as target_card_cb() but UNIT_PREF_KIND_RATE (no offset). */
 static void ramp_card_cb(lv_event_t *e)
 {
     (void)e;
     float min_r, max_r;
     profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
     const unit_pref_t pref = unit_pref_get();
+    s_pad_pref = pref;
     static char s_ramp_caption[20];
     snprintf(s_ramp_caption, sizeof(s_ramp_caption), "Ramp %s/hr", unit_pref_suffix(pref));
     ui_num_pad_params_t params = {
@@ -395,8 +388,8 @@ lv_obj_t *ui_page_profile_builder_segment_build(void)
     lv_obj_set_style_pad_gap(s_cards_row, UI_THEME_PADDING_PX / 2, 0);
     lv_obj_remove_flag(s_cards_row, LV_OBJ_FLAG_SCROLLABLE);
 
-    build_card(s_cards_row, "Target C", &s_target_val_label, target_card_cb);
-    build_card(s_cards_row, "Ramp C/hr", &s_ramp_val_label, ramp_card_cb);
+    s_target_cap_label = lv_obj_get_child(build_card(s_cards_row, "Target", &s_target_val_label, target_card_cb), 0);
+    s_ramp_cap_label = lv_obj_get_child(build_card(s_cards_row, "Ramp", &s_ramp_val_label, ramp_card_cb), 0);
     build_card(s_cards_row, "Dwell min", &s_dwell_val_label, dwell_card_cb);
 
     lv_obj_t *nav_row2 = lv_obj_create(scr);

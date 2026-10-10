@@ -203,10 +203,15 @@ bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_p
 
 const char *lcd_touch_cal_exit_target(bool has_user_role, const char *wanted)
 {
-    if (!has_user_role || wanted == NULL) {
+    if (wanted == NULL) {
         return "home";
     }
-    return wanted;
+    /* touch_test is part of the calibration flow (only a Done -> home button,
+     * no data or actions), so it opens without a role (LCD review R6). */
+    if (strcmp(wanted, "touch_test") == 0) {
+        return wanted;
+    }
+    return has_user_role ? wanted : "home";
 }
 
 bool lcd_safety_strip_needs_pin(bool has_user_role)
