@@ -160,3 +160,28 @@ class Lcd13JudgeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Lcd05DimPointTest(unittest.TestCase):
+    def test_dims_to_20_percent_and_restores(self):
+        b = FakeBoard()
+        r = _run(C._case_lcd05, b, FakeSrv(), [(100, 100, 100), (60, 60, 60)])
+        self.assertEqual(r.verdict, Verdict.PASS)
+        self.assertEqual([p["brightness"] for p in b.posts], ["100", "20", "80"])
+
+
+class Lcd13RowLabelTest(unittest.TestCase):
+    def test_builtin_uses_catalogue_title_not_code(self):
+        body = [{"id": 129, "builtin": True, "name": "04DSDH", "code": "04DSDH",
+                              "title": "Low Temperature Drop-and-Hold"}]
+        ctx = {"http_get_json": lambda path: (200, body)}
+        self.assertEqual(C._lcd13_row_label(ctx, "04DSDH"), "Low Temperature Drop-and-Hold")
+
+    def test_falls_back_to_name_when_route_unreadable(self):
+        ctx = {"http_get_json": lambda path: (500, None)}
+        self.assertEqual(C._lcd13_row_label(ctx, "04DSDH"), "04DSDH")
+
+    def test_favourite_prefix_matches(self):
+        self.assertTrue(C._lcd13_row_matches("* Low Temperature Drop-and-Hold", "Low Temperature Drop-and-Hold"))
+        self.assertFalse(C._lcd13_row_matches("04DSDH", "Low Temperature Drop-and-Hold"))
+

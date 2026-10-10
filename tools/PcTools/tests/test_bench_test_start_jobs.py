@@ -143,6 +143,29 @@ class BenchTestStartTest(_Base):
         self.assertIs(runner.ctx["attended"], True)
         self.assertIs(runner.ctx["allow_flash"], True)
 
+    def test_ota_image_arguments_reach_the_runner_ctx(self):
+        # bench1 2026-10-10: OT-G06 could not run via bench_test_start because
+        # ota_image_path was not accepted.
+        kw = dict(ota_image_path="C:/img/KilnCtrl.bin", ota_corrupt_image_path="C:/img/bad.bin",
+                  ota_truncated_image_path="C:/img/trunc.bin", ota_wrong_build_image_path="C:/img/wb.bin",
+                  ota_image_build="2026-10-10", ota_pico_image_path="C:/img/p.bin",
+                  ota_pico_image_commit="abc1234", ota_pico_corrupt_image_path="C:/img/pb.bin",
+                  update_downgrade_repo="o/old", update_wrong_repo="o/wrong")
+        self.finish(BT.bench_test_start(suite="ota", cases="OT-G06", **kw))
+        ctx = _FakeRunner.instances[-1].ctx
+        for k, v in kw.items():
+            self.assertEqual(ctx[k], v, k)
+        # and the synchronous twin
+        BT.bench_test_run(suite="ota", cases="OT-G06", **kw)
+        ctx2 = _FakeRunner.instances[-1].ctx
+        for k, v in kw.items():
+            self.assertEqual(ctx2[k], v, k)
+
+    def test_omitted_ota_arguments_stay_out_of_ctx(self):
+        self.finish(BT.bench_test_start(suite="smoke"))
+        ctx = _FakeRunner.instances[-1].ctx
+        self.assertNotIn("ota_image_path", ctx)
+
     def test_defaults_keep_opt_ins_off(self):
         self.finish(BT.bench_test_start(suite="heat"))
         kw = _FakeRunner.instances[-1].run_kwargs

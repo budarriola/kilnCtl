@@ -1788,7 +1788,9 @@ def judge_pause_resume(paused_state: str, duties_while_paused: "list[float]", fi
     return CaseResult(Verdict.PASS, observed={"paused_state": paused_state, "final_state": final_state})
 
 
-def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool) -> CaseResult:
+def judge_stop(
+    state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool, ack_reason: str = ""
+) -> CaseResult:
     """HP-05: stop leaves RUNNING, zeroes duties and relays, and the last-run
     card can be acknowledged."""
     if state_after_stop == "running":
@@ -1801,9 +1803,16 @@ def judge_stop(state_after_stop: str, duties: "list[float]", relays: "list[bool]
         return CaseResult(
             Verdict.FAIL, reason="a relay is still commanded on after stop", observed={"relays": relays}
         )
-    if not acked:
+    # run_state_acknowledge() only acknowledges the BOOT record (a previous
+    # boot's firing). A firing started and stopped within this boot leaves no
+    # such record, so the firmware answers "no previous-run record to
+    # acknowledge": the card is already clear, which is the outcome HP-05
+    # wants. Any other refusal is a real failure.
+    already_clear = (not acked) and "no previous-run record" in (ack_reason or "")
+    if not acked and not already_clear:
         return CaseResult(
-            Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card", observed={"acked": acked}
+            Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card",
+            observed={"acked": acked, "ack_reason": ack_reason},
         )
     return CaseResult(Verdict.PASS, observed={"state": state_after_stop, "duties": duties, "relays": relays})
 

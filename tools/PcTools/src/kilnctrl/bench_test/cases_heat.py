@@ -850,7 +850,9 @@ def _case_hp05(ctx: dict) -> CaseResult:
         duties = [z.duty for z in st.zones]
         relays = [z.relay_commanded_on for z in st.zones]
         ack_result = srv._profiles.ack_last_run()
-        return J.judge_stop(st.state_name, duties, relays, bool(ack_result.ok))
+        return J.judge_stop(
+            st.state_name, duties, relays, bool(ack_result.ok), str(getattr(ack_result, "reason", "") or "")
+        )
     finally:
         _cleanup_bench_profile(ctx)
 

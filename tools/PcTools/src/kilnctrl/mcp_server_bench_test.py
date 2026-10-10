@@ -29,7 +29,16 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                     allow_heat: bool = True, lcd_stop_heat: bool = False,
                     lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                     tag: Optional[str] = None, host: Optional[str] = None,
-                    attended: bool = False, allow_flash: bool = False) -> str:
+                    attended: bool = False, allow_flash: bool = False,
+                    ota_image_path: Optional[str] = None, ota_corrupt_image_path: Optional[str] = None,
+                    ota_truncated_image_path: Optional[str] = None,
+                    ota_wrong_build_image_path: Optional[str] = None,
+                    ota_image_build: Optional[str] = None,
+                    ota_pico_image_path: Optional[str] = None,
+                    ota_pico_image_commit: Optional[str] = None,
+                    ota_pico_corrupt_image_path: Optional[str] = None,
+                    update_downgrade_repo: Optional[str] = None,
+                    update_wrong_repo: Optional[str] = None) -> str:
     """Run a standardized bench-test suite against this board
     (docs/BENCH_TEST_SYSTEM_PLAN.md). `suite` is one of `smoke`, `static`,
     `flash`, `stack`, `ota`, `autotune`, `heat`, `web`, `lcd`, `safety`,
@@ -78,6 +87,12 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     (an ESP/Pico JTAG flash round trip); both stay SKIP without it,
     independent of `attended`, since a flash needs no operator present.
 
+    The `ota_*` image paths / commit / build and `update_*_repo` arguments are
+    the same inputs `ota_matrix_run` takes; they are put into the case context
+    unchanged so suite `ota` cases that need an image (OT-E01, OT-G01..G06, ...)
+    can run from here too. A case still gates itself, and still SKIPs when its
+    input is absent. Nothing here relaxes a gate.
+
     No case in this wave heats, flashes, writes config, or touches Wi-Fi,
     unless it was explicitly opted into as above.
 
@@ -102,6 +117,18 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     case_list = [c.strip() for c in cases.split(",") if c.strip()] if cases else None
     ctx = {"host": resolved_host, "tag": tag,
            "attended": attended, "allow_flash": allow_flash}
+    for key, value in (("ota_image_path", ota_image_path),
+                       ("ota_corrupt_image_path", ota_corrupt_image_path),
+                       ("ota_truncated_image_path", ota_truncated_image_path),
+                       ("ota_wrong_build_image_path", ota_wrong_build_image_path),
+                       ("ota_image_build", ota_image_build),
+                       ("ota_pico_image_path", ota_pico_image_path),
+                       ("ota_pico_image_commit", ota_pico_image_commit),
+                       ("ota_pico_corrupt_image_path", ota_pico_corrupt_image_path),
+                       ("update_downgrade_repo", update_downgrade_repo),
+                       ("update_wrong_repo", update_wrong_repo)):
+        if value is not None:
+            ctx[key] = value
     runner = BenchTestRunner(ctx)
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
@@ -227,7 +254,16 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                       allow_heat: bool = True, lcd_stop_heat: bool = False,
                       lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                       tag: Optional[str] = None, host: Optional[str] = None,
-                      attended: bool = False, allow_flash: bool = False) -> str:
+                      attended: bool = False, allow_flash: bool = False,
+                      ota_image_path: Optional[str] = None, ota_corrupt_image_path: Optional[str] = None,
+                      ota_truncated_image_path: Optional[str] = None,
+                      ota_wrong_build_image_path: Optional[str] = None,
+                      ota_image_build: Optional[str] = None,
+                      ota_pico_image_path: Optional[str] = None,
+                      ota_pico_image_commit: Optional[str] = None,
+                      ota_pico_corrupt_image_path: Optional[str] = None,
+                      update_downgrade_repo: Optional[str] = None,
+                      update_wrong_repo: Optional[str] = None) -> str:
     """Start `bench_test_run` in the background and return a job id at once.
 
     Same arguments, same meaning, same gating as `bench_test_run` (read its
@@ -245,7 +281,17 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
         lambda: bench_test_run(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
                                lcd_stop_heat=lcd_stop_heat, lcd_edit_heat=lcd_edit_heat,
                                ota_allow_heat=ota_allow_heat, tag=tag, host=host,
-                               attended=attended, allow_flash=allow_flash),
+                               attended=attended, allow_flash=allow_flash,
+                               ota_image_path=ota_image_path,
+                               ota_corrupt_image_path=ota_corrupt_image_path,
+                               ota_truncated_image_path=ota_truncated_image_path,
+                               ota_wrong_build_image_path=ota_wrong_build_image_path,
+                               ota_image_build=ota_image_build,
+                               ota_pico_image_path=ota_pico_image_path,
+                               ota_pico_image_commit=ota_pico_image_commit,
+                               ota_pico_corrupt_image_path=ota_pico_corrupt_image_path,
+                               update_downgrade_repo=update_downgrade_repo,
+                               update_wrong_repo=update_wrong_repo),
         {"suite": suite, "cases": cases, "dry_run": dry_run, "allow_heat": allow_heat,
          "tag": tag},
         classify=classify_bench_report,

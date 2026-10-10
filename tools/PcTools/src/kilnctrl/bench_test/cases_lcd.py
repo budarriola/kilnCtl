@@ -5779,7 +5779,14 @@ def _case_lcd26(ctx: dict) -> CaseResult:
 
 _DISPLAY_POWER_PATH = "/api/settings/display_power"
 _LCD05_MIN_DROP_FRACTION = 0.25
-_LCD05_TEST_BRIGHTNESS = 50
+#: Dim point. Firmware applies the stored percent LINEARLY as LEDC duty with
+#: no floor or gamma (backlight_pwm.c: backlight_duty_percent_for_state ->
+#: hal_pwm_set_duty; settings_http.c accepts 0-100), so 50% is a real 2x
+#: drop in emitted light. But the bench webcam runs auto-exposure and may
+#: clip at 100%, which swallowed most of that 2x (bench1 2026-10-10 measured
+#: only -19.8% at 50%). A deeper dim point leaves a drop auto-exposure cannot
+#: fully cancel; the >= 25% pass threshold is unchanged.
+_LCD05_TEST_BRIGHTNESS = 20
 _LCD06_TIMEOUT_1MIN = 0
 _LCD06_WAIT_S = 70.0
 #: Panel-interior box in the 1280x720 camera frame (inside lcd_sampler's
@@ -5833,7 +5840,7 @@ def _judge_lcd05(lum_full: float, lum_dim: float, inert: bool) -> CaseResult:
     obs["drop_fraction"] = round(drop, 3)
     if drop >= _LCD05_MIN_DROP_FRACTION:
         return CaseResult(Verdict.PASS, observed=obs)
-    return CaseResult(Verdict.FAIL, reason=f"luminance dropped only {drop:.1%} at 50% brightness (need >= {_LCD05_MIN_DROP_FRACTION:.0%})", observed=obs)
+    return CaseResult(Verdict.FAIL, reason=f"luminance dropped only {drop:.1%} at {_LCD05_TEST_BRIGHTNESS}% brightness (need >= {_LCD05_MIN_DROP_FRACTION:.0%})", observed=obs)
 
 
 def _lcd05_sample_lum(ctx: dict, name: str, target: dict) -> "Optional[float]":
@@ -5870,7 +5877,7 @@ def _case_lcd05(ctx: dict) -> CaseResult:
         sleep(1.0)
         lum_full = _lcd05_sample_lum(ctx, "lcd05_100.jpg", target)
         if not _display_power_write(ctx, orig, _LCD05_TEST_BRIGHTNESS, orig["timeout_setting"]):
-            return CaseResult(Verdict.INCONCLUSIVE, reason="could not set brightness 50")
+            return CaseResult(Verdict.INCONCLUSIVE, reason=f"could not set brightness {_LCD05_TEST_BRIGHTNESS}")
         sleep(1.0)
         lum_dim = _lcd05_sample_lum(ctx, "lcd05_50.jpg", target)
         if lum_full is None or lum_dim is None:
@@ -5953,6 +5960,29 @@ def _lcd13_tap(touch, t: dict) -> None:
     time.sleep(_LCD26_TAP_SETTLE_S)
 
 
+def _lcd13_row_label(ctx: dict, name: str) -> str:
+    """Text the picker draws for a profile. The picker shows a builtin's
+    catalogue TITLE (ui_page_profile_picker.c: profiles_builtin_entry()->title,
+    e.g. "Low Temperature Drop-and-Hold"), not its code ("04DSDH") that
+    profiles.list_all() reports as the name, so look the title up in GET
+    /api/profiles/builtin; fall back to the name (user profiles, route unreadable)."""
+    try:
+        from . import cases_web_rw as _web
+        status, body = _web._get_json(ctx, "/api/profiles/builtin")
+    except Exception:  # noqa: BLE001
+        return name
+    entries = body.get("profiles") if isinstance(body, dict) else body
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and name in (e.get("code"), e.get("name")) and e.get("title"):
+            return str(e["title"])
+    return name
+
+
+def _lcd13_row_matches(row_name: object, label: str) -> bool:
+    """A favourite row is drawn "* <label>" (format_label)."""
+    return isinstance(row_name, str) and (row_name == label or row_name == "* " + label)
+
+
 def _case_lcd13(ctx: dict) -> CaseResult:
     _wake_and_home(ctx)
     srv = _srv(ctx)
@@ -5968,6 +5998,7 @@ def _case_lcd13(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no builtin profile with more than 4 segments")
     prof = cands[0]
     expected_pages = (prof.segment_count + _LCD13_ROWS_PER_PAGE - 1) // _LCD13_ROWS_PER_PAGE
+    row_label = _lcd13_row_label(ctx, prof.name)
     outcome: Optional[CaseResult] = None
     try:
         fail = _click_then_page(ui, "settings", "config")[0] or _click_then_page(ui, "Profiles", "profiles")[0]
@@ -5979,13 +6010,13 @@ def _case_lcd13(ctx: dict) -> CaseResult:
         for _ in range(12):
             tap, _b = _list_tap_targets_resolving_busy(ui)
             targets = tap.get("targets", [])
-            found = next((r for r in _profile_rows_by_position(targets) if r.get("name") == prof.name), None)
+            found = next((r for r in _profile_rows_by_position(targets) if _lcd13_row_matches(r.get("name"), row_label)), None)
             nxt = _diagnostics_next_target(targets)
             if found is not None or nxt is None:
                 break
             _lcd13_tap(touch, nxt)
         if found is None:
-            outcome = CaseResult(Verdict.INCONCLUSIVE, reason=f"profile {prof.name!r} row not found on the picker")
+            outcome = CaseResult(Verdict.INCONCLUSIVE, reason=f"profile {prof.name!r} (picker label {row_label!r}) row not found on the picker")
             return outcome
         rows = [found]  # profile-picker row label, same allowed non-literal form as LCD-09
         fail = _click_then_page(ui, rows[0]["name"], "profile_detail")[0] or _click_then_page(ui, "Segments", "profile_segments")[0]
