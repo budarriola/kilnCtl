@@ -23,7 +23,7 @@ origin/dev `feda5da10`.
 | W3 | INFO | reset side channel | The weak check now runs before any token check, so an unauthenticated caller reaches `strcmp(password, ap_password / ap_ssid / username)`. Body, status and backoff are identical on both failure paths. Only timing differs, by one 4-slot constant-time consume. That is microseconds against Wi-Fi jitter, behind a 5 s+ per-IP ladder, and it is only an exact-guess oracle for the AP passphrase, which WPA2 already exposes offline. Not exploitable. Keep it in mind if W1 is fixed with a distinct "weak" reply. |
 | W4 | LOW | zones JS test vacuity | The "AbortError branch does NOT auto-reload" assertion matches only the text `loadCurrent(`. A deferred reload such as `setTimeout(loadCurrent, 0)` passes (negtest `abort_deferred_reload` MISSED). |
 | W5 | INFO | zones page | Other `loadCurrent()` callers still overwrite unsaved edits without asking: sweep completion (`zones_page.html:2567`) and autotune Accept (`:4297`). This predates the batch and is outside LOW-5's scope. |
-| W6 | INFO | dev tree | `firmware/KilnFW/App/test/build_host_tests.ps1` on origin/dev still has conflict markers at lines 3300-3308 (`$totalExpected` 80 vs 76; the merged value is likely 81). A full host-test run on dev fails to parse. For this review the conflict was resolved locally, not committed, and only `-Only auth_totp` was run. |
+| W6 | INFO | dev tree | `firmware/KilnFW/App/test/build_host_tests.ps1` on origin/dev still has conflict markers at lines 3300-3308 (`$totalExpected` 80 vs 76; the merged value is likely 81). A full host-test run on dev failed to parse. Since resolved on dev by `ecfd6bbb4` (81). For this review the conflict was resolved locally, not committed, and only `-Only auth_totp` was run. |
 
 ## auth_totp_http.c `reset_post_handler`
 
@@ -112,5 +112,5 @@ itself.
    advanced.
 3. W4: assert that the AbortError body does not mention `loadCurrent` at all, or run the catch
    handler with a fake `loadCurrent` and a fake timer.
-4. W6: resolve the `build_host_tests.ps1` conflict on dev (likely `$totalExpected = 81`, keeping both
+4. W6: done by `ecfd6bbb4` after this review was written (`$totalExpected = 81`, keeping both
    comment lines).
