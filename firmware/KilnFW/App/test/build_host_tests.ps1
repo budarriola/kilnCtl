@@ -1512,6 +1512,19 @@ try {
             "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
 
+    # ---- test_kiln_io_owner_sx_dispatch.c: owner_task() relay/SX_RESET dispatch over the fake chip (R2-A)
+    $exeKod = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner_sx_dispatch.exe"
+    $kodObjDir = Join-Path $outDir "kod"
+    New-Item -ItemType Directory -Force -Path $kodObjDir | Out-Null
+    $cmdKod = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$kodObjDir\\`" /Fe:`"$exeKod`" " +
+            "`"$(Join-Path $testDir 'test_kiln_io_owner_sx_dispatch.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
+            "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
+    Invoke-HostTestExe -Name "kiln_io_owner_sx_dispatch" -ExePath $exeKod -BuildCmd $cmdKod
+
     # ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
     # Header-only (safety_trip_words.h is static inline, no .c) -- see the test
     # file's own header comment. No shared-symbol collision risk, but every
@@ -3481,7 +3494,8 @@ try {
     # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
     # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
     # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
-    $totalExpected = 92
+    # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    $totalExpected = 93
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
