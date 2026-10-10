@@ -3570,6 +3570,33 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
     return true;
 }
 
+/* Pass 1 for the zone tuning entries' board topology: every entry's "index" must be a configured zone on
+ * THIS board. The backup carries no thermo_count (it is board topology, set on Thermocouples & Zones, and
+ * has no import setter), so a board whose zones config is empty (thermo_count 0) cannot take any zone entry.
+ * backup_import_apply_two_pass() rejects such an entry too, but only AFTER kiln_configs[] has been committed,
+ * which made the refusal a 500 partial write (bench 2026-10-09). Refuse here, before anything is written. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const char *body, char *err_msg,
+                                                                         size_t err_cap)
+{
+    const char *zones_arr = backup_json_obj_find(body, "zones");
+    uint8_t thermo_count = zones_config_get_thermo_count();
+    for (const char *ze = backup_json_arr_first(zones_arr); ze; ze = backup_json_arr_next(ze)) {
+        double didx;
+        if (!backup_json_field_num(ze, "index", &didx) || didx < 0) {
+            continue; /* malformed entries get their specific message from the main parse */
+        }
+        if (didx >= thermo_count) {
+            snprintf(err_msg, err_cap,
+                     "zone %u in the backup is not a configured zone on this board (%u configured); the backup "
+                     "does not carry the zone count, so set it first (Thermocouples & Zones settings). "
+                     "Nothing was written.",
+                     (unsigned)didx, (unsigned)thermo_count);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Pass 1 for the profiles' RELAY_IO segments and on_off_rules: run the REAL save-time validators
  * (validate_io_segment_in_state()/validate_on_off_rules_in_state(), profiles_validate.c) against the
  * configuration this import WILL produce -- candidate zone_type and relay_mask per zone, and the aux
@@ -3871,6 +3898,9 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
     if (!backup_import_profiles_precheck(body, err_msg, err_cap)) {
         return false; // pass 1: a profile the post-import config would refuse; nothing written
+    }
+    if (!backup_import_zone_topology_precheck(body, err_msg, err_cap)) {
+        return false; // pass 1: zone entry for a zone this board lacks; nothing written (400, not a partial write)
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched

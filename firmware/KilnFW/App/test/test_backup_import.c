@@ -5103,6 +5103,30 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
                     "differing record: the file's value was restored");
 }
 
+static void test_import_onto_empty_zones_config_refused_before_any_write(void)
+{
+    TEST_SECTION("backup_import_apply -- a board with zero configured zones refuses zone entries in pass 1: "
+                 "400-class (no partial write), nothing committed, clear message");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (!s_export_body) {
+        return;
+    }
+    test_stub_zones_set_thermo_count(0);
+    char import_err[256] = "";
+    bool partial = true;
+    float kp_before = s_writes[1].kp;
+    bool ok = backup_import_apply(s_export_body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan,
+                                  &partial, import_err, sizeof(import_err));
+    TEST_CHECK(!ok, "import onto an empty zones config is refused");
+    TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
+    TEST_CHECK(strstr(import_err, "not a configured zone") != NULL, "the error names the missing zone configuration");
+    TEST_CHECK(s_writes[1].kp == kp_before, "no zone setter ran");
+    reset_stub_state();
+}
+
 static void test_import_refuses_duplicate_zone_index(void)
 {
     TEST_SECTION("backup_import_apply -- two zone tuning entries with the same index are refused in pass 1, "
@@ -7218,6 +7242,7 @@ void run_test_backup_import(void)
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_import_refuses_duplicate_zone_index();
+    test_import_onto_empty_zones_config_refused_before_any_write();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();
