@@ -83,7 +83,7 @@ NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segme
                             # Top-level additive blocks (relay_cycles, backup_export_prefs()) and
                             # their nested sub-keys. Not zone data: cfg_convert.py carries the
                             # top-level ones verbatim via ADDITIVE_TOP_LEVEL_KEYS.
-                            "relay_cycles", "hw_relays", "c", "unit", "ramp_assist", "display_power",
+                            "relay_cycles", "stale_or_unknown_stores", "hw_relays", "c", "unit", "ramp_assist", "display_power",
                             "brightness_percent", "timeout_setting", "keep_on_while_firing",
                             "display_on_error", "hidden_builtin_profiles", "tz", "relay_names",
                             "type"}

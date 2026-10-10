@@ -143,7 +143,7 @@ V4_COUPLING_KEY_PREFIX = "coupling_c"
 # correctly -- it just cannot explain that one key's fate, which is exactly
 # what the mirror-drift check is for).
 ADDITIVE_TOP_LEVEL_KEYS = ("relay_cycles", "unit", "ramp_assist", "display_power",
-                           "hidden_builtin_profiles", "tz", "relay_names")
+                           "hidden_builtin_profiles", "tz", "relay_names", "stale_or_unknown_stores")
 
 KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     "coupling_tau_c", "coupling_dead_time_c", "coupling_diag_k_dc", "settings_source_g",
