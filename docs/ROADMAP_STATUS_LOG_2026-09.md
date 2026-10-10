@@ -821,7 +821,7 @@ LCD-25 written and PASS (Discard edit path; Save as/Overwrite not exercised).
 >   d23cefe4 (not backtick-quoted, superseded) was itself superseded by
 >   `93a8716f`'s shared AP-subnet helper/HTTP-layer message/confirm-side
 >   guard change, unrelated to this check's subject; refreshed to
->   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`379b1a56` (citation refreshed 2026-10-09, max_uri_handlers still 184; refreshed 2026-10-05 after WP8 cap bump 184, earlier `622f0539`, earlier ` `ff1851ca`/`a3c7d454` changed the file).
+>   blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`52e2860d` (citation refreshed 2026-10-09, max_uri_handlers still 184; refreshed 2026-10-05 after WP8 cap bump 184, earlier `622f0539`, earlier ` `ff1851ca`/`a3c7d454` changed the file).
 > - **Pending:** `cfg_fs_list`'s scratch heap move is still in review.
 > - **Bench commission flash still blocked, and now on a second, independent
 >   gap**: `check_00_kilnfw_target_build.ps1` publishes only
