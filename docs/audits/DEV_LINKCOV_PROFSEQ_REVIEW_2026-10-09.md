@@ -13,6 +13,8 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### MED-1: `check_aux_relay_conflict_sites.ps1` now fails on dev (a69ff8fb)
 
+**FIXED in 696e981f.**
+
 - `tools/check_aux_relay_conflict_sites.ps1:57` pins the aux-conflict call to
   `Func = 'zones_post_apply'`. `a69ff8fb` turned `zones_post_apply`
   (`firmware/KilnFW/App/drivers/http/zones_http_post.c`, about line 814) into a
@@ -29,6 +31,8 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
   Negative-test with `tools\negtest.ps1 -Preset check` by deleting the call.
 
 ### LOW-1: boot load/migration RAM writes are not gen-bracketed
+
+**FIXED in 12d483d6.**
 
 - `profiles_http.c:1492` (migration assign) and `:1503` (migration failure
   memset) in `migrate_from_default_partition()`, called from
@@ -54,6 +58,8 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### LOW-2: `s_slot_rev_pub` is dead
 
+**FIXED in 12d483d6.**
+
 - Declared `profiles_http.c:82`, stored at `:1284`, `:1365`, `:1419`, never
   loaded since `profiles_http_slot_rev()` (`:1877`) now returns `s_slot_gen`.
   The comment at `:79-82` and `profiles_store.h:66-81` still describe the
@@ -66,6 +72,8 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
   gen seqlock (odd = in flight, any change = refuse).
 
 ### LOW-3: link-down clear dropped the fixed stale threshold
+
+**FIXED in 12d483d6.**
 
 - `safety_link.c:301-316` (`safety_reset_stale_peer_info_if_link_down`) now
   clears `peer_version_known`, `pico_boot_id_known`, `peer_build_known` and
@@ -82,6 +90,8 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
   reset helper to keep the old bound.
 
 ### LOW-4 (informational): seqlock reader has no explicit acquire fence
+
+**FIXED in 12d483d6.**
 
 - `profiles_http.c:83-104` uses `atomic_fetch_add` (seq_cst) for
   `gen_begin/gen_end`; the reader (`profile_executor_run.c:289` capture,
