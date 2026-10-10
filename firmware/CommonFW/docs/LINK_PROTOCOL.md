@@ -520,6 +520,18 @@ and the ESP echoes it here whenever its last DIAG carried it. The Pico then:
   up; the ESP's bounded boot-clear retry covers a 30-byte DIAG cached in the
   short window before the Pico learned the ESP's version.
 
+**Known rollback hazard (kilnlink v17 review LOW-3).** If the ESP is rolled
+back from a protocol 17 image to a 16 one while the Pico stays up (it keeps
+`peer=17` from the earlier `ANNOUNCE_VERSION`) and the rolled-back ESP's
+ANNOUNCE burst is lost, the Pico keeps sending the 31-byte DIAG and keeps
+refusing 3-byte clears (`LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED`), which the
+16 ESP can only send. A latched trip then cannot be cleared from the ESP side.
+Recovery: reboot the Pico (`debug_reset(peer="pico")` or a power cycle) so it
+forgets the peer version and re-learns it from the next ANNOUNCE. Also see
+UPDATE_PROTOCOL.md's `ota_rollback(processor)` bullet. On a protocol 17 ESP the
+boot-time clear now waits for a DIAG carrying `trip_seq` rather than spending a
+retry on an unbound clear a >= 17 Pico would refuse.
+
 Both lengths decode on both sides, so `KILNLINK_MIN_COMPATIBLE` stays 7. The
 PC wire is unchanged: `safety_clear_trip` still sends no mask or seq, and the
 ESP fills both from its own cached DIAG.

@@ -2934,6 +2934,72 @@ static void test_m4_clear_trip_echoes_diag_trip_seq(void)
                "rejected DIAG frames do not touch the cached trip_seq");
 }
 
+// kilnlink review LOW-1/2/4 (2026-10-09 v17 review).
+static void low_fw_version(SafetyLinkClass *link, uint8_t boot_id, uint16_t proto)
+{
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, boot_id,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(link, &fw_msg);
+    link->peer_version_known = true;
+    link->peer_protocol_version = proto;
+}
+
+static void test_low1_pico_reboot_forgets_cached_diag_trip_seq(void)
+{
+    TEST_SECTION("LOW-1 -- a Pico reboot forgets the cached DIAG trip_seq, so a stale bound "
+                 "clear cannot match the new boot's seq-1 trip");
+    SafetyLinkClass link = boot_clear_test_setup();
+    low_fw_version(&link, 42u, 17u);
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known && link.cached.diag_trip_seq == 1u, "setup: seq 1 cached");
+    low_fw_version(&link, 43u, 17u); // boot_id change = Pico reboot
+    TEST_CHECK(link.cached.diag_trip_seq_known == false, "reboot clears diag_trip_seq_known");
+    TEST_CHECK(link.cached.diag_trip_seq == 0u, "reboot clears the cached seq");
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear still sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
+               "the clear is the unbound form, never the stale seq-1 bound form");
+}
+
+static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
+{
+    TEST_SECTION("LOW-2 -- boot clear on a >= 17 peer does not spend an attempt on a 30-byte DIAG");
+    SafetyLinkClass link = boot_clear_test_setup();
+    low_fw_version(&link, 42u, 17u);
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
+               "30-byte DIAG from a v17 peer: no clear sent");
+    TEST_CHECK(s_boot_clear_attempts == 0, "no attempt consumed");
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 5u, true);
+    safety_link_service_boot_clear_if_pending(&link);
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
+               "31-byte DIAG: bound clear sent");
+    TEST_CHECK(s_boot_clear_attempts == 1, "exactly one attempt consumed");
+
+    // A peer older than 17 never sends byte 30: the unbound clear still goes.
+    SafetyLinkClass old = boot_clear_test_setup();
+    low_fw_version(&old, 42u, 16u);
+    base = s_stub_broadcast_count;
+    TEST_CHECK(drive_one_diag_and_service(&old, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base + 1u,
+               "peer < 17: 30-byte DIAG still gets the legacy clear");
+}
+
+static void test_low4_link_down_invalidates_uptime_baseline(void)
+{
+    TEST_SECTION("LOW-4 -- link-down clears the DIAG uptime baseline; the first DIAG after "
+                 "recovery re-seeds it instead of reading as a reboot");
+    SafetyLinkClass link = make_link();
+    apply_diag_uptime(&link, UINT32_MAX - 1000u);
+    TEST_CHECK(link.pico_uptime_baseline_known, "setup: baseline known");
+    safety_link_note_link_down(&link);
+    TEST_CHECK(link.pico_uptime_baseline_known == false, "link-down invalidates the baseline");
+    apply_diag_uptime(&link, 300000u); // would regress against the old baseline
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "post-outage DIAG seeds, not a reboot");
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "baseline re-seeded");
+}
+
 static void test_boot_clear_refused_then_retried_succeeds(void)
 {
     TEST_SECTION("safety_link_service_boot_clear_if_pending -- a Pico-refused clear "
@@ -3139,6 +3205,9 @@ int main(void)
     test_m4_clear_trip_echoes_diag_trip_seq();
     test_boot_clear_refused_then_retried_succeeds();
     test_boot_clear_stops_after_own_fault_source_rises();
+    test_low1_pico_reboot_forgets_cached_diag_trip_seq();
+    test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
+    test_low4_link_down_invalidates_uptime_baseline();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
 

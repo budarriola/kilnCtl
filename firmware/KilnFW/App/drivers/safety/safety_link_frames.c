@@ -271,6 +271,14 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 {
     link->cached.trip_event_ever_received = false;
     link->cached.trip_last_seq = 0u;
+    /* kilnlink review LOW-1: the cached DIAG trip_seq (byte 30) is the other
+     * half of the same pair -- the new boot restarts trip_seq at 1, so a
+     * bound clear built from the old boot's cached seq 1 (same mask) would
+     * match a NEW trip. Forget it; the next 31-byte DIAG re-establishes it,
+     * and until then a clear is unbound (refused by a protocol 17 Pico, never
+     * wrongly accepted). */
+    link->cached.diag_trip_seq_known = false;
+    link->cached.diag_trip_seq = 0u;
     /* RELAY_LIFE_BUDGET.md: the Pico rebooting may have left K4 in either
      * state before it ever comes up -- this ESP's last-observed
      * safety_relay_state predates that reboot and must not be compared
@@ -283,6 +291,20 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
      * own doc comment (safety_link.h) for why this moved off the calling
      * task's stack 2026-09-10. */
     link->reannounce_pending = true;
+}
+
+/* kilnlink review LOW-4: called when the link is declared down. The DIAG
+ * uptime baseline must not survive an outage: one spanning the 49.7-day
+ * uptime wrap (or any long gap) would otherwise read as a reboot. The first
+ * DIAG after recovery re-seeds it. A reboot during the outage is still caught
+ * by the FW_VERSION boot_id path. */
+void safety_link_note_link_down(SafetyLinkClass *link)
+{
+    if (!safety_lock(link)) {
+        return;
+    }
+    link->pico_uptime_baseline_known = false;
+    safety_unlock(link);
 }
 
 void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg)
@@ -1074,6 +1096,13 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
                    (s_boot_clear_attempts == 0u ||
                     (now - s_boot_clear_last_attempt_tick_ms) >= SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS) &&
                    link->fault_sources == 0u &&
+                   /* kilnlink review LOW-2: a Pico known to be >= 17 refuses an
+                    * unbound 3-byte clear (SEQ_REQUIRED, no reply reaches us), so
+                    * do not offer one from a 30-byte DIAG cached before it learned
+                    * our version -- wait for a DIAG that carries trip_seq, without
+                    * spending an attempt. Never weakens the Pico's refusal. */
+                   !(link->peer_version_known && link->peer_protocol_version >= 17u &&
+                     !link->cached.diag_trip_seq_known) &&
                    link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
                    link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
             want_boot_clear = true;
