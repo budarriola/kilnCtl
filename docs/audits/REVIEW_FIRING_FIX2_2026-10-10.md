@@ -18,10 +18,10 @@ Review tree: dev tip `c2121889b`. All line numbers refer to that tree.
 
 ## Fix status (batch firefx3)
 
-- MEDIUM-1 fixed in 462fe5623: run-start clear reverted; unowned pending OFF bits are retried while RUNNING every 1 s, never for relays owned by run zones or aux claims.
-- LOW-1 fixed in 462fe5623: send_enable queues a release when reboot_hold is set while the send is in flight.
-- LOW-2 fixed in 462fe5623: guard 9 merge and assert now precede relay_unknown_release_locked().
-- LOW-3 fixed in 462fe5623: tests added; mutations M1, M2, M3, M4b all CAUGHT by negtest.
+- MEDIUM-1 fixed in 3c57e1d54: run-start clear reverted; unowned pending OFF bits are retried while RUNNING every 1 s, never for relays owned by run zones or aux claims.
+- LOW-1 fixed in 3c57e1d54: send_enable queues a release when reboot_hold is set while the send is in flight.
+- LOW-2 fixed in 3c57e1d54: guard 9 merge and assert now precede relay_unknown_release_locked().
+- LOW-3 fixed in 3c57e1d54: tests added; mutations M1, M2, M3, M4b all CAUGHT by negtest.
 - LOW-5 note: bench zone configs still need a check for progress_window_s > wrong_dir_window_s (guard 1 latency); no code change.
 
 ## Findings (severity-ranked)
