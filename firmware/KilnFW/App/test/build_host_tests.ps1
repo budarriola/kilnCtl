@@ -1512,6 +1512,17 @@ try {
             "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
     Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
 
+    # ---- test_dashboard_http_relay.c: dashboard_set_relay() mapping + dashboard_http_get_safety_trip() (R2-E)
+    $exeDhr = Join-Path $outDir "kilnctl_host_tests_dashboard_http_relay.exe"
+    $dhrObjDir = Join-Path $outDir "dhr"
+    New-Item -ItemType Directory -Force -Path $dhrObjDir | Out-Null
+    $cmdDhr = "cl /I`"$(Join-Path $testDir 'stubs_dashboard_http_relay')`" /I`"$(Join-Path $testDir 'stubs_dashboard_status')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dhrObjDir\\`" /Fe:`"$exeDhr`" " +
+            "`"$(Join-Path $testDir 'test_dashboard_http_relay.c')`" `"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "dashboard_http_relay" -ExePath $exeDhr -BuildCmd $cmdDhr
+
     # ---- test_kiln_io_owner_sx_dispatch.c: owner_task() relay/SX_RESET dispatch over the fake chip (R2-A)
     $exeKod = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner_sx_dispatch.exe"
     $kodObjDir = Join-Path $outDir "kod"
@@ -3495,7 +3506,8 @@ try {
     # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
     # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
     # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
-    $totalExpected = 93
+    # 93 -> 94: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    $totalExpected = 94
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
