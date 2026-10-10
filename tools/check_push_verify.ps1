@@ -90,7 +90,8 @@ try {
     git -C $work remote set-url origin $goodUrl *>$null
 
     Write-Host "case: explicit refspec beats a narrowed fetch refspec (P1)"
-    git -C $work config remote.origin.fetch "+refs/heads/main:refs/remotes/origin/main"
+    git -C $other push -q origin HEAD:refs/heads/side *>$null                          # a branch that exists, so the narrowed fetch itself succeeds
+    git -C $work config remote.origin.fetch "+refs/heads/side:refs/remotes/origin/side"
     $cx = Commit $other "x.txt" "cx doomed"
     git -C $other push origin dev *>$null
     git -C $work fetch -q origin "+refs/heads/dev:refs/remotes/origin/dev" *>$null      # work now knows cx on origin/dev
