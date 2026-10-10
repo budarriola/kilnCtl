@@ -12,7 +12,7 @@ changed.
 
 ## Findings
 
-### MED-1: the login page change does nothing; `/login` still shows raw `{"error":"bad_host"}`
+### MED-1: the login page change does nothing; `/login` still shows raw `{"error":"bad_host"}` [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 `login_page.html` loads no `app.js` (its only script is the inline `<script>` at line 45,
 plus `theme.css`). `window.kcHostRefusalFromText` is therefore always undefined there, and
@@ -31,7 +31,7 @@ small mapper in `login_page.html` or load `/app.js` there.
 the page source, so it passes while the code is dead. A behavioral test, or an assertion
 that the page can reach the helper, would catch this.
 
-### LOW-1: the zones Save 30 s timer also runs while the login modal is open; the retry can abort at once with a false "board did not answer"
+### LOW-1: the zones Save 30 s timer also runs while the login modal is open; the retry can abort at once with a false "board did not answer" [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 `zones_page.html` passes `signal: saveAbort.signal` into `window.fetch`, which is
 `app.js`'s wrapper. On a 401, or a 403 `insufficient_role`, the wrapper opens the login
@@ -50,7 +50,7 @@ does not reload the form. Retrying re-posts the same form. The page sends no gen
 token, so a retry is not refused as a lost update, and it is idempotent. The text could say
 the save may or may not have landed and suggest reloading.
 
-### LOW-2: blank-guard refusal names wire keys, and can name a field the operator cannot see
+### LOW-2: blank-guard refusal names wire keys, and can name a field the operator cannot see [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 The refusal lists keys such as `z0_wrongdirwindow`: the internal wire name with a 0-based
 zone index, while the page labels zones 1-based with descriptive labels. Six of the eight
@@ -62,7 +62,7 @@ GET-populated values cannot be blank (`|| 0` defaults), so this happens only aft
 The logic itself is correct: the refusal comes before `disabled = true` and before the
 POST, and it covers `type=number` inputs holding non-numeric text, whose `.value` is `''`.
 
-### LOW-3: step 11's read-back chain is not returned, so a progress-save rejection is unhandled
+### LOW-3: step 11's read-back chain is not returned, so a progress-save rejection is unhandled [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 In `renderStep11()`, the `.then(function (r) { ... fetch('/api/auth/config')... })` body
 does not `return` the inner read-back chain. A rejection from `postStepState(11, 'done')`
@@ -90,7 +90,7 @@ Step 11 Save has no double-submit guard. A double click sends two
 converge. The guard was already missing before this commit; the same is true of steps
 1, 2, 4, 5 and 6.
 
-### LOW-4: `stepSaveFailed` leaves `stepStatusLine` permanently styled as an error
+### LOW-4: `stepSaveFailed` leaves `stepStatusLine` permanently styled as an error [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 `stepSaveFailed()` sets `className = 'werr'` on `#stepStatusLine`. `gRenderStepDetail()`
 later rewrites only that element's `textContent` (around line 3006), so every later
@@ -101,7 +101,7 @@ On the same paths, step 3's `okEl` keeps "Write accepted and every channel verif
 converting." on screen next to the failure line. That is true (the zones write did land),
 but nothing says the step was not marked done.
 
-### LOW-5: some pages still show the raw host-refusal code
+### LOW-5: some pages still show the raw host-refusal code [FIXED 2026-10-09 in 6d8b7314 (MED-1) / 731f0466 (LOW-1..5)]
 
 The pages that were not changed still show the host-refusal code verbatim:
 

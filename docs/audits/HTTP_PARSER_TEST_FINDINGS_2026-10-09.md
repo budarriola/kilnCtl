@@ -24,19 +24,19 @@ Not covered: profiles retarget/delete/run_queue/live-edit handlers (no body-feed
 the existing test files), auth/TOTP form handlers (`test_totp_http_core.c` tests the core only; login and
 bootstrap are not built with a recv stub), zones-style per-field fuzz of live-edit.
 
-## F1 (Low) `http_form_url_decode` writes `out[0]` when `out_cap == 0` and `src_len == 0`
+## F1 (Low) `http_form_url_decode` writes `out[0]` when `out_cap == 0` and `src_len == 0` [FIXED 2026-10-09 in e9882975]
 - `firmware/KilnFW/App/drivers/common/http_form.h:32-60`. The `o + 1 >= out_cap` guard sits
   inside the loop, so an empty source skips it and the final `out[o] = '\0'` runs.
 - Input: `http_form_url_decode("", 0, buf, 0)`. Observed: `buf[0]` overwritten (verified by probe).
   Expected: no write, return -1.
 - Latent: every current caller passes a non-zero `sizeof`.
 
-## F2 (Low) `http_form_parse_float` accepts C99 hex floats
+## F2 (Low) `http_form_parse_float` accepts C99 hex floats [FIXED 2026-10-09 in e9882975]
 - `http_form.h` `http_form_parse_float`, via `strtof`. Input `0x1p3` returns 8.0 (verified).
   Expected: refused like `0x10` is for `http_form_parse_long`. Value is still finite and
   range-checked by callers, so no unsafe value results.
 
-## F3 (Low) whole-page zones POST tolerates leading whitespace in numeric fields
+## F3 (Low) whole-page zones POST tolerates leading whitespace in numeric fields [FIXED 2026-10-09 in e9882975]
 - `drivers/persist/zones_config_json.c:766-774` (`zones_config_json_parse_float_field`, plain
   `strtof`). Input `z0_kp=%201`, same for `z0_cal/ki/kd/ramp/maxtemp/mintemp/sanity`:
   accepted (verified, 8 probes). `http_form_parse_float` refuses the same value.
