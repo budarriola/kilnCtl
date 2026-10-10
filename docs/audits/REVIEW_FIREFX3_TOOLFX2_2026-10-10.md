@@ -13,6 +13,8 @@ Both batches are sound. There is one LOW finding in firefx3 and one MEDIUM findi
 
 ### A-LOW-1: the running pending-OFF retry can cut a relay owned by a relay/IO segment
 
+**Fixed in 020c23526 (host tests; negtested).**
+
 `zone_off_pending_retry_running()` is in `profile_executor_relay_io.c` (around line 553). It builds `owned` from three sources:
 
 - the relay masks of active zones;

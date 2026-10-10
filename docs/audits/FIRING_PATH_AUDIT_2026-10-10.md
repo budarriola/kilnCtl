@@ -23,6 +23,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 
 ### MED-1. A failed OFF for an IO-segment relay is dropped for good
 
+**Fixed in 32b33598c (host tests; negtested).**
+
 - **Where:** `control/profile_executor_relay_io.c:1156-1175`, in `io_seg_finish()`.
 - **What happens:**
   - When `kiln_io_owner_command_set_relay_mask_authorized(bit, 0)` fails, the function only logs. The log claims "sweep_unowned_relays() will keep retrying".
@@ -64,6 +66,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Fix:** either refuse DONE the same way as FAULTED (the caller halts or dismisses first), or stage the new run in a local copy and write `s_exec` only after the last refusal. The second keeps the "start again from DONE" UX.
 
 ### MED-3. In DONE/FAULTED the executor still writes OFF to relays it no longer owns, defeating autotune and manual control
+
+**Fixed in 32b33598c (host tests; negtested).**
 
 - **Where:** `control/profile_executor.c:754-755` (non-RUNNING tick) and `control/profile_executor_relay_io.c:601-611` (`force_all_relays_off`) and 505-510 (`force_zone_relay_off`, which calls `apply_relay(zi, false)`).
 - **What happens:**
@@ -120,6 +124,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 
 ### LOW-1. 3c57e1d54's running retry can force OFF a relay the new run's IO segment is driving ON
 
+**Fixed in 020c23526 (host tests; negtested).**
+
 - **Where:** `control/profile_executor_run.c:704-705` now deliberately keeps `zone_off_pending_mask` across a run start.
 - **What the retry excludes:** `zone_off_pending_retry_running()` (`profile_executor_relay_io.c:553-593`) skips active zones' relays, autotune zones and `aux_claim_mask`.
 - **The gap:** an IO-segment relay is owned `RELAY_OWNER_PROFILE`, so the owner filter keeps it in the mask.
@@ -130,6 +136,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Severity:** OFF direction only. **Fix:** also exclude relays of active IO segments.
 
 ### LOW-2. An aux disabled mid-run is forgotten if its OFF write fails
+
+**Fixed in 32b33598c (host tests; negtested).**
 
 - **Where:** `control/profile_executor_relay_io.c:945-951`. The return value of `aux_apply_relay(i, false)` is ignored, and `profile_executor_aux_reset_runtime(i)` then clears `commanded_on`/`actuated_on` unconditionally.
 - **Why nothing retries it:** aux relays are not in `claimed_relay_mask`, so the sweep does not see them, and `profile_executor_aux_fault_drop()` runs only when not RUNNING.
@@ -148,6 +156,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Backstop:** the Pico's own trip opens K4, so the hazard is relay wear and a confusing log, not heat. **Fix:** stamp AUTHORIZED commands with a generation that the direct all-off bumps.
 
 ### LOW-4. A superseded-mask force-off that fails near run end is never retried
+
+**Fixed in 32b33598c (host tests; negtested).**
 
 - **Where:** `control/profile_executor_relay_io.c:1473-1489` (`force_relay_mask_off`). It keeps the claimed bit so the sweep can retry, but the sweep runs only while RUNNING.
 - **Gap:** if the run ends first, `halt()` and `force_all_relays_off()` name only the current masks, so the old relay is not retried until the next run.
