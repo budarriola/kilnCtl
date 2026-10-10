@@ -167,9 +167,20 @@ def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
         return f"error: board reported failure: {result} (host={resolved})"
     warning = result.get("warning")
     state = "enabled" if enabled else "disabled"
-    if warning:
-        return f"ok - zone {zone} adaptive tuning {state} (host={resolved}) -- WARNING: {warning}"
-    return f"ok - zone {zone} adaptive tuning {state} (POST accepted by the board, not read back) (host={resolved})"
+    wtxt = f" -- WARNING: {warning}" if warning else ""
+    try:
+        rows = at_http.get_status(resolved)
+        row = next((r for r in rows if getattr(r, "zone", None) == zone), None)
+    except Exception as exc:  # noqa: BLE001
+        return (f"UNVERIFIED - zone {zone} adaptive tuning POST accepted but the read-back failed ({exc}); "
+                f"state UNKNOWN (host={resolved}){wtxt}")
+    if row is None:
+        return (f"UNVERIFIED - zone {zone} adaptive tuning POST accepted but GET /api/adaptive_tune "
+                f"has no row for the zone; state UNKNOWN (host={resolved}){wtxt}")
+    if bool(row.enabled) != bool(enabled):
+        return (f"FAILED - zone {zone} adaptive tuning POST accepted but status reads enabled={row.enabled}, "
+                f"wanted {enabled} (host={resolved}){wtxt}")
+    return f"ok - zone {zone} adaptive tuning {state}, read back verified (host={resolved}){wtxt}"
 
 
 @_core._tool()

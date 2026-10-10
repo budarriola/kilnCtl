@@ -55,7 +55,8 @@ class SetEnabledConfirmGateTest(unittest.TestCase):
         mock_set.assert_not_called()
 
     def test_proceeds_with_confirm_true(self):
-        with unittest.mock.patch.object(at_http, "set_enabled",
+        row = unittest.mock.MagicMock(zone=1, enabled=True)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]),              unittest.mock.patch.object(at_http, "set_enabled",
                                          return_value={"ok": True}) as mock_set:
             result = m.adaptive_tune_set_enabled(1, True, confirm=True, host="10.0.0.5")
         mock_set.assert_called_once_with("10.0.0.5", 1, True)
@@ -64,7 +65,8 @@ class SetEnabledConfirmGateTest(unittest.TestCase):
         self.assertIn("enabled", result)
 
     def test_warning_from_board_surfaced(self):
-        with unittest.mock.patch.object(
+        row = unittest.mock.MagicMock(zone=2, enabled=False)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]), unittest.mock.patch.object(
             at_http, "set_enabled",
             return_value={"ok": True, "warning": "applied live, save failed"},
         ):

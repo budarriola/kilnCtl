@@ -787,6 +787,13 @@ try {
 
     # ---- report
     Write-Line ""
+    # A failed baseline invalidates every per-mutation verdict (other -Parallel workers still ran theirs):
+    # report SKIPPED/BASELINE-FAILED, never CAUGHT/MISSED.
+    $baselineFailed = ($script:result.baseline -and (-not $script:result.baseline.passed))
+    if ($baselineFailed) {
+        foreach ($m in $script:result.mutations) { $m.verdict = 'BASELINE-FAILED' }
+        Write-Line "SKIPPED: baseline failed; per-mutation results below are not attributable (BASELINE-FAILED)" Red
+    }
     foreach ($m in $script:result.mutations) {
         $col = switch ($m.verdict) { 'CAUGHT' { 'Green' } 'MISSED' { 'Red' } default { 'Yellow' } }
         Write-Line ("{0,-7} {1}  (exit {2}, {3}s)" -f $m.verdict, $m.name, $m.exit, $m.seconds) $col

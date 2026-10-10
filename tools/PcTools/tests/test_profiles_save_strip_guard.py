@@ -30,7 +30,7 @@ class _Prof:
         return types.SimpleNamespace(ok=True, id=3, warning_count=0, error="")
 
     def get(self, pid):
-        return types.SimpleNamespace(name=self.detail_name, segments=[0] * self.nsegs)
+        return types.SimpleNamespace(name=self.detail_name, segments=[types.SimpleNamespace(target_c=100.0, ramp_c_per_hr=50.0, dwell_min=1)] * self.nsegs)
 
 
 class StripGuardTests(unittest.TestCase):

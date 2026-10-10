@@ -213,7 +213,7 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
     try:
         before = wac.get_auth_config(resolved)
     except wac.WebAuthSetupHttpError as exc:
-        if "unreachable" in str(exc).lower():
+        if exc.unreachable:
             return f"error: could not read GET /api/auth/config (host={resolved}): {exc}"
         config_readable = False
 

@@ -188,8 +188,13 @@ def profiles_save(
         return (f"FAILED - board reported ok for #{result.id} but the read-back failed; "
                 "slot content UNVERIFIED")
     got_mask = getattr(got, "zone_mask", None)
+    def _seg_differs(a, b) -> bool:
+        return (abs(a.target_c - b.target_c) > 1.0 or abs(a.ramp_c_per_hr - b.ramp_c_per_hr) > 1.0
+                or int(a.dwell_min) != int(b.dwell_min))
+
     if got.name != name or len(got.segments) != len(segments) or (
-            got_mask is not None and got_mask != zone_mask):
+            got_mask is not None and got_mask != zone_mask) or any(
+            _seg_differs(a, b) for a, b in zip(got.segments, segments)):
         return (f"FAILED - board reported ok for #{result.id} but read-back differs "
                 f"(name {got.name!r}, {len(got.segments)} segment(s); wanted {name!r}, {len(segments)})")
     return f"ok - saved as #{result.id}{suffix}, read back verified"

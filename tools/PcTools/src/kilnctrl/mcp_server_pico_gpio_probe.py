@@ -126,14 +126,14 @@ def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     except RuntimeError as exc:
         return f"error: {exc}"
     _srv._session_log.warning("pico_gpio_write: gpio%d = %s", gpio_num, "high" if level else "low")
-    note = ""
     try:
         if bool(pico_gpio_probe.read(gpio_num)) != bool(level):
             return (f"FAILED - pico gpio{gpio_num} commanded {'high' if level else 'low'} but the input level "
                     "reads back different (pin loaded, or the write did not take)")
     except Exception:  # noqa: BLE001
-        note = " (read-back unavailable; UNVERIFIED)"
-    return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}{note}"
+        return (f"UNVERIFIED - pico gpio{gpio_num} commanded {'high' if level else 'low'}; "
+                "read-back unavailable, state UNKNOWN")
+    return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}"
 
 
 @_core._tool()

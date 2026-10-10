@@ -1366,7 +1366,7 @@ def flash_firmware(
     if adapter_refusal:
         return adapter_refusal
 
-    hazards, unreadable, _state_notes = _recovery_board_state_refusals(host, allow_link_down=True)
+    hazards, unreadable, state_notes = _recovery_board_state_refusals(host, allow_link_down=True)
     if hazards:
         return ("error: refusing to flash -- observed hazard (no flag overrides this): "
                 + "; ".join(hazards))
@@ -1523,7 +1523,7 @@ def flash_firmware(
 
     def _post_flash(base_msg: str) -> str:
         base_msg = (
-            f"{base_msg}\n\n{provenance_note}\n\n"
+            f"{base_msg}\n\n" + "".join(f"NOTE: {n}\n" for n in state_notes) + f"{provenance_note}\n\n"
             "NOTE: this reset the ESP. If the Pico was also reset around the same "
             "time (a dual reflash), expect a correct S6a (mainFault) trip while the "
             "ESP's safety link handshake is still coming up -- see docs/audits/"

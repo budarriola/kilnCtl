@@ -227,7 +227,8 @@ def _archive_flashed_safty_elf(elf_path: str, explicit_elf_path: Optional[str] =
 
 
 @_core._tool()
-def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False) -> str:
+def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = False, allow_stale: bool = False,
+                  allow_running: bool = False) -> str:
     """Flashes an ELF to `peer` ("esp" or "pico") over OpenOCD and resets it.
     Writes flash on a live board -- refused unless `confirm=True` is passed
     explicitly (tools/PcTools/TODO.md's "flash writes require an explicit
@@ -253,7 +254,11 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     uncommitted changes, against those changed files' mtimes -- see
     stale_check.py. Pass allow_stale=True to flash anyway. Only checked when
     using the peer's default ELF and default build-info location; an explicit
-    elf_path bypasses the check (nothing to compare it against)."""
+    elf_path bypasses the check (nothing to compare it against).
+
+    Reprogramming the Pico resets it, so it is REFUSED while the ESP reports a
+    running/paused profile or autotune, or that state cannot be read
+    (allow_running=True, exactly True, overrides)."""
     if peer == debug_probe.PEER_ESP:
         return (
             "error: debug_program(peer=\"esp\") is refused -- use flash_firmware(); "
@@ -262,6 +267,11 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
 
     if confirm is not True:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
+
+    if allow_running is not True:
+        refusal = _esp_profile_running_refusal("reprogram the Pico under")
+        if refusal is not None:
+            return refusal
 
     stale_prefix = ""
     if peer == debug_probe.PEER_PICO and elf_path is None:
@@ -334,9 +344,9 @@ def _esp_profile_running_refusal(action: str) -> "Optional[str]":
     if status is None:
         return (f"error: refusing to {action} ESP -- profile executor state could not be read "
                 f"({err}), so a firing cannot be ruled out. {override}")
-    if status.state in (1, 2):
+    if status.state not in (0, 3, 4):
         return (
-            f"error: refusing to {action} ESP while a profile is {status.state_name} -- "
+            f"error: refusing to {action} ESP while a profile is {status.state_name} (running/paused/unknown) -- "
             "this would freeze or interrupt relay control mid-firing. " + override
         )
     try:
@@ -517,10 +527,8 @@ def debug_halt(peer: str, allow_running: bool = False) -> str:
     paused (halting the ESP mid-profile freezes relay control and stops its
     telemetry to the Pico, which would correctly read it as a dead main
     controller and trip -- see debug_probe.py's module docstring). If the ESP
-    doesn't answer the status query at all, the halt is allowed -- a board
-    that isn't reachable over the UART link isn't running a profile you'd be
-    interrupting, so that failure shouldn't block an unrelated JTAG halt.
-    Pass allow_running=True (exactly True) to override.
+    doesn't answer the status query at all, or the executor/autotune state is
+    unreadable or unknown, the halt is REFUSED (fail closed). Pass allow_running=True (exactly True) to override.
     """
     if peer == debug_probe.PEER_ESP and allow_running is not True:
         refusal = _esp_profile_running_refusal("halt")
@@ -718,6 +726,8 @@ def debug_write_memory(
         note = _write_readback_note(peer, address, value, width)
         if "FAILED:" in note:
             return "FAILED - " + msg + note
+        if "UNVERIFIED" in note:
+            return "UNVERIFIED - " + msg + note
         return msg + note
     _log_openocd_result(
         f"debug_write_memory(peer={peer}, address=0x{address:x}, value=0x{value:x}, width={width})", ok, output

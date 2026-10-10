@@ -246,6 +246,9 @@ def post_commissioning(host: str, body: str, timeout: float = SAFETY_CFG_HTTP_TI
     except TimeoutError as exc:
         raise SafetyCfgHttpError(f"POST {_API_PATH} timed out -- the Pico may have APPLIED it; state UNKNOWN, "
                                   f"read GET {_API_PATH} back before retrying") from exc
+    except OSError as exc:  # reset / RemoteDisconnected mid-response: POST was sent
+        raise SafetyCfgHttpError(f"POST {_API_PATH} connection failed mid-response ({exc}) -- the Pico may have "
+                                  f"APPLIED it; state UNKNOWN, read GET {_API_PATH} back before retrying") from exc
     try:
         return json.loads(text)
     except Exception as exc:

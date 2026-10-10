@@ -55,11 +55,13 @@ class RealToolThroughRegistryTests(unittest.TestCase):
     def test_flash_firmware_allow_stale_string_refused(self):
         from kilnctrl import mcp_server  # noqa: F401
         reg = mcp_server.registry
-        with um.patch("kilnctrl.mcp_server_flash.flash_firmware") as ff:
+        with um.patch("kilnctrl.mcp_server_flash._refuse_if_adapter_absent") as ff, \
+                um.patch("kilnctrl.mcp_server_flash._recovery_board_state_refusals") as ff2:
             out = reg.invoke("flash_firmware", {"allow_stale": "yes"})
         self.assertIn("refused flash_firmware", out)
         self.assertIn("allow_stale", out)
         ff.assert_not_called()
+        ff2.assert_not_called()
 
 
 class PicoGpioConfirmTests(unittest.TestCase):

@@ -145,7 +145,7 @@ class StartPreflightTest(unittest.TestCase):
     def test_proceeds_when_board_clean(self):
         with unittest.mock.patch.object(capability_preflight, "get_board_info",
                                          return_value=_reachable_board()):
-            with unittest.mock.patch.object(sweep_http, "start",
+            with unittest.mock.patch.object(sweep_http, "status", return_value={"state": "running"}),                  unittest.mock.patch.object(sweep_http, "start",
                                              return_value={"ok": True, "reason": "ok"}) as mock_start:
                 result = m.zone_current_sweep_start(confirm=True, host="10.0.0.5")
         mock_start.assert_called_once_with("10.0.0.5")

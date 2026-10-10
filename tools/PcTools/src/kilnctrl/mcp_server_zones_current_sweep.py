@@ -159,8 +159,16 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
         return f"error: {exc} (host={resolved})"
     if not result.get("ok"):
         return f"refused by firmware: {result.get('reason', '(no reason given)')} (host={resolved})"
+    try:
+        st = sweep_http.status(resolved)
+    except sweep_http.ZoneSweepHttpError as exc:
+        return (f"UNVERIFIED - current sweep start accepted but the status read-back failed ({exc}); "
+                f"state UNKNOWN, poll zone_current_sweep_status() (host={resolved})")
+    if st.get("state") not in ("running", "done"):
+        return (f"UNVERIFIED - current sweep start accepted but status reads state={st.get('state')!r} "
+                f"reason={st.get('reason')!r}; state UNKNOWN (host={resolved})")
     return (
-        f"ok - current sweep started (host={resolved}); energizing relays one zone at a time, "
+        f"ok - current sweep started, status state={st.get('state')} (host={resolved}); energizing relays one zone at a time, "
         "roughly 5s/zone -- poll zone_current_sweep_status() for progress"
     )
 

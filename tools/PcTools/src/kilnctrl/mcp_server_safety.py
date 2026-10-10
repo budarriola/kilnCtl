@@ -358,13 +358,16 @@ def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
         try:
             after = _srv._safety.get_diag()
         except SafetyQueryError as exc:
-            return f"{sent}\nread-back failed ({exc}); check safety_get_status()"
+            return f"UNVERIFIED -- clear sent ({sent}) but read-back failed ({exc}); state UNKNOWN, check safety_get_status()"
         if not (after.trip_reason or after.trip_mask) or time.monotonic() >= deadline:
             break
         time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
     left = devices.safety_trip_mask_for_reason(after.trip_reason) if after.trip_reason else 0
-    return (f"{sent}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
-            f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if left or after.trip_mask else 'cleared'})")
+    still = bool(left or after.trip_mask)
+    nothing = "" if (before.trip_reason or before.trip_mask) else " (nothing was latched before the clear)"
+    head = "STILL LATCHED -- " if still else ""
+    return (f"{head}{sent}{nothing}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
+            f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if still else 'cleared'})")
 
 
 @_core._tool()

@@ -77,9 +77,17 @@ def _wifi_write_refusal(confirm: object, what: str, allow_running: object = Fals
         if status is None:
             return (f"error: {what} refused -- profile executor state could not be read (no answer). "
                     "Pass allow_running=True (exactly True) to override.")
-        if status.state in (1, 2):
-            return (f"error: {what} refused while a profile is {status.state_name} -- a Wi-Fi change can "
+        if status.state not in (0, 3, 4):
+            return (f"error: {what} refused while a profile is {status.state_name} (running/paused/unknown) -- a Wi-Fi change can "
                     "drop the link mid-firing. Stop the profile first or pass allow_running=True.")
+        try:
+            at = _srv._autotune.get_status()
+        except Exception as exc:  # noqa: BLE001
+            return (f"error: {what} refused -- autotune state could not be read ({exc}). "
+                    "Pass allow_running=True (exactly True) to override.")
+        if at.state not in (0, 5, 6):
+            return (f"error: {what} refused while autotune is {at.state_name!r} -- a Wi-Fi change can "
+                    "drop the link mid-run. Pass allow_running=True to override.")
     return None
 
 

@@ -287,6 +287,13 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         verify_mock.assert_not_called()
         self.assertIn("flashed and verified OK", result)
 
+    def test_board_state_notes_are_surfaced(self):
+        """Batch C LOW-1: board-state notes must reach the operator."""
+        with unittest.mock.patch.object(mf, "_recovery_board_state_refusals",
+                                        return_value=([], [], ["a safety trip is latched"])),              unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""):
+            result = mf.flash_firmware(confirm=True, verify=True)
+        self.assertIn("NOTE: a safety trip is latched", result)
+
     def test_verify_true_failure_surfaces_as_error_string(self):
         with unittest.mock.patch.object(
             mf, "_verify_flash_landed",

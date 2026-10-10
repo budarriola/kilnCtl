@@ -1187,8 +1187,16 @@ def backup_import(
                 f"took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
                 f"{after_readiness}"
             )
+        kept_note = ""
+        try:
+            kept = json.loads(resp_text).get("relay_cycles_kept")
+        except Exception:  # noqa: BLE001
+            kept = None
+        if isinstance(kept, list) and kept:
+            kept_note = (f"\nNOTE: relay_cycles counters {kept} were NOT lowered: the backup value was below the "
+                         "live wear count, so the live (higher) count was kept (raise-only).")
         return (
-            f"ok - restored. (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
+            f"ok - restored.{kept_note} (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
             f"full job took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
             f"{after_readiness}"
         )

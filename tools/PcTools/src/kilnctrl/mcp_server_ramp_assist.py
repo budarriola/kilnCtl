@@ -118,7 +118,15 @@ def ramp_assist_set_enabled(enabled: bool, confirm: bool = False, host: Optional
     if not result.get("ok"):
         return f"error: board reported failure: {result} (host={resolved})"
     state = "enabled" if enabled else "disabled"
-    return f"ok - ramp assist {state} (POST accepted by the board, not read back) (host={resolved})"
+    try:
+        actual = ra_http.get_enabled(resolved)
+    except Exception as exc:  # noqa: BLE001
+        return (f"UNVERIFIED - ramp assist POST accepted but the read-back failed ({exc}); "
+                f"state UNKNOWN (host={resolved})")
+    if bool(actual) != bool(enabled):
+        return (f"FAILED - ramp assist POST accepted but GET /api/ramp_assist reads enabled={actual}, "
+                f"wanted {enabled} (host={resolved})")
+    return f"ok - ramp assist {state}, read back verified (host={resolved})"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

@@ -244,6 +244,17 @@ exit 0
     Assert-True ("$($r.Json.error)" -match 'BASELINE FAILED') "baselinefail: error does not name the baseline: $($r.Json.error)"
     Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -eq 'CAUGHT' }).Count -eq 0) "baselinefail: a CAUGHT verdict was reported on a failing baseline"
     Assert-True ($r.Json.baseline.passed -eq $false) "baselinefail: baseline.passed should be false"
+    # -Parallel 2 with a failing baseline: non-baseline workers still run, but no per-mutation
+    # verdict may read CAUGHT/MISSED (INFO, batch C review).
+    $mfb = Join-Path $scratch "muts_bf.json"
+    Set-Content -LiteralPath $mfb -Encoding UTF8 -Value (@(
+            @{ name = "minus"; file = "calc.ps1"; find = '$a + $b'; replace = '$a - $b'; expect = 'FAIL: Add-Two' },
+            @{ name = "low"; edits = @(@{ file = "calc.ps1"; find = '-gt 10'; replace = '-gt 4' }) }
+        ) | ConvertTo-Json -Depth 5)
+    $r = Run-Neg "baselinefail_par" @('-Command', ($testCmd + ' -ForceFail'), '-Mutations', $mfb, '-Parallel', '2')
+    Assert-True ($r.Exit -eq 2) "baselinefail_par: exit $($r.Exit), expected 2"
+    Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -in 'CAUGHT', 'MISSED' }).Count -eq 0) "baselinefail_par: a CAUGHT/MISSED verdict was reported on a failing baseline"
+    Assert-True ("$($r.Text)" -notmatch '(?m)^CAUGHT\s') "baselinefail_par: printed a CAUGHT line on a failing baseline"
     Step "baseline"
     }
     if ($Group -eq 'D') {
