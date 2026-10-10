@@ -742,7 +742,7 @@ try {
             # system_mode_gate_http_send_refusal() -- link both real, pure,
             # no-ESP-IDF-dependency objects in, same convention as exe50's
             # own dedicated executable for the module's unit tests.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
             # docs/HTTP_POST_OWNER_MIGRATION.md A2 review fix (Opus,
             # 2026-09-25): zones_post_handler() (zones_http_post.c, #included
@@ -1258,7 +1258,7 @@ try {
             # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
             # itself is faked in test_ota_http.c, same convention as its other
             # profile_executor/autotune_engine fakes.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
     # WEB_AUTH_PLAN.md section 2b: ota_http.c now calls
     # http_auth_policy_web_enabled() (http_auth_policy_iface.c) directly, and
@@ -1421,7 +1421,7 @@ try {
             "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
             "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             # kiln_io_owner.c's relay writes feed relay_off_tracker (on/off min_off_s hold).
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
     # docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1):
@@ -1831,7 +1831,7 @@ try {
     New-Item -ItemType Directory -Force -Path $kcfgObjDir | Out-Null
     $cmd24kcfg = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$kcfgObjDir\\`" /Fe:`"$exe24kcfg`" `"$(Join-Path $testDir 'test_kiln_cfg_http.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
@@ -1864,7 +1864,7 @@ try {
     New-Item -ItemType Directory -Force -Path $atGateObjDir | Out-Null
     $cmdAtGate = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$atGateObjDir\\`" /Fe:`"$exeAtGate`" `"$(Join-Path $testDir 'test_adaptive_tune_http_gate.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
@@ -2485,6 +2485,32 @@ try {
 
     Invoke-HostTestExe -Name "auth_totp_http_fuzz" -ExePath $exeTf -BuildCmd $cmdTf
 
+    # ---- test_aux_outputs_http_handlers.c: campaign 8 handler matrix ----
+    # Real aux_outputs_cfg/_http_core/_http #include'd; fake relay board.
+    $exeAh = Join-Path $outDir "kilnctl_host_tests_aux_outputs_http_handlers.exe"
+    $ahObjDir = Join-Path $outDir "ah"
+    New-Item -ItemType Directory -Force -Path $ahObjDir | Out-Null
+    $cmdAh = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$ahObjDir\\`" /Fe:`"$exeAh`" `"$(Join-Path $testDir 'test_aux_outputs_http_handlers.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "aux_outputs_http_handlers" -ExePath $exeAh -BuildCmd $cmdAh
+
+    # ---- test_dashboard_exec_http_handlers.c: campaign 8 profile start/stop/pause ----
+    $exeDe = Join-Path $outDir "kilnctl_host_tests_dashboard_exec_http_handlers.exe"
+    $deObjDir = Join-Path $outDir "de"
+    New-Item -ItemType Directory -Force -Path $deObjDir | Out-Null
+    $cmdDe = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$deObjDir\\`" /Fe:`"$exeDe`" `"$(Join-Path $testDir 'test_dashboard_exec_http_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_exec_http_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_exec_http_handlers" -ExePath $exeDe -BuildCmd $cmdDe
+
     # ---- test_readiness_crash_disclosure.c: its own 46th, separate
     # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
     # GET /api/readiness's crash-report checklist item leaked
@@ -2972,7 +2998,7 @@ try {
             # handler() now calls system_mode_gate_check()/system_mode_gate_
             # http_send_refusal() -- link both real, pure, leaf modules,
             # same as $cmd50/$cmd4's own fix.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
@@ -3256,7 +3282,8 @@ try {
     # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
     # 75 -> 77: test_danger_mode.c (campaign 6) plus one exe an earlier landing did not count (origin/dev built 76 vs expected 75)
     # 77 -> 78: test_diagnostics_http.c (campaign 9)
-    $totalExpected = 78
+    # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
+    $totalExpected = 80
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
