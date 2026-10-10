@@ -176,3 +176,13 @@ Clean except for the findings listed above.
 - **setup_progress_http.c**: post.
 - **iter_tune_http.c**: query read.
 - **adaptive_tune_http.c**: body read.
+
+## Follow-up 2026-10-09 (Opus review LOWs of e51f9402/4115bc19)
+
+- **L1 fixed**: the upload-deadline status is 503 (`OTA_HTTP_UPLOAD_SLOW_CODE`, `ota_http_util.h`), not 408, on the stage upload, `/api/ota/esp` and `/api/ota/pico`; browsers silently resend a 408 on a reused keep-alive socket. Body error stays `upload_too_slow`. Pinned by `test_ota_http.c`.
+- **L2 fixed**: `ota_page.html` maps `upload_too_slow` to a friendly message on the stage card and the Pico card (`uploadTooSlowText`); `ota_http_client._push_image` reports a broken pipe or reset mid-send as "server closed the connection (possibly upload_too_slow or another refusal)", not "unreachable" (pytest added). The response itself cannot be read after urllib's send fails.
+- **L3 fixed**: zones cycle-probe copy, `wifi_provision_http.c` scan_get and `kiln_cfg_http.c` list_get use `persist_scratch_alloc()`; the three files are now in `check_persist_scratch_malloc_caps.ps1` scope (negtest: a reverted malloc is caught). Zones probe OOM answers 503, not 400.
+- **L5 fixed**: recovery `read_exact` / `read_body_exact` report the overall deadline as 504 "upload too slow" (`RECOVERY_UPLOAD_TOO_SLOW`), distinct from a lost connection (400). 504 is not in `mcp_server_recovery._PRE_ERASE_STATUSES`, so a mid-image timeout keeps its erase warning.
+- **L6 fixed**: the missing-give wedge in `update_fetch.c` `wr_call` logs whether a finished WR_FINISH may have left an installable stage.
+- **L7 fixed**: the stage-upload recv-failure path uses `update_stage_upload_abort_owned(..., STAGE_SOURCE_UPLOAD)`.
+- Also: `update_fetch` host test now links `ota_http_util.c` plus a `hal_time_now_us` stub (it was not building on dev since e51f9402).
