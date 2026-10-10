@@ -1880,6 +1880,18 @@ try {
 
     Invoke-HostTestExe -Name "uart_bridge_ext_control_gate" -ExePath $exeUartBridgeControlGate -BuildCmd $cmdUartBridgeControlGate
 
+    # ---- test_uart_bridge_thermo_gate.c: THERMO UART writers refused during a run ----
+    # (review 12 Part B). Header-only gate helper + real system_mode_gate.c.
+    $exeUartBridgeThermoGate = Join-Path $outDir "kilnctl_host_tests_uart_bridge_thermo_gate.exe"
+    $uartBridgeThermoGateObjDir = Join-Path $outDir "uartbridgethermogate"
+    New-Item -ItemType Directory -Force -Path $uartBridgeThermoGateObjDir | Out-Null
+    $cmdUartBridgeThermoGate = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeThermoGateObjDir\\`" /Fe:`"$exeUartBridgeThermoGate`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_thermo_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_thermo_gate" -ExePath $exeUartBridgeThermoGate -BuildCmd $cmdUartBridgeThermoGate
+
     # ---- test_uart_bridge_ext_worker.c: its own separate executable ----------
     # #includes uart_bridge_ext.c directly (static bx_worker_iteration() and
     # the save-section hooks have no other seam) with fake FreeRTOS primitives

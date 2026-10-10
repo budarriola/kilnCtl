@@ -28,6 +28,7 @@
 #include "settings.h"
 #include "stack_margin.h"
 #include "thermo_owner.h"
+#include "uart_bridge_thermo_gate.h"
 #include "uart_task_ids.h"
 #include "wifi_prov.h"
 #include "zones_config_accessors.h"
@@ -215,6 +216,14 @@ static void thermo_bridge_task(void *arg)
          * kiln_io_owner's Phase 1 rewrite of io_bridge_task above). A bad
          * channel index still comes back as ESP_ERR_NOT_FOUND, now from
          * thermo_owner_command_*() instead of a NULL MAX31856_bus_channel(). */
+        {
+            char gate_reason[64];
+            if (thermo_bridge_write_refused(subcmd, gate_reason, sizeof(gate_reason))) {
+                ESP_LOGW(TAG, "thermo: subcmd 0x%02X refused while a run is active: %s", subcmd, gate_reason);
+                bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "refused: run active");
+                continue;
+            }
+        }
         switch (subcmd) {
             case THERMO_CMD_CONFIG_CHANNEL: {
                 if (!bridge_args_ok("thermo", &msg, 6)) {
