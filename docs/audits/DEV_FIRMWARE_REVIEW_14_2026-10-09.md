@@ -224,3 +224,12 @@ Each mutation ran in a throwaway worktree copy at `51933463`, with a passing unm
 | `http_origin_check.h`: bracketed-host character check accepts anything | `test_http_auth_enforce.c` | CAUGHT (`test_http_auth_enforce.c:762`) |
 | `profiles_http.c`: `s_boot_loading` save gate -> `if (0)` | `test_profiles_http.c` | CAUGHT (`test_profiles_http.c:5069-5070`) |
 | `elf_archive.py`: `len(p) < 6` -> `len(p) < 0` | `test_crash_elf_recovery_archive.py` | MISSED (LOW-8) |
+
+## Fix status (fwbatch14)
+
+Stack-review items (M1, M2, L2, INFO) were fixed separately on origin/dev and are not covered here.
+
+- MED-1, LOW-1, LOW-7, LOW-8: FIXED in b77c0ce94 (plus 19bd98965, test registration).
+- LOW-2, LOW-3, LOW-4, LOW-6, NIT-1, NIT-2: FIXED in 283937330.
+- LOW-5: FIXED in 38eaf6bcd (save, delete, retarget and revert are refused until the boot load finishes).
+- NIT-3: SKIPPED. The hostname constant is shared by three build configurations including the recovery image; consolidating it is out of proportion to a nit.
