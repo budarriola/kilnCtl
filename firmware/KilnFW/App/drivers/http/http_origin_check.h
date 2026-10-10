@@ -8,7 +8,9 @@
 // = 80). Origin absent -> Referer's scheme://host[:port] gets the same compare.
 // Both absent -> allowed (MCP tools, curl and the LCD send neither).
 // Separately (F4) the Host itself must be an IP literal, localhost, or a name whose first
-// label is the board's hostname (<mdns>.local, router DNS kilnctl / kilnctl.lan, ...).
+// label is the board's hostname AND the rest is empty, "local", or one of a fixed list of
+// non-public LAN suffixes (lan, home, localdomain, home.arpa, internal, intranet, private).
+// Any other suffix is refused: kilnctl.<attacker domain> rebound to the LAN IP must fail.
 #ifndef KILNCTL_HTTP_ORIGIN_CHECK_H
 #define KILNCTL_HTTP_ORIGIN_CHECK_H
 
@@ -171,9 +173,12 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
 // Origin==Host compare above passes. Refusing any Host that is not one of the board's
 // own names closes it: an attacker needs a DNS name, an IP literal is never theirs.
 // Allowed: IPv4 literal (a.b.c.d, optional :port), bracketed IPv6 literal,
-// "localhost", and any name whose FIRST label equals mdns_name (case-insensitive:
-// "<name>", "<name>.local", "<name>.lan", "<name>.home", ... any suffix, for router DNS)
-// when mdns_name != NULL. Other names stay refused. Missing Host -> allowed
+// "localhost", and (when mdns_name != NULL) "<name>", "<name>.local" or "<name>.<sfx>"
+// where sfx is in a fixed list of non-public home/LAN suffixes (lan, home, localdomain,
+// home.arpa, internal, intranet, private); case-insensitive, optional port, optional single
+// trailing dot. NOT "any suffix": an attacker can register kilnctl.<their domain> and
+// rebind it to the board's LAN IP, so a public TLD or unlisted multi-label suffix is
+// refused. Other names stay refused. Missing Host -> allowed
 // (HTTP/1.0 non-browser clients; a browser always sends one).
 static inline bool http_origin_host_is_ipv4_literal_(const char *h) {
     int dots = 0, digits = 0;
@@ -210,13 +215,26 @@ static inline bool http_origin_host_name_allowed(const char *host, const char *m
     }
     if (mdns_name != NULL && mdns_name[0] != '\0') {
         size_t n = strlen(mdns_name);
-        if (n <= strlen(hp.host) && (hp.host[n] == '\0' || hp.host[n] == '.')) {
+        size_t hl = strlen(hp.host);
+        if (hl > 0 && hp.host[hl - 1] == '.') {
+            hp.host[--hl] = '\0'; // one trailing dot (FQDN form)
+        }
+        if (n <= hl && (hp.host[n] == '\0' || hp.host[n] == '.')) {
             for (size_t i = 0; i < n; i++) {
                 if (http_origin_lc_(mdns_name[i]) != hp.host[i]) {
                     return false;
                 }
             }
-            return true;
+            if (hp.host[n] == '\0') {
+                return true;
+            }
+            static const char *const k_sfx[] = {"local", "lan", "home", "localdomain",
+                                                "home.arpa", "internal", "intranet", "private"};
+            for (size_t k = 0; k < sizeof(k_sfx) / sizeof(k_sfx[0]); k++) {
+                if (strcmp(hp.host + n + 1, k_sfx[k]) == 0) {
+                    return true;
+                }
+            }
         }
     }
     return false;
