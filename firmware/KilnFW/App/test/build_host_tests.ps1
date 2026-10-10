@@ -3242,8 +3242,8 @@ try {
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
     # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
-    # 75 -> 76: added test_danger_mode.c (campaign 6)
-    $totalExpected = 76
+    # 75 -> 77: test_danger_mode.c (campaign 6) plus one exe an earlier landing did not count (origin/dev built 76 vs expected 75)
+    $totalExpected = 77
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
