@@ -40,6 +40,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 
 ### MED-2. A start refused from DONE corrupts the finished run and persists a bogus firing-stats record
 
+**FIXED (execfx):** `profile_executor_run()` snapshots `s_exec` when the state is DONE, just before the first overwrite, and every later refusal restores it through `run_refuse_unlock()`; an allocation failure refuses the start. Test: `test_run_refused_from_done_leaves_done_state_untouched`.
+
 - **Where:** `control/profile_executor_run.c`. The function refuses RUNNING and PAUSED (426) and FAULTED (431), but not DONE.
 - **What it overwrites first:** under the lock, it overwrites the previous run's state before several later refusals:
   - `s_exec.profile = p` (674)
@@ -135,6 +137,8 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Effect:** the aux stays energized for the rest of the run. It is opened at the terminal state by `force_aux_relays_off()`.
 
 ### LOW-3. A queued AUTHORIZED ON can execute after the watchdog's direct all-off
+
+**FIXED (execfx):** `kiln_io_all_relays_off()` bumps `kiln_io_relay_off_epoch()`; AUTHORIZED commands carry the epoch sampled when posted, and the owner task writes OFF instead of ON for a stale one (returns `ESP_ERR_INVALID_STATE`). Test: `test_authorized_on_queued_before_all_off_is_dropped`.
 
 - **Where:** `owners/kiln_io_owner.c`, `post_and_wait()`. A command is queued with `xQueueSend(..., 0)` and the caller gives up after 200 ms, but the command still runs later. `CMD_SET_RELAY_MASK_AUTHORIZED` has no gate inside the owner task.
 - **Scenario:**
