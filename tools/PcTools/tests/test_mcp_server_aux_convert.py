@@ -267,6 +267,27 @@ class ConvertTest(unittest.TestCase):
         r, _ = self._run(post=ahc.AuxHttpError("x", 500, "ROLLBACK INCOMPLETE"))
         self.assertTrue(r.startswith("error"), r)
 
+    def test_500_reads_state_back_and_says_committed_or_not(self):
+        r, _ = self._run(post=ahc.AuxHttpError("x", 500, "ROLLBACK INCOMPLETE"))
+        self.assertIn("read-back after the failure", r)
+        self.assertIn("zone_type=0", r)
+
+    def test_timeout_reads_state_back(self):
+        r, _ = self._run(post=ahc.AuxHttpError("x", None, "timed out"))
+        self.assertIn("read-back after the failure", r)
+
+    def test_409_does_not_read_back(self):
+        exc = ahc.AuxHttpError("x", 409, "refused -- a firing or autotune run is active")
+        r, _ = self._run(post=exc)
+        self.assertNotIn("read-back after the failure", r)
+
+    def test_failed_readback_says_state_unknown(self):
+        with unittest.mock.patch.object(zones_http_client, "get_zones",
+                                        side_effect=[_zones(), zones_http_client.ZonesHttpError("down")]),              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value=_profiles()),              unittest.mock.patch.object(ma.readiness_http_client, "get_readiness", return_value={"items": []}),              unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value={}),              unittest.mock.patch.object(ahc, "post_move_zone_to_aux",
+                                        side_effect=ahc.AuxHttpError("x", 500, "boom")):
+            r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True)
+        self.assertIn("state UNKNOWN", r)
+
     def test_readback_zone_unchanged_fails_loud(self):
         r, _ = self._run(after_zones=_zones())
         self.assertTrue(r.startswith("FAILED"), r)

@@ -1285,15 +1285,20 @@ def _preset_named_omit_preserved_keys(preset: dict) -> "set[str]":
         if i is None:
             continue
         for key in z:
+            # Keep a key only when build_post_body() really takes its VALUE
+            # from the preset (_PRESET_ZONE_OVERRIDE_FIELDS). The GET/backup
+            # spellings (model_k_dc, coupling_cN, ...) are reference-only
+            # there: build_post_body() echoes GET's rounded print for them,
+            # so keeping them would re-post rounded values (review LOW-6).
+            if key not in _PRESET_ZONE_OVERRIDE_FIELDS:
+                continue
             suffix = _ZONE_FIELD_FORM_KEY.get(key)
             if suffix is not None:
                 keep.add(f"z{i}_{suffix}")
-            m = _ZONE_COUPLING_CELL_RE.match(key)
-            if m:
-                keep.add(f"z{i}_coupling_c{m.group(1)}")
         if _PRESET_ZONE_COUPLING_FIELD in z:
             for j in range(len(z[_PRESET_ZONE_COUPLING_FIELD])):
-                keep.add(f"z{i}_coupling_c{j}")
+                if j != i:  # the diagonal is never overlaid
+                    keep.add(f"z{i}_coupling_c{j}")
     return keep
 
 

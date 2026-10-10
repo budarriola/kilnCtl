@@ -74,7 +74,7 @@ class ActionTests(unittest.TestCase):
 
 
 class PresetToolTests(unittest.TestCase):
-    def _call(self, exporter, apply_exc=None, **kw):
+    def _call(self, exporter, apply_exc=None, apply_return=None, load_exc=None, running=None, **kw):
         link = mock.Mock()
         link.send.return_value = mock.Mock(ok=True)
         info = mock.Mock()
@@ -82,9 +82,9 @@ class PresetToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d, \
              mock.patch.object(factory_reset_guard, "BACKUP_DIR", d), \
              mock.patch("kilnctrl.backup_export_http_client.get_export", exporter), \
-             mock.patch.object(config_presets, "load_preset_data", return_value={}), \
-             mock.patch.object(config_presets, "apply_preset", side_effect=apply_exc), \
-             mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason", return_value=None), \
+             mock.patch.object(config_presets, "load_preset_data", return_value={}, side_effect=load_exc), \
+             mock.patch.object(config_presets, "apply_preset", side_effect=apply_exc, return_value=apply_return), \
+             mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason", return_value=running), \
              mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"), \
              mock.patch.object(mcp_server._srv._link if hasattr(mcp_server, "_srv") else mcp_server._link, "send", link.send), \
              mock.patch.object(mcp_server._info, "arm_boot_push"), \
@@ -102,6 +102,28 @@ class PresetToolTests(unittest.TestCase):
         link.send.assert_called_once()
         self.assertIn("BOARD WIPED", result)
         self.assertIn("kilnctl_backup_prereset_", result)
+
+    def test_all_ok_false_says_wiped(self):
+        res = mock.Mock(all_ok=False)
+        res.describe.return_value = "zone 0 pid=FAILED"
+        result, link = self._call(_good_export, apply_return=res)
+        link.send.assert_called_once()
+        self.assertIn("BOARD WIPED", result)
+        self.assertIn("PARTIALLY", result)
+
+    def test_bad_preset_name_errors_before_backup_and_send(self):
+        exporter = mock.Mock(side_effect=_good_export)
+        result, link = self._call(exporter, load_exc=config_presets.ConfigPresetError("no such preset"))
+        self.assertTrue(result.startswith("error"), result)
+        exporter.assert_not_called()
+        link.send.assert_not_called()
+
+    def test_running_refuses_before_backup_and_send(self):
+        exporter = mock.Mock(side_effect=_good_export)
+        result, link = self._call(exporter, running="a profile is currently running")
+        self.assertTrue(result.startswith("refused"), result)
+        exporter.assert_not_called()
+        link.send.assert_not_called()
 
 
 class CallLogTests(unittest.TestCase):

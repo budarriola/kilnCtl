@@ -120,6 +120,14 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
         )
     except (ui_test_runner.UiScriptError, config_presets.ConfigPresetError) as exc:
         return f"error: {exc}"
+    except Exception as exc:  # noqa: BLE001 -- any preset-path error class must still report what was written
+        if not (apply_preset and "preset" in script):
+            raise
+        return (f"error: preset {script['preset']!r} apply raised {type(exc).__name__}: {exc}; "
+                f"NO steps ran, the board may be PARTIALLY written{_partial_note(exc)}")
+    if "preset" in script and not apply_preset and isinstance(result, dict):
+        result["preset_skipped"] = (f"preset {script['preset']!r} skipped (apply_preset=False): "
+                                    "the script ran against the board's current config")
     return json.dumps(result)
 
 

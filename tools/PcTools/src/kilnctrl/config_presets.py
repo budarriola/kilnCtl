@@ -465,27 +465,45 @@ def _apply_preset_stages(control, preset, zones_host, zones_timeout, verify_zone
                          safety_host, safety_timeout, verify_safety, use_ct_map_backup,
                          verify_pid, done) -> PresetApplyResult:
     results = []
-    for zone in preset["zones"]:
-        pid: "OkReason" = control.set_zone_pid(
-            zone["index"], zone["pid_kp"], zone["pid_ki"], zone["pid_kd"]
-        )
-        model_ok = None
-        model_detail = ""
-        if all(k in zone for k in ("k_dc", "tau_s", "dead_time_s")):
-            model = control.set_zone_model(
-                zone["index"], zone["k_dc"], zone["tau_s"], zone["dead_time_s"]
+    try:
+        for zone in preset["zones"]:
+            pid: "OkReason" = control.set_zone_pid(
+                zone["index"], zone["pid_kp"], zone["pid_ki"], zone["pid_kd"]
             )
-            model_ok = bool(model)
-            model_detail = getattr(model, "reason", "") or ""
-        results.append(
-            ZoneApplyResult(
-                zone=zone["index"],
-                pid_ok=bool(pid),
-                pid_detail=getattr(pid, "reason", "") or "",
-                model_ok=model_ok,
-                model_detail=model_detail,
+            # Record the PID write the moment it lands, so a raise in this
+            # zone's model write (or in a later zone) still reports it.
+            results.append(
+                ZoneApplyResult(
+                    zone=zone["index"],
+                    pid_ok=bool(pid),
+                    pid_detail=getattr(pid, "reason", "") or "",
+                    model_ok=None,
+                    model_detail="",
+                )
             )
-        )
+            if all(k in zone for k in ("k_dc", "tau_s", "dead_time_s")):
+                model = control.set_zone_model(
+                    zone["index"], zone["k_dc"], zone["tau_s"], zone["dead_time_s"]
+                )
+                results[-1] = ZoneApplyResult(
+                    zone=zone["index"], pid_ok=results[-1].pid_ok,
+                    pid_detail=results[-1].pid_detail, model_ok=bool(model),
+                    model_detail=getattr(model, "reason", "") or "")
+    except Exception:
+        # A raise on zone N: report which zones already landed, and still
+        # read the PID back on them (best effort -- never mask the original).
+        if results:
+            landed = results
+            if verify_pid:
+                try:
+                    landed = _verify_pid_readback(control, preset, results)
+                except Exception:  # noqa: BLE001
+                    pass
+            done.append("PID written over UART before the failure: " + ", ".join(
+                f"zone {r.zone} pid={'ok' if r.pid_ok else 'FAILED'}"
+                f"{'' if r.model_ok is None else (' model=ok' if r.model_ok else ' model=FAILED')}"
+                for r in landed))
+        raise
 
     if verify_pid and results:
         results = _verify_pid_readback(control, preset, results)

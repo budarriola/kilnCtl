@@ -302,6 +302,10 @@ def safety_set_fault_out(assert_fault: bool, confirm: bool = False) -> str:
     return f"refused - could not set fault out{detail}"
 
 
+_CLEAR_TRIP_READBACK_WINDOW_S = 2.0
+_CLEAR_TRIP_READBACK_POLL_S = 0.25
+
+
 @_core._tool()
 def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
     """Clear a latched safety trip on the safety processor.
@@ -323,7 +327,7 @@ def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
 
     Not confirm-gated by design: clearing a trip is a routine operator step; the Pico refuses it while the cause persists and the post-trip dwell applies.
 
-    Precheck (2026-10-09): reads GET_DIAG first. Refuses when the link is down or the reported
+    Precheck (2026-10-09): reads GET_DIAG first. Refuses when no DIAG was ever received (link not up) or the reported
     `trip_mask` is not `1 << (trip_reason - 1)` (the mask rule in
     `link_frame_trip_mask_for_reason()`), i.e. more than the one expected guard is latched or the
     reading is inconsistent, unless `allow_unexpected_mask=True` after a human has reviewed it.
@@ -333,19 +337,31 @@ def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
         before = _srv._safety.get_diag()
     except SafetyQueryError as exc:
         return f"refused: could not read GET_DIAG before clearing ({exc}) -- state UNKNOWN"
-    if before.ever_received:
-        expected = devices.safety_trip_mask_for_reason(before.trip_reason)
-        if before.trip_mask != expected and allow_unexpected_mask is not True:
-            return (f"refused: trip_mask 0x{before.trip_mask:04X} != expected 0x{expected:04X} "
-                    f"(1 << (trip_reason {before.trip_reason} - 1)); review safety_get_diag() and pass "
-                    f"allow_unexpected_mask=True only if the extra guards are understood")
+    if not before.ever_received:
+        return ("refused: no GET_DIAG/DIAG frame has been received yet (safety link not up), so the tool "
+                "cannot show which trip it would clear -- wait for link-up and check safety_get_status()")
+    # Defence in depth only: the Pico derives trip_mask from trip_reason as 1 << (reason-1)
+    # (link_frame_trip_mask_for_reason), so on real firmware this cannot differ; it catches a
+    # corrupted or inconsistent reading.
+    expected = devices.safety_trip_mask_for_reason(before.trip_reason)
+    if before.trip_mask != expected and allow_unexpected_mask is not True:
+        return (f"refused: trip_mask 0x{before.trip_mask:04X} != expected 0x{expected:04X} "
+                f"(1 << (trip_reason {before.trip_reason} - 1)); review safety_get_diag() and pass "
+                f"allow_unexpected_mask=True only if the extra guards are understood")
     sent = _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
     if not sent.startswith("ok"):
         return sent
-    try:
-        after = _srv._safety.get_diag()
-    except SafetyQueryError as exc:
-        return f"{sent}\nread-back failed ({exc}); check safety_get_status()"
+    # The clear is fire-and-forget and the Pico applies it a few hundred ms later, so poll
+    # briefly for the cleared state before reporting STILL LATCHED.
+    deadline = time.monotonic() + _CLEAR_TRIP_READBACK_WINDOW_S
+    while True:
+        try:
+            after = _srv._safety.get_diag()
+        except SafetyQueryError as exc:
+            return f"{sent}\nread-back failed ({exc}); check safety_get_status()"
+        if not (after.trip_reason or after.trip_mask) or time.monotonic() >= deadline:
+            break
+        time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
     left = devices.safety_trip_mask_for_reason(after.trip_reason) if after.trip_reason else 0
     return (f"{sent}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
             f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if left or after.trip_mask else 'cleared'})")

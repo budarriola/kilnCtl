@@ -105,10 +105,6 @@ class ThermoGateTests(unittest.TestCase):
                 self.assertTrue(out.startswith("refused") and "live" in out, out)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class SafetyClearTripPrecheckTests(unittest.TestCase):
     def _diag(self, reason, mask):
         return um.MagicMock(ever_received=True, trip_reason=reason, trip_mask=mask)
@@ -132,3 +128,169 @@ class SafetyClearTripPrecheckTests(unittest.TestCase):
         with um.patch.object(mcp_server._safety, "set_fault_out") as w:
             self.assertTrue(mcp_server.safety_set_fault_out(False).startswith("refused"))
         w.assert_not_called()
+
+
+class SafetyClearTripLinkAndPollTests(unittest.TestCase):
+    def test_refuses_when_no_diag_ever_received(self):
+        d = um.MagicMock(ever_received=False, trip_reason=0, trip_mask=0)
+        with um.patch.object(mcp_server._safety, "get_diag", return_value=d),              um.patch.object(mcp_server, "_send") as s:
+            out = mcp_server.safety_clear_trip()
+        self.assertTrue(out.startswith("refused"), out)
+        s.assert_not_called()
+
+    def test_readback_polls_until_cleared(self):
+        latched = um.MagicMock(ever_received=True, trip_reason=6, trip_mask=0x20)
+        clear = um.MagicMock(ever_received=True, trip_reason=0, trip_mask=0)
+        with um.patch.object(mcp_server._safety, "get_diag", side_effect=[latched, latched, latched, clear]),              um.patch.object(mcp_server, "_send", return_value="ok - sent"),              um.patch("kilnctrl.mcp_server_safety.time.sleep"):
+            out = mcp_server.safety_clear_trip()
+        self.assertIn("cleared", out)
+        self.assertNotIn("STILL LATCHED", out)
+
+    def test_still_latched_after_window(self):
+        latched = um.MagicMock(ever_received=True, trip_reason=6, trip_mask=0x20)
+        with um.patch.object(mcp_server._safety, "get_diag", return_value=latched),              um.patch.object(mcp_server, "_send", return_value="ok - sent"),              um.patch("kilnctrl.mcp_server_safety.time.sleep"),              um.patch("kilnctrl.mcp_server_safety.time.monotonic", side_effect=[0.0, 0.1, 5.0, 5.1, 5.2]):
+            out = mcp_server.safety_clear_trip()
+        self.assertIn("STILL LATCHED", out)
+
+
+class ApplyPresetRealPartialTests(unittest.TestCase):
+    """Real _apply_preset_stages path: a raise on zone N reports the zones that landed."""
+
+    def _preset(self):
+        return {"name": "p", "zones": [
+            {"index": i, "pid_kp": 1.0, "pid_ki": 0.1, "pid_kd": 0.0} for i in range(3)]}
+
+    def test_raise_on_zone2_reports_zones_0_and_1_and_reads_back(self):
+        control = um.MagicMock()
+        control.set_zone_pid.side_effect = [True, True, ControlQueryError("uart timeout")]
+        g = lambda i: um.MagicMock(index=i, pid_kp=1.0, pid_ki=0.1, pid_kd=0.0)  # noqa: E731
+        control.get_zones.return_value = (None, None, [g(0), g(1)])
+        with self.assertRaises(ControlQueryError) as cm:
+            config_presets.apply_preset(control, self._preset())
+        note = cm.exception.preset_partial
+        self.assertIn("zone 0 pid=ok", note)
+        self.assertIn("zone 1 pid=ok", note)
+        self.assertNotIn("nothing had landed", note)
+        control.get_zones.assert_called_once()  # PID read-back ran on the landed zones
+
+    def test_readback_mismatch_shown_in_partial(self):
+        control = um.MagicMock()
+        control.set_zone_pid.side_effect = [True, ControlQueryError("x")]
+        bad = um.MagicMock(index=0, pid_kp=9.0, pid_ki=0.1, pid_kd=0.0)
+        control.get_zones.return_value = (None, None, [bad])
+        with self.assertRaises(ControlQueryError) as cm:
+            config_presets.apply_preset(control, self._preset())
+        self.assertIn("zone 0 pid=FAILED", cm.exception.preset_partial)
+
+    def test_first_zone_raise_says_nothing_landed(self):
+        control = um.MagicMock()
+        control.set_zone_pid.side_effect = ControlQueryError("x")
+        with self.assertRaises(ControlQueryError) as cm:
+            config_presets.apply_preset(control, self._preset())
+        self.assertIn("nothing had landed", cm.exception.preset_partial)
+
+
+
+
+class PresetKeepKeysTests(unittest.TestCase):
+    """LOW-6: only keys whose VALUE build_post_body() takes from the preset are kept."""
+
+    def test_get_spelled_model_and_coupling_cells_not_kept(self):
+        preset = {"zones": [{"index": 0, "model_k_dc": 1.5, "model_tau_s": 99.0,
+                              "model_dead_time_s": 3.0, "coupling_c1": 0.25,
+                              "pid_kp": 2.0}]}
+        keep = zones_http_client._preset_named_omit_preserved_keys(preset)
+        for k in ("z0_k", "z0_tau", "z0_deadtime", "z0_coupling_c1"):
+            self.assertNotIn(k, keep)
+
+    def test_coupling_coeff_row_kept_except_diagonal(self):
+        preset = {"zones": [{"index": 1, "coupling_coeff": [0.1, 0.0, 0.3]}]}
+        keep = zones_http_client._preset_named_omit_preserved_keys(preset)
+        self.assertEqual(keep, {"z1_coupling_c0", "z1_coupling_c2"})
+
+
+
+class UiRunScriptPresetErrorTests(unittest.TestCase):
+    SCRIPT = {"backend": "lcd", "preset": "x"}
+
+    def test_preset_error_class_reported_with_partial(self):
+        from kilnctrl import zones_http_client as z
+        exc = z.ZonesHttpError("boom")
+        exc.preset_partial = "PID written: zone 0 pid=ok"
+        with um.patch.object(ui_test_runner, "run_ui_script", side_effect=exc), \
+             um.patch.object(ui_test_runner, "load_ui_script", return_value=self.SCRIPT), \
+             um.patch(RUN_GATE, return_value=None):
+            out = mcp_server.ui_run_script("s", apply_preset=True, confirm=True)
+        self.assertTrue(out.startswith("error"), out)
+        self.assertIn("zone 0 pid=ok", out)
+        self.assertIn("PARTIALLY", out)
+
+    def test_skipped_preset_is_stated(self):
+        with um.patch.object(ui_test_runner, "run_ui_script", return_value={"ok": True}), \
+             um.patch.object(ui_test_runner, "load_ui_script", return_value=self.SCRIPT):
+            out = mcp_server.ui_run_script("s")
+        self.assertIn("preset_skipped", out)
+        self.assertIn("apply_preset=False", out)
+
+
+class Low10MiscTests(unittest.TestCase):
+    def test_thermo_write_reg_readback_mismatch_warns(self):
+        back = um.Mock(values=[0x55])
+        with um.patch(RUN_GATE, return_value=None), \
+             um.patch.object(mcp_server._thermo, "write_reg", return_value=um.Mock(ok=True, reason="")), \
+             um.patch.object(mcp_server._thermo, "read_reg", return_value=back):
+            out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
+        self.assertTrue(out.startswith("warning"), out)
+        self.assertIn("0x55", out)
+
+    def test_thermo_write_reg_readback_match_ok(self):
+        back = um.Mock(values=[0xAA])
+        with um.patch(RUN_GATE, return_value=None), \
+             um.patch.object(mcp_server._thermo, "write_reg", return_value=um.Mock(ok=True, reason="")), \
+             um.patch.object(mcp_server._thermo, "read_reg", return_value=back):
+            out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+
+    def test_relay_io_hits_fail_closed_without_segments(self):
+        def gj(host, path, timeout):
+            if path == "/api/profiles":
+                return [{"id": 3, "builtin": False}]
+            return {"name": "x"}  # no segments array
+        with um.patch.object(ahc, "_get_json", side_effect=gj):
+            with self.assertRaises(ahc.AuxHttpError):
+                ahc.get_stored_relay_io_hits("h", 4)
+
+    def test_relay_io_hits_finds_segment(self):
+        def gj(host, path, timeout):
+            if path == "/api/profiles":
+                return [{"id": 3, "builtin": False}, {"id": 200, "builtin": True}]
+            return {"segments": [{"seg_kind": 0}, {"seg_kind": 1, "io_target": 4}]}
+        with um.patch.object(ahc, "_get_json", side_effect=gj):
+            self.assertEqual(ahc.get_stored_relay_io_hits("h", 4), {3: [2]})
+
+    def test_bench_aux_rule_5xx_is_unknown_state_not_refusal(self):
+        from kilnctrl import mcp_server_aux as ma, mcp_server_ota, profile_edit_http_client as pehc
+        aux = {"relays": [{"relay": 4, "enabled": True, "conflicted": False, "tc_zone": 0}]}
+        exc = pehc.ProfileEditHttpError("boom", status=500)
+        with um.patch.object(ma, "_running_reason", return_value=None), \
+             um.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="h"), \
+             um.patch.object(ahc, "get_aux_outputs", return_value=aux), \
+             um.patch.object(ahc, "_get_json", return_value=[]), \
+             um.patch.object(pehc, "post_profile", side_effect=exc):
+            out = ma.profile_save_bench_aux_rule(30.0, 28.0, confirm=True)
+        self.assertTrue(out.startswith("error"), out)
+        self.assertIn("UNKNOWN", out)
+
+    def test_load_config_preset_partial_apply_line(self):
+        from kilnctrl import mcp_server_config_presets as mcp_
+        res = um.Mock(all_ok=False)
+        res.describe.return_value = "zone 1 failed"
+        with um.patch(RUN_GATE, return_value=None), \
+             um.patch.object(config_presets, "load_preset_data", return_value={}), \
+             um.patch.object(config_presets, "apply_preset", return_value=res):
+            out = mcp_.load_config_preset("x", confirm=True)
+        self.assertIn("FAILED (partial apply)", out)
+
+
+if __name__ == "__main__":
+    unittest.main()
