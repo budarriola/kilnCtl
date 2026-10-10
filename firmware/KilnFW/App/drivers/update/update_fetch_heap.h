@@ -25,7 +25,19 @@
 //   -> FETCH_HEAP_PRECHECK_MIN           30836 B   (8192 + 18548 + 4096). The idle board sits at
 //      29647-31123 B free, so an idle-minimum board is now REFUSED (retry later) rather than admitted
 //      with only 1932 B of margin; the older 28672 B figure above is superseded.
-// The slack is deliberately NOT larger: the board idles at 29647-31123 B free
+// REVISED AGAIN (bench finding, origin/dev 8fcd3237: update_check refused at idle, 29815 B free < 30836 B):
+//   floor                                8192 B  (owner floor, unchanged)
+//   worst draw                          17524 B  (16500 + 1024 B stager scratch; scratch cut 2048 -> 1024,
+//                                                 UPDATE_STAGE_SCRATCH_MIN is 256, see
+//                                                 docs/audits/UPDATE_FETCH_HEAP_DRAW_2026-10-09.md route 4)
+//   concurrent httpd / KDF margin        3840 B  (was 4096). The login KDF (web_auth_store.c) does no heap
+//                                                 allocation of its own (iterated HMAC on the caller's stack),
+//                                                 so the margin only covers a concurrent httpd request; it
+//                                                 is NOT shown mutually exclusive with the fetch, so kept.
+//   -> FETCH_HEAP_PRECHECK_MIN          29556 B  (8192 + 17524 + 3840), below the 29647 B idle minimum;
+//      at the idle minimum the post-draw margin over the floor is 29647 - 17524 - 8192 = 3931 B.
+//      (old: 8192 + 18548 + 4096 = 30836 B, above idle.) Estimate, not a measurement: the WP8 gate
+//      (b) bench run must confirm min_free >= 8192 B with scratch 1024.// The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
 // idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 16500 = 13147 B,
 // 4955 B above the 8192 B floor.
@@ -56,12 +68,12 @@ extern "C" {
 // Stager scratch: INTERNAL RAM (MALLOC_CAP_INTERNAL), one per job. Must be internal and small: a PSRAM
 // scratch makes esp_partition_read borrow an internal bounce buffer of up to 16 KiB per read (review
 // GITHUB_UPDATE_CHAIN_REVIEW_2026-10-09 MED-1). Its bytes are part of the worst draw, taken out of the slack.
-#define FETCH_HEAP_SCRATCH_BYTES 2048u
+#define FETCH_HEAP_SCRATCH_BYTES 1024u
 #define FETCH_HEAP_WORST_DRAW_BYTES (16500u + FETCH_HEAP_SCRATCH_BYTES)
-// Margin for a concurrent login KDF / httpd request while the fetch holds its allocations (review 3 LOW-5:
+// Margin for a concurrent httpd request / login KDF / httpd request while the fetch holds its allocations (review 3 LOW-5:
 // the old 1932 B left almost nothing against the 8192 B floor). Admitted free minus the full worst draw
 // (18548 B) must still leave floor + this margin.
-#define FETCH_HEAP_SLACK_BYTES 4096u
+#define FETCH_HEAP_SLACK_BYTES 3840u
 #define FETCH_HEAP_PRECHECK_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_WORST_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_LARGEST_BLOCK_MIN 6144u
 // Mid-body abort (read loop only, session already built): floor plus 4 KB of transient room.
