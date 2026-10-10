@@ -58,6 +58,8 @@ The F4 fallback in `apply_relay()` (around line 47) has the same gap, and it pre
 
 ### B-MEDIUM-1: negtest orphan reaping can kill unrelated processes
 
+**FIXED in 46afbf427:** children adopted only if created at or after their parent (`Test-ChildAdoptable`), no `taskkill /T`, spare names on every kill; test in `check_negtest.ps1`, 3 negtest mutations CAUGHT.
+
 `tools/negtest.ps1` builds the tracked tree in `Add-Descendants` (around line 391) and kills it in `Stop-Tracked` (around line 406).
 
 `Add-Descendants` builds the tree from `Win32_Process.ParentProcessId` every 1.5 s. It never checks that a child was created at or after its parent. Windows does not update `ParentProcessId` when a parent exits, and PIDs are reused quickly. That allows two kinds of false descendant:
@@ -76,6 +78,8 @@ This repo runs many concurrent sessions and long-lived MCP servers on one machin
 - Re-apply `SpareNames` to every kill.
 
 ### B-LOW / INFO
+
+**FIXED in 46afbf427:** `-RequireAssertion` now matches `  FAIL file:line:` (test in `check_negtest.ps1`); `push_verify.ps1` temp-file delete retries.
 
 - **`push_verify.ps1` (P1-P3) is correct.**
   - An empty `-Commit` exits 2.
