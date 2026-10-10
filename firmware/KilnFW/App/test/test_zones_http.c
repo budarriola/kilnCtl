@@ -2387,6 +2387,33 @@ static void test_post_whole_page_cross_zone_legal_chain_accepted(void)
               "zone 1's link committed as Custom");
 }
 
+extern size_t persist_scratch_test_fail_size;
+extern int persist_scratch_test_fail_nth;
+extern int persist_scratch_test_seen;
+
+// The settings_source cycle-probe copy failing to allocate is a server fault: 503 with the shared
+// ZONES_HTTP_ERR_OOM text through httpd_resp_send_custom_err(), never a 400 naming a bad field.
+static void test_post_probe_oom_is_503(void)
+{
+    TEST_SECTION("zones_post_handler -- cycle-probe scratch OOM answers 503 'out of memory', not 400");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
+        for (uint8_t g = 0; g < SRC_GROUP_COUNT; g++) {
+            s_zones.cfg.zones[z].settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;
+        }
+    }
+    persist_scratch_test_fail_size = sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT;
+    persist_scratch_test_seen = 0;
+    persist_scratch_test_fail_nth = 1;
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("1", "255"));
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0, "probe OOM is a 503");
+    TEST_CHECK(!s_test_err_called, "and not a 400 through httpd_resp_send_err");
+    TEST_CHECK(!s_test_ok_called, "no success reported");
+    TEST_CHECK(strstr(s_last_resp_body, ZONES_HTTP_ERR_OOM) != NULL, "body carries the out-of-memory text");
+}
+
 // ---------------------------------------------------------------------------
 // FIX 1 -- a found-but-refused newer-version zones blob must not look like
 // "nothing found" to the legacy-migration decision, and must never be
@@ -16520,6 +16547,7 @@ void run_test_zones_http(void)
     test_zones_post_strict_optional_keys();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
+    test_post_probe_oom_is_503();
     test_post_zone0_follows_zone1_accepted();
 
     test_zones_pid_post_refused_while_profile_running();
