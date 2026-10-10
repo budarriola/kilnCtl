@@ -341,9 +341,9 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
 
     Step "submodule pins pushed"
     & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1") -RepoPath $top -Commit (git rev-parse HEAD).Trim()
-    $script:subPins = $(if ($LASTEXITCODE -eq 0) { 'pass' } elseif ($LASTEXITCODE -eq 1) { 'fail' } else { 'skipped' })
-    if ($LASTEXITCODE -eq 1) { Finish 1 "a submodule pin is not on its remote; push the submodule commit first (nothing pushed)" }
-    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
+    $script:subPins = $(if ($LASTEXITCODE -eq 0) { 'pass' } elseif ($LASTEXITCODE -eq 3) { 'skipped' } else { 'fail' })
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { Finish 1 "submodule pin check refused (exit $LASTEXITCODE): a pin is not on its remote or the check errored; nothing pushed" }
+    if ($LASTEXITCODE -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
 
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)

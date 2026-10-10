@@ -151,8 +151,8 @@ if ($nFail -gt 0) {
 } else { Write-Host "check log OK: full run on tree of $x, 0 failed" -ForegroundColor Green }
 
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptRoot 'check_submodule_pins_pushed.ps1') -RepoPath $RepoPath -Commit $m
-if ($LASTEXITCODE -eq 1) { Fail 'submodule-pins' 'a submodule pin in the promote commit is not on its remote; push the submodule commit first.' }
-if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
+if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { Fail 'submodule-pins' "submodule pin check refused (exit $LASTEXITCODE): a pin is not on its remote or the check errored; push the submodule commit first." }
+if ($LASTEXITCODE -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
 G push origin "${m}:refs/heads/main" | Out-Null
 if ($rc -ne 0) { Fail 'push-main' 'plain fast-forward push of main was rejected (never forced); re-run after fetching.' }
 G fetch --quiet origin | Out-Null

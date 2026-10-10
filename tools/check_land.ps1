@@ -247,6 +247,17 @@ try {
     Assert ($r.Code -eq 1 -and $r.Json.error -match 'post-rebase checks failed') "refused"
     Assert ((OriginHead) -eq $before) "nothing pushed"
 
+    Write-Host "case: unpushed submodule pin blocks push; submodule_pins=fail"
+    $c = New-Clone "c_pin"
+    $om = $origin -replace '\\','/'
+    Set-Content -LiteralPath (Join-Path $c ".gitmodules") -Value "[submodule `"m`"]`n`tpath = m`n`turl = $om`n"
+    git -C $c add .gitmodules *>$null
+    git -C $c update-index --add --cacheinfo "160000,1111111111111111111111111111111111111111,m" *>$null
+    git -C $c commit -q -m "pin" *>$null
+    $before = OriginHead
+    $r = Run-Land $c @("-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail (out: $($r.Out.Trim() -replace '\s+',' '))"
+    Assert ((OriginHead) -eq $before) "nothing pushed"
     Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
     $mainc = New-Clone "c_wtmain"
     $wt = Join-Path $tmp "c_wt_linked"

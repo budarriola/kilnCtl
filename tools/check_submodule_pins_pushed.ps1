@@ -21,6 +21,7 @@ $ErrorActionPreference = 'Continue'
 # Never let git raise a credential prompt or hang: a missing/private repo must FAIL, not block.
 $env:GIT_TERMINAL_PROMPT = '0'
 $env:GCM_INTERACTIVE = 'never'
+if (-not $env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes -o ConnectTimeout=20' }
 $TimeoutSec = 60
 if ($env:KILNCTL_SUBPIN_TIMEOUT_SEC) { $TimeoutSec = [int]$env:KILNCTL_SUBPIN_TIMEOUT_SEC }
 # Default resolved in the body: $PSScriptRoot is empty inside a param() default under Windows PowerShell 5.1 -File.
@@ -48,7 +49,7 @@ $netPattern = 'Could not resolve host|Failed to connect|Connection timed out|Con
 
 # Read .gitmodules from the commit being checked, not the working tree.
 $treeEntries = & git -C $RepoPath ls-tree -r $Commit 2>$null
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: cannot read tree of $Commit in $RepoPath" -ForegroundColor Red; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: cannot read tree of $Commit in $RepoPath" -ForegroundColor Red; exit 2 }
 $gitlinks = @($treeEntries | Where-Object { $_ -match '^160000 commit ' })
 $cfg = & git -C $RepoPath config --blob "${Commit}:.gitmodules" --get-regexp '^submodule\..*\.(path|url)$' 2>$null
 $cfgExit = $LASTEXITCODE
@@ -67,8 +68,15 @@ foreach ($line in $cfg) {
     }
 }
 
-$scratch = Join-Path ([IO.Path]::GetTempPath()) ("subpins_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
 $failed = 0; $skipped = 0
+# S-2b: every gitlink must be named by a .gitmodules path at this commit.
+$modPaths = @($mods.Values | ForEach-Object { $_['path'] })
+foreach ($g in $gitlinks) {
+    $gp = ($g -split "	", 2)[1]
+    if ($modPaths -notcontains $gp) { Write-Host "FAIL: gitlink $gp in $Commit is not named by .gitmodules" -ForegroundColor Red; $failed++ }
+}
+$scratch = Join-Path ([IO.Path]::GetTempPath()) ("subpins_" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+
 try {
     foreach ($name in ($mods.Keys | Sort-Object)) {
         $path = $mods[$name]['path']; $url = $mods[$name]['url']
@@ -102,6 +110,11 @@ try {
     if (Test-Path $scratch) { Remove-Item -Recurse -Force $scratch -ErrorAction SilentlyContinue }
 }
 if ($failed -gt 0) { exit 1 }
+if ($skipped -gt 0) {
+    # If origin answers, the network is up and the submodule host failure is real: FAIL, not SKIP.
+    $o = Invoke-GitBounded @('-C', $RepoPath, 'ls-remote', 'origin', 'HEAD')
+    if ($o.Exit -eq 0) { Write-Host "FAIL: submodule host unreachable but origin answers; cannot confirm pins are pushed" -ForegroundColor Red; exit 1 }
+}
 if ($skipped -gt 0) { Write-Host "SKIP: $skipped submodule(s) unchecked (network); this is not a PASS"; exit 3 }
 Write-Host "PASS: all submodule pins are on their remotes"
 exit 0

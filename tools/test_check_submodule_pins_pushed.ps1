@@ -66,6 +66,33 @@ try {
     Set-Content -Path (Join-Path $sup '.gitmodules') -Value ''
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
     if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: commit-gitmodules: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: commit-gitmodules" }
-} catch { Write-Host "ERROR: $_"; $fails++ } finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
+    # S-2a: working tree .gitmodules is present but names only "other"; commit's names "m" with the unpushed pin -> must FAIL
+    Set-Content -Path (Join-Path $sup '.gitmodules') -Value "[submodule `"other`"]`n`tpath = other`n`turl = $rp/nonexistent`n"
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1 -or $out -notmatch 'push the submodule commit to its remote before landing') { Write-Host "FAIL: commit-gitmodules-differs: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: commit-gitmodules-differs" }
+    Remove-Item (Join-Path $sup '.gitmodules') -Force; G -C $sup checkout -q -- .gitmodules
+    # S-2b: gitlink not named by .gitmodules (second gitlink "x") -> FAIL
+    G -C $sup update-index --add --cacheinfo "160000,$tip,x"; G -C $sup commit -q -m extragl
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1 -or $out -notmatch 'not named by .gitmodules') { Write-Host "FAIL: unnamed-gitlink: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: unnamed-gitlink" }
+    G -C $sup update-index --force-remove x; G -C $sup commit -q -m rmx
+    # S-1a: submodule host down but origin answers -> FAIL (not SKIP); origin down too -> SKIP
+    $sup2 = Join-Path $root 'sup2'
+    git init -q $sup2 2>&1 | Out-Null
+    G -C $sup2 config user.email t@t; G -C $sup2 config user.name t
+    Set-Content -Path (Join-Path $sup2 '.gitmodules') -Value "[submodule `"m`"]`n`tpath = m`n`turl = https://nonexistent-host.invalid/x.git`n"
+    G -C $sup2 add .gitmodules; G -C $sup2 update-index --add --cacheinfo "160000,$tip,m"; G -C $sup2 commit -q -m s
+    G -C $sup2 remote add origin $rp/remote
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup2 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1 -or $out -notmatch 'origin answers') { Write-Host "FAIL: origin-up-submodule-down: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: origin-up-submodule-down" }
+    G -C $sup2 remote set-url origin https://nonexistent-host.invalid/o.git
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup2 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 3) { Write-Host "FAIL: both-down: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: both-down" }
+    # S-6: no-arg run (default RepoPath) under -File must not crash at param binding (exit 2 = script error)
+    Push-Location (Join-Path $PSScriptRoot '..')
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    Pop-Location
+    if ($out -match 'Cannot bind|ParameterBinding' -or $out -notmatch 'PASS|SKIP|FAIL: ') { Write-Host "FAIL: no-arg: exit $code`n$out"; $fails++ } else { Write-Host "ok: no-arg (exit $code)" }} catch { Write-Host "ERROR: $_"; $fails++ } finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
 if ($fails) { Write-Host "$fails FAILED"; exit 1 }
 Write-Host "all passed"; exit 0

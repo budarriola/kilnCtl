@@ -19,13 +19,14 @@ foreach ($f in $files) {
     $t = [regex]::Replace($t, '/\*.*?\*/', { param($m) ($m.Value -replace '[^\n]', '') }, 'Singleline')
     $t = [regex]::Replace($t, '//[^\n]*', '')
     $rel = $f.FullName.Substring($root.Length + 1) -replace '\\', '/'
-    $lines = $t -split "`n"
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ($lines[$i] -notmatch "\b$fn\s*\(") { continue }
-        # declaration/definition: the line begins with the return type, not a call expression
-        if ($lines[$i] -match "^\s*const\s+char\s*\*\s*$fn\s*\(") { $defs++; continue }
+    # Whole-text match so a call split across lines (name, newline, "(") is still seen.
+    foreach ($m in [regex]::Matches($t, "\b$fn\s*\(")) {
+        $ln = ($t.Substring(0, $m.Index) -split "`n").Count
+        $before = $t.Substring([Math]::Max(0, $m.Index - 40), [Math]::Min(40, $m.Index))
+        # declaration/definition: preceded by the return type, not a call expression
+        if ($before -match 'const\s+char\s*\*\s*$') { $defs++; continue }
         if ($rel -eq $allowedFile) { $allowedCalls++; continue }
-        $viol += "${rel}:$($i + 1): call to $fn() outside $allowedFile"
+        $viol += "${rel}:${ln}: call to $fn() outside $allowedFile"
     }
 }
 if ($defs -lt 2) { throw "check_touch_cal_exit_target_caller: declaration+definition of $fn not found ($defs); renamed? check is blind." }
