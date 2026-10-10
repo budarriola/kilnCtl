@@ -89,7 +89,7 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: draw boot_id from the RP2040 ROSC / `get_rand_32()`, and/or
   have the ESP also treat a `diag_uptime_ms` regression as a reboot.
 
-### M2. COMMIT_CONFIG / APPLY_CONFIG_VOLATILE silently revert an earlier SET_CONFIG or SET_CT_CAL (two copies of one record) -- FIXED in 70451274
+### M2. COMMIT_CONFIG / APPLY_CONFIG_VOLATILE silently revert an earlier SET_CONFIG or SET_CT_CAL (two copies of one record) -- FIXED in 0e04c0a9
 
 - Fix: staging is now a list of SET_PARAM edits (`link_staging.c`), not a
   record. COMMIT/APPLY build the candidate at commit time from the
@@ -131,7 +131,7 @@ stale, or a legitimate command sequence whose state goes out of step.
   direct `config_store_write*()` in link_task, or have both direct writers go
   through the staging path.
 
-### M3. Staged SET_PARAMs outlive the ESP boot that sent them (reset-one-side across processors) -- FIXED in 70451274
+### M3. Staged SET_PARAMs outlive the ESP boot that sent them (reset-one-side across processors) -- FIXED in 0e04c0a9
 
 - Fix: `link_task_handle_push_context()` discards staged edits when the
   ESP boot_id changes or PUSH_CONTEXT stopped for at least
@@ -238,7 +238,7 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: refuse `gain <= 0` (and bound `|offset|`) in
   `config_params_set()` and `config_params_validate_ranges()`.
 
-### L3. Flash-writing commands are not idempotent or rate-limited; a stale comment says a no-op write cannot happen -- FIXED in 51101ad0
+### L3. Flash-writing commands are not idempotent or rate-limited; a stale comment says a no-op write cannot happen -- FIXED in 0795908c
 
 - Fix: after the write decision, `config_store_write_ex()` compares the
   packed candidate (with the persisted seq) against the current slot's
