@@ -258,7 +258,7 @@ try {
     $st = @{}; foreach ($x in $b.results) { $st[[string]$x.check] = [string]$x.status }
     Assert ($st["tools\check_ok.ps1"] -ceq "PASS" -and $st["tools\check_known.ps1"] -ceq "FAIL") "recorded PASS and FAIL per check"
     $r = Run-Checks @("-Only", "check_known")
-    Assert ($r.Out -match 'Main baseline not recorded: -Only') "a filtered run does not record"
+    Assert ($r.Out -match 'not recorded as a new main baseline: -Only') "a filtered run does not record"
 
     Set-Content -LiteralPath (ScTool "check_new.ps1") -Value "exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m addnew *>$null

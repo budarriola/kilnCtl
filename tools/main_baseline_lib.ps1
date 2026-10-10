@@ -170,7 +170,7 @@ function Test-MainBaselineRecordable {
     # the long run; any commit on main's history is a legitimate main state.
     if ($head -cne $main) {
         & git -C $RepoRoot merge-base --is-ancestor $head $main 2>$null
-        if ($LASTEXITCODE -ne 0) { return (& $no "HEAD is not $MainRef nor an ancestor of it") }
+        if ($LASTEXITCODE -ne 0) { return (& $no "HEAD is not $MainRef nor an ancestor of it (expected on dev; only a clean checkout of main history seeds a baseline)") }
     }
     $st = Get-CheckCacheTreeState -RepoRoot $RepoRoot
     if (-not $st.Clean) { return (& $no $st.Reason) }

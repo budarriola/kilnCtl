@@ -1049,10 +1049,10 @@ function Exit-WithBaseline {
                 $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot
                 Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
             } else {
-                Write-Host "Main baseline not recorded: $($rec.Reason)" -ForegroundColor DarkGray
+                Write-Host "This run is not recorded as a new main baseline: $($rec.Reason). The comparison above uses the stored main baseline." -ForegroundColor DarkGray
             }
         } else {
-            Write-Host "Main baseline not recorded: -Only/-Skip run is partial" -ForegroundColor DarkGray
+            Write-Host "This run is not recorded as a new main baseline: -Only/-Skip run is partial." -ForegroundColor DarkGray
         }
     } catch {
         Write-Host "main baseline: skipped ($($_.Exception.Message))" -ForegroundColor Yellow
