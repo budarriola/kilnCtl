@@ -239,6 +239,35 @@ INDETERMINATE without changing the exit code.
   INDETERMINATE does not mean the call graph is complete.
 - `test_stack_budget_symbol_bounds.py`: 22 passed.
 
+## Fix status (2026-10-10)
+
+B1, B2, P1, P2, P3, N1, N2 and N3 are FIXED in `1d54d0730`, with test follow-ups
+`e5936650a` (B2b rank ordering made load-bearing), `c43e0a0f2` (P1 test narrows the
+refspec to an existing branch) and `3d9486bbf` (N2 not-ok fixture effective).
+
+- B1: `--format=%(objectname)` quoted; check_main_baseline fails on any uncaught
+  error and asserts its count (81).
+- B2: a fork-point baseline is no longer Exact via mbDev for a main-side HEAD; Exact
+  baselines are ranked (HEAD-tree match, then dev-tree, then other), then commit time,
+  then commit id.
+- P1: explicit refspec fetch. P2: `-Commit` required (exit 2). P3: `-FetchTimeoutSec`
+  validated, git process tree killed on timeout, temp files removed, failed-fetch test.
+- N1: saftyfw-host preset counts only `SAFTYFW HOST TESTS: FAILED`. N2: `-RequireAssertion`
+  is case-sensitive, drops `^not ok`, and is refused with `-ExpectPattern` or a preset.
+  N3: behavioural test of the pytest default pattern.
+- Extra: negtest now tracks and kills worker descendants (host_build_worker, host-test
+  exes) on every exit path; test `orphan_reaped`.
+- Also fixed `check_submodule_pins_pushed.ps1`: `$PSScriptRoot` param default is empty
+  under 5.1 `-File`; resolved in the body.
+- S1 not addressed.
+
+Re-run negative tests: mb_unquote_format, mb_drop_b2a, mb_rank_off,
+mb_dev_tree_exact_always, mb_dev_ref_label, pv_no_refspec, pv_ignore_fetch_failure,
+ng_pytest_error_counts, ng_saftyfw_buildfail_counts, ng_reqassert_notok,
+ng_reqassert_ci, ng_reqassert_ignored, ng_no_tracked_kill: all CAUGHT. Unmutated:
+check_main_baseline PASS (81 assertions), check_push_verify PASS, check_negtest PASS
+(185 assertions).
+
 ## Negative-test results
 
 All runs used `tools/negtest.ps1 -Preset check -PresetArg <check> -Mutations <json>`.
