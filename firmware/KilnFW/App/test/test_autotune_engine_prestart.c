@@ -807,9 +807,11 @@ bool zones_current_sweep_is_active(void)
  * tuning-quality write can flip it to true -- same convention as
  * s_stub_set_pid_result below. */
 static bool s_stub_set_model_result = false;
+static int s_stub_set_model_call_count = 0;
 static bool s_stub_atomic_reject = false; /* F1: combined model+gains setter refuses */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    s_stub_set_model_call_count++;
     s_zones_write_total++;
     (void)zone_index; (void)k_dc; (void)tau_s; (void)dead_time_s;
     return s_stub_set_model_result;
@@ -4127,6 +4129,8 @@ static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
     s_fake_zone_max_ramp = seed_ramp;
     s_fake_set_pid_call_count = 0;
     int ramp_calls_before = s_stub_set_max_ramp_call_count;
+    int model_calls_before = s_stub_set_model_call_count;
+    int clear_ki_calls_before = g_clear_ki_baseline_calls;
     s_zones_write_total = 0;
     autotune_accept_opts_t adopt = {.adopt_ceiling = true};
 
@@ -4143,6 +4147,9 @@ static void test_autotune_engine_accept_refused_by_mode_gate_while_running(void)
         TEST_CHECK(s_zones_write_total == 0, "refused accept must call NO zones_config_set_* writer");
         TEST_CHECK(s_stub_set_max_ramp_call_count == ramp_calls_before,
                    "refused accept must not call the zones-config max_ramp write");
+        TEST_CHECK(s_stub_set_model_call_count == model_calls_before, "refused accept must not call zones_config_set_model");
+        TEST_CHECK(g_clear_ki_baseline_calls == clear_ki_calls_before, "refused accept must not call adaptive_tune_clear_ki_baseline");
+        TEST_CHECK(!s_at.external_write_reserved, "refused accept must not leave external_write_reserved set");
         TEST_CHECK(memcmp(&s_fake_zone_kp, &seed_kp, sizeof(float)) == 0 &&
                    memcmp(&s_fake_zone_ki, &seed_ki, sizeof(float)) == 0 &&
                    memcmp(&s_fake_zone_kd, &seed_kd, sizeof(float)) == 0,

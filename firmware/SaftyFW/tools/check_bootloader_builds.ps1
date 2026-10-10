@@ -115,7 +115,7 @@ try {
     }
 
     Write-Host "Building saftyfw_bootloader (ninja) ..."
-    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane heavy
+    $buildGate = Enter-KilnBuildGate -Label "saftyfw_bootloader_build" -Lane light
     try {
         ninja
         $ninjaExit = $LASTEXITCODE
