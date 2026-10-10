@@ -9,6 +9,8 @@ forward declaration) and `e3909732` (docs). They were reviewed on origin/dev
 
 ### HIGH-1: F1 leaves most trip-disabling fields installable while ARMED
 
+**FIXED in 7637e8a76** (fail-closed gate on heat-possible, see commits 7637e8a76 and the earlier tests/gate commits on this branch).
+
 `config_store_volatile_would_loosen_safety()` (`config_store_flash.c` ~1642)
 now refuses changes to `safety_tc_installed`, `ct_installed`, the CT
 fields_set bits, `ct_topology`, `zone_ct_channel`, `tc_offset_c`,
@@ -64,6 +66,8 @@ inputs) except for an explicit, reviewed exception list.
 
 ### MED-1: F1 also blocks kiln package swaps whenever the board is idle
 
+**FIXED in 7637e8a76** (fail-closed gate on heat-possible, see commits 7637e8a76 and the earlier tests/gate commits on this branch).
+
 ARMED is the steady state that starts 60 s after boot, not "firing". So
 `kiln_cfg_swap` (`safety_cfg_write.c`'s `volatile_install` path, whose
 comment still says "never refused for ARMED") now fails for any package pair
@@ -89,6 +93,8 @@ running) rather than on the ARMED state. Then update the stale ESP comment.
 
 ### LOW-1: The F2 boot-time bound rejects a whole legacy record, against the precedent next to it
 
+**FIXED in 7637e8a76** (fail-closed gate on heat-possible, see commits 7637e8a76 and the earlier tests/gate commits on this branch).
+
 `config_params_validate_ranges()` checks `|tc_offset_c| <= 50` without any
 condition (`config_params.c` ~781). The comment directly above it, for
 `max_rate_c_per_min`, explains why a bound added later must not reject a
@@ -102,6 +108,8 @@ unlikely: the bench value is -4.25 C. On SET_PARAM, the 50 C bound is fine
 for real calibration, since thermocouple and CJ errors are a few degrees.
 
 ### LOW-2: INJECT_TC only works in the first 60 s after boot
+
+**NOT CHANGED, documented (7637e8a76):** thermo_task cannot see link_task's heat signal; relaxing risks an enable racing an active injection. The gate stays ARMED-or-energized (stricter, safe).
 
 `thermo_inject_allowed()` requires `installed == 0` and not
 ARMED-or-energized. Injection therefore works only during the 60 s boot
@@ -117,6 +125,8 @@ PcTools has no INJECT_TC sender, so the practical impact is low.
 
 ### LOW-3: Some of the tests do not prove the fix (negtest results below)
 
+**FIXED in 7637e8a76** (fail-closed gate on heat-possible, see commits 7637e8a76 and the earlier tests/gate commits on this branch).
+
 - The F1 terms for `zone_ct_channel` and `cj_time_s` survive removal. The
   fields_set XOR term has no test case at all.
 - The F6 "S2/S10 hold while `!tc_usable`" behaviour is untested. Forcing
@@ -126,6 +136,8 @@ PcTools has no INJECT_TC sender, so the practical impact is low.
   semantic re-mutation of each was then caught by a real test.
 
 ### LOW-4: Docs out of date with the code
+
+**FIXED in 7637e8a76** (fail-closed gate on heat-possible, see commits 7637e8a76 and the earlier tests/gate commits on this branch).
 
 - `firmware/SaftyFW/docs/CONFIG_REFERENCE.md` line 47 says `tc_offset_c` is
   "Deliberately unbounded beyond finiteness". It is now limited to ±50 C.
@@ -139,6 +151,8 @@ PcTools has no INJECT_TC sender, so the practical impact is low.
 - No drift was found in `ARCHITECTURE.md`.
 
 ### INFO
+
+**FIXED in 7637e8a76** (backfill runs before the compare; mutation-tested).
 
 - **F3 (S9 without context):** correct and complete. The debounce streak,
   the `current_sensing_commissioned` split and the CT-disabled branch are
