@@ -171,7 +171,7 @@ No source file changed, so the CAUGHT/MISSED verdicts stand.
 
 ## Fix status (persfx2 batch)
 
-Fixed in `a5303da6b (tests follow in 94fe879fc, 0459bf715)`. Host tests 86/86 (the earlier "83/83" was a stale count).
+Fixed in `8a8b35e7a (tests follow in 26da1f472, f28189d99)`. Host tests 86/86 (the earlier "83/83" was a stale count).
 
 - MED-2: `POST /api/zones` answers 409 `zones_config_undecided` before the commit point while the boot could not
   decide the stored config, and the load fault is cleared only after `nvs_save()` returns ESP_OK. Test:
