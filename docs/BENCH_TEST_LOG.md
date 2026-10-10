@@ -3231,3 +3231,17 @@ Firmware under test: origin/dev `0dd056c6` plus TWO bench-local, uncommitted bui
 | ota_matrix, autotune, heat | not attempted: same gate (autotune and firing refused firmware-side) |
 
 Board left running dev firmware, safety link up and ARMED, no trip. The campaign is gated on a human running the E-stop verification (`estop_verify` was deliberately not called).
+
+## 2026-10-10 bench1 run (firmware d93cf774a, ESP flashed; Pico not reflashed, left as is)
+
+Built origin/dev d93cf774a from a clean worktree, flashed with flash_firmware (verified, boot_guard cleared). get_readiness: estop_verified ok; safety_commissioned not_done (3 of 68), unchanged.
+
+- heat (run 20261010T171928Z_heat_bench1): 7 PASS, 1 FAIL. HP-05 FAIL: profiles_ack_last_run() did not clear the last-run card. HP-01/02/03/04/06/07/08 PASS.
+- aux: not run. AX-C01 SKIP, rest NOT_RUN/SKIP: KILNCTL_AUX_BENCH_CONFIRM=1 not set in the MCP server environment; setting it needs an MCP server restart, which the permission system denied. SPARE_RELAY_ONOFF_PLAN step 9 still open.
+- web (20261010T180157Z_web_bench1): FAIL overall. Many `GET <page> failed (status=406)` on /settings/display, /safety, /settings/commissioning, /readiness, /setup, /settings (WEB-DISP-03/04, SAF-02/03, COMM-02/03/05/06, RDY-03, WIZ-02/04/05/06/08, SET-02/03). Other FAILs: ZONE-03 (failsafe_state missing), ZONE-05 (another config field changed across identity PID write), OTA-03/04 (/ota HTML lacks espPicker/espRollback, retired buttons; judge stale), WIFI-03 (renderApQr literal), SEC-06 (literal 'clear_credentials' in cases_web_misc.py), BAK-04 (missing 'refused while a profile is running' text). INCONCLUSIVE: DASH-02, DASH-07, ZONE-13. SKIP: PROF-11, WIFI-06. Many NOT_RUN depend on HP/AT/OT cases not in this invocation.
+- lcd (20261010T180431Z_lcd_bench1): PASS LCD-06,08,09,14,16,21; FAIL LCD-05 (luminance dropped only -19.8% at 50% brightness, need >= 25%); INCONCLUSIVE LCD-01 (camera chroma), LCD-13 (profile '04DSDH' row not on picker), LCD-19, LCD-26; rest NOT_RUN (not_implemented or lcd_edit_heat off).
+- OT-G06: not run (needs ota_image_path of the running image and bench_test_start does not take it; bench_test_start/ota_matrix paths not exercised).
+- zone 0 autotune (step, duty 0.5): engine aborted in settling at 180 s: "zone 0 is still drifting -0.0179C/s (above 0.0030C/s) -- not settled yet" (zone was cooling from the heat suite). No heat applied.
+- update_check: FAILED http 404 (no release published in budarriola/kilnCtl). Heap was not sampled during it.
+
+After runs: executor idle, link up, no trip, heap_internal min_free 14383 B (floor 8192 ok), uptime 3318 s. Stack worst headroom: backlight_pwm 29.2% (LOW flag, 896 B free), lvgl 30.0%, httpd_worker 32.3%, info_uart_bridge 33.5%, touch_uart_bridge 35.6%; none within 10%. profile_exec_wdt 3880 B free of 6144.
