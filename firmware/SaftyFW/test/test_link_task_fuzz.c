@@ -210,7 +210,7 @@ static int g_checks, g_fail;
         g_checks++;                                                                    \
         if (!(c)) {                                                                    \
             g_fail++;                                                                  \
-            printf("FAIL line %d: ", __LINE__);                                        \
+            printf("FAIL test_link_task_fuzz.c:%d: ", __LINE__);                                        \
             printf(__VA_ARGS__);                                                       \
             printf("\n");                                                              \
         }                                                                              \

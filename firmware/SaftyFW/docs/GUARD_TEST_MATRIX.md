@@ -172,6 +172,18 @@ Drive the thermal ones from `firmware/KilnFW/App/test/sim_plant.c` — it alread
 element lag, sensor transport delay and radiative loss, so the traces are
 realistic rather than synthetic ramps.
 
+### Link handler refusal-path coverage, round 3 (2026-10-10)
+
+`test/test_link_task_fuzz.c` drives the real `link_task.c` (`#include`d) through
+the framing layer. Round 3 added three scenarios for handlers that had no
+refusal-path coverage:
+
+| Handler | Asserted through the real function |
+|---|---|
+| `SET_CT_CAL` (0x19) | channel >= 3, gain 0 on a calibrated channel, NaN/Inf/negative/huge gain, NaN/huge offset and a short frame all reach NO `config_store_write()` and no `current_task_reload_ct_cal()`; a refused write does not reload; an accepted write carries exactly the channel values, leaves other channels alone, reloads once and drops the superseded staged gain (0x0311). |
+| `SET_FIRING_CEILING` (0x09), `SET_CLOCK` (0x0C) | 0 / negative / NaN / +-Inf ceilings CLEAR a stored ceiling (never half-accepted); a malformed frame leaves it untouched; implausible epochs (0, below 2020, above 2100, all-ones) never overwrite the clock, both bounds inclusive. |
+| `REBOOT` (0x29), `ROLLBACK` (0x17) | refused REBOOT replies accepted=0 + the policy reason and never resets; accepted REBOOT replies accepted=1/NONE and resets exactly once; malformed REBOOT is ignored; refused ROLLBACK sends `ROLLBACK_RESULT` only to a peer that announced protocol >= 9 (unannounced and v8 peers get nothing), with the policy reason. |
+
 ### Two properties worth testing directly rather than by example
 
 **Monotonicity of the ceiling.** RETIRED 2026-09-24 along with `firing_max_c`'s
