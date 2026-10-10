@@ -175,3 +175,8 @@ check closure.
 | wizard step 2: remove `lockSave` from the Save handler | `test_web_review_fixes.js`, all `test_*.js` | MISSED (LOW-4) |
 
 All runs: baseline passed, real tree unchanged, copies removed.
+
+## Fix status
+
+MED-1, LOW-1, LOW-2, LOW-3, LOW-4 (PcTools part) and INFO-1 fixed in batch C; see the closure table
+in PCTOOLS_WRITE_TOOLS_REVIEW_2026-10-09.md for the commit ids. LOW-5 is a web JS item and was skipped.

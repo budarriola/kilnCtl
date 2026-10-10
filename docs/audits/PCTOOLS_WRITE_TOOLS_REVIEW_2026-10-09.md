@@ -25,3 +25,29 @@ config_presets, ui_test, info, safety, thermo clients/servers). Part B appends i
 
 Tests: tools/PcTools/tests/test_pctools_write_review_2026_10_09.py; negtest CAUGHT for the
 ui_run_script confirm gate, the hystc/coilpower regex, and the thermo confirm gate.
+
+## Part B and batch C closure (INFO-1 of REVIEW_TOOLINGB_WEBAUTH_2026-10-09.md)
+
+Part B findings were fixed in 0c2846fb. Batch C follow-ups, all FIXED:
+
+| Finding | Status |
+|---|---|
+| backup_import transport wording ("may have committed" only when it could have) | FIXED in 5188806e1 |
+| crash_report_clear POST timeout reported as state UNKNOWN | FIXED in 5188806e1 |
+| quarantine client uncaught OSError | FIXED in 5188806e1 |
+| kiln_config_apply must check the status id | FIXED in 143d0e9fb |
+| expander_* raw writers: confirm is True plus run gate | FIXED in 143d0e9fb |
+| safety commissioning read-back failure after POST reports state UNKNOWN | FIXED in f5500bcfa |
+| backup_import content read-back | skipped: a generic diff is unsound under merge and mirror semantics |
+| client generation token for /api/zones | deferred: needs firmware |
+
+Review REVIEW_TOOLINGB_WEBAUTH_2026-10-09.md items:
+
+| Finding | Status |
+|---|---|
+| MED-1 flash_firmware link-down latched trip | FIXED in 9750dc627 (a latched trip is a note in link-down mode while not ARMED; running profile, autotune and energized relays stay hard refusals) |
+| LOW-1 FL-10/FL-11 allow_flash exact True | FIXED in 22a8ed016 |
+| LOW-2 running guards fail open (debug, wifi) | FIXED in 11a9a1f50 and 15f8f1682 (unreadable refuses, allow_running=True overrides; autotune covered; debug_step and leave_halted reads guarded; debug_resume left unguarded on purpose because a halted ESP cannot answer the state read) |
+| LOW-3 read-backs that cannot fail | FIXED in 11a9a1f50, 15f8f1682, f313bfe15 |
+| LOW-4 PcTools part (real tool through the registry) | FIXED in f313bfe15 |
+| LOW-5 zones Save reload (web JS) | skipped: web JS item |

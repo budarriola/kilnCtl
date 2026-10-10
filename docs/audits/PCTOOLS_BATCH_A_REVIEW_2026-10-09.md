@@ -243,3 +243,10 @@ and the result JSON does not say the preset was skipped. No caller of
   LOW batch) are correctly marked not done.
 - **Not examined:** whether `_verify_pid_readback` compares against inherited
   (`settings_source`) gains, which could give a false mismatch. Speculative; not verified.
+
+## Fix status (tooling batch C)
+
+Findings 1 and 2 (MED, the promote blockers) were fixed and pushed first as 91eb1f0ce. Findings 3 and
+4 through 12 were fixed in b29b43dfb with tests in test_pctools_write_review_2026_10_09.py and the
+related test files. Negative tests (tools/negtest.ps1 pytest preset) came back CAUGHT for the
+ui_run_script confirm gate, the keep-keys strip exception, and the per-zone preset progress.
