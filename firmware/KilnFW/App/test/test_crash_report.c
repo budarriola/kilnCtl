@@ -1002,6 +1002,8 @@ void run_test_crash_report(void)
     test_crash_report_note_alive_writes_a_valid_beacon();
     test_init_invalidates_a_stale_beacon();
     test_image_match_and_stale_stamping();
+    test_v3_record_migrates_and_stays_unacknowledged();
+    test_capture_verdict_retries_own_image_dump();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }
