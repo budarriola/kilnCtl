@@ -41,6 +41,14 @@ $recoveryDir = Join-Path $repo 'firmware\KilnFW_recovery'
 $code = $LASTEXITCODE
 
 if ($code -eq 0) {
+    # Fixture test: the mojibake pattern must flag bad pages and pass clean ones.
+    $fixture = Join-Path $repo 'firmware\KilnFW\App\test\test_lint_mojibake.js'
+    if (-not (Test-Path $fixture)) { Write-Output "FAIL: test_lint_mojibake.js not found at $fixture"; exit 1 }
+    & node $fixture
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "FAIL: test_lint_mojibake.js reported failure(s) (exit $LASTEXITCODE)"
+        exit 1
+    }
     exit 0
 }
 

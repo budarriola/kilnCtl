@@ -171,6 +171,12 @@ Write-Output "failures: $fail"
 if ($fail) { exit 1 }
 exit 0
 '@
+    New-Item -ItemType Directory -Path (Join-Path $repo 'sub\deep') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $repo 'sub\deep\check_fixture.ps1') -Encoding ASCII -Value @'
+if ($env:NEGTEST_FIXTURE_LOG) { Add-Content -LiteralPath $env:NEGTEST_FIXTURE_LOG -Value "ran" }
+Write-Output "FAIL: fixture-check-sentinel-none"
+exit 0
+'@
     Set-Content -LiteralPath (Join-Path $repo ".gitignore") -Encoding ASCII -Value "*.log"
     G init -q -b main $repo
     # Perf: this scratch repo is tiny and short-lived; no daemons, no gc, no optional index writes.
@@ -391,6 +397,17 @@ exit 0
     G -C $repo worktree remove --force $liveCopy
     Remove-Item -LiteralPath "$liveCopy.owner.json" -Force -ErrorAction SilentlyContinue
     Step "stale sweep"
+
+    # ---------------------------------------------------------------- -Preset check name resolution
+    $ckExit = @('-Preset', 'check', '-PresetArg')
+    $mutCk = @('-File', 'sub\deep\check_fixture.ps1', '-Find', 'exit 0', '-Replace', 'exit 1')
+    foreach ($nm in @('check_fixture.ps1', 'sub\deep\check_fixture.ps1')) {
+        $r = Run-Neg "checkname_$nm" ($ckExit + @($nm) + $mutCk)
+        Assert-True ($r.Exit -eq 0 -and $r.Json.verdict -eq 'ALL_CAUGHT') "checkname '$nm': exit $($r.Exit) verdict $($r.Json.verdict)`n$($r.Text)"
+    }
+    $r = Run-Neg "checkname_none" ($ckExit + @('check_nonexistent.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 2 -and $r.Text -match 'no such check') "checkname none: exit $($r.Exit), expected 2 'no such check'"
+    Step "check name resolution"
     }
 }
 finally {

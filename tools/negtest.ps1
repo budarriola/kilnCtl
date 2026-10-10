@@ -648,7 +648,16 @@ switch ($Preset) {
     'check' {
         if (-not $PresetArg) { Finish 2 "-Preset check needs -PresetArg <repo-relative check script>" }
         if ([IO.Path]::IsPathRooted($PresetArg)) { Finish 2 "-PresetArg for -Preset check must be repo-relative (it runs the COPY's script)" }
-        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $PresetArg))) { Finish 2 "no such check: $PresetArg" }
+        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $PresetArg))) {
+            # Accept a bare name (check_x.ps1) the way run_all_checks discovers checks: any
+            # check_*.ps1 in the tree, excluding build output, node_modules and dotted dirs.
+            $bare = [IO.Path]::GetFileName($PresetArg)
+            $hits = @(Get-ChildItem -LiteralPath $RepoRoot -Filter $bare -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -like 'check_*.ps1' -and $_.FullName -notmatch '\\build\\' -and $_.FullName -notmatch '\\node_modules\\' -and $_.FullName.Substring($RepoRoot.Length) -notmatch '\\\.[^\\]+\\' })
+            if ($hits.Count -eq 0) { Finish 2 "no such check: $PresetArg" }
+            if ($hits.Count -gt 1) { Finish 2 "ambiguous check name $PresetArg matches: $(($hits | ForEach-Object { $_.FullName.Substring($RepoRoot.Length).TrimStart('\') }) -join ', ')" }
+            $PresetArg = $hits[0].FullName.Substring($RepoRoot.Length).TrimStart('\')
+        }
         $cmdText = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PresetArg`""
     }
     'pytest' {

@@ -25,5 +25,15 @@ ok(r.code === 1 && /mojibake/.test(r.out), 'mojibake inside a script string is f
 r = lint(page('Loading… and ...'));
 ok(r.code === 0 && !/mojibake/.test(r.out), 'a real ellipsis and ASCII dots are not flagged');
 
+/* The U+00C2 / U+00C3 lead pairs (8eba89bd2): a double-encoded degree sign is
+ * C2 B0 and an accented e is C3 A9. Built from char codes so this file stays ASCII. */
+const DEG_MOJI = String.fromCharCode(0xc2, 0xb0), E_MOJI = String.fromCharCode(0xc3, 0xa9);
+r = lint(page('Temp 20' + DEG_MOJI + 'C'));
+ok(r.code === 1 && /mojibake/.test(r.out), 'double-encoded degree sign (U+00C2 U+00B0) is flagged');
+r = lint(page('caf' + E_MOJI));
+ok(r.code === 1 && /mojibake/.test(r.out), 'double-encoded e-acute (U+00C3 U+00A9) is flagged');
+r = lint(page('Temp 20' + String.fromCharCode(0xb0) + 'C, caf' + String.fromCharCode(0xe9)));
+ok(r.code === 0 && !/mojibake/.test(r.out), 'a legitimate degree sign and e-acute pass clean');
+
 console.log(failed ? failed + ' FAILED' : 'all passed');
 process.exit(failed ? 1 : 0);
