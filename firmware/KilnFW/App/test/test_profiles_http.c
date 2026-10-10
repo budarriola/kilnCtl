@@ -1947,7 +1947,11 @@ static void test_profiles_saves_refuse_under_reset_mark(void)
     pref_cfg_fs_set_reset_refuse_hook(prf_hook);
     s_prf_mark = true;
     TEST_CHECK(nvs_save_slot(3) == ESP_ERR_INVALID_STATE, "nvs_save_slot refuses");
-    TEST_CHECK(profiles_favorites_set(3, true) == ESP_ERR_INVALID_STATE, "profiles_favorites_set refuses");
+    s_prf_mark = false;
+    (void)profiles_favorites_set(5, false);
+    s_prf_mark = true;
+    TEST_CHECK(profiles_favorites_set(5, true) == ESP_ERR_INVALID_STATE, "profiles_favorites_set refuses");
+    TEST_CHECK(!profiles_favorites_is(5), "refused favorite leaves RAM untouched");
     TEST_CHECK(!fav_file_exists(), "no favorites file written");
     s_prf_mark = false;
     pref_cfg_fs_set_reset_refuse_hook(NULL);

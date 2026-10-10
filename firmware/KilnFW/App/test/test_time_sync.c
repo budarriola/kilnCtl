@@ -316,9 +316,11 @@ static void test_ts_set_tz_refused_under_reset_mark(void)
     TEST_SECTION("time_sync_set_tz: refused under the save lock while the reset mark is set, nothing written");
     ts_fresh_mounted();
     pref_cfg_fs_set_reset_refuse_hook(tsr_hook);
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "precondition: EST5EDT applied");
     s_tsr_mark = true;
     uint32_t r0 = s_tz_rev;
-    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_ERR_INVALID_STATE, "refused");
+    TEST_CHECK(time_sync_set_tz("CST6CDT") == ESP_ERR_INVALID_STATE, "refused");
+    TEST_CHECK(strcmp(s_status.tz, "EST5EDT") == 0, "live TZ not changed by a refused set");
     TEST_CHECK(s_tz_rev == r0, "rev not bumped");
     s_tsr_mark = false;
     TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "works once the mark clears");
