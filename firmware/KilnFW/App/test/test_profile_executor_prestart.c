@@ -11708,6 +11708,23 @@ static void test_guard_trip_tick_never_writes_relay_on_first(void)
     reset_test_thermo_readings();
 }
 
+/* Firing review 2026-10-09 item 3: elapsed seconds accumulate in ms, no per-tick rounding. */
+static void test_elapsed_accumulates_ms_without_rounding_loss(void)
+{
+    TEST_SECTION("firing review item 3: total/segment elapsed accumulate sub-second dt exactly (no per-tick rounding)");
+    uint32_t sec = 0;
+    uint16_t rem = 0;
+    for (int i = 0; i < 10; i++) exec_elapsed_accumulate(&sec, &rem, 0.4f);
+    TEST_CHECK(sec == 4 && rem == 0, "ten 0.4 s ticks make 4 s (the old per-tick rounding gave 0)");
+    sec = 0; rem = 0;
+    for (int i = 0; i < 10; i++) exec_elapsed_accumulate(&sec, &rem, 0.6f);
+    TEST_CHECK(sec == 6 && rem == 0, "ten 0.6 s ticks make 6 s (the old per-tick rounding gave 10)");
+    sec = 5; rem = 0;
+    exec_elapsed_accumulate(&sec, &rem, -1.0f);
+    exec_elapsed_accumulate(&sec, &rem, NAN);
+    TEST_CHECK(sec == 5 && rem == 0, "negative / NaN dt adds nothing");
+}
+
 static void run_test_aux_wp3(void)
 {
     test_aux_start_control_run_succeeds();
@@ -11730,6 +11747,7 @@ static void run_test_aux_wp3(void)
     test_aux_fault_drop_via_task_tick();
     test_monitor_only_zone_tick_wiring();
     test_guard_trip_tick_never_writes_relay_on_first();
+    test_elapsed_accumulates_ms_without_rounding_loss();
     test_relay_cycles_persist_runs_after_lock_give();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();

@@ -685,6 +685,19 @@ static void profile_executor_account_relay_starvation(zone_runtime_t *z, float d
 
 /* ---- control task ----------------------------------------------------------- */
 
+/* Accumulate one tick's measured dt into a whole-second counter without
+ * per-tick rounding loss: the sub-second remainder carries in *rem_ms
+ * (firing review 2026-10-09 item 3; the old (uint32_t)(dt_s + 0.5f) per tick
+ * let a 0.4 s tick add 0 and a 0.6 s tick add 1, drifting elapsed time and so
+ * dwell/rule timing). NaN/negative/absurd dt adds nothing. */
+static void exec_elapsed_accumulate(uint32_t *seconds, uint16_t *rem_ms, float dt_s)
+{
+    if (!(dt_s > 0.0f) || dt_s > 3600.0f) return;
+    uint32_t ms = (uint32_t)(dt_s * 1000.0f + 0.5f) + (uint32_t)*rem_ms;
+    *seconds += ms / 1000u;
+    *rem_ms = (uint16_t)(ms % 1000u);
+}
+
 void executor_task_entry(void *arg)
 {
     (void)arg;
@@ -827,7 +840,7 @@ void executor_task_entry(void *arg)
          * remaining_s estimate quietly falls behind), only excluded while
          * PAUSED, since this whole block is skipped then. See
          * profile_exec_status_t.total_elapsed_s. */
-        s_exec.total_elapsed_s += (uint32_t)(dt_s + 0.5f);
+        exec_elapsed_accumulate(&s_exec.total_elapsed_s, &s_exec.total_elapsed_rem_ms, dt_s);
 
         /* TODO relay/IO segments: tick every active NON-BLOCKING segment's
          * own hold timer, independent of whichever ramp/dwell segment is
@@ -1041,7 +1054,7 @@ void executor_task_entry(void *arg)
                  * ZONE_RAMP dwell does) rather than the per-segment
                  * remaining_s a non-blocking segment uses, since a blocking
                  * segment's timer IS the schedule's timer. */
-                s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+                exec_elapsed_accumulate(&s_exec.segment_elapsed_s, &s_exec.segment_elapsed_rem_ms, dt_s);
                 ready_to_advance = s_exec.segment_elapsed_s >= seg->dwell_min * 60u;
             } else {
                 /* "Runs WITH the next segment": advance on the very same tick
@@ -1061,6 +1074,7 @@ void executor_task_entry(void *arg)
                 }
                 s_exec.segment_index++;
                 s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                 segment_changed = true;
                 if (s_exec.segment_index >= s_exec.profile.segment_count) {
                     exec_enter_terminal_state(PROFILE_EXEC_DONE);
@@ -1085,7 +1099,7 @@ void executor_task_entry(void *arg)
                 seg = &s_exec.profile.segments[s_exec.segment_index];
             }
         } else if (lock_ok || stretched_this_tick) {
-            s_exec.segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+            exec_elapsed_accumulate(&s_exec.segment_elapsed_s, &s_exec.segment_elapsed_rem_ms, dt_s);
             if (!s_exec.dwelling) {
                 float new_target;
                 if (seg->ramp_c_per_hr <= 0.0f) {
@@ -1120,6 +1134,7 @@ void executor_task_entry(void *arg)
                 if (s_exec.target_c == seg->target_c) {
                     s_exec.dwelling = true;
                     s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                     /* PID_EXPANSION_PLAN.md sec 7.3: dwell credit spend, at
                      * the single point this shared schedule actually enters
                      * a dwell. Resets every active zone's banked dwell_
@@ -1213,6 +1228,7 @@ void executor_task_entry(void *arg)
                     }
                     s_exec.dwelling = false;
                     s_exec.segment_elapsed_s = 0;
+                s_exec.segment_elapsed_rem_ms = 0;
                     seg = &s_exec.profile.segments[s_exec.segment_index];
                     /* target_c stays where it is -- that's the new segment's ramp start. */
                     /* A segment boundary is the transition that most changes

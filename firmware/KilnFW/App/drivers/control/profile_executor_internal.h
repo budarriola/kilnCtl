@@ -763,6 +763,12 @@ typedef struct {
     bool dwelling;
     float target_c;              /* shared setpoint, stepped incrementally each tick */
     uint32_t segment_elapsed_s;  /* shared; only advances while ramp-lock is satisfied */
+    /* Sub-second carry (0..999 ms) behind segment_elapsed_s/total_elapsed_s: the whole-second
+     * fields stay the wire/persist unit, but every tick's measured dt is accumulated in ms so
+     * per-tick rounding no longer drifts them (firing review 2026-10-09 item 3). Not persisted:
+     * a resume loses under 1 s. */
+    uint16_t segment_elapsed_rem_ms;
+    uint16_t total_elapsed_rem_ms;
     TickType_t prev_control_tick; /* for the *measured* dt_s pid.c/heater_output.c want */
 
     /* The rate the profile is COMMANDING the setpoint to move at, degC/s,

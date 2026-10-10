@@ -693,6 +693,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.segment_index = 0;
     s_exec.dwelling = false;
     s_exec.segment_elapsed_s = 0;
+    s_exec.segment_elapsed_rem_ms = 0;
     s_exec.ramp_lock_held = false;
     s_exec.ramp_lock_lagging_mask = 0;
     /* docs/audits/profile_executor_panic_2026-09-24.md: latched per-run so a
@@ -1170,6 +1171,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             s_exec.segment_index = plan.entry_segment_index;
             s_exec.dwelling = plan.entry_dwelling;
             s_exec.segment_elapsed_s = plan.entry_segment_elapsed_s;
+            s_exec.segment_elapsed_rem_ms = 0;
             baseline_target_c = plan.entry_target_c;
 
             s_exec.warm_started = true;
@@ -1219,6 +1221,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     s_exec.target_c = baseline_target_c;
     s_exec.run_start_c = baseline_target_c;
     s_exec.total_elapsed_s = 0;
+    s_exec.total_elapsed_rem_ms = 0;
 
     /* PID_EXPANSION_PLAN.md sec 3.6d: seed every zone's own capped setpoint
      * at the same value s_exec.target_c starts this run/warm-start from --
