@@ -419,9 +419,40 @@ static void execute_scope_job(void *arg)
     ctx->err = first_err;
 }
 
-static esp_err_t execute_scope(const reset_scope_t *scope)
+/* Late system-mode-gate look, taken AFTER relay_authority_reset_in_flight_begin(): the entry checks in
+ * reset_post_handler()/factory_reset_execute() run before the body read and the flash-worker dispatch,
+ * so a firing or autotune could start in between and have its storage erased under it. The starters
+ * publish their heat claim and then read the reset mark (relay_authority.h); this side sets the mark and
+ * then reads the heat claim, both under relay_authority's leaf spinlock, so at least one side refuses.
+ * Returns true (with mode_reason filled, when given) if the gate refuses. */
+static bool reset_mode_gate_refuses(char *mode_reason, size_t mode_reason_cap)
+{
+    sys_mode_snapshot_t mode_snap = { 0 };
+    relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
+    char reason[SYSTEM_MODE_GATE_REASON_MAX];
+    reason[0] = '\0';
+    bool refused = system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, reason, sizeof(reason));
+    if (refused && mode_reason && mode_reason_cap > 0) {
+        snprintf(mode_reason, mode_reason_cap, "%s", reason);
+    }
+    return refused;
+}
+
+/* Returns FACTORY_RESET_ERR_MODE_GATE_REFUSED (mode_reason filled, nothing erased, reset mark cleared)
+ * if a firing or autotune run holds the heat claim once the reset mark is set. */
+static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, size_t mode_reason_cap)
 {
     execute_scope_job_ctx_t ctx = { .scope = scope, .err = ESP_FAIL };
+
+    /* Mark first, then re-check: see reset_mode_gate_refuses(). From here on a run start refuses with
+     * "factory reset in progress" until this mark is cleared (only on a path where nothing was erased)
+     * or the board reboots. */
+    relay_authority_reset_in_flight_begin();
+    if (reset_mode_gate_refuses(mode_reason, mode_reason_cap)) {
+        relay_authority_reset_in_flight_end();
+        ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a firing or autotune run started meanwhile");
+        return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+    }
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): neither known caller
      * (the HTTP handler below, or the UART SYSTEM bridge task) is expected
@@ -435,6 +466,7 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         if (submit_err != ESP_OK) {
             ESP_LOGE(TAG, "factory_reset: could not dispatch erase to flash worker: %s",
                      esp_err_to_name(submit_err));
+            relay_authority_reset_in_flight_end(); /* the job never ran: nothing was erased */
             return submit_err;
         }
     }
@@ -448,6 +480,8 @@ static esp_err_t execute_scope(const reset_scope_t *scope)
         /* No reboot means the RAM state (revs included) would keep running
          * against just-erased storage and rewrite pre-reset data. Fail loud. */
         ESP_LOGE(TAG, "factory_reset: could not create the reboot task -- reset NOT complete");
+        /* The reset mark deliberately stays set: storage is already erased, so no run may start
+         * against it before the reboot the operator now has to do by hand. */
         return ESP_ERR_NO_MEM;
     }
     return ctx.err;
@@ -481,7 +515,7 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
         }
     }
 
-    return execute_scope(&kScopes[(size_t)scope]);
+    return execute_scope(&kScopes[(size_t)scope], NULL, 0);
 }
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
@@ -588,8 +622,15 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     }
 
     ESP_LOGW(TAG, "factory_reset from %s: authenticated, scope '%s' accepted", ip, scope->name);
-    esp_err_t first_err = execute_scope(scope);
+    char late_reason[SYSTEM_MODE_GATE_REASON_MAX];
+    late_reason[0] = '\0';
+    esp_err_t first_err = execute_scope(scope, late_reason, sizeof(late_reason));
 
+    if (first_err == FACTORY_RESET_ERR_MODE_GATE_REFUSED) {
+        /* A run started after the entry check above; nothing was erased. */
+        ESP_LOGW(TAG, "factory_reset from %s: refused by system mode gate at dispatch: %s", ip, late_reason);
+        return system_mode_gate_http_send_refusal(req, late_reason);
+    }
     if (first_err != ESP_OK) {
         /* Best-effort is not good enough here: an operator who asked for a
          * wipe and silently got a partial one (e.g. "all" that only erased

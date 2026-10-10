@@ -1372,6 +1372,22 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* Factory reset in flight, second look: factory_reset.c's execute_scope() sets the reset mark and
+     * then re-reads the heat claim before it dispatches the erase; this side has published the heat
+     * claim (above) and now reads the mark, both under relay_authority's leaf spinlock -- so either the
+     * reset refuses 409 or this refuses, never an erase under a live run (relay_authority.h). */
+    if (relay_authority_reset_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "factory reset in progress -- the controller reboots when it finishes");
+        }
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: factory reset in progress",
+                 (unsigned)profile_id);
+        return false;
+    }
+
     /* Zones config changed, second look (HTTP audit E1 finding 1): POST /api/zones gates on the
      * heat claim at entry, then does a slow Pico ceiling raise before committing, so it could commit
      * a new config between this function's config reads above and the RUNNING commit below -- and

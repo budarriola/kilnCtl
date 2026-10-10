@@ -1086,6 +1086,13 @@ bool zones_config_changed_since(uint32_t gen_snapshot)
     return s_test_zones_gen_bump_after_heat_claim && s_heat_zone_claim_begin_calls > 0;
 }
 
+// Factory reset in flight: see test_profile_executor_prestart.c's identical fake.
+static bool s_test_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void)
+{
+    return s_test_reset_in_flight;
+}
+
 // The distinguishing observation is the same one
 // test_profile_executor_prestart.c's equivalent tests use: the gate runs
 // BEFORE the s_at.lock == NULL guard, so a blocked board answers the gate's
@@ -3490,6 +3497,39 @@ static void test_run_refuses_when_zones_config_changes_during_start(void)
     TEST_CHECK(!ok, "a zones config commit during the start must refuse the autotune start");
     TEST_CHECK(strstr(errbuf, "zones configuration changed") != NULL, "the refusal names the config change");
     TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
+// Factory reset in flight: a reset mark set before the start's late check refuses it, claims released.
+static void test_run_refuses_when_factory_reset_in_flight(void)
+{
+    TEST_SECTION("autotune_engine_run() -- a factory reset in flight refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_reset_in_flight = true;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "a factory reset in flight must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "factory reset in progress") != NULL, "the refusal names the factory reset");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
     TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
     TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
 }
@@ -7156,6 +7196,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_when_zones_config_changes_during_start();
+    test_run_refuses_when_factory_reset_in_flight();
     test_run_refuses_at_atomic_zone_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own

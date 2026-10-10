@@ -53,8 +53,9 @@ typedef enum {
  * same reasoning as reset_post_handler(). ESP_ERR_INVALID_ARG for an
  * out-of-range scope (no erase attempted, no reboot scheduled).
  * FACTORY_RESET_ERR_MODE_GATE_REFUSED if system_mode_gate refused (a firing
- * or autotune run is active) -- no erase attempted, no reboot scheduled,
- * and this is the ONLY function in this file that can return it, so a
+ * or autotune run is active, at entry or at the late re-check taken after the
+ * reset-in-flight mark is set, relay_authority.h) -- no erase attempted, no
+ * reboot scheduled, and this is the ONLY function in this file that can return it, so a
  * caller need not guess whether an ESP_ERR_INVALID_STATE meant "refused" or
  * "erase partially failed". */
 esp_err_t factory_reset_execute(factory_reset_scope_t scope);

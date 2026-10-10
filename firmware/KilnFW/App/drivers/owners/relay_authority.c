@@ -224,3 +224,34 @@ void relay_authority_heat_run_active(bool *profile, bool *autotune)
     }
     portEXIT_CRITICAL(&s_heat_claim_mux);
 }
+
+/* Factory reset in flight -- relay_authority.h's doc comment above these declarations has the "why".
+ * Shares s_heat_claim_mux with the heat claims it pairs against. */
+static uint8_t s_reset_in_flight_depth = 0;
+
+void relay_authority_reset_in_flight_begin(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_reset_in_flight_depth < UINT8_MAX) {
+        s_reset_in_flight_depth++;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+void relay_authority_reset_in_flight_end(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    if (s_reset_in_flight_depth > 0) {
+        s_reset_in_flight_depth--;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_in_flight(void)
+{
+    bool in_flight;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    in_flight = (s_reset_in_flight_depth != 0);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return in_flight;
+}

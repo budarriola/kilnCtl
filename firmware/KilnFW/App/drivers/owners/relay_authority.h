@@ -283,6 +283,21 @@ void relay_authority_heat_sweep_claim_end(void);
  * this function). Either out-pointer may be NULL. */
 void relay_authority_heat_run_active(bool *profile, bool *autotune);
 
+/* Factory reset in flight (HTTP audit: factory_reset.c checked the system mode gate only before its
+ * body read and flash-worker dispatch, so a firing or autotune could start between that check and the
+ * erase). Same paired shape as the zones POST late check (5c638423): factory_reset.c's execute_scope()
+ * calls _begin(), THEN re-reads relay_authority_heat_run_active() and refuses (calling _end()) if a run
+ * holds the heat claim; profile_executor_run() and autotune_begin_run_locked() publish their heat claim,
+ * THEN read relay_authority_reset_in_flight() and refuse, releasing their claims, if it is set. Every
+ * access is under the same leaf s_heat_claim_mux, so at least one of the two sides sees the other.
+ *
+ * A depth counter, not a bool, so two concurrent resets (HTTP and UART) cannot clear each other's mark.
+ * _end() is called only on a path where no erase ran; once the erase has run the board reboots, and the
+ * mark deliberately stays set until then. Spinlock only, never blocks. */
+void relay_authority_reset_in_flight_begin(void);
+void relay_authority_reset_in_flight_end(void);
+bool relay_authority_reset_in_flight(void);
+
 #ifdef __cplusplus
 }
 #endif

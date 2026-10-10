@@ -1314,6 +1314,20 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
                  (unsigned)zone_index);
         return false;
     }
+    /* Factory reset in flight, second look -- same pairing as profile_executor_run()'s identical
+     * check (relay_authority.h): the reset sets its mark and then re-reads the heat claim, this side
+     * has published the claim and now reads the mark, so at least one of the two refuses. */
+    if (relay_authority_reset_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "factory reset in progress -- the controller reboots when it finishes");
+        }
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: factory reset in progress",
+                 (unsigned)zone_index);
+        return false;
+    }
     /* Zones config changed, second look (HTTP audit E1 finding 1) -- same pairing as
      * profile_executor_run()'s identical check: POST /api/zones re-reads the heat claim inside its
      * commit critical section, this side publishes the claim and then reads the generation under

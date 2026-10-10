@@ -702,6 +702,14 @@ bool zones_config_changed_since(uint32_t gen_snapshot)
     return s_test_zones_gen_bump_after_heat_claim && g_heat_zone_claim_begin_calls > 0;
 }
 
+// Factory reset in flight: factory_reset.c's execute_scope() sets this mark before it re-checks the
+// heat claim and dispatches the erase. Modeled here as "set before the start reached its late check".
+static bool s_test_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void)
+{
+    return s_test_reset_in_flight;
+}
+
 // live_profile.c/profiles_http.c are the http/persist tier, deliberately not
 // linked into this control-tier host executable (same reasoning as
 // profiles_http_get() above) -- fixed at 0 by default so reload_live_profile_
@@ -2780,6 +2788,42 @@ static void test_run_refuses_when_zones_config_changes_during_start(void)
     TEST_CHECK(strstr(err, "zones configuration changed") != NULL, "the refusal names the config change");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
     TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// Factory reset in flight: a reset that set its mark before this start reached its late check must make
+// the start refuse, with every claim released (the reset's own re-check then sees no heat claim).
+static void test_run_refuses_when_factory_reset_in_flight(void)
+{
+    TEST_SECTION("profile_executor_run() -- a factory reset in flight refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_reset_in_flight = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "a factory reset in flight must refuse the start");
+    TEST_CHECK(strstr(err, "factory reset in progress") != NULL, "the refusal names the factory reset");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(g_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
     TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
     TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
 
@@ -11735,6 +11779,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_when_zones_config_changes_during_start();
+    test_run_refuses_when_factory_reset_in_flight();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();

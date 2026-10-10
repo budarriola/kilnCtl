@@ -301,8 +301,16 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
 // bx_worker_stub.h (that header models re-entrancy across a dispatch this
 // file never performs; a plain pass-through is enough here and keeps this
 // file from taking on a dependency it does not exercise).
+// Factory reset in flight: counts dispatches (the erase job ran) and can refuse the dispatch
+// outright, so the late-check tests can prove "nothing erased" and "mark cleared on dispatch failure".
+static int g_flash_worker_dispatches = 0;
+static esp_err_t g_flash_worker_result = ESP_OK;
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
+    if (g_flash_worker_result != ESP_OK) {
+        return g_flash_worker_result;
+    }
+    g_flash_worker_dispatches++;
     fn(arg);
     return ESP_OK;
 }
@@ -418,6 +426,27 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
         *autotune_running_out = g_stub_autotune_active;
     }
 }
+
+// relay_authority.h -- factory reset in flight mark (factory_reset.c's execute_scope()). Depth counter
+// like the real one. g_stub_run_starts_at_reset_mark models a firing that started after the entry
+// mode-gate check but before the mark: it flips the run state as the mark is set, so only the late
+// re-check after the mark can see it.
+static int g_reset_in_flight_depth = 0;
+static bool g_stub_run_starts_at_reset_mark = false;
+void relay_authority_reset_in_flight_begin(void)
+{
+    g_reset_in_flight_depth++;
+    if (g_stub_run_starts_at_reset_mark) {
+        g_stub_profile_state = PROFILE_EXEC_RUNNING;
+    }
+}
+void relay_authority_reset_in_flight_end(void)
+{
+    if (g_reset_in_flight_depth > 0) {
+        g_reset_in_flight_depth--;
+    }
+}
+bool relay_authority_reset_in_flight(void) { return g_reset_in_flight_depth != 0; }
 
 // safety_link.h -- never actually invoked by any test here (ota_http_safety is
 // left NULL for every test -- ota_http_start()'s io_or_null/safety_or_null
@@ -697,7 +726,21 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     }
     return ESP_OK;
 }
-int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
+// Body source for the factory-reset late-check test; NULL (default) keeps the old "no body" behavior.
+static const char *s_fake_recv_body = NULL;
+static size_t s_fake_recv_off = 0;
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
+{
+    (void)r;
+    if (!s_fake_recv_body) {
+        return 0;
+    }
+    size_t left = strlen(s_fake_recv_body) - s_fake_recv_off;
+    size_t n = left < buf_len ? left : buf_len;
+    memcpy(buf, s_fake_recv_body + s_fake_recv_off, n);
+    s_fake_recv_off += n;
+    return (int)n;
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -1296,6 +1339,88 @@ static void test_factory_reset_execute_refused_by_mode_gate_during_firing(void)
                                           "nothing at all, not even the scopes it would normally touch");
 
     g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// Factory reset in flight, reset side: a firing that starts after the entry mode-gate check (modeled
+// by g_stub_run_starts_at_reset_mark) is seen by the late re-check taken after the reset mark is set.
+// The reset refuses with the mode gate's sentinel, dispatches no erase, and clears its mark.
+static void test_factory_reset_execute_refused_when_run_starts_during_dispatch(void)
+{
+    TEST_SECTION("factory_reset_execute() -- a run started after the entry check is refused at dispatch, "
+                 "nothing erased, reset mark cleared");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_stub_run_starts_at_reset_mark = true;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_run_starts_at_reset_mark = false;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED,
+              "a run that started during the dispatch must refuse the reset with the mode-gate sentinel");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// Same race through POST /api/factory_reset: the late refusal is the mode gate's 409, not a 500.
+static void test_factory_reset_http_refused_when_run_starts_during_dispatch(void)
+{
+    TEST_SECTION("reset_post_handler -- a run started after the entry check answers the mode gate's 409 "
+                 "at dispatch, nothing erased, reset mark cleared");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1"); /* no safety link in this fixture */
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    g_stub_run_starts_at_reset_mark = true;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_run_starts_at_reset_mark = false;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0,
+              "the late refusal is the system mode gate's 409, never a 500 erase failure");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// The mark is cleared when the erase job could not be dispatched (nothing erased), and kept once the
+// erase ran (the board reboots next).
+static void test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase(void)
+{
+    TEST_SECTION("factory_reset_execute() -- reset mark cleared on dispatch failure, kept after the erase");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+
+    g_flash_worker_result = ESP_FAIL;
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_flash_worker_result = ESP_OK;
+    TEST_CHECK(err == ESP_FAIL, "a dispatch failure is reported");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the mark is cleared when nothing was erased");
+
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(g_reset_in_flight_depth == 1,
+              "the mark stays set after the erase, so no run can start before the reboot");
+    (void)err;
+    g_reset_in_flight_depth = 0;
 }
 
 static void test_credential_survives_factory_reset_wifi_scope(void)
@@ -2538,6 +2663,9 @@ void run_test_ota_http(void)
     test_factory_reset_refused_by_system_mode_gate_during_firing();
     test_recovery_boot_set_failed_restores_boot_target();
     test_factory_reset_execute_refused_by_mode_gate_during_firing();
+    test_factory_reset_execute_refused_when_run_starts_during_dispatch();
+    test_factory_reset_http_refused_when_run_starts_during_dispatch();
+    test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase();
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
