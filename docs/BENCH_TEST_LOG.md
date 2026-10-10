@@ -3155,3 +3155,39 @@ Flashed origin/dev 8fcd3237 on both processors from worktree `C:\wt\benchflash_c
   - z0 tuning_valid=no after the restore.
   - relay_cycles read 0 because the v5 backup carries none.
 - Final state: aux outputs disabled, zone 2 zone_type 0, test profile deleted, kiln config 1 active (was null), link up, armed, no trip.
+
+## 2026-10-10 bench agent: crash review and blocked-item rerun on dev 8fcd3237
+
+Board: origin/dev 8fcd3237 on both processors, host 192.168.1.156. Firmware was not changed. `update_check` was not repeated.
+
+- Crash report review: OLD, cleared.
+  - Record: dump_id 448121097, exc_task `tls_spike`, exc_pc 0x400559dd, crash_uptime 17157 s, fw_build "Oct  9 2026 20:34:10" (the running 8fcd3237 build).
+  - The coredump image is byte-identical (sha256 9ba85c50...) to `firmware/KilnFW/coredump_archive/coredump-9ba85c503229.json`, fetched 2026-10-05T06:57:07Z with fw_build "Oct  4 2026 23:44:01".
+  - Symbolized with `find_crash_elf`. It matches the WP7 TLS spike build `elf_archive/KilnCtrl-2162cf7c31dd.elf`. Neither the running app ELF (`KilnCtrl-d28019a44fa3.elf`) nor any recovery-archive ELF has `spike_task`, and `KILNCTL_TLS_SPIKE` defaults to n.
+  - Backtrace: `spike_task` (tls_spike.c:146) -> `mbedtls_ssl_handshake` -> `mbedtls_ssl_handshake_client_step` -> `mbedtls_psa_key_agreement_ecdh` -> `mbedtls_ecp_mul_restartable` -> `ecp_mul_restartable_internal` -> `mbedtls_mpi_mul_mod`/`mbedtls_mpi_mul_mpi`. This is the 2026-10-04 task-watchdog trip on IDLE0 during the ECDH handshake to api.github.com in the spike build.
+  - `crash_report_clear(confirm=True, allow_unacknowledged=True)`, then read-back: no record, coredump present=False.
+  - After the clear: `heap_internal` free 29815 B, min_free 14371 B (above the 8192 B floor); link up, ARMED, no trip.
+- Firmware defect: a recaptured old coredump is stamped with the capturing boot's identity.
+  - `crash_report.c:480` recaptures whenever the NVS record is missing or its dump_id differs; the coredump partition still holds the old image.
+  - The capture path calls `hal_sysinfo_get_build_info()` for the running app (`crash_report.c:510-512`), and `fill_v3_fields()` writes it into fw_build (`crash_report.c:300`).
+  - `crash_uptime` comes from the previous boot's uptime beacon, and `reset_reason` is the current boot's.
+  - Result: a months-old dump reads as a crash of the current firmware. The coredump summary's own `app_elf_sha256` is not used to cross-check or fill fw_build.
+  - Likely trigger this time: the NVS record was lost (see the kiln_nvs note below) while the coredump partition kept the image, since `crash_report_ack` never erases it. Not fixed here.
+- E-stop interlock: NOT VERIFIED, and it blocks everything below.
+  - `get_readiness` reports `estop_verified: not_done -- never confirmed`. It was ok on 2026-09-21 (C5), and since then no session called `estop_verify`.
+  - The record (`kiln_cfg/estop_verif` in the `kiln_nvs` partition) is erased by `factory_reset` kiln/all (whole-partition erase). It is also cleared by any committed `estop_active_level` safety param (`safety_cfg_write.c:529`, by design).
+  - Hypothesis, not proven: the unexplained config wipe noted in the previous section (zones count 0) was a `kiln_nvs` loss. That would also explain the lost crash record (recaptured above) and the lost E-stop record.
+  - `estop_verify` is human-only (needs physical verification), so it was not called. An operator must run the E-stop bench procedure in `firmware/SaftyFW/README.md`, then call `estop_verify`.
+- ON_OFF step 9 (quasi-dwell rule): BLOCKED.
+  - Zone 2 was set to zone_type 1, and profile `BENCH_ONOFF9` was saved as id 2 (45 C at 900 C/h with a 15 min dwell; rule: zone 2, DWELL phase, BELOW 50 C). The save returned "too_fast" feasibility warnings.
+  - `profiles_start(2)` was refused: "the E-STOP INTERLOCK has not been verified on this board".
+  - Restored: profile 2 deleted, zone 2 zone_type 0 (confirmed by read-back); aux outputs untouched (enabled_mask 0).
+  - Design finding from code reading: `on_off_trigger_decide.c` (~105-118) resets `lock_true_s` to 0 on every tick that is not ramp-locked. The ramp lock toggles at the band edge (`profile_executor.c` ~915-959, band `exec_threshold(zi,3)`), so the 120 s quasi-dwell entry only happens for a zone that is fully stalled inside the band, not for one crawling along its edge. Step 9 needs a profile that holds the zone deep inside the lock band for 120 s.
+- bench_test web: BLOCKED. Job 2a7329d3, run `logs/bench_test/20261010T041932Z_web_dev8fcd3237_rerun/`, exit 2, "PREFLIGHT FAILED: readiness gate blocks: estop_verified"; all 120 cases NOT_RUN.
+- bench_test lcd: BLOCKED. Job ce86c26b, run `logs/bench_test/20261010T041938Z_lcd_dev8fcd3237_rerun/`, same preflight failure; all 26 cases NOT_RUN.
+- OT-G06: BLOCKED. `ota_matrix_start(confirm=True, cases="OT-G06")`, job b63c1a21, was refused at the run-level precondition ("readiness gate blocks: estop_verified"). Nothing was applied.
+- Final state:
+  - 8fcd3237 on both processors; link up, ARMED, no trip, executor idle.
+  - Crash report cleared, coredump erased.
+  - Zones all zone_type 0; profiles #0 M18C_TEST and #1 B1_THROWAWAY only; aux disabled.
+  - Readiness: 19 ok; not_done: safety_commissioned (3 of 68) and estop_verified; cannot_yet: ct_attribution.
