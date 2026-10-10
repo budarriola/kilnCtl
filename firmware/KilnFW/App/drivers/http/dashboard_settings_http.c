@@ -73,10 +73,12 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (unit_pref_set(pref) != ESP_OK) {
-        /* unit_pref_set() persists first and publishes to RAM only on success,
-         * so the live value is unchanged. No NVS fallback: an error, never ok. */
-        ESP_LOGW(DASH_TAG, "unit preference not saved -- live value unchanged");
+    bool adopted = false;
+    if (unit_pref_set_ex(pref, &adopted) != ESP_OK) {
+        /* Live value is unchanged unless `adopted` (file read back with the new value, RAM
+         * matches it). No NVS fallback: an error, never ok. */
+        ESP_LOGW(DASH_TAG, "unit preference save not verified -- %s",
+                 adopted ? "live value now matches the file" : "live value unchanged");
         return cfg_fs_http_persist_failed(req);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");

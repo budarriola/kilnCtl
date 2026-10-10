@@ -255,13 +255,16 @@ bool kiln_cfg_swap_is_pending(void);
  * post-boot re-verification could not confirm both sides match (including
  * its own fallback-rollback failing), an unrecognised marker byte, and
  * ACTIVE_ID_UNSAVED: an ESP_DONE row confirmed on both sides whose active-id
- * save failed. That last kind is display-only (both processors agree, heat
- * is not gated by it) and retried automatically at every boot; the UI shows
- * it with softer text than the others (/api/status's
- * kiln_cfg_swap_boot_fault_kind). Never latched by the STAGED case (a clean,
+ * save failed, and ROLLBACK_ACTIVE_ID_UNSAVED: a recovery that rolled both
+ * sides back to the pre-swap config (PICO_OPEN/PICO_DONE, or the ESP_DONE
+ * fallback) but whose active-id restore failed. Those last two kinds are
+ * display-only (both processors agree, heat is not gated by them) and retried
+ * automatically at every boot; the UI shows them with softer text than the
+ * others (/api/status's kiln_cfg_swap_boot_fault_kind). The first says the
+ * target was APPLIED, the second says it was ROLLED BACK. Never latched by the STAGED case (a clean,
  * harmless discard: nothing was ever written to either processor), by a
  * recovery that succeeds, or by an ESP_DONE row found with both sides back
- * on the pre-swap config (a rollback whose clear failed; LOW-3 clears it). Not
+ * on the pre-swap config with nothing kept (a rollback whose clear failed; LOW-3 clears it). Not
  * cleared mid-boot, same "fixed for the boot" discipline as zones_cfg_load_
  * fault_t (zones_config_accessors.h) -- a fresh boot that recovers cleanly,
  * or that finds no pending record at all, re-evaluates to false. */
@@ -275,6 +278,9 @@ typedef enum {
     KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,    /* ESP_DONE row confirmed both sides, but the active_id save
                                                     * failed; record kept for a retry next boot. Display-only:
                                                     * both processors agree, heat is not gated by this. */
+    KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, /* recovery ROLLED BACK both sides to the pre-swap
+                                                    * config, but the active_id restore failed; record kept
+                                                    * for a retry next boot. Display-only, heat not gated. */
 } kiln_cfg_swap_boot_fault_kind_t;
 
 typedef struct {
@@ -297,7 +303,7 @@ kiln_cfg_swap_boot_fault_kind_t kiln_cfg_swap_get_boot_fault_kind(void);
 /* Stable lowercase name of a fault kind, for /api/status's additive
  * kiln_cfg_swap_boot_fault_kind field ("none", "unreadable", "no_link",
  * "rollback_failed", "esp_done_unconfirmed", "unrecognised_marker",
- * "active_id_unsaved"; "unknown" for any other value). */
+ * "active_id_unsaved", "rollback_active_id_unsaved"; "unknown" for any other value). */
 const char *kiln_cfg_swap_boot_fault_kind_name(kiln_cfg_swap_boot_fault_kind_t kind);
 
 #ifdef __cplusplus

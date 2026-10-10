@@ -75,6 +75,12 @@ unit_pref_t unit_pref_get(void);
 // choice will not survive a reboot, not that it failed to take effect now.
 esp_err_t unit_pref_set(unit_pref_t pref);
 
+// Same as unit_pref_set(), plus *out_adopted (may be NULL): true only when the save reported an
+// error but the file read back as holding the new value, so RAM was flipped to match it (the
+// value is live now AND will survive a reboot, though the write was not verified). On every
+// other error the live value is unchanged and *out_adopted is false.
+esp_err_t unit_pref_set_ex(unit_pref_t pref, bool *out_adopted);
+
 // Read-only dual-write status for GET /api/cfgfs (cfg_fs_status.h's
 // cfg_fs_dualwrite_item_t) -- re-reads the file (pref_cfg_fs_load_raw(),
 // no side effects) and the NVS candidate fresh on every call, and compares

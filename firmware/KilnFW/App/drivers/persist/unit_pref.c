@@ -145,6 +145,14 @@ static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
 
 esp_err_t unit_pref_set(unit_pref_t pref)
 {
+    return unit_pref_set_ex(pref, NULL);
+}
+
+esp_err_t unit_pref_set_ex(unit_pref_t pref, bool *out_adopted)
+{
+    if (out_adopted) {
+        *out_adopted = false;
+    }
     if (pref != UNIT_PREF_CELSIUS && pref != UNIT_PREF_FAHRENHEIT) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -181,6 +189,9 @@ esp_err_t unit_pref_set(unit_pref_t pref)
         if (f_valid && f_rev == new_rev) {
             s_unit_pref = (unit_pref_t)f_raw;
             s_unit_pref_rev = f_rev;
+            if (out_adopted) {
+                *out_adopted = true;
+            }
             ESP_LOGW(TAG, "unit preference save reported %s but the file holds the new value (rev %lu) -- RAM "
                           "adopts it so a reboot cannot flip the live value",
                      esp_err_to_name(err), (unsigned long)f_rev);

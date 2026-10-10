@@ -147,11 +147,13 @@ static void units_toggle_apply(void *user_data)
     }
     unit_pref_t next =
         unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
-    esp_err_t err = unit_pref_set(next);
+    bool adopted = false;
+    esp_err_t err = unit_pref_set_ex(next, &adopted);
     if (err != ESP_OK) {
-        /* unit_pref_set() persists first and publishes to RAM only on success,
-         * so the live value is unchanged; the repaint below shows the old unit. */
-        ESP_LOGW(TAG, "unit preference not saved -- live value unchanged");
+        /* Live value unchanged unless `adopted` (file holds the new value, RAM matches);
+         * the repaint below shows whichever unit is live. */
+        ESP_LOGW(TAG, "unit preference save not verified -- %s",
+                 adopted ? "live value now matches the file" : "live value unchanged");
     }
     units_cell_set_label();
 }

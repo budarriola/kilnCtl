@@ -80,6 +80,8 @@ const char *kiln_cfg_swap_boot_fault_kind_name(kiln_cfg_swap_boot_fault_kind_t k
         return "unrecognised_marker";
     case KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED:
         return "active_id_unsaved";
+    case KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED:
+        return "rollback_active_id_unsaved";
     default:
         return "unknown";
     }
@@ -1121,6 +1123,12 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, c
         if (link && rollback_ex(link, p, /*esp_was_committed=*/true, sub, sizeof(sub), &kept)) {
             if (!kept) {
                 clear_pending();
+            } else {
+                /* Rolled back, but the active-id restore failed and the journal is kept: never silent. */
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
+                                 "a kiln-config swap was rolled back on both processors, but saving which "
+                                 "kiln is active failed -- zone edits are not auto-saved until it is retried "
+                                 "at the next boot; heat is not affected");
             }
         } else {
             ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
@@ -1341,11 +1349,11 @@ static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
             } else {
                 /* Review LOW: both sides are back on R but the persisted active_id restore failed, so the
                  * journal is kept (autosave stays suppressed, retried each boot). Never silent: latch the
-                 * display-only ACTIVE_ID_UNSAVED kind (web banner + LCD notice already exist). Heat is not
+                 * display-only ROLLBACK_ACTIVE_ID_UNSAVED kind (web banner + LCD notice say ROLLED BACK). Heat is not
                  * gated: kiln_cfg_swap_is_pending() only blocks autosave, never a firing start or an apply. */
                 ESP_LOGE(TAG, "boot: interrupted swap rolled back, but restoring the saved active kiln failed -- "
                               "journal kept, autosave suppressed, will retry next boot");
-                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED, p->target_id,
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
                                  "an interrupted kiln-config swap was rolled back on both processors, but saving "
                                  "which kiln is active failed -- zone edits are not auto-saved until it is retried "
                                  "at the next boot; heat is not affected");

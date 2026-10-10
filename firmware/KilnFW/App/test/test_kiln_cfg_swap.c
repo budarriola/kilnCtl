@@ -1543,8 +1543,8 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
     s_set_active_id_should_fail = false;
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_PICO_DONE,
                "boot recovery did not clear the record after an id restore failure");
-    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
-               "kept journal after a failed id restore latches the display-only active_id_unsaved fault");
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED,
+               "kept journal after a failed id restore latches the display-only rollback_active_id_unsaved fault");
 
     TEST_SECTION("MED: boot ESP_DONE fallback rollback (target unreadable) with id restore failing -- record kept");
     reset_state();
@@ -1557,6 +1557,8 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
     s_set_active_id_should_fail = false;
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
                "ESP_DONE record kept after the fallback's id restore failed");
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED,
+               "ESP_DONE fallback rollback with kept journal latches rollback_active_id_unsaved");
 }
 
 static void test_low4_apply_reason_names_uncleared_journal(void)
@@ -1703,6 +1705,8 @@ static void test_low1_boot_fault_kind_names(void)
     TEST_SECTION("LOW-1: boot fault kind names for /api/status");
     TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED),
                       "active_id_unsaved") == 0, "active_id_unsaved");
+    TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED),
+                      "rollback_active_id_unsaved") == 0, "rollback_active_id_unsaved");
     TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED),
                       "esp_done_unconfirmed") == 0, "esp_done_unconfirmed");
     TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_NONE), "none") == 0, "none");

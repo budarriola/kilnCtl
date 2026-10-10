@@ -440,7 +440,9 @@ static void test_readback_failure_after_write_keeps_ram_and_file_consistent(void
     TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "baseline Celsius saved");
     g_up_orig_write_fn = pref_cfg_fs_get_write_fn();
     pref_cfg_fs_set_write_fn(up_write_then_fail);
-    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) != ESP_OK, "failure is still reported");
+    bool adopted = false;
+    TEST_CHECK(unit_pref_set_ex(UNIT_PREF_FAHRENHEIT, &adopted) != ESP_OK, "failure is still reported");
+    TEST_CHECK(adopted, "out_adopted reports live value now matches the file");
     pref_cfg_fs_set_write_fn(g_up_orig_write_fn);
     TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM adopted the value the file holds");
     uint32_t live_rev = s_unit_pref_rev;

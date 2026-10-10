@@ -2137,9 +2137,12 @@ function renderKilnCfgSwapBootFault(data) {
   // LOW-1: "active_id_unsaved" is display-only -- both processors agree on
   // the applied config and heat is not gated; only the saved "which kiln is
   // active" marker failed, and boot retries it. Neutral banner, softer text.
-  var unsaved = data.kiln_cfg_swap_boot_fault_kind === 'active_id_unsaved';
+  var kind = data.kiln_cfg_swap_boot_fault_kind;
+  var rolledBack = kind === 'rollback_active_id_unsaved';
+  var unsaved = kind === 'active_id_unsaved' || rolledBack;
   el.innerHTML = '<div class="banner' + (unsaved ? '' : ' interrupted') + '">' +
-    (unsaved ? '<h3>KILN CONFIG APPLIED -- ACTIVE KILN NOT SAVED (retried each boot)</h3>'
+    (rolledBack ? '<h3>KILN CONFIG ROLLED BACK -- ACTIVE KILN NOT SAVED (retried each boot)</h3>' :
+     unsaved ? '<h3>KILN CONFIG APPLIED -- ACTIVE KILN NOT SAVED (retried each boot)</h3>'
              : '<h3>KILN CONFIG SWAP INTERRUPTED -- NOT RECOVERED</h3>') +
     '<div class="row"><span>' + window.kcEscapeHtml(reason) + '</span></div>' +
     '</div>';

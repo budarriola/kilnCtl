@@ -172,6 +172,11 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     s_fake_unit_pref = pref;
     return ESP_OK;
 }
+esp_err_t unit_pref_set_ex(unit_pref_t pref, bool *out_adopted)
+{
+    if (out_adopted) *out_adopted = false;
+    return unit_pref_set(pref);
+}
 
 // ---------------------------------------------------------------------
 // profiles_http.h / profiles_builtin.h / run_state.h / profile_executor.h

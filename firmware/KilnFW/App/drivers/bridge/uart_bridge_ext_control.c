@@ -173,9 +173,11 @@ static void control_handle_message(void *vargs)
                     break;
                 }
                 uint8_t raw = msg.payload[1];
+                bool adopted = false;
                 bool ok = (raw == (uint8_t)UNIT_PREF_CELSIUS || raw == (uint8_t)UNIT_PREF_FAHRENHEIT) &&
-                          unit_pref_set((unit_pref_t)raw) == ESP_OK;
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                          unit_pref_set_ex((unit_pref_t)raw, &adopted) == ESP_OK;
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok,
+                                             ok ? NULL : (adopted ? "save not verified, live value now matches file" : NULL));
                 break;
             }
             default:

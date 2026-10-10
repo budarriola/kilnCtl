@@ -320,9 +320,12 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                  * kiln_cfg_swap_get_boot_fault()'s struct, so no second copy
                  * of its 200-byte reason lands on this stack (ds already
                  * carries one). */
+                kiln_cfg_swap_boot_fault_kind_t swap_kind = kiln_cfg_swap_get_boot_fault_kind();
                 lv_label_set_text(s_ui_home_trip_strip,
-                                   kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED
+                                   swap_kind == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED
                                        ? "KILN APPLIED -- active kiln not saved, retried at boot"
+                                   : swap_kind == KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED
+                                       ? "KILN ROLLED BACK -- active kiln not saved, retried at boot"
                                        : "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
             } else {
