@@ -337,6 +337,11 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks @extra
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
+    Step "submodule pins pushed"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1")
+    if ($LASTEXITCODE -eq 1) { Finish 1 "a submodule pin is not on its remote; push the submodule commit first (nothing pushed)" }
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
+
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }

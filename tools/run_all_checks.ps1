@@ -206,7 +206,10 @@ $checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
         # the whole tree. Without this the first run of this script found 24
         # scripts where the repository has 11, and would have been reporting
         # the pass/fail state of an abandoned worktree alongside the real one.
-        $_.FullName -notmatch '\\\.[^\\]+\\'
+        $_.FullName -notmatch '\\\.[^\\]+\\' -and
+        # Needs the network (git ls-remote); not a standing check. land.ps1 and
+        # dev_promote.ps1 run it before pushing. Its offline test is wired below.
+        $_.Name -ne 'check_submodule_pins_pushed.ps1'
     } |
     Sort-Object FullName
 
@@ -352,6 +355,20 @@ if (Test-Path $dupSymbolsTest) {
 } else {
     Write-Host ""
     Write-Host "WARNING: expected test $dupSymbolsTest not found -- proceeding" -ForegroundColor Yellow
+}
+
+# test_check_submodule_pins_pushed.ps1 tests the network-dependent
+# check_submodule_pins_pushed.ps1 against local scratch repos (offline). The
+# check itself is excluded from the glob above; wired explicitly here.
+$subPinsTest = Join-Path $repoRoot "tools\test_check_submodule_pins_pushed.ps1"
+if (Test-Path $subPinsTest) {
+    $checks += Get-Item $subPinsTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host ""
+    Write-Host "FAILED: expected test $subPinsTest not found --" -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
 }
 
 # test_check_lcd_home_nav_gated.ps1 is a negative test, not a guard -- it
