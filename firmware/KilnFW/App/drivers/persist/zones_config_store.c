@@ -624,8 +624,12 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     uint8_t file_on_disk_version = 0;
+    /* Review 11 LOW-1: resolve may write zones.json.bad (and a resync copy); run it inside the save section so
+     * those writes are ordered against every other zones writer and the factory-reset barrier. */
+    zcfg_save_lock();
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    zcfg_save_unlock();
     zones_cfg_fs_reject_t file_reject;
     bool file_rejected = zones_config_cfg_fs_get_last_reject(&file_reject);
     /* Review 11 MED-2: latch only when NO trustworthy copy was adopted. A rejected file that fell back

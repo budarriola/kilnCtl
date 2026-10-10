@@ -149,6 +149,7 @@ So the busy refusal is the real LOW-1 fix. The `journal_write` fence is defence 
 The MISSED row is expected, because the host tests are single-threaded. See INFO-4.
 
 #### LOW-6: a lazily re-inited kiln_nvs lets unfenced NVS writers survive a kiln or all reset
+**FIXED (86edeef6): `hal_kv_set_write_refuse_hook` fences every kiln_nvs hal_kv write at one choke point; installed by main.c.**
 
 **Cause.**
 - The partition erase de-inits kiln_nvs, and `hal_kv_open()` does not re-init it.
@@ -166,6 +167,7 @@ This is LOW because it needs a concurrent request inside a sub-second window aft
 **Suggested fix.** Make `estop_verification` `persist()` check `relay_authority_reset_refuses_writer()`, at minimum. Or fence `hal_kv_set_*` for the kiln_nvs partition centrally, the same way 04848cd9 fenced `cfg_fs_write_atomic()`.
 
 #### LOW-7: nothing pins the main.c hook installs
+**FIXED (86edeef6): `tools/check_reset_fence_hooks.ps1`.**
 
 All three refusals rely on the three setter calls at main.c:226-228. No check script or test fails if one is removed. The host tests install the hook themselves, so they would stay green.
 

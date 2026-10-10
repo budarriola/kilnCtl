@@ -56,6 +56,7 @@ strength check, so a weak `new_password` burns the token and the caller must red
   Inconsistent strictness only; NaN, inf, overflow, `%00` and garbage are all refused.
 
 ## F4 (Medium) backup import accepts and applies truncated JSON
+**FIXED (fe77e56a): `backup_json_validate_document()` runs before any scanner.**
 - `firmware/KilnFW/App/drivers/http/backup_import.c` (field scanners, no whole-document validation
   before pass 1). Probe: every proper prefix of a valid v2 body. Accepted (apply returns ok) at
   cut points 36-48 (`{"kind":"kilnctl_backup","version":2` ... through `"profiles":` , nothing to write),
@@ -67,15 +68,18 @@ strength check, so a weak `new_password` burns the token and the caller must red
 - Test coverage skips exactly those cut points (marked F4 in `test_fuzz_hostile_backup_shapes`).
 
 ## F5 (Low) backup import ignores a wrong-typed `profiles` / `zones` value
+**FIXED (fe77e56a): wrong-typed arrays refused 400.**
 - Same file. Bodies `"profiles":{}` and `"zones":"x"` are accepted with ok and nothing written
   for that section; the operator sees a successful restore that restored nothing.
 - Expected: 400 naming the key.
 
 ## F6 (Low) duplicate top-level keys: first occurrence wins
+**FIXED (fe77e56a): duplicate top-level keys refused.**
 - `{"kind":"kilnctl_backup","kind":"x",...}` and `"version":2,"version":9999` are accepted (the
   first value is used). Ambiguous documents should be refused. No unsafe write results.
 
 ## F7 (Low) aux/kiln_cfg numeric fields accept a leading space ("relay=+1")
+**FIXED (5122ca99): sign refused in aux `field_long` and kiln_cfg `parse_required_id`; invalid percent escapes (F8f) refused 400 in `http_form_url_decode`.**
 - `aux_outputs_http_core.c` `field_long` (`strtol` skips leading whitespace; `+` decodes to a
   space). `relay=+1&enabled=1` -> 200 for relay 1. `http_form_parse_long` refuses the same input.
   Same shape in `kiln_cfg_http.c` `parse_required_id`. Inconsistent strictness only.
@@ -86,6 +90,7 @@ strength check, so a weak `new_password` burns the token and the caller must red
   Expected by strict decoders: 400. Harmless for storage; recorded as a leniency.
 
 ## F9 (Low) `parse_required_id` saturates instead of rejecting overflow
+**FIXED (5122ca99): strict `http_form_parse_long` rejects ERANGE.**
 - `kiln_cfg_http.c` `parse_required_id`: `strtol` returns LONG_MAX (INT32_MAX on both Xtensa and
   MSVC) for `id=99999999999`, `v > INT32_MAX` is then false, so the id aliases 2147483647 with no
   ERANGE check. The id then fails the existence lookup (404), so nothing is written; verified in the

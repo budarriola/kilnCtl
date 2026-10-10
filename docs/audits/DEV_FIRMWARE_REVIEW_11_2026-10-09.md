@@ -74,7 +74,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### LOW-1 (ab210508): read-only paths now write `.bad` outside any save lock, with a factory-reset fence race
 
-**PARTLY FIXED in fa4a62ef: a failed .bad write is reported (file_rejected/bad_copy_failed) and blocks overwrite; the .bad write is still not moved under the save lock.**
+**FIXED: fa4a62ef reports a failed .bad write; the resolve call (the only .bad writer) now runs under the zones save lock in `nvs_load` (zones_config_store.c), tested in test_zones_config_cfg_fs.c case F.**
 
 - `load_raw` callers that now reach `preserve_rejected_file` (`persist/zones_config_cfg_fs.c:63-88`) at runtime:
   - GET /api/cfgfs (`diagnostics_http.c:1569`)

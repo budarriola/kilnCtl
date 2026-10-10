@@ -1429,6 +1429,26 @@ static esp_err_t fail_bad_write(const char *name, const void *data, size_t len)
     return cfg_fs_write_atomic(name, data, len);
 }
 
+static int s_save_depth;
+static int s_bad_write_depth = -1;
+static bool depth_enter(void)
+{
+    s_save_depth++;
+    return true;
+}
+static void depth_exit(bool reserved)
+{
+    (void)reserved;
+    s_save_depth--;
+}
+static esp_err_t depth_recording_write(const char *name, const uint8_t *data, size_t len)
+{
+    if (strcmp(name, ZONES_CFG_BAD_FILE_PATH) == 0) {
+        s_bad_write_depth = s_save_depth;
+    }
+    return cfg_fs_write_atomic(name, data, len);
+}
+
 static void test_rejected_file_with_older_copy_present(void)
 {
     TEST_SECTION("zones cfg_fs (review 11): rejected file + valid older NVS/legacy copy");
@@ -1495,6 +1515,19 @@ static void test_rejected_file_with_older_copy_present(void)
     zones_config_cfg_fs_reset_write_fn_for_test();
     TEST_CHECK(!valid && zones_config_get_load_fault(&lf) && lf.file_rejected && lf.bad_copy_failed,
                "LOW-2: a failed .bad write is reported in the fault record");
+
+    /* F. LOW-1: the .bad write happens inside the zones save section. */
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "re-plant the corrupt file for F");
+    (void)cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH);
+    pref_cfg_fs_set_save_section_hooks(depth_enter, depth_exit);
+    s_save_depth = 0;
+    s_bad_write_depth = -1;
+    zones_config_cfg_fs_set_write_fn(depth_recording_write);
+    zones_config_load_fault_reset_for_test();
+    (void)nvs_load(&found, &valid);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    pref_cfg_fs_set_save_section_hooks(NULL, NULL);
+    TEST_CHECK(s_bad_write_depth == 1, "review 11 LOW-1: the .bad write runs inside the zones save section");
 
     /* E. LOW-1: a read-only load_raw never writes .bad. */
     TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK || true, "ensure no .bad");
