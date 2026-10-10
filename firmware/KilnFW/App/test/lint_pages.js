@@ -185,11 +185,14 @@ for (const root of page_roots) for (const fullPath of walk_files(root).filter(p 
    * pair U+00E2 U+20AC is the lead of every double-encoded U+2000 block
    * punctuation character, and never appears in real text. */
   {
-    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac), 'g');
+    /* Lead pairs: U+00E2 U+20AC (punctuation), U+00C2 + U+00A0..U+00BF
+     * (degree sign, plus-minus, micro, nbsp...), U+00C3 + a Latin-1 or
+     * cp1252-mapped continuation (accented letters). */
+    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac) + '|\\u00c2[\\u00a0-\\u00bf]|\\u00c3[\\u0080-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u2122]', 'g');
     let mm;
     while ((mm = mre.exec(src))) {
       bad++;
-      console.log(`${f} (line ${src.slice(0, mm.index).split(String.fromCharCode(10)).length}): mojibake sequence U+00E2 U+20AC ` +
+      console.log(`${f} (line ${src.slice(0, mm.index).split(String.fromCharCode(10)).length}): mojibake sequence (U+00E2 U+20AC, U+00C2 xx or U+00C3 xx) ` +
         `(double-encoded UTF-8, e.g. a broken ellipsis) -- retype the character or use ASCII.`);
     }
   }
