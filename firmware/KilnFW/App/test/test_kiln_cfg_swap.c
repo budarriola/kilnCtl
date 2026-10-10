@@ -132,15 +132,33 @@ bool kiln_cfg_store_get_full_package(int32_t id, uint8_t *blob_out, uint16_t cap
 }
 
 static bool s_set_active_id_should_fail = false;
+static int s_set_active_id_unlocked_calls = 0; // LOW-5: calls made without kiln_cfg_store_lock held
+/* LOW-2 race probe: kiln_cfg_swap_is_pending() as seen from inside the
+ * active-id save, i.e. mid-apply after ESP_DONE. -1 = never probed. */
+static bool s_probe_pending_in_set_active_id = false;
+static int s_pending_seen_in_set_active_id = -1;
+bool kiln_cfg_swap_is_pending(void);
 bool kiln_cfg_store_set_active_id_raw(int32_t id, char *reason_out, size_t reason_cap)
 {
+    if (s_lock_depth <= 0) {
+        s_set_active_id_unlocked_calls++;
+    }
+    /* LOW-7: the real kiln_cfg_store_set_active_id_raw() sets RAM active_id
+     * BEFORE it persists (kiln_cfg_store.c), so a failed persist still
+     * leaves RAM naming the new id. The fake must do the same, or a test of
+     * the failed-save path asserts on a RAM state the firmware never has. */
+    s_active_id = id;
+    /* Probe after the RAM set, before the persist: the window a concurrent
+     * autosave would hit if the exception were armed early. */
+    if (s_probe_pending_in_set_active_id) {
+        s_pending_seen_in_set_active_id = kiln_cfg_swap_is_pending() ? 1 : 0;
+    }
     if (s_set_active_id_should_fail) {
         if (reason_out && reason_cap) {
             snprintf(reason_out, reason_cap, "forced set_active_id failure");
         }
         return false;
     }
-    s_active_id = id;
     return true;
 }
 
@@ -200,6 +218,32 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 // -- safety_link.h --
 typedef struct SafetyLinkClass_s { int dummy; } SafetyLinkClass;
 static SafetyLinkClass s_fake_link;
+
+// -- safety_ceiling_sync.h (required ceiling, LOW-6) --
+// What safety_ceiling_sync_required_ceiling_c() reports: the ceiling the
+// CURRENT zones require. Unknown by default, so every pre-LOW-6 test sees
+// R's snapshot value restored exactly as before.
+static bool s_required_known = false;
+static float s_required_ceiling = 0.0f;
+bool safety_ceiling_sync_required_ceiling_c(float *out_c)
+{
+    if (!out_c || !s_required_known) {
+        return false;
+    }
+    *out_c = s_required_ceiling;
+    return true;
+}
+// LOW-6 interleave hook: when > 0, the first volatile ceiling write (the
+// raise-first step) is followed by a simulated zones POST that raised a zone
+// max: the required ceiling becomes this value and the Pico ceiling is
+// raised to it, exactly what the zones POST guard does on the real board.
+static float s_zone_raise_after_first_ceiling_write = 0.0f;
+static int s_volatile_ceiling_write_count = 0;
+// LOW-7 hook: each volatile ceiling write while this is > 0 arms the NEXT
+// NVS write-class call to fail (and decrements). Lets a test fail the
+// PICO_OPEN marker save (armed by the raise-first write) and then the clear
+// (armed by restore_r_ceiling_volatile()'s write) in the same apply.
+static int s_fail_next_kv_write_per_ceiling_write = 0;
 
 // -- safety_cfg_write.h --
 static bool s_pico_push_should_fail = false;
@@ -303,6 +347,18 @@ bool safety_cfg_write_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16
     }
     if (param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C) {
         s_pico_ceiling = value;
+        s_volatile_ceiling_write_count++;
+        if (s_volatile_ceiling_write_count == 1 && s_zone_raise_after_first_ceiling_write > 0.0f) {
+            s_required_known = true;
+            s_required_ceiling = s_zone_raise_after_first_ceiling_write;
+            if (s_pico_ceiling < s_required_ceiling) {
+                s_pico_ceiling = s_required_ceiling;
+            }
+        }
+        if (s_fail_next_kv_write_per_ceiling_write > 0) {
+            s_fail_next_kv_write_per_ceiling_write--;
+            fake_kv_script_write_status_after(0, HAL_IO);
+        }
     }
     return true;
 }
@@ -526,6 +582,14 @@ static void reset_state(void)
     s_zones_import_should_fail = false;
     s_zones_import_call_count = 0;
     s_set_active_id_should_fail = false;
+    s_set_active_id_unlocked_calls = 0;
+    s_probe_pending_in_set_active_id = false;
+    s_pending_seen_in_set_active_id = -1;
+    s_required_known = false;
+    s_required_ceiling = 0.0f;
+    s_zone_raise_after_first_ceiling_write = 0.0f;
+    s_volatile_ceiling_write_count = 0;
+    s_fail_next_kv_write_per_ceiling_write = 0;
 
     fake_kv_set_write_safe_here(true);
     kiln_cfg_swap_set_link(&s_fake_link);
@@ -1327,7 +1391,9 @@ static void test_active_id_save_failure_keeps_record_and_boot_retries(void)
     kiln_cfg_swap_boot_fault_t fault;
     TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
                "boot fault latched with kind ACTIVE_ID_UNSAVED");
-    TEST_CHECK(s_active_id == KILN_CFG_NO_ACTIVE_ID, "active id still unset");
+    // LOW-7: the real set_active_id_raw() sets RAM before persisting, so RAM
+    // names the target even though the persisted id does not.
+    TEST_CHECK(s_active_id == 7, "RAM active id names the target; only the persisted id is unsaved");
 
     TEST_SECTION("M1: next boot, active-id save works -- swap finished, record cleared");
     s_set_active_id_should_fail = false;
@@ -1369,6 +1435,244 @@ static void test_save_pending_read_back_catches_silent_write(void)
     TEST_CHECK(s_zones_import_call_count == 0, "ESP untouched");
 }
 
+// -- UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md follow-up, LOW-1..LOW-7 --
+
+static void test_low6_restore_never_below_zone_raise_pico_open_path(void)
+{
+    TEST_SECTION("LOW-6: zone max raised after raise-first, PICO_OPEN save fails -- restore keeps the "
+                 "ceiling at the zones' requirement, not R's lower snapshot");
+    reset_state();
+    s_zone_raise_after_first_ceiling_write = 1400.0f;
+    fake_kv_script_write_status_after(2, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused when PICO_OPEN cannot be persisted");
+    TEST_CHECK(s_volatile_ceiling_write_count >= 2, "the restore write actually ran (raise-first + restore)");
+    TEST_CHECK(s_pico_ceiling >= 1400.0f, "Pico ceiling NOT lowered below the raised zone max (1400)");
+    TEST_CHECK(s_pico_committed.count == 0, "Pico package never pushed");
+}
+
+static void test_low6_restore_never_below_zone_raise_rollback_path(void)
+{
+    TEST_SECTION("LOW-6: zone max raised after raise-first, PICO_DONE save fails -- rollback() restore keeps "
+                 "the ceiling at the zones' requirement");
+    reset_state();
+    s_zone_raise_after_first_ceiling_write = 1400.0f;
+    fake_kv_script_write_status_after(4, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok && !diverged, "swap refused and cleanly rolled back");
+    TEST_CHECK(pico_param_bits(&s_pico_committed, 0x0201u) == 7u, "Pico content back on R");
+    TEST_CHECK(s_pico_ceiling >= 1400.0f, "Pico ceiling NOT lowered below the raised zone max (1400)");
+
+    TEST_SECTION("LOW-6: zone requirement below R -- R's snapshot ceiling is still what is restored");
+    reset_state();
+    s_zone_raise_after_first_ceiling_write = 900.0f; /* hook only raises s_pico_ceiling if lower: it is not */
+    fake_kv_script_write_status_after(4, HAL_IO);
+    ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok, "swap refused");
+    TEST_CHECK(s_pico_ceiling == 1000.0f, "R's ceiling (1000) restored when it is already above the zones' need");
+}
+
+static kiln_cfg_swap_pending_t make_pending(kiln_cfg_swap_marker_t marker)
+{
+    kiln_cfg_swap_pending_t p;
+    memset(&p, 0, sizeof(p));
+    p.marker = (uint8_t)marker;
+    p.target_id = 7;
+    p.previous_active_id = 3;
+    p.rollback_blob_len = 32;
+    memset(p.rollback_blob, 0xCD, sizeof(p.rollback_blob)); /* R == reset_state()'s live blob */
+    p.rollback_pico = s_current_pico_snapshot;
+    p.crc32 = pending_crc(&p);
+    return p;
+}
+
+static void test_low4_low5_rollback_uncleared_journal_reported(void)
+{
+    TEST_SECTION("LOW-4: rollback succeeds but the journal clear fails -- reported, record kept");
+    reset_state();
+    kiln_cfg_swap_pending_t p = make_pending(KILN_CFG_SWAP_MARKER_PICO_DONE);
+    TEST_CHECK(save_pending(&p), "PICO_DONE record persists");
+    fake_kv_script_write_status_after(0, HAL_IO); /* rollback()'s only NVS write is the final clear */
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool rolled = rollback(&s_fake_link, &p, /*esp_was_committed=*/false, reason, sizeof(reason));
+    TEST_CHECK(rolled, "both sides are back on R -- rollback itself still succeeded");
+    TEST_CHECK(strstr(reason, KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE) != NULL,
+               "reason carries the uncleared-journal note instead of staying silent");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_PICO_DONE,
+               "record still on flash -- boot recovery will clear it");
+    TEST_CHECK(kiln_cfg_swap_is_pending(), "autosave stays suppressed while the record is uncleared");
+
+    TEST_SECTION("LOW-5: rollback restores active_id under kiln_cfg_store_lock");
+    TEST_CHECK(s_set_active_id_unlocked_calls == 0, "set_active_id_raw never called without the store lock");
+    TEST_CHECK(s_lock_depth == 0, "lock released afterwards");
+    TEST_CHECK(s_active_id == 3, "active_id restored to the previous id");
+}
+
+static void test_low4_apply_reason_names_uncleared_journal(void)
+{
+    TEST_SECTION("LOW-4: generation race rollback whose clear fails -- the apply's reason names it");
+    reset_state();
+    g_bump_gen_on_push = true;
+    /* Writes: STAGED 0/1, PICO_OPEN 2/3, PICO_DONE 4/5, then the generation
+     * check rolls back; rollback's clear set_blob is write index 6. */
+    fake_kv_script_write_status_after(6, HAL_IO);
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    g_bump_gen_on_push = false;
+    printf("   reason: %s\n", reason);
+    TEST_CHECK(!ok && !diverged, "refused and rolled back");
+    TEST_CHECK(strstr(reason, KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE) != NULL,
+               "apply reason appends the uncleared-journal note");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE, "record left for boot");
+}
+
+static void test_low4_note_survives_long_message(void)
+{
+    TEST_SECTION("LOW-4: rolled_back_reason() keeps the note when the message fills the buffer");
+    char longmsg[KILN_CFG_SWAP_REASON_MAX * 2];
+    memset(longmsg, 'x', sizeof(longmsg) - 1);
+    longmsg[sizeof(longmsg) - 1] = '\0';
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool r = rolled_back_reason(reason, sizeof(reason), longmsg, KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE);
+    TEST_CHECK(!r, "always returns false");
+    TEST_CHECK(strstr(reason, KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE) != NULL,
+               "note survives a long message (truncation drops the message tail, not the note)");
+}
+
+static void test_low3_esp_done_both_on_r_is_cleared(void)
+{
+    TEST_SECTION("LOW-3: ESP_DONE record with both sides back on R -- cleared, never latched");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    s_pico_committed = s_current_pico_snapshot; /* Pico on R (0x0201 == 7) */
+    /* live blob is reset_state()'s 0xCD == R */
+    kiln_cfg_swap_pending_t p = make_pending(KILN_CFG_SWAP_MARKER_ESP_DONE);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "record cleared");
+    TEST_CHECK(!kiln_cfg_swap_get_boot_fault(NULL), "no ESP_DONE_UNCONFIRMED latch over a consistent R state");
+    TEST_CHECK(s_active_id == 3, "active_id restored to previous_active_id before the clear");
+
+    TEST_SECTION("LOW-3: both on R, persisted active_id names the target and restoring it fails -- latched, "
+                 "not cleared");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    s_pico_committed = s_current_pico_snapshot;
+    s_active_id = 7; /* a diverged/ACTIVE_ID_UNSAVED path already persisted the target */
+    p = make_pending(KILN_CFG_SWAP_MARKER_ESP_DONE);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+    s_set_active_id_should_fail = true;
+    kiln_cfg_swap_boot_recover();
+    s_set_active_id_should_fail = false;
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
+               "record kept: active_id could not be put back on R's kiln");
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED,
+               "latched ESP_DONE_UNCONFIRMED instead of clearing over a target active_id");
+
+    TEST_SECTION("LOW-3: ESP on R but Pico on neither -- still latched");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    memset(&s_pico_committed, 0, sizeof(s_pico_committed));
+    set_pico_param(&s_pico_committed, 0x0201u, KILNLINK_PARAM_TYPE_U16, 99);
+    p = make_pending(KILN_CFG_SWAP_MARKER_ESP_DONE);
+    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED,
+               "half-on-R state still latches ESP_DONE_UNCONFIRMED");
+}
+
+static void test_low2_autosave_unblocked_after_active_id_unsaved(void)
+{
+    TEST_SECTION("LOW-2: apply finished but active-id save failed -- is_pending false, autosave allowed");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    s_set_active_id_should_fail = true;
+    s_probe_pending_in_set_active_id = true;
+    s_pending_seen_in_set_active_id = -1;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    s_probe_pending_in_set_active_id = false;
+    TEST_CHECK(!ok && !diverged, "applied but not a clean success");
+    /* 2026-09-15 race: until apply returns, a concurrent autosave must see
+     * the swap as pending, so the exception may only be armed at the end. */
+    TEST_CHECK(s_pending_seen_in_set_active_id == 1,
+               "is_pending() true mid-apply (inside the active-id save, after ESP_DONE)");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE, "record kept at ESP_DONE");
+    TEST_CHECK(!kiln_cfg_swap_is_pending(), "autosave not blocked: RAM active id names the live target");
+
+    TEST_SECTION("LOW-2: a later zone edit autosaves into the target slot -- next boot does not latch "
+                 "ESP_DONE_UNCONFIRMED");
+    /* Simulate the zone edit + autosave: live and the target slot change together. */
+    s_live_blob[5] = 0x11;
+    s_slot_blob[5] = 0x11;
+    s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID; /* a reboot loses the RAM flag */
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    kiln_cfg_swap_boot_recover();
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && fault.kind == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
+               "boot latches only the display-only ACTIVE_ID_UNSAVED kind");
+    TEST_CHECK(!kiln_cfg_swap_is_pending(), "boot finish also re-enables autosave");
+
+    TEST_SECTION("LOW-2: a different RAM active id keeps autosave blocked");
+    s_active_id = 3;
+    TEST_CHECK(kiln_cfg_swap_is_pending(), "autosave stays blocked if RAM active id is not the target");
+}
+
+static void test_low7_marker_save_fails_and_clear_fails(void)
+{
+    TEST_SECTION("LOW-7: PICO_OPEN save fails AND the clear fails -- record reads STAGED, boot discards");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    /* First ceiling write (raise-first) arms the PICO_OPEN set_blob failure;
+     * the second (the restore) arms the clear's set_blob failure. */
+    s_fail_next_kv_write_per_ceiling_write = 2;
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    reason[0] = '\0';
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    TEST_CHECK(!ok && !diverged, "swap refused, not a divergence");
+    TEST_CHECK(s_fail_next_kv_write_per_ceiling_write == 0, "both injected failures were consumed");
+    TEST_CHECK(s_pico_committed.count == 0, "Pico package never pushed");
+    TEST_CHECK(s_pico_ceiling == 1000.0f, "ceiling put back to R");
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_STAGED,
+               "record still reads STAGED (both later writes failed)");
+    kiln_cfg_swap_boot_recover();
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "boot discards the STAGED record");
+    TEST_CHECK(!kiln_cfg_swap_get_boot_fault(NULL), "no boot fault for a STAGED discard");
+}
+
+static void test_low1_boot_fault_kind_names(void)
+{
+    TEST_SECTION("LOW-1: boot fault kind names for /api/status");
+    TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED),
+                      "active_id_unsaved") == 0, "active_id_unsaved");
+    TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED),
+                      "esp_done_unconfirmed") == 0, "esp_done_unconfirmed");
+    TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_NONE), "none") == 0, "none");
+    reset_state();
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault));
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_NONE, "no fault -> NONE");
+    latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED, 7, "x");
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
+               "latched kind reported");
+    kiln_cfg_swap_boot_fault_t fault;
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault(&fault) && strstr(fault.reason, "x") != NULL, "reason kept");
+    TEST_CHECK(strlen("KILN APPLIED -- active kiln not saved, retried at boot") < 96, "LCD text under 96 chars");
+}
+
 int main(void)
 {
     test_clean_swap_applies_both_halves();
@@ -1402,6 +1706,15 @@ int main(void)
     test_esp_done_save_failure_rolls_back();
     test_active_id_save_failure_keeps_record_and_boot_retries();
     test_save_pending_read_back_catches_silent_write();
+    test_low6_restore_never_below_zone_raise_pico_open_path();
+    test_low6_restore_never_below_zone_raise_rollback_path();
+    test_low4_low5_rollback_uncleared_journal_reported();
+    test_low4_apply_reason_names_uncleared_journal();
+    test_low4_note_survives_long_message();
+    test_low3_esp_done_both_on_r_is_cleared();
+    test_low2_autosave_unblocked_after_active_id_unsaved();
+    test_low7_marker_save_fails_and_clear_fails();
+    test_low1_boot_fault_kind_names();
 
     if (g_test_failures == 0) {
         printf("ALL TESTS PASSED\n");

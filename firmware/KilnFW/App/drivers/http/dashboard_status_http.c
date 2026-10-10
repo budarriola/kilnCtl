@@ -528,6 +528,11 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         json_escape(ds->kiln_cfg_swap_boot_fault_reason, swap_reason_esc, sizeof(swap_reason_esc));
         APPEND(",\"kiln_cfg_swap_boot_fault_target_id\":%ld", (long)ds->kiln_cfg_swap_boot_fault_target_id);
         APPEND(",\"kiln_cfg_swap_boot_fault_reason\":\"%s\"", swap_reason_esc);
+        /* LOW-1, additive: the latched kind's stable name, so the dashboard
+         * can show "active_id_unsaved" (display-only) with softer text. */
+        char swap_kind_esc[sizeof(ds->kiln_cfg_swap_boot_fault_kind) * 2 + 1];
+        json_escape(ds->kiln_cfg_swap_boot_fault_kind, swap_kind_esc, sizeof(swap_kind_esc));
+        APPEND(",\"kiln_cfg_swap_boot_fault_kind\":\"%s\"", swap_kind_esc);
     }
 
     /* 2026-09-16: surfaces thermo_task.c's (SaftyFW) MAX31856 tc_type

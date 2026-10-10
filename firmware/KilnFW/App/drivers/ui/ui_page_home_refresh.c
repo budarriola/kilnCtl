@@ -19,7 +19,7 @@
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
-#include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault_kind() -- M13 fix */
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 #include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
@@ -301,20 +301,29 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                 }
                 lv_label_set_text(s_ui_home_trip_strip, fault_buf);
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
-            } else if (kiln_cfg_swap_get_boot_fault(NULL)) {
+            } else if (kiln_cfg_swap_get_boot_fault_kind() != KILN_CFG_SWAP_BOOT_FAULT_NONE) {
                 /* M13 fix: an interrupted two-processor kiln-config swap
-                 * could not be recovered at boot -- heaters are alarmed/
-                 * disabled the whole time this is true (kiln_cfg_swap.c's
-                 * own hooks into the divergence/ceiling gates it reuses).
-                 * Ranked above the migration-persist warning below (that one
-                 * is informational only; this one means heat is actively
-                 * refused right now), below a live safety trip (the
-                 * OTA-bypass banner once ranked here too, retired
-                 * 2026-09-29). Same 96-char/no-scroll strip; the full
-                 * reason (names the remedy) is on the web dashboard only --
-                 * this literal is the short form that fits here. */
+                 * could not be recovered at boot. For every kind but
+                 * ACTIVE_ID_UNSAVED the record is left pending and the
+                 * divergence/ceiling gates kiln_cfg_swap.c reuses are what
+                 * refuse heat while the two sides disagree; this strip only
+                 * says why. ACTIVE_ID_UNSAVED (LOW-1) is display-only: both
+                 * processors agree on the applied config, heat is not gated,
+                 * and only the saved "which kiln is active" marker failed --
+                 * boot retries it -- so it gets softer text that does not
+                 * claim anything is interrupted. Ranked above the
+                 * migration-persist warning below and below a live safety
+                 * trip (the OTA-bypass banner once ranked here too, retired
+                 * 2026-09-29). Same 96-char/no-scroll strip; the full reason
+                 * is on the web dashboard only -- these literals are the
+                 * short forms that fit here. Reads the kind only, not
+                 * kiln_cfg_swap_get_boot_fault()'s struct, so no second copy
+                 * of its 200-byte reason lands on this stack (ds already
+                 * carries one). */
                 lv_label_set_text(s_ui_home_trip_strip,
-                                   "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
+                                   kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED
+                                       ? "KILN APPLIED -- active kiln not saved, retried at boot"
+                                       : "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
             } else {
                 /* M13 fix (2026-09-16): lowest priority of the branches

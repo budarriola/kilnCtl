@@ -180,6 +180,10 @@ typedef struct {
     bool     kiln_cfg_swap_boot_fault;
     int32_t  kiln_cfg_swap_boot_fault_target_id;
     char     kiln_cfg_swap_boot_fault_reason[200];
+    /* LOW-1: kiln_cfg_swap_boot_fault_kind_name() of the latched kind
+     * ("active_id_unsaved" is display-only: both processors agree, heat is
+     * not gated, retried at each boot). Empty when no fault latched. */
+    char     kiln_cfg_swap_boot_fault_kind[24];
 
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache

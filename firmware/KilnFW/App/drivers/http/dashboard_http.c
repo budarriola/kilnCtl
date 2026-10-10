@@ -498,6 +498,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->kiln_cfg_swap_boot_fault_target_id = swap_boot_fault.target_id;
     snprintf(out->kiln_cfg_swap_boot_fault_reason, sizeof(out->kiln_cfg_swap_boot_fault_reason), "%s",
              swap_boot_fault.reason);
+    snprintf(out->kiln_cfg_swap_boot_fault_kind, sizeof(out->kiln_cfg_swap_boot_fault_kind), "%s",
+             out->kiln_cfg_swap_boot_fault ? kiln_cfg_swap_boot_fault_kind_name(swap_boot_fault.kind) : "");
 
     /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
      * struct comment above these fields for the full rationale). Every read

@@ -1,4 +1,4 @@
-﻿# Unchecked persist result audit, 2026-10-09
+# Unchecked persist result audit, 2026-10-09
 
 Scope: the "logging unchecked success" class named in CLAUDE.md, in
 `firmware/KilnFW/App/**` and `firmware/SaftyFW/src/**`, audited at origin/dev
@@ -251,6 +251,69 @@ is left behind for a fetch the user saw fail. It is a real image, so this is not
 a safety issue, but `GET /api/update/status` then disagrees with the job result.
 Log the failure.
 
+## Opus review of the M1/M2/L6 fix (7f10efe3): LOW findings -- FIXED
+
+The Opus review of `7f10efe3` raised seven LOW findings, all in or around
+`kiln_cfg_swap.c`. All are fixed in the follow-up commit; each fix has a host
+test in `test_kiln_cfg_swap.c`, and LOW-2/3/4/5/6 plus the review-of-the-fix items
+below were negative-tested with `tools/negtest.ps1` (eight mutations, each CAUGHT).
+
+- **LOW-6 (rollback ceiling restore could tighten below the zones).**
+  `restore_r_ceiling_volatile()` now writes max(R's snapshot ceiling, the
+  ceiling the current zones require), the latter from the new
+  `safety_ceiling_sync_required_ceiling_c()` (same policy and zone read as the
+  reconcile). Unknown requirement (zones not valid) falls back to R's value.
+  Residual window: a zones POST that has guard-raised but not committed is not
+  visible; the reconcile that every caller runs right after is the second pass.
+  Tests: `test_low6_restore_never_below_zone_raise_pico_open_path`,
+  `test_low6_restore_never_below_zone_raise_rollback_path`.
+- **LOW-1 (ACTIVE_ID_UNSAVED shown as an interrupted swap).** `/api/status`
+  gains additive `kiln_cfg_swap_boot_fault_kind` (`kiln_cfg_swap_boot_fault_kind_name()`).
+  The main page shows "KILN CONFIG APPLIED -- ACTIVE KILN NOT SAVED (retried
+  each boot)" in a neutral banner for `active_id_unsaved`; the LCD strip shows
+  "KILN APPLIED -- active kiln not saved, retried at boot" and no longer claims
+  heat is refused. Latch reason and the `kiln_cfg_swap.h` M13 comment corrected.
+- **LOW-2 (autosave blocked after a failed active-id save).**
+  `kiln_cfg_swap_is_pending()` returns false for an ESP_DONE record kept open
+  only because the active-id save failed (RAM flag set at the very end of a
+  finished apply or boot finish) when RAM active_id names the target, so
+  autosave writes into the target's slot and the next boot does not latch
+  ESP_DONE_UNCONFIRMED. ESP_DONE during an apply's own steps stays blocked.
+  Test: `test_low2_autosave_unblocked_after_active_id_unsaved`, which also
+  probes `kiln_cfg_swap_is_pending()` inside the active-id save (after
+  ESP_DONE, after the RAM set) and requires it true, so arming the exception
+  early (the 2026-09-15 race) fails the test.
+- **LOW-3 (ESP_DONE with both sides on R latched).** `finish_esp_done_impl()`
+  clears an ESP_DONE record whose live blob and Pico read-back both equal R (a
+  rollback whose final clear failed) instead of latching. Before clearing it
+  puts the persisted active_id back on `previous_active_id` (under the store
+  lock); if that fails the record is kept and ESP_DONE_UNCONFIRMED latches, so a
+  record whose active_id already names the target can never be cleared while R
+  is live (autosave would write R over the target's slot). Test:
+  `test_low3_esp_done_both_on_r_is_cleared`.
+- **LOW-4 (rollback's final clear unchecked).** Checked, logged, and appended to
+  the apply's reason ("swap journal not cleared after rollback; retried at next
+  boot"), placed first so a long message truncates instead of the note
+  (`test_low4_note_survives_long_message`). Tests: `test_low4_low5_rollback_uncleared_journal_reported`,
+  `test_low4_apply_reason_names_uncleared_journal`.
+- **LOW-5 (rollback's active_id write unlocked).** Now under
+  `kiln_cfg_store_lock()`, taken only after the Pico round trips and the
+  reconcile return.
+- **LOW-7 (host stub hid the RAM-before-persist contract).** The fake
+  `kiln_cfg_store_set_active_id_raw()` sets RAM before failing, like the real
+  one; the M1 test now expects RAM active_id 7. New
+  `test_low7_marker_save_fails_and_clear_fails` (PICO_OPEN save and the clear
+  both fail: record reads STAGED, boot discards it, no fault).
+
+Not changed: an apply that ends diverged still keeps autosave blocked for the
+session (pre-existing behaviour, outside these findings). Also not changed: a
+later apply resets the LOW-2 flag before persisting STAGED, so if that STAGED
+persist fails, autosave stays blocked for the rest of the boot. That fails safe,
+and the next boot recovers the record. The new 24-byte
+`kiln_cfg_swap_boot_fault_kind` field grows each UI-side `dashboard_status_t`
+local by 24 B. The lvgl task has a 10240 B stack, and its static walk is
+INDETERMINATE: 4432 B is a lower bound, not a measurement.
+
 ## Not findings: checked and justified
 
 - `zones_config_store.c:727/731` `(void)zones_config_persist_migrated_blob_verified(...)`:
@@ -342,7 +405,7 @@ SaftyFW:
 
 ## Recommended follow-ups, in priority order
 
-1. ~~M1 and M2, `kiln_cfg_swap.c`.~~ Fixed in `7f10efe3`, with L6.
+1. ~~M1 and M2, `kiln_cfg_swap.c`.~~ Fixed in `7f10efe3`, with L6; the review's LOW-1..LOW-7 follow-ups are fixed too (section above).
 2. L1: dirty-flag retry in `profiles_favorites_set` and
    `profiles_builtin_set_hidden/restore_all`.
 3. L3: do not overwrite the firing history after a failed load.
