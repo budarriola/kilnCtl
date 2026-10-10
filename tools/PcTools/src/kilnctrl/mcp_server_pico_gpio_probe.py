@@ -75,11 +75,23 @@ from . import mcp_server_core as _core
 # WRITE unconditionally, with no confirm/override -- enforced in
 # pico_gpio_probe.py itself, not just here. READ is allowed for GPIO6.
 #
-# Unlike the ESP tools, there is no "profile running" or "ARMED" gate here:
-# SaftyFW exposes no protocol yet for the PC to query relay state (same gap
-# debug_write_memory() already documents for peer="pico"). GPIO6's hard deny
-# is what stands in for that guard rail today.
+# The writers refuse while the Pico is ARMED, or when ARMED cannot be read
+# (fail closed), exactly like debug_write_memory(); GPIO6 stays hard-denied.
 # ---------------------------------------------------------------------------
+def _armed_refusal(tool: str) -> Optional[str]:
+    """Same fail-closed ARMED gate as debug_write_memory(peer="pico")."""
+    try:
+        armed, detail = debug_probe.pico_armed_state()
+    except Exception as exc:  # noqa: BLE001
+        armed, detail = None, f"state read raised {exc}"
+    if armed is False:
+        return None
+    _srv._session_log.warning("%s: REFUSED armed_state=%s detail=%s", tool, armed, detail)
+    if armed is None:
+        return f"error: {tool} refused -- could not confidently determine Pico ARMED state ({detail})"
+    return f"error: {tool} refused -- Pico is ARMED ({detail})"
+
+
 @_core._tool()
 def pico_gpio_set_mode(gpio_num: int, mode: str, confirm: bool = False) -> str:
     """Configure a Pico (RP2040) GPIO as input / input_pullup / input_pulldown
@@ -95,6 +107,10 @@ def pico_gpio_set_mode(gpio_num: int, mode: str, confirm: bool = False) -> str:
     if confirm is not True:
         return "error: pico_gpio_set_mode refused without confirm=True -- it halts the Pico core and rewrites pad registers"
     mode_val = mode.strip().lower()
+    if gpio_num != pico_gpio_probe.SAFTYFW_RELAY_GPIO:
+        refusal = _armed_refusal("pico_gpio_set_mode")
+        if refusal is not None:
+            return refusal
     try:
         pico_gpio_probe.set_mode(gpio_num, mode_val)
     except pico_gpio_probe.PicoGpioProbeRefused as exc:
@@ -119,6 +135,10 @@ def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     """
     if confirm is not True:
         return "error: pico_gpio_write refused without confirm=True -- it drives a live Pico pin"
+    if gpio_num != pico_gpio_probe.SAFTYFW_RELAY_GPIO:
+        refusal = _armed_refusal("pico_gpio_write")
+        if refusal is not None:
+            return refusal
     try:
         pico_gpio_probe.write(gpio_num, level)
     except pico_gpio_probe.PicoGpioProbeRefused as exc:

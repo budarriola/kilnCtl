@@ -146,15 +146,19 @@ class SetAuxOutputTest(_Base):
 
 
 class SetAuxManualTest(_Base):
-    def _io(self, relay_on):
+    def _io(self, relay_on, unknown=False, i2c=False):
         st = unittest.mock.Mock()
         st.relay.side_effect = lambda r: relay_on
+        st.relay_state_unknown = unknown
+        st.i2c_failed = i2c
         return st
 
-    def _run(self, snap, shadow_on, **kw):
+    def _run(self, snap, shadow_on, unknown=False, i2c=False, uart_ip="10.0.0.5", **kw):
+        wifi = unittest.mock.Mock(connected=True, ip=uart_ip)
         with unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=snap), \
              unittest.mock.patch.object(ahc, "post_aux_manual", return_value=True) as post, \
-             unittest.mock.patch.object(ma._srv._io, "read", return_value=self._io(shadow_on)):
+             unittest.mock.patch.object(ma._srv._info, "get_wifi_status", return_value=wifi), \
+             unittest.mock.patch.object(ma._srv._io, "read", return_value=self._io(shadow_on, unknown, i2c)):
             r = ma.control_set_aux_manual(**kw)
         return r, post
 
@@ -191,6 +195,21 @@ class SetAuxManualTest(_Base):
     def test_shadow_mismatch_fails_loud(self):
         r, _ = self._run(_snap({4: {"enabled": True}}), False, relay=4, on=True, confirm=True)
         self.assertTrue(r.startswith("FAILED"), r)
+
+    def test_unknown_flag_off_fails(self):
+        r, _ = self._run(_snap({4: {"enabled": True}}), False, unknown=True, relay=4, on=False, confirm=True)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("relay_state_unknown", r)
+
+    def test_i2c_failed_fails(self):
+        r, _ = self._run(_snap({4: {"enabled": True}}), True, i2c=True, relay=4, on=True, confirm=True)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("i2c_failed", r)
+
+    def test_board_identity_mismatch_fails(self):
+        r, _ = self._run(_snap({4: {"enabled": True}}), True, uart_ip="10.0.0.9", relay=4, on=True, confirm=True)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("10.0.0.9", r)
 
     def test_bad_args(self):
         for kw in ({"relay": 0, "on": True}, {"relay": 4, "on": 1}):

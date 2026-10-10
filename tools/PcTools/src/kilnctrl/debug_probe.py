@@ -854,8 +854,31 @@ def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple
     if cmd is None:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_WRITE_CMDS)}, got {width!r}")
     peer_cfg = resolve_peer(peer)
-    tcl = f"{_adapter_prefix(peer_cfg)}init; halt; {cmd} 0x{address:x} 0x{value:x}; exit"
-    return _run(peer, tcl)
+    # Owner rule: halt via probe, ALWAYS resume. The write is catch-wrapped so a
+    # failing write cannot skip the resume tail; the resume outcome is printed
+    # and checked below so a core left halted is reported loudly, not silently.
+    tcl = (
+        f"{_adapter_prefix(peer_cfg)}init; halt; "
+        f'if {{[catch {{{cmd} 0x{address:x} 0x{value:x}}} _kctl_werr]}} {{puts "KCTL_WRITE_ERR $_kctl_werr"}}; '
+        f'if {{[catch {{{_RESUME_TCL}}} _kctl_rerr]}} {{puts "KCTL_RESUME_ERR $_kctl_rerr"}}; '
+        "sleep 100; "
+        "foreach _kctl_t [target names] { "
+        "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
+        'puts "KCTL_AFTER $_kctl_t $_kctl_s" }; exit'
+    )
+    ok, output = _run(peer, tcl)
+    werr = [ln for ln in (output or "").splitlines() if ln.startswith("KCTL_WRITE_ERR")]
+    rerr = [ln for ln in (output or "").splitlines() if ln.startswith("KCTL_RESUME_ERR")]
+    halted = [ln.split()[1] for ln in (output or "").splitlines()
+              if len(ln.split()) == 3 and ln.startswith("KCTL_AFTER") and ln.split()[2] != "running"]
+    if ok and (rerr or halted):
+        return False, (f"{output}\nERROR: write_memory RESUME FAILED -- target(s) {halted or 'unknown'} may still be "
+                       f"HALTED ({'; '.join(rerr) or 'state not running'}). Run debug_resume now.")
+    if ok and werr:
+        return False, f"{output}\nERROR: {werr[0]}"
+    if not ok and not (output or "").count("KCTL_AFTER"):
+        return ok, output + "\nWARNING: write_memory could not confirm the core was resumed; run debug_resume."
+    return ok, output
 
 
 # `primask` and `control` are here for a reason, not for completeness. Without
