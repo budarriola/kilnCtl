@@ -41,6 +41,7 @@ $excludeNames = @(
     'lint_pages.js'       # a separate lint tool (own contract/exit codes), already
                           # enforced by check_lint_pages.ps1 -- not a test_*.js unit test.
     '_drivers_layout.js'  # shared require()d helper, no assertions of its own to run.
+    '_page_vm.js'         # shared require()d vm/fake-DOM helper for the executing page tests, no assertions of its own.
 )
 
 $files = Get-ChildItem -Path $testDir -Filter '*.js' -File |
