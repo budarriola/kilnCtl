@@ -48,7 +48,7 @@ would exit 2. So the guard protects future tests and changes no current behaviou
 
 ## Findings
 
-### LOW-1: C1 derived list goes silently green if registrations are lost
+### LOW-1: C1 derived list goes silently green if registrations are lost (FIXED in dfd3a346f)
 
 `firmware/SaftyFW/test/build_host_tests.ps1:300,663-680`. `$results` is built only from
 `$allHostNames`. If that list ends up empty, `$results` is empty, the script prints
@@ -62,7 +62,7 @@ hand-written chain could not fail this way.
 Suggested fix: fail when `$allHostNames.Count` is 0 or differs from the number of queued
 builds, or iterate `$exitCodes` as well and fail on any name present in only one of the two.
 
-### NIT
+### NIT (all FIXED in dfd3a346f: dead $mainExit removed, "did not run" marker, duplicate rail check removed, with-statement reformatted, S5 failure message names the bit, nested-run guard, direct S5 try_clear test)
 
 - `build_host_tests.ps1:651`: `$mainExit` is now dead (assigned and never read).
 - `build_host_tests.ps1:664`: an executable that never ran is reported as `(exit 1)`, the
