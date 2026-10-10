@@ -1551,6 +1551,7 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
     kiln_cfg_swap_set_link(&s_fake_link);
     p = make_pending(KILN_CFG_SWAP_MARKER_ESP_DONE);
     TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
+    memset(&s_boot_fault, 0, sizeof(s_boot_fault)); /* the PICO_DONE section above latched the same kind */
     s_slot_exists = false; /* target slot cannot be re-read => fallback rollback */
     s_set_active_id_should_fail = true;
     kiln_cfg_swap_boot_recover();
