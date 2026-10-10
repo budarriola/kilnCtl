@@ -98,7 +98,7 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
    fields give 400, the system-mode gate gives 409, auth-tier refusal holds,
    success reads back, and no persistent write happens on any refusal (count
    stub store writes).
-9. **(diagnostics_http part done 2026-10-09, test_diagnostics_http.c; ota/update part open.) diagnostics_http and ota/update handler refusals (KilnFW).** Compile
+9. **(diagnostics_http part done 2026-10-09, test_diagnostics_http.c; ota_http part done 2026-10-10, test_ota_http_refusals.c; update_*_http gate refusals open.) diagnostics_http and ota/update handler refusals (KilnFW).** Compile
    `diagnostics_http.c` with stubs: estop_verify refused unless safety_trip is
    ok, crash_report_clear refused when unacknowledged, nvs_keys refuses
    `kiln_auth`; ota_esp / rollback and `update_http_*gate_refuses` refuse during

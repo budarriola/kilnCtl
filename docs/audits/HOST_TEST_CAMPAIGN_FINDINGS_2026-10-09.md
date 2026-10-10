@@ -177,3 +177,39 @@ lands, invert that check. `backup_import.c` was out of scope (another agent).
 
 Three mutations, all CAUGHT with a passing baseline (`tools
 egtest.ps1 -Command` over `build_host_tests.ps1 -Only persist_campaign10`): touch_cal version check disabled (2 failures), ct_verify zone_count bound loosened (1), backup_json isfinite check dropped (2).
+
+## Campaign 9b: OTA HTTP handlers (test_ota_http_refusals.c)
+
+127 checks, built on `test_ota_http.c`'s stubs (extended with settable partition,
+`esp_ota_*`, recovery-mode, relay-shadow and recv fakes). Covered: the
+interlock gate (409 with a safety link, 428 without the acknowledge header),
+the single update claim (a refusal or failure must release it), ESP push body
+and size validation, the 500 mapping for no OTA partition, `esp_ota_begin`,
+header write and chunk write failures, `esp_ota_abort` on every failure after
+begin, rollback refusals, recovery_exit and boot_guard_reset reporting,
+recovery_boot refusals (mode gate, energized or unreadable relay, recovery
+image absent, set-boot failure with restore, reboot task creation failure),
+Pico push refusals, and registration of exactly 13 distinct routes.
+
+Negative test: 4 mutations (target==running check, `esp_ota_abort` cleanup,
+recovery_boot claim release on set failure, Pico relay-start handling), all
+CAUGHT.
+
+Not covered: the `update_*_http*.c` gate-refusal handlers. That part of item 9
+stays open.
+
+Findings (handler behaviour left as is, per campaign rules; the tests do not
+pin either behaviour):
+
+- `ota_recovery_exit_post_handler` sends `{"ok":true,"status":"rebooting"}`
+  before it creates the reboot task. If `xTaskCreate` fails, the log says the
+  board will not reboot, but the client has already been told it is
+  rebooting. It also reports ok when `boot_guard_mark_healthy()` did not
+  verify, which is logged only. Severity low: the route is an operator escape
+  hatch and the log line names the manual recovery (power cycle).
+- `ota_esp_rollback_post_handler` has the same ordering: the "rebooting" body
+  goes out before the reboot task creation is checked.
+- The recovery_boot branch that releases the claim after an energized-relay
+  refusal is shadowed by the mode gate (`relay_authority_heat_run_active` and
+  `relays_energized` refuse first), so the post-claim authoritative re-read is
+  not reachable through the fakes. Not a defect, a coverage limit.
