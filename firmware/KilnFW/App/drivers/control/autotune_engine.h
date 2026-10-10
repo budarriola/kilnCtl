@@ -403,6 +403,10 @@ typedef enum {
                                                 * writes RAM and bumps s_config_generation BEFORE it calls
                                                 * nvs_save(), so the new ceiling IS live in RAM for this boot;
                                                 * it just was not persisted and will revert on reboot */
+    AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN,     /* zones_config_set_max_ramp() refused (e.g. a run holds the heat
+                                                * claim) and the ceiling read back unchanged -- NOTHING was
+                                                * written, not even RAM; new_ceiling_c_per_hr reports the old
+                                                * value */
 } autotune_ceiling_adoption_t;
 
 /* Result of autotune_engine_accept() below: what happened to the
@@ -487,7 +491,8 @@ typedef struct {
  *     deliberately-set ceiling.
  * An out-of-range estimate (> ZONE_MAX_RAMP_C_PER_HR_MAX) is REJECTED, never
  * clamped. A persist failure on the ceiling write itself is reported as
- * AUTOTUNE_CEILING_FAILED_TO_PERSIST.
+ * AUTOTUNE_CEILING_FAILED_TO_PERSIST (value live in RAM), a refusal that
+ * wrote nothing as AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN.
  *
  * In every case the gains (and model, if any) are still accepted/persisted
  * regardless of adopt_ceiling's outcome -- adopt_ceiling only ever adds a

@@ -980,6 +980,8 @@ bool adaptive_tune_any_write_in_flight(void)
  * persist). Default true so a positive-path test does not also have to set
  * this. */
 static bool s_stub_set_max_ramp_result = true;
+static bool s_stub_set_max_ramp_ram_on_fail = false;
+static float s_stub_get_max_ramp_value; /* fwd: defined with the getter stub below */
 static int s_stub_set_max_ramp_call_count = 0;
 static uint8_t s_stub_set_max_ramp_zone = 0xFF;
 static float s_stub_set_max_ramp_value = -1.0f;
@@ -991,6 +993,9 @@ bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
     s_stub_set_max_ramp_value = c_per_hr;
     if (s_stub_set_max_ramp_result) {
         s_fake_zone_max_ramp = c_per_hr;
+    }
+    if (!s_stub_set_max_ramp_result && s_stub_set_max_ramp_ram_on_fail) {
+        s_stub_get_max_ramp_value = c_per_hr; /* nvs_save() failed AFTER the RAM write */
     }
     return s_stub_set_max_ramp_result;
 }
@@ -5004,6 +5009,7 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
     s_stub_set_model_result = true;
     s_stub_set_max_ramp_call_count = 0;
     s_stub_set_max_ramp_result = false; /* forces the persist to fail */
+    s_stub_set_max_ramp_ram_on_fail = true; /* ... AFTER the RAM write, like the real nvs_save() failure */
     s_stub_get_max_ramp_result = true;
     s_stub_get_max_ramp_value = 0.0f; /* no ceiling configured yet -- would otherwise be adoptable */
 
@@ -5011,6 +5017,7 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
     autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
                                         .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
     bool accepted = autotune_engine_accept(&opts, &result);
+    s_stub_set_max_ramp_ram_on_fail = false;
 
     TEST_CHECK(accepted, "the accept itself still succeeds -- gains/model are already live");
     TEST_CHECK(s_stub_set_max_ramp_call_count == 1,
@@ -5028,6 +5035,55 @@ static void test_autotune_engine_accept_reports_ceiling_persist_failure(void)
                     "was not persisted");
     TEST_CHECK_NEAR(result.old_ceiling_c_per_hr, 0.0f, 1e-4,
                     "reported old ceiling is what a reboot will revert to");
+
+    s_stub_set_pid_result = false;
+    s_stub_set_model_result = false;
+    s_stub_set_max_ramp_result = true;
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+}
+
+/* Review 15 LOW-2: a setter refusal that wrote nothing (a run holds the heat
+ * claim) must NOT be reported as FAILED_TO_PERSIST ("live in RAM"). */
+static void test_autotune_engine_accept_ceiling_claim_refusal_not_live_in_ram(void)
+{
+    TEST_SECTION("autotune_engine_accept(.., adopt_ceiling=true) reports REFUSED_NOT_WRITTEN when the setter "
+                 "refuses without writing RAM");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    s_at.lock = xSemaphoreCreateMutex();
+    s_at.state = AUTOTUNE_ENGINE_DONE;
+    s_at.method = AUTOTUNE_METHOD_STEP;
+    s_at.zone_index = 2;
+    s_at.model.valid = true;
+    s_at.model.settled = true;
+    s_at.model.extrapolation_converged = true;
+    s_at.model.tau_consistent_with_gain = true;
+    s_at.model.k_gain_c_per_duty = 10.0f;
+    s_at.model.tau_s = 100.0f;
+    s_at.model.dead_time_s = 5.0f;
+    s_at.predicted_max_ramp_ambient_c_per_hr = 123.5f;
+
+    s_stub_set_pid_result = true;
+    s_stub_set_model_result = true;
+    s_stub_set_max_ramp_call_count = 0;
+    s_stub_set_max_ramp_result = false;
+    s_stub_set_max_ramp_ram_on_fail = false; /* refusal: nothing written */
+    s_stub_get_max_ramp_result = true;
+    s_stub_get_max_ramp_value = 0.0f;
+
+    autotune_accept_opts_t opts = {.adopt_ceiling = true};
+    autotune_accept_result_t result = {.adoption = AUTOTUNE_CEILING_SKIPPED_NOT_REQUESTED,
+                                        .old_ceiling_c_per_hr = -1.0f, .new_ceiling_c_per_hr = -1.0f};
+    (void)autotune_engine_accept(&opts, &result);
+
+    TEST_CHECK(result.adoption == AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN,
+              "a refusal that wrote nothing is REFUSED_NOT_WRITTEN, not FAILED_TO_PERSIST");
+    TEST_CHECK_NEAR(result.new_ceiling_c_per_hr, 0.0f, 1e-4,
+                    "reported ceiling is the unchanged old value, not the refused estimate");
 
     s_stub_set_pid_result = false;
     s_stub_set_model_result = false;
@@ -7269,6 +7325,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_engine_accept_skips_when_it_would_tighten();
     test_autotune_engine_accept_skips_ceiling_adoption_when_read_fails();
     test_autotune_engine_accept_reports_ceiling_persist_failure();
+    test_autotune_engine_accept_ceiling_claim_refusal_not_live_in_ram();
     test_autotune_engine_accept_rejects_out_of_range_not_clamped();
     test_min_excursion_refuses_a_fit_below_the_rise_floor();
     test_physical_plausibility_refuses_gain_implying_ceiling_below_max_temp();

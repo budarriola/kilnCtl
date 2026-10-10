@@ -724,6 +724,24 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                  * ignored above and this branch didn't exist), so a rejected
                  * or failed persist looked identical to ADOPTED to every
                  * caller. Now reported distinctly. */
+                /* Review 15 LOW-2: a refusal (heat claim held by a run, bad zone)
+                 * writes NOTHING, unlike an nvs_save() failure which leaves the
+                 * value live in RAM. Tell them apart by reading the ceiling back:
+                 * only report "live in RAM" when it really is. */
+                float live_ceiling_c_per_hr = 0.0f;
+                const bool live_in_ram = zones_config_get_max_ramp(zone, &live_ceiling_c_per_hr) &&
+                                         live_ceiling_c_per_hr == predicted_max_ramp_ambient_c_per_hr;
+                if (!live_in_ram) {
+                    if (out != NULL) {
+                        out->adoption = AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN;
+                        out->new_ceiling_c_per_hr = old_ceiling_c_per_hr;
+                    }
+                    ESP_LOGW(AT_TAG,
+                             "autotune zone %u: gains and model accepted; predicted ramp ceiling (%.1f degC/hr) "
+                             "was refused by the zones store (a run holds the heat claim?) and NOT written; "
+                             "ceiling stays %.1f degC/hr",
+                             zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
+                } else {
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_FAILED_TO_PERSIST;
                     out->new_ceiling_c_per_hr = predicted_max_ramp_ambient_c_per_hr;
@@ -738,6 +756,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                          "is live in RAM for this boot but was not persisted -- will revert to %.1f degC/hr "
                          "on reboot",
                          zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
+                }
             } else {
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_ADOPTED;

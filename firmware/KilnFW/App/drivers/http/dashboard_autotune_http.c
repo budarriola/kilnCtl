@@ -512,6 +512,7 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
     case AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE: outcome_name = "REJECTED_OUT_OF_RANGE"; break;
     case AUTOTUNE_CEILING_SKIPPED_READ_FAILED: outcome_name = "SKIPPED_READ_FAILED"; break;
     case AUTOTUNE_CEILING_FAILED_TO_PERSIST: outcome_name = "FAILED_TO_PERSIST"; break;
+    case AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN: outcome_name = "REFUSED_NOT_WRITTEN"; break;
     }
     /* Sized to the longest actual response rather than a round number (this
      * task stack has been within 64 B of overflow before -- see
