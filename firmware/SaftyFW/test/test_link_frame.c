@@ -375,9 +375,19 @@ static void test_trip_event_publish_barrier(void)
             dw = q;
         }
         TEST_CHECK(w != NULL && dw != NULL && (size_t)(w - dw) < 40u, "writer: HAL_DMB() immediately before the seq bump");
-        const char *r = strstr(text, "uint8_t seq = s_trip_seq;");
-        const char *dr = r ? strstr(r, "HAL_DMB();") : NULL;
-        TEST_CHECK(r != NULL && dr != NULL && (size_t)(dr - r) < 40u, "reader: HAL_DMB() right after reading the seq");
+        /* LOW-6: the reader is a real seqlock -- generation read, acquire barrier, the seq and
+         * fields, barrier, generation re-read, retry on odd/moved. */
+        const char *g1 = strstr(text, "uint32_t g1 = s_trip_gen;");
+        const char *dg = g1 ? strstr(g1, "HAL_DMB();") : NULL;
+        TEST_CHECK(g1 != NULL && dg != NULL && (size_t)(dg - g1) < 40u, "reader: HAL_DMB() right after reading the generation");
+        const char *rs = g1 ? strstr(g1, "seq = s_trip_seq;") : NULL;
+        const char *g2 = rs ? strstr(rs, "uint32_t g2 = s_trip_gen;") : NULL;
+        const char *db = rs ? strstr(rs, "HAL_DMB();") : NULL;
+        TEST_CHECK(rs != NULL && g2 != NULL && db != NULL && db < g2, "reader: seq and fields read, barrier, then the generation re-read");
+        TEST_CHECK(g2 != NULL && strstr(g2, "(g1 & 1u) == 0u && g1 == g2") != NULL, "reader: retries unless the generation was even and unchanged");
+        const char *wg1 = strstr(text, "s_trip_gen++;");
+        const char *wg2 = wg1 ? strstr(wg1 + 1, "s_trip_gen++;") : NULL;
+        TEST_CHECK(wg1 != NULL && wg2 != NULL && wg1 < w && wg2 < w, "writer: generation bumped odd before and even again before the seq bump");
         free(text);
     }
 }

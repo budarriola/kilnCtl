@@ -332,6 +332,12 @@ static void test_session_drops_heat_grant(void)
         TEST_CHECK(d != NULL && strstr(d, "safety_core_request_enable(false)") != NULL &&
                        strstr(d, "safety_core_request_enable(false)") - d < 400,
                    "link_task.c drops the grant when the decision says so");
+        // LOW-7: the decision's second argument must be the real HEAT_OWNER_ACTIVE flag test --
+        // a constant there (true: never drops; false: always drops) keeps the lines above passing.
+        const char *call_end = d ? strstr(d, "safety_core_request_enable(false)") : NULL;
+        const char *flag = d ? strstr(d, "(snap.flags & CONTEXT_FLAG_HEAT_OWNER_ACTIVE) != 0u") : NULL;
+        TEST_CHECK(flag != NULL && call_end != NULL && flag < call_end,
+                   "link_task.c passes (snap.flags & CONTEXT_FLAG_HEAT_OWNER_ACTIVE) != 0u to the drop decision");
         free(text);
     }
 }

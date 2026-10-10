@@ -606,7 +606,13 @@ static bool s_trip_command_owed = false;
 // which is what keeps the two flags from ever being able to deadlock or
 // oscillate against each other.
 static bool s_clear_command_owed = false;
-static uint8_t s_trip_seq = 0;
+// LOW-6 (safety-link fix batch 2): both are written by safety_core_task (core 1)
+// and read lock-free by the link task on the other core, so they are volatile:
+// without it the compiler may hoist/merge the reader's loads. s_trip_gen is a
+// real seqlock generation (odd while a capture is in flight); s_trip_seq is the
+// protocol-visible trip number (wraps 255->1, never usable as the generation).
+static volatile uint8_t s_trip_seq = 0;
+static volatile uint32_t s_trip_gen = 0;
 static safety_trip_t s_trip_reason = SAFETY_TRIP_NONE;
 static uint32_t s_trip_uptime_ms = 0;
 static float s_trip_tc_c = 0.0f; // meaningless while s_trip_seq == 0 -- the getter
@@ -1448,12 +1454,20 @@ static void safety_core_task(void *arg)
             // safety_core_get_trip_event() is lock-free, so a reader must
             // never be able to observe the new seq before the fields it
             // describes are already written.
+            // Seqlock write side: odd generation while the fields change, so a
+            // reader that overlaps a SECOND trip's capture (old seq, half-new
+            // fields) sees the generation move and retries instead of
+            // returning a torn mix. The seq itself is bumped after the fields.
+            s_trip_gen++;
+            HAL_DMB();
             s_trip_reason = s_guard_state.reason;
             s_trip_uptime_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
             s_trip_tc_c = input.tc_valid ? input.tc_c : NAN;
             s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
                                                                             &s_guard_cfg);
             // F5: release -- every field above must be visible to the other core before the seq is.
+            HAL_DMB();
+            s_trip_gen++; // even again: capture complete
             HAL_DMB();
             s_trip_seq = link_frame_next_trip_seq(s_trip_seq); // wraps 255 -> 1, never 0 (F4)
 
@@ -1722,25 +1736,41 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
                                  uint32_t *out_uptime_ms, float *out_tc_c,
                                  float *out_deciding_threshold)
 {
-    // Read s_trip_seq FIRST, matching the write-order comment at the capture
-    // site in safety_core_task() above -- if a trip lands between this read
-    // and the field reads below, the caller sees either the old, fully
-    // consistent set (this seq, these fields) or -- at worst -- reports one
-    // trip event a poll cycle later than it happened. It can never observe a
-    // torn mix of one trip's seq with another trip's fields, because the
-    // writer always finishes writing every field before bumping the seq.
-    uint8_t seq = s_trip_seq;
-    HAL_DMB(); // F5: acquire -- the fields below are read only after the seq (pairs with the writer's DMB)
+    // Lock-free reader of the trip-event snapshot written by safety_core_task().
+    // The seq/fields consistency rule is the seqlock below (s_trip_gen); the
+    // writer also bumps s_trip_seq LAST so a new seq implies complete fields.
+    // LOW-6: a real seqlock read. The writer holds s_trip_gen odd while it
+    // rewrites the fields; re-read the generation after the fields and retry if
+    // it was odd or moved. Bounded (the capture is a few stores), so a wedged
+    // writer cannot hang the link task: after the bound the last snapshot is
+    // returned as-is (at worst one poll sees a torn second trip; the next poll
+    // sees the new seq and a consistent set).
+    uint8_t seq = 0;
+    safety_trip_t reason = SAFETY_TRIP_NONE;
+    uint32_t uptime_ms = 0;
+    float tc_c = NAN;
+    float threshold = NAN;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        uint32_t g1 = s_trip_gen;
+        HAL_DMB(); // F5: acquire -- the fields below are read only after the generation/seq
+        seq = s_trip_seq;
+        reason = s_trip_reason;
+        uptime_ms = s_trip_uptime_ms;
+        tc_c = s_trip_tc_c;
+        threshold = s_trip_deciding_threshold;
+        HAL_DMB();
+        uint32_t g2 = s_trip_gen;
+        if ((g1 & 1u) == 0u && g1 == g2) {
+            break;
+        }
+    }
 
     if (out_trip_seq) {
         *out_trip_seq = seq;
     }
     if (seq == 0) {
         // No trip yet this boot -- every other output is meaningless
-        // (matches the header comment's documented "false, everything
-        // zeroed" contract) rather than whatever s_trip_* happen to hold
-        // (their static-storage zero-init, in this case, but that is an
-        // implementation detail the caller must not rely on).
+        // (the documented "false, everything zeroed" contract).
         if (out_trip_reason) {
             *out_trip_reason = SAFETY_TRIP_NONE;
         }
@@ -1757,16 +1787,16 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
     }
 
     if (out_trip_reason) {
-        *out_trip_reason = s_trip_reason;
+        *out_trip_reason = reason;
     }
     if (out_uptime_ms) {
-        *out_uptime_ms = s_trip_uptime_ms;
+        *out_uptime_ms = uptime_ms;
     }
     if (out_tc_c) {
-        *out_tc_c = s_trip_tc_c;
+        *out_tc_c = tc_c;
     }
     if (out_deciding_threshold) {
-        *out_deciding_threshold = s_trip_deciding_threshold;
+        *out_deciding_threshold = threshold;
     }
     return true;
 }
