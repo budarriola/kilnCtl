@@ -197,6 +197,27 @@ first-use `esp_log` mutex-create and `__assert_func` tail. Live on the bench
 8 KB internal-heap floor, unmeasured. The `ota_rollback_reboot` bump is
 transient. Neither is harmful, but call them guessed.
 
+**Resolved for `danger_mode` (2026-10-09): reverted to 3072 B.** Measured:
+- Static, `check_all_task_stack_budgets.py` against a fresh KilnFW target ELF
+  built from origin/main 129586d4 (origin/dev's tip did not build:
+  `backup_import.c:3590` `-Werror=format-truncation`): 800 B walked
+  (`danger_mode_task` 64, `safety_link_request_enable` 48, `safety_exchange` 32,
+  `safety_drain_inbox` 64, `safety_drain_inbox_ex` 352, `safety_apply_fw_version`
+  176, `safety_parse_fw_version` 64), ceiling 2112 B, honest free 1972 B (64.2%
+  of 3072 B). Still INDETERMINATE (one unresolved indirect call), so 800 B is a
+  lower bound; the pessimistic add-on is the ~1.1 KB first-use `esp_log`
+  mutex-create / `__assert_func` tail above.
+- Live, `get_stack_margin` on the bench board (read-only): 2292 B free at worst
+  of 3072 B, 780 B used. The 2026-09-04 baseline JSON agrees (2320 B free, 752 B
+  used).
+- Worst case is about 800 + 1100 = 1900 B, leaving at least 38% of 3072 B free,
+  far above the 15% critical line. The 4096 B bump had no measured basis and
+  cost 1024 B of permanent internal DRAM against the 8 KB floor, so
+  `danger_mode.c` (`xTaskCreate`, `stack_margin_register`, comment) is back at
+  3072 B. The checker's `"danger_mode": 2256` ceiling row is untouched (another
+  session owns that file) and still sits above the measured figure.
+  `ota_rollback_reboot` stays 4096 B (transient, never run on hardware).
+
 ## Answers in brief
 1. The union handles a literal loaded in one block and called in another
    after a forward branch. A backward-branch order or `l32r` then `mov` into
