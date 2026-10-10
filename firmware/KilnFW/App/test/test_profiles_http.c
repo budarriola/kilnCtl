@@ -1049,6 +1049,14 @@ static void test_pcfg_adopted_file_retires_legacy_nvs_blob(void)
     nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
     nvs_close(h);
     TEST_CHECK(blen == sizeof(back) && back[0] == 40, "persisted prof_rev array untouched");
+    /* Review 12 LOW-5: the persisted used bitmap must have slot 0 cleared (no dangling bit). */
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    profiles_slot_bitmap_t persisted_used;
+    memset(&persisted_used, 0xFF, sizeof(persisted_used));
+    size_t ulen = sizeof(persisted_used);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, &persisted_used, &ulen) == ESP_OK, "persisted used bitmap readable");
+    nvs_close(h);
+    TEST_CHECK(!profiles_slot_bitmap_test(&persisted_used, 0), "retire cleared the persisted used bit for slot 0");
     profile_t fp;
     TEST_CHECK(pcfg_file_profile(0, &fp), "file still present");
 }
@@ -1079,6 +1087,15 @@ static void test_pcfg_retire_keeps_blob_when_file_not_adopted(void)
     memset(&s_profiles, 0, sizeof(s_profiles));
     nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
     TEST_CHECK(pcfg_nvs_slot_blob_present(0), "equal rev (NVS adopted): NVS blob kept");
+
+    /* Review 12 LOW-5: equal rev AND identical bytes -- the file may be adopted, the blob must still stay. */
+    pcfg_reset_all();
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    stage_legacy_slot(0, &file_side, 41);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "identical file at EQUAL rev 41");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "equal rev, identical bytes: NVS blob kept (strict >)");
 }
 
 static void test_pcfg_unused_slot_keeps_nvs_rev_floor(void)
