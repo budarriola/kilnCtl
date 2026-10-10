@@ -52,7 +52,7 @@ The fixer did not rerun the tests on the final rebased tree, so I ran them here.
 
 ## Findings
 
-### T-1 LOW -- the default GIT_SSH_COMMAND overrides the user's core.sshCommand / GIT_SSH
+### T-1 LOW -- the default GIT_SSH_COMMAND overrides the user's core.sshCommand / GIT_SSH -- FIXED (toolfx5)
 `tools/check_submodule_pins_pushed.ps1:24` sets `GIT_SSH_COMMAND=ssh -o BatchMode=yes ...`
 whenever that variable is unset. Git gives GIT_SSH_COMMAND precedence over both `GIT_SSH`
 (plink) and `core.sshCommand`. A common Windows setup has `core.sshCommand` pointing at
@@ -71,7 +71,7 @@ Fix: set the default only when `GIT_SSH_COMMAND`, `GIT_SSH` and `git config core
 all empty. Otherwise reuse the configured command with BatchMode appended, as in
 `-c core.sshCommand="<existing> -o BatchMode=yes"`.
 
-### T-2 LOW -- the origin probe treats any failure as "origin unreachable"
+### T-2 LOW -- the origin probe treats any failure as "origin unreachable" -- FIXED (toolfx5)
 At `check_submodule_pins_pushed.ps1:115-116`, any nonzero exit from `ls-remote origin HEAD` keeps
 the run at SKIP. That includes an auth error under `GCM_INTERACTIVE=never` and
 `GIT_TERMINAL_PROMPT=0`.
@@ -88,7 +88,7 @@ Fix: classify the probe output with `$netPattern`. Only a network-pattern failur
 Any other probe failure means origin is reachable, so it should FAIL, or exit 2 with
 "cannot decide".
 
-### T-3 LOW -- bounded but long stalls; the suite test hits GitHub
+### T-3 LOW -- bounded but long stalls; the suite test hits GitHub -- FIXED (toolfx5)
 - In land, the worst case per push attempt is N x (60 s ls-remote + 60 s fetch) + 60 s for the
   origin probe. That is about 7 min with three submodules. The pin step sits inside the
   non-fast-forward retry loop (land.ps1:342), so it repeats on every attempt.
@@ -102,7 +102,7 @@ Fix: in the no-arg case, set `KILNCTL_SUBPIN_TIMEOUT_SEC=5`, or run it with the 
 at a scratch repo. Its only purpose is the parameter-binding smoke test. In land, skip the re-run
 when the rebased tree's gitlinks did not change (compare `ls-tree` output).
 
-### T-4 LOW -- a fetch timeout is reported as "not on remote"
+### T-4 LOW -- a fetch timeout is reported as "not on remote" -- FIXED (toolfx5; message only, no automated test: needs a fetch that hangs after a good ls-remote)
 At `check_submodule_pins_pushed.ps1:103-105`, a fetch-by-sha that times out after a good ls-remote
 (`$f.TimedOut`) prints `FAIL: <path> pins <sha>, not on <url>` and the instruction to push the
 submodule. That message is wrong, and it sends the operator to push something that is already
@@ -111,7 +111,7 @@ false-refusal path.
 
 Fix: when `$f.TimedOut`, print "fetch timed out; cannot confirm", and keep the FAIL.
 
-### T-5 LOW -- test gaps (by inspection)
+### T-5 LOW -- test gaps (by inspection) -- FIXED (toolfx5)
 - No check_land case drives an exit other than 0 or 1 from the pin script. Reverting S-4a at
   land.ps1:345 (for example, letting exit 2 fall through to the warning) is therefore not caught.
   A `-PinCheckScript` seam with stubs that exit 2 and 3 would close this. The 3 case should
@@ -121,7 +121,7 @@ Fix: when `$f.TimedOut`, print "fetch timed out; cannot confirm", and keep the F
 - `check_dev_promote.ps1` has no pin case. Removing the pin call from dev_promote.ps1:153-155,
   or reverting it to warn on every nonzero code, passes every test.
 
-### T-6 INFO -- a stale `$LASTEXITCODE` if `git rev-parse HEAD` fails
+### T-6 INFO -- a stale `$LASTEXITCODE` if `git rev-parse HEAD` fails -- FIXED (toolfx5)
 At land.ps1:343, `(git rev-parse HEAD).Trim()` on `$null` raises a statement-terminating error
 before the child runs. `$LASTEXITCODE` then still holds the 0 from the post-rebase checks script,
 so `subPins='pass'` is recorded and the push proceeds. This is practically unreachable right
