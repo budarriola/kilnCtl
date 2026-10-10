@@ -74,6 +74,8 @@ static uint8_t g_sent[300];
 static size_t g_sent_len = 0;
 static uint8_t g_sent_src_task = 0;
 static uint32_t g_sent_timeout = 0;
+static unsigned g_mask_change_at = 0;
+static uint8_t g_mask_change_to = 0;
 
 #undef xTaskGetTickCount
 #define xTaskGetTickCount() ((TickType_t)g_tick)
@@ -83,6 +85,7 @@ static void fake_vTaskDelay(TickType_t t)
 {
     (void)t;
     g_tick += UART_BRIDGE_LINK_CHECK_MS; /* 1 kHz tick: ms == ticks */
+    if (g_mask_change_at && g_delay_calls + 1 == g_mask_change_at) { g_unowned = g_mask_change_to; }
     if (++g_delay_calls > g_delay_limit) {
         longjmp(g_loop_exit, 1);
     }
@@ -296,6 +299,7 @@ static void wd_reset(void)
     g_drop_last_mask = 0xEE;
     g_drop_last_value = 0xEE;
     g_drop_result = ESP_OK;
+    g_mask_change_at = 0;
     s_link_ever_seen = false;
     s_link_last_activity = 0;
     g_ctx.io = &g_io;
@@ -389,6 +393,13 @@ static void test_watchdog(void)
     wd_run(2);
     CHECK(g_drop_calls == 1);
     CHECK(g_drop_last_value == 0);
+
+    /* mask changes after a confirmed drop: the drop is re-armed for the new mask */
+    wd_reset();
+    g_mask_change_at = 4;
+    g_mask_change_to = 0x03;
+    wd_run(8);
+    CHECK(g_drop_calls == 2 && g_drop_last_mask == 0x03 && g_drop_last_value == 0);
 }
 
 static void test_start_link_watchdog(void)
