@@ -2813,6 +2813,15 @@ try {
             "/Fo:`"$sleObjDir\\`" /Fe:`"$exeSle`" `"$(Join-Path $testDir 'test_safety_link_endian.c')`""
     Invoke-HostTestExe -Name "safety_link_endian" -ExePath $exeSle -BuildCmd $cmdSle
 
+    $exeLl = Join-Path $outDir "kilnctl_host_tests_ui_lcd_lock.exe"
+    $llObjDir = Join-Path $outDir "ll"
+    New-Item -ItemType Directory -Force -Path $llObjDir | Out-Null
+    $cmdLl = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /Zc:preprocessor /I`"$(Join-Path $testDir 'stubs_lcd_lock')`" " +
+            "/Fo:`"$llObjDir\\`" /Fe:`"$exeLl`" `"$(Join-Path $testDir 'test_ui_lcd_lock.c')`" " +
+            "`"$(Join-Path $driversDir 'ui/lcd_auth_state.c')`" `"$(Join-Path $driversDir 'net/login_backoff.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+    Invoke-HostTestExe -Name "ui_lcd_lock" -ExePath $exeLl -BuildCmd $cmdLl
+
     Complete-HostTestQueue
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
@@ -3460,6 +3469,7 @@ try {
     # 86 -> 88: test_dashboard_autotune_http_get_handlers.c, test_zone_aux_convert_http.c (c78b)
     # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
     $totalExpected = 90
+    # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
