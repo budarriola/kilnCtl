@@ -485,7 +485,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
     {
         char val[16];
         int len = http_form_find_field(body, "pc_link_abort_silence_ms", val, sizeof(val));
-        if (len != -1) {
+        if (len != -1 && len != 0) { /* blank keeps the stored value; -2 overflow still hits the 400 */
             if (!zones_config_json_parse_float_field(body, "pc_link_abort_silence_ms", 0.0f,
                                    ZONE_PC_LINK_SILENCE_MS_MAX, &tmp->pc_link_abort_silence_ms)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,

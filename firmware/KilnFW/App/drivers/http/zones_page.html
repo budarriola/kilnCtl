@@ -2654,7 +2654,7 @@ document.getElementById('relayCount').addEventListener('change', renderZones);
 /* Optional guard/model/tuning fields: zones_http_post_parse.c omit-PRESERVES each one, but
    a blank value ("z0_driftperiod=") is "present" and fails its range parse with a misleading
    400. A blank optional field is therefore left out of the POST (keeps the stored value). */
-var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|xzone|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
 }

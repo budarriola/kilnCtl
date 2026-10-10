@@ -20,6 +20,17 @@
 #include "persist_scratch.h" /* persist_scratch_alloc() -- probe copy */
 #include "zone_settings_source_chain.h"
 
+/* Blank-tolerant presence for the guard fields and z%u_xzone: pre-strict-parse these
+ * treated "key=" (a page pushing an empty <input type=number>) as omitted, i.e. 0/disabled.
+ * Non-empty garbage still fails the range parse (400). */
+static bool zones_http_field_nonblank(const char *body, const char *key)
+{
+    char probe[2];
+    int n = http_form_find_field(body, key, probe, sizeof(probe));
+    return n != -1 && n != 0; /* -2 (overflow) is non-blank: parse rejects it */
+}
+
+
 /* SRC_GROUP_LIMITS/RELAY_TIMING/CONTROL/GUARDS/TC order, indexed by the
  * #defines in zones_config_accessors.h -- see zones_http_internal.h's
  * declaration of this array for why it lives here (parser and GET emitter
@@ -587,7 +598,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_wrongdirwindow", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_wrong_dir_window_s)) {
                 *err_reason = "zone guard_wrong_dir_window_s out of range";
                 return false;
@@ -597,7 +608,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_wrongdirrate", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_wrong_dir_rate_c_per_min)) {
                 *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
                 return false;
@@ -607,7 +618,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_offsettle", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_off_settle_s)) {
                 *err_reason = "zone guard_off_settle_s out of range";
                 return false;
@@ -617,7 +628,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_runawayrate", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_runaway_rate_c_per_min)) {
                 *err_reason = "zone guard_runaway_rate_c_per_min out of range";
                 return false;
@@ -627,7 +638,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_runawaymargin", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->guard_runaway_margin_c)) {
                 *err_reason = "zone guard_runaway_margin_c out of range";
                 return false;
@@ -637,7 +648,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_driftperiod", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_drift_period_s)) {
                 *err_reason = "zone guard_drift_period_s out of range";
                 return false;
@@ -647,7 +658,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_debounce", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_DEBOUNCE_TICKS_MAX, &z->guard_sensor_fault_debounce_ticks)) {
                 *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
                 return false;
@@ -657,7 +668,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_frozenwindow", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_frozen_window_s)) {
                 *err_reason = "zone guard_frozen_window_s out of range";
                 return false;
@@ -680,7 +691,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_xzone", i);
     {
         char probe[16];
-        if (zones_config_json_field_present(body, key)) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_CROSS_ZONE_DELTA_C_MAX, &z->cross_zone_max_delta_c)) {
                 *err_reason = "zone cross_zone_max_delta_c out of range";
                 return false;

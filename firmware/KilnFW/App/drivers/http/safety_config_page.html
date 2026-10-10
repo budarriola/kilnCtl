@@ -314,7 +314,8 @@ document.getElementById('save').addEventListener('click', function () {
      dead weight that could also mislead a reader of this page's source
      into thinking a POST from here could ever change it. */
   if (current.continue_on_zone_trip) params.push('continue_on_zone_trip=1');
-  params.push('pc_link_abort_silence_ms=' + document.getElementById('pcLink').value);
+  var pcLinkVal = document.getElementById('pcLink').value;
+  if (pcLinkVal !== '') params.push('pc_link_abort_silence_ms=' + pcLinkVal);
   /* 2026-08-27+1, owner report ("name relays not assigned to a zone"):
      relay<N>_name lives in the same whole-page record this endpoint edits.
      This page has no UI for it -- naming an unassigned relay is

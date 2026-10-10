@@ -1806,7 +1806,7 @@ static void test_zones_post_strict_optional_keys(void)
     TEST_SECTION("zones_post_handler -- present-but-empty optional keys are 400 and change nothing");
     strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=", "empty max_simultaneous_relays -> 400");
     strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=", "empty continue_on_zone_trip -> 400");
-    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=", "empty pc_link_abort_silence_ms -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=abc", "garbage pc_link_abort_silence_ms -> 400");
     strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=", "empty relay1_type -> 400");
 
     TEST_SECTION("zones_post_handler -- over-long optional keys are 400 and change nothing");
@@ -1839,6 +1839,44 @@ static void test_zones_post_strict_optional_keys(void)
     TEST_CHECK(s_relay_names.cfg.types[0] == 2, "omitted relay1_type preserves the stored type");
     TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 0 && s_zones.cfg.continue_on_zone_trip == 0,
                "omitted max_simultaneous_relays/continue_on_zone_trip take the documented 0 default");
+}
+
+#define ONE_ZONE_BLANK_BODY     "thermo_count=1&relay_count=2&" MINIMAL_TIMING_PROFILE_BODY "&"     "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"     "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"     "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&z0_timingprofile=0&"     "z0_settings_source=255"
+
+static void test_zones_post_blank_guard_fields_and_pc_link(void)
+{
+    static const char *const keys[] = {"wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate",
+                                       "runawaymargin", "driftperiod", "debounce", "frozenwindow", "xzone"};
+    TEST_SECTION("zones_post_handler -- blank guard fields/xzone mean 0 (pre-strict semantics); garbage is 400");
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        char body[1600];
+        snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=", keys[k]);
+        strict_zones_seed();
+        s_zones.cfg.zones[0].cross_zone_max_delta_c = 9.0f;
+        s_zones.cfg.zones[0].guard_wrong_dir_window_s = 9.0f;
+        run_zones_post(body);
+        if (s_test_err_called) printf("  err: %s\n", s_test_err_msg);
+        TEST_CHECK(!s_test_err_called && s_test_ok_called, keys[k]);
+        TEST_CHECK(s_zones.cfg.zones[0].cross_zone_max_delta_c == 0.0f &&
+                       s_zones.cfg.zones[0].guard_wrong_dir_window_s == 0.0f &&
+                       s_zones.cfg.zones[0].guard_wrong_dir_rate_c_per_min == 0.0f &&
+                       s_zones.cfg.zones[0].guard_off_settle_s == 0.0f &&
+                       s_zones.cfg.zones[0].guard_runaway_rate_c_per_min == 0.0f &&
+                       s_zones.cfg.zones[0].guard_runaway_margin_c == 0.0f &&
+                       s_zones.cfg.zones[0].guard_drift_period_s == 0.0f &&
+                       s_zones.cfg.zones[0].guard_sensor_fault_debounce_ticks == 0.0f &&
+                       s_zones.cfg.zones[0].guard_frozen_window_s == 0.0f,
+                   "blank guard/xzone stores 0");
+        snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
+        strict_zones_seed();
+        run_zones_post(body);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, "garbage guard/xzone value -> 400");
+    }
+    TEST_SECTION("zones_post_handler -- blank pc_link_abort_silence_ms keeps the stored value");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE "&pc_link_abort_silence_ms=");
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "blank pc_link accepted");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 1234.0f, "blank pc_link preserves stored value");
 }
 
 // A single per-zone body block, shared by the whole-page cross-zone cycle
@@ -16562,6 +16600,7 @@ void run_test_zones_http(void)
     test_zones_post_safety_tc_type_is_ignored_even_when_garbage();
     test_zones_post_accepts_clean_minimal_body();
     test_zones_post_strict_optional_keys();
+    test_zones_post_blank_guard_fields_and_pc_link();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
     test_post_probe_oom_is_503();
