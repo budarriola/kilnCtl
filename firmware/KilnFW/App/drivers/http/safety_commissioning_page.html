@@ -1673,7 +1673,7 @@ function checkFiringOrAutotuneRunning() {
   return window.kcCommissioningCheckBusy();
 }
 
-function loadCurrent() {
+function loadCurrent(isBg) {
   // Sequenced, not parallel: renderGroups() reads ctMapDerived synchronously,
   // so the map has to be in hand before the commissioning response is
   // rendered. A failed/absent CT-map fetch is not fatal -- it just leaves
@@ -1686,7 +1686,7 @@ function loadCurrent() {
     if (m && typeof m.k_mask === 'number' && m.k && m.k.length === 3) ctKDerived = m;
   }).catch(function () { /* leave ctMapDerived alone -- manual entry stays available */ })
     .then(loadZoneNames)
-    .then(loadCommissioning);
+    .then(function () { return loadCommissioning(isBg === true); });
 }
 
 // Names for the "Not fitted" zone picker (gCardNotFitted's <select>),
@@ -1702,7 +1702,21 @@ function loadZoneNames() {
   }).catch(function () { /* leave gZoneNames empty -- gPrefill() falls back to "Zone N" */ });
 }
 
-function loadCommissioning() {
+/* WEB_UI_JS_AUDIT M-3: the 5 s background refresh must not rebuild the form under an operator who has typed
+ * unsaved edits (renderGroups() replaces every input), or "Save all" would post the stored values and report
+ * "Committed.". fieldsDirty is set by a real user edit in #fields; a background load that finds it set updates
+ * only the read-only status (latest, flags, CRC line, banners). Any non-background load (after a save, an
+ * auto-zero, a preset) renders in full and clears it. */
+var fieldsDirty = false;
+(function () {
+  var f = document.getElementById('fields');
+  function mark(e) { if (e.isTrusted) fieldsDirty = true; }
+  f.addEventListener('input', mark);
+  f.addEventListener('change', mark);
+})();
+
+function loadCommissioning(isBg) {
+  var bg = isBg === true;
   fetch('/api/safety/commissioning').then(function (r) { return r.json(); }).then(function (data) {
     latest = data;
     gLoadFailed = false;
@@ -1713,6 +1727,11 @@ function loadCommissioning() {
     window.kcCtCal = Array.isArray(data.ct_cal) ? data.ct_cal : [];
     setBodyFlags(data);
     renderCrcLine(data);
+    if (bg && fieldsDirty) {
+      renderTcOffsetBanner(data);
+      return;
+    }
+    fieldsDirty = false;
     renderGroups(data);
     renderTcOffsetBanner(data);
     // RELAY_LIFE_BUDGET.md: reflect the stored safety relay
@@ -2352,7 +2371,7 @@ loadCurrent();
 // Refetch periodically so a `stale` flag that clears on its own (the ESP's
 // own cache refetch, COMMISSIONING.md section 3) is reflected here without
 // a manual reload -- same cadence class as zones_page.html's autotune poll.
-setInterval(loadCurrent, 5000);
+setInterval(function () { loadCurrent(true); }, 5000);
 
 (function () {
   var btn = document.getElementById('themeBtn');

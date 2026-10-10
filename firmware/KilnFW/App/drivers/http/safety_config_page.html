@@ -375,6 +375,10 @@ document.getElementById('save').addEventListener('click', function () {
   if (!ok) { msg.textContent = 'Every timing box must be a number of 0 or more.'; return; }
 
   msg.textContent = 'Saving…';
+  /* WEB_UI_JS_AUDIT M-1: refuse (409) if the zones config changed elsewhere since this page loaded it. */
+  if (current && current.generation !== undefined && current.generation !== null) {
+    params.push('expected_generation=' + current.generation);
+  }
   var savedEditSeq = kcEditSeq;
   fetch('/api/zones', {
     method: 'POST',
@@ -395,7 +399,17 @@ document.getElementById('save').addEventListener('click', function () {
       msg.textContent = 'Sign-in cancelled -- not saved.';
       return;
     }
-    msg.textContent = 'Save failed: ' + e.message;
+    var text = e.message;
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && parsed.error === 'zones_config_stale') {
+        text = 'the zone settings changed elsewhere (autotune, another page or a tool) since this page loaded. ' +
+          'Nothing was saved. Reload the page and redo your edit.';
+      } else if (parsed && parsed.reason) {
+        text = parsed.reason;
+      }
+    } catch (parseErr) { /* plain-text refusal -- show as-is */ }
+    msg.textContent = 'Save failed: ' + text;
   });
 });
 

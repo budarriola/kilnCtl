@@ -2105,6 +2105,43 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     test_cfg_rows_reset();
 }
 
+static void test_zones_post_expected_generation(void)
+{
+    TEST_SECTION("POST /api/zones -- optional expected_generation: stale -> 409 and nothing written; "
+                 "current or absent -> commits; garbage -> 400 (WEB_UI_JS_AUDIT M-1)");
+    seed_two_zone_pid_baseline();
+    char body[1400];
+    zones_cfg_t before = s_zones.cfg;
+    uint32_t gen = s_config_generation;
+
+    snprintf(body, sizeof(body), "%s&expected_generation=%lu", TWO_ZONE_MINIMAL_BODY("255", "255"),
+             (unsigned long)(gen + 1u));
+    run_zones_post(body);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "stale expected_generation answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_stale") != NULL, "409 names zones_config_stale");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "stale submit wrote nothing");
+    TEST_CHECK(s_config_generation == gen, "stale submit did not bump the generation");
+
+    snprintf(body, sizeof(body), "%s&expected_generation=abc", TWO_ZONE_MINIMAL_BODY("255", "255"));
+    run_zones_post(body);
+    TEST_CHECK(s_test_err_called, "non-numeric expected_generation refused");
+    TEST_CHECK(s_config_generation == gen, "garbage token wrote nothing");
+
+    snprintf(body, sizeof(body), "%s&expected_generation=%lu", TWO_ZONE_MINIMAL_BODY("255", "255"),
+             (unsigned long)gen);
+    run_zones_post(body);
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "matching expected_generation commits");
+    TEST_CHECK(s_config_generation == gen + 1u, "matching submit bumped the generation");
+
+    /* The same (now old) token again is stale. */
+    run_zones_post(body);
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "re-using the consumed token answered 409");
+
+    /* Absent = old behaviour. */
+    run_zones_post(TWO_ZONE_MINIMAL_BODY("255", "255"));
+    TEST_CHECK(s_test_ok_called && !s_test_err_called, "absent expected_generation keeps the old behaviour");
+}
+
 static esp_err_t zh_failing_cfg_write_fn(const char *rel_path, const void *data, size_t len);
 
 /* persfx MED-2 (second half): a fault latched WITHOUT the undecided flag must survive a POST whose save fails;
@@ -17240,6 +17277,7 @@ void run_test_zones_http(void)
     test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
+    test_zones_post_expected_generation();
     test_zones_post_refused_while_load_undecided_keeps_fault();
     test_zones_post_failed_save_keeps_load_fault();
     test_zones_post_refuses_run_started_during_ceiling_raise();

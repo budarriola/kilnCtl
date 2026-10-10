@@ -407,6 +407,8 @@ any schedule against your own kiln and clay before firing it.</p>
 
 <script>
 var editingId = null;
+var editingRev = null;  /* M-2: slot_rev + name GET /api/profile reported when the editor loaded this slot */
+var editingName = null;
 var zones = [];
 var zoneCeilings = []; // max_ramp_c_per_hr per zone, parallel to `zones`; 0 = unset
 var RAMP_WARN_FRACTION = 0.8; // mirrors PROFILE_RAMP_WARN_FRACTION in profiles_http.c
@@ -1381,6 +1383,8 @@ window.addEventListener('beforeunload', function (e) {
 
 function resetEditor() {
   editingId = null;
+  editingRev = null;
+  editingName = null;
   document.getElementById('editorTitle').textContent = 'New profile';
   document.getElementById('pname').value = '';
   setSelectedZoneMask(0);
@@ -2043,6 +2047,8 @@ function copyBuiltin(p) {
 
 function loadIntoEditor(p) {
   editingId = p.id; /* a builtin id: the board turns the save into a copy */
+  editingRev = null;
+  editingName = null;
   kcDirty = false;
   document.getElementById('editorTitle').textContent = 'Copy of: ' + (p.title || p.name);
   document.getElementById('pname').value = p.name;
@@ -2087,6 +2093,8 @@ function editProfile(id) {
   ]).then(function (results) {
     var p = results[0];
     editingId = id;
+    editingRev = (typeof p.slot_rev === 'number') ? p.slot_rev : null;
+    editingName = p.name;
     document.getElementById('editorTitle').textContent = 'Edit: ' + p.name;
     document.getElementById('pname').value = p.name;
     setSelectedZoneMask(p.zone_mask);
@@ -2251,6 +2259,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }
   var params = [];
   params.push('id=' + (editingId === null ? '-1' : editingId));
+  /* M-2: let the board refuse (409) if this slot was changed or deleted since the editor loaded it. */
+  if (editingId !== null && editingRev !== null) {
+    params.push('expected_rev=' + editingRev);
+    if (editingName !== null) params.push('expected_name=' + encodeURIComponent(editingName));
+  }
   params.push('name=' + encodeURIComponent(document.getElementById('pname').value));
   var zoneMask = selectedZoneMask();
   if (zoneMask === 0) {
@@ -2302,6 +2315,12 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
     .then(function (result) {
+      if (result.data && result.data.error === 'profile_changed') {
+        msg.innerHTML = '<span class="err">Not saved: this profile was changed or deleted elsewhere since you opened it. ' +
+          'Reload it from the list (Edit) to see the current version, then redo your changes.</span>';
+        refreshAll();
+        return;
+      }
       if (!result.ok || result.data.ok === false) {
         msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(result.data.error || 'save failed') + '</span>';
         return;
@@ -2312,6 +2331,8 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       }
       msg.innerHTML = html;
       editingId = result.data.id;
+      editingRev = (typeof result.data.slot_rev === 'number') ? result.data.slot_rev : null;
+      editingName = null; /* the board may normalise the saved name; the rev alone guards the next save */
       /* Edits typed while the save was in flight are not in what was saved: keep the guard armed for them. */
       if (kcEditSeq === savedEditSeq) kcDirty = false;
       else msg.innerHTML += '<br><span class="warn">You made further edits while saving -- they are not saved yet.</span>';

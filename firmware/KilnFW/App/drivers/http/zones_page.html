@@ -3008,6 +3008,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var savedZonesEditSeq = zonesEditSeq;
   saveBtnEl.disabled = true;
   params = omitBlankOptionalParams(params);
+  /* WEB_UI_JS_AUDIT M-1: refuse (409) if the zones config changed elsewhere since this page loaded it. */
+  if (current && current.generation !== undefined && current.generation !== null) {
+    params.push('expected_generation=' + current.generation);
+  }
   /* A stalled connection must not leave Save disabled until the browser gives up. */
   var saveTimer = null;
   /* Arms a fresh 30 s timer + signal. app.js's fetch wrapper clears the timer while its login
@@ -3059,6 +3063,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     try {
       var parsed = JSON.parse(text);
       if (parsed && parsed.reason) text = parsed.reason;
+      /* WEB_UI_JS_AUDIT M-1: the board refused because the config changed since this page loaded. */
+      if (parsed && parsed.error === 'zones_config_stale') {
+        text = 'the zone settings changed elsewhere (autotune, another page or a tool) since this page loaded. ' +
+          'Nothing was saved. Reload the page and redo your edit.';
+      }
     } catch (parseErr) { /* not JSON -- show as-is */ }
     /* LOW-5: a bad_host / cross_origin refusal reads as guidance, not raw {"error":"bad_host"}. */
     text = (window.kcHostRefusalFromText && window.kcHostRefusalFromText(e.message)) || text;

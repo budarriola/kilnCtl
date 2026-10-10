@@ -780,10 +780,24 @@ function submitZonesConfig(data, liveZones, extraParams) {
     params = params.concat(zoneToPostParams(z, i));
   }
   if (extraParams) params = params.concat(extraParams);
+  /* WEB_UI_JS_AUDIT M-1: send the generation this step's GET saw; the board refuses 409 if the zones config
+     changed elsewhere since (autotune Accept, an MCP writer, another page). */
+  if (data.generation !== undefined && data.generation !== null) params.push('expected_generation=' + data.generation);
   return fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) {
-    if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+    if (!r.ok) {
+      return r.text().then(function (t) {
+        try {
+          var j = JSON.parse(t);
+          if (j && j.error === 'zones_config_stale') {
+            throw new Error('The zone settings changed elsewhere since this step loaded (autotune, another page or a tool). ' +
+              'Nothing was saved. Reload this page and redo the step.');
+          }
+        } catch (pe) { if (pe && pe.message && pe.message.indexOf('Nothing was saved') !== -1) throw pe; }
+        throw new Error(t || ('http ' + r.status));
+      });
+    }
     return r;
   });
 }

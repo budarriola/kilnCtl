@@ -40,9 +40,9 @@ or `KilnFW_recovery/`.
 
 | ID | Sev | Area |
 |----|-----|------|
-| M-1 | MED | zones Save, safety_config Save and wizard zone steps re-post the whole `/api/zones` page from an old GET; no client generation |
-| M-2 | MED | profile save overwrites slot `id` with no rev check; a deleted-and-reused slot gets clobbered |
-| M-3 | MED | safety_commissioning re-renders every 5 s, wiping unsaved edits; Save all then reports "Committed." |
+| M-1 | MED (FIXED) | zones Save, safety_config Save and wizard zone steps re-post the whole `/api/zones` page from an old GET; no client generation |
+| M-2 | MED (FIXED) | profile save overwrites slot `id` with no rev check; a deleted-and-reused slot gets clobbered |
+| M-3 | MED (FIXED) | safety_commissioning re-renders every 5 s, wiping unsaved edits; Save all then reports "Committed." |
 | L-1 | LOW | STOP FIRING / Pause / Resume / Ack give no feedback on failure |
 | L-2 | LOW | Clear Trip refusal text erased by the next poll; plain-text refusals show nothing |
 | L-3 | LOW | zones sweep: Abort is fire-and-forget; the status poll dies after one failed fetch |
@@ -65,6 +65,8 @@ or `KilnFW_recovery/`.
 ## MED
 
 ### M-1 Whole-page `/api/zones` writes from a stale GET (three pages)
+
+**FIXED (webfx5).** POST /api/zones takes optional `expected_generation`; a stale value answers 409 `zones_config_stale` and writes nothing. zones_page, safety_config_page, the wizard zone steps and the PcTools zone writers (`build_post_body`) send it.
 
 **Where.** Each of these posts every zone field, taken from the GET made when the page or step
 loaded:
@@ -111,6 +113,8 @@ failure once (HP-02 in CLAUDE.md).
 
 ### M-2 Profile save overwrites a slot with no concurrency token
 
+**FIXED (webfx5).** GET /api/profile adds `slot_rev`; POST /api/profile takes optional `expected_rev` and `expected_name` and answers 409 `profile_changed` (nothing written, also for a deleted slot). The page sends them and offers reload.
+
 **Where.** The `profiles_page.html` save handler, about 2240-2318, posts `id=editingId`.
 `profiles_edit_http.c:527-551` treats an id in 0..99 as "create or overwrite this slot". It
 reads only id, name, zone_mask, seg_count, favorite, hidden and segments. There is no rev or
@@ -129,6 +133,8 @@ route has none.
 name and refuse when it differs.
 
 ### M-3 Safety commissioning page wipes unsaved edits every 5 s
+
+**FIXED (webfx5).** The 5 s background reload skips `renderGroups` while the form is dirty, so Save posts what the user typed.
 
 **Where.**
 

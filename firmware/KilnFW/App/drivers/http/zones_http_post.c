@@ -338,7 +338,34 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
     /* Lost-update guard: tmp is assembled from s_zones.cfg (preserved fields) and committed whole at
      * the commit point, after blocking work (Pico ceiling confirm). Any other writer in between bumps
      * s_config_generation; the commit re-checks it and refuses rather than overwrite that write. */
-    const uint32_t gen_at_snapshot = s_config_generation;
+    uint32_t gen_at_snapshot = s_config_generation;
+    /* Optional client-side lost-update token (WEB_UI_JS_AUDIT M-1): the "generation" the page's GET /api/zones
+     * printed. Absent = old behaviour (MCP writers that GET-merge-POST right away). Present and different from
+     * the live generation = the config changed elsewhere since the page loaded: refuse 409, write nothing (this
+     * runs before the Pico ceiling raise). The value also becomes the snapshot, so the commit re-check covers
+     * a bump landing after this point. */
+    {
+        char gval[16];
+        int glen = http_form_find_field(body, "expected_generation", gval, sizeof(gval));
+        if (glen != -1) {
+            long g = 0;
+            if (!http_form_parse_long(gval, glen, 0, 2147483647L, &g)) {
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_generation must be a non-negative integer");
+                free(body);
+                return ESP_OK;
+            }
+            if ((uint32_t)g != gen_at_snapshot) {
+                ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: expected_generation %ld != live %u", g,
+                         (unsigned)gen_at_snapshot);
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_set_type(req, "application/json");
+                httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_stale\",\"reason\":\"the zones config changed elsewhere (autotune, another page or a tool) since this page loaded; reload and redo your edit\"}");
+                free(body);
+                return ESP_OK;
+            }
+            gen_at_snapshot = (uint32_t)g;
+        }
+    }
 
     if (!zones_config_json_parse_u8_field(body, "thermo_count", 0, MAX31856_CHANNEL_COUNT, &tmp->thermo_count)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "thermo_count missing or out of range");

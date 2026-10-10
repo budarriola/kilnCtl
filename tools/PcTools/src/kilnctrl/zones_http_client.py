@@ -326,6 +326,11 @@ def post_zones(host: str, body: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> s
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
+        if status_code == 409 and "zones_config_stale" in (detail or ""):
+            # WEB_UI_JS_AUDIT M-1: expected_generation (from the GET this body was built from) was stale.
+            raise ZonesHttpError("POST /api/zones refused: the zones config changed on the board since it was "
+                                 "read (expected_generation stale); nothing was written -- re-read and retry. "
+                                 f"HTTP 409: {detail}", status_code, detail) from exc
         raise ZonesHttpError(f"POST /api/zones refused: HTTP {status_code}: {detail}",
                               status_code, detail) from exc
     except urllib.error.URLError as exc:
@@ -1188,6 +1193,12 @@ def build_post_body(current: dict, preset: dict) -> str:
                         "docstring and the cross_zone_max_delta_c incident noted on "
                         "_PRESET_ZONE_OVERRIDE_FIELDS)")
         fields.update(_encode_zone(idx, merged))
+
+    # WEB_UI_JS_AUDIT M-1: pin the write to the generation of the GET it was merged from; the board answers
+    # 409 zones_config_stale (nothing written) if another writer committed in between. Older firmware ignores it.
+    gen = current.get("generation")
+    if isinstance(gen, int) and not isinstance(gen, bool) and gen >= 0:
+        fields["expected_generation"] = str(gen)
 
     return urllib.parse.urlencode(fields)
 

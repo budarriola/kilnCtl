@@ -878,6 +878,26 @@ class PostZonesTest(unittest.TestCase):
             with self.assertRaises(zh.ZonesHttpError):
                 zh.post_zones("192.0.2.1", "x=1")
 
+    def test_stale_generation_409_gets_clear_message(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/zones", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b'{"ok":false,"error":"zones_config_stale","reason":"x"}'))
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(zh.ZonesHttpError) as ctx:
+                zh.post_zones("kiln.local", "expected_generation=1")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("changed on the board", str(ctx.exception))
+        self.assertIn("nothing was written", str(ctx.exception))
+
+    def test_build_post_body_pins_expected_generation(self):
+        cur = _sample_get_response()
+        cur["generation"] = 41
+        fields = dict(urllib.parse.parse_qsl(zh.build_post_body(cur, {"zones": []})))
+        self.assertEqual(fields.get("expected_generation"), "41")
+        del cur["generation"]
+        fields = dict(urllib.parse.parse_qsl(zh.build_post_body(cur, {"zones": []})))
+        self.assertNotIn("expected_generation", fields)
+
 
 class ApplyZonePresetTest(unittest.TestCase):
     def _mock_get_then_post_then_get(self, first_get: dict, post_body: bytes, second_get: dict):

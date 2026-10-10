@@ -4337,6 +4337,57 @@ static void test_profile_edit_post_slot_gen(void)
                "generation even and advanced after the edit (gen_end)");
 }
 
+static void test_profile_post_expected_rev(void)
+{
+    TEST_SECTION("POST /api/profile -- expected_rev/expected_name: stale or reused slot -> 409 and nothing "
+                 "written; matching -> saves and returns the new slot_rev (WEB_UI_JS_AUDIT M-2)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t rev0 = profiles_http_slot_rev(4);
+    char body[400];
+    const char *tail = "&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+
+    /* an edit by someone else moves the rev */
+    run_profile_post("id=4&name=Other&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(profiles_http_slot_rev(4) != rev0, "setup: the other writer moved the rev");
+    uint32_t rev1 = profiles_http_slot_rev(4);
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu%s", (unsigned long)rev0, tail);
+    esp_err_t r = run_profile_post(body);
+    TEST_CHECK(r == ESP_OK && strstr(s_resp_capture, "profile_changed") != NULL, "stale expected_rev refused with profile_changed");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Other") == 0, "stale save wrote nothing");
+    TEST_CHECK(profiles_http_slot_rev(4) == rev1, "stale save did not move the rev");
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu&expected_name=WrongName%s", (unsigned long)rev1, tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "profile_changed") != NULL, "matching rev but different identity (name) refused");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Other") == 0, "identity mismatch wrote nothing");
+
+    snprintf(body, sizeof(body), "id=4&name=Mine&expected_rev=%lu&expected_name=Other%s", (unsigned long)rev1, tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL && strstr(s_resp_capture, "\"slot_rev\":") != NULL,
+               "matching token saves and reports slot_rev");
+    TEST_CHECK(strcmp(s_profiles.profiles[4].name, "Mine") == 0, "matching save wrote the slot");
+
+    /* deleted slot: an expected_* overwrite must not resurrect it */
+    TEST_CHECK(profiles_http_delete(4), "delete slot 4");
+    snprintf(body, sizeof(body), "id=4&name=Ghost&expected_rev=%lu%s", (unsigned long)profiles_http_slot_rev(4), tail);
+    run_profile_post(body);
+    TEST_CHECK(strstr(s_resp_capture, "profile_changed") != NULL, "overwrite of a deleted slot with a token refused");
+    TEST_CHECK(!profiles_slot_used(4), "deleted slot not resurrected");
+
+    /* no token: old behaviour */
+    run_profile_post("id=4&name=Legacy&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL, "no token keeps the old create-or-overwrite behaviour");
+}
+
 static void test_retarget_slot_gen(void)
 {
     TEST_SECTION("slot generation: retarget commit and revert bracket each slot's assign + persist");

@@ -452,7 +452,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * and on no other path, since every earlier error returns before this
      * allocation; an allocation failure degrades to a clean 500 rather than
      * a stack overflow. */
-#define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX)
+#define PROFILE_DETAIL_JSON_CAP (848 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX)
     char *json = heap_caps_malloc(PROFILE_DETAIL_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
@@ -492,6 +492,9 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
 
     /* *6+1, not *2+1 -- see the identical N3 comment above in
      * profiles_list_get_handler(). */
+    /* M-2 (WEB_UI_JS_AUDIT): the slot's save generation, read before the copy below, is the token a page
+     * echoes as expected_rev on POST /api/profile so a stale editor is refused with 409. */
+    const uint32_t slot_rev_at_read = profiles_http_slot_rev((uint8_t)id);
     char name_escaped[PROFILE_NAME_MAX_LEN * 6 + 1];
     profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
     /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
@@ -503,10 +506,10 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     profiles_http_json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
     APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
            "\"segment_count\":%u,\"feasibility\":\"%s\",\"exceeds_ceiling\":%s,"
-           "\"ceiling_note\":\"%s\",\"segments\":[",
+           "\"ceiling_note\":\"%s\",\"slot_rev\":%lu,\"segments\":[",
            id, name_escaped, p->zone_mask, p->segment_count,
            profile_feasibility_verdict_str(rollup), exceeds_ceiling ? "true" : "false",
-           ceiling_note_escaped);
+           ceiling_note_escaped, (unsigned long)slot_rev_at_read);
     for (uint8_t i = 0; i < p->segment_count; i++) {
         const profile_segment_t *s = &p->segments[i];
         /* Genuine firmware defect found while wiring the editor UI to this

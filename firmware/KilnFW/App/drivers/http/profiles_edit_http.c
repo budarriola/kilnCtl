@@ -555,6 +555,35 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    /* M-2 (WEB_UI_JS_AUDIT): optional stale-editor guard for an overwrite of an existing slot. expected_rev is
+     * the slot_rev GET /api/profile printed when the page loaded it (profiles_http_slot_rev); expected_name is
+     * the slot's name then (identity: a slot deleted and re-created under the same id is refused even if the
+     * counter were to collide, e.g. across a reboot). Absent = old behaviour (benchproto/MCP/import paths). */
+    bool have_expected_rev = false;
+    long expected_rev = 0;
+    bool have_expected_name = false;
+    char expected_name[PROFILE_NAME_MAX_LEN + 1];
+    expected_name[0] = '\0';
+    {
+        char rv[16];
+        int rl = http_form_find_field(body, "expected_rev", rv, sizeof(rv));
+        if (rl != -1) {
+            if (!http_form_parse_long(rv, rl, 0, 2147483647L, &expected_rev)) {
+                free(body);
+                httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_rev invalid");
+                return ESP_OK;
+            }
+            have_expected_rev = true;
+        }
+        int nl = http_form_find_field(body, "expected_name", expected_name, sizeof(expected_name));
+        if (nl == -2) {
+            free(body);
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "expected_name invalid");
+            return ESP_OK;
+        }
+        have_expected_name = (nl != -1);
+    }
+
     /* check_httpd_task_stack_budget.py: profile_t (~428 B) used to be a
      * plain local (`tmp`) here, contributing to this handler's own
      * httpd_worker frame for the whole function (it stays live until the
@@ -645,6 +674,29 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     uint8_t target_id;
     if (requested_id >= 0 && requested_id < PROFILES_MAX_COUNT) {
         target_id = (uint8_t)requested_id;
+        /* M-2: refuse a stale overwrite before anything is written. */
+        if (have_expected_rev || have_expected_name) {
+            bool stale = false;
+            if (!profiles_slot_used(target_id)) {
+                stale = true; /* deleted since the page loaded it */
+            } else if (have_expected_rev && profiles_http_slot_rev(target_id) != (uint32_t)expected_rev) {
+                stale = true;
+            } else if (have_expected_name && strcmp(s_profiles.profiles[target_id].name, expected_name) != 0) {
+                stale = true;
+            }
+            if (stale) {
+                profiles_save_unlock();
+                ESP_LOGW(PROFILES_TAG, "POST /api/profile refused: slot %u changed since the editor loaded it",
+                         (unsigned)target_id);
+                free(warn_json);
+                free(tmp);
+                httpd_resp_set_status(req, "409 Conflict");
+                httpd_resp_set_type(req, "application/json");
+                return httpd_resp_sendstr(req,
+                    "{\"ok\":false,\"error\":\"profile_changed\",\"reason\":\"this profile was changed or deleted "
+                    "elsewhere since you opened it; reload it and redo your edit\"}");
+            }
+        }
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
@@ -718,6 +770,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
     profiles_slot_gen_end(target_id);
+    const uint32_t saved_rev = profiles_http_slot_rev(target_id);
     profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
@@ -740,7 +793,8 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req,
                                   "{\"ok\":false,\"error\":\"out of memory building the response\"}");
     }
-    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"warnings\":%s}", target_id, warn_json);
+    int n = snprintf(json, json_cap, "{\"ok\":true,\"id\":%u,\"slot_rev\":%lu,\"warnings\":%s}", target_id,
+                 (unsigned long)saved_rev, warn_json);
     free(warn_json);
     httpd_resp_set_type(req, "application/json");
     esp_err_t ret = httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
