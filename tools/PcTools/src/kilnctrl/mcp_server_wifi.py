@@ -71,9 +71,13 @@ def _wifi_write_refusal(confirm: object, what: str, allow_running: object = Fals
     if allow_running is not True:
         try:
             status = _srv._profiles.get_exec_status(timeout=2.0)
-        except Exception:  # noqa: BLE001 - unreachable executor must not block
-            status = None
-        if status is not None and status.state in (1, 2):
+        except Exception as exc:  # noqa: BLE001
+            return (f"error: {what} refused -- profile executor state could not be read ({exc}), so a "
+                    "firing cannot be ruled out. Pass allow_running=True (exactly True) to override.")
+        if status is None:
+            return (f"error: {what} refused -- profile executor state could not be read (no answer). "
+                    "Pass allow_running=True (exactly True) to override.")
+        if status.state in (1, 2):
             return (f"error: {what} refused while a profile is {status.state_name} -- a Wi-Fi change can "
                     "drop the link mid-firing. Stop the profile first or pass allow_running=True.")
     return None
@@ -293,8 +297,12 @@ def wifi_forget(ssid: str, confirm: bool = False, allow_running: bool = False) -
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
-        if _wifi_readback_networks(ssid) is True:
+        present = _wifi_readback_networks(ssid)
+        if present is True:
             return f"FAILED - board reported ok but {ssid!r} is still in the saved list"
+        if present is None:
+            return (f"FAILED - board reported ok for forgetting {ssid!r} but the saved list could not be "
+                    "read back; state UNVERIFIED")
         return f"ok - forgot {ssid!r}"
     detail = f": {result.reason}" if result.reason else " (no reason given; the board may simply not have that network saved)"
     return f"refused - could not forget {ssid!r}{detail}"

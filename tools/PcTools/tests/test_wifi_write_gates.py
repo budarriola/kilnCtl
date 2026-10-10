@@ -88,6 +88,22 @@ class WifiGateTests(unittest.TestCase):
         self.assertTrue(out.startswith("refused"))
         self.assertNotIn("no such saved network", out)
 
+    def test_unreadable_executor_refuses_and_override_works(self):
+        f = _Fake(nets=["a"])
+        def boom(timeout=2.0):
+            raise OSError("down")
+        with um.patch.multiple(w._srv, _wifi=f, _profiles=types.SimpleNamespace(get_exec_status=boom),
+                               create=True):
+            self.assertIn("could not be read", w.wifi_forget("a", confirm=True))
+            self.assertEqual(f.calls, [])
+            self.assertTrue(w.wifi_forget("a", confirm=True, allow_running=True).startswith("ok"))
+
+    def test_forget_unreadable_readback_fails(self):
+        f = _Fake(nets=["a"])
+        f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            self.assertIn("FAILED", w.wifi_forget("a", confirm=True))
+
     def test_status_explicit_host_untrusted(self):
         st = types.SimpleNamespace(ap_password="", mode_name="home", state_name="x", sta_connected=False,
                                    ssid="", ap_ssid="", sta_ip="", sta_rssi=0, ap_clients=0)
