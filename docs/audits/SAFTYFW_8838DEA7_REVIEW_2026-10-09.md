@@ -107,3 +107,7 @@ before the commit)". Cosmetic.
 - Call-site ordering apart from HIGH-1: the reset runs before `s_last_context_boot_id`/`s_context_boot_id_known` are updated and before `s_last_context_rx_tick` is refreshed. That is the order `context_gap` and the session test need. `staged_before` is read before the reset, so the discard log count is right. The first context after a Pico boot (`prev_known=false`) resets nothing. That is correct, because `link_task_start()` already zeroed the version.
 - A same-boot_id context gap keeps the version. Correct, because the same image is still talking.
 - Guard accumulators are still untouched by a boot_id change. That matches the existing rationale comment at `link_task.c:1339-1365`.
+
+## Status
+
+HIGH-1, MED-1, LOW-1 (documented as deliberately kept, conservative) and LOW-2 fixed in fe5ac57f. The optional ESP-side re-announce was NOT done.
