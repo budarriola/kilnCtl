@@ -107,7 +107,9 @@ pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void);
  * and through it zones_config_store.c's and profiles_http.c's) calls
  * pref_cfg_fs_save_section_enter() BEFORE taking its mutex and
  * pref_cfg_fs_save_section_exit() with that call's result AFTER giving it.
- * On the device uart_bridge_ext.c installs hooks that reserve the flash
+ * On the device uart_bridge_ext.c installs hooks (from
+ * uart_bridge_ext_save_reservation_init(), first thing in app_main, so
+ * before any saver task and before the worker exists) that reserve the flash
  * worker for the section when the caller is not the worker, so a save mutex
  * is never held off the worker while the worker runs a job that could need
  * the same mutex. Without installed hooks both calls are no-ops (enter

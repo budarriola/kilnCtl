@@ -17,8 +17,10 @@
  * the section dispatches onto that same worker. Holding the mutex off the
  * worker while the worker runs a job that blocks on it deadlocks both. So
  * take reserves the worker first (pref_cfg_fs_save_section_enter(), a no-op
- * on the worker itself and before the worker exists) and give releases it
- * last. Order: reservation outer, mutex inner. See pref_cfg_fs.h. */
+ * on the worker itself) and give releases it last. The reservation works
+ * before the worker task exists too: app_main creates the reservation lock
+ * and installs the hooks first thing (uart_bridge_ext_save_reservation_init()).
+ * Order: reservation outer, mutex inner. See pref_cfg_fs.h. */
 #include <stdbool.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"

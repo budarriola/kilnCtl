@@ -381,3 +381,57 @@ No function in `wifi_prov`, `update_fetch`, LVGL, `heat_enable` or
 | F3 MEDIUM | `adaptive_tune_lock` | profile executor (run end) | FIXED (plan/apply/commit split) |
 | F4 LOW | `s_rc.persist_lock` | executor / worker | Bounded 3 s stall; accepted by design (ordering invariant) |
 | F5 LOW | `s_rc.lock` | boot (`relay_cycles_init`) | FIXED (load into locals, publish under lock) |
+
+## Follow-ups to the review of 4271767d / 48e1ba8a
+
+**Finding 5 (save section entered before the worker starts reserves nothing): CLOSED.**
+The review's premise was wrong about the trigger: LVGL does not start before the
+worker. `main_control_bringup()` starts the worker, and LVGL starts later in
+`main_bridges_bringup()`. The window was still real in principle, so it is closed
+rather than argued. `s_bx_lock` now uses static storage. `uart_bridge_ext_save_reservation_init()`
+creates it and installs the save-section hooks. `app_main` calls that function right after
+`uart_log_bridge_early_init()`, before any other task exists. `bx_reserve_for_save_section()`
+no longer requires `s_bx_started`, and `ensure_started()` neither creates nor deletes the
+lock any more. A section entered before the worker starts now holds `s_bx_lock`, so a
+worker created mid-section cannot run a queued or posted job until the section ends.
+
+**Worker-side test seam: ADDED.** `bx_worker_iteration()` is the worker loop body, split out
+with no behaviour change. `test/test_uart_bridge_ext_worker.c` includes `uart_bridge_ext.c`
+with fake FreeRTOS primitives (a recursive mutex that tracks owner and depth, a one-slot queue,
+a done semaphore that runs one worker iteration as the worker task). It has 5 tests, 159 checks:
+- a reservation made before the worker starts;
+- the worker not reserving for itself;
+- a dispatch inside a section counting recursively;
+- the timeout path giving nothing back;
+- a posted job delayed, not dropped, while a section holds the lock.
+
+Five mutations were run with `tools/negtest.ps1`, and every one was caught.
+
+**Finding 4 (`profiles_http.c` `retarget_commit` holds the worker reservation for up to
+about 2N cfg writes plus 2N reads): DOCUMENTED, not changed.** The only safety-relevant waiter
+is `safety_poll`'s synchronous `safety_cfg_store_flush_if_dirty()`, and only when the safety
+config is dirty. It would trip S6b only if the hold outlasted the link timeout. Retarget is
+idle-only, and S6b fails safe. Chunking was rejected because it breaks the all-or-nothing
+retarget. The comment is at the top of `retarget_commit()`.
+
+**Executor stack budget regression from 4271767d: FIXED in 2fcd20c1.**
+`check_executor_task_stack_budget` failed on dev at 2816 B against a 1936 B ceiling.
+Two paths through `adaptive_tune_run_end` were over the ceiling:
+
+1. 4271767d's on-worker branch in `nvs_save()` called `zones_autosave_job()` directly.
+   The static analyser counts a direct call on every path, worker or not. That put the
+   ~2.8 KB autosave frame into `executor_task_entry`'s worst case, through
+   `adaptive_tune_apply_coupled_plan` -> `zones_config_set_coupling_cell` -> `nvs_save`.
+   The on-worker branch now calls the job through a volatile function pointer. Behaviour is
+   unchanged: the job still runs inline on the worker, and `flash_worker_lint`'s
+   `is_on_flash_worker()` guard is kept. The volatile load stops GCC from folding the call
+   back into a direct one.
+2. With that path gone, the next one was 2080 B. `adaptive_tune_plan_coupled_locked` kept two
+   288 B observation arrays on the stack, giving it a 704 B frame. They are now one malloc'd
+   block, freed right after `adaptive_tune_coupled_fit()`. If the allocation fails, the
+   function records a refusal reason and returns.
+
+On a fresh target build of the fixed tree, `executor_task_entry` measures 1712 B, which passes.
+The ceiling was not raised.
+
+The finding-5 fix and the test seam are in 9cc5ed06.

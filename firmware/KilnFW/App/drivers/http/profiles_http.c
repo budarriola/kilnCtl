@@ -2253,7 +2253,21 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
     /* The whole retarget (plan re-check, swap, save, verify, revert) is ONE
      * section under the save mutex; only leaf locks are taken inside. The plan
      * refusals are re-run here, under the lock, so a slot changed since the
-     * caller's own plan() cannot slip past them. */
+     * caller's own plan() cannot slip past them.
+     *
+     * WORKER HOLD (accepted, documented 2026-10-09, review of 4271767d
+     * finding 4): profiles_save_lock() also reserves the flash worker
+     * (cfg_save_lock.h), so for the whole section no other task can run a
+     * flash-worker job. Worst case is every affected slot saved and verified,
+     * then, on a failure, every one reverted and verified again: about 2N cfg
+     * file writes plus 2N reads for N affected slots (N <= PROFILES_MAX_COUNT).
+     * The one safety-relevant waiter is safety_poll's synchronous
+     * safety_cfg_store_flush_if_dirty(), and only when the safety config is
+     * dirty at that moment; it would trip S6b only if the hold outlasted the
+     * link timeout. Retarget is idle-only (refused mid-firing), and S6b is a
+     * fail-safe trip, not an unsafe state. Chunking the section (dropping the
+     * lock between slots) was rejected: it breaks the all-or-nothing retarget
+     * this section exists to guarantee. */
     /* Executor state is read BEFORE the save lock so no executor lock is taken under it. */
     uint8_t active_id = 0;
     bool have_active = profile_executor_get_active_id(&active_id);
