@@ -51,3 +51,12 @@ Review REVIEW_TOOLINGB_WEBAUTH_2026-10-09.md items:
 | LOW-3 read-backs that cannot fail | FIXED in 3c3e12d9f, 3f4e12260, c769c8a6a |
 | LOW-4 PcTools part (real tool through the registry) | FIXED in c769c8a6a |
 | LOW-5 zones Save reload (web JS) | skipped: web JS item |
+
+
+## Status update: batch D (0e76d38b6 on origin/dev)
+
+Fixed: zone_current_sweep_start status read-back, ramp_assist and adaptive_tune read-backs, relay_cycles_kept note
+in backup_import, web_auth message match replaced by an `unreachable` flag, debug_program executor-running check.
+recovery_boot_guard_reset "not applicable" was already fixed. Not done (no read-back available or ambiguous):
+autotune_accept, ota_rollback_pico (fire-and-forget UART), safety_set_log_level (Pico does not report its level),
+expander_* confirm.

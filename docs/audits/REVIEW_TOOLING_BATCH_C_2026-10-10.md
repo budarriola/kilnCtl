@@ -211,3 +211,11 @@ knowing the first one may have applied.
 | zone_strip_noop | omit-preserved zone keys not stripped | CAUGHT |
 | keepkeys_no_filter | preset keep-keys filter removed | CAUGHT |
 | keepkeys_diag_kept | coupling diagonal kept | CAUGHT |
+
+
+## Status update: batch D (0e76d38b6 on origin/dev)
+
+Fixed: LOW-1 (state notes shown by flash_firmware), LOW-2 (safety_clear_trip leads STILL LATCHED / UNVERIFIED),
+LOW-3 (debug_write_memory UNVERIFIED lead), LOW-4 (running guards allow-list idle/done/faulted; Wi-Fi guard checks
+autotune), LOW-5 (pico_gpio_write UNVERIFIED), LOW-6 (post_commissioning OSError = state UNKNOWN), NIT-3, NIT-4,
+NIT-5 (profiles_save compares segment content). Still open: NIT-1, NIT-2 (recovery_flash note wording).
