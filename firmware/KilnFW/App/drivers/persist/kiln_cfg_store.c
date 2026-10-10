@@ -243,15 +243,35 @@ static void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg
     }
 }
 
+/* Topology override (review 14 LOW-4): owned by the task that installed it.
+ * The restore path installs the backup's planned counts so the compatibility
+ * check runs against the topology being restored; any OTHER task validating a
+ * kiln_configs upload meanwhile must see the live counts, never the planned
+ * ones. Readers therefore honour the override only on the owning task.
+ * Writer order: fields, then owner, then active (clear: active, then owner). */
 static bool s_topology_override_active = false;
 static uint8_t s_topology_override_thermo = 0;
 static uint8_t s_topology_override_relay = 0;
+static void *s_topology_override_owner = NULL;
 
 void kiln_cfg_store_restore_topology_override(bool active, uint8_t thermo_count, uint8_t relay_count)
 {
+    if (!active) {
+        s_topology_override_active = false;
+        s_topology_override_owner = NULL;
+        s_topology_override_thermo = 0;
+        s_topology_override_relay = 0;
+        return;
+    }
     s_topology_override_thermo = thermo_count;
     s_topology_override_relay = relay_count;
-    s_topology_override_active = active;
+    s_topology_override_owner = (void *)xTaskGetCurrentTaskHandle();
+    s_topology_override_active = true;
+}
+
+static bool topology_override_applies_here(void)
+{
+    return s_topology_override_active && s_topology_override_owner == (void *)xTaskGetCurrentTaskHandle();
 }
 
 static kiln_cfg_store_blob_t s_store;
@@ -2239,9 +2259,9 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
      * DIFFERENT (different names/gains/a CT-less package on a CT-equipped
      * controller) is accepted -- only what this hardware cannot run at all
      * is refused. */
-    uint8_t live_relay_count = s_topology_override_active ? s_topology_override_relay : zones_config_get_relay_count();
-    uint8_t live_thermo_count =
-        s_topology_override_active ? s_topology_override_thermo : zones_config_get_thermo_count();
+    const bool topo_override_here = topology_override_applies_here();
+    uint8_t live_relay_count = topo_override_here ? s_topology_override_relay : zones_config_get_relay_count();
+    uint8_t live_thermo_count = topo_override_here ? s_topology_override_thermo : zones_config_get_thermo_count();
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
         const zone_cfg_t *zc = &s->cand.zones[z];
         for (uint8_t bit = 0; bit < 8; bit++) {

@@ -23,6 +23,7 @@
 #include "safety_ceiling_sync.h" /* owner request 2026-09-10 -- Pico abs_max_temp_c tracks the zone max */
 #include "system_mode_gate.h" /* SYS_ACTION_WRITE_ZONES_CONFIG -- owner decision Q2, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() -- 409, shared sender */
+#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- review 14 LOW-3 fence */
 #include "kiln_cfg_swap.h" /* kiln_cfg_swap_zone_edits_at_risk() -- LOW-1 refusal */
 #include "zone_settings_source_chain.h"
 #include "cfg_fs_refusal_http.h"
@@ -218,6 +219,16 @@ esp_err_t zones_post_handler(httpd_req_t *req)
             ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused by system mode gate: %s", mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    /* Review 14 LOW-3: a backup restore (or a zone-to-aux conversion, which raises the same flag) is
+     * mid-commit. A zones page save now could change thermo_count under the restore's already-resolved
+     * topology and turn its later stages into a 500 partial write; the run starters already refuse on this
+     * flag. Same 409 sender as the gates above. */
+    if (backup_import_restore_in_flight()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: a backup restore or configuration change is in flight");
+        return system_mode_gate_http_send_refusal(
+            req, "a backup restore or configuration change is in progress -- retry when it finishes");
     }
 
     /* LOW-1 (dev firmware review 10): a kept rollback journal (active_id restore failed) re-imports the pre-swap

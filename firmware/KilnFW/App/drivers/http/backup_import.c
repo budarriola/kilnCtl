@@ -1017,7 +1017,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_resolve_topology(const char *bo
 static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates,
-                                        bool *zones_landed_out, bool *aux_wrote_out, bool parse_only)
+                                        bool *zones_landed_out, bool *aux_wrote_out, bool parse_only,
+                                        const backup_topology_t *resolved_topo)
 {
     *zones_landed_out = false;
     double dver;
@@ -1037,10 +1038,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
     uint32_t bound_dwell_max;
     profiles_http_get_bounds(&bound_target_min, &bound_target_max, &bound_ramp_min, &bound_ramp_max,
                              &bound_dwell_max);
-    backup_topology_t topo;
-    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
-        return false;
-    }
+    /* Resolved ONCE by backup_import_apply() (review 14 LOW-3) and passed down, so a concurrent change of the
+     * live thermo_count cannot make a later stage judge a different topology than pass 1 did. */
+    const backup_topology_t topo = *resolved_topo;
     uint8_t thermo_count = topo.thermo;
     uint8_t valid_zone_bits = thermo_count >= 8 ? 0xFFu : (uint8_t)((1u << thermo_count) - 1u);
 
@@ -2968,8 +2968,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
      * change. Only actually saves when this batch touched anything: a
      * no-op/empty import (candidate_count == 0 for both arrays) must not
      * pay for a flash write it has no reason to make, same as the old
-     * settings_source_dirty gate this replaces. */
-    if (timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
+     * settings_source_dirty gate this replaces. A topology-only v7 restore (topo.apply set, no zones or timing
+     * profiles) must still save: zones_config_set_topology_no_save() only changed RAM (review 14 LOW-2). */
+    if (topo.apply || timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
         uint64_t save_start_us = hal_time_now_us();
         bool save_ok = zones_config_save_now();
         long long save_elapsed_ms = (long long)((hal_time_now_us() - save_start_us) / 1000u);
@@ -3649,18 +3650,17 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
 }
 
 /* Pass 1 for the zone tuning entries' board topology: every entry's "index" must be a configured zone on
- * THIS board. The backup carries no thermo_count (it is board topology, set on Thermocouples & Zones, and
- * has no import setter), so a board whose zones config is empty (thermo_count 0) cannot take any zone entry.
+ * THIS board. A v7 backup carries thermo_count/relay_count: it is applied (backup_import_resolve_topology())
+ * onto an empty board (thermo_count 0) and refused as a mismatch on a configured board whose topology differs;
+ * an older backup without them leaves the live counts in force, so an empty board refuses its zone entries.
  * backup_import_apply_two_pass() rejects such an entry too, but only AFTER kiln_configs[] has been committed,
  * which made the refusal a 500 partial write (bench 2026-10-09). Refuse here, before anything is written. */
-static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const char *body, char *err_msg,
-                                                                         size_t err_cap)
+static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const char *body,
+                                                                         const backup_topology_t *resolved_topo,
+                                                                         char *err_msg, size_t err_cap)
 {
     const char *zones_arr = backup_json_obj_find(body, "zones");
-    backup_topology_t topo;
-    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
-        return false;
-    }
+    const backup_topology_t topo = *resolved_topo;
     uint8_t thermo_count = topo.thermo;
     for (const char *ze = backup_json_arr_first(zones_arr); ze; ze = backup_json_arr_next(ze)) {
         double didx;
@@ -3710,7 +3710,9 @@ static void backup_import_prefix_entry(char *err_msg, size_t err_cap, unsigned e
     err_msg[(size_t)n + len] = '\0';
 }
 
-static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body, char *err_msg, size_t err_cap)
+static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body,
+                                                                    const backup_topology_t *resolved_topo,
+                                                                    char *err_msg, size_t err_cap)
 {
     const char *profiles_arr = backup_json_obj_find(body, "profiles");
     if (profiles_arr == NULL || backup_json_arr_first(profiles_arr) == NULL) {
@@ -3726,11 +3728,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
     profile_validate_state_t *st = &sc->st;
     /* Effective topology (review L6, superseded 2026-10-09): the live count, or the backup's own
      * thermo_count when this restore is about to set it on an unconfigured board. */
-    backup_topology_t topo;
-    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
-        free(sc);
-        return false;
-    }
+    const backup_topology_t topo = *resolved_topo;
     st->zone_count = topo.thermo;
     if (st->zone_count > MAX31856_CHANNEL_COUNT) {
         st->zone_count = MAX31856_CHANNEL_COUNT;
@@ -3933,7 +3931,8 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
 
 /* DEV_REVIEW_13 F8: run the whole pass-1 parse (profiles, zones, timing profiles) into scratch candidate arrays
  * BEFORE anything is committed, so a parse/validate refusal is a 4xx with nothing written. */
-static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, char *err_msg, size_t err_cap)
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, const backup_topology_t *resolved_topo,
+                                                             char *err_msg, size_t err_cap)
 {
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -3944,7 +3943,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, ch
         snprintf(err_msg, err_cap, "out of memory validating the backup -- nothing was changed");
     } else {
         bool zl = false, aw = false;
-        ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates, tp, &zl, &aw, true);
+        ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates, tp, &zl, &aw, true,
+                                     resolved_topo);
     }
     free(tp);
     free(zone_candidates);
@@ -3972,8 +3972,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, ch
  * *partial_write_out = true and the caller reports a distinct 500 naming
  * what landed rather than a 400 implying nothing did. Always set on entry;
  * never left indeterminate on any return path. */
-static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
-                                 int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
+static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, const backup_topology_t *resolved_topo,
+                                 kiln_cfg_restore_mode_t mode, bool dry_run, int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
                                  bool *partial_write_out, char *err_msg, size_t err_cap)
 {
     *partial_write_out = false;
@@ -4001,13 +4001,13 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
     }
-    if (!backup_import_profiles_precheck(body, err_msg, err_cap)) {
+    if (!backup_import_profiles_precheck(body, resolved_topo, err_msg, err_cap)) {
         return false; // pass 1: a profile the post-import config would refuse; nothing written
     }
-    if (!backup_import_zone_topology_precheck(body, err_msg, err_cap)) {
+    if (!backup_import_zone_topology_precheck(body, resolved_topo, err_msg, err_cap)) {
         return false; // pass 1: zone entry for a zone this board lacks; nothing written (400, not a partial write)
     }
-    if (!backup_import_parse_only(body, err_msg, err_cap)) {
+    if (!backup_import_parse_only(body, resolved_topo, err_msg, err_cap)) {
         return false; // pass 1: profile/zone/timing-profile parse refusal; nothing written (400, not a partial write)
     }
     if (dry_run) {
@@ -4082,7 +4082,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
 
     bool zones_landed = false;
     bool ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates,
-                                         timing_profile_candidates, &zones_landed, &aux_wrote, false);
+                                         timing_profile_candidates, &zones_landed, &aux_wrote, false,
+                                         resolved_topo);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
      * exit from backup_import_apply_two_pass(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
@@ -4152,7 +4153,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
                           (unsigned)topo.relay);
     }
     kiln_cfg_store_restore_topology_override(topo.apply, topo.thermo, topo.relay);
-    bool ok = backup_import_apply_body(body, mode, dry_run, ack_delete_count, ack_no_safety_processor, plan,
+    bool ok = backup_import_apply_body(body, &topo, mode, dry_run, ack_delete_count, ack_no_safety_processor, plan,
                                        partial_write_out, err_msg, err_cap);
     kiln_cfg_store_restore_topology_override(false, 0, 0);
     return ok;

@@ -303,16 +303,11 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
     if (!link || !safety_lock(link)) {
         return;
     }
-    /* review LOW-3: the up window scales with poll_period_ms; the fixed SAFETY_LINK_STALE_MS bound the rest of
-     * the firmware uses must also trigger the clear, so a slow-poll config cannot keep stale peer info. */
-    uint32_t stale_bound = link->poll_period_ms * SAFETY_LINK_UP_PERIODS; /* review LOW-5: scale with the poll period */
-    if (stale_bound < (uint32_t)SAFETY_LINK_STALE_MS) {
-        stale_bound = (uint32_t)SAFETY_LINK_STALE_MS;
-    }
-    if (stale_bound > 0xFFFEu) {
-        stale_bound = 0xFFFEu;
-    }
-    if (!safety_link_up_locked(link) || safety_link_is_stale(safety_age_ms_locked(link), (uint16_t)stale_bound)) {
+    /* The clear keys on !safety_link_up_locked() alone. That window scales with poll_period_ms *
+     * SAFETY_LINK_UP_PERIODS BY DESIGN (review LOW-5: a slow poll keeps the boot id through one missed
+     * reply), so the fixed SAFETY_LINK_STALE_MS (1500 ms) bound is deliberately NOT applied here: any
+     * second stale test with a bound derived from the same period was redundant with !up (review 14 LOW-6). */
+    if (!safety_link_up_locked(link)) {
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;

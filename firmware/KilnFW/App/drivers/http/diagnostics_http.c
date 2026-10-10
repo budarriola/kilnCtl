@@ -474,10 +474,9 @@ overflow:
     /* Buffer overflow while building the crash-report JSON: never send the
      * truncated, malformed partial body as a 200 -- that reads as success to
      * a caller that only checks the status code. Log once and fail loud with
-     * a 500 instead. json[] is 1024 B and the margin after the v3 fields is
-     * only ~61 B, so this is meant to be reachable if the record grows again
-     * -- do not enlarge json[] to "fix" it (house rule: never enlarge httpd
-     * stack buffers). */
+     * a 500 instead. json is a 1024 B HEAP buffer (json_cap above), so the
+     * httpd-stack rule does not apply to it; the margin is small, so grow
+     * json_cap together with any new field rather than letting this fire. */
     ESP_LOGE(TAG, "crash_report JSON overflowed %u-byte buffer at o=%u",
              (unsigned)json_cap, (unsigned)o);
     free(json);

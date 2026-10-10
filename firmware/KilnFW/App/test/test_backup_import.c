@@ -5291,6 +5291,33 @@ static void test_import_pass1b_parse_failure_is_not_a_partial_write(void)
     reset_stub_state();
 }
 
+static void test_backup_topology_only_restore_is_saved(void)
+{
+    TEST_SECTION("backup topology -- review 14 LOW-2: a v7 restore carrying ONLY thermo_count/relay_count "
+                 "(no zones, no timing profiles) still reaches zones_config_save_now()");
+    char body[160];
+    char e[256] = "";
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    snprintf(body, sizeof(body), "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_settings_source_save_calls = 0;
+    bool ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "topology-only import onto an empty board succeeds");
+    TEST_CHECK(g_topology_set_calls == 1, "topology applied once");
+    TEST_CHECK(g_settings_source_save_calls == 1, "the topology reached flash: exactly one batched save");
+    reset_stub_state();
+    /* Control: no topology to apply (configured board, matching counts) and nothing else -> no save. */
+    snprintf(body, sizeof(body), "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":3,\"relay_count\":4}",
+             BACKUP_FORMAT_VERSION);
+    g_settings_source_save_calls = 0;
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok && g_settings_source_save_calls == 0, "matching topology and nothing else pays for no save");
+    reset_stub_state();
+}
+
 static void test_backup_topology_round_trip(void)
 {
     TEST_SECTION("backup topology -- export carries thermo_count/relay_count; empty board takes them then the zones; "
@@ -7477,6 +7504,7 @@ void run_test_backup_import(void)
     test_import_refuses_duplicate_zone_index();
     test_import_onto_empty_zones_config_refused_before_any_write();
     test_backup_topology_round_trip();
+    test_backup_topology_only_restore_is_saved();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();

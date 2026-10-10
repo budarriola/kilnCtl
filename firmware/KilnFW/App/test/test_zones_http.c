@@ -2362,6 +2362,25 @@ static void test_zones_pid_post_accepts_while_idle(void)
     TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
 }
 
+static void test_zones_post_refused_while_restore_in_flight(void)
+{
+    TEST_SECTION("zones_post_handler -- review 14 LOW-3: refuses with 409 while a backup restore is in flight, "
+                 "writes nothing, and works again afterwards");
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_backup_restore_in_flight = true;
+    g_probe_interlock_called = 0;
+    s_ceiling_writer_calls = 0;
+    s_test_ok_called = false;
+    uint32_t rev_before = s_zones_cfg_rev;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    s_test_backup_restore_in_flight = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "refusal is HTTP 409");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "nothing was persisted (rev unchanged)");
+    TEST_CHECK(strstr(s_last_resp_body, "restore or configuration change") != NULL, "body names the restore");
+    TEST_CHECK(!s_test_ok_called, "must not report success");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "nothing reached the Pico ceiling write");
+}
+
 static void test_zones_pid_post_refused_while_rollback_pending(void)
 {
     TEST_SECTION("POST /api/zones/pid -- review 12 LOW-1: 409 and no write while a rollback journal is kept");
@@ -17175,6 +17194,7 @@ void run_test_zones_http(void)
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refuses_run_started_during_ceiling_raise();
     test_zones_post_refused_while_rollback_pending();
+    test_zones_post_refused_while_restore_in_flight();
     test_zones_post_refused_while_async_job_busy();
 }
 

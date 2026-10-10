@@ -3672,6 +3672,27 @@ static void test_autosave_override_ignores_a_foreign_nonnull_dispatcher(void)
                "deferred, the branch the owner explicitly rejected");
 }
 
+// Review 14 LOW-4: the restore topology override is scoped to the task that
+// installed it; another task validating an upload must see the live counts.
+static void test_topology_override_scoped_to_owning_task(void)
+{
+    kiln_cfg_store_restore_topology_override(true, 3, 6);
+    TEST_CHECK(topology_override_applies_here(), "the installing task sees its own override");
+    TEST_CHECK(s_topology_override_thermo == 3 && s_topology_override_relay == 6, "override counts stored");
+
+    // Simulate another task: the owner is some other handle.
+    void *real_owner = s_topology_override_owner;
+    s_topology_override_owner = (void *)0x7E57F0F0u;
+    TEST_CHECK(!topology_override_applies_here(),
+               "a different task must NOT see the restore's planned topology (would pass/fail an unrelated upload "
+               "against counts the live board does not have)");
+    s_topology_override_owner = real_owner;
+
+    kiln_cfg_store_restore_topology_override(false, 0, 0);
+    TEST_CHECK(!topology_override_applies_here(), "cleared override applies to nobody");
+    TEST_CHECK(s_topology_override_owner == NULL, "clear drops the owner too");
+}
+
 static void test_autosave_from_live_noop_with_no_active_config(void)
 {
     TEST_SECTION("kiln_cfg_store_autosave_from_live -- no-op (success, nothing written) with no active config");
@@ -4236,6 +4257,7 @@ void run_test_kiln_cfg_store(void)
     test_autosave_override_ignores_a_foreign_dispatcher();
     test_autosave_override_applies_to_its_own_dispatcher();
     test_autosave_override_ignores_a_foreign_nonnull_dispatcher();
+    test_topology_override_scoped_to_owning_task();
     test_autosave_keeps_existing_pico_half_while_cache_unfetched();
     test_autosave_from_live_suppressed_while_diverged();
     test_autosave_from_live_suppressed_while_swap_pending();
