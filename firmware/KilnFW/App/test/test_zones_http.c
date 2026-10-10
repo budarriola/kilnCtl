@@ -1596,6 +1596,15 @@ static void test_parse_float_field_rejects_trailing_garbage(void)
     TEST_CHECK(out == -1.0f, "out must be untouched on rejection");
 }
 
+static void test_parse_float_field_rejects_leading_space_and_hex(void)
+{
+    TEST_SECTION("parse_float_field -- leading whitespace and hex floats refused (HTTP parser F3)");
+    float out = -1.0f;
+    TEST_CHECK(!zones_config_json_parse_float_field("z0_kp=%201", "z0_kp", 0.0f, 5000.0f, &out), "leading space refused");
+    TEST_CHECK(!zones_config_json_parse_float_field("z0_kp=0x1p3", "z0_kp", 0.0f, 5000.0f, &out), "hex float refused");
+    TEST_CHECK(zones_config_json_parse_float_field("z0_kp=1.5", "z0_kp", 0.0f, 5000.0f, &out) && out == 1.5f, "plain value still parses");
+}
+
 static void test_parse_float_field_rejects_unit_suffix(void)
 {
     TEST_SECTION("parse_float_field -- a value with a trailing unit suffix is rejected (FIX 2)");
@@ -16771,6 +16780,7 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 void run_test_zones_http(void)
 {
     test_zone_name_control_chars_refused();
+    test_parse_float_field_rejects_leading_space_and_hex();
     test_fuzz_zone_fields_hostile_values();
     test_fuzz_zones_post_toplevel_hostile();
     // cfg is the only save target now, so every handler test that commits a

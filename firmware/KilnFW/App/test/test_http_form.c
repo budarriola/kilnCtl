@@ -90,6 +90,8 @@ static void test_float(void)
     TEST_CHECK(!handler_float("d=inf", "d", &f), "inf refused");
     TEST_CHECK(!handler_float("d=1e999", "d", &f), "overflow refused");
     TEST_CHECK(!handler_float("d=0.%005", "d", &f), "%00 refused");
+    TEST_CHECK(!handler_float("d=0x1p3", "d", &f), "hex float refused (F2)");
+    TEST_CHECK(!handler_float("d=%201", "d", &f), "leading space refused");
     TEST_CHECK(!handler_float("d=%200.5", "d", &f), "leading space refused");
 }
 
@@ -105,6 +107,10 @@ static void test_decode(void)
     TEST_CHECK(http_form_find_field("a=", "a", out, sizeof(out)) == -1 || http_form_find_field("a=", "a", out, sizeof(out)) == 0,
                "empty value is reported as absent or zero-length, never a positive length");
     TEST_CHECK(http_form_find_field("b=1", "a", out, sizeof(out)) == -1, "absent returns -1");
+    {
+        char sentinel[2] = { 0x55, 0x55 };
+        TEST_CHECK(http_form_url_decode("", 0, sentinel, 0) == -1 && sentinel[0] == 0x55, "cap 0 decode writes nothing (F1)");
+    }
 
     /* A -2 must leave out as the empty string, never an unterminated or truncated
      * prefix: callers that test != -1 then strtol()/strcmp() the buffer (zones

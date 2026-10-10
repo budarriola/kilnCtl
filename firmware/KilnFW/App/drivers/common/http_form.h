@@ -32,6 +32,9 @@ extern "C" {
 static inline int http_form_url_decode(const char *src, size_t src_len, char *out, size_t out_cap)
 {
     size_t o = 0;
+    if (out_cap == 0) {
+        return -1; /* no room even for the NUL: write nothing (F1) */
+    }
     for (size_t i = 0; i < src_len; i++) {
         char c = src[i];
         if (o + 1 >= out_cap) {
@@ -101,6 +104,10 @@ static inline bool http_form_is_bool01(const char *v, int len)
 static inline bool http_form_parse_float(const char *v, int len, float *out)
 {
     if (!v || len <= 0 || (int)strlen(v) != len || isspace((unsigned char)v[0])) {
+        return false;
+    }
+    /* F2: strtof accepts C99 hex floats (0x1p3); parse_long refuses 0x, so do the same. */
+    if (strpbrk(v, "xX") != NULL) {
         return false;
     }
     char *end = NULL;

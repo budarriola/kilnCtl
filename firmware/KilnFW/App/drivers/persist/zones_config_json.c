@@ -770,13 +770,9 @@ bool zones_config_json_parse_float_field(const char *body, const char *key, floa
     if (len <= 0) {
         return false;
     }
-    char *end = NULL;
-    float v = strtof(val, &end);
-    /* *end != '\0' -- same trailing-garbage rejection as zones_config_json_parse_u8_field()
-     * above; see its comment. NaN is already correctly rejected here, and
-     * inf is caught incidentally by the finite min/max bounds -- neither of
-     * those is what this check is for. */
-    if (end == val || *end != '\0' || isnan(v) || v < min || v > max) {
+    /* F3: same strictness as http_form_parse_float (no leading space, no hex, finite). */
+    float v;
+    if (!http_form_parse_float(val, len, &v) || v < min || v > max) {
         return false;
     }
     *out = v;
