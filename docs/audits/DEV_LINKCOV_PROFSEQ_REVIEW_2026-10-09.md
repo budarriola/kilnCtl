@@ -32,7 +32,7 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### LOW-1: boot load/migration RAM writes are not gen-bracketed
 
-**FIXED in 12d483d6.**
+**FIXED in 7452e63b.**
 
 - `profiles_http.c:1492` (migration assign) and `:1503` (migration failure
   memset) in `migrate_from_default_partition()`, called from
@@ -58,7 +58,7 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### LOW-2: `s_slot_rev_pub` is dead
 
-**FIXED in 12d483d6.**
+**FIXED in 7452e63b.**
 
 - Declared `profiles_http.c:82`, stored at `:1284`, `:1365`, `:1419`, never
   loaded since `profiles_http_slot_rev()` (`:1877`) now returns `s_slot_gen`.
@@ -73,7 +73,7 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### LOW-3: link-down clear dropped the fixed stale threshold
 
-**FIXED in 12d483d6.**
+**FIXED in 7452e63b.**
 
 - `safety_link.c:301-316` (`safety_reset_stale_peer_info_if_link_down`) now
   clears `peer_version_known`, `pico_boot_id_known`, `peer_build_known` and
@@ -91,7 +91,7 @@ No code was changed by this review. Line numbers are against `dd46bc6d`.
 
 ### LOW-4 (informational): seqlock reader has no explicit acquire fence
 
-**FIXED in 12d483d6.**
+**FIXED in 7452e63b.**
 
 - `profiles_http.c:83-104` uses `atomic_fetch_add` (seq_cst) for
   `gen_begin/gen_end`; the reader (`profile_executor_run.c:289` capture,
