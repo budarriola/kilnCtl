@@ -31,6 +31,7 @@
 //     matches the code's own caller-thread-validates /
 //     owner-task-mutates split (see wifi_prov_note_possible_static_
 //     reachability()'s doc comment in wifi_prov.h).
+#include "hal_time.h"
 #include <stdbool.h>
 #include <string.h>
 

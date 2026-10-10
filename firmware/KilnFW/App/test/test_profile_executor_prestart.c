@@ -668,6 +668,7 @@ static safety_link_status_t g_stub_safety_st;
  * Default: link up, so the many tests that reach the gate stay unaffected; aux_tick_case() turns
  * it off to keep its explicit rc/st control, and the LD-01 test drives g_stub_link_mode. */
 static bool g_stub_force_link_up = true;
+static int g_stub_link_calls = 0; /* mode 5 only: calls seen since the test armed it */
 static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INVALID_STATE), 3 = ESP_FAIL, 4 = NULL link (INVALID_ARG) */
 
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
@@ -675,13 +676,15 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     (void)link;
     if (g_stub_force_link_up) {
         /* LOW-1: error returns leave garbage that looks link-up (the real function leaves *out untouched). */
-        if (g_stub_link_mode >= 2) {
+        if (g_stub_link_mode >= 2 && g_stub_link_mode <= 4) {
             if (out) memset(out, 0xFF, sizeof(*out));
             return g_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE
                  : g_stub_link_mode == 3 ? ESP_FAIL : ESP_ERR_INVALID_ARG; /* 4 = NULL link */
         }
         if (out) memset(out, 0, sizeof(*out));
-        if (out) out->link_up = (g_stub_link_mode == 0);
+        /* mode 5 = up on the first call (the entry gate), down on every later one (commit recheck). */
+        if (g_stub_link_mode == 5) g_stub_link_calls++;
+        if (out) out->link_up = (g_stub_link_mode == 0) || (g_stub_link_mode == 5 && g_stub_link_calls <= 1);
         return ESP_OK;
     }
     if (out) {
@@ -2859,6 +2862,30 @@ static void test_run_refuses_unless_link_positively_up(void)
         s_test_profiles_http_get_ok = false;
         s_test_zones_config_valid = false;
     }
+}
+
+/* LOW-4: the link drops between the entry gate and the commit point. The second gate call must
+ * refuse the start, unwind the claims and name the cause. */
+static void monitor_only_tick_setup(bool zone1_monitor_only);
+static void test_run_refuses_when_link_drops_before_commit(void)
+{
+    TEST_SECTION("profile_executor_run() rechecks the link right before RUNNING (LD-01 LOW-4)");
+    bool saved_force = g_stub_force_link_up;
+    monitor_only_tick_setup(false);
+    g_request_enable_true_calls = 0;
+    g_stub_link_calls = 0;
+    g_stub_force_link_up = true;
+    g_stub_link_mode = 5;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    int calls = g_stub_link_calls;
+    g_stub_link_mode = 0;
+    g_stub_force_link_up = saved_force;
+    TEST_CHECK(calls >= 2, "the gate ran a second time before commit");
+    TEST_CHECK(!ok, "start refused when the link drops before commit");
+    TEST_CHECK(strstr(err, "safety link went down while the firing was starting") != NULL, "refusal names the cause");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "run did not enter RUNNING");
+    TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request");
 }
 
 // CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: a config the
@@ -12041,6 +12068,7 @@ static void run_test_aux_wp3(void)
     test_guard_trip_tick_never_writes_relay_on_first();
     test_elapsed_accumulates_ms_without_rounding_loss();
     test_relay_cycles_persist_runs_after_lock_give();
+    test_run_refuses_when_link_drops_before_commit();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();
     test_zone_drives_run_predicate();
