@@ -68,6 +68,9 @@ Two differences remain:
 
 ### F1 (LOW-MED): a refused saved_nets record plus a surviving legacy namespace re-adopts stale mode and AP identity on every boot
 
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
+
 `wifi_prov_migrate_from_default_partition()` (`wifi_prov_nvs.c:594`) decides
 `adopt = !nvs_saved_nets_record_present(WIFI_NVS_PARTITION)`.
 `nvs_saved_nets_record_present()` (`:266`) returns false for an absent record and
@@ -100,6 +103,9 @@ unreadable). Do not adopt while the record is unreadable or newer.
 
 ### F2 (LOW): the client precheck omits the AP SSID / AP password equality rule, and a refusal costs a fresh TOTP code
 
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
+
 The firmware refuses a new password equal to the AP SSID or the AP password
 (when non-empty). Neither `kcResetPasswordProblem()` (app.js) nor
 `reset_password_problem()` (`totp_http_client.py`) can check this, because
@@ -109,6 +115,9 @@ returns to step 1 on any failure. So the user has to wait for a new TOTP code.
 Fix direction: on a 400 weak-password reply, keep the token and stay on step 2.
 
 ### F3 (LOW): refused-record errors do not say how to recover
+
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
 
 - A refused add returns 400 "could not save credentials". A refused forget
   returns 500 "could not forget network" (`wifi_provision_http.c`).
@@ -124,6 +133,9 @@ the next reboot, while RAM still holds the adopted network. A reboot recovers.
 
 ### F4 (LOW): strict static-IP edits refuse some formerly accepted configs, and the error text is misleading
 
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
+
 `wifi_prov_static_ip_config_valid()` now refuses all of these:
 - an off-subnet gateway
 - /31 and /32 masks (`inv < 3u`)
@@ -137,6 +149,9 @@ not mention the subnet or gateway rule.
 
 ### F5 (LOW): W5 dirty tracking does not cover `#relayNames`
 
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
+
 `zonesFormDirty` is set only by input/change listeners on `#zones`,
 `thermoCount`, `relayCount`, `maxSimultaneous` and `continueOnZoneTrip`.
 `#relayNames` (`zones_page.html:371`) lives outside `#zones`. Yet `saveBtn`
@@ -146,6 +161,9 @@ autotune Accept calls `reloadUnlessDirty()`. That is exactly the W5 symptom,
 for those fields.
 
 ### F6 (INFO): the WPA2 minimum drops WPA1-only networks
+
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
 
 `threshold.authmode = WIFI_AUTH_WPA2_PSK` (with PMF capable, not required)
 means a board already joined to a WPA/TKIP-only access point stops associating
@@ -160,6 +178,9 @@ admission while the hijack runs. The hijack runs only in AP or AP+STA fallback,
 so the exposure is small.
 
 ### F8 (INFO): fake_kv still diverges from target for get_blob on a string key
+
+**FIXED 2026-10-10** (SHA_PLACEHOLDER): see the commit message; host/JS tests negative-tested with tools
+egtest.ps1.
 
 rf4 made fake_kv typed getters return NOT_FOUND on a type mismatch, which
 matches ESP-IDF: `Storage::findItem` skips TYPE_MISMATCH items. But fake_kv's
