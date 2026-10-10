@@ -1997,6 +1997,11 @@ static void test_volatile_gate_backfills_before_compare(void)
     base.zone_ct_channel[2] = 2u;
     base.ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE; // stale: zone map says summed
     TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: install (backfills ct_topology)");
+    {
+        config_store_record_t running;
+        config_store_get_full_record(&running);
+        TEST_CHECK(running.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "fixture: installed ct_topology was backfilled to SUMMED");
+    }
     config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
     config_store_record_t resend = base; // still carries the stale legacy byte
     TEST_CHECK(config_store_write_volatile(&resend, NULL) == true,
