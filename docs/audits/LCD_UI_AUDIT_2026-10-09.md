@@ -53,8 +53,8 @@ Context that shapes the findings:
 | L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. **Fixed** (LCD chart commit, see Third pass fix note). |
 | L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. **Fixed** (LCD chart commit, see Third pass fix note). |
 | L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. **Fixed** (LCD chart commit, see Third pass fix note). |
-| L29 | INFO | geometry | **FIXED in 22c54a17.** Tick and legend positions add the chart's content offset twice (2 px); the top Y label sits 3 px above the content box. |
-| L30 | INFO | rail | **FIXED in 22c54a17** (write-on-change, name copy under the zones lock, aux caption static assert). Rail zone name/temp labels are rewritten every tick; zone names are read without the zones lock; aux caption table hard-codes 4 relays. |
+| L29 | INFO | geometry | **FIXED in 8b65ea9a.** Tick and legend positions add the chart's content offset twice (2 px); the top Y label sits 3 px above the content box. |
+| L30 | INFO | rail | **FIXED in 8b65ea9a** (write-on-change, name copy under the zones lock, aux caption static assert). Rail zone name/temp labels are rewritten every tick; zone names are read without the zones lock; aux caption table hard-codes 4 relays. |
 
 L9 (second pass, below) is the only HIGH finding: it opens every gate, Clear Trip included, on one boot path. Otherwise Clear Trip itself is correct: ADMIN gate, role
 re-checked inside the action, and the same `dashboard_safety_clear_trip()`
@@ -474,7 +474,7 @@ Float precision on the bucket times is also lost far below that size.
 Fix: clamp `horizon_s` to a display maximum (for example 99 h) before tick
 math, or set a non-zero minimum ramp rate in the validator.
 
-### L29 (INFO) **FIXED in 22c54a17 (labels content-local, top Y label clamped inside the chart)** Tick and legend geometry off by the chart padding
+### L29 (INFO) **FIXED in 8b65ea9a (labels content-local, top Y label clamped inside the chart)** Tick and legend geometry off by the chart padding
 
 `lv_obj_set_pos()` on a child is relative to the parent's content area
 (LVGL `src/core/lv_obj_pos.c:901`-`:902` adds the parent's padding).
@@ -486,7 +486,7 @@ top Y label lands at content y = -3, so its top pixel row is outside the chart
 and clipped; bottom X labels touch the card's outer edge. The chart is not
 scrollable (`ui/ui_page_home.c:883`), so nothing scrolls. Cosmetic.
 
-### L30 (INFO) **FIXED in 22c54a17** Rail helper notes
+### L30 (INFO) **FIXED in 8b65ea9a** Rail helper notes
 
 - `ui_home_rail_refresh()` (`ui/ui_page_home_refresh.c:995`) sets each zone's
   name and temperature text every tick even when unchanged, which invalidates
