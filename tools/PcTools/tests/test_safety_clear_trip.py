@@ -30,7 +30,7 @@ class SafetyClearTripHappyPathTests(unittest.TestCase):
         with unittest.mock.patch.object(
             mcp_server, "_send", return_value="ok - delivered to the destination task's inbox (ACK)"
         ) as mock_send:
-            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=False, trip_reason=0, trip_mask=0)):
+            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=True, trip_reason=0, trip_mask=0)):
                 result = mcp_server.safety_clear_trip()
         self.assertTrue(result.startswith("ok"))
         mock_send.assert_called_once()
@@ -53,7 +53,7 @@ class SafetyClearTripDeliveryFailureTests(unittest.TestCase):
                      describe=lambda: "destination task not registered on the peer (NACK)",
                  ),
              ):
-            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=False, trip_reason=0, trip_mask=0)):
+            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=True, trip_reason=0, trip_mask=0)):
                 result = mcp_server.safety_clear_trip()
         self.assertFalse(result.startswith("ok"))
         self.assertIn("UNDELIVERABLE", result)
@@ -65,7 +65,7 @@ class SafetyClearTripErrorPathTests(unittest.TestCase):
                  type(mcp_server._info), "compatible",
                  new_callable=unittest.mock.PropertyMock, return_value=False), \
              unittest.mock.patch.object(mcp_server._link, "send") as mock_link_send:
-            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=False, trip_reason=0, trip_mask=0)):
+            with unittest.mock.patch.object(mcp_server._safety, "get_diag", return_value=unittest.mock.MagicMock(ever_received=True, trip_reason=0, trip_mask=0)):
                 result = mcp_server.safety_clear_trip()
         self.assertTrue(result.startswith("error"))
         self.assertIn("protocol version mismatch", result)
