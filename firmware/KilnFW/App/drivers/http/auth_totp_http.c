@@ -61,6 +61,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -347,6 +348,8 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
+            totp_secure_zero(body, RESET_BODY_MAX);
+            free(body);
             totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
@@ -435,7 +438,10 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
 
 // --- OPEN: POST /api/auth/reset ---------------------------------------------
 
-#define RESET_BODY_MAX 256
+// Worst legal body: "username=" + 32 chars and "new_password=" + 128 chars both fully
+// percent-encoded (3x) + "reset_token=" + hex token + separators, so 256 could refuse
+// a valid reset (login was raised to 512 for the same reason, e51f9402). Heap, not stack.
+#define RESET_BODY_MAX 512
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
@@ -456,7 +462,11 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
-    char body[RESET_BODY_MAX];
+    char *body = (char *)malloc(RESET_BODY_MAX);
+    if (body == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
@@ -475,6 +485,9 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int token_len = http_form_find_field(body, "reset_token", reset_token, sizeof(reset_token));
     int password_len = http_form_find_field(body, "new_password", new_password, sizeof(new_password));
+    totp_secure_zero(body, RESET_BODY_MAX);
+    free(body);
+    body = NULL;
     if (username_len < 0 || token_len < 0 || password_len < 0) {
         totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username, reset_token and new_password are required");

@@ -14,6 +14,7 @@
 #include "pref_cfg_fs.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
+#include "http_form.h" /* http_form_find_field() -- note_from_form */
 
 static const char *TAG = "setup_wiz_progress";
 
@@ -587,6 +588,38 @@ static esp_err_t persist_all(void)
     return err;
 }
 
+/* Bytes to keep when cutting `full_len` bytes of `s` down to `n`: backs up
+ * over UTF-8 continuation bytes so a multi-byte sequence is never split. */
+static size_t utf8_safe_len(const char *s, size_t n, size_t full_len)
+{
+    if (n >= full_len) {
+        return full_len;
+    }
+    while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80) {
+        n--;
+    }
+    return n;
+}
+
+bool setup_wizard_progress_note_from_form(const char *body, char *out, size_t out_cap)
+{
+    char tmp[SETUP_WIZARD_NOTE_FORM_MAX];
+    int len = http_form_find_field(body, "note", tmp, sizeof(tmp));
+    if (len == -2) {
+        return false; /* only when the whole body cap is exceeded; the caller bounds the body */
+    }
+    if (out_cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (len > 0) {
+        size_t n = utf8_safe_len(tmp, out_cap - 1, (size_t)len);
+        memcpy(out, tmp, n);
+        out[n] = '\0';
+    }
+    return true;
+}
+
 esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_state_t state, const char *note)
 {
     if (step_index >= SETUP_WIZARD_STEP_COUNT || !setup_wizard_step_state_is_valid(state)) {
@@ -599,8 +632,10 @@ esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_s
     s_steps[step_index].state = state;
     s_steps[step_index].ts = (uint32_t)(hal_time_now_us() / 1000000ULL);
     if (note && note[0] != '\0') {
-        strncpy(s_steps[step_index].note, note, SETUP_WIZARD_NOTE_MAX - 1);
-        s_steps[step_index].note[SETUP_WIZARD_NOTE_MAX - 1] = '\0';
+        size_t n = strnlen(note, SETUP_WIZARD_NOTE_MAX - 1);
+        n = utf8_safe_len(note, n, strlen(note));
+        memset(s_steps[step_index].note, 0, SETUP_WIZARD_NOTE_MAX);
+        memcpy(s_steps[step_index].note, note, n);
     } else {
         s_steps[step_index].note[0] = '\0';
     }

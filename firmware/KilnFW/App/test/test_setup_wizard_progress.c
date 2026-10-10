@@ -565,6 +565,37 @@ static void test_NEGATIVE_stored_state_must_not_win_over_readiness(void)
     TEST_CHECK(eff == SETUP_WIZ_EFFECTIVE_REGRESSED, "the correct effective state is REGRESSED, not DONE");
 }
 
+/* POST /api/setup/progress contract: a long note is truncated to
+ * SETUP_WIZARD_NOTE_MAX-1 bytes (UTF-8 safe) and the step is still saved. */
+static void test_long_note_truncates_and_saves(void)
+{
+    reset();
+    setup_wizard_progress_start();
+
+    const char *body = "step=8&state=skipped&note=0123456789012345678901234567890123456789012345678901234";
+    char note[SETUP_WIZARD_NOTE_MAX];
+    TEST_CHECK(setup_wizard_progress_note_from_form(body, note, sizeof(note)), "55-char note is accepted, not rejected");
+    TEST_CHECK(strlen(note) == SETUP_WIZARD_NOTE_MAX - 1, "55-char note truncated to 31 chars");
+    TEST_CHECK(strncmp(note, "0123456789012345678901234567890", 31) == 0, "truncation keeps the prefix");
+    TEST_CHECK(setup_wizard_progress_set_step(8, SETUP_WIZ_STEP_SKIPPED, note) == ESP_OK, "step saved");
+    setup_wizard_step_t s8;
+    setup_wizard_progress_get_step(8, &s8);
+    TEST_CHECK(s8.state == SETUP_WIZ_STEP_SKIPPED, "state recorded despite the long note");
+    TEST_CHECK(strlen(s8.note) == 31, "stored note is 31 chars");
+
+    /* 30 ASCII + a 2-byte char (%C3%A9) straddling byte 31: must not split it. */
+    const char *utf = "note=012345678901234567890123456789%C3%A9%C3%A9";
+    TEST_CHECK(setup_wizard_progress_note_from_form(utf, note, sizeof(note)), "utf8 note accepted");
+    TEST_CHECK(strlen(note) == 30, "multi-byte char not cut in half");
+    TEST_CHECK(setup_wizard_progress_set_step(8, SETUP_WIZ_STEP_DONE, "012345678901234567890123456789\xC3\xA9\xC3\xA9") == ESP_OK,
+               "set_step with long utf8 note ok");
+    setup_wizard_progress_get_step(8, &s8);
+    TEST_CHECK(strlen(s8.note) == 30, "set_step also truncates UTF-8 safely");
+
+    TEST_CHECK(setup_wizard_progress_note_from_form("step=8&state=done", note, sizeof(note)) && note[0] == '\0',
+               "absent note yields empty");
+}
+
 void run_test_setup_wizard_progress(void)
 {
     test_defaults_on_empty_nvs();
@@ -582,6 +613,7 @@ void run_test_setup_wizard_progress(void)
     test_partition_init_failure_degrades_to_defaults();
     test_corrupt_blob_size_falls_back_to_defaults();
     test_state_name_round_trip();
+    test_long_note_truncates_and_saves();
     test_readiness_overrides_stored_regressed();
     test_NEGATIVE_stored_state_must_not_win_over_readiness();
 

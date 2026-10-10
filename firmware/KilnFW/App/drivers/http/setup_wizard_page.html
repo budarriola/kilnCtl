@@ -1126,7 +1126,7 @@ function renderStep8() {
         'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step8Skip">No CT ' +
         'installed &amp; mark done</button></div>';
       document.getElementById('step8Skip').addEventListener('click', function () {
-        postStepState(8, 'done', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
+        postStepState(8, 'done', 'ct_installed=0, no check').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
       });
       return;
     }
@@ -1173,7 +1173,8 @@ function renderStep8() {
           return;
         }
         okEl.innerHTML = '<p class="wok">' + v.text + '</p>';
-        postStepState(8, 'done').then(function () {
+        postStepState(8, 'done').then(function (r) {
+          if (stepSaveFailed(r)) return;
           armStepMessage(9, function () {
             var ok2 = document.getElementById('step8Ok');
             if (ok2) ok2.innerHTML = '<p class="wok">' + v.text + '</p>';
@@ -1216,7 +1217,7 @@ function renderStep8() {
 
     document.getElementById('step8SkipLater').addEventListener('click', function () {
       step8StopPoll();
-      postStepState(8, 'skipped', 'deferred -- resume later, requires heat + owner present').then(function () { loadAll(); });
+      postStepState(8, 'skipped', 'deferred, needs heat + owner').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
     });
   });
 }
@@ -1355,7 +1356,7 @@ function renderStep9() {
             resultEl.textContent = matched ? 'Stored.' : 'WARNING: board reports different gains than sent.';
             resultEl.className = matched ? 's10result wok' : 's10result werr';
             if (matched && kp > 0) {
-              postStepState(9, 'done').then(function () { loadAll(); });
+              postStepState(9, 'done').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
             }
           });
         }).catch(function (e) {
@@ -1475,8 +1476,9 @@ function renderStep11() {
             // (too short, bad role, store full), locking the web UI behind a
             // credential that does not exist. Reject here so the catch below
             // surfaces it and cmd=set_policy is never sent.
-            if (res.ok) return null;
+            // The board answers 200 {"ok":false,"error":...} on refusal (security_http.c).
             return res.json().catch(function () { return {}; }).then(function (body) {
+              if (res.ok && body && body.ok === true) return null;
               throw new Error((body && body.error) ||
                 'The board refused the administrator login details -- login was NOT turned on.');
             });
@@ -1502,7 +1504,7 @@ function renderStep11() {
       });
       chain.then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (body) {
-          return { ok: res.ok, body: body };
+          return { ok: res.ok && !!body && body.ok === true, body: body };
         });
       }).then(function (r) {
         if (!r.ok) {
@@ -1519,7 +1521,7 @@ function renderStep11() {
           msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
         }).then(function () {
           return postStepState(11, 'done');
-        }).then(function () { loadAll(); });
+        }).then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
       }).catch(function (err) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
           renderErrList(errEl, ['Sign-in cancelled.']);
@@ -1530,7 +1532,7 @@ function renderStep11() {
       });
     });
     document.getElementById('step11Skip').addEventListener('click', function () {
-      postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
+      postStepState(11, 'skipped', 'optional, deferred').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
     });
   });
 }
@@ -1742,6 +1744,16 @@ function postStepState(stepId, state, note) {
   }); });
 }
 
+/* A step save the board refused (non-2xx) must be shown, not chained into loadAll. */
+function stepSaveFailed(r) {
+  if (r && r.ok) return false;
+  var el = document.getElementById('stepStatusLine');
+  var msg = 'Could not save this step: ' + ((r && r.body && r.body.error) || 'the board refused it') +
+    ' -- try again.';
+  if (el) { el.textContent = msg; el.className = 'werr'; }
+  return true;
+}
+
 function renderErrList(el, errors) {
   if (!errors.length) { el.innerHTML = ''; return; }
   el.innerHTML = '<div class="werr"><ul>' +
@@ -1795,7 +1807,7 @@ function renderStep0() {
             ['A crash report appeared since this screen loaded -- review it before continuing.']);
           return;
         }
-        postStepState(0, 'done').then(function () { loadAll(); });
+        postStepState(0, 'done').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
       });
     });
   });
