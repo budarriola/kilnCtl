@@ -52,7 +52,9 @@ divergence check.
 
 ## Findings
 
-### M1. Kiln swap: active_id persist failure is ignored at boot and logged only at runtime (user-data-loss)
+### M1. Kiln swap: active_id persist failure is ignored at boot and logged only at runtime (user-data-loss) -- FIXED
+
+**FIXED 2026-10-09 (`f8edfd52`):** a failed active_id save after a verified swap keeps the record at ESP_DONE and `kiln_cfg_swap_apply()` returns false with the `KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX` reason (the kiln configs page no longer appends "Nothing was changed." to it). Boot recovery checks the result, logs, latches the display-only `KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED` fault and keeps the record, so the next boot retries. Host-tested by `test_active_id_save_failure_keeps_record_and_boot_retries`.
 
 - `firmware/KilnFW/App/drivers/persist/kiln_cfg_swap.c:890`. In the boot
   ESP_DONE recovery path, the return of
@@ -81,7 +83,9 @@ Fix direction: on a failed active_id persist, keep the pending record at
 ESP_DONE so the next boot retries `finish_esp_done_impl`. Surface the failure in
 the apply status, not just in the log.
 
-### M2. Kiln swap: the PICO_OPEN / PICO_DONE / ESP_DONE marker persists are unchecked (safety-relevant, backstopped)
+### M2. Kiln swap: the PICO_OPEN / PICO_DONE / ESP_DONE marker persists are unchecked (safety-relevant, backstopped) -- FIXED
+
+**FIXED 2026-10-09 (`f8edfd52`):** a failed PICO_OPEN save refuses the swap before `push_and_verify_pico()`; the raise-first ceiling (same or looser) is put back to R's, then the standing reconcile runs. A failed PICO_DONE or ESP_DONE save rolls the swap back. PICO_DONE is not safe to skip as the text below suggests: a record stuck at PICO_OPEN is rolled back at boot with `esp_was_committed=false`, which would leave the ESP on the target. The STAGED boot comment now names the ceiling raise. Host-tested by `test_pico_open_save_failure_aborts_before_pico_push`, `test_pico_done_save_failure_rolls_back` and `test_esp_done_save_failure_rolls_back`.
 
 - `kiln_cfg_swap.c:612` (`persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_OPEN)`),
   `:634` (PICO_DONE) and `:683` (ESP_DONE) all discard the bool.
@@ -211,7 +215,9 @@ The image chunks themselves are covered by the whole-image CRC read-back at
 The autotune run still reports success. RAM holds the cells until reboot, then
 they revert. `control_get_zones` shows the cells until that reboot.
 
-### L6. Kiln swap save_pending() has no read-back (cosmetic)
+### L6. Kiln swap save_pending() has no read-back (cosmetic) -- FIXED
+
+**FIXED 2026-10-09 (`f8edfd52`):** `save_pending()` reads the record back into a `persist_scratch_alloc()` buffer and compares it before reporting success. Host-tested by `test_save_pending_read_back_catches_silent_write`.
 
 `kiln_cfg_swap.c:130-151` checks `hal_kv_set_blob` and `hal_kv_commit` return
 codes but never reads back. boot_guard's 2026-09-08 failure was exactly an NVS
@@ -336,8 +342,7 @@ SaftyFW:
 
 ## Recommended follow-ups, in priority order
 
-1. M1 and M2, `kiln_cfg_swap.c`. Keep the journal open on a failed active_id
-   persist, and refuse the swap when the PICO_OPEN marker fails to persist.
+1. ~~M1 and M2, `kiln_cfg_swap.c`.~~ Fixed in `f8edfd52`, with L6.
 2. L1: dirty-flag retry in `profiles_favorites_set` and
    `profiles_builtin_set_hidden/restore_all`.
 3. L3: do not overwrite the firing history after a failed load.
