@@ -3344,18 +3344,9 @@ static void test_try_clear(void)
         TEST_CHECK(!s.is_tripped, "S5 successful clear: is_tripped false");
     }
 
-    /* A graduated guard (S1, 3-tick over-ceiling streak) still physically
-     * over-ceiling at clear time: this is the documented scope limit, not a
-     * bug. safety_guards_clear() (inside try_clear) resets
-     * s1_over_ceiling_streak to 0 along with everything else, so the single
-     * retick only brings the streak to 1 -- nowhere near
-     * S1_OVER_CEILING_STREAK_TO_TRIP (3) -- and try_clear reports success
-     * even though the underlying condition (reading still above the
-     * ceiling) has not gone away. S1 is not broken by this: left running,
-     * it will re-trip on its own normal timescale (3 more consecutive
-     * over-ceiling ticks) once safety_core keeps calling safety_guards_tick()
-     * afterward. This test documents that real, limited behaviour rather
-     * than asserting a stronger guarantee try_clear does not provide. */
+    /* T1 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): S1 is refused while the reading
+     * is still above abs_max_temp_c (previously accepted, then re-tripped ~3
+     * ticks later), and accepted once it is back under the ceiling. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -3366,21 +3357,60 @@ static void test_try_clear(void)
         TEST_CHECK(s.is_tripped, "sanity: S1 tripped via 3 consecutive over-ceiling readings");
         TEST_CHECK(s.reason == SAFETY_TRIP_OVERTEMP, "sanity: reason is SAFETY_TRIP_OVERTEMP");
 
-        /* Still over-ceiling at clear time. */
         bool cleared = safety_guards_try_clear(&s, &cfg, &over);
-        TEST_CHECK(cleared, "scope limit: a single retick does not rebuild S1's 3-tick streak, clear holds");
-        TEST_CHECK(!s.is_tripped, "scope limit: is_tripped is false right after the clear, even though still over-ceiling");
-        TEST_CHECK(s.s1_over_ceiling_streak == 1, "scope limit: the retick brought the streak to exactly 1, not 3");
+        TEST_CHECK(!cleared, "T1: S1 clear refused while still above abs_max_temp_c");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVERTEMP, "T1: refused S1 clear leaves the latch untouched");
 
-        /* Left running against the same still-over-ceiling input, S1 does
-         * its job and re-trips on its own timescale -- proving this is a
-         * scope limit of try_clear's single retick, not a hole in S1
-         * itself. */
-        bool retripped = false;
-        for (int i = 0; i < 2 && !retripped; i++) {
-            retripped = safety_guards_tick(&s, &cfg, &over);
-        }
-        TEST_CHECK(retripped, "S1 re-trips on its own normal timescale once the streak rebuilds");
+        safety_guard_input_t at = base_input();
+        at.tc_c = 1300.0f; /* == ceiling is not over */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &at), "T1: S1 clear accepted once the reading is back at/under the ceiling");
+        TEST_CHECK(!s.is_tripped, "T1: S1 cleared");
+    }
+
+    /* T1: S8 -- refused while the tripping window measured against the current
+     * reading still exceeds max_rate_c_per_min; accepted once the kiln cooled. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "sanity: S8 tripped");
+
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "T1: S8 clear refused while still above the rate vs the tripping window");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_RATE, "T1: refused S8 clear leaves the latch untouched");
+
+        safety_guard_input_t cool = base_input();
+        cool.dt_s = 0.1f;
+        cool.tc_c = 30.0f; /* (30-40)/1min < 10 C/min */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "T1: S8 clear accepted once the reading is back under the rate");
+        TEST_CHECK(!s.is_tripped, "T1: S8 cleared");
+    }
+
+    /* T4: S12 still runs on a bad TC read when the cold junction is valid. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_c = 90.0f; /* > cj_max_c default (85) */
+        bad.dt_s = 61.0f; /* > cj_time_s default (60) */
+        bool tripped = safety_guards_tick(&s, &cfg, &bad);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "T4: S12 trips on a hot valid cold junction despite a bad TC read");
+
+        safety_guards_reset(&s);
+        bad.cj_invalid = true;
+        bad.cj_c = (float)NAN;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with an invalid cold junction does not run S12 (no new trip)");
     }
 
     /* 2026-08-23 hardware finding: S5 (and S12/S13/S6b below) are the four

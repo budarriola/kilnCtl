@@ -93,6 +93,9 @@ typedef struct {
     bool              reboot_classify_pending; /* reboot seen with a claim held, cause not yet known */
     uint32_t          reboot_classify_since_ms;
     bool              reboot_hold;           /* fatal-cause reboot: do NOT re-request heat */
+    bool              last_pico_tripped;     /* last fresh DIAG said TRIPPED (T3: the Pico's trip latch
+                                              * does not survive a non-watchdog reboot) */
+    bool              reboot_was_tripped;    /* the reboot being classified followed a TRIPPED DIAG */
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -198,6 +201,8 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_classify_pending = false;
     s_he.reboot_classify_since_ms = 0u;
     s_he.reboot_hold = false;
+    s_he.last_pico_tripped = false;
+    s_he.reboot_was_tripped = false;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -534,6 +539,7 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         he_k4_reset_locked();
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
+        s_he.reboot_was_tripped = false;
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -713,6 +719,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * nothing about it (reset-one-side class: the Pico side restarted). */
         he_k4_reset_locked();
         if (s_he.held_mask != 0u) {
+            s_he.reboot_was_tripped = s_he.last_pico_tripped;
             s_he.reboot_classify_pending = true;
             s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         }
@@ -720,6 +727,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     if (s_he.held_mask == 0u) {
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
+        s_he.reboot_was_tripped = false;
     } else if (s_he.reboot_classify_pending) {
         if (diag_since_reboot) {
             s_he.reboot_classify_pending = false;
@@ -727,7 +735,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                                   SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                   SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
                                   SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
-            if ((boot_reason & fatal) != 0u) {
+            /* T3 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): the Pico's trip latch is RAM-only
+             * and does not survive a non-watchdog reset, so a reboot that followed a
+             * TRIPPED DIAG is treated as fatal whatever its boot reason says: the
+             * latched trip was lost, not cleared by an operator. Withholds heat only. */
+            if ((boot_reason & fatal) != 0u || s_he.reboot_was_tripped) {
                 s_he.reboot_hold = true;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
                 if (s_he.granted || s_he.pending) {
@@ -785,6 +797,9 @@ void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed,
     bool log_resend = false;
     bool armed_or_warn = diag_state == SAFETY_LINK_DIAG_STATE_ARMED ||
                          diag_state == SAFETY_LINK_DIAG_STATE_WARN;
+    if (fresh) {
+        s_he.last_pico_tripped = (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+    }
     if (s_he.held_mask == 0u) {
         he_k4_reset_locked();
     } else if (s_he.reboot_hold) {

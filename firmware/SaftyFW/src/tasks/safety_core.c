@@ -294,6 +294,10 @@ static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
 // (this file's own comments elsewhere on log_task_log() cost), and a
 // standing mismatch is exactly as true on tick 2 as it was on tick 1.
 static bool s_borrowed_type_mismatch_warned;
+// T2: last-good-config bookkeeping for a failed config_store read (see the
+// cfg_read_ok block in the tick). Reset with the guards at task start.
+static bool s_have_good_guard_cfg;
+static bool s_last_good_tc_not_installed_declared;
 
 // KILN_PROFILES_PLAN.md item 16 -- same "log once on the transition, not
 // every tick" idiom as s_borrowed_type_mismatch_warned just above, for the
@@ -1065,7 +1069,18 @@ static safety_guard_input_t safety_core_build_input(void)
     // to config_store_default() either way, so ignoring it for them is
     // correct, not an oversight.
     bool cfg_read_ok = config_store_get_full_record(&cfg_rec);
+    // T2 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): a failed read yields the default
+    // record (fields_set == 0), which would zero S1/S8/S2/S14 config and flip
+    // the S5 "declared not installed" suppression for one tick. Keep the last
+    // GOOD values instead. Until a first good read exists (s_have_good_guard_cfg
+    // false) behaviour is unchanged: the default record is used, as at boot.
     bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
+    if (cfg_read_ok) {
+        s_have_good_guard_cfg = true;
+        s_last_good_tc_not_installed_declared = safety_tc_not_installed_declared;
+    } else if (s_have_good_guard_cfg) {
+        safety_tc_not_installed_declared = s_last_good_tc_not_installed_declared;
+    }
 
     // S13's sample_counter_advancing. GUARD_TEST_MATRIX.md section 6 (row
     // S13) found the actual gap: `borrowed_zone_index` IS a real config_store
@@ -1111,7 +1126,9 @@ static safety_guard_input_t safety_core_build_input(void)
     // against. Before this call existed, none of them ever arrived and S1
     // could not fire at any temperature -- see
     // safety_core_load_guard_cfg()'s own doc comment.
-    safety_core_load_guard_cfg(&cfg_rec);
+    if (cfg_read_ok || !s_have_good_guard_cfg) {
+        safety_core_load_guard_cfg(&cfg_rec);
+    }
 
     // KILN_PROFILES_PLAN.md item 16, defence in depth -- NOT the primary
     // interlock. The primary refusal already lives in safety_core_request_
@@ -1418,6 +1435,8 @@ static void safety_core_task(void *arg)
     (void)arg;
 
     safety_guards_reset(&s_guard_state);
+    s_have_good_guard_cfg = false;
+    s_last_good_tc_not_installed_declared = false;
 
     TickType_t last_wake = xTaskGetTickCount();
 

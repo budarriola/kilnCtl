@@ -1115,6 +1115,25 @@ static void test_k4_timer_and_episode_restart(void)
     TEST_CHECK(!heat_enable_grant_unconfirmed(), "leaving ARMED clears the unconfirmed latch (LOW-1)");
 }
 
+static void test_pico_reboot_after_tripped_holds(void)
+{
+    TEST_SECTION("heat_enable -- T3: a reboot that followed a TRIPPED DIAG is fatal even if benign-looking");
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "POWERON reboot right after a TRIPPED DIAG -> hold (trip latch lost)");
+
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, true, 1500u); /* trip cleared */
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "a POWERON reboot after the trip was cleared stays benign");
+}
+
 static void test_pico_reboot_cause_holds_or_retries(void)
 {
     TEST_SECTION("heat_enable -- MED-1: a fatal-cause Pico reboot is never silently re-requested");
@@ -1304,6 +1323,7 @@ void run_test_heat_enable(void)
     test_executor_autotune_and_stale_diag_wiring();
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
+    test_pico_reboot_after_tripped_holds();
     test_enable_in_flight_under_reboot_hold_queues_release();
     test_watchdog_loop_and_bounded_pause_wiring();
     test_executor_wires_k4_and_reboot_state();

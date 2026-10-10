@@ -255,8 +255,12 @@ bool link_task_get_firing_ceiling(float *out)
 
 bool config_store_get_full_record(config_store_record_t *out)
 {
+    if (!W.cfg_read_ok) {
+        config_store_default(out); // models the real fail-closed default record
+        return false;
+    }
     *out = W.cfg;
-    return W.cfg_read_ok;
+    return true;
 }
 bool config_store_ram_integrity_recurrence_pending(void) { return W.integrity_recurrence; }
 bool commissioning_gate_energize_allowed(bool enable, const config_store_record_t *rec)
@@ -690,20 +694,30 @@ static void test_s1_overtemp(void)
     // Latch while still hot and after cooling.
     steps(30);
     TEST_CHECK(is_tripped(), "S1: latched while still hot");
-    // S1 is a documented scope limit (safety_guards.c guard_condition_still_immediate):
-    // a 3-tick debounce has no single-tick re-test, so a clear while still hot is
-    // accepted -- but the guard must re-trip on its own debounce with a NEW seq.
+    // T1: a clear while still over the ceiling is REFUSED (S1 level re-test).
     uint8_t seq_first = trip_seq_now();
     TEST_CHECK(safety_core_request_clear_trip(true, seq_first), "S1: clear queued while hot");
     steps(1);
-    TEST_CHECK(last_outcome() == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED, "S1: clear accepted while hot (documented limit)");
-    TEST_CHECK(steps_until_trip(20) > 0, "S1: re-trips after the clear while still over the ceiling");
-    TEST_CHECK(trip_seq_now() != seq_first, "S1: re-trip is a new occurrence (new seq)");
+    TEST_CHECK(last_outcome() == SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED, "S1: clear refused while hot (T1)");
+    TEST_CHECK(is_tripped() && trip_seq_now() == seq_first, "S1: still the same latched occurrence");
     W.thermo.tc_c = 200.0f;
     steps(3);
     clear_bound_and_settle();
     TEST_CHECK(last_outcome() == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED && !is_tripped(),
                "S1: clear accepted once cooled");
+}
+
+static void test_failed_cfg_read_keeps_last_good_guard_cfg(void)
+{
+    TEST_SECTION("T2: a failed config_store read keeps the last good guard config");
+    world_reset_keep_clock();
+    core_start();
+    steps(3); // good reads: guard cfg loaded (abs_max 1300)
+    W.cfg_read_ok = false; // default record would zero abs_max_temp_c
+    W.thermo.tc_c = 1400.0f;
+    int n = steps_until_trip(50);
+    TEST_CHECK(n > 1 && n <= 20, "T2: S1 still trips on a failed config read (last good abs_max kept)");
+    TEST_CHECK(trip_reason() == SAFETY_TRIP_OVERTEMP, "T2: reason is S1");
 }
 
 static void test_s1_uncommissioned_never_trips(void)
@@ -1081,6 +1095,7 @@ int main(void)
     test_trip_seq_wrap();
     test_s1_overtemp();
     test_s1_uncommissioned_never_trips();
+    test_failed_cfg_read_keeps_last_good_guard_cfg();
     test_s5_stale_thermo();
     test_s5_spi_fault_and_not_installed();
     test_s6a_main_fault();

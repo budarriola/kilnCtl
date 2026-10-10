@@ -117,6 +117,7 @@ Pure `safety_guards.c`, MSVC, no SDK, no hardware — same setup as
 | All | Any guard, during `startup_grace_s` | Evaluated and reported, **relay never energized, no latch** |
 | All | Trip, condition clears, no clear command | **Still tripped** — latching |
 | All | `CLEAR_TRIP` while condition is still true | **Refused** |
+| S1, S8 | `CLEAR_TRIP` while the reading is still over the ceiling / the tripping window still exceeds the rate | **Refused** (`test_try_clear`, T1 of REVIEW_SAFTYFW_TRIP_PATH_2026-10-10) |
 | All | `CLEAR_TRIP` with a mismatched `trip_mask` | **Refused** |
 | All | Guard verdicts with the TX path stubbed out | **Bit-identical** to a live-TX run |
 

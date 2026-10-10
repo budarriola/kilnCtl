@@ -175,6 +175,14 @@ The `CLAUDE.md` sentence should be updated. This review does not edit
 - **Context parser.** It enforces the length and `zone_count <= CONTEXT_SNAPSHOT_MAX_ZONES`, with an exact length match. Non-finite setpoints and measurements are filtered in `context_reduce_zones()` (snapshots.h, F5). `borrowed_zone_index` is bounded 0..2 at config-param validation before it indexes the S13 arrays.
 - **Boot classification.** Every deliberate Pico reboot path (`hal_wdt_reboot` = `watchdog_reboot`) and the fatal hooks (stack overflow, malloc, assert) land as WATCHDOG or fatal-kind bits. The ESP holds on those. A hard fault locks up and is reset by the watchdog, so it also reports WATCHDOG. POWERON means "not a watchdog reset", which the ESP treats as benign per the owner decision of 2026-10-10. See T3 for the trip-latch residual.
 
+## Fix status (2026-10-10)
+
+- **T1 FIXED.** `guard_condition_still_immediate()` now refuses an S1 clear while `abs_max_temp_c > 0 && tc_valid && tc_c > abs_max_temp_c`, and an S8 clear while the tripping window (state not yet zeroed) measured against the current reading still exceeds `max_rate_c_per_min`. `test_safety_guards.c` and `test_safety_core_host.c` now assert refusal and the accept-after-cooling case; the matrix row was added.
+- **T2 FIXED.** `safety_core.c` keeps the last good guard config (and the last good S5 "declared not installed" flag) on a failed `config_store_get_full_record()`. Until a first good read exists (reset with the guards at task start) the boot behaviour is unchanged: the default record is used. Host test `test_failed_cfg_read_keeps_last_good_guard_cfg`.
+- **T3 FIXED ESP-side, no protocol change.** `heat_enable.c` remembers whether the last fresh DIAG said TRIPPED; a Pico reboot detected with a claim held after such a DIAG is classified fatal (hold, owe `REQUEST_ENABLE(false)`) regardless of boot reason. Withholds heat only. Host test `test_pico_reboot_after_tripped_holds`. The Pico-side latch loss itself still waits for the next protocol bump.
+- **T4 FIXED.** S12 is a helper `s12_evaluate()` also run on a bad TC read when the cold junction is valid; S5 untouched. Host test in `test_try_clear` block.
+- **T5 already fixed** on dev: CLAUDE.md now says the config store atomicity defects are fixed (`24090c9a`, `98d237b0`); `docs/CONFIG_FILESYSTEM.md` has no "unfixed" wording.
+
 ## Negative tests
 
 All runs used `tools\negtest.ps1 -Preset saftyfw-host -Mutations <json>`,
