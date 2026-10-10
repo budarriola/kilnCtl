@@ -34,8 +34,8 @@ referenced), X no execution test (none, or source-text only).
 | 2 | SaftyFW `src/tasks/link_task.c` (3592 L) | kilnlink RX/TX, frame dispatch, SET_PARAM, clear-trip, update commands | S N P | T (campaign 2: `test_link_task_fuzz.c` covers enable/heat-grant, CRC, resync, seq, unknown cmds; SET_PARAM and update commands not covered) | Dispatch table, CRC/length reject paths, commit/reject glue, TC type gate wiring (only extracted `link_task_*` helpers run) |
 | 3 | SaftyFW `src/tasks/thermo_task.c` (748 L) | MAX31856 read, fault bits, DRDY recovery feeding safety | S | Y (campaign 3: `test_thermo_task_faults.c`, 70 checks, task-loop harness) | Real SPI/DRDY timing; stuck-reading detection is the guards' job |
 | 4 | SaftyFW `src/tasks/watchdog_task.c` (344 L) | Check-in aggregation, hardware watchdog feed | S | Y (campaign 4: `test_watchdog_task_loop.c`, 134 checks) | Real scheduler, core affinity, `update_task_erase_slot()` feed |
-| 5 | KilnFW `drivers/safety/safety_link_payload.c` (337 L) | Builds status/trip/diag/stats payloads for the link | S N | T (0/5 referenced; compile test only) | `safety_link_build_status_payload`, `_trip_event_`, `_diag_`, `_stats_`, `_fw_version_` byte layouts |
-| 6 | KilnFW `drivers/safety/danger_mode.c` (378 L) | Operator danger-mode heat enable window | S R | T (1/9) | `request_start`, `set_heat_enable_request`, `remaining_ms` expiry, `stop`, `get_relay_status`, `init` |
+| 5 | KilnFW `drivers/safety/safety_link_payload.c` (337 L) | Builds status/trip/diag/stats payloads for the link | S N | Y (campaign 5: `test_safety_link_compile.c` + `test_safety_link_payload_golden.h`, golden bytes; F5-1 fixed) | `safety_link_build_status_payload`, `_trip_event_`, `_diag_`, `_stats_`, `_fw_version_` byte layouts |
+| 6 | KilnFW `drivers/safety/danger_mode.c` (378 L) | Operator danger-mode heat enable window | S R | Y (campaign 6: `test_danger_mode.c`; F6-1 fixed) | `request_start`, `set_heat_enable_request`, `remaining_ms` expiry, `stop`, `get_relay_status`, `init` |
 | 7 | KilnFW `drivers/owners/kiln_io_owner.c` (938 L), `kiln_io.c` (523 L) | SX1509 relay/IO command owner, relay writes | R S | T (6/18, 7/15) | `command_set_relay`, `set_io_dir`, sx reset/read/scan, irq paths |
 | 8 | KilnFW `drivers/http/aux_outputs_http.c` (211 L) | Spare-relay aux outputs GET/POST (drives relays) | R N P | X (no test names it) | Whole handler: field parse, range refusal, mode-gate 409, readback |
 | 9 | KilnFW `http/zone_aux_convert_http.c` (179 L), `http/dashboard_exec_http.c` (914 L) | Zone-to-aux convert; exec pause/ack, safety clear trip, history CSV | R P N S | T (convert only via test_zones_http; exec 2/13) | `profile_exec_pause_post_handler`, `dashboard_safety_clear_trip`, `profile_exec_ack_last_run_post_handler`, firing_history / history_csv handlers |
@@ -78,12 +78,12 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
 4. **watchdog_task starvation (SaftyFW). DONE (campaign 4).** Skip one required check-in and
    assert the feed is withheld within the bound; skip none and assert feeding.
    Cover the boot-checkin list so a new task cannot be omitted silently.
-5. **safety_link_payload golden byte layouts (KilnFW).** Golden vectors for
+5. **DONE (campaign 5). safety_link_payload golden byte layouts (KilnFW).** Golden vectors for
    status, trip_event, diag, stats and fw_version payloads, plus a round trip
    against the SaftyFW `link_frame` parser so a one-sided field change fails
    (reset-one-side class). Include `safety_link_frame.c` endian helpers at
    boundary values.
-6. **danger_mode lifecycle (KilnFW).** Fake clock: request_start, touch
+6. **DONE (campaign 6). danger_mode lifecycle (KilnFW).** Fake clock: request_start, touch
    extends, expiry at the exact ms, stop clears the heat request,
    set_heat_enable refused outside the window, init rebinds the safety class,
    get_relay_status mirrors the link state.
