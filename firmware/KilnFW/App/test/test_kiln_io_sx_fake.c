@@ -330,6 +330,17 @@ static void test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven(void)
     TEST_CHECK(chip_relays_logical() == 0x01 && g_io.relay_shadow == 0x01, "and the coil is really energised");
 }
 
+/* Relay latch stuck high: the latch write is unverifiable while pins are still
+ * inputs, so only the post-config read-back can notice a pin driven high. */
+static void test_k7_03_reinit_readback_catches_stuck_high_latch(void)
+{
+    setup_ready();
+    (void)SX1509_reset(&g_exp, false);
+    F.stuck_set[SX1509_REG_DATA_A] = 0x01;
+    TEST_CHECK(kiln_io_reinit(&g_io) == ESP_ERR_INVALID_RESPONSE, "reinit read-back rejects a relay pin reading high");
+    TEST_CHECK(!g_io.initialized, "board not initialised");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) != ESP_OK, "relay ON refused");
+}
 static void test_k7_03_reinit_failure_blocks_relay_on(void)
 {
     setup_ready();
@@ -468,6 +479,7 @@ int main(void)
     test_k7_unknown_chip_state_does_not_claim_off();
     test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven();
     test_k7_03_reinit_failure_blocks_relay_on();
+    test_k7_03_reinit_readback_catches_stuck_high_latch();
     test_k7_04_all_relays_off_after_por_repairs_direction();
     test_k7_04_unrepairable_por_reports_failure();
     test_all_relays_off_failfast_and_failsafe();
