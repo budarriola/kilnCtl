@@ -117,10 +117,11 @@ def _capability_preflight_ok(ctx: dict) -> Tuple[bool, str]:
         report = run_fn({}, host)
     except Exception as exc:
         return False, f"capability_preflight raised {type(exc).__name__}: {exc}"
-    if report.ok and not getattr(report.board, "heat_blocked", ()):
+    board = getattr(report, "board", None)
+    heat_blocked = getattr(board, "heat_blocked", ())
+    if report.ok and not heat_blocked:
         return True, ""
-    board = report.board
-    if report.ok and getattr(board, "heat_blocked", None):
+    if report.ok and heat_blocked:
         return False, "estop_unverified: refusing to heat: E-stop not physically verified"
     if getattr(board, "crash_unacknowledged", False):
         return False, f"refusing to heat: unacknowledged crash report ({getattr(board, 'crash_summary', '')})"
