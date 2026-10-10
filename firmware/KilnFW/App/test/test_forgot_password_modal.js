@@ -85,6 +85,8 @@ const RANGE_C = extractRange(
   '  // One modal on screen at a time. There is exactly one overlay/panel, so a'
 );
 
+const RESET_PW_SRC = SRC.match(/window\.kcResetPasswordProblem = function \(pw, username\) \{[\s\S]*?\r?\n  \};\r?\n/)[0];
+
 if (RANGE_S.indexOf('function kcModalIsTop') === -1 || RANGE_S.indexOf('function kcFocusFirstEmpty') === -1) {
   throw new Error('sanity: extracted range does not include the kcModalStack helpers');
 }
@@ -250,6 +252,12 @@ function makeContext(opts) {
       resume: function (noticeText) { resumeCalls.push(noticeText); },
     },
     console: fakeConsole,
+    // The real client-side strength rule (web batch W1), extracted from app.js, never a stand-in.
+    window: (function () {
+      const w = {};
+      new Function('window', 'TextEncoder', RESET_PW_SRC)(w, TextEncoder);
+      return w;
+    })(),
     encodeURIComponent,
     String,
     // Deliberately no localStorage/sessionStorage globals -- the modal
@@ -356,8 +364,8 @@ function flush() {
   {
     const { ctx, dom, fetchCalls } = makeContext({});
     ctx.openForgotPasswordModal(); // forgotResetToken is null right after open
-    dom.registry['kc-forgot-newpass'].value = 'samepass1';
-    dom.registry['kc-forgot-newpass2'].value = 'samepass1';
+    dom.registry['kc-forgot-newpass'].value = 'Samepass-1x9';
+    dom.registry['kc-forgot-newpass2'].value = 'Samepass-1x9';
     dom.registry['kc-forgot-step2'].dispatch('submit');
     await flush();
     assert(fetchCalls.length === 0, 'step2 with no held token never calls fetch');
@@ -379,8 +387,8 @@ function flush() {
     dom.registry['kc-forgot-code'].value = '654321';
     dom.registry['kc-forgot-step1'].dispatch('submit');
     await flush();
-    dom.registry['kc-forgot-newpass'].value = 'newpassword1';
-    dom.registry['kc-forgot-newpass2'].value = 'newpassword1';
+    dom.registry['kc-forgot-newpass'].value = 'NewSecret-pw99';
+    dom.registry['kc-forgot-newpass2'].value = 'NewSecret-pw99';
     dom.registry['kc-forgot-step2'].dispatch('submit');
     await flush();
     assert(resumeCalls.length === 1 && /reset/i.test(resumeCalls[0] || ''),
@@ -407,19 +415,50 @@ function flush() {
     dom.registry['kc-forgot-code'].value = '654321';
     dom.registry['kc-forgot-step1'].dispatch('submit');
     await flush();
-    dom.registry['kc-forgot-newpass'].value = 'short';
-    dom.registry['kc-forgot-newpass2'].value = 'short';
+    dom.registry['kc-forgot-newpass'].value = 'Sh0rt-but-ok-1';
+    dom.registry['kc-forgot-newpass2'].value = 'Sh0rt-but-ok-1';
     dom.registry['kc-forgot-step2'].dispatch('submit');
     assert(ctx.forgotResetToken === null, 'token nulled as soon as the /reset POST is sent');
     await flush();
     assert(dom.registry['kc-forgot-step1'].hidden === false, 'failed reset returns to step1');
     assert(dom.registry['kc-forgot-newpass'].value === '', 'failed reset clears new-password field');
-    dom.registry['kc-forgot-newpass'].value = 'short';
-    dom.registry['kc-forgot-newpass2'].value = 'short';
+    dom.registry['kc-forgot-newpass'].value = 'Sh0rt-but-ok-1';
+    dom.registry['kc-forgot-newpass2'].value = 'Sh0rt-but-ok-1';
     dom.registry['kc-forgot-step2'].dispatch('submit');
     await flush();
     const resets = fetchCalls.filter((c) => c.url === '/api/auth/reset');
     assert(resets.length === 1, 'token never sent twice (' + resets.length + ' reset POSTs)');
+  }
+
+  // Group 7a (web batch W1): a weak password is refused locally with the token UNSPENT, so the
+  // operator can retype and succeed with the same code/token (the firmware now checks strength
+  // before consuming the token, but answers a weak password with the same generic 400).
+  {
+    const { ctx, dom, fetchCalls } = makeContext({
+      fetchResponses: [
+        { status: 202, json: { reset_token: 'tok-keep' } },
+        { status: 200, json: { ok: true } },
+      ],
+    });
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-username'].value = 'bench';
+    dom.registry['kc-forgot-code'].value = '654321';
+    dom.registry['kc-forgot-step1'].dispatch('submit');
+    await flush();
+    dom.registry['kc-forgot-newpass'].value = 'weak';
+    dom.registry['kc-forgot-newpass2'].value = 'weak';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    assert(fetchCalls.filter((c) => c.url === '/api/auth/reset').length === 0, 'weak password never POSTs /reset');
+    assert(ctx.forgotResetToken === 'tok-keep', 'weak password leaves the reset token unspent');
+    assert(/too short/i.test(dom.registry['kc-forgot-error2'].textContent), 'weak password explains why');
+    assert(dom.registry['kc-forgot-step2'].hidden === false, 'weak password stays on step 2');
+    dom.registry['kc-forgot-newpass'].value = 'Str0ng-enough-pw';
+    dom.registry['kc-forgot-newpass2'].value = 'Str0ng-enough-pw';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    const rs = fetchCalls.filter((c) => c.url === '/api/auth/reset');
+    assert(rs.length === 1 && /reset_token=tok-keep/.test(rs[0].init.body), 'retry with a strong password sends the SAME token');
   }
 
   // Group 7c: the page-lifetime keydown listener is inert while hidden.

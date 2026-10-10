@@ -90,7 +90,7 @@ let a failed or impossible verification read as success:
 
 ### LOW-4: tests that do not pin the fix
 
-[JS half FIXED 2026-10-10 in 6c341bb3: zones timeout, per-step wizard lock and omitBlankOptionalParams are now behavioural and negtest-CAUGHT; the Python/guardFieldHidden/kcHostRefusalFromText/source-regex items remain open.]
+[JS half FIXED 2026-10-10 in 6c341bb3; guardFieldHidden, kcHostRefusalFromText and the abort/lock/omit assertions made behavioural in the web batch 2 commit. Still open: step 3 "NOT marked done" text, the Python items, the two source-regex assertions.]
 
 - `test_gate_flag_strictness_partb.py` unit-tests only `_is_gate_flag_name`. It never checks
   that a real registered tool (e.g. `flash_firmware(skip_backup="yes")`) is refused end to end

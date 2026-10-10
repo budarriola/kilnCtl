@@ -102,15 +102,9 @@ itself.
   - C, run with `-IncludeDirty` to carry the local conflict resolution: 3 CAUGHT, 1 MISSED (W2).
   - JS: 7 CAUGHT, 1 MISSED (W4).
 
-## Suggested follow-ups (not done here)
+## Resolution
 
-1. W1: pre-check strength on the client before spending the token. In `app.js` step 2 and in
-   `totp_reset_password`, check at least 10 characters, not all lowercase, and no
-   "password"/"kiln". Alternatively, add a `reason:"weak"` to the 400 reply, but only for the
-   length, lowercase and common-word failures, never the AP-password or SSID equality.
-2. W2: after the weak attempt, assert that an immediate retry gets 429 before the clock is
-   advanced.
-3. W4: assert that the AbortError body does not mention `loadCurrent` at all, or run the catch
-   handler with a fake `loadCurrent` and a fake timer.
-4. W6: done by `ecfd6bbb4` after this review was written (`$totalExpected = 81`, keeping both
+W1, W2, W4, W5 fixed 2026-10-10: `app.js` `kcResetPasswordProblem` and `totp_http_client.reset_password_problem` precheck strength before the token or TOTP code is spent (the AP SSID/passphrase equality rule stays board-side); `test_auth_totp_http_fuzz.c` pins the weak-path backoff (429 on immediate retry); `handleSaveAbort` is run behaviourally; sweep completion and autotune Accept go through `reloadUnlessDirty` (warns, offers Reload, never silently discards). Negtests CAUGHT.
+
+W6: done by `ecfd6bbb4` after this review was written (`$totalExpected = 81`, keeping both
    comment lines).
