@@ -14,7 +14,7 @@ The recent rev-floor and junk-repair commits do not cause it. They act on `prof_
 
 Verdict: expected. Proposed fix (low priority): in profiles_cfg_fs_resolve_ex's adopt-FILE branch, retire the slot's legacy NVS blob (erase and verify under the profiles save lock) and log once per slot at INFO. Do not change the adopt-file decision.
 
-**Fixed in 7101b741 (finding a):** profiles_http.c nvs_load_all_from now erases the slot's legacy NVS blob and used bit (rev array/floor untouched) when the cfg file is adopted with a strictly higher rev than a decoded NVS blob; never when cfg is unmounted, the file read failed, or revs are equal (NVS adopted). Stale 'NVS resync' comment removed.
+**Fixed in 65ac0650 (finding a):** profiles_http.c nvs_load_all_from now erases the slot's legacy NVS blob and used bit (rev array/floor untouched) when the cfg file is adopted with a strictly higher rev than a decoded NVS blob; never when cfg is unmounted, the file read failed, or revs are equal (NVS adopted). Stale 'NVS resync' comment removed.
 
 ## (b) z0 tuning_valid=no after the restore: EXPECTED, not a backup defect
 
