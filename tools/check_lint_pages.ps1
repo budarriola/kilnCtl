@@ -36,7 +36,8 @@ if ($null -eq $node) {
     exit 3
 }
 
-& node $lintScript $targetDir
+$recoveryDir = Join-Path $repo 'firmware\KilnFW_recovery'
+& node $lintScript $targetDir $recoveryDir
 $code = $LASTEXITCODE
 
 if ($code -eq 0) {

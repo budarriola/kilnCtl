@@ -167,8 +167,10 @@ function hardcoded_background_literals(code, label, line0) {
   return out;
 }
 
-for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) {
-  const f = path.relative(dir, fullPath).split(path.sep).join('/');
+/* Extra page roots (argv[3..], e.g. firmware/KilnFW_recovery) get the same parse/style checks. */
+const page_roots = [dir, ...process.argv.slice(3)];
+for (const root of page_roots) for (const fullPath of walk_files(root).filter(p => /\.(html|js|css)$/.test(p) && !/[\/](build|managed_components)[\/]/.test(p))) {
+  const f = path.relative(root, fullPath).split(path.sep).join('/');
   let src = fs.readFileSync(fullPath, 'utf8');
   const scripts = [], styles = [];
 
@@ -189,7 +191,7 @@ for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) 
       scripts.push({ code: m[1], line: src.slice(0, m.index).split('\n').length });
     }
     const yre = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-    while ((m = yre.exec(src))) {
+    while (root === dir && (m = yre.exec(src))) { /* theme/style rules are main-UI only */
       styles.push({ code: m[1], line: src.slice(0, m.index).split('\n').length });
     }
   }

@@ -712,7 +712,7 @@ function loadStageStatus() {
  * deadline passed. Shared by the stage card and the Pico card. Returns null when e is something else. */
 var UPLOAD_TOO_SLOW_TAIL = 'Check the Wi-Fi signal, move closer or use a wired path, and upload again.';
 /* Stage: the header sector is erased only once the first bytes pass the identity/version/policy checks, and the
- * deadline can fire before or after that point, so a previously staged image MAY have been cleared. */
+ * deadline can fire before or after that point, so a previously staged image MAY have been cleared.
  * Pico push: refused before any Pico flash write, so the Pico is unchanged. */
 var UPLOAD_TOO_SLOW_STAGE_TEXT = 'The upload was too slow and the board gave up (overall deadline). ' +
   'No new image was staged; a previously staged image may have been cleared; check the Stage card. ' + UPLOAD_TOO_SLOW_TAIL;
