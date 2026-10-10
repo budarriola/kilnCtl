@@ -138,13 +138,15 @@ bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t
 
 bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
-                                        bool context_gap)
+                                        bool context_gap, bool announced_known,
+                                        uint8_t announced_boot_id)
 {
     if (!link_staging_new_esp_session(prev_known, prev_boot_id, boot_id, context_gap)) {
         return false;
     }
     link_staging_reset(st);
-    if (boot_id != prev_boot_id && peer_protocol_version != NULL) {
+    if (boot_id != prev_boot_id && peer_protocol_version != NULL &&
+        (!announced_known || announced_boot_id != boot_id)) {
         *peer_protocol_version = 0u;
     }
     return true;

@@ -293,6 +293,9 @@ static volatile bool s_degraded_no_context = false;
 // link_frame_pack_status()'s own doc comment (link_frame.h) for why "unknown"
 // and "known old" must behave identically here.
 static volatile uint16_t s_peer_protocol_version = 0;
+// ESP boot_id the version above was announced under (kilnlink_announce_t.boot_id).
+static volatile bool s_peer_version_boot_id_known = false;
+static volatile uint8_t s_peer_version_boot_id = 0;
 
 static uint16_t s_msg_index = 0;
 static uint8_t s_boot_id = 0;
@@ -1385,7 +1388,8 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
     // link_staging_apply_context_session()): a rolled-back ESP that lost its
     // announce burst must not be sent the previous boot's frame formats.
     if (link_staging_apply_context_session(&s_staging, &peer_version, s_context_boot_id_known,
-                                           s_last_context_boot_id, snap.boot_id, context_gap)) {
+                                           s_last_context_boot_id, snap.boot_id, context_gap,
+                                           s_peer_version_boot_id_known, s_peer_version_boot_id)) {
         s_peer_protocol_version = peer_version;
         if (staged_before > 0u) {
             char discard_msg[64];
@@ -1458,12 +1462,18 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     // "are we fully compatible" (see link_frame_pack_status()'s doc comment,
     // link_frame.h).
     s_peer_protocol_version = eval.peer_protocol_version;
+    s_peer_version_boot_id = msg.boot_id;
+    s_peer_version_boot_id_known = true;
 
     // LINK_PROTOCOL.md section 4, "What each side does about a mismatch":
     // the Pico enters DEGRADED_NO_CONTEXT and does NOT latch a trip. This is
     // the ONLY effect a version mismatch has from in here -- no relay/trip
     // call, by design (and this file could not make one anyway, see the
     // header comment).
+    // LOW-1: s_degraded_no_context is deliberately NOT reset when the context
+    // session function forgets the version on a boot_id change. Degraded only
+    // blocks things, so keeping the previous verdict is the conservative
+    // direction; the next ANNOUNCE rewrites it together with the version.
     s_degraded_no_context = eval.degraded_no_context;
 }
 
@@ -3412,6 +3422,7 @@ bool link_task_start(void)
         s_boot_id = (uint8_t)(r ^ (r >> 8) ^ (r >> 16) ^ (r >> 24));
     }
     s_degraded_no_context = false;
+    s_peer_version_boot_id_known = false;
     s_peer_protocol_version = 0; // unknown until this boot's own ANNOUNCE_VERSION arrives
     s_msg_index = 0;
     s_rx_assembly_len = 0;

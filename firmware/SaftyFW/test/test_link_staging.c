@@ -262,30 +262,49 @@ static void test_apply_context_session(void)
 
     link_staging_reset(&s_st);
     TEST_CHECK(stage(&committed, mk_f32(0x0104u, 1300.0f)), "stage an edit");
-    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, false),
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, false, false, 0u),
                "same boot_id, no gap: no new session");
     TEST_CHECK(link_staging_count(&s_st) == 1u && pv == 16u, "staging and version untouched");
 
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, true),
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, true, false, 0u),
                ">5 s gap, same boot_id: new session");
     TEST_CHECK(link_staging_count(&s_st) == 0u, "gap discards staging");
     TEST_CHECK(pv == 16u, "gap alone keeps the peer protocol version");
 
     TEST_CHECK(stage(&committed, mk_f32(0x0104u, 1300.0f)), "stage again");
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false),
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, false, 0u),
                "boot_id change: new session");
     TEST_CHECK(link_staging_count(&s_st) == 0u, "boot_id change discards staging");
     TEST_CHECK(pv == 0u, "boot_id change resets peer protocol version to unknown");
 
     pv = 17u;
-    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, false, 0u, 0x33u, true),
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, false, 0u, 0x33u, true, false, 0u),
                "first context after Pico boot: nothing reset");
     TEST_CHECK(pv == 17u, "first context keeps the version");
+}
+
+static void test_apply_context_session_announce_order(void)
+{
+    TEST_SECTION("announce/context ordering: version kept only for the announced boot_id");
+    uint16_t pv = 17u;
+    link_staging_reset(&s_st);
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, true, 0x22u),
+               "announce B then context B after context A: new session");
+    TEST_CHECK(pv == 17u, "announced boot_id matches context: version kept");
+    pv = 17u;
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, true, 0x11u),
+               "announce A then context B: new session");
+    TEST_CHECK(pv == 0u, "announced boot_id differs: version forgotten");
+    pv = 17u;
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, false, 0u),
+               "no announce known, context B");
+    TEST_CHECK(pv == 0u, "no announce this boot: version forgotten");
 }
 
 void run_test_link_staging(void)
 {
     test_apply_context_session();
+    test_apply_context_session_announce_order();
     test_new_esp_session();
     test_direct_tc_type_survives_later_commit();
     test_direct_write_supersedes_earlier_edit();

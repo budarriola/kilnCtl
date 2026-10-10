@@ -94,11 +94,16 @@ bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t
 // makes every link_frame_*_supported() gate false: legacy-length frames and
 // accepting an unbound (3-byte) CLEAR_TRIP -- the same state as a fresh Pico
 // boot before any announce, and the ESP's next ANNOUNCE_VERSION restores it.
+// The version is forgotten only when boot_id differs from the boot_id the
+// version was ANNOUNCED under (announced_known/announced_boot_id): the ESP
+// sends ANNOUNCE_VERSION before its first PUSH_CONTEXT, so an announce for
+// this very boot_id is current and must be kept.
 // A plain context gap with the same boot_id does NOT clear the version: the
 // same ESP image is still talking, only silent. Returns true on a new session.
 bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
-                                        bool context_gap);
+                                        bool context_gap, bool announced_known,
+                                        uint8_t announced_boot_id);
 
 #ifdef __cplusplus
 }
