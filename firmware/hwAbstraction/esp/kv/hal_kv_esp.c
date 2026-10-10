@@ -112,13 +112,26 @@ static const char *TAG = "hal_kv_esp";
 struct hal_kv_esp_impl {
     nvs_handle_t handle;
     bool is_open;
+    bool default_partition;
+    char partition[16]; /* truncated copy of the open() partition name, for the write-refuse hook */
 };
+
+static hal_kv_write_refuse_fn_t volatile s_write_refuse_fn = NULL;
+
+void hal_kv_set_write_refuse_hook(hal_kv_write_refuse_fn_t fn) {
+    s_write_refuse_fn = fn;
+}
 
 _Static_assert(sizeof(struct hal_kv_esp_impl) <= sizeof(((hal_kv_handle_t *)0)->storage),
                "hal_kv_esp_impl exceeds HAL_KV_HANDLE_STORAGE_BYTES reservation");
 
 static struct hal_kv_esp_impl *hal_kv_esp_impl(hal_kv_handle_t *h) {
     return (struct hal_kv_esp_impl *)(void *)h->storage;
+}
+
+static bool hal_kv_esp_write_refused(const struct hal_kv_esp_impl *impl) {
+    hal_kv_write_refuse_fn_t fn = s_write_refuse_fn;
+    return fn && fn(impl->default_partition ? NULL : impl->partition);
 }
 
 /* See the INTERFACE MISMATCH note above: NVS-specific codes this backend's
@@ -189,6 +202,12 @@ hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
         return hal_kv_esp_err_to_status(err);
     }
     impl->is_open = true;
+    impl->default_partition = (partition == NULL);
+    impl->partition[0] = '\0';
+    if (partition) {
+        strncpy(impl->partition, partition, sizeof(impl->partition) - 1);
+        impl->partition[sizeof(impl->partition) - 1] = '\0';
+    }
     return HAL_OK;
 }
 
@@ -212,6 +231,9 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h) {
     struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
     if (!impl->is_open) {
         return HAL_NOT_READY;
+    }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     /* See the durability comment at the top of this file: forces NVS's
      * staged writes on this handle out to flash now. */
@@ -243,6 +265,9 @@ hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key,
     if (!impl->is_open) {
         return HAL_NOT_READY;
     }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
+    }
     esp_err_t err = nvs_set_blob(impl->handle, key, buf, len);
     return hal_kv_esp_err_to_status(err);
 }
@@ -270,6 +295,9 @@ hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key,
     if (!impl->is_open) {
         return HAL_NOT_READY;
     }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
+    }
     esp_err_t err = nvs_set_str(impl->handle, key, value);
     return hal_kv_esp_err_to_status(err);
 }
@@ -293,6 +321,9 @@ hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
     struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
     if (!impl->is_open) {
         return HAL_NOT_READY;
+    }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u32(impl->handle, key, value);
     return hal_kv_esp_err_to_status(err);
@@ -318,6 +349,9 @@ hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value) {
     if (!impl->is_open) {
         return HAL_NOT_READY;
     }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
+    }
     esp_err_t err = nvs_set_u8(impl->handle, key, value);
     return hal_kv_esp_err_to_status(err);
 }
@@ -329,6 +363,9 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key) {
     struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
     if (!impl->is_open) {
         return HAL_NOT_READY;
+    }
+    if (hal_kv_esp_write_refused(impl)) {
+        return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_erase_key(impl->handle, key);
     return hal_kv_esp_err_to_status(err);

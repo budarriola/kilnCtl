@@ -174,6 +174,7 @@ static unsigned s_get_call_count = 0;
 
 void fake_kv_reset_all(void)
 {
+    hal_kv_set_write_refuse_hook(NULL);
     memset(s_partitions, 0, sizeof(s_partitions));
     memset(s_handles, 0, sizeof(s_handles));
     s_write_safe_here = true;
@@ -317,6 +318,22 @@ void fake_kv_set_write_safe_here(bool safe)
 
 /* --- hal_kv.h implementation --- */
 
+/* Mutation fence mirror of hal_kv_esp.c (hal_kv.h "Mutation fence"). */
+static hal_kv_write_refuse_fn_t s_write_refuse_fn = NULL;
+
+void hal_kv_set_write_refuse_hook(hal_kv_write_refuse_fn_t fn)
+{
+    s_write_refuse_fn = fn;
+}
+
+static bool write_refused(const fake_kv_handle_slot_t *hs)
+{
+    if (!s_write_refuse_fn) return false;
+    const char *name = s_partitions[hs->partition_slot].name;
+    return s_write_refuse_fn(name[0] ? name : NULL);
+}
+
+
 hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
                           hal_kv_mode_t mode, const char *partition)
 {
@@ -397,6 +414,8 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
 {
     fake_kv_handle_slot_t *hs = get_handle(h);
     if (!hs) return HAL_NOT_READY;
+
+    if (write_refused(hs)) return HAL_NOT_READY;
 
     if (take_write_fail()) {
         s_next_write_fail_armed = false;
@@ -494,6 +513,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
     if (buf == NULL && len > 0) return HAL_INVALID_ARG;
     if (len > FAKE_KV_MAX_VALUE_BYTES) return HAL_INVALID_SIZE;
+    if (write_refused(hs)) return HAL_NOT_READY;
 
     if (take_write_fail()) {
         s_next_write_fail_armed = false;
@@ -581,6 +601,8 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
     if (key == NULL) return HAL_INVALID_ARG;
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
+
+    if (write_refused(hs)) return HAL_NOT_READY;
 
     if (take_write_fail()) {
         s_next_write_fail_armed = false;

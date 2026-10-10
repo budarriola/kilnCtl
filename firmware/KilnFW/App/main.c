@@ -43,6 +43,8 @@
 #include "kiln_io.h"
 #include "pref_cfg_fs.h"
 #include "cfg_fs.h"
+#include "hal_kv.h"
+#include <string.h>
 #include "cfg_fs_mount.h"
 #include "relay_authority.h"
 #include "safety_link.h"
@@ -207,6 +209,15 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
  * Both abort paths call main_kiln_enter_safe_state() first: app_main
  * returning does not stop FreeRTOS, so leaving the board safe has to be an
  * action, not an omission. */
+/* Factory-reset writer fence for the kiln_nvs partition (hal_kv.h "Mutation fence"): every hal_kv_set_*,
+ * hal_kv_erase_key and hal_kv_commit on a kiln_nvs handle is refused while the reset mark is set, except on
+ * the reset job's own task (relay_authority_reset_refuses_writer()). One choke point for estop_verification,
+ * firing_shadow, kiln_cfg_swap, adaptive_tune, run_state and every other kiln_nvs writer. */
+static bool kiln_nvs_reset_refuses_write(const char *partition)
+{
+    return partition != NULL && strcmp(partition, "kiln_nvs") == 0 && relay_authority_reset_refuses_writer();
+}
+
 void app_main(void)
 {
     // Installed before anything else touches ESP_LOGx, so every line from
@@ -227,6 +238,7 @@ void app_main(void)
     pref_cfg_fs_set_reset_refuse_hook(relay_authority_reset_refuses_writer);
     cfg_fs_mount_set_write_refuse_hook(relay_authority_reset_refuses_writer);
     cfg_fs_set_write_refuse_hook(relay_authority_reset_refuses_writer);
+    hal_kv_set_write_refuse_hook(kiln_nvs_reset_refuses_write);
 
     static main_boot_ctx_t ctx;
 

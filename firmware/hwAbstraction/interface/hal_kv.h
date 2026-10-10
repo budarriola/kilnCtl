@@ -170,6 +170,14 @@ hal_status_t hal_kv_stats(const char *partition, hal_kv_stats_t *out);
  * enforce it. */
 bool hal_kv_write_safe_here(void);
 
+/* Mutation fence (factory-reset writer fence, 2026-10-09 rstfence LOW-6). The device installs ONE predicate
+ * (main.c); every mutating call on a READ_WRITE handle -- hal_kv_set_*, hal_kv_erase_key, hal_kv_commit --
+ * asks it with the handle's partition name (NULL for the default partition) and, when it answers true,
+ * returns HAL_NOT_READY without touching storage. hal_kv_erase_partition()/_init_partition() are partition
+ * level operations and are not fenced (they are the reset job's own tools). No hook = nothing refused. */
+typedef bool (*hal_kv_write_refuse_fn_t)(const char *partition);
+void hal_kv_set_write_refuse_hook(hal_kv_write_refuse_fn_t fn);
+
 #ifdef __cplusplus
 }
 #endif

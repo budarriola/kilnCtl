@@ -10,6 +10,13 @@
 
 static int g_pass = 0, g_fail = 0;
 
+/* Mutation fence (hal_kv.h): refuse writes on the "kiln_nvs" partition only. */
+static bool s_fence_on = false;
+static bool fence_pred(const char *partition)
+{
+    return s_fence_on && partition != NULL && strcmp(partition, "kiln_nvs") == 0;
+}
+
 #define CHECK(cond) \
     do { \
         if (cond) { g_pass++; } \
@@ -314,6 +321,37 @@ int main(void)
     CHECK(hal_kv_stats("kiln_nvs", &prof_stats) == HAL_OK);
     CHECK(prof_stats.used_entries == 103); /* 100 profN + prof_used + prof_favusr + prof_favbi */
     fake_kv_reset_all();
+
+    /* --- mutation fence: refuses set/erase/commit on kiln_nvs while the predicate says so; reads, other
+     * partitions and a cleared predicate are untouched --- */
+    {
+        hal_kv_handle_t fk, fo;
+        CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK);
+        CHECK(hal_kv_init_partition(NULL) == HAL_OK);
+        CHECK(hal_kv_open(&fk, "fence_ns", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK);
+        CHECK(hal_kv_open(&fo, "fence_ns", HAL_KV_MODE_READ_WRITE, NULL) == HAL_OK);
+        CHECK(hal_kv_set_u32(&fk, "a", 1) == HAL_OK);
+        CHECK(hal_kv_commit(&fk) == HAL_OK);
+        hal_kv_set_write_refuse_hook(fence_pred);
+        s_fence_on = true;
+        CHECK(hal_kv_set_blob(&fk, "b", "x", 1) == HAL_NOT_READY);
+        CHECK(hal_kv_set_str(&fk, "s", "x") == HAL_NOT_READY);
+        CHECK(hal_kv_set_u32(&fk, "a", 2) == HAL_NOT_READY);
+        CHECK(hal_kv_set_u8(&fk, "u", 2) == HAL_NOT_READY);
+        CHECK(hal_kv_erase_key(&fk, "a") == HAL_NOT_READY);
+        CHECK(hal_kv_commit(&fk) == HAL_NOT_READY);
+        uint32_t got = 0;
+        CHECK(hal_kv_get_u32(&fk, "a", &got) == HAL_OK && got == 1); /* nothing changed, reads allowed */
+        CHECK(hal_kv_set_u32(&fo, "a", 7) == HAL_OK);                /* default partition not fenced */
+        CHECK(hal_kv_commit(&fo) == HAL_OK);
+        s_fence_on = false;
+        CHECK(hal_kv_set_u32(&fk, "a", 3) == HAL_OK);
+        CHECK(hal_kv_commit(&fk) == HAL_OK);
+        hal_kv_set_write_refuse_hook(NULL);
+        CHECK(hal_kv_close(&fk) == HAL_OK);
+        CHECK(hal_kv_close(&fo) == HAL_OK);
+        fake_kv_reset_all();
+    }
 
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
