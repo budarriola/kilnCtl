@@ -1067,7 +1067,8 @@ CEILING_BYTES = {
     # 2026-10-10, safety link review F1: the watchdog loop now calls
     # heat_enable_note_pico_state() (K4 reconcile) before heat_enable_reconcile(),
     # measured 2688 -> 2704 B (26.7% of the 4096 B stack still free). Re-pinned.
-    "profile_exec_wdt": 2704,
+    # firing review item 1 (guard9_prelock_check inlined in watchdog_task_entry): measured 2704 -> 2720 B (honest free 1076 B of 4096 B).
+    "profile_exec_wdt": 2720,
     "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
