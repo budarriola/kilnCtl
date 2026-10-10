@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 193.
+Gate rows: 194.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 179 |
+| NEGATIVE-TESTED | 180 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
@@ -190,6 +190,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_release_manifest.ps1` | NEGATIVE-TESTED | 10-07 | size gate 0x400000 -> 0x500000; dirty-tree refusal off; sha256 compare off; draft flag off; open gates not refused; provenance refusal off; token forwarded on hop 2; semver gate off | all RED except semver gate off, which PASSED (a later gate also exits 1): WEAK, fixed by requiring the is-not-semver text; now RED |
 | `tools/check_release_merge.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `(Compare-Semver $Tag $t) -le 0` -> `-le -999` in release_merge.ps1 (semver-newer gate off) | CAUGHT (exit 1, `FAIL: non-newer tag refused`); negtest copy removed, real tree unchanged |
 | `tools/check_release_version_regex.ps1` | NEGATIVE-TESTED | 10-07 | cap 32 -> 33; cap dropped; - dropped from the prerelease charset; leading-zero reject neutralised; + allowed in the prerelease charset; badtag[] edits; table renamed | all RED except the + charset, which PASSED: WEAK (minor), fixed by pinning v1.2.3-rc+1 on both sides; now RED |
+| `tools/check_reset_fence_hooks.ps1` | NEGATIVE-TESTED | 10-10 | negtest 2026-10-10 (`-Preset check`) | main.c: `hal_kv_set_write_refuse_hook(kiln_nvs_reset_refuses_write);` replaced by `(void)kiln_nvs_reset_refuses_write;` (a dropped install line) | CAUGHT (exit 1); baseline PASS |
 | `tools/check_route_tier_coverage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added `.uri = "/api/zz_new_route"` with no tier row ; [2026-10-09 stale-row branch] temp copy of route_tier_table.h with an extra row `/zz_stale` passed via -TableFile | RED, row named; check returned to PASS on restore (fixture only; test_check_route_tier_coverage.ps1 assertion 2b pins it) |
 | `tools/check_safe_remove_junction.ps1` | NEGATIVE-TESTED | 10-07 | unlink skipped in Remove-TreeSafe; no descent in Remove-ReparsePointsUnder; unlink dropped at both call sites; site pattern made blind; an unguarded $r = & git ... worktree remove site | skip-unlink and blind mutants PASSED: WEAK, fixed (unlink report required, command-line site pattern); the $r = & git site PASSED that fix too and is caught after the opus review reordered the pattern; all RED; recursive-delete mutant equivalent on this PowerShell |
 | `tools/check_safety_baud_sync.ps1` | NEGATIVE-TESTED | 09-16d | SaftyFW bootloader uart_init baud 230400 changed to 115200 | RED, two rates named; hand-restored; PASS |
