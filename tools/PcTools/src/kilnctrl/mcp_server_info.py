@@ -666,6 +666,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
     # the read-back after a 202/timeout, all inside one bounded deadline.
     deadline = time.monotonic() + _CLEAR_DEADLINE_S
     poll_readback = False
+    post_timed_out = False
     while True:
         try:
             reply = crash_report_clear_http_client.post_crash_report_clear(resolved)
@@ -678,6 +679,7 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
             _clear_sleep(_CLEAR_POLL_S)
         except crash_report_clear_http_client.CrashReportClearTimeout:
             poll_readback = True  # the erase may still be running -- poll, do not assume
+            post_timed_out = True
             break
         except crash_report_clear_http_client.CrashReportClearHttpError as exc:
             if exc.status == 500:
@@ -712,7 +714,9 @@ def crash_report_clear(confirm: bool = False, allow_unacknowledged: bool = False
         still_present.append("coredump image still present=true")
     if in_progress:
         still_present.append(f"clear_in_progress still true after {_CLEAR_DEADLINE_S:.0f}s")
-    return (f"FAILED: POST /api/crash_report/clear returned ok, but the re-fetch shows "
+    post_said = ("timed out with no reply (outcome unknown)" if post_timed_out
+                 else "returned ok")
+    return (f"FAILED: POST /api/crash_report/clear {post_said}, but the re-fetch shows "
             f"{'; '.join(still_present)} -- {summary}; {_image_summary(image_after)} "
             f"(host={resolved}). Do not trust this as cleared.")
 
@@ -1160,7 +1164,10 @@ def backup_import(
             resolved, body_text, mode=mode, dry_run=dry_run,
             ack_delete_count=ack_delete_count, ack_no_safety=ack_no_safety)
     except backup_import_http_client.BackupImportHttpError as exc:
-        return f"error: POST /api/backup/import failed transport-side (host={resolved}): {exc}"
+        return (f"error: POST /api/backup/import failed transport-side (host={resolved}): {exc} -- "
+                f"outcome UNKNOWN: the import MAY HAVE COMMITTED (a 2026-09-28 bench run timed out "
+                f"and had committed). Do not retry blindly; check get_readiness()/control_get_zones() "
+                f"or re-run with dry_run=True before deciding.")
     elapsed_s = time.monotonic() - t0
 
     after_readiness = _readiness_summary("readiness after")

@@ -242,5 +242,18 @@ class BackupImportRefusalTest(_Base):
         self.assertIn("error", result.lower())
 
 
+class BackupImportTransportWordingTest(_Base):
+    def test_transport_failure_says_outcome_unknown_may_have_committed(self):
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(_GOOD_DOC))
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+             unittest.mock.patch.object(bi, "post_import", side_effect=bi.BackupImportHttpError("timed out")):
+            result = msi.backup_import(path, confirm=True)
+        self.assertIn("UNKNOWN", result)
+        self.assertIn("MAY HAVE COMMITTED", result)
+
+
 if __name__ == "__main__":
     unittest.main()

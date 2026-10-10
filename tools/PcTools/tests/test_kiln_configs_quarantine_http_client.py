@@ -154,5 +154,20 @@ class ClearFailureTest(unittest.TestCase):
         self.assertEqual(ctx.exception.status, 409)
 
 
+class RawOsErrorTest(unittest.TestCase):
+    def test_socket_timeout_on_clear_is_wrapped_and_says_unknown(self):
+        with unittest.mock.patch.object(qc.http_auth, "urlopen", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(qc.KilnConfigsQuarantineHttpError) as cm:
+                qc.post_quarantine_clear("h")
+        self.assertIn("UNKNOWN", str(cm.exception))
+
+    def test_socket_timeout_on_probe_and_list_is_wrapped(self):
+        with unittest.mock.patch.object(qc.http_auth, "urlopen", side_effect=ConnectionResetError("rst")):
+            with self.assertRaises(qc.KilnConfigsQuarantineHttpError):
+                qc.get_quarantine_status("h")
+            with self.assertRaises(qc.KilnConfigsQuarantineHttpError):
+                qc.get_kiln_configs_list("h")
+
+
 if __name__ == "__main__":
     unittest.main()
