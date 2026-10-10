@@ -93,7 +93,7 @@ zones' `relay_mask`, including zones that are disabled or typed ON_OFF
 (an ON_OFF zone keeps its relay; moving it to aux is the sec 10 flow, not an
 implicit overlap).
 
-Enforcement points, each refuses with HTTP 400 naming the relay and the
+Enforcement points, each refuses (HTTP 409 for an ownership conflict) naming the relay and the
 other owner (never silently masks):
 
 1. Aux write (`POST` aux fields, sec 7): enabling relay N is refused if N is
@@ -469,8 +469,9 @@ jig on relay 4 terminals; the bench cannot validate anything kiln-scale.
 4. Verify by `io_read`/relay shadow (primary) that relay 4 toggles with the
    rule and honours min on/off; verify with CT only if a real load is wired
    through a CT channel (record which channel; otherwise CT is N/A, say so).
-5. Conflict: try enabling aux on relay 1 -> expect 400; try zone relay_mask
-   containing relay 4 -> expect 400.
+5. Conflict: try enabling aux on relay 1 -> expect 409 (conflict; the bench saw
+   409, which matches the owner mode-gate/conflict rule, field-validation errors stay 400); try zone
+   relay_mask containing relay 4 -> expect 409.
 6. Safety: with relay 4 on, inject a Pico trip by the existing
    sanctioned bench trip path (not the E-stop jumper) -> relay 4 drops;
    clear per procedure (trip_mask is `1 << (trip_reason - 1)`).

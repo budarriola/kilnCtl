@@ -304,7 +304,8 @@ recomputed from `ramp_lock_held` each tick and holds no state beyond the two
 timers, which are the only new state this feature adds to `s_exec`.
 
 **Reported, not inferred.** `effective_dwell`, `quasi_dwell` and the two
-timers go into `/api/status` and the dashboard. An operator seeing a vent open
+timers are reported in the device log only (bench 2026-10-09: `/api/status`
+does not carry them; no `/api/status` fields are planned for them). An operator seeing a vent open
 must be able to see *why* — "segment 3, quasi-dwell for 14 min (ramp-locked,
 zone 2 lagging 31 °C)".
 
@@ -460,9 +461,10 @@ does not exist.
   ordinary form fields on `POST /api/zones/config`, echoed by `GET`. Rules go
   on the existing profile POST/GET as an indexed field family
   (`rule0_zone=3&rule0_phase=2&...`), matching how segments are already
-  encoded. `/api/status` gains `effective_dwell`, `quasi_dwell`,
-  `quasi_dwell_held_s`, and per on/off zone `commanded_on`, `on_time_s`,
-  `switch_count`, `rule_reason` (short string).
+  encoded. Not implemented in `/api/status`: `effective_dwell`, `quasi_dwell`
+  and `quasi_dwell_held_s` appear only in the device log (bench 2026-10-09);
+  check current `/api/status` output before relying on per-zone
+  `commanded_on`, `on_time_s`, `switch_count`, `rule_reason`.
 - **LCD (480×320 landscape, no scroll, no new colours):** on/off zones render
   in the existing zone strip with the temperature slot replaced by
   `ON`/`OFF` and the duty bar replaced by a filled/empty block, reusing the
