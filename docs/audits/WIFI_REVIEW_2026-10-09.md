@@ -24,6 +24,8 @@ review 8's migration notes, review 2 #1, `wifi_factory_reset_driver_storage_2026
 
 ### MED-1: captive-portal DNS responder answers responses and every interface, so it can loop or reflect
 
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
+
 Where: `wifi_prov_link.c` `dns_hijack_task()`, about lines 1067-1161.
 
 The task binds UDP `INADDR_ANY:53` and replies to every datagram of 12 bytes or
@@ -58,6 +60,8 @@ reflector use.
 
 ### LOW-1: saved_nets loader trusts `count` and NUL termination from flash
 
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
+
 Where: `wifi_prov_nvs.c` `nvs_load_saved_nets_from()`, about lines 313-377.
 Users: `wifi_prov_api.c` around lines 59, 176 and 194-198 (forget
 compaction), `wifi_prov_link.c` around line 292 (join-candidate loop),
@@ -83,6 +87,8 @@ wrong size), and set `nets[i].ssid[32] = '\0'` and `nets[i].password[64] = '\0'`
 for every entry.
 
 ### LOW-2: an unreadable, wrong-size or newer-version saved_nets blob reads as "no networks", opens the setup routes and is overwritten on the next save
+
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
 
 Where: `wifi_prov_nvs.c` `nvs_load_saved_nets_from()` (it returns `ESP_OK`
 with an empty list on read error, size mismatch, or a version newer than this
@@ -111,6 +117,8 @@ error, which should be retried, from a record that really does not exist.
 
 ### LOW-3: UART bridge can set an AP password with an embedded NUL, which leaves the AP open while reporting success
 
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
+
 Where: `uart_bridge_ext_wifi.c:326-347` (`WIFI_CMD_SET_AP_IDENTITY`),
 `wifi_prov_api.c` `wifi_prov_set_ap_password()` (around line 492) and
 `wifi_prov_set_ap_ssid()` (around line 435), `wifi_prov_link.c:56`
@@ -135,6 +143,8 @@ Fix: add the same `memchr` refusal to both AP setters, or check `strlen` of the
 copied value against `password_len` in the producer.
 
 ### LOW-4: static IP validation does not check that the configuration makes sense
+
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
 
 Where: `wifi_prov_api.c` `wifi_prov_set_static_ip()`, about lines 668-724;
 `wifi_prov_link.c:85` `parse_ipv4()` (lwIP `ip4addr_aton()`).
@@ -162,6 +172,8 @@ special addresses above. Require strict four-octet dotted decimal.
 
 ### LOW-5: STA auth threshold accepts WPA (TKIP)
 
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
+
 Where: `wifi_prov_link.c:181` (`apply_sta_config()`,
 `threshold.authmode = WIFI_AUTH_WPA_PSK`).
 
@@ -172,6 +184,8 @@ Fix: `WIFI_AUTH_WPA2_PSK` as the threshold, and `pmf_cfg.capable = true`. If
 an owner still needs a WPA-only router, make that an explicit setting.
 
 ### LOW-6: `dns_hijack` task is exempt from stack-margin reporting under a reason that is no longer true
+
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
 
 Where: `tools/check_stack_margin_registration.ps1:560`; `wifi_prov_link.c:1170`
 creates the task with a 3072 B PSRAM stack and a NULL handle.
@@ -187,6 +201,8 @@ Fix: register it with `stack_margin_register()` and drop the exemption, or make
 the task really provisioning-only and delete it when the AP goes down.
 
 ### INFO
+
+**Fixed in 52c19a8d0 (guard-line tags 82bea6511).**
 
 - **Unlocked string getters.** `wifi_prov_get_saved_ssid()`,
   `wifi_prov_get_ap_password()` and the `wifi_prov_get_static_*()` getters
