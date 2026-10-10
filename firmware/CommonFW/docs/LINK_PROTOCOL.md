@@ -1013,6 +1013,15 @@ refuses a volatile install (reported as COMMIT_CONFIG_REJECTED / REJECT_ARMED)
 that changes any trip-relevant field outside a short allowlist; an idle,
 de-energized board accepts it.
 
+**CT commissioning order (SaftyFW review LOW-1, documented, check unchanged pending owner).** The heat-possible
+probe counts `current_task_any_current_present()` as heat, and on a CT chain marked fitted but not yet calibrated
+the op-amp offset floor reads as current present, so the probe stays true. While that holds, `APPLY_CONFIG_VOLATILE`
+refuses every non-tightening trip-relevant change (`k_ct_v_per_a`, an `abs_max_temp_c` raise), and `COMMIT_CONFIG`
+is refused while ARMED. Commission the CT parameters (`SET_CT_CAL` / `COMMIT_CONFIG`) while the Pico is disarmed,
+before arming; do not try to calibrate a fitted CT through the volatile path on an armed board. The check fails
+closed on purpose and is pinned by `scenario_heat_probe_current_floor` in `test_link_task_fuzz.c`; loosening it
+is a safety-semantics change that needs an owner decision.
+
 ---
 
 ## 5. The fault line (out of band)

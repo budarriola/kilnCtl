@@ -122,7 +122,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW_recovery/main/check_recovery_pico_proto.ps1` | NEGATIVE-TESTED | rest-10-08 | SRAM upper bound widened | RED; hand-restored; PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_upload.ps1` | NEGATIVE-TESTED | rest-10-08 | max_len + 1 | RED; hand-restored; PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_wifi_policy.ps1` | NEGATIVE-TESTED | rest-10-08 | storage_rc >= 0 | RED; hand-restored; PASS |
-| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | NEGATIVE-TESTED | fw-10-08 (release_gate_vacuity_audit_fw_2026-10-08) | link_frame trip mask shift | CAUGHT (RED), restored by negtest |
+| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | NEGATIVE-TESTED | fw-10-08 (release_gate_vacuity_audit_fw_2026-10-08) | link_frame trip mask shift; 10-10 link_task.c push_context skips safety_core_request_enable(false); link_task.c heat probe ignores current | CAUGHT (RED), restored by negtest; last two CAUGHT by link_task_fuzz_tests.exe |
 | `firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1` | NEGATIVE-TESTED | 09-17 | garbage top-level token inserted in link_frame.c | RED, ninja errors, exit 1; hand-restored; deleted build/ and rebuilt PASS 477/477 |
 | `firmware/SaftyFW/test/check_01_saftyfw_pushed_build.ps1` | REVIEWED, NOT MUTATED | 09-18 | cannot be driven locally (builds origin/main) | not exercised; a deliberate FAIL would need a broken commit pushed to origin/main |
 | `firmware/SaftyFW/test/check_no_sim_plant_guard_disable.ps1` | NEGATIVE-TESTED | rest-10-08 | fabricated header: macro 0 PASS, macro 1 FAIL, macro absent FAIL | hand test |
