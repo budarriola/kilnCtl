@@ -85,3 +85,14 @@ Scope notes, not defects:
 - The v3-crash-record-after-upgrade scenario (DEV_FIRMWARE_REVIEW_14 MED-1) is
   decided in `crash_report.c`'s loader, not in these handlers. The handlers only
   render whatever `crash_report_get()` returns, so it is not reachable here.
+
+## Campaign 8: relay / aux / profile-exec HTTP handlers
+
+Tests: `test_aux_outputs_http_handlers.c` (128 checks; real `aux_outputs_cfg.c`, `aux_outputs_http_core.c`, `aux_outputs_http.c` and `system_mode_gate.c`, handlers fetched through the real `kiln_http_register` path, fake relay board) and `test_dashboard_exec_http_handlers.c` (39 checks; real `dashboard_exec_http.c`, GET paths link-stubbed, executor/readiness/danger-mode fakes that count calls). Both assert module state (store entries, enabled mask, rev, relay-board call log, executor call counts) on every refusal. Negtests: removing the aux mode gate and removing the start handler's `danger_mode_active()` refusal were both CAUGHT.
+
+No defects found in the covered surface: mode gate 409 mid-run (profile and autotune), ADMIN tier for all three aux routes, relay 0/5/negative/overflow/non-numeric, truncated bodies, recv errors, content_len edge values, duplicate keys (first wins), claim-busy 409, zone-conflict 409, quarantine 409, disabling an aux drives its relay OFF, relay-board errors map to refusals with no store change, start id range and executor-refusal relay.
+
+Observations (design notes, not filed as defects):
+- K8-01 (INFO): `POST /api/profile_exec/start` has no `confirm` field and its only mode gate is the recovery-mode check plus the readiness interlock and `danger_mode_active()`; a second start while a run is active is refused only by `profile_executor_run()` (faked here), so that refusal is not covered at the handler level.
+- K8-02 (INFO): stop/pause/resume/ack are deliberately ungated (stop works in recovery mode and with danger mode on); pinned by test.
+- K8-03 (INFO): the raw `relay_post_handler` route no longer exists; the raw write path is aux manual via `dashboard_set_relay()`, covered here with the board faked. `zone_aux_convert_http.c` `move_handler` (hook on POST /api/zones, not a route) is not covered at handler level; its core has its own test.
