@@ -2948,14 +2948,14 @@ try {
     # Compiles the REAL update_fetch.c, update_http.c and update_stage.c (plus
     # policy/release/url/heap helpers) against fakes for the HTTP client, psa
     # sha256, FreeRTOS tasks (Windows threads), the stage partition, the update
-    # claim and httpd (stubs_update_fetch/ + fake_support.c). Private stub dir
+    # claim and httpd (stubs_update_fetch/ incl. fake_support.c). Private stub dir
     # first: it overrides semphr/task/psa/esp_app_* headers.
     $exeUf = Join-Path $outDir "kilnctl_host_tests_update_fetch.exe"
     $ufObjDir = Join-Path $outDir "uf"
     New-Item -ItemType Directory -Force -Path $ufObjDir | Out-Null
     $ufStubDir = Join-Path $testDir "stubs_update_fetch"
     $ufSrcs = @(
-        "test_update_fetch.c", "fake_support.c"
+        "test_update_fetch.c", "stubs_update_fetch/fake_support.c"
     ) | ForEach-Object { "`"$(Join-Path $testDir $_)`"" }
     $ufSrcs += @(
         "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",

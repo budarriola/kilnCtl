@@ -368,7 +368,7 @@ static void wr_task(void *arg)
             break;
         case WR_WRITE: c->res = update_stage_upload_write(st, c->data, c->len); break;
         case WR_FINISH: c->res = update_stage_upload_finish(st); break;
-        case WR_ABORT: update_stage_upload_abort(st); break;
+        case WR_ABORT: update_stage_upload_abort_owned(st, STAGE_SOURCE_GITHUB); break;
         case WR_EXIT:
             s_c->wr_task = NULL;
             xSemaphoreGive(s_c->wr_done);
@@ -464,7 +464,12 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
             return UPDATE_STAGE_ERR_FLASH;
         }
         // Review 5 L1: the writer finished in the same instant; its give is (about to be) posted.
-        (void)xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000));
+        if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
+            s_c->wr_wedged = true;
+            ESP_LOGE(TAG, "flash writer op %d: completion give missing after finishing in the timeout instant", (int)cmd);
+            return UPDATE_STAGE_ERR_FLASH;
+        }
     }
     return s_c->wr.res;
 }
