@@ -236,9 +236,22 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
     if (autotune_running_out) *autotune_running_out = s_stub_autotune_running;
 }
 
+/* When set, the stub reproduces relay_authority.c's real relay_authority_on_blocked()
+ * body (NULL link -> APP source; otherwise blocked iff the link's fault_sources != 0,
+ * and an uninitialised link reads 0 -- safety_link_get_fault_sources()). Kept in step by
+ * hand with drivers/owners/relay_authority.c:16-29. */
+static bool s_stub_blocked_real_semantics = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
-    (void)safety;
+    if (s_stub_blocked_real_semantics) {
+        if (!safety) {
+            if (out_sources) *out_sources = SAFETY_FAULT_SRC_APP;
+            return true;
+        }
+        uint32_t src = safety->initialized ? safety->fault_sources : 0u;
+        if (out_sources) *out_sources = src;
+        return src != 0u;
+    }
     if (out_sources) *out_sources = 0;
     return false;
 }
@@ -3753,6 +3766,42 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
     heat_enable_release_backstop(HEAT_ENABLE_CLAIMANT_AUTOTUNE);
     heat_enable_service_pending_release();
     TEST_CHECK(s_req_enable_false_calls == 1, "the per-tick backstop is free after the first release");
+}
+
+
+/* Host-test campaign (linkdn). With the safety link down/stale/never up AND the poll task's
+ * SAFETY_FAULT_SRC_SAFETY_LINK source latched, the begin-run gate refuses, names the source and
+ * requests no heat. The un-latched variant (link down, fault_sources == 0 -- the window before
+ * the poll task's next tick, or fault_on_link_loss off) is NOT committed: the real engine starts
+ * and requests heat there. See docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md, LD-01. */
+static void test_begin_run_refuses_on_down_link_with_latched_link_source(void)
+{
+    TEST_SECTION("autotune begin-run: link down with SAFETY_LINK source latched -- refuses, names it, no heat request");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    reset_heat_enable_recorder(false);
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    safety.initialized = true;
+    safety.fault_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 0.0f;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+    s_stub_blocked_real_semantics = true;
+
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_stub_blocked_real_semantics = false;
+
+    TEST_CHECK(!ok, "start must be refused while the safety link is down");
+    TEST_CHECK(s_req_enable_true_calls == 0, "and no heat-enable request may be made");
+    TEST_CHECK(strstr(errbuf, "heat is blocked") != NULL, "and the refusal says why");
+    TEST_CHECK(strstr(errbuf, "0x") == NULL, "with a decoded source, not a hex value");
 }
 
 static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
@@ -7392,6 +7441,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_guard_trip_releases_heat_enable();
     test_autotune_manual_abort_releases_heat_enable();
     test_autotune_start_on_a_down_link_does_not_claim_heat();
+    test_begin_run_refuses_on_down_link_with_latched_link_source();
 
     // Target-temperature step mode (slice 1) -- order-independent, each
     // re-zeroes s_at via its own helper.
