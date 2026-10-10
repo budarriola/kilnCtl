@@ -541,7 +541,7 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
                  * config being rejected. */
                 snprintf(reason_out, reason_cap,
                          "ROLLBACK REFUSED (a run holds the zones claim; the previous config is valid and "
-                         "the rollback is retried when the run ends or at next boot): %.60s",
+                         "the rollback is retried when the run ends or at next boot): %.40s",
                          sub);
                 return false;
             }
