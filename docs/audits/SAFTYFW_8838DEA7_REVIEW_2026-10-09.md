@@ -111,3 +111,57 @@ before the commit)". Cosmetic.
 ## Status
 
 HIGH-1, MED-1, LOW-1 (documented as deliberately kept, conservative) and LOW-2 fixed in fe5ac57f. The optional ESP-side re-announce was NOT done.
+
+## Fix review (fe5ac57f), 2026-10-09
+
+Read-only Opus review of `fe5ac57f` at origin/dev `696e981f`.
+
+Verdict: HIGH-1 is fixed, with no new defect. MED-1 is fixed for the pure function, but the
+call-site wiring is still untested (LOW-A below). LOW-1 and LOW-2 are done.
+
+Build: `check_00_saftyfw_target_build.ps1` PASS in this worktree. `link_task.c` compiled for
+SaftyFW, slotA and slotB with no warnings, and slotA/slotB differ as expected.
+`check_00_saftyfw_host_tests.ps1` PASS (72/72).
+
+Orderings (prev context = A, ESP reboots to B):
+- Announce B, then context B: the announced boot_id equals the context's, so the version is kept. This is the HIGH-1 case, and it is now correct.
+- Context B before any announce B: the version is zeroed (announced A != B). The announce B that follows sets it again with boot_id B, and the next context B is the same session. Correct.
+- Two reboots back to back (A -> B -> C): the announce from C overwrites B's. Context C after A keeps C's version. If B announced and C's burst is lost entirely, context C sees announced B != C and zeroes. Correct. UART delivery is in order, so a stale B announce cannot arrive after C's frames.
+- Announce retry (the re-burst after a Pico boot_id change, or the S6a re-announce): same boot_id, so this is an idempotent overwrite. Correct.
+- Pico reboot with the ESP alive: `link_task_start()` clears `s_peer_version_boot_id_known` and the version. The first context has `prev_known=false`, so nothing resets. The ESP re-announces on the new Pico boot_id, and later contexts with the same boot_id keep the version, including after a 5 s gap. Correct.
+- Lost announce (all 4 copies): context B zeroes, as intended. The version then stays 0 for the rest of that ESP session, because the optional ESP-side DIAG-driven re-announce was not done. This is a residual, not a regression. It is still recommended.
+
+A stale version surviving a reflash to an older protocol: the older image's own announce
+overwrites the version whenever any copy arrives (`boot_id` has been in the announce codec since
+`a9c6ab43`). If the whole burst is lost, the version survives only on an 8-bit `esp_boot_id`
+collision (`hal_sysinfo_random_u32()`, 1 in 256) with the previously announced boot_id. That is
+the same exposure 8838dea7 already had, through `boot_id == prev_boot_id`. INFO, no action.
+
+Races: none. `link_task_handle_announce_version()`, `link_task_handle_push_context()` and
+every reader of `s_peer_protocol_version` (`link_task_send_status`, `link_task_send_diag`, the
+CLEAR_TRIP handler and `link_task_send_rollback_result`) run on the link task. They are called
+from `link_task_rx_process_byte()` and the `link_task_fn()` loop. The new pair is written
+non-atomically, but it has a single writer and a single reader on the same task, so no reader
+can see a torn pair. `link_task_start()` writes it before the task exists.
+
+`link_task_start()` resets `s_peer_version_boot_id_known`. `s_peer_version_boot_id` itself is
+not zeroed, but every use is gated by the flag. OK.
+
+`s_degraded_no_context`: kept on purpose and documented, which is the conservative direction.
+The comment sits in the announce handler, not at the push_context call site the review named.
+Cosmetic.
+
+### LOW-A: the call-site wiring that HIGH-1 lived in is still untested
+
+`test_apply_context_session_announce_order()` calls the real `link_staging.c` function, not a
+copy. A negtest that breaks its announced-boot_id condition is CAUGHT. But `link_task.c` is not
+host-built, so the argument wiring at `link_task.c:1390-1392` has no coverage.
+`tools\negtest.ps1 -Preset saftyfw-host` with `s_peer_version_boot_id` replaced by
+`s_last_context_boot_id` in that call is MISSED. That mutation reintroduces HIGH-1 exactly: the
+version is zeroed on every ESP reboot. The two new parameters are `bool` and `uint8_t`, next to
+`bool prev_known, uint8_t prev_boot_id`, so swapping or misordering them compiles silently. Fix:
+pass `{known, boot_id}` pairs as a small struct, which turns a swap into a type error, or move
+the whole "context frame -> session decision" step into a pure helper that takes the link-task
+state struct. Either way, cover the call site with a host test.
+
+Status of this fix review: LOW-A open; the ESP-side re-announce remains optional and not done.
