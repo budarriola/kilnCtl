@@ -217,9 +217,9 @@ static void thermo_bridge_task(void *arg)
          * channel index still comes back as ESP_ERR_NOT_FOUND, now from
          * thermo_owner_command_*() instead of a NULL MAX31856_bus_channel(). */
         {
-            char gate_reason[64];
-            if (thermo_bridge_write_refused(subcmd, gate_reason, sizeof(gate_reason))) {
-                ESP_LOGW(TAG, "thermo: subcmd 0x%02X refused while a run is active: %s", subcmd, gate_reason);
+            /* NULL reason: the task stack budget (thermo_uart_bridge) has no room for a 96 B buffer. */
+            if (thermo_bridge_write_refused(subcmd, NULL, 0)) {
+                ESP_LOGW(TAG, "thermo: subcmd 0x%02X refused while a run is active", subcmd);
                 bridge_reply_reject(ctx->proto, &msg, UART_TASK_ID_THERMO, subcmd, "refused: run active");
                 continue;
             }
