@@ -463,6 +463,66 @@ try {
         "/Fo:`"$configStoreFlashObjDir\\`" /Fe:`"$configStoreFlashExe`" $configStoreFlashSourceArgs"
     Add-HostBuild -Name "config_store_flash_tests.exe" -ExePath $configStoreFlashExe -BuildCmd $configStoreFlashCmd
 
+    # Host campaigns 1 and 2 (docs/audits/HOST_TEST_COVERAGE_GAPS_2026-10-09.md).
+    # Both are SEPARATE executables: each defines recording fakes for the
+    # hardware/link/timer seams (safety_core.c's and link_task.c's callees)
+    # that would collide (LNK2005) with the real tasks the main exe links.
+    #   safety_core_host_tests.exe -- the REAL safety_core.c + safety_guards.c
+    #     driven tick by tick (guards S1..S16: trip, latch, clear, no-false-trip).
+    #   link_task_fuzz_tests.exe   -- link_task.c #included, so its RX statics
+    #     are reachable; seeded deterministic fuzzer plus targeted frame cases.
+    $safetyCoreHostStubsDir = Join-Path $testDir "stubs\safety_core_host"
+    $linkTaskHostStubsDir = Join-Path $testDir "stubs\link_task_host"
+    $scExe = Join-Path $outDir "safety_core_host_tests.exe"
+    $scObjDir = Join-Path $outDir "safety_core_host_obj"
+    New-Item -ItemType Directory -Force -Path $scObjDir | Out-Null
+    $scSources = @(
+        (Join-Path $testDir "test_safety_core_host.c"),
+        (Join-Path $srcDir "tasks\safety_core.c"),
+        (Join-Path $srcDir "safety_guards.c"),
+        (Join-Path $srcDir "config_store.c"),
+        (Join-Path $srcDir "tasks\link_frame.c"),
+        (Join-Path $srcDir "tasks\clock_health.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c"),
+        (Join-Path $srcDir "tasks\reboot_announce.c"),
+        (Join-Path $srcDir "tasks\relay_grace.c"),
+        (Join-Path $srcDir "config_params.c"),
+        (Join-Path $bootDir "crc32.c")
+    )
+    $scSourceArgs = ($scSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $scCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$srcDir\update`" /I `"$bootDir`" /I `"$commonIncDir`" " +
+        "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$hwAbstractionCommonDir`" " +
+        "/I `"$freertosMinStubDir`" /I `"$safetyCoreHostStubsDir`" /I `"$testDir`" " +
+        "/Fo:`"$scObjDir\\`" /Fe:`"$scExe`" $scSourceArgs"
+    Add-HostBuild -Name "safety_core_host_tests.exe" -ExePath $scExe -BuildCmd $scCmd
+
+    $ltExe = Join-Path $outDir "link_task_fuzz_tests.exe"
+    $ltObjDir = Join-Path $outDir "link_task_fuzz_obj"
+    New-Item -ItemType Directory -Force -Path $ltObjDir | Out-Null
+    $ltSources = @(
+        (Join-Path $testDir "test_link_task_fuzz.c"),
+        (Join-Path $commonSrcDir "saftyfw_image_identity.c"),
+        (Join-Path $srcDir "tasks\link_frame.c"),
+        (Join-Path $srcDir "config_store.c"),
+        (Join-Path $srcDir "config_params.c"),
+        (Join-Path $bootDir "crc32.c"),
+        (Join-Path $srcDir "tasks\link_staging.c"),
+        (Join-Path $srcDir "tasks\link_task_announce_eval.c"),
+        (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
+        (Join-Path $srcDir "tasks\link_task_tc_type_gate.c"),
+        (Join-Path $srcDir "tasks\tc_type_reapply_policy.c"),
+        (Join-Path $srcDir "link_diag_flags.c"),
+        (Join-Path $srcDir "tasks\reboot_announce.c")
+    ) + @(Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
+    $ltSourceArgs = ($ltSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $ltCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$srcDir\update`" /I `"$bootDir`" /I `"$commonIncDir`" " +
+        "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$hwAbstractionCommonDir`" /I `"$hwAbstractionPicoUartDir`" " +
+        "/I `"$freertosMinStubDir`" /I `"$linkTaskHostStubsDir`" /I `"$safetyCoreHostStubsDir`" /I `"$testDir`" " +
+        "/Fo:`"$ltObjDir\\`" /Fe:`"$ltExe`" $ltSourceArgs"
+    Add-HostBuild -Name "link_task_fuzz_tests.exe" -ExePath $ltExe -BuildCmd $ltCmd
+
     # bootloader/recovery_update.c's own host test -- a SEPARATE executable: it
     # #includes the real recovery_update.c (to reach its static dispatch/status
     # entry points) against bare-metal SDK stubs (stubs\bootloader_sdk_stub:
@@ -504,6 +564,8 @@ try {
     $halSpiPicoExit = $exitCodes["hal_spi_pico_tests.exe"]
     $configStoreFlashExit = $exitCodes["config_store_flash_tests.exe"]
     $blRecoveryExit = $exitCodes["bootloader_recovery_update_tests.exe"]
+    $safetyCoreHostExit = $exitCodes["safety_core_host_tests.exe"]
+    $linkTaskFuzzExit = $exitCodes["link_task_fuzz_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -517,6 +579,8 @@ try {
         "hal_spi_pico_tests.exe"       = $halSpiPicoExit
         "config_store_flash_tests.exe" = $configStoreFlashExit
         "bootloader_recovery_update_tests.exe" = $blRecoveryExit
+        "safety_core_host_tests.exe"   = $safetyCoreHostExit
+        "link_task_fuzz_tests.exe"     = $linkTaskFuzzExit
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
@@ -538,6 +602,12 @@ try {
     }
     if ($configStoreFlashExit -ne 0) {
         exit $configStoreFlashExit
+    }
+    if ($safetyCoreHostExit -ne 0) {
+        exit $safetyCoreHostExit
+    }
+    if ($linkTaskFuzzExit -ne 0) {
+        exit $linkTaskFuzzExit
     }
     exit $blRecoveryExit
 } finally {

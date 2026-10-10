@@ -22,6 +22,7 @@ TickType_t xTaskGetTickCount(void);
 // test_relay_owner_gpio_init_stubs.c; the critical-section macros are
 // no-ops here, matching that they are never actually entered.
 void vTaskDelayUntil(TickType_t *previous_wake_time, TickType_t time_increment);
+void vTaskDelay(TickType_t ticks);
 #define taskENTER_CRITICAL() do {} while (0)
 #define taskEXIT_CRITICAL()  do {} while (0)
 
