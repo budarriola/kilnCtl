@@ -224,3 +224,13 @@ The negtest JSON reported `real_tree_unchanged: false`. The only change in the
 worktree during the run was this review document being written; the shared
 main tree was unchanged (checked with `git status --porcelain` before and
 after).
+
+## Fix status
+
+F1, F3, F4, F5 and the N1/N4/N8 test gaps are fixed in FIXSHA (danger_mode.c, kiln_io.c/.h,
+profile_executor.c/_relay_io.c/_internal.h; tests in test_danger_mode.c, test_kiln_io_sx_fake.c,
+test_kiln_io_owner.c, test_profile_executor_prestart.c). F1: the rollback retries its lock take
+until it succeeds and restores the deadline. F3: the unserialised all-off returns
+KILN_IO_ERR_UNSERIALISED_OFF and leaves relay_shadow alone. F4: the relay-unknown release runs
+after the guard-9 block. F5: the executor tracks the relay-unknown hold and a foreign (boot
+safe-state) holder; halt and release only drop APP when no owner holds it. F2 and F6 unchanged.
