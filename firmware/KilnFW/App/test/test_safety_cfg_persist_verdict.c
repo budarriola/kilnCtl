@@ -36,7 +36,7 @@ void run_test_safety_cfg_persist_verdict(void)
         TEST_CHECK(false, "could not locate safety_cfg_write.c");
         return;
     }
-    TEST_CHECK(strstr(text, "safety_cfg_persist_verdict(st.diag_ever_received, st.diag_flags)") != NULL,
+    TEST_CHECK(strstr(text, "safety_cfg_persist_verdict(diag_ever, diag_flags)") != NULL,
                "confirm_commit_landed() consults the verdict");
     TEST_CHECK(strstr(text, "/*require_persisted=*/!volatile_install") != NULL,
                "a persistent (non-volatile) commit requires the persisted verdict");

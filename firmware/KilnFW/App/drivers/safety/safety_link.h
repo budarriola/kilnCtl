@@ -1827,6 +1827,12 @@ esp_err_t safety_link_stop(SafetyLinkClass *link);
  * GET_STATUS from. */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out);
 
+/* Narrow DIAG read for safety_cfg_write.c's F3 persisted check: just whether a
+ * DIAG was ever received and its flags byte, without copying the whole (large)
+ * safety_link_status_t onto a caller's task stack. Same locking as
+ * safety_link_get_status(). */
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags);
+
 /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- the single shared
  * predicate every "Thermocouple faults"-style display site (LCD, web,
  * PcTools) must call before showing the safety processor's OWN

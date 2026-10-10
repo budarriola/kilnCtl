@@ -312,10 +312,10 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
          * and reports unconfirmed, retried on its own backoff. */
         safety_cfg_persist_verdict_t v = SAFETY_CFG_PERSIST_VERDICT_UNKNOWN;
         for (int waited = 0;; waited += SAFETY_CFG_PERSIST_POLL_MS) {
-            safety_link_status_t st;
-            memset(&st, 0, sizeof(st));
-            if (safety_link_get_status(link, &st) == ESP_OK) {
-                v = safety_cfg_persist_verdict(st.diag_ever_received, st.diag_flags);
+            bool diag_ever = false;
+            uint8_t diag_flags = 0u;
+            if (safety_link_get_diag_flags(link, &diag_ever, &diag_flags) == ESP_OK) {
+                v = safety_cfg_persist_verdict(diag_ever, diag_flags);
             }
             if (v == SAFETY_CFG_PERSIST_VERDICT_PERSISTED || nonblocking_refetch ||
                 waited >= SAFETY_CFG_PERSIST_WAIT_MS) {
