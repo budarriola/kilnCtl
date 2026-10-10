@@ -31,6 +31,8 @@ integer or float overflow was found over a long firing.
 
 ### 1. Medium: guard 9 sits behind the lock it is meant to police
 
+**Status: fixed in 51bd900c7 (+ 16d9581d7 reconcile fix).**
+
 - `profile_executor.c:2176`: `watchdog_task_entry()` calls
   `xSemaphoreTake(s_exec.lock, portMAX_DELAY)`. Only after that does it compute
   `since_ms = now - s_exec.last_tick_tick` and test it against
@@ -65,6 +67,8 @@ for the bookkeeping, and on timeout set `SAFETY_FAULT_SRC_APP` anyway.
 
 ### 2. Low: relay commanded before the same tick's guard
 
+**Status: fixed in 81b618c6a.**
+
 - `profile_executor.c:1568`: `apply_relay(zi, want_relay_on[zi])` is called for
   a heater zone.
 - `profile_executor.c:1761`: that zone's `thermal_guard_tick()` runs afterwards
@@ -83,6 +87,8 @@ reading-only checks: sensor invalid, max/min temperature) before
 `apply_relay()`. Pass `want_on = false` when that zone tripped this tick.
 
 ### 3. Low: run and segment clocks round each tick to whole seconds
+
+**Status: fixed in 6959845ff.**
 
 - `profile_executor.c:830`: `total_elapsed_s += (uint32_t)(dt_s + 0.5f)`.
 - `profile_executor.c:1044` and `:1088`: `segment_elapsed_s` is accumulated the
@@ -105,6 +111,8 @@ after 49 days) and derive seconds from that. Alternatively, keep a
 `float`/ms remainder carried between ticks.
 
 ### 4. Low: a failed OFF write at halt is never retried
+
+**Status: fixed in 8ebd43cc9.**
 
 - `profile_executor_status.c:47`: `profile_executor_halt()` calls
   `force_all_relays_off()`, and later `exec_enter_terminal_state(IDLE)`.
@@ -136,6 +144,8 @@ state, including IDLE, until confirmed.
 
 ### 5. Low: NaN duty is not rejected at the heater output
 
+**Status: fixed in 5a583ebfe.**
+
 - `heater_output.c:66-69`: the clamp is `if (duty < 0) ... else if (duty > 1)`.
   A NaN passes through both tests.
 - `heater_output.c:102`: `on_ms = (uint32_t)(duty * window_ms)`. Converting
@@ -158,6 +168,8 @@ which maps NaN to 0. Add a host test that feeds NaN.
 
 ### 6. Low: climbing-window override when no plant model is valid
 
+**Status: fixed in a87d4d452.**
+
 - `thermal_guard.c:327`: `window_s = effective_f(cfg->wrong_dir_window_s, climbing ? progress_window : WRONG_DIR_WINDOW_S)`.
   A configured `wrong_dir_window_s` therefore also sets guard 1's *climbing*
   window.
@@ -175,6 +187,8 @@ It fails safe (a nuisance abort), so it is Low.
 `progress_window_s` for the climbing branch, as that audit proposed.
 
 ### 7. Info: resume skips start gates, but they are covered
+
+**Status: fixed in 9608f4152 (acquire result logged).**
 
 `profile_executor_resume()` (`profile_executor_status.c:324`) re-claims the
 relays, seeds bumpless PID, sets RUNNING and acquires `heat_enable`. It
