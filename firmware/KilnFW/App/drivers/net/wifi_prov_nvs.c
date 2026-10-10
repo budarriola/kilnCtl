@@ -129,6 +129,25 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     if (err != HAL_OK) {
         return hal_status_to_esp_err(err);
     }
+    /* An EMPTY namespace is "not found". ESP-IDF keeps a namespace entry after
+     * nvs_erase_all()/erasing every key, so recovery's Wi-Fi reset (which runs
+     * nvs_erase_all on this default-partition namespace) leaves one behind. Only
+     * a namespace in which at least one known key exists counts as saved data;
+     * otherwise the migration would adopt an all-default legacy config and
+     * override the AP identity that survives in WIFI_NVS_PARTITION. */
+    static const char *const probe_keys[] = WIFI_PROV_NVS_ALL_KEYS_INIT;
+    bool any_key = false;
+    for (size_t i = 0; i < sizeof(probe_keys) / sizeof(probe_keys[0]) && !any_key; i++) {
+        char probe[8];
+        size_t plen = sizeof(probe);
+        /* Any status but NOT_FOUND (OK, wrong type, too long for the probe buffer)
+         * proves the key exists. */
+        any_key = hal_kv_get_str(&h, probe_keys[i], probe, &plen) != HAL_NOT_FOUND;
+    }
+    if (!any_key) {
+        hal_kv_close(&h);
+        return ESP_OK;
+    }
     if (out_found) {
         *out_found = true;
     }

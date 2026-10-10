@@ -156,7 +156,7 @@ typedef struct {
     // Counters.
     unsigned mut_ops, writes, reads, violations, bad_ranges;
     unsigned stage_erases, set_boots, verifies, aborts;
-    unsigned app_erases, app_erase_max, yields; // erase-ahead granularity (R2-I4)
+    unsigned app_erases, app_erase_max, yields, yield_writes[8]; // erase-ahead granularity (R2-I4)
 } fl_t;
 
 static uint8_t g_image[IMG_LEN];
@@ -230,7 +230,14 @@ static int cb_app_read(void *c, uint32_t off, void *buf, size_t len)
 }
 static void cb_yield(void *c)
 {
-    ((fl_t *)c)->yields++;
+    fl_t *f = c;
+    // Remember how many app writes preceded each yield: hash_region yields sit at
+    // 0 writes (staged hash) or at the final count (read-back); only the copy
+    // loop yields strictly between.
+    if (f->yields < 8) {
+        f->yield_writes[f->yields] = f->writes;
+    }
+    f->yields++;
 }
 static int cb_app_erase(void *c, uint32_t off, uint32_t len)
 {
@@ -500,6 +507,13 @@ static void test_happy(void)
     // between, never as one blocking whole-partition erase.
     CHECK(f->app_erases == 2 && f->app_erase_max == 65536u, "happy: app erased in two 64 KiB blocks, not one whole-partition erase");
     CHECK(f->yields >= 1, "happy: yields between blocks");
+    unsigned copy_yields = 0;
+    for (unsigned i = 0; i < f->yields && i < 8; i++) {
+        if (f->yield_writes[i] > 0 && f->yield_writes[i] < f->writes) {
+            copy_yields++;
+        }
+    }
+    CHECK(copy_yields >= 1, "happy: the copy loop itself yields between blocks (not only hash_region)");
     CHECK(f->app[IMG_LEN] == 0xFF && f->app[APP_SIZE - 1] == 0xFF, "happy: erased tail beyond the image");
     // Idempotence: a second apply finds nothing staged.
     recovery_apply_progress_t p2;

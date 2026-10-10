@@ -134,6 +134,7 @@ try {
     Test-Mutant "toobig" @(@("if (len > io->app_size) {", "if (len > io->app_size * 100u) {"),
                            @("if (vr == RIC_OVERSIZE) {", "if (vr == 12345) {"))
     # Copy mechanics.
+    Test-Mutant "copyyield" @(, @("if (io->yield && ((off + n) % RECOVERY_APPLY_ERASE_BLOCK) == 0) {", "if (0) {"))
     Test-Mutant "eraseahead" @(, @("if (off >= erased) {", "if (off == 0) {"))
     Test-Mutant "writeoff" @(, @("io->app_write(io->ctx, off, scratch, n) != 0", "io->app_write(io->ctx, 0, scratch, n) != 0"))
     Test-Mutant "modflag" @(, @("prog->app_modified = true;", "(void)0;"))
@@ -158,7 +159,7 @@ try {
     Test-Mutant "noerase" @(, @("prog->stage_cleared = io->stage_erase(io->ctx, 0, STAGE_HEADER_SECTOR) == 0;",
                                 "prog->stage_cleared = true;"))
 
-    Write-Host "check_recovery_apply: PASS ($passCount assertions; 21 negative-test mutants plus the real build failed or passed as required)"
+    Write-Host "check_recovery_apply: PASS ($passCount assertions; 22 negative-test mutants plus the real build failed or passed as required)"
     exit 0
 }
 finally {

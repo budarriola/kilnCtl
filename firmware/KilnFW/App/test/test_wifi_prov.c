@@ -589,6 +589,38 @@ static void test_legacy_default_wifi_erase_keeps_board_unprovisioned(void)
     hal_kv_close(&h);
 }
 
+// F2 (REVIEW_RECOVERY_FIX2): recovery's nvs_erase_all leaves an EMPTY wifi_cfg
+// namespace in the default partition. The migration must not count it as found
+// (it would adopt an all-default legacy config over the wifi_nvs AP identity).
+static void test_empty_legacy_namespace_is_not_found(void)
+{
+    TEST_SECTION("empty default-partition wifi_cfg namespace is not 'found' (REVIEW_RECOVERY_FIX2 F2)");
+    seed_legacy_default_wifi();
+    bool found = false;
+    TEST_CHECK(wifi_prov_nvs_load_from(NULL, &found) == ESP_OK && found, "control: a namespace holding keys is found");
+
+    TEST_CHECK(legacy_default_nvs_erase_wifi() == ESP_OK, "erase every key; the namespace itself remains");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK,
+               "setup: the emptied namespace still opens (as after nvs_erase_all)");
+    hal_kv_close(&h);
+    found = true;
+    TEST_CHECK(wifi_prov_nvs_load_from(NULL, &found) == ESP_OK, "load of the emptied namespace succeeds");
+    TEST_CHECK(!found, "an emptied namespace is not found");
+
+    /* End to end: a custom AP identity already in wifi_nvs survives the boot. */
+    seed_legacy_default_wifi();
+    TEST_CHECK(legacy_default_nvs_erase_wifi() == ESP_OK, "erase legacy keys");
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION) == HAL_OK, "open wifi_nvs");
+    TEST_CHECK(hal_kv_set_str(&h, NVS_KEY_AP_SSID, "myap") == HAL_OK, "seed AP ssid override");
+    TEST_CHECK(hal_kv_set_u8(&h, NVS_KEY_HAS_AP_SSID, 1) == HAL_OK, "seed has_ap_ssid");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "commit");
+    hal_kv_close(&h);
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.has_ap_ssid_override && strcmp(s_wifi.ap_ssid, "myap") == 0,
+               "AP identity override survives an emptied legacy namespace");
+}
+
 static bool legacy_wifi_key_present(const char *key)
 {
     hal_kv_handle_t h;
@@ -1703,6 +1735,7 @@ void run_test_wifi_prov(void)
     test_set_static_ip_stores_and_clears_dns();
     test_dns_nvs_round_trip();
     test_legacy_default_wifi_erase_keeps_board_unprovisioned();
+    test_empty_legacy_namespace_is_not_found();
     test_legacy_wifi_migration_is_one_shot();
     test_interrupted_first_migration_retries_next_boot();
     test_legacy_migration_failures_never_lose_credential();

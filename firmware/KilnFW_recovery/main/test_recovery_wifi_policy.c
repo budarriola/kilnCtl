@@ -46,6 +46,14 @@ static char *slurp(const char *path)
     if (buf) {
         size_t got = fread(buf, 1, (size_t)n, f);
         buf[got] = 0;
+        // CRLF checkouts: the scans below use LF needles.
+        size_t w = 0;
+        for (size_t r = 0; r < got; r++) {
+            if (buf[r] != '') {
+                buf[w++] = buf[r];
+            }
+        }
+        buf[w] = 0;
     }
     fclose(f);
     return buf;
@@ -166,31 +174,92 @@ static void test_http(const char *path)
         return;
     }
     strip_comments(src);
-    // R2-L1: exit and boot_guard_reset treat a failed kiln_nvs as not applicable.
+    // R2-L1: exit and boot_guard_reset treat a failed kiln_nvs as not applicable,
+    // and a failed clear refuses (500) -- the result must gate a 500 reply, not
+    // just be called.
     const char *sigs[] = {"esp_err_t recovery_exit_post(", "esp_err_t boot_guard_reset_post("};
     for (int i = 0; i < 2; i++) {
         char *b = fn_body(src, sigs[i]);
         CHECK(b != NULL, "boot_guard route handler found");
         if (b) {
-            CHECK(strstr(b, "boot_guard_clear_or_na(") != NULL, "route uses boot_guard_clear_or_na()");
+            const char *gate = strstr(b, "if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {");
+            CHECK(gate != NULL, "route gates on the clear result (if (!boot_guard_clear_or_na(...)))");
+            if (gate) {
+                const char *st = strstr(gate, "500 Internal Server Error");
+                const char *close = strstr(gate, "\n    }");
+                CHECK(st != NULL && close != NULL && st < close, "a failed clear answers 500 inside the gate branch");
+                const char *ok = i == 0 ? strstr(b, "ok, rebooting into the application; %s\", bg_msg)")
+                                        : strstr(b, "return httpd_resp_sendstr(req, bg_msg);");
+                CHECK(ok != NULL && close != NULL && ok > close,
+                      "success reply follows the gate and carries the clear message");
+            }
             CHECK(strstr(b, " clear_boot_guard(") == NULL && strstr(b, "!clear_boot_guard(") == NULL,
                   "route does not call plain clear_boot_guard()");
             free(b);
         }
     }
+    // R2-I1: ota_esp_post clears (gated) BEFORE the upload overwrites `app`.
+    char *o = fn_body(src, "esp_err_t ota_esp_post(");
+    CHECK(o != NULL, "ota_esp_post found");
+    if (o) {
+        const char *g = strstr(o, "if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {");
+        const char *u = strstr(o, "recovery_upload_stream(");
+        CHECK(g != NULL && u != NULL && g < u, "ota_esp_post clears boot_guard (gated) before recovery_upload_stream()");
+        if (g && u) {
+            const char *st = strstr(g, "500 Internal Server Error");
+            CHECK(st != NULL && st < u, "ota_esp_post refuses 500 on a failed clear before the upload");
+        }
+        free(o);
+    }
+    // boot_guard_clear_or_na: only the kiln_nvs failure bit makes "not applicable"
+    // true; everything else must actually clear.
+    char *na = fn_body(src, "static bool boot_guard_clear_or_na(char *msg, size_t cap)\n{");
+    CHECK(na != NULL, "boot_guard_clear_or_na definition found");
+    if (na) {
+        CHECK(strstr(na, "if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {") != NULL,
+              "not-applicable is gated on RECOVERY_NVS_FAIL_KILN");
+        CHECK(strstr(na, "RECOVERY_NVS_FAIL_DEFAULT") == NULL && strstr(na, "RECOVERY_NVS_FAIL_WIFI") == NULL,
+              "not-applicable is not gated on another partition's bit");
+        const char *r1 = strstr(na, "return true;");
+        const char *r2 = strstr(na, "return clear_boot_guard(msg, cap);");
+        CHECK(r1 != NULL && r2 != NULL && r1 < r2 && strstr(r1 + 1, "return true;") == NULL,
+              "exactly one 'return true' (the not-applicable branch), then the real clear is returned");
+        free(na);
+    }
     // R2-L2: the Wi-Fi reset also erases the legacy default-partition copy and
-    // reports success only through rhp_wifi_reset_ok().
+    // reports success only through rhp_wifi_reset_ok(), using the real result.
     char *w = fn_body(src, "esp_err_t wifi_reset_post(");
     CHECK(w != NULL, "wifi_reset_post found");
     if (w) {
-        CHECK(strstr(w, "erase_legacy_default_wifi()") != NULL, "wifi reset erases the legacy default-partition copy");
-        CHECK(strstr(w, "rhp_wifi_reset_ok(") != NULL, "wifi reset gated by rhp_wifi_reset_ok()");
+        const char *call = strstr(w, "int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);");
+        CHECK(call != NULL, "wifi reset stores the legacy erase result in legacy_rc");
+        CHECK(call != NULL && strstr(call + 8, "legacy_rc =") == NULL && strstr(w, "legacy_rc =") == call + 4,
+              "legacy_rc is assigned exactly once, from the erase");
+        const char *gate = strstr(w, "if (!rhp_wifi_reset_ok(erase_failed, (int)err, legacy_rc) && erase_failed == 0 && err == ESP_OK) {");
+        CHECK(gate != NULL && call != NULL && call < gate, "failure branch is taken on !rhp_wifi_reset_ok(..., legacy_rc), after the erase");
+        if (gate) {
+            const char *st = strstr(gate, "500 Internal Server Error");
+            const char *ok = strstr(w, "ok, Wi-Fi settings cleared, restarting\"");
+            CHECK(st != NULL && ok != NULL && st < ok, "legacy erase failure answers 500 before the success reply");
+        }
+        CHECK(strstr(w, "legacy copy not checked") != NULL && strstr(w, "httpd_resp_sendstr(req, legacy_skipped") != NULL,
+              "reply says when the legacy erase was skipped");
         free(w);
     }
     char *l = fn_body(src, "static int erase_legacy_default_wifi(");
-    CHECK(l != NULL && strstr(l, "nvs_erase_all(") != NULL && strstr(l, "nvs_open(WIFI_NVS_NAMESPACE") != NULL,
-          "legacy erase opens the default partition's wifi_cfg and erases it");
-    free(l);
+    CHECK(l != NULL, "legacy erase found");
+    if (l) {
+        const char *rw = strstr(l, "nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &h)");
+        const char *er = strstr(l, "err = nvs_erase_all(h);");
+        const char *cm = strstr(l, "err = nvs_commit(h);");
+        const char *cl = strstr(l, "nvs_close(h);\n    return (int)err;");
+        CHECK(rw && er && cm && rw < er && er < cm, "legacy erase: open read-write, erase_all, then commit");
+        CHECK(er != NULL && cm != NULL && strstr(er, "if (err == ESP_OK) {") != NULL &&
+                  strstr(er, "if (err == ESP_OK) {") < cm,
+              "legacy erase: commit only when erase_all succeeded");
+        CHECK(cl != NULL && cm != NULL && cm < cl, "legacy erase returns the erase/commit result");
+        free(l);
+    }
     free(src);
 }
 

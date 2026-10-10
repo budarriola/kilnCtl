@@ -200,8 +200,8 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL; // body unread: close the socket rather than drain it
     }
 
-    // R2-I1: clear the counter BEFORE `app` is overwritten (same order as
-    // recovery_apply and /api/recovery/exit): a failed clear refuses with `app`
+    // R2-I1: clear the counter BEFORE `app` is overwritten (before the write,
+    // like /api/recovery/exit; recovery_apply clears again just before set_boot): a failed clear refuses with `app`
     // untouched, body unread, rather than leaving a new image unselectable. A
     // count at or above the threshold would bounce the new app straight back to
     // recovery. (A rejected upload leaves the cleared counter cleared, which is
@@ -763,10 +763,12 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
 // Returns 0 when it is gone or unreachable (namespace absent, or the default
 // partition never initialised so the app cannot read it either), else an
 // esp_err_t. The namespace holds only the legacy Wi-Fi keys.
-static int erase_legacy_default_wifi(void)
+static int erase_legacy_default_wifi(bool *skipped)
 {
+    *skipped = false;
     if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
         ESP_LOGW(TAG, "wifi_reset: default nvs unavailable, legacy copy not erased");
+        *skipped = true;
         return 0;
     }
     nvs_handle_t h;
@@ -822,7 +824,8 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
     }
     err = nvs_commit(h);
     nvs_close(h);
-    int legacy_rc = erase_legacy_default_wifi();
+    bool legacy_skipped = false;
+    int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);
     if (!rhp_wifi_reset_ok(erase_failed, (int)err, legacy_rc) && erase_failed == 0 && err == ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "Wi-Fi settings cleared, but the legacy copy in the default NVS partition could not be erased",
@@ -839,7 +842,9 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "Wi-Fi settings commit failed", HTTPD_RESP_USE_STRLEN);
     }
-    esp_err_t sent = httpd_resp_sendstr(req, "ok, Wi-Fi settings cleared, restarting");
+    esp_err_t sent = httpd_resp_sendstr(req, legacy_skipped
+                                                 ? "ok, Wi-Fi settings cleared, restarting (legacy copy not checked: default NVS unavailable)"
+                                                 : "ok, Wi-Fi settings cleared, restarting");
     restart_soon(500);
     return sent;
 }

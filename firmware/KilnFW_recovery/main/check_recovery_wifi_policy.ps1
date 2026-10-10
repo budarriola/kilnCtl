@@ -134,8 +134,40 @@ try {
     }
     esp_err_t serr" -Tag "exitplain"
     # R2-L2: legacy default-partition erase must stay wired and gate the result.
-    Test-Mutant -File "recovery_http.c" -Needle "int legacy_rc = erase_legacy_default_wifi();" -Replacement "int legacy_rc = 0;" -Tag "nolegacy"
+    Test-Mutant -File "recovery_http.c" -Needle "int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);" -Replacement "int legacy_rc = 0;" -Tag "nolegacy"
     Test-Mutant -File "recovery_http_policy.h" -Needle "&& legacy_rc == 0" -Replacement "" -Tag "legacyignored"
+
+    # Behaviour mutants (review W1-W7): each must fail the source-shape scans.
+    Test-Mutant -File "recovery_http.c" -Needle "if (!rhp_wifi_reset_ok(erase_failed" -Replacement "if (rhp_wifi_reset_ok(erase_failed" -Tag "w1negate"
+    Test-Mutant -File "recovery_http.c" -Needle "    bool legacy_skipped = false;
+    int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);" -Replacement "    bool legacy_skipped = false;
+    int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);
+    legacy_rc = 0;" -Tag "w2overwrite"
+    Test-Mutant -File "recovery_http.c" -Needle "        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return (int)err;" -Replacement "    }
+    nvs_close(h);
+    return (int)err;" -Tag "w3nocommit"
+    Test-Mutant -File "recovery_http.c" -Needle "    return clear_boot_guard(msg, cap);
+}" -Replacement "    return true;
+}" -Tag "w4alwaystrue"
+    Test-Mutant -File "recovery_http.c" -Needle "if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
+        snprintf(msg, cap, `"boot_guard not" -Replacement "if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
+        snprintf(msg, cap, `"boot_guard not" -Tag "w5wrongbit"
+    Test-Mutant -File "recovery_http.c" -Needle "    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, `"500 Internal Server Error`");
+        httpd_resp_set_hdr(req, `"Connection`", `"close`");" -Replacement "    char bg_msg[96];
+    if (0) {
+        httpd_resp_set_status(req, `"500 Internal Server Error`");
+        httpd_resp_set_hdr(req, `"Connection`", `"close`");" -Tag "w6noprecear"
+    Test-Mutant -File "recovery_http.c" -Needle "    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, `"500 Internal Server Error`");
+        return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+    }
+    return httpd_resp_sendstr(req, bg_msg);" -Replacement "    (void)boot_guard_clear_or_na(bg_msg, sizeof(bg_msg));
+    return httpd_resp_sendstr(req, bg_msg);" -Tag "w7ignoreresult"
 
     Write-Host "check_recovery_wifi_policy: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0

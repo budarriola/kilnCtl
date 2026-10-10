@@ -487,14 +487,16 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
 def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear the boot_guard counter from the recovery image (POST
     /api/ota/esp/boot_guard_reset on the RECOVERY image; not the main app's route of the same path). The board
-    erases the record in both locations and reads it back itself.
+    erases the record in both locations and reads it back itself, EXCEPT when its kiln_nvs failed to start:
+    it then answers 200 "boot_guard not applicable (kiln_nvs unavailable)" and clears nothing. That reply is
+    reported as NOT APPLICABLE / not cleared, never as ok.
 
     REFUSES unless ``confirm is True`` exactly. Reads recovery status first (``record_present``/
     ``boot_count``), then always POSTs: the status route reports only the
     CURRENT record location, while the board also erases the legacy
     "boot_guard"/"count" record that the main app's boot_guard.c still reads
     as a fallback, so an absent current record does not mean nothing is left.
-    The board answers 200 only after reading BOTH locations back absent.
+    A plain-success 200 means the board read BOTH locations back absent.
     Re-reads status afterward and FAILS LOUDLY if ``record_present`` is still
     not false -- a 200 reply is not trusted alone, and a lost reply is
     UNVERIFIED.
@@ -512,11 +514,18 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
             return _post_error("/api/ota/esp/boot_guard_reset", exc)
         return (f"UNVERIFIED: POST /api/ota/esp/boot_guard_reset was sent but the reply was lost ({exc}); "
                 f"the board may or may not have cleared it -- read recovery_status (host={resolved})")
+    if "not applicable" in str(reply.get("text", "")).lower():
+        return (f"NOT APPLICABLE: board replied {reply['text']!r} -- its kiln_nvs is unavailable in the "
+                f"recovery image, so NOTHING was cleared (host={resolved}); the application will read "
+                f"the boot_guard counter itself")
     try:
         after = rhc.get_status(resolved)
     except rhc.RecoveryHttpError as exc:
         return (f"UNVERIFIED: board replied {reply['text']!r} but the confirming status read failed "
                 f"(host={resolved}): {exc}")
+    if after.get("boot_guard_record") == "unreadable":
+        return (f"UNVERIFIED: board replied {reply['text']!r} but status reports boot_guard_record="
+                f"'unreadable', so record_present=False proves nothing was cleared (host={resolved})")
     if after.get("record_present") is False:
         return (f"ok - board replied {reply['text']!r} (it erases and reads back both record locations) and "
                 f"status confirms: before record_present={before.get('record_present')!r} boot_count="

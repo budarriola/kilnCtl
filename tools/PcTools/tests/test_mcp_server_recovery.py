@@ -393,6 +393,24 @@ class BootGuardResetTest(_Base):
         self.assertTrue(out.startswith("ok - "), out)
         self.assertEqual([p["path"] for p in board.posts], ["/api/ota/esp/boot_guard_reset"])
 
+    def test_not_applicable_reply_is_not_reported_ok(self):
+        # kiln_nvs failed to start: the board answers 200 "not applicable" and clears nothing,
+        # while status reads record_present=False/unreadable. Must never read as a confirmed clear.
+        board = FakeBoard(status=[_status(), _status(record_present=False, record_len=0,
+                                                     boot_guard_record="unreadable")],
+                          post_reply={"status": 200,
+                                      "text": "boot_guard not applicable (kiln_nvs unavailable)"})
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("NOT APPLICABLE"), out)
+        self.assertNotIn("ok - ", out)
+        self.assertNotIn("confirms", out)
+
+    def test_unreadable_record_after_plain_ok_is_unverified(self):
+        board = FakeBoard(status=[_status(), _status(record_present=False, record_len=0,
+                                                     boot_guard_record="unreadable")])
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
     def test_lost_reply_is_unverified(self):
         board = FakeBoard(post_error=rpc.RecoveryPostError("timed out", None, stage="post"))
         out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
