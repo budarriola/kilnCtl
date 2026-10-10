@@ -3230,7 +3230,8 @@ try {
     # 72 -> 73: added test_uart_bridge_ext_worker.c's own Invoke-HostTestExe
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
-    $totalExpected = 74
+    # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
+    $totalExpected = 75
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
