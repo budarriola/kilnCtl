@@ -260,6 +260,10 @@ const uint8_t live_profile_page_html_gz_end[] = {0};
 static const char *s_stub_body_ptr;
 static size_t s_stub_body_len;
 static size_t s_stub_body_pos;
+// Fuzz hooks (HTTP body fuzz part 3): after s_stub_fail_after bytes were handed
+// out every recv returns s_stub_fail_ret (0 = EOF, <0 = error).
+static size_t s_stub_fail_after = (size_t)-1;
+static int s_stub_fail_ret = 0;
 
 static char s_resp_status[32];
 static char s_resp_body[1024];
@@ -269,6 +273,8 @@ static void stub_reset_http(void)
     s_stub_body_ptr = NULL;
     s_stub_body_len = 0;
     s_stub_body_pos = 0;
+    s_stub_fail_after = (size_t)-1;
+    s_stub_fail_ret = 0;
     strncpy(s_resp_status, "200 OK", sizeof(s_resp_status) - 1);
     s_resp_status[sizeof(s_resp_status) - 1] = '\0';
     s_resp_body[0] = '\0';
@@ -284,7 +290,13 @@ static void stub_set_body(const char *body)
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    if (s_stub_body_pos >= s_stub_fail_after) {
+        return s_stub_fail_ret;
+    }
     size_t remaining = s_stub_body_len - s_stub_body_pos;
+    if (s_stub_fail_after != (size_t)-1 && s_stub_body_pos + remaining > s_stub_fail_after) {
+        remaining = s_stub_fail_after - s_stub_body_pos;
+    }
     size_t n = remaining < buf_len ? remaining : buf_len;
     if (n == 0) {
         return 0;
@@ -1112,6 +1124,177 @@ static void mount_fresh_cfg_scratch(void)
     (void)cfg_fs_init(scratch, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// HTTP body fuzz part 3: hostile bodies on the live-edit accept/decide routes.
+// A refused request must leave the pending record and the working slot as they
+// were and must not create or overwrite any saved profile.
+// ---------------------------------------------------------------------------
+static bool fuzz_live_still_pending(void)
+{
+    live_edit_record_t rec;
+    return live_profile_load_record(&rec) && rec.pending;
+}
+
+static httpd_req_t fuzz_req(const char *body, long long content_len, size_t fail_after, int fail_ret)
+{
+    stub_reset_http();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = content_len;
+    stub_set_body(body);
+    s_stub_fail_after = fail_after;
+    s_stub_fail_ret = fail_ret;
+    return req;
+}
+
+static void test_fuzz_live_decide_hostile_bodies(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- hostile bodies decide nothing");
+    const char *good = "action=overwrite&confirm=1";
+    size_t glen = strlen(good);
+
+    // recv error / EOF at every offset while Content-Length promises the whole body.
+    for (size_t at = 0; at < glen; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            reset_fakes();
+            fork_for_tests(0);
+            httpd_req_t req = fuzz_req(good, (long long)glen, at, ret);
+            (void)api_profile_live_decide_post_handler(&req);
+            TEST_CHECK(fuzz_live_still_pending(), "recv failure mid-body leaves the record pending");
+            TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "recv failure mid-body reports no success");
+        }
+    }
+
+    // Content-Length extremes.
+    long long lens[] = { 0, -1, 192, 193, 100LL * 1024 * 1024, 0x7fffffffffffffffLL };
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(good, lens[i], (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        TEST_CHECK(fuzz_live_still_pending(), "bad Content-Length leaves the record pending");
+        TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "bad Content-Length refused 400");
+    }
+    {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(good, (long long)glen + 30, (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        TEST_CHECK(fuzz_live_still_pending(), "Content-Length longer than the body leaves the record pending");
+    }
+
+    // 8 KB value and an over-long name.
+    static char big[9000];
+    memset(big, 'A', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t breq = fuzz_req(big, (long long)strlen(big), (size_t)-1, 0);
+    (void)api_profile_live_decide_post_handler(&breq);
+    TEST_CHECK(fuzz_live_still_pending() && strcmp(s_resp_status, "400 Bad Request") == 0, "8 KB body refused 400");
+
+    struct {
+        const char *body;
+        const char *why;
+    } bad[] = {
+        { "action=overwrite&confirm=1x", "confirm with trailing junk" },
+        { "action=overwrite&confirm=%2B1", "confirm plus sign" },
+        { "action=overwrite&confirm=+1", "confirm leading space" },
+        { "action=overwrite&confirm=01", "confirm leading zero" },
+        { "action=overwrite&confirm=", "confirm empty" },
+        { "action=overwrite&confirm=1000", "confirm overflows its buffer" },
+        { "action=overwrite&confirm=%00", "confirm NUL" },
+        { "action=overwrite&confirm=0&confirm=1", "duplicate confirm, 0 first" },
+        { "action=overwrite", "no confirm" },
+        { "action=Overwrite&confirm=1", "action case" },
+        { "action=overwrite%00x&confirm=1", "NUL escape in action" },
+        { "action=overwrit%65&confirm=1x", "escape in action plus bad confirm" },
+        { "action=overwrite%&confirm=1", "dangling percent in action" },
+        { "action=bogus&action=overwrite&confirm=1", "duplicate action, bogus first" },
+        { "xaction=overwrite&confirm=1", "key prefix collision" },
+        { "action=", "empty action" },
+        { "", "empty body (zero length)" },
+        { "action=save_as", "save_as with no name" },
+        { "action=save_as&name=", "save_as empty name" },
+        { "action=save_as&name=a%0Ab", "save_as name with newline" },
+        { "action=save_as&name=a%00b", "save_as name with NUL" },
+        { "action=save_as&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "save_as over-long name" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(bad[i].body, (long long)strlen(bad[i].body), (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "refused, nothing decided: %s", bad[i].why);
+        TEST_CHECK(fuzz_live_still_pending() && !profiles_slot_used(1) && strcmp(s_resp_status, "400 Bad Request") == 0,
+                   msg);
+    }
+
+    // Control: the same route does decide with a clean body.
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t req = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL && !fuzz_live_still_pending(),
+               "control: a clean overwrite body decides and clears the record");
+}
+
+static void test_fuzz_live_accept_hostile_bodies(void)
+{
+    TEST_SECTION("POST /api/profile/live -- hostile transport leaves the working slot untouched");
+    const char *good = "body=ok";
+    size_t glen = strlen(good);
+    profile_t before, after;
+
+    for (size_t at = 0; at < glen; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            reset_fakes();
+            fork_for_tests(0);
+            TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+            httpd_req_t req = fuzz_req(good, (long long)glen, at, ret);
+            (void)api_profile_live_post_handler(&req);
+            TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+                       "recv failure mid-body leaves the working slot unchanged");
+            TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "recv failure reports no success");
+        }
+    }
+
+    long long lens[] = { 0, -1, 100LL * 1024 * 1024, 0x7fffffffffffffffLL };
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+        httpd_req_t req = fuzz_req(good, lens[i], (size_t)-1, 0);
+        (void)api_profile_live_post_handler(&req);
+        TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "bad Content-Length refused 400");
+        TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+                   "bad Content-Length leaves the working slot unchanged");
+    }
+
+    // Content-Length longer than what arrives: recv hits EOF, nothing saved.
+    reset_fakes();
+    fork_for_tests(0);
+    TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+    httpd_req_t lreq = fuzz_req(good, (long long)glen + 50, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&lreq);
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+               "Content-Length longer than the body leaves the working slot unchanged");
+
+    // Not firing / not forked: the body is never even read.
+    reset_fakes();
+    httpd_req_t nreq = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&nreq);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "accept with no fork is refused");
+
+    // Control.
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t creq = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&creq);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "control: a clean body is accepted");
+}
+
 int main(void)
 {
     // fake_kv.c requires every partition to be explicitly initialized before
@@ -1160,6 +1343,8 @@ int main(void)
     test_refusals_are_json_with_an_error_field();
     test_registration_registers_all_five_routes();
     test_registration_no_server();
+    test_fuzz_live_decide_hostile_bodies();
+    test_fuzz_live_accept_hostile_bodies();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

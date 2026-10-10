@@ -2441,6 +2441,27 @@ try {
 
     Invoke-HostTestExe -Name "web_auth_login_http" -ExePath $exe45 -BuildCmd $cmd45
 
+    # ---- test_auth_totp_http_fuzz.c: HTTP body fuzz part 3 (forgot/reset) ----
+    # auth_totp_http.c #include'd directly; real web_auth_store/totp_config/
+    # session table over fake_kv, counting fake password setter.
+    $exeTf = Join-Path $outDir "kilnctl_host_tests_auth_totp_http_fuzz.exe"
+    $atfObjDir = Join-Path $outDir "tf"
+    New-Item -ItemType Directory -Force -Path $atfObjDir | Out-Null
+    $cmdTf = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$atfObjDir\\`" /Fe:`"$exeTf`" `"$(Join-Path $testDir 'test_auth_totp_http_fuzz.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_session_iface.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'net/login_backoff.c')`" `"$(Join-Path $driversDir 'net/web_auth_login.c')`" " +
+            "`"$(Join-Path $driversDir 'http/login_ip_scope.c')`" `"$(Join-Path $driversDir 'net/totp.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/totp_config.c')`" `"$(Join-Path $driversDir 'http/totp_http_core.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "auth_totp_http_fuzz" -ExePath $exeTf -BuildCmd $cmdTf
+
     # ---- test_readiness_crash_disclosure.c: its own 46th, separate
     # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
     # GET /api/readiness's crash-report checklist item leaked

@@ -147,6 +147,11 @@ static const char *s_recv_body = NULL;
 static size_t s_recv_body_len = 0;
 static size_t s_recv_offset = 0;
 static size_t s_recv_chunk_max = 1;
+// Fuzz hooks (HTTP body fuzz part 3): once s_recv_fail_after bytes were handed
+// out, every further call returns s_recv_fail_ret (0 = peer closed, <0 = error).
+static size_t s_recv_fail_after = (size_t)-1;
+static int s_recv_fail_ret = 0;
+static int s_recv_calls = 0;
 
 static void recv_stage(const char *body, size_t chunk_max)
 {
@@ -154,15 +159,25 @@ static void recv_stage(const char *body, size_t chunk_max)
     s_recv_body_len = body ? strlen(body) : 0;
     s_recv_offset = 0;
     s_recv_chunk_max = chunk_max ? chunk_max : 1;
+    s_recv_fail_after = (size_t)-1;
+    s_recv_fail_ret = 0;
+    s_recv_calls = 0;
 }
 
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    s_recv_calls++;
+    if (s_recv_offset >= s_recv_fail_after) {
+        return s_recv_fail_ret;
+    }
     if (!s_recv_body || s_recv_offset >= s_recv_body_len) {
         return 0;
     }
     size_t remaining = s_recv_body_len - s_recv_offset;
+    if (s_recv_fail_after != (size_t)-1 && s_recv_offset + remaining > s_recv_fail_after) {
+        remaining = s_recv_fail_after - s_recv_offset;
+    }
     size_t n = remaining < buf_len ? remaining : buf_len;
     if (n > s_recv_chunk_max) {
         n = s_recv_chunk_max;
@@ -1160,6 +1175,143 @@ static void test_logout_with_no_cookie_leaves_session_untouched(void)
                "the unrelated session is left in place -- no token was presented to revoke");
 }
 
+// ---------------------------------------------------------------------------
+// HTTP body fuzz part 3: hostile login bodies. Every refusal must mint no
+// session (no Set-Cookie) and leave the stored credential untouched.
+// ---------------------------------------------------------------------------
+static int fuzz_login_raw(const char *body, long long content_len, size_t chunk, size_t fail_after, int fail_ret)
+{
+    recv_stage(body, chunk);
+    s_recv_fail_after = fail_after;
+    s_recv_fail_ret = fail_ret;
+    s_last_set_cookie[0] = '\0';
+    s_last_err_status = 0;
+    s_last_status_line = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = content_len;
+    (void)login_post_handler(&req);
+    return s_last_err_status;
+}
+
+static bool fuzz_login_creds_intact(void)
+{
+    web_auth_password_record_t rec;
+    return web_auth_store_load_password(WEB_AUTH_ROLE_ADMINISTRATOR, &rec) == WEB_AUTH_LOAD_OK && rec.configured &&
+           strcmp(rec.username, "admin") == 0 &&
+           web_auth_store_verify_password(WEB_AUTH_ROLE_ADMINISTRATOR, "correct-horse-battery-staple");
+}
+
+static void fuzz_login_fresh(void)
+{
+    reset_all();
+    set_admin_credential("admin", "correct-horse-battery-staple");
+}
+
+static void test_fuzz_login_hostile_bodies(void)
+{
+    TEST_SECTION("login_post_handler -- hostile bodies never mint a session or touch the credential");
+    const char *good = "username=admin&password=correct-horse-battery-staple";
+    size_t glen = strlen(good);
+    int st;
+
+    // Every proper truncation of the valid body with a matching Content-Length.
+    for (size_t cut = 0; cut < glen; cut++) {
+        char b[128];
+        memcpy(b, good, cut);
+        b[cut] = '\0';
+        fuzz_login_fresh();
+        st = fuzz_login_raw(b, (long long)cut, 999, (size_t)-1, 0);
+        TEST_CHECK(s_last_set_cookie[0] == '\0', "truncated login body mints no session");
+        TEST_CHECK(st == 400 || st == 401, "truncated login body is refused 400/401");
+    }
+
+    // Content-Length lies / extremes.
+    fuzz_login_fresh();
+    st = fuzz_login_raw(good, 0, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "Content-Length 0 refused 400");
+    st = fuzz_login_raw(good, -1, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "negative Content-Length refused 400");
+    st = fuzz_login_raw(good, 512, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "Content-Length == LOGIN_BODY_MAX refused 400");
+    st = fuzz_login_raw(good, 100LL * 1024 * 1024, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0' && s_recv_calls == 0,
+               "100 MB Content-Length refused 400 before any recv");
+    st = fuzz_login_raw(good, 0x7fffffffffffffffLL, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_recv_calls == 0, "huge Content-Length refused before any recv");
+    st = fuzz_login_raw(good, (long long)glen + 40, 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "Content-Length longer than the body (recv returns 0) refused 400");
+
+    // recv error / EOF mid-body at every offset, one byte per call.
+    for (size_t at = 0; at < glen; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_login_fresh();
+            st = fuzz_login_raw(good, (long long)glen, 1, at, ret);
+            TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "recv error/EOF mid-body refused 400, no session");
+        }
+    }
+
+    // Field shape attacks.
+    struct {
+        const char *body;
+        const char *why;
+    } bad[] = {
+        { "username=admin", "no password field" },
+        { "password=correct-horse-battery-staple", "no username field" },
+        { "username=admin&password=wrong&password=correct-horse-battery-staple", "duplicate password, wrong first" },
+        { "password=wrong&password=correct-horse-battery-staple&username=admin", "duplicate password, wrong first (reordered)" },
+        { "username=admin&password=correct-horse-battery-staple%00x", "NUL escape after the password" },
+        { "username=admin&password=correct-horse-battery-stap%6", "truncated percent escape in password" },
+        { "username=admin&password=correct-horse-battery-stap%zz", "non-hex percent escape in password" },
+        { "username=admin%00&password=correct-horse-battery-staple", "NUL escape in username" },
+        { "username=admin&password=", "empty password" },
+        { "username=&password=correct-horse-battery-staple", "empty username" },
+        { "xusername=admin&xpassword=correct-horse-battery-staple", "key prefix collision" },
+        { "username=admin;password=correct-horse-battery-staple", "wrong separator" },
+        { "username[]=admin&password[]=correct-horse-battery-staple", "array style keys" },
+        { "username=admin&password=+correct-horse-battery-staple", "leading space in password" },
+        { "username=admin&password=correct-horse-battery-staple+", "trailing space in password" },
+        { "username=ADMIN&password=correct-horse-battery-staple", "username case" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        fuzz_login_fresh();
+        st = fuzz_login_raw(bad[i].body, (long long)strlen(bad[i].body), 999, (size_t)-1, 0);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "refused with no session: %s", bad[i].why);
+        TEST_CHECK(s_last_set_cookie[0] == '\0' && (st == 400 || st == 401), msg);
+    }
+
+    // 8 KB body is refused by the cap; values under the cap that overflow the
+    // field buffers must not authenticate.
+    fuzz_login_fresh();
+    static char big[9000];
+    memset(big, 'A', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    st = fuzz_login_raw(big, (long long)strlen(big), 999, (size_t)-1, 0);
+    TEST_CHECK(st == 400 && s_last_set_cookie[0] == '\0', "8 KB body refused 400");
+    char mid[512];
+    snprintf(mid, sizeof(mid), "username=admin&password=");
+    size_t l = strlen(mid);
+    memset(mid + l, 'B', 400);
+    mid[l + 400] = '\0';
+    st = fuzz_login_raw(mid, (long long)strlen(mid), 999, (size_t)-1, 0);
+    TEST_CHECK(s_last_set_cookie[0] == '\0' && (st == 400 || st == 401), "400-byte password refused, no session");
+    snprintf(mid, sizeof(mid), "username=");
+    l = strlen(mid);
+    memset(mid + l, 'C', 300);
+    mid[l + 300] = '\0';
+    strcat(mid, "&password=x");
+    st = fuzz_login_raw(mid, (long long)strlen(mid), 999, (size_t)-1, 0);
+    TEST_CHECK(s_last_set_cookie[0] == '\0' && (st == 400 || st == 401), "300-byte username refused, no session");
+
+    TEST_CHECK(fuzz_login_creds_intact(), "stored administrator credential unchanged after the hostile run");
+
+    // Control: the valid body still logs in (the suite is not vacuous).
+    fuzz_login_fresh();
+    st = fuzz_login_raw(good, (long long)glen, 999, (size_t)-1, 0);
+    TEST_CHECK(s_last_set_cookie[0] != '\0', "control: the valid body logs in");
+}
+
 void run_test_web_auth_login_http(void)
 {
     test_lockout_is_per_ip_not_global();
@@ -1187,6 +1339,7 @@ void run_test_web_auth_login_http(void)
     test_429_response_is_logged();
     test_logout_with_valid_cookie_clears_session();
     test_logout_with_no_cookie_leaves_session_untouched();
+    test_fuzz_login_hostile_bodies();
 }
 
 int main(void)

@@ -292,6 +292,12 @@ static bool s_send_capture_on = false;
 // non-chunked path profile_post_handler() actually uses for every response).
 static const char *s_post_body;
 static size_t s_post_body_left;
+// Fuzz hooks: after s_fail_after bytes were served recv returns s_fail_ret (0 EOF, <0 error).
+static size_t s_post_served;
+static size_t s_fail_after = (size_t)-1;
+static int s_fail_ret = 0;
+static int s_fake_hide_calls = 0;
+static int s_fake_restore_calls = 0;
 static char s_resp_capture[2048];
 static size_t s_resp_capture_len;
 static bool s_resp_capture_on;
@@ -354,8 +360,15 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    if (s_fail_after != (size_t)-1 && s_post_served >= s_fail_after) {
+        return s_fail_ret;
+    }
     if (s_post_body && s_post_body_left > 0) {
         size_t n = buf_len < s_post_body_left ? buf_len : s_post_body_left;
+        if (s_fail_after != (size_t)-1 && s_post_served + n > s_fail_after) {
+            n = s_fail_after - s_post_served;
+        }
+        s_post_served += n;
         memcpy(buf, s_post_body, n);
         s_post_body += n;
         s_post_body_left -= n;
@@ -592,10 +605,12 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
 {
     (void)id;
     (void)hidden;
+    s_fake_hide_calls++;
     return ESP_OK;
 }
 esp_err_t profiles_builtin_restore_all(void)
 {
+    s_fake_restore_calls++;
     return ESP_OK;
 }
 
@@ -5156,6 +5171,161 @@ static void test_fuzz_profile_post_hostile(void)
     TEST_CHECK(s_last_err_code == 400 || s_last_err_code == 413, "100 MB Content-Length refused up front");
 }
 
+// HTTP body fuzz part 3: delete / builtin hide / builtin restore / favorite.
+// A refused request must erase, hide, unhide or favorite nothing.
+static int fuzz_post(esp_err_t (*h)(httpd_req_t *), const char *body, long long clen, size_t fail_after, int fail_ret)
+{
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = clen;
+    s_post_body = body;
+    s_post_body_left = strlen(body);
+    s_post_served = 0;
+    s_fail_after = fail_after;
+    s_fail_ret = fail_ret;
+    s_last_err_code = 0;
+    (void)h(&req);
+    s_post_body = NULL;
+    s_post_body_left = 0;
+    s_fail_after = (size_t)-1;
+    s_fail_ret = 0;
+    return s_last_err_code;
+}
+
+static void fuzz_small_setup(void)
+{
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    s_profiles.profiles[8] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x100);
+    (void)nvs_save_slot(8);
+    (void)profiles_favorites_set(8, false);
+    g_fake_builtin_on = true;
+    s_fake_hide_calls = 0;
+    s_fake_restore_calls = 0;
+}
+
+static void test_fuzz_small_body_handlers(void)
+{
+    TEST_SECTION("delete/hide/restore/favorite fuzz -- hostile bodies change nothing");
+    const char *dgood = "id=8";
+    size_t dl = strlen(dgood);
+    int st;
+    long long lens[] = { 0, -1, 65, 100000000LL, 0x7fffffffffffffffLL, 0 /* body length + 30, set below */ };
+    size_t nlens = sizeof(lens) / sizeof(lens[0]);
+
+    // delete: recv failure at every offset, Content-Length extremes, bad ids.
+    for (size_t at = 0; at < dl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(profile_delete_post_handler, dgood, (long long)dl, at, ret);
+            TEST_CHECK(st == 400 && profiles_slot_used(8), "delete: recv failure mid-body erases nothing");
+        }
+    }
+    lens[5] = (long long)dl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_delete_post_handler, dgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st == 400 && profiles_slot_used(8), "delete: bad Content-Length erases nothing");
+    }
+    const char *dbad[] = { "id=", "id=+8", "id=8x", "id=-8", "id=%00", "id=8%00", "id=9999999999999", "id=256",
+                           "id=8%", "id=%zz", "xid=8", "id[]=8", "ID=8", "id=1.5", "id=0x8", "id= 8", "id=8 ",
+                           "id=%ff" };
+    for (size_t i = 0; i < sizeof(dbad) / sizeof(dbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_delete_post_handler, dbad[i], (long long)strlen(dbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "delete: refused, slot 8 intact: %s", dbad[i]);
+        TEST_CHECK(st >= 400 && profiles_slot_used(8), msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(profile_delete_post_handler, dgood, (long long)dl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && !profiles_slot_used(8), "delete: control, clean body erases the slot");
+
+    // favorite
+    const char *fgood = "id=8&favorite=1";
+    size_t fl = strlen(fgood);
+    for (size_t at = 0; at < fl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(profile_favorite_post_handler, fgood, (long long)fl, at, ret);
+            TEST_CHECK(st == 400 && !profiles_favorites_is(8), "favorite: recv failure mid-body marks nothing");
+        }
+    }
+    lens[5] = (long long)fl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_favorite_post_handler, fgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st == 400 && !profiles_favorites_is(8), "favorite: bad Content-Length marks nothing");
+    }
+    const char *fbad[] = { "id=8&favorite=2", "id=8&favorite=10", "id=8&favorite=%31%31", "id=8&favorite=1x",
+                           "id=8&favorite=+1", "id=8&favorite=%00", "id=8&favorite=-1", "id=%00", "id=8x&favorite=1",
+                           "id=", "favorite=1", "id=300&favorite=1", "id=8&favorite=0000000000" };
+    for (size_t i = 0; i < sizeof(fbad) / sizeof(fbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(profile_favorite_post_handler, fbad[i], (long long)strlen(fbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "favorite: refused, nothing marked: %s", fbad[i]);
+        TEST_CHECK(st >= 400 && !profiles_favorites_is(8), msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(profile_favorite_post_handler, fgood, (long long)fl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && profiles_favorites_is(8), "favorite: control, clean body marks the slot");
+
+    // builtin hide (fake builtin id is PROFILE_BUILTIN_ID_BASE)
+    char hgood[48];
+    snprintf(hgood, sizeof(hgood), "id=%d&hidden=1", (int)PROFILE_BUILTIN_ID_BASE);
+    size_t hl = strlen(hgood);
+    for (size_t at = 0; at < hl; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            fuzz_small_setup();
+            st = fuzz_post(builtin_hide_post_handler, hgood, (long long)hl, at, ret);
+            TEST_CHECK(st == 400 && s_fake_hide_calls == 0, "hide: recv failure mid-body hides nothing");
+        }
+    }
+    lens[5] = (long long)hl + 30;
+    for (size_t i = 0; i < nlens; i++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_hide_post_handler, hgood, lens[i], (size_t)-1, 0);
+        TEST_CHECK(st >= 400 && s_fake_hide_calls == 0, "hide: bad Content-Length hides nothing");
+    }
+    const char *hbad[] = { "id=", "id=-1", "id=+1", "id=%00", "xid=1", "hidden=1", "id=1000", "id=%zz", "id=8" };
+    for (size_t i = 0; i < sizeof(hbad) / sizeof(hbad[0]); i++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_hide_post_handler, hbad[i], (long long)strlen(hbad[i]), (size_t)-1, 0);
+        char msg[120];
+        snprintf(msg, sizeof(msg), "hide: refused, nothing hidden: %s", hbad[i]);
+        TEST_CHECK(st >= 400 && s_fake_hide_calls == 0, msg);
+    }
+    fuzz_small_setup();
+    st = fuzz_post(builtin_hide_post_handler, hgood, (long long)hl, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && s_fake_hide_calls == 1, "hide: control, clean body hides once");
+
+    // builtin restore: a bad body must not restore.
+    for (size_t i = 0; i < nlens; i++) {
+        if (lens[i] <= 0) {
+            continue; /* empty body is the legitimate form */
+        }
+        fuzz_small_setup();
+        st = fuzz_post(builtin_restore_post_handler, "x=1", lens[i], (size_t)-1, 0);
+        if (lens[i] == 3) {
+            continue;
+        }
+        TEST_CHECK(st == 400 && s_fake_restore_calls == 0, "restore: bad Content-Length restores nothing");
+    }
+    for (int ret = -1; ret <= 0; ret++) {
+        fuzz_small_setup();
+        st = fuzz_post(builtin_restore_post_handler, "abc", 3, 1, ret);
+        TEST_CHECK(st == 400 && s_fake_restore_calls == 0, "restore: recv failure restores nothing");
+    }
+    fuzz_small_setup();
+    st = fuzz_post(builtin_restore_post_handler, "", 0, (size_t)-1, 0);
+    TEST_CHECK(st == 0 && s_fake_restore_calls == 1, "restore: control, empty body restores");
+    g_fake_builtin_on = false;
+}
+
 void run_test_profiles_http(void)
 {
     test_fuzz_profile_post_hostile();
@@ -5196,6 +5366,7 @@ void run_test_profiles_http(void)
     test_profile_name_nul_refused();
     test_profile_rule_temp_nan_refused_even_with_cmp_none();
     test_profile_favorite_empty_slot_refused();
+    test_fuzz_small_body_handlers();
     test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();
