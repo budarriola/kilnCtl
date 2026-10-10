@@ -445,7 +445,12 @@ static esp_err_t maybe_auto_format_and_remount(esp_err_t original_mount_err)
     }
     /* cfg_fs stays UNAVAILABLE for THIS boot's return from cfg_fs_mount_device()
      * -- the deferred task installs the mount and write functions later, off
-     * this call stack entirely. */
+     * this call stack entirely. Returning the ORIGINAL error (not ESP_OK) is
+     * deliberate and correct: the only caller (main_boot_early.c) uses the
+     * result to report whether cfg_fs is mounted NOW, and it is not -- the
+     * format has merely been scheduled. If the deferred format later succeeds,
+     * status flips to MOUNTED and cfg_fs_get_status()/cfg_fs_is_available()
+     * are the source of truth, never this boot-time return value. */
     return original_mount_err;
 }
 

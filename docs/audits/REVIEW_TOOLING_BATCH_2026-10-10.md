@@ -259,7 +259,8 @@ refspec to an existing branch) and `3d9486bbf` (N2 not-ok fixture effective).
   exes) on every exit path; test `orphan_reaped`.
 - Also fixed `check_submodule_pins_pushed.ps1`: `$PSScriptRoot` param default is empty
   under 5.1 `-File`; resolved in the body.
-- S1 not addressed.
+- S1: closed as by design (INFO). The note deliberately never gates, matching
+  check_all_task_stack_budgets; it is a lower-bound disclosure, not a defect.
 
 Re-run negative tests: mb_unquote_format, mb_drop_b2a, mb_rank_off,
 mb_dev_tree_exact_always, mb_dev_ref_label, pv_no_refspec, pv_ignore_fetch_failure,
