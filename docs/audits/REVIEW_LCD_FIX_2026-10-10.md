@@ -16,10 +16,10 @@ Paths below are relative to `firmware/KilnFW/App/drivers/` unless noted.
 | MED | R1 | Danger mode and autotune still do not exclude each other |
 | MED | R2 | Danger-mode start check is early only; open-danger vs start race |
 | LOW | R3 | `danger_mode_active()` fails open on lock timeout |
-| LOW | R4 | Builder pad converts with the unit read at done time, not at open time |
-| LOW | R5 | Builder card titles still say "Target C" / "Ramp C/hr"; stale comments |
-| LOW | R6 | First-boot calibration without a role skips touch_test verification |
-| LOW | R7 | Unit-entry tests miss the lower clamp and the display rounding |
+| LOW | R4 (FIXED 3de43246) | Builder pad converts with the unit read at done time, not at open time |
+| LOW | R5 (FIXED 3de43246) | Builder card titles still say "Target C" / "Ramp C/hr"; stale comments |
+| LOW | R6 (FIXED 3de43246) | First-boot calibration without a role skips touch_test verification |
+| LOW | R7 (FIXED 3de43246) | Unit-entry tests miss the lower clamp and the display rounding |
 | NIT | R8 | Float scale drift on accept-unchanged (below noise floor) |
 | NIT | R9 | Stale refusal log text in `profile_executor_run()` |
 
