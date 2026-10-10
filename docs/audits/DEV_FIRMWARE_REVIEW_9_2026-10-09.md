@@ -71,6 +71,8 @@ Fix: move the heat-claim re-check into `zones_config_set_pid_no_save()` and its 
 ## Earlier findings, status
 
 - Review 8 L1-L4: fixed in `523ba6dc`, the base of this range.
+- Review 9 L1: fixed in `582bcecc` (tests `8840dee7`). Accept refuses via the mode-gate 409 path while any adaptive `write_in_flight` is set; the adaptive apply skips a zone whose gains changed since the plan, and commit records no applied state or revert snapshot if the live gains are no longer ours.
+- Review 9 L2: fixed in `582bcecc`. `zones_config_set_pid/model[_no_save]_checked` re-check the heat claim inside the `zones_cfg_lock` section and return `ZONES_SET_BUSY_RUNNING`; zones_http_pid, UART SET_ZONE_PID/MODEL and Accept map it to 409/refusal. The executor and the adaptive run-end write run after the claim is released, so need no exception. The adaptive revert and backup import now get the refusal too (bool false). kiln_cfg apply has no direct setter call.
 
 ## Checked, no defect
 
@@ -92,4 +94,4 @@ Fix: move the heat-claim re-check into `zones_config_set_pid_no_save()` and its 
 - **Run-end call sites.** `pending_coupling` and the `adaptive_tune_run_end()` callers run outside `s_exec.lock`.
 - **Starter pairing.** Each starter takes its generation snapshot, then publishes its claim, then calls `changed_since`. Against POST's re-check under the lock, either the POST sees the claim or the starter sees the bump.
 - **Stack.** No commit in range adds a large stack local. The two arrays that used to be on the stack (coupled-plan observations and the login body) moved to the heap.
-- **Tests.** Most fixes come with targeted host tests. Neither L1 nor L2 has a test that covers the interleaving.
+- **Tests.** Most fixes come with targeted host tests. L1 and L2 now have interleaving host tests (negtest: all CAUGHT).
