@@ -1961,6 +1961,15 @@ try {
 
     Invoke-HostTestExe -Name "uart_bridge_thermo_gate" -ExePath $exeUartBridgeThermoGate -BuildCmd $cmdUartBridgeThermoGate
 
+    # ---- test_uart_bridge_core.c: bridge guards, codecs, reply_reject, link watchdog (campaign 10) ----
+    $exeUartBridgeCore = Join-Path $outDir "kilnctl_host_tests_uart_bridge_core.exe"
+    $uartBridgeCoreObjDir = Join-Path $outDir "uartbridgecore"
+    New-Item -ItemType Directory -Force -Path $uartBridgeCoreObjDir | Out-Null
+    $cmdUartBridgeCore = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeCoreObjDir\\`" /Fe:`"$exeUartBridgeCore`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_core.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_core" -ExePath $exeUartBridgeCore -BuildCmd $cmdUartBridgeCore
     # ---- test_persist_campaign10.c: backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store ----
     $exeC10 = Join-Path $outDir "kilnctl_host_tests_persist_campaign10.exe"
     $c10ObjDir = Join-Path $outDir "persistcampaign10"
@@ -3379,7 +3388,8 @@ try {
     # 80 -> 81: test_persist_campaign10.c (campaign 10)
     # 81 -> 82: test_ota_http_refusals.c (campaign 9b)
     # 82 -> 83: test_update_http_refusals.c (campaign 9c)
-    $totalExpected = 83
+    # 83 -> 84: test_uart_bridge_core.c (campaign 10)
+    $totalExpected = 84
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
