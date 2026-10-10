@@ -31,7 +31,7 @@ commissioning a CT through the volatile path can deadlock until the CT is
 calibrated by COMMIT while disarmed. Suggest: gate the current term on
 `current_sensing_commissioned`, or document the required order.
 
-**Resolution (SHA_PLACEHOLDER): documented, check unchanged pending owner.** The required order (commission CT params while disarmed, via COMMIT, before arming) is in `firmware/CommonFW/docs/LINK_PROTOCOL.md` next to the `APPLY_CONFIG_VOLATILE` gate text. `scenario_heat_probe_current_floor` (`test_link_task_fuzz.c`) pins the fail-closed probe (present current => heat possible); gating on `current_sensing_commissioned` remains an owner decision.
+**Resolution (dad356035): documented, check unchanged pending owner.** The required order (commission CT params while disarmed, via COMMIT, before arming) is in `firmware/CommonFW/docs/LINK_PROTOCOL.md` next to the `APPLY_CONFIG_VOLATILE` gate text. `scenario_heat_probe_current_floor` (`test_link_task_fuzz.c`) pins the fail-closed probe (present current => heat possible); gating on `current_sensing_commissioned` remains an owner decision.
 
 ### LOW-2: lost ANNOUNCE after ESP reboot silently downgrades M4 clear binding
 
@@ -108,7 +108,7 @@ errors (vacuous); they were re-run with `(void)` casts and caught by real
 assertions, as listed. The F2 call-site mutation is caught only by a test that
 greps `link_task.c` source; a behavioral test through `push_context` would be stronger.
 
-**Resolved (SHA_PLACEHOLDER):** `scenario_push_context` in `test_link_task_fuzz.c` already drives the real `link_task.c` push-context path (new boot_id and context gap without HEAT_OWNER_ACTIVE => `safety_core_request_enable(false)`; heat owner or same session => no drop). Re-run negtest (`-Preset saftyfw-host -RequireAssertion`), call site skipped: CAUGHT by `link_task_fuzz_tests.exe` (behavioural) as well as the source-text test. Probe mutation (`in.any_current_present = false`): CAUGHT by `scenario_heat_probe_current_floor`.
+**Resolved (dad356035):** `scenario_push_context` in `test_link_task_fuzz.c` already drives the real `link_task.c` push-context path (new boot_id and context gap without HEAT_OWNER_ACTIVE => `safety_core_request_enable(false)`; heat owner or same session => no drop). Re-run negtest (`-Preset saftyfw-host -RequireAssertion`), call site skipped: CAUGHT by `link_task_fuzz_tests.exe` (behavioural) as well as the source-text test. Probe mutation (`in.any_current_present = false`): CAUGHT by `scenario_heat_probe_current_floor`.
 
 ## Stack
 
