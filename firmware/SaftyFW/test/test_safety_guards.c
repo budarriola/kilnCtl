@@ -4290,7 +4290,41 @@ static void test_guard_review_2026_10_09(void)
         TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LOAD_STUCK_ON,
                    "S3 still trips during a continuous bad TC read");
     }
-}
+
+    TEST_SECTION("guard review F6 / LOW-3 -- S2 and S10 hold (do not reset) while the TC read is bad");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.overshoot_margin_c = 50.0f;
+        cfg.overshoot_time_s = 1000.0f;
+        cfg.tc_disagreement_c = 100.0f;
+        cfg.tc_disagreement_time_s = 2.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 1000.0f;                 /* 100 C over setpoint, 300 C from the zone TC */
+        in.nearest_zone_measured_c = 700.0f;
+        in.dt_s = 1.0f;
+        for (int i = 0; i < 5; i++) {
+            TEST_CHECK(!safety_guards_tick(&s, &cfg, &in), "good over-reads do not trip yet");
+        }
+        TEST_CHECK(s.s2_over_elapsed_s == 5.0f, "fixture: S2 accumulator is 5 s");
+        TEST_CHECK(s.s10_warn, "fixture: S10 warn is set");
+        const float s10_elapsed = s.s10_disagree_elapsed_s;
+
+        in.tc_valid = false;
+        in.tc_c = (float)NAN;
+        for (int i = 0; i < 3; i++) {
+            TEST_CHECK(!safety_guards_tick(&s, &cfg, &in), "short bad read does not trip");
+        }
+        TEST_CHECK(s.s2_over_elapsed_s == 5.0f, "S2 accumulator is held, not reset or advanced, across a bad read");
+        TEST_CHECK(s.s10_disagree_elapsed_s == s10_elapsed, "S10 accumulator is held across a bad read");
+        TEST_CHECK(s.s10_warn, "S10 warn is held across a bad read");
+    }}
 
 void run_test_safety_guards(void)
 {

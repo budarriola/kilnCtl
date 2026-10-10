@@ -2003,6 +2003,49 @@ static void test_volatile_gate_backfills_before_compare(void)
                "heat possible: resend with a stale legacy ct_topology is not refused");
 }
 
+// LOW-3: fields_set differences alone (value bytes identical) are a change
+// to what the guards treat as commissioned. Heat possible refuses both
+// directions; the allowlisted mains/power bits stay accepted.
+static void test_volatile_gate_refuses_fields_set_only_changes(void)
+{
+    TEST_SECTION("config_store_flash: heat possible refuses a fields_set-only change, either direction (LOW-3)");
+    const uint32_t bits[] = {
+        CONFIG_STORE_SET_TC_SOURCE, CONFIG_STORE_SET_BORROWED_ZONE_INDEX, CONFIG_STORE_SET_TC_PLACEMENT_MODE,
+        CONFIG_STORE_SET_CT_CHANNEL_MAP, CONFIG_STORE_SET_CT_CHANNEL_MAP_0, CONFIG_STORE_SET_CT_CHANNEL_MAP_1,
+        CONFIG_STORE_SET_CT_CHANNEL_MAP_2, CONFIG_STORE_SET_I_NORMAL_A_0, CONFIG_STORE_SET_I_NORMAL_A_1,
+        CONFIG_STORE_SET_I_NORMAL_A_2, CONFIG_STORE_SET_CT_INSTALLED, CONFIG_STORE_SET_ZONE_CT_CHANNEL_0,
+        CONFIG_STORE_SET_ZONE_CT_CHANNEL_1, CONFIG_STORE_SET_ZONE_CT_CHANNEL_2,
+    };
+    for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
+        for (int dir = 0; dir < 2; dir++) {
+            reset_all();
+            config_store_boot_load();
+            config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+            config_store_record_t base;
+            config_store_default(&base);
+            if (dir == 0) {
+                base.fields_set &= ~bits[i];
+            } else {
+                base.fields_set |= bits[i];
+            }
+            TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: idle install");
+            config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+            config_store_record_t next;
+            config_store_get_full_record(&next);
+            next.fields_set ^= bits[i];
+            printf("  fields_set bit 0x%08X dir %d\n", (unsigned)bits[i], dir);
+            TEST_CHECK(config_store_write_volatile(&next, NULL) == false,
+                       "a fields_set-only change is refused while heat is possible");
+        }
+    }
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t cur;
+    config_store_get_full_record(&cur);
+    cur.fields_set ^= CONFIG_STORE_SET_MAINS_VOLTAGE_V;
+    TEST_CHECK(config_store_write_volatile(&cur, NULL) == true, "the mains_voltage set-bit is allowlisted");
+}
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -2044,6 +2087,7 @@ int main(void)
     test_volatile_gate_identical_resend_and_idle_accept();
     test_volatile_gate_follows_heat_probe_not_armed();
     test_volatile_gate_backfills_before_compare();
+    test_volatile_gate_refuses_fields_set_only_changes();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
