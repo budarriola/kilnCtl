@@ -165,6 +165,11 @@ static void test_set_field_validation(void)
     TEST_CHECK(do_set("relay=0&enabled=1") == 400, "relay 0");
     TEST_CHECK(do_set("relay=5&enabled=1") == 400, "relay 5");
     TEST_CHECK(do_set("relay=x&enabled=1") == 400, "relay non-numeric");
+    TEST_CHECK(do_set("relay=+1&enabled=1") == 400, "relay with a leading + (decodes to a space) refused");
+    TEST_CHECK(do_set("relay=%2B1&enabled=1") == 400, "relay +1 refused");
+    TEST_CHECK(do_set("relay=%201&enabled=1") == 400, "relay with leading space refused");
+    TEST_CHECK(do_set("relay=1&enabled=%zz") == 400, "invalid percent escape refused");
+    TEST_CHECK(f_set_calls == 0, "no store write for any of them");
     TEST_CHECK(do_set("relay=1") == 400, "missing enabled");
     TEST_CHECK(do_set("relay=1&enabled=2") == 400, "enabled 2");
     TEST_CHECK(do_set("relay=1&enabled=1&tc_zone=9") == 400, "tc_zone past last zone");

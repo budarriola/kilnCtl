@@ -493,6 +493,7 @@ static void test_apply_hostile_bodies_never_reach_swap(void)
     static const char *const bodies[] = {
         "", "id", "id=", "id=abc", "id=1x", "id=-1", "id=%00", "id=1%002", "id=%zz",
         "id=0x1", "id=1.5", "id=+", "foo=1", "&&&", "id=1e2", "id=--1",
+        "id=+1", "id=%2B1", "id=%201", "id=99999999999", "id=2147483648",
     };
     for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
         test_reset();

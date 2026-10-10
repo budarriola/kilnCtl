@@ -55,6 +55,10 @@ static inline int http_form_url_decode(const char *src, size_t src_len, char *ou
             }
             out[o++] = dec;
             i += 2;
+        } else if (c == '%') {
+            /* HTTP fuzz F8f: "%", "%zz", "%0" -- an invalid percent escape is a malformed request, not a literal. */
+            out[0] = '\0'; /* o + 1 < out_cap here, so out_cap > 0 */
+            return -1;
         } else {
             out[o++] = c;
         }

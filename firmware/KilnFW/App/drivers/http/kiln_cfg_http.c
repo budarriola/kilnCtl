@@ -111,9 +111,9 @@ static bool parse_required_id(const char *body, const char *key, int32_t *out_id
     if (len <= 0) {
         return false;
     }
-    char *end = NULL;
-    long v = strtol(val, &end, 10);
-    if (end == val || *end != '\0' || v < 0 || v > INT32_MAX) {
+    /* HTTP fuzz F7/F9: plain decimal digits only (no '+', no leading whitespace), ERANGE rejected, not saturated. */
+    long v = 0;
+    if (val[0] == '+' || !http_form_parse_long(val, len, 0, INT32_MAX, &v)) {
         return false;
     }
     *out_id = (int32_t)v;

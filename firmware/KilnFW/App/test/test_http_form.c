@@ -145,10 +145,12 @@ static void test_fuzz_inputs(void)
     TEST_CHECK(http_form_find_field("a=%00&a=1", "a", out, sizeof(out)) == -2, "first duplicate with %00 refuses (no fallthrough)");
     TEST_CHECK(http_form_find_field("a=1=2", "a", out, sizeof(out)) == 3 && strcmp(out, "1=2") == 0, "extra '=' stays in value");
 
-    TEST_CHECK(http_form_find_field("a=%", "a", out, sizeof(out)) == 1 && out[0] == '%', "lone % kept literal");
-    TEST_CHECK(http_form_find_field("a=%4", "a", out, sizeof(out)) == 2 && strcmp(out, "%4") == 0, "truncated escape kept literal");
-    TEST_CHECK(http_form_find_field("a=%zz", "a", out, sizeof(out)) == 3 && strcmp(out, "%zz") == 0, "non-hex escape kept literal");
-    TEST_CHECK(http_form_find_field("a=%4g", "a", out, sizeof(out)) == 3 && strcmp(out, "%4g") == 0, "half-hex escape kept literal");
+    /* HTTP fuzz F8f: an invalid percent escape is refused (-2, out left empty), never kept literally. */
+    TEST_CHECK(http_form_find_field("a=%", "a", out, sizeof(out)) == -2 && out[0] == '\0', "lone % refused");
+    TEST_CHECK(http_form_find_field("a=%4", "a", out, sizeof(out)) == -2, "truncated escape refused");
+    TEST_CHECK(http_form_find_field("a=%zz", "a", out, sizeof(out)) == -2, "non-hex escape refused");
+    TEST_CHECK(http_form_find_field("a=%4g", "a", out, sizeof(out)) == -2, "half-hex escape refused");
+    TEST_CHECK(http_form_find_field("a=ok%", "a", out, sizeof(out)) == -2, "trailing % after valid text refused");
     TEST_CHECK(http_form_find_field("a=%25", "a", out, sizeof(out)) == 1 && out[0] == '%', "%25 decodes to %");
     TEST_CHECK(http_form_find_field("a=%2500", "a", out, sizeof(out)) == 3 && strcmp(out, "%00") == 0, "%2500 is a literal '%00' string, not a NUL");
     TEST_CHECK(http_form_find_field("a=%00%00", "a", out, sizeof(out)) == -2, "repeated %00 refused");
