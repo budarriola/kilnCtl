@@ -1091,6 +1091,11 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
             }
             strncpy(c->p.name, name, PROFILE_NAME_MAX_LEN);
             c->p.name[PROFILE_NAME_MAX_LEN] = '\0';
+        } else if (backup_json_obj_find(pe, "name") != NULL) {
+            /* K10-01: backup_json_field_str() now FAILS on a present-but-unusable string (over-long for the
+             * buffer, unterminated, bad escape) instead of truncating it. */
+            snprintf(err_msg, err_cap, "profile entry %u: name too long or malformed", (unsigned)candidate_count);
+            return false;
         }
 
         double dmask;
@@ -1468,6 +1473,11 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
                 return false;
             }
             zc->has_name = true;
+        } else if (backup_json_obj_find(ze, "name") != NULL) {
+            /* K10-01: present-but-unusable name (over-long, unterminated, bad escape) is a rejection. */
+            snprintf(err_msg, err_cap, "zone tuning entry %u: name too long or malformed",
+                     (unsigned)zone_candidate_count);
+            return false;
         }
 
         double drelay;

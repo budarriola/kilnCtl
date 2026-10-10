@@ -117,21 +117,31 @@ static void test_backup_json(void)
     /* ---- characterization of defects ---- */
     char small[4];
     bool r = backup_json_field_str("{\"s\":\"abcdefgh\"}", "s", small, sizeof(small));
-    TEST_CHECK(r && strcmp(small, "abc") == 0,
-               "CHARACTERIZATION K10-01: field_str silently truncates an over-long string and reports success");
+    TEST_CHECK(!r && small[0] == '\0', "K10-01: field_str over-long string is an error, not a truncation");
+    r = backup_json_field_str("{\"s\":\"abc\"}", "s", small, sizeof(small));
+    TEST_CHECK(r && strcmp(small, "abc") == 0, "K10-01: exact-fit string accepted");
     r = backup_json_field_str("{\"s\":\"abc", "s", small, sizeof(small));
-    TEST_CHECK(r == true,
-               "CHARACTERIZATION K10-02: field_str accepts an unterminated string (truncated backup) as success");
+    TEST_CHECK(r == false, "K10-02: field_str rejects an unterminated string (truncated backup)");
     r = backup_json_field_str("{\"s\":\"A\\u0042\"}", "s", s, sizeof(s));
-    TEST_CHECK(r && strcmp(s, "Au0042") == 0,
-               "CHARACTERIZATION K10-03: \\u escape is mangled to 'u0042' without error");
+    TEST_CHECK(r && strcmp(s, "AB") == 0, "K10-03: \\u0042 decodes to 'B'");
+    r = backup_json_field_str("{\"s\":\"\\u00e9\\u20ac\"}", "s", s, sizeof(s));
+    TEST_CHECK(r && strcmp(s, "\xC3\xA9\xE2\x82\xAC") == 0, "K10-03: \\u escapes above 0x7F decode to UTF-8");
+    TEST_CHECK(!backup_json_field_str("{\"s\":\"\\u00zz\"}", "s", s, sizeof(s)), "K10-03: bad hex digits rejected");
+    TEST_CHECK(!backup_json_field_str("{\"s\":\"\\q\"}", "s", s, sizeof(s)), "K10-03: unknown escape rejected");
+    TEST_CHECK(backup_json_field_str("{\"s\":\"a\\n\\\"b\"}", "s", s, sizeof(s)) && strcmp(s, "a\n\"b") == 0,
+               "standard escapes still decode");
     d = 0;
     r = backup_json_field_num("{\"a\":0x1F}", "a", &d);
-    TEST_CHECK(r && d == 31.0,
-               "CHARACTERIZATION K10-04: field_num accepts hex float syntax (strtod) as a valid JSON number");
+    TEST_CHECK(!r, "K10-04: field_num rejects hex syntax");
+    TEST_CHECK(!backup_json_field_num("{\"a\":inf}", "a", &d) && !backup_json_field_num("{\"a\":+1}", "a", &d),
+               "K10-04: inf and leading '+' rejected");
     d = 0;
     r = backup_json_field_num("{\"a\":12abc}", "a", &d);
-    TEST_CHECK(r && d == 12.0, "CHARACTERIZATION K10-05: field_num ignores trailing garbage after the number");
+    TEST_CHECK(!r, "K10-05: field_num rejects trailing garbage after the number");
+    TEST_CHECK(backup_json_field_num("{\"a\":-1.5e2}", "a", &d) && d == -150.0 &&
+                   backup_json_field_num("{\"a\": 7 }", "a", &d) && d == 7.0 &&
+                   backup_json_field_num("{\"a\":0}", "a", &d) && d == 0.0,
+               "normal numbers (exponent, spaces, zero) still accepted");
     r = backup_json_field_num("{\"a\":1,\"a\":2}", "a", &d);
     TEST_CHECK(r && d == 1.0, "duplicate key: first wins (documented)");
 }
@@ -172,23 +182,25 @@ static void test_touch_cal(void)
 
     tc_rec_t r = { .version = 2, .a = 1, .e = 1 };
     put_tc_raw(&r, sizeof(r));
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated, "newer version -> uncalibrated");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated, "newer version -> uncalibrated, error code");
     r.version = 0;
     put_tc_raw(&r, sizeof(r));
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated, "version 0 -> uncalibrated");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated, "version 0 -> uncalibrated, error code");
     r.version = 1;
     put_tc_raw(&r, sizeof(r) - 4);
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated, "truncated record -> uncalibrated");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated, "truncated record -> uncalibrated, error code");
     uint8_t big[64];
     memset(big, 0, sizeof(big));
     big[0] = 1;
     put_tc_raw(big, sizeof(big));
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated, "oversized record -> uncalibrated");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated, "oversized record -> uncalibrated, error code");
 
     touch_cal_store_save(&in);
     fake_kv_script_corrupt_key("kiln_nvs", "touch_cal", "affine_v1");
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated,
-               "CHARACTERIZATION K10-06: corrupt (HAL_IO) record loads as ESP_OK uncalibrated, no error to caller");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated,
+               "K10-06: corrupt (HAL_IO) record is uncalibrated WITH an error code");
+    fake_kv_reset_all();
+    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && !c.calibrated, "K10-06: fresh board still ESP_OK uncalibrated");
 
     fake_kv_reset_all();
     fake_kv_script_next_write_status(HAL_NO_MEM);
@@ -200,21 +212,26 @@ static void test_touch_cal(void)
     fake_kv_reset_all();
     fake_kv_script_silent_set_noops(1);
     esp_err_t se = touch_cal_store_save(&in);
-    TEST_CHECK(se == ESP_OK && !touch_cal_store_is_calibrated(),
-               "CHARACTERIZATION K10-07: save has no read-back; a write that lies OK reports success but nothing persisted");
+    TEST_CHECK(se != ESP_OK && !touch_cal_store_is_calibrated(),
+               "K10-07: save reads back; a write that lies OK is reported as a failure");
 
     fake_kv_reset_all();
     touch_cal_t nan_in = in;
     nan_in.a = NAN;
-    TEST_CHECK(touch_cal_store_save(&nan_in) == ESP_OK && touch_cal_store_load(&c) == ESP_OK && c.calibrated &&
-                   isnan(c.a),
-               "CHARACTERIZATION K10-08: NaN coefficient saved and loaded as 'calibrated' (no value validation, no CRC)");
+    TEST_CHECK(touch_cal_store_save(&nan_in) != ESP_OK && !touch_cal_store_is_calibrated(),
+               "K10-08: NaN coefficient refused at save");
+    {
+        tc_rec_t nr = { .version = 1, .a = NAN, .e = 1 };
+        put_tc_raw(&nr, sizeof(nr));
+        TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated, "K10-08: NaN record loads uncalibrated");
+    }
+    fake_kv_reset_all();
     fake_kv_reset_all();
     memset(&r, 0, sizeof(r));
     r.version = 1;
     put_tc_raw(&r, sizeof(r));
-    TEST_CHECK(touch_cal_store_load(&c) == ESP_OK && c.calibrated && c.a == 0 && c.e == 0,
-               "CHARACTERIZATION K10-08b: all-zero v1 record (degenerate map) loads as calibrated");
+    TEST_CHECK(touch_cal_store_load(&c) != ESP_OK && !c.calibrated,
+               "K10-08b: all-zero v1 record (degenerate map) is not calibrated");
 
     uint16_t rx[3] = { 100, 900, 100 }, ry[3] = { 100, 100, 900 };
     int32_t sx[3] = { 0, 319, 0 }, sy[3] = { 0, 0, 479 };
@@ -365,22 +382,25 @@ static void test_pref_cfg_fs(void)
     TEST_CHECK(pref_cfg_fs_save("big.bin", big, BIG, 10) == ESP_ERR_NO_MEM, "save alloc failure reports NO_MEM");
     disarm_oom();
     arm_oom(4 + BIG, 1);
-    pref_cfg_fs_load_raw("big.bin", BIG, v_first1, bout, &rev, &valid);
-    TEST_CHECK(!valid && rev == 0,
-               "CHARACTERIZATION K10-09: load_raw alloc failure is indistinguishable from 'file absent' (no error channel)");
+    TEST_CHECK(pref_cfg_fs_load_raw_checked("big.bin", BIG, v_first1, bout, &rev, &valid) == ESP_ERR_NO_MEM && !valid,
+               "K10-09: load_raw_checked reports alloc failure as NO_MEM, not absent");
     disarm_oom();
+    TEST_CHECK(pref_cfg_fs_load_raw_checked("nofile.bin", BIG, v_first1, bout, &rev, &valid) == ESP_OK && !valid,
+               "K10-09: truly absent file is ESP_OK / invalid");
     size_t ol;
     arm_oom(4 + BIG, 1);
-    TEST_CHECK(!pref_cfg_fs_load_var("big.bin", bout, BIG, &ol, &rev),
-               "CHARACTERIZATION K10-09b: load_var alloc failure also reads as absent");
+    TEST_CHECK(pref_cfg_fs_load_var_checked("big.bin", bout, BIG, &ol, &rev) == ESP_ERR_NO_MEM,
+               "K10-09b: load_var_checked reports alloc failure as NO_MEM");
     disarm_oom();
+    TEST_CHECK(pref_cfg_fs_load_var_checked("nofile.bin", bout, BIG, &ol, &rev) == ESP_ERR_NOT_FOUND,
+               "K10-09b: absent file is NOT_FOUND");
     arm_oom(4 + BIG, 1);
     bool rok = pref_cfg_fs_resolve("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev, &used);
     disarm_oom();
     pref_cfg_fs_load_raw("big.bin", BIG, v_first1, bout, &rev, &valid);
-    TEST_CHECK(rok, "resolve returned success");
-    TEST_CHECK(valid && rev == 3 && bout[1] == 6,
-               "CHARACTERIZATION K10-10: transient OOM reading the file makes resolve() adopt the OLDER NVS value and overwrite the newer file (rev 9 -> 3)");
+    TEST_CHECK(!rok, "K10-10: resolve reports failure when the file cannot be read");
+    TEST_CHECK(valid && rev == 9 && bout[1] == 5,
+               "K10-10: transient OOM reading the file leaves the NEWER file (rev 9) untouched");
     fresh();
     pref_cfg_fs_save("big.bin", big, BIG, 9);
     arm_oom(BIG, 1);
@@ -403,8 +423,7 @@ static void test_pref_cfg_fs(void)
         arm_oom(4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64, 1);
         bool pn = pref_cfg_fs_probe_newer_wrong_size("big.bin", BIG, 0, 1, &ver);
         disarm_oom();
-        TEST_CHECK(!pn,
-                   "CHARACTERIZATION K10-11: probe_newer alloc failure answers 'not newer', letting a caller overwrite a newer-firmware file");
+        TEST_CHECK(pn, "K10-11: probe_newer alloc failure answers 'cannot decide' (newer), so the file is kept");
     }
 }
 
@@ -459,8 +478,9 @@ static void test_ct_verify(void)
     t = b; t.zone[0].responded_ch = 4;
     TEST_CHECK(!ct_verify_blob_validate(&t, sizeof(t)), "responded_ch 4 rejected");
     t = b; t.zone[0].measured_a = NAN;
-    TEST_CHECK(ct_verify_blob_validate(&t, sizeof(t)),
-               "CHARACTERIZATION K10-12: NaN measured_a/threshold_a passes validate (verdict floats unchecked)");
+    TEST_CHECK(!ct_verify_blob_validate(&t, sizeof(t)), "K10-12: NaN measured_a rejected");
+    t = b; t.zone[0].threshold_a = INFINITY;
+    TEST_CHECK(!ct_verify_blob_validate(&t, sizeof(t)), "K10-12: infinite threshold_a rejected");
 
     fresh();
     ct_verify_store_start();
@@ -498,8 +518,8 @@ static void test_ct_verify(void)
     pref_cfg_fs_set_write_fn(failing_write);
     TEST_CHECK(ct_verify_store_save(&b2) == ESP_FAIL, "write failure returned");
     pref_cfg_fs_reset_write_fn_for_test();
-    TEST_CHECK(ct_verify_store_get(&t) && t.fingerprint == 0x99,
-               "CHARACTERIZATION K10-13: after a failed save RAM serves the unpersisted verdict; a reboot silently reverts to the old one");
+    TEST_CHECK(ct_verify_store_get(&t) && t.fingerprint == 0x1234,
+               "K10-13: after a failed save RAM keeps the previous (persisted) verdict");
     pref_cfg_fs_load_raw(CT_VERIFY_CFG_FILE_PATH, sizeof(f), ct_verify_blob_validate, &f, &frev, &fv);
     TEST_CHECK(fv && frev == 1 && f.fingerprint == 0x1234, "file still holds the previous verdict");
     TEST_CHECK(ct_verify_store_save(&b2) == ESP_OK, "retry succeeds");
@@ -527,9 +547,17 @@ static void test_ct_verify(void)
         fputc(0xFF, fp);
         fclose(fp);
     }
-    ct_verify_store_start();
-    TEST_CHECK(ct_verify_store_get(&t) && t.fingerprint == 0x1234,
-               "CHARACTERIZATION K10-14: corrupt newer file silently replaced by the older NVS verdict (file overwritten); no operator-visible report");
+    TEST_CHECK(ct_verify_store_start() != ESP_OK && !ct_verify_store_get(NULL),
+               "K10-14: corrupt file -> error, no verdict served");
+    {
+        char p[300];
+        snprintf(p, sizeof(p), "%s/ct_verify.bin", BASE);
+        FILE *fp = fopen(p, "rb");
+        uint8_t chk[4 + sizeof(ct_verify_blob_t)];
+        size_t got = fp ? fread(chk, 1, sizeof(chk), fp) : 0;
+        if (fp) fclose(fp);
+        TEST_CHECK(got == sizeof(chk) && chk[4 + 1] == 0xFF, "K10-14: corrupt file left untouched, not replaced from NVS");
+    }
 }
 
 int main(void)

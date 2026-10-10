@@ -35,9 +35,10 @@ typedef struct {
 // Loads the persisted calibration from NVS. On any failure (never
 // calibrated, corrupt record, size mismatch after a layout change) *out is
 // set to {.calibrated = false, ...identity-ish...} and ESP_OK is still
-// returned -- "not calibrated yet" is expected steady state on a fresh
-// board, not an error a caller needs to branch on separately from "load
-// failed". Callers only need to check out->calibrated.
+// returned for a FRESH board ("not calibrated yet" is the expected steady
+// state). A record that exists but is unreadable, wrong size/version, or
+// holds non-finite/degenerate coefficients returns an error code (and logs)
+// with *out uncalibrated (K10-06/08). Callers only need out->calibrated.
 esp_err_t touch_cal_store_load(touch_cal_t *out);
 
 // Convenience wrapper around touch_cal_store_load() for a caller that only

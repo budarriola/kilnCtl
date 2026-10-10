@@ -77,6 +77,12 @@ extern "C" {
 // pref_cfg_fs_save()/pref_cfg_fs_commit() using the actual length.
 bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev);
 
+// Checked twin of pref_cfg_fs_load_var(): ESP_OK = loaded; ESP_ERR_NOT_FOUND = no usable file (unmounted,
+// absent, too short, over cap); ESP_ERR_NO_MEM or an I/O code = the file's state could NOT be determined,
+// which is NOT "absent" (K10-09b): a caller deciding whether to overwrite must refuse on that.
+esp_err_t pref_cfg_fs_load_var_checked(const char *rel_path, void *out, size_t cap, size_t *out_len,
+                                       uint32_t *out_rev);
+
 // Deletes the file at rel_path. ESP_OK when it did not exist either;
 // ESP_ERR_INVALID_STATE when cfg is not mounted.
 esp_err_t pref_cfg_fs_remove(const char *rel_path);
@@ -167,6 +173,14 @@ typedef bool (*pref_cfg_fs_validate_fn_t)(const void *bytes, size_t len);
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                            void *out_bytes, uint32_t *out_rev, bool *out_valid);
 
+// Checked twin of pref_cfg_fs_load_raw() (K10-09): same outputs, plus a return code. ESP_OK = the read
+// completed (*out_valid says whether the file held a usable item; absent, wrong-size, over-size and
+// validator-rejected files are ESP_OK / valid=false). ESP_ERR_NO_MEM (scratch allocation failed) or an I/O
+// code = the file's state is UNKNOWN: it may hold a newer value, so a caller that would overwrite the
+// file on "absent" must refuse instead. ESP_ERR_INVALID_ARG for bad arguments.
+esp_err_t pref_cfg_fs_load_raw_checked(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                                       void *out_bytes, uint32_t *out_rev, bool *out_valid);
+
 // Identical to pref_cfg_fs_load_raw() in every result, but logs nothing for a
 // wrong-size or validator-rejected file. For read-only status polls (GET
 // /api/cfgfs) that must not repeat a boot-time warning on every request.
@@ -181,7 +195,9 @@ void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg
 // and that byte (at item offset `version_offset`) is above `current_version`;
 // *out_version then holds it. Read-only: never writes or erases. A wrong-size
 // file at current-or-older version, an exact-size file, an absent file or an
-// unmounted cfg all return false (corruption/normal paths unchanged).
+// unmounted cfg all return false (corruption/normal paths unchanged). When the file cannot be read
+// (scratch allocation failure or an I/O error) the answer is "cannot decide" and the function returns
+// TRUE with *out_version 0xFF, so the caller keeps the file untouched (K10-11).
 // Callers that get true must not let pref_cfg_fs_resolve() run, since its
 // NVS->file migration would overwrite the newer file.
 bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
@@ -193,6 +209,10 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
 // inputs plus whatever is on the file. `out_bytes` (capacity `item_size`)
 // and `out_rev` are always written; `out_used_file` says which side won
 // (informational).
+//
+// Returns false (out_bytes zeroed) WITHOUT writing either side when the file's state cannot be
+// determined (scratch allocation or I/O failure, K10-10): the file may hold a newer value, and
+// adopting the NVS candidate would overwrite it.
 //
 // Returns true if `out_bytes` is trustworthy, false if neither side
 // produced anything valid (out_bytes zeroed, out_rev 0, out_used_file

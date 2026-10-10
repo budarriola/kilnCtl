@@ -146,8 +146,15 @@ static void raw_buf_put(raw_buf_t *b)
     b->p = NULL;
 }
 
-static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
-                          void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet)
+/* Returns ESP_OK when the read COMPLETED and *out_valid says whether the file held a usable item
+ * (absent, wrong-size, oversized and validator-rejected files are all ESP_OK / valid=false: the file is
+ * known not to hold a usable value). Returns an error -- ESP_ERR_NO_MEM for a failed scratch
+ * allocation, otherwise cfg_fs_read()'s code -- when the file's state could NOT be determined
+ * (K10-09/K10-10): a caller must then treat the file as possibly holding a newer value and must not
+ * overwrite it. An unmounted cfg is ESP_OK / absent, matching the old void API (the normal state on a
+ * board without cfg). */
+static esp_err_t load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                               void *out_bytes, uint32_t *out_rev, bool *out_valid, bool quiet)
 {
     if (out_bytes) {
         memset(out_bytes, 0, item_size);
@@ -159,15 +166,16 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
         *out_valid = false;
     }
     if (!rel_path || !out_bytes || !out_rev || !out_valid || item_size == 0 || item_size > PREF_CFG_FS_MAX_LARGE_ITEM) {
-        return;
+        return ESP_ERR_INVALID_ARG;
     }
     if (!cfg_fs_is_available()) {
-        return;
+        return ESP_OK;
     }
 
     raw_buf_t rb;
     if (!raw_buf_get(&rb, item_size)) {
-        return;
+        ESP_LOGW(PREF_FS_TAG, "%s read skipped: scratch allocation failed -- file state unknown", rel_path);
+        return ESP_ERR_NO_MEM;
     }
     uint8_t *raw = rb.p;
     size_t len = 0;
@@ -176,10 +184,16 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
         raw_buf_put(&rb);
         // ESP_ERR_NOT_FOUND (never migrated yet) is the normal state on
         // every board today -- not logged, same convention as
-        // zones_config_cfg_fs_load_raw(). Any other read failure is quiet
-        // here too; the caller's resolve() decides whether it is worth a
-        // divergence warning.
-        return;
+        // zones_config_cfg_fs_load_raw(). ESP_ERR_INVALID_SIZE is a file
+        // bigger than any item this build writes: unusable, not unknown.
+        // Anything else (I/O failure) leaves the file's state unknown.
+        if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_SIZE) {
+            return ESP_OK;
+        }
+        if (!quiet) {
+            ESP_LOGW(PREF_FS_TAG, "%s read failed: %s -- file state unknown", rel_path, esp_err_to_name(err));
+        }
+        return err;
     }
     if (len != 4 + item_size) {
         if (!quiet) {
@@ -187,7 +201,7 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
                      (unsigned)len, (unsigned)(4 + item_size), (unsigned)item_size);
         }
         raw_buf_put(&rb);
-        return;
+        return ESP_OK;
     }
 
     uint32_t rev = get_u32_le(raw);
@@ -198,25 +212,32 @@ static void load_raw_impl(const char *rel_path, size_t item_size, pref_cfg_fs_va
                      rel_path, (unsigned long)rev);
         }
         raw_buf_put(&rb);
-        return;
+        return ESP_OK;
     }
 
     memcpy(out_bytes, item_bytes, item_size);
     *out_rev = rev;
     *out_valid = true;
     raw_buf_put(&rb);
+    return ESP_OK;
+}
+
+esp_err_t pref_cfg_fs_load_raw_checked(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                                       void *out_bytes, uint32_t *out_rev, bool *out_valid)
+{
+    return load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
 }
 
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                            void *out_bytes, uint32_t *out_rev, bool *out_valid)
 {
-    load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
+    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, false);
 }
 
 void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                                 void *out_bytes, uint32_t *out_rev, bool *out_valid)
 {
-    load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
+    (void)load_raw_impl(rel_path, item_size, validate, out_bytes, out_rev, out_valid, true);
 }
 
 bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
@@ -231,7 +252,12 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
     size_t cap = 4 + PREF_CFG_FS_MAX_LARGE_ITEM + 64;
     uint8_t *buf = (uint8_t *)persist_scratch_alloc(cap);
     if (!buf) {
-        return false;
+        /* K10-11: cannot decide -> answer "newer" so the caller keeps the file untouched. */
+        ESP_LOGW(PREF_FS_TAG, "%s newer-schema probe: scratch allocation failed -- treating file as newer", rel_path);
+        if (out_version) {
+            *out_version = 0xFF;
+        }
+        return true;
     }
     size_t len = 0;
     esp_err_t err = cfg_fs_read(rel_path, buf, cap, &len);
@@ -242,6 +268,12 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
          * it can only come from newer firmware. Count it as NEWER so resolve()
          * never overwrites it. The version byte is unreadable here: report 0xFF
          * ("unknown, newer"). */
+        newer = true;
+        if (out_version) {
+            *out_version = 0xFF;
+        }
+    } else if (err != ESP_OK && err != ESP_ERR_NOT_FOUND) {
+        /* K10-11: an unreadable file (I/O error) is undecidable, not "not newer". */
         newer = true;
         if (out_version) {
             *out_version = 0xFF;
@@ -301,7 +333,8 @@ esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t ite
     return err;
 }
 
-bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev)
+esp_err_t pref_cfg_fs_load_var_checked(const char *rel_path, void *out, size_t cap, size_t *out_len,
+                                       uint32_t *out_rev)
 {
     if (out_len) {
         *out_len = 0;
@@ -311,23 +344,31 @@ bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *o
     }
     if (!rel_path || !out || !out_len || !out_rev || cap == 0 || cap > PREF_CFG_FS_MAX_LARGE_ITEM ||
         !cfg_fs_is_available()) {
-        return false;
+        return ESP_ERR_NOT_FOUND;
     }
     raw_buf_t rb;
     if (!raw_buf_get(&rb, cap)) {
-        return false;
+        return ESP_ERR_NO_MEM;
     }
     size_t len = 0;
     esp_err_t err = cfg_fs_read(rel_path, rb.p, rb.cap, &len);
     if (err != ESP_OK || len < 4 + 1) {
         raw_buf_put(&rb);
-        return false;
+        if (err == ESP_OK || err == ESP_ERR_NOT_FOUND || err == ESP_ERR_INVALID_SIZE) {
+            return ESP_ERR_NOT_FOUND; /* absent / too short / over cap: no usable file */
+        }
+        return err; /* I/O failure: state unknown */
     }
     *out_rev = get_u32_le(rb.p);
     *out_len = len - 4;
     memcpy(out, rb.p + 4, len - 4);
     raw_buf_put(&rb);
-    return true;
+    return ESP_OK;
+}
+
+bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev)
+{
+    return pref_cfg_fs_load_var_checked(rel_path, out, cap, out_len, out_rev) == ESP_OK;
 }
 
 esp_err_t pref_cfg_fs_remove(const char *rel_path)
@@ -350,7 +391,17 @@ static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_
 {
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(rel_path, item_size, validate, file_bytes, &file_rev, &file_valid);
+    esp_err_t rerr = pref_cfg_fs_load_raw_checked(rel_path, item_size, validate, file_bytes, &file_rev, &file_valid);
+    if (rerr != ESP_OK) {
+        /* K10-09/10: the file's state is unknown (allocation or I/O failure). It may hold a newer value
+         * than the NVS candidate: adopt nothing, write nothing, report failure. */
+        ESP_LOGE(PREF_FS_TAG, "%s unreadable (%s) -- not resolving, file left untouched", rel_path,
+                 esp_err_to_name(rerr));
+        memset(out_bytes, 0, item_size);
+        *out_rev = 0;
+        *out_used_file = false;
+        return false;
+    }
 
     if (!file_valid) {
         // No usable file -- fall back to the NVS candidate, and if it is

@@ -8,8 +8,10 @@
 // the zones config stack or the HTTP layer behind it.
 #include "ct_verify_store.h"
 
+#include <math.h>
 #include <string.h>
 
+#include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "esp_log.h"
 #include "hal_kv.h"
@@ -183,6 +185,11 @@ bool ct_verify_blob_validate(const void *bytes, size_t len)
         if (zv->responded_ch > CT_VERIFY_CHANNELS) {
             return false;
         }
+        /* K10-12: the measured/threshold amps are shown to the operator; a NaN or inf is not a
+         * measurement this code produced. */
+        if (!isfinite(zv->measured_a) || !isfinite(zv->threshold_a)) {
+            return false;
+        }
     }
     return true;
 }
@@ -246,6 +253,25 @@ esp_err_t ct_verify_store_start(void)
     memset(&nvs_blob, 0, sizeof(nvs_blob));
     bool nvs_ok = nvs_load(&nvs_blob, false);
 
+    /* K10-14: a cfg file that EXISTS but does not validate (wrong size, failed validator, unreadable)
+     * may be a newer-firmware or damaged verdict. pref_cfg_fs_resolve() treats it as absent and would
+     * overwrite it with the older NVS verdict. Do not: serve no verdict (the safe state, never a pass),
+     * leave the file for inspection, and say so loudly. */
+    if (cfg_fs_is_available()) {
+        uint8_t fbuf[4 + sizeof(ct_verify_blob_t) + 64];
+        size_t flen = 0;
+        esp_err_t ferr = cfg_fs_read(CT_VERIFY_CFG_FILE_PATH, fbuf, sizeof(fbuf), &flen);
+        if (ferr != ESP_ERR_NOT_FOUND &&
+            (ferr != ESP_OK || flen != 4 + sizeof(ct_verify_blob_t) ||
+             !ct_verify_blob_validate(fbuf + 4, sizeof(ct_verify_blob_t)))) {
+            ESP_LOGE(TAG,
+                     "CT verdict file %s exists but is unusable (read=%s, %u bytes) -- NOT replacing it from NVS; "
+                     "no verdict this boot",
+                     CT_VERIFY_CFG_FILE_PATH, esp_err_to_name(ferr), (unsigned)flen);
+            return ESP_ERR_INVALID_RESPONSE;
+        }
+    }
+
     /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
      * rev; otherwise the legacy NVS blob stands and, when cfg is mounted, is
      * migrated into the file. Non-fatal throughout: "no verdict" is the safe
@@ -281,20 +307,20 @@ esp_err_t ct_verify_store_save(const ct_verify_blob_t *blob)
         return ESP_ERR_INVALID_ARG;
     }
 
-    /* In-RAM truth first, the same ordering display_power_cfg_set() uses: a
-     * failed write must mean "this verdict will not survive a reboot", not
-     * "this verdict did not happen". The readiness item reads RAM. */
-    s_blob = *blob;
-    s_have = true;
+    /* K10-13: RAM is updated only AFTER the verdict is durable. Serving an unpersisted verdict would
+     * show a result that silently reverts at reboot; on failure the previous verdict stays and the
+     * error is returned. */
 
     /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
      * no NVS write follows, and a failure is returned, never masked. The rev
      * advances only after a verified write. */
     uint32_t new_rev = s_rev + 1;
-    esp_err_t err = pref_cfg_fs_commit(CT_VERIFY_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "CT verdict");
+    esp_err_t err = pref_cfg_fs_commit(CT_VERIFY_CFG_FILE_PATH, blob, sizeof(*blob), new_rev, "CT verdict");
     if (err != ESP_OK) {
         return err;
     }
+    s_blob = *blob;
+    s_have = true;
     s_rev = new_rev;
     return ESP_OK;
 }

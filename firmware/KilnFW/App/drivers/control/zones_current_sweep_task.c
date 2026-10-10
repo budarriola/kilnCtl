@@ -2257,8 +2257,10 @@ static void zone_sweep_record_ct_attribution(void)
          * storing a value the validator would (correctly) throw away. */
         blob.zone[zi].responded_ch =
             (out.responded_ch < CT_VERIFY_CHANNELS) ? out.responded_ch : (uint8_t)CT_VERIFY_CHANNELS;
-        blob.zone[zi].measured_a = out.measured_a;
-        blob.zone[zi].threshold_a = out.threshold_a;
+        /* The engine reports "nothing resolved" as NaN; ct_verify_blob_validate() rejects non-finite floats
+         * (K10-12), so store 0.0 -- the verdict/reason already say no measurement was decided. */
+        blob.zone[zi].measured_a = isfinite(out.measured_a) ? out.measured_a : 0.0f;
+        blob.zone[zi].threshold_a = isfinite(out.threshold_a) ? out.threshold_a : 0.0f;
 
         ESP_LOGI(ZONES_HTTP_TAG, "zone %u CT attribution: %s (%s)", zi, zone_ct_verdict_str(out.verdict),
                  zone_ct_verify_reason_str(out.reason));
@@ -2276,7 +2278,7 @@ static void zone_sweep_record_ct_attribution(void)
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG,
                  "CT attribution verdict NOT persisted (err %d: cfg file write failed or cfg not mounted, "
-                 "see POST /api/cfgfs/format_confirm) -- it holds for this boot only", (int)err);
+                 "see POST /api/cfgfs/format_confirm) -- the verdict is discarded, not served", (int)err);
     }
 }
 

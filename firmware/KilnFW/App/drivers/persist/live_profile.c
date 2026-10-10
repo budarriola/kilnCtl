@@ -481,10 +481,16 @@ bool live_profile_load_record(live_edit_record_t *out)
     uint8_t buf[sizeof(live_edit_persisted_t)];
     size_t len = 0;
     uint32_t rev = 0;
-    if (pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, buf, sizeof(buf), &len, &rev)) {
+    esp_err_t lerr = pref_cfg_fs_load_var_checked(LIVE_PROFILE_RECORD_FILE_PATH, buf, sizeof(buf), &len, &rev);
+    if (lerr == ESP_OK) {
         /* A file that is present is final: a wrong-version/short record is
          * discarded, never papered over by the older legacy NVS copy. */
         return live_edit_record_decode(buf, len, out);
+    }
+    if (lerr != ESP_ERR_NOT_FOUND) {
+        /* K10-09b: the file could not be read (alloc/I/O) -- its state is unknown, so the older legacy
+         * NVS copy must not stand in for it. */
+        return false;
     }
     len = sizeof(buf);
     if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, buf, &len, NULL) != HAL_OK) {
@@ -571,7 +577,14 @@ static load_working_outcome_t load_working_internal(profile_t *out, const char *
     }
     size_t len = 0;
     uint32_t rev = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+    esp_err_t lerr = pref_cfg_fs_load_var_checked(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev);
+    if (lerr != ESP_OK && lerr != ESP_ERR_NOT_FOUND) {
+        /* K10-09b: unreadable file (alloc/I/O), not an absent one: do not fall back to the older legacy copy. */
+        free(buf);
+        if (out_reason) *out_reason = "cfg file unreadable";
+        return LOAD_WORKING_TRANSIENT;
+    }
+    if (lerr != ESP_OK) {
         /* No cfg file: the legacy NVS copy (pre-2026-10-07 builds) is the
          * fallback. */
         bool opened = false;
@@ -782,7 +795,10 @@ void live_profile_start(void)
     uint8_t rbuf[sizeof(live_edit_persisted_t)];
     size_t rlen = 0;
     uint32_t rev = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, sizeof(rbuf), &rlen, &rev)) {
+    /* K10-09b: migrate the legacy NVS copy only when the file is genuinely ABSENT; an unreadable file may
+     * hold newer data and must not be overwritten by the older legacy copy. */
+    if (pref_cfg_fs_load_var_checked(LIVE_PROFILE_RECORD_FILE_PATH, rbuf, sizeof(rbuf), &rlen, &rev) ==
+        ESP_ERR_NOT_FOUND) {
         rlen = sizeof(rbuf);
         live_edit_record_t tmp;
         if (nvs_legacy_get(NVS_KEY_LIVE_RECORD, rbuf, &rlen, NULL) == HAL_OK && live_edit_record_decode(rbuf, rlen, &tmp)) {
@@ -796,7 +812,8 @@ void live_profile_start(void)
         return;
     }
     size_t len = 0;
-    if (!pref_cfg_fs_load_var(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev)) {
+    if (pref_cfg_fs_load_var_checked(LIVE_PROFILE_WORKING_FILE_PATH, buf, PROFILE_BLOB_MAX_SIZE, &len, &rev) ==
+        ESP_ERR_NOT_FOUND) {
         len = PROFILE_BLOB_MAX_SIZE;
         profile_t tmp;
         const char *reason = "";

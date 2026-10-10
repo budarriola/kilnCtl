@@ -42,6 +42,16 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
+/* K10-08/08b: a record is a usable calibration only if every coefficient is finite and the 2x2 linear
+ * part is invertible (an all-zero map sends every tap to the same pixel). */
+static bool coeffs_usable(float a, float b, float c, float d, float e, float f)
+{
+    if (!isfinite(a) || !isfinite(b) || !isfinite(c) || !isfinite(d) || !isfinite(e) || !isfinite(f)) {
+        return false;
+    }
+    return ((double)a * (double)e - (double)b * (double)d) != 0.0;
+}
+
 static void set_uncalibrated(touch_cal_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -73,11 +83,22 @@ esp_err_t touch_cal_store_load(touch_cal_t *out)
     err = hal_kv_get_blob(&h, NVS_KEY_CAL, &rec, &len);
     hal_kv_close(&h);
 
-    if (err != HAL_OK || len != sizeof(rec) || rec.version != TOUCH_CAL_RECORD_VERSION) {
-        if (err == HAL_OK) {
-            ESP_LOGW(TAG, "stored calibration record size/version mismatch -- treating as uncalibrated");
-        }
-        return ESP_OK;
+    if (err == HAL_NOT_FOUND) {
+        return ESP_OK; /* fresh board */
+    }
+    if (err != HAL_OK) {
+        /* K10-06: a record that exists but cannot be read is NOT a fresh board. */
+        ESP_LOGE(TAG, "stored calibration record unreadable: %s -- uncalibrated, recalibration needed",
+                 hal_status_to_name(err));
+        return hal_status_to_esp_err(err) == ESP_OK ? ESP_FAIL : hal_status_to_esp_err(err);
+    }
+    if (len != sizeof(rec) || rec.version != TOUCH_CAL_RECORD_VERSION) {
+        ESP_LOGE(TAG, "stored calibration record size/version mismatch -- uncalibrated, recalibration needed");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    if (!coeffs_usable(rec.a, rec.b, rec.c, rec.d, rec.e, rec.f)) {
+        ESP_LOGE(TAG, "stored calibration has non-finite or degenerate coefficients -- uncalibrated");
+        return ESP_ERR_INVALID_RESPONSE;
     }
 
     out->calibrated = true;
@@ -100,6 +121,10 @@ bool touch_cal_store_is_calibrated(void)
 esp_err_t touch_cal_store_save(const touch_cal_t *cal)
 {
     if (!cal) return ESP_ERR_INVALID_ARG;
+    if (!coeffs_usable(cal->a, cal->b, cal->c, cal->d, cal->e, cal->f)) {
+        ESP_LOGE(TAG, "refusing to save non-finite or degenerate touch calibration");
+        return ESP_ERR_INVALID_ARG;
+    }
 
     hal_status_t part_err = nvs_partition_init(NVS_PARTITION);
     if (part_err != HAL_OK) {
@@ -125,6 +150,16 @@ esp_err_t touch_cal_store_save(const touch_cal_t *cal)
     err = hal_kv_set_blob(&h, NVS_KEY_CAL, &rec, sizeof(rec));
     if (err == HAL_OK) {
         err = hal_kv_commit(&h);
+    }
+    if (err == HAL_OK) {
+        /* K10-07: read back -- a write that reported OK but stored nothing must not read as success. */
+        touch_cal_record_t chk;
+        size_t chk_len = sizeof(chk);
+        hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_CAL, &chk, &chk_len);
+        if (rerr != HAL_OK || chk_len != sizeof(chk) || memcmp(&chk, &rec, sizeof(rec)) != 0) {
+            ESP_LOGE(TAG, "touch calibration read-back mismatch (%s)", hal_status_to_name(rerr));
+            err = (rerr != HAL_OK) ? rerr : HAL_IO;
+        }
     }
     hal_kv_close(&h);
 

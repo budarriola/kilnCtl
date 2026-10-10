@@ -144,15 +144,27 @@ const char *backup_json_arr_next(const char *elem)
     return NULL;
 }
 
+static const char *bj_check_number(const char *p);
+
 bool backup_json_field_num(const char *obj, const char *key, double *out)
 {
     const char *v = backup_json_obj_find(obj, key);
     if (!v) {
         return false;
     }
+    /* K10-04/K10-05: strict JSON number grammar (no hex floats, "inf", leading '+', ...) followed by a
+     * value delimiter -- "12abc" is not 12. strtod only converts text this check already accepted. */
+    const char *nend = bj_check_number(v);
+    if (!nend) {
+        return false;
+    }
+    if (*nend != '\0' && *nend != ',' && *nend != '}' && *nend != ']' && *nend != ' ' && *nend != '\t' &&
+        *nend != '\n' && *nend != '\r') {
+        return false;
+    }
     char *end = NULL;
     double d = strtod(v, &end);
-    if (end == v || !isfinite(d)) {
+    if (end != nend || !isfinite(d)) {
         return false;
     }
     *out = d;
@@ -183,15 +195,81 @@ bool backup_json_field_str(const char *obj, const char *key, char *out, size_t c
     }
     v++;
     size_t o = 0;
-    while (*v && *v != '"' && o + 1 < cap) {
-        if (*v == '\\' && v[1]) {
-            v++;
-            char c = *v;
-            out[o++] = (c == 'n') ? '\n' : (c == 't') ? '\t' : c;
-            v++;
-        } else {
-            out[o++] = *v++;
+    out[0] = '\0';
+    /* K10-01/02/03: an over-long value, an unterminated string and an undecodable escape are ERRORS --
+     * returning a truncated or mangled string as success restores a damaged value silently. */
+    while (*v != '"') {
+        if (*v == '\0') {
+            out[0] = '\0';
+            return false; /* unterminated (truncated backup) */
         }
+        char buf[4];
+        size_t n = 1;
+        if (*v == '\\') {
+            v++;
+            switch (*v) {
+            case '"': buf[0] = '"'; break;
+            case '\\': buf[0] = '\\'; break;
+            case '/': buf[0] = '/'; break;
+            case 'b': buf[0] = '\b'; break;
+            case 'f': buf[0] = '\f'; break;
+            case 'n': buf[0] = '\n'; break;
+            case 'r': buf[0] = '\r'; break;
+            case 't': buf[0] = '\t'; break;
+            case 'u': {
+                unsigned cp = 0;
+                for (int i = 1; i <= 4; i++) {
+                    char h = v[i];
+                    unsigned dgt;
+                    if (h >= '0' && h <= '9') {
+                        dgt = (unsigned)(h - '0');
+                    } else if (h >= 'a' && h <= 'f') {
+                        dgt = (unsigned)(h - 'a') + 10u;
+                    } else if (h >= 'A' && h <= 'F') {
+                        dgt = (unsigned)(h - 'A') + 10u;
+                    } else {
+                        out[0] = '\0';
+                        return false; /* bad hex (also catches a NUL) */
+                    }
+                    cp = (cp << 4) | dgt;
+                }
+                if (cp >= 0xD800u && cp <= 0xDFFFu) {
+                    out[0] = '\0';
+                    return false; /* surrogate half: not decoded here */
+                }
+                if (cp == 0u) {
+                    out[0] = '\0';
+                    return false; /* an embedded NUL cannot live in a C string */
+                }
+                if (cp < 0x80u) {
+                    buf[0] = (char)cp;
+                } else if (cp < 0x800u) {
+                    buf[0] = (char)(0xC0u | (cp >> 6));
+                    buf[1] = (char)(0x80u | (cp & 0x3Fu));
+                    n = 2;
+                } else {
+                    buf[0] = (char)(0xE0u | (cp >> 12));
+                    buf[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+                    buf[2] = (char)(0x80u | (cp & 0x3Fu));
+                    n = 3;
+                }
+                v += 4; /* now on the last hex digit */
+                break;
+            }
+            default:
+                out[0] = '\0';
+                return false; /* unknown escape (or a lone backslash at the end) */
+            }
+        } else {
+            buf[0] = *v;
+        }
+        if (o + n + 1 > cap) {
+            out[0] = '\0';
+            return false; /* does not fit */
+        }
+        memcpy(out + o, buf, n);
+        o += n;
+        v++;
     }
     out[o] = '\0';
     return true;
