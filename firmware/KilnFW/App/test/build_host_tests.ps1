@@ -2603,6 +2603,18 @@ try {
 
     Invoke-HostTestExe -Name "dashboard_exec_http_handlers" -ExePath $exeDe -BuildCmd $cmdDe
 
+    # ---- test_dashboard_autotune_http_handlers.c: campaign 8 autotune start/abort/accept ----
+    $exeDa = Join-Path $outDir "kilnctl_host_tests_dashboard_autotune_http_handlers.exe"
+    $daObjDir = Join-Path $outDir "da"
+    New-Item -ItemType Directory -Force -Path $daObjDir | Out-Null
+    $cmdDa = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$daObjDir\\`" /Fe:`"$exeDa`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_autotune_http_handlers" -ExePath $exeDa -BuildCmd $cmdDa
+
     # ---- test_readiness_crash_disclosure.c: its own 46th, separate
     # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
     # GET /api/readiness's crash-report checklist item leaked
@@ -3400,7 +3412,8 @@ try {
     # 82 -> 83: test_update_http_refusals.c (campaign 9c)
     # 83 -> 84: test_uart_bridge_core.c (campaign 10)
     # 84 -> 85: test_ct_leak_alarm_service.c (round 2, R2-1)
-    $totalExpected = 85
+    # 85 -> 86: test_dashboard_autotune_http_handlers.c (campaign 8 autotune)
+    $totalExpected = 86
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
