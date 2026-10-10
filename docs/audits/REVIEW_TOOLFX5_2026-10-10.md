@@ -47,6 +47,8 @@ Baseline passed and the real tree was unchanged in both runs.
 ## LOW
 
 **L-1. The `-PinCheckScript` seam is accepted on a real land/promote, and the verdict does not show it.**
+
+**Fixed in a912d6a8a:** Seams refused unless -AllowStandaloneClone (land) / foreign -RepoPath (dev_promote); verdict shows submodule_pins=pass(stub:<path>) and checks_script_override; negtest CAUGHT.
 `tools/land.ps1:76,353`, `tools/dev_promote.ps1:33,154`.
 Scenario: an agent copying a test command line, or one that wants to get past a failing pin check, runs
 `land.ps1 -PinCheckScript stub.ps1` (stub exits 0) from a real worktree. The real check never
@@ -58,6 +60,8 @@ every test. At minimum, add `pin_check_script` to the JSON verdict and print a y
 OVERRIDE line.
 
 **L-2. The T-3 retry skip has no test. A regression that drops the gitlink comparison would ship green.**
+
+**Fixed in a912d6a8a:** check_land counter-stub cases (gitlink racer: 2 pin runs, plain-file racer: 1); negtest CAUGHT (two mutations).
 `tools/land.ps1:349`. Negtest L1 (`if ($script:subPins -eq 'pass')`) was MISSED.
 Scenario: attempt 1 passes the pin check. The push loses a race to a commit that bumps the
 `tools/mykicadMcp` gitlink to an unpushed sha. With the comparison gone, attempt 2 skips the
@@ -69,6 +73,8 @@ one call when the racer changes only a regular file. Worth adding, because this 
 behavior T-3 introduced.
 
 **L-3. When both `GIT_SSH` and `core.sshCommand` are set, the script leaves git's actual ssh unbatched. The precedence comment is inverted.**
+
+**Fixed in a912d6a8a:** Real precedence comment; core.sshCommand batched even with GIT_SSH set; test sshcommand-beats-GIT_SSH; negtest CAUGHT.
 `tools/check_submodule_pins_pushed.ps1:28,32`.
 The comment says `GIT_SSH_COMMAND > GIT_SSH > core.sshCommand`. git's real order is
 `GIT_SSH_COMMAND > core.sshCommand > GIT_SSH`: `get_ssh_command()` reads the config before
@@ -80,6 +86,8 @@ core.sshCommand with no BatchMode. A passphrase or host-key prompt then hangs un
 Fix: drop `-and -not $env:GIT_SSH` from line 32 and correct the comment.
 
 **L-4. Appending `-o BatchMode=yes` breaks a PuTTY plink or TortoisePlink ssh command.**
+
+**Fixed in a912d6a8a:** Add-SshBatch: ssh -> -o BatchMode=yes, plink/TortoisePlink -> -batch, other programs untouched; negtest CAUGHT (2 mutations).
 `tools/check_submodule_pins_pushed.ps1:31,33`.
 Scenario: `core.sshCommand` or `GIT_SSH_COMMAND` is `plink` or `"C:/Program Files/PuTTY/plink.exe"`.
 plink has no `-o` option, so every ssh ls-remote fails with a message that does not match
@@ -90,6 +98,8 @@ variant test), or when `GIT_SSH_VARIANT` is `ssh`. Otherwise leave the command a
 for plink.
 
 **L-5. Some transient network errors that are not auth turn the origin probe into FAIL instead of SKIP.**
+
+**Fixed in a912d6a8a:** netPattern gains Connection was reset, errno 10054, schannel handshake, SSL_connect, HTTP 5xx; test transient-tls-reset-is-skip; negtest CAUGHT.
 `tools/check_submodule_pins_pushed.ps1:56,131`.
 `$netPattern` misses Windows schannel/OpenSSL wording such as `SSL_connect: Connection was reset`
 ("Connection was reset" does not contain "Connection reset"), `errno 10054`,
@@ -103,6 +113,8 @@ found|does not appear to be a git repository|could not read Username|returned er
 and SKIP everything else.
 
 **L-6. The T-6 empty-HEAD guard cannot fire.**
+
+**Fixed in a912d6a8a:** Guard now rev-parse --verify -q plus exit code and sha shape; negtest MISSED by design (HEAD cannot be unborn at that point in the rebase flow, defensive only).
 `tools/land.ps1:346-347`.
 In a repo where HEAD is unborn or unreadable, `git rev-parse HEAD` prints the literal `HEAD`
 on stdout (verified: `out=[HEAD] exit=128`), so `$headSha` is never empty. It still fails
@@ -111,6 +123,8 @@ runs. So this is a wording and dead-code issue, not a hole. Negtest L2 was MISSE
 Fix: `$headSha = (& git rev-parse --verify -q HEAD 2>$null | Out-String).Trim(); if ($LASTEXITCODE -ne 0 -or $headSha -notmatch '^[0-9a-f]{40}$') { Finish 1 ... }`.
 
 **L-7. When `GIT_SSH_COMMAND` is set, its BatchMode append has no test.**
+
+**Fixed in a912d6a8a:** Test env-ssh-command-batchmode; negtest CAUGHT.
 `tools/check_submodule_pins_pushed.ps1:31`. Negtest P4 was MISSED.
 The T-1 test covers only the `core.sshCommand` branch. It clears `GIT_SSH_COMMAND`/`GIT_SSH`
 and does not restore them afterwards. That is harmless because the test runs in its own
