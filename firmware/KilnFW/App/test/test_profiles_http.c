@@ -4155,6 +4155,11 @@ static void test_profile_post_builtin_id_copies_to_first_free(void)
     TEST_CHECK(run_profile_post(body) == ESP_OK, "handler replies itself");
     TEST_CHECK(s_last_err_code != 400, "builtin id is not a 400");
     TEST_CHECK(profiles_slot_used(0), "copy landed in the first free slot");
+    TEST_CHECK(strstr(s_resp_capture, "\"ok\":true") != NULL, "reply is ok:true");
+    TEST_CHECK(strstr(s_resp_capture, "\"id\":0,") != NULL, "reply id is the new user slot (0), not the builtin id");
+    TEST_CHECK(strcmp(s_profiles.profiles[0].name, "BuiltinCopy") == 0, "slot 0 holds the posted contents");
+    TEST_CHECK(!profiles_slot_used(1), "exactly one slot was created");
+    TEST_CHECK(g_builtin_profile_count == 0, "builtin catalogue unchanged");
     g_fake_builtin_on = false;
 }
 

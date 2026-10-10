@@ -543,6 +543,9 @@ def get_profile_detail(host: str, profile_id: int, timeout: float = DEFAULT_HTTP
     return _get_json(host, f"/api/profile?id={profile_id}", timeout)
 
 
+BUILTIN_PROFILE_ID_BASE = 128  # PROFILE_BUILTIN_ID_BASE in firmware profiles_builtin.h
+
+
 def save_profile_segments(
     host: str, profile_id: int, name: str, zone_mask: int, segments: Sequence[dict],
     timeout: float = DEFAULT_HTTP_TIMEOUT_S,
@@ -570,11 +573,30 @@ def save_profile_segments(
         else:
             fields[f"seg{i}_target"] = str(float(seg.get("target_c", 0.0)))
             fields[f"seg{i}_ramp"] = str(float(seg.get("ramp_c_per_hr", 0.0)))
+    if profile_id >= BUILTIN_PROFILE_ID_BASE:
+        # Firmware (3ade435b) maps a builtin id to a NEW user slot instead of a 400, so an
+        # "in place" rewrite would silently leave the builtin unstabilised plus a stray copy.
+        raise RunQueueError(
+            f"profile {profile_id} is a builtin (>= {BUILTIN_PROFILE_ID_BASE}); it cannot be "
+            "rewritten in place -- copy it to a user slot first or run with stabilize off")
     body = _post_form(host, "/api/profile", fields, timeout)
     try:
-        return json.loads(body)
+        result = json.loads(body)
     except Exception as exc:  # noqa: BLE001
         raise RunQueueError(f"POST /api/profile response was not JSON: {body!r}") from exc
+    returned = result.get("id") if isinstance(result, dict) else None
+    if result.get("ok", False) and returned is not None and int(returned) != profile_id:
+        # Not in place: the firmware created a different slot. Remove the stray, fail loudly.
+        stray = int(returned)
+        cleanup = "stray slot left behind"
+        try:
+            _post_form(host, "/api/profile/delete", {"id": str(stray)}, timeout)
+            cleanup = f"stray slot {stray} deleted"
+        except Exception as exc:  # noqa: BLE001
+            cleanup = f"stray slot {stray} could NOT be deleted ({exc})"
+        raise RunQueueError(
+            f"POST /api/profile for id {profile_id} returned id {stray} (not in place); {cleanup}")
+    return result
 
 
 def ensure_stabilized_profile(

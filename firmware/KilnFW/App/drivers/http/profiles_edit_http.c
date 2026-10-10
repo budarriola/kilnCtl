@@ -525,7 +525,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     body[received] = '\0';
 
     /* id: empty or "-1" creates in the first free slot; a valid existing id
-     * overwrites that slot. Any other value in 0..7 also targets that exact
+     * overwrites that slot. Any other user-slot value (0..99) also targets that exact
      * slot (create-or-overwrite), so a client that already knows its id can
      * address it directly rather than relying on "first free". */
     char id_val[8];

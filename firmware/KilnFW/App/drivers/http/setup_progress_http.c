@@ -196,7 +196,7 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
     /* Contract (setup_wizard_progress.h): a too-long note is truncated, never rejected. */
     char note_val[SETUP_WIZARD_NOTE_MAX];
     if (!setup_wizard_progress_note_from_form(body, note_val, sizeof(note_val))) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note too long");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "note too long or contains a control character");
         return ESP_OK;
     }
     const char *note = (note_val[0] != '\0') ? note_val : NULL;

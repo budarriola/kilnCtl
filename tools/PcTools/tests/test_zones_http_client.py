@@ -1364,3 +1364,10 @@ class MergeZonesDiagTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_format_scalar_refuses_empty_string():
+    import pytest
+    from kilnctrl import zones_http_client as zc
+    with pytest.raises(zc.ZonesHttpError):
+        zc._format_scalar("z0_xzone", "", set())

@@ -724,6 +724,9 @@ def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
         # silently coercing True/False to 1.0/0.0.
         raise ZonesHttpError(f"field {key!r} is a bool but has no known bool encoding")
     if isinstance(value, str):
+        if value == "":
+            # Firmware treats a blank as omit-preserve; refuse here so a preset never relies on it.
+            raise ZonesHttpError(f"field {key!r} is an empty string -- refusing to send a blank value")
         return value
     return repr(float(value))
 

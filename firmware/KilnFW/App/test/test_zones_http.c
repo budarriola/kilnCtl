@@ -1847,26 +1847,26 @@ static void test_zones_post_blank_guard_fields_and_pc_link(void)
 {
     static const char *const keys[] = {"wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate",
                                        "runawaymargin", "driftperiod", "debounce", "frozenwindow", "xzone"};
-    TEST_SECTION("zones_post_handler -- blank guard fields/xzone mean 0 (pre-strict semantics); garbage is 400");
+    TEST_SECTION("zones_post_handler -- blank guard fields/xzone keep the stored value; omitted is still 0; garbage is 400");
     for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
         char body[1600];
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=", keys[k]);
         strict_zones_seed();
-        s_zones.cfg.zones[0].cross_zone_max_delta_c = 9.0f;
-        s_zones.cfg.zones[0].guard_wrong_dir_window_s = 9.0f;
+        zone_cfg_t *z = &s_zones.cfg.zones[0];
+        float *fields[9] = {&z->guard_wrong_dir_window_s, &z->guard_wrong_dir_rate_c_per_min, &z->guard_off_settle_s,
+                            &z->guard_runaway_rate_c_per_min, &z->guard_runaway_margin_c, &z->guard_drift_period_s,
+                            &z->guard_sensor_fault_debounce_ticks, &z->guard_frozen_window_s, &z->cross_zone_max_delta_c};
+        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f;
         run_zones_post(body);
         if (s_test_err_called) printf("  err: %s\n", s_test_err_msg);
         TEST_CHECK(!s_test_err_called && s_test_ok_called, keys[k]);
-        TEST_CHECK(s_zones.cfg.zones[0].cross_zone_max_delta_c == 0.0f &&
-                       s_zones.cfg.zones[0].guard_wrong_dir_window_s == 0.0f &&
-                       s_zones.cfg.zones[0].guard_wrong_dir_rate_c_per_min == 0.0f &&
-                       s_zones.cfg.zones[0].guard_off_settle_s == 0.0f &&
-                       s_zones.cfg.zones[0].guard_runaway_rate_c_per_min == 0.0f &&
-                       s_zones.cfg.zones[0].guard_runaway_margin_c == 0.0f &&
-                       s_zones.cfg.zones[0].guard_drift_period_s == 0.0f &&
-                       s_zones.cfg.zones[0].guard_sensor_fault_debounce_ticks == 0.0f &&
-                       s_zones.cfg.zones[0].guard_frozen_window_s == 0.0f,
-                   "blank guard/xzone stores 0");
+        for (size_t f = 0; f < 9; f++) {
+            if (f == k) {
+                TEST_CHECK(*fields[f] == 9.0f, "blank guard/xzone preserves the stored value (never default/disable)");
+            } else {
+                TEST_CHECK(*fields[f] == 0.0f, "omitted guard/xzone keeps whole-page-submit 0");
+            }
+        }
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
         strict_zones_seed();
         run_zones_post(body);

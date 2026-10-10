@@ -119,7 +119,7 @@ def build_post_fields(
     """Builds the ``rule%u_*``/``seg%u_*`` form-field list
     ``profiles_parse_profile_fields()`` expects. ``profile_id`` targets an
     existing user slot (create-or-overwrite, same convention as
-    profile_post_handler()'s ``id`` field: 0..7 addresses that exact slot).
+    profile_post_handler()'s ``id`` field: 0..99 addresses that exact user slot; builtins (>=128) map to a new slot).
     ``on_off_rules`` defaults to none -- an ordinary segment-only save, same
     as every existing caller of this family. A list longer than
     PROFILE_MAX_ON_OFF_RULES (8) is refused by the firmware (validate_
