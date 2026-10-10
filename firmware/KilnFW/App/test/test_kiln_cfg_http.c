@@ -531,6 +531,7 @@ static void test_save_optional_id_strict(void)
     static const char *const bad[] = {
         "name=a&id=%zz", "name=a&id=+5", "name=a&id=%205", "name=a&id=99999999999",
         "name=a&id=-1", "name=a&id=1x", "name=a&id=2147483648", "name=a&id=%2B5",
+        "name=a&id=", "name=a&id=&x=1",
     };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         test_reset();

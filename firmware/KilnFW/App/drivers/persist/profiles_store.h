@@ -52,6 +52,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
 bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                            uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
 
+/* Drops a slot that profiles_http_save_ex() applied in RAM but could not persist (*out_persisted == false), so a
+ * failed live save_as leaves no unsaved profile listed and a retry with the same name is not refused as a duplicate.
+ * RAM only (storage already failed); takes the save lock. No-op for an unused or out-of-range id. */
+void profiles_http_drop_unpersisted(uint8_t id);
+
 /* Same erase-and-clear profile_delete_post_handler() runs. Returns false
  * (no-op) for an out-of-range or already-unused id. Pure storage, but kept
  * here alongside get/save (rather than only in profiles_http.h) because a

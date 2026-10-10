@@ -315,6 +315,15 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
 esp_err_t profiles_list_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
+    /* fwlow16 L3: rev_unknown is per listed (used) slot, but when the rev floors are unknown every slot is,
+     * unused ones included, and a save into the first free slot is then refused with nothing listed to show it.
+     * The array shape is the wire contract, so the catalog-level fact travels as a header. */
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!profiles_slot_used(id) && s_profile_rev_unknown[id]) {
+            httpd_resp_set_hdr(req, "X-Profile-Floors-Unknown", "1");
+            break;
+        }
+    }
     esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
     bool first = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT && err == ESP_OK; id++) {

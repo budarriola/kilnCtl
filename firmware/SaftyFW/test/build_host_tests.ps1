@@ -322,6 +322,7 @@ try {
         }
     }
     $exitCodes = @{}
+    $global:HostTestTimedOut = @()
     $allHostNames = @()
     $queuedBuildCount = 0
     $buildFailures = @()
@@ -691,7 +692,7 @@ try {
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
-        $names = ($failed | ForEach-Object { if ($_.Value -eq -1) { "$($_.Key) (did not run)" } else { "$($_.Key) (exit $($_.Value))" } }) -join ", "
+        $names = ($failed | ForEach-Object { if (@($global:HostTestTimedOut) -contains $_.Key) { "$($_.Key) (timed out after $TestTimeoutSec s)" } elseif ($_.Value -eq -1) { "$($_.Key) (did not run)" } else { "$($_.Key) (exit $($_.Value))" } }) -join ", "
         Write-Host "SAFTYFW HOST TESTS: FAILED -- $names"
     } else {
         Write-Host "SAFTYFW HOST TESTS: all passed"

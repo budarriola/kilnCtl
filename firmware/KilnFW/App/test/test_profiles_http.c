@@ -263,11 +263,13 @@ esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type)
 // 2026-09-29: http_auth_http.c now calls wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req))
 // to tag each session touch with whether it arrived over the SoftAP interface.
 int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
+static bool s_floors_unknown_hdr_set;
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 {
     (void)r;
-    (void)field;
-    (void)value;
+    if (field && value && strcmp(field, "X-Profile-Floors-Unknown") == 0 && strcmp(value, "1") == 0) {
+        s_floors_unknown_hdr_set = true;
+    }
     return ESP_OK;
 }
 void web_set_asset_cache_headers(httpd_req_t *r);
@@ -2930,6 +2932,38 @@ static void test_profiles_list_json_valid_with_escape_heavy_names(void)
               "all 8 user-slot entries must be present in the listing, none dropped");
 }
 
+static void test_profiles_list_floors_unknown_header_covers_free_slots(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- unknown rev floors on a FREE slot raise X-Profile-Floors-Unknown");
+
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    profile_t *p = &s_profiles.profiles[0];
+    memset(p, 0, sizeof(*p));
+    snprintf(p->name, sizeof(p->name), "One");
+    p->zone_mask = 1;
+    p->segment_count = 1;
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 0);
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    s_floors_unknown_hdr_set = false;
+    TEST_CHECK(profiles_list_get_handler(&req) == ESP_OK, "list ok");
+    TEST_CHECK(!s_floors_unknown_hdr_set, "known floors: no header");
+
+    s_profile_rev_unknown[0] = true; /* only the USED slot is unknown: the per-entry flag already covers it */
+    s_floors_unknown_hdr_set = false;
+    (void)profiles_list_get_handler(&req);
+    TEST_CHECK(!s_floors_unknown_hdr_set, "a used-only unknown slot does not raise the header");
+
+    s_profile_rev_unknown[3] = true; /* a free slot: nothing listed shows it, so the header must */
+    s_floors_unknown_hdr_set = false;
+    (void)profiles_list_get_handler(&req);
+    TEST_CHECK(s_floors_unknown_hdr_set, "a free rev-unknown slot raises X-Profile-Floors-Unknown");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
 // Opus review pass (docs/ON_OFF_ZONE.md step 5b) -- profile_detail_
 // get_handler()'s PROFILE_DETAIL_JSON_CAP budgeted PROFILE_MAX_ON_OFF_RULES
 // at 128 bytes/rule, but a rule object with a real temp_source key measures
@@ -5472,6 +5506,7 @@ void run_test_profiles_http(void)
     test_newer_version_refused_not_wiped();
     test_one_bad_slot_does_not_affect_others();
     test_profiles_list_json_valid_with_escape_heavy_names();
+    test_profiles_list_floors_unknown_header_covers_free_slots();
     test_profile_detail_json_valid_at_max_capacity();
     test_profiles_list_carries_last_run_started_unix_s();
     test_profiles_list_reports_rev_unknown();

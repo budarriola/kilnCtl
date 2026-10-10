@@ -34,7 +34,9 @@ function Invoke-HostTestProcess {
         Write-Host "FAIL ${Name}: timed out after $TimeoutSec s"
         Write-Host "---- output tail ($Name) ----"
         $lines | Select-Object -Last 40 | ForEach-Object { Write-Host $_ }
-        return -1
+        # -1 collides with callers' "did not run" sentinel; report the timeout separately (B-LOW-1).
+        $global:HostTestTimedOut = @($global:HostTestTimedOut) + $Name
+        return 124
     } finally {
         Remove-Item -LiteralPath $outF, $errF, $nullIn -Force -ErrorAction SilentlyContinue
     }

@@ -513,6 +513,18 @@ static int g_barrier_saw_mark = 0;
 void relay_authority_reset_job_enter(void) { g_reset_job_depth++; }
 static int g_last_erases_kiln_nvs = -1;
 void relay_authority_reset_set_erases_kiln_nvs(bool erases) { g_last_erases_kiln_nvs = erases ? 1 : 0; }
+/* Real try_begin refuses while a reset mark is held (covered by test_link_watchdog.c). Many tests here run several
+ * successful resets back to back without a reboot, so this fake refuses only when a test asks it to. */
+static bool g_stub_try_begin_enforce = false;
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs)
+{
+    if (g_stub_try_begin_enforce && g_reset_in_flight_depth != 0) {
+        return false;
+    }
+    relay_authority_reset_set_erases_kiln_nvs(erases_kiln_nvs);
+    relay_authority_reset_in_flight_begin();
+    return true;
+}
 void relay_authority_reset_job_exit(void) { g_reset_job_depth--; }
 void persist_reset_barrier(void)
 {

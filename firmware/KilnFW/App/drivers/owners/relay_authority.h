@@ -324,6 +324,11 @@ bool relay_authority_reset_refuses_writer(void);
  * Remaining behaviour for an erasing scope: every other-task kiln_nvs write between the mark and the reboot
  * (~500 ms after the erase) is refused and lost -- there are no shutdown handlers. */
 void relay_authority_reset_set_erases_kiln_nvs(bool erases);
+/* fwlow16 L2: atomic "set the erase flag and begin the in-flight mark, unless a reset is already in flight".
+ * Returns false (nothing changed, do NOT call _end()) when one is: a second, narrower reset must not overwrite
+ * the first one's fence or run under its erase. factory_reset.c's execute_scope() uses this; on true the caller
+ * pairs it with _end() exactly as with _begin(). */
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs);
 bool relay_authority_reset_refuses_kiln_nvs_writer(void);
 
 /* LD-01 (HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09): the ONE start gate for the two engines that

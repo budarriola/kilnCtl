@@ -476,6 +476,7 @@ static void scenario_resync(void)
 static void scenario_push_context(void)
 {
     reset_link_state();
+    s_context_lock = (SemaphoreHandle_t)1; /* publish needs a lock; without it malformed-never-overwrites is vacuous (A-LOW-2) */
     uint8_t p[15 + 14 * 12];
     uint8_t n;
 
@@ -534,6 +535,10 @@ static void scenario_push_context(void)
     CHECK(g_enable_false == 1, "boot_id 255->0 is a session change: false=%d", g_enable_false);
 
     // Malformed PUSH_CONTEXT: never published, bad counter moves, no grant.
+    // Distinctive last-good snapshot so a published malformed frame (zeros / partial fields) cannot compare equal (A-LOW-2).
+    g_tick_ms += 100;
+    n = build_context(p, CONTEXT_FLAG_CONTEXT_VALID | CONTEXT_FLAG_HEAT_OWNER_ACTIVE, 77, 1);
+    send_esp(p, n);
     reset_counts();
     uint32_t bad_before = s_context_frames_bad;
     context_snapshot_t before;
@@ -550,7 +555,8 @@ static void scenario_push_context(void)
     context_snapshot_t after;
     bool have = link_task_get_context_snapshot(&after);
     CHECK(s_context_frames_bad == bad_before + 4, "malformed contexts counted: %u", (unsigned)(s_context_frames_bad - bad_before));
-    CHECK(had == have && (!had || (before.boot_id == after.boot_id && before.flags == after.flags)),
+    CHECK(had && have && before.boot_id == 77 && memcmp(&before, &after, sizeof(before)) == 0 &&
+              after.flags == before.flags,
           "malformed contexts never overwrite the last good snapshot");
     CHECK(g_enable_true == 0 && g_enable_false == 0, "malformed context has no grant side effect");
 
@@ -560,6 +566,8 @@ static void scenario_push_context(void)
     uint32_t okc = s_context_frames_ok;
     send_esp(p, n);
     CHECK(s_context_frames_ok == okc + 1, "zone_count == MAX accepted");
+    s_context_lock = NULL; /* do not leak the fake lock into later scenarios */
+    s_context_published = false;
 }
 
 static void scenario_trip_seq(void)
@@ -896,6 +904,8 @@ static void scenario_heat_probe_current_floor(void)
     CHECK(link_task_heat_possible_probe(),
           "current present (e.g. uncalibrated CT offset floor) => heat possible, fail closed (LOW-1, owner decision pending)");
     g_any_current_present = false;
+    s_context_lock = NULL; /* A-LOW-1: restore so later scenarios see the untouched state */
+    s_context_published = false;
 }
 
 // --- R2-B: COMMIT_CONFIG / APPLY_CONFIG_VOLATILE handlers ------------------------
@@ -1302,8 +1312,10 @@ int main(void)
     scenario_resync();
     printf("-> push_context\n");
     scenario_push_context();
+    CHECK(s_context_lock == NULL && !s_context_published, "push_context scenario leaves no fake context lock/publish behind");
     printf("-> heat_probe_current_floor\n");
     scenario_heat_probe_current_floor();
+    CHECK(s_context_lock == NULL && !s_context_published, "heat_probe scenario leaves no fake context lock/publish behind (A-LOW-1)");
     printf("-> trip_seq\n");
     scenario_trip_seq();
     printf("-> unknown_commands\n");

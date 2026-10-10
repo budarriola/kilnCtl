@@ -802,11 +802,12 @@ static esp_err_t nvs_partition_init(const char *partition)
  * simply overwritten with the new 16-byte shape the next time anything
  * saves), and used_bitmap_save() always writes the full new shape.
  *
- * The two-branch dispatch (type-mismatch vs size-mismatch) exists because
- * the real ESP-IDF NVS backend enforces the on-flash type of a key (a
- * blob-typed read against a key written as U8 fails with
- * ESP_ERR_NVS_TYPE_MISMATCH, mapped to HAL_INVALID_ARG by
- * hal_kv_esp.c) while the host-test fake backend (hwAbstraction/host/
+ * The multi-branch dispatch exists because the real ESP-IDF NVS backend
+ * (checked against v6.0.2) turns a page-level type mismatch into
+ * ESP_ERR_NVS_NOT_FOUND, so a blob-typed read of a key written as U8 ends in
+ * HAL_NOT_FOUND and the legacy u8 read is tried before the key is declared
+ * absent (a HAL_INVALID_ARG from a different backend is handled the same
+ * way below), while the host-test fake backend (hwAbstraction/host/
  * fake_kv.c) stores everything by raw size with no type tag, so the same
  * old byte instead comes back as a successful blob read of length 1. Both
  * are handled so the migration path is exercised the same way on host as
@@ -1959,6 +1960,20 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     return true;
 }
 
+void profiles_http_drop_unpersisted(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT) {
+        return;
+    }
+    profiles_save_lock();
+    profiles_slot_gen_begin(id);
+    if (profiles_slot_used(id)) {
+        profiles_slot_clear(id);
+        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
+    }
+    profiles_slot_gen_end(id);
+    profiles_save_unlock();
+}
 /* ---- Delete-in-flight mark (HTTP input parsing audit L23) -----------------
  *
  * The race: a delete checks "is the executor running this slot" and then

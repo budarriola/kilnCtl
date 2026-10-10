@@ -251,6 +251,22 @@ static void test_kiln_nvs_fence_only_when_scope_erases_it(void)
     relay_authority_reset_in_flight_end();
 }
 
+// fwlow16 L2: a second, narrower reset must neither drop the first one's kiln_nvs fence nor run at all.
+static void test_second_reset_cannot_drop_kiln_nvs_fence(void)
+{
+    TEST_CHECK(relay_authority_reset_try_begin(true), "first (kiln-erasing) reset begins");
+    TEST_CHECK(!relay_authority_reset_try_begin(false), "a second reset while one is in flight is refused");
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "the refused second reset left the fence set");
+    relay_authority_reset_set_erases_kiln_nvs(false); // legacy setter path: sticky while in flight
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "a false flag never clears a kiln-erasing fence");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "the first reset's end clears the mark");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "and the fence");
+    TEST_CHECK(relay_authority_reset_try_begin(false), "a reset can begin again once the first ended");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "a wifi/profiles scope does not fence kiln_nvs");
+    relay_authority_reset_in_flight_end();
+}
+
 static void test_reset_in_flight_counter_is_a_depth_count(void)
 {
     TEST_CHECK(!relay_authority_reset_in_flight(), "clean slate: no reset in flight");
@@ -299,6 +315,7 @@ int main(void)
     test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
     test_kiln_nvs_fence_only_when_scope_erases_it();
     test_reset_refuses_writer_exempts_reset_job_task();
+    test_second_reset_cannot_drop_kiln_nvs_fence();
     test_reset_in_flight_counter_is_a_depth_count();
     test_heat_sweep_active_follows_the_sweep_claim();
 

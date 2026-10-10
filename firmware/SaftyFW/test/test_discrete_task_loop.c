@@ -8,6 +8,7 @@
 // Debounce windows are derived from the task period: N_estop = ceil(50/10) = 5
 // samples, N_mainfault = ceil(200/10) = 20.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -180,14 +181,56 @@ static void test_independence(void)
     TEST_CHECK(s_mf_out[(int)N_MF - 1], "mainFault asserts at 20");
 }
 
-int main(void)
+/* Nested-run guard (review B1): task_harness exits 2 with a message when a
+ * hook calls th_run_captured_task() while a run is active. exit() cannot be
+ * observed in-process, so the parent re-runs this exe with a child argument
+ * and checks the exit code and stderr text. */
+static void nested_hook(void)
 {
+    th_run_captured_task(); /* illegal: a run is already active */
+    th_abort();
+}
+
+static int nested_child(void)
+{
+    fresh();
+    th_set_delay_hook(nested_hook);
+    if (discrete_task_start()) {
+        th_run_captured_task();
+    }
+    return 0; /* reaching here means the guard did not fire */
+}
+
+static void test_harness_nested_run_guard(const char *self)
+{
+    TEST_SECTION("task_harness -- nested th_run_captured_task() exits 2");
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "\"\"%s\" --nested-child 2> nested_child_stderr.txt\"", self);
+    int rc = system(cmd);
+    TEST_CHECK(rc == 2, "nested run exits with code 2");
+    char buf[256] = {0};
+    FILE *f = fopen("nested_child_stderr.txt", "rb");
+    if (f) {
+        size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+        buf[n] = 0;
+        fclose(f);
+        remove("nested_child_stderr.txt");
+    }
+    TEST_CHECK(strstr(buf, "nested th_run_captured_task") != NULL, "nested run says why it exited");
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 1 && strcmp(argv[1], "--nested-child") == 0) {
+        return nested_child();
+    }
     test_start();
     test_estop_debounce_active_high();
     test_estop_glitch_rejected();
     test_estop_active_low_runtime();
     test_main_fault();
     test_independence();
+    test_harness_nested_run_guard(argv[0]);
 
     printf("\n%d checks, %d failures\n", g_test_count, g_test_failures);
     return g_test_failures == 0 ? 0 : 1;

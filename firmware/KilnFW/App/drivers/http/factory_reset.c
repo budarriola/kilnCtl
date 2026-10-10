@@ -524,8 +524,15 @@ static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, si
             erases_kiln_nvs = true;
         }
     }
-    relay_authority_reset_set_erases_kiln_nvs(erases_kiln_nvs); /* before the mark: see relay_authority.h */
-    relay_authority_reset_in_flight_begin();
+    /* Flag and mark in one step, refused while another reset is in flight (fwlow16 L2): a second reset could
+     * otherwise overwrite the first one's kiln_nvs fence during the ~500 ms before its reboot. */
+    if (!relay_authority_reset_try_begin(erases_kiln_nvs)) {
+        if (mode_reason && mode_reason_cap > 0) {
+            snprintf(mode_reason, mode_reason_cap, "refused -- a factory reset is already in progress");
+        }
+        ESP_LOGW(TAG, "factory_reset: refused -- another reset is already in flight");
+        return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+    }
     if (reset_mode_gate_refuses(mode_reason, mode_reason_cap)) {
         relay_authority_reset_in_flight_end();
         ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a run, sweep or restore started meanwhile");

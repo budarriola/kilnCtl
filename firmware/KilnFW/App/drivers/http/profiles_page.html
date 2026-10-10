@@ -1398,6 +1398,7 @@ function resetEditor() {
  * overlays a checkbox on eligible rows, and a Favorites section above it
  * that is a SHORTCUT view, not a second copy of the data -- it filters the
  * same two cached arrays rather than owning any state of its own. */
+var floorsUnknown = false; // X-Profile-Floors-Unknown header of /api/profiles (free slots refuse saves too)
 var savedProfiles = null;  // array from /api/profiles, filtered to !builtin
 var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden ones excluded
 var favoriteIds = [];      // from /api/profiles/favorites
@@ -1452,7 +1453,10 @@ function loadFavorites() {
 
 function refreshAll() {
   return Promise.all([
-    fetch('/api/profiles').then(function (r) { return r.json(); }),
+    fetch('/api/profiles').then(function (r) {
+    floorsUnknown = !!(r.headers && r.headers.get && r.headers.get('X-Profile-Floors-Unknown') === '1');
+    return r.json();
+  }),
     fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }),
     loadFavorites(),
   ]).then(function (res) {
@@ -1471,7 +1475,7 @@ function refreshAll() {
     rb.style.display = hiddenCount > 0 ? '' : 'none';
     rb.textContent = 'Restore ' + hiddenCount + ' removed';
 
-    var revUnknown = savedProfiles.some(function (p) { return p.rev_unknown === true; });
+    var revUnknown = floorsUnknown || savedProfiles.some(function (p) { return p.rev_unknown === true; });
     var rn = document.getElementById('revNotice');
     if (rn) {
       rn.style.display = revUnknown ? '' : 'none';

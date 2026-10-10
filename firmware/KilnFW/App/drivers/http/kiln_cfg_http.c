@@ -228,7 +228,7 @@ static esp_err_t save_post_handler(httpd_req_t *req)
          * refused, never treated as an absent id (which saves a NEW slot). */
         char id_val[16];
         int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
-        if (id_len == -2) {
+        if (id_len == -2 || id_len == 0) { /* fwlow16 L4: present-but-empty "id=" is malformed, not absent (-1) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
             return ESP_OK;
         }

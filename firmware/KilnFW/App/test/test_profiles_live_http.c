@@ -177,6 +177,12 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     }
     return true;
 }
+void profiles_http_drop_unpersisted(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT && profiles_slot_used(id)) {
+        profiles_slot_clear(id);
+    }
+}
 bool profiles_http_delete(uint8_t id)
 {
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
@@ -741,6 +747,13 @@ static void test_decide_save_as_persist_failure_is_500_and_keeps_edit(void)
     TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 on a failed storage save");
     live_edit_record_t rec;
     TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "the pending edit is kept");
+    /* fwlow16 L1: the RAM-only copy must not stay listed, and a same-name retry must land in the same slot. */
+    TEST_CHECK(!profiles_slot_used(1), "the unpersisted RAM slot is dropped (no phantom profile)");
+    g_fake_profiles_http_save_unpersisted = false;
+    httpd_req_t retry = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&retry);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "same-name retry after the failure succeeds");
+    TEST_CHECK(profiles_slot_used(1), "retry landed in the freed slot");
 }
 
 static void test_decide_overwrite_builtin_403(void)

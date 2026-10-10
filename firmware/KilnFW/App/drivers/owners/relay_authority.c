@@ -298,8 +298,24 @@ bool relay_authority_reset_refuses_writer(void)
 void relay_authority_reset_set_erases_kiln_nvs(bool erases)
 {
     portENTER_CRITICAL(&s_heat_claim_mux);
-    s_reset_erases_kiln_nvs = erases;
+    /* fwlow16 L2: sticky while a reset is in flight -- a narrower reset must not drop the fence of one that
+     * erased kiln_nvs. At depth 0 it assigns (a stale value never leaks into the next reset). */
+    if (erases || s_reset_in_flight_depth == 0) {
+        s_reset_erases_kiln_nvs = erases;
+    }
     portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool ok = (s_reset_in_flight_depth == 0);
+    if (ok) {
+        s_reset_erases_kiln_nvs = erases_kiln_nvs;
+        s_reset_in_flight_depth = 1;
+    }
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return ok;
 }
 
 bool relay_authority_reset_refuses_kiln_nvs_writer(void)
