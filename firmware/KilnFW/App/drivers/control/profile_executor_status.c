@@ -359,6 +359,14 @@ bool profile_executor_resume(void)
         xSemaphoreGive(s_exec.lock);
         return false;
     }
+    /* LD-01 follow-up (REVIEW_LD01_WWFIX MED-1): the same start gate a fresh run uses. A resume on a down or
+     * unconfirmed safety link would otherwise report RUNNING and heat silently when the link returns. Shared
+     * by every caller (UART, HTTP, LCD). Refused resume leaves the run PAUSED; retry once the link is up. */
+    if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "resume")) {
+        xSemaphoreGive(s_exec.lock);
+        ESP_LOGW(PE_TAG, "profile_executor_resume() refused: heat is blocked or the safety link is not positively up");
+        return false;
+    }
     /* Reclaim PROFILE ownership handed to MANUAL on pause -- see
      * profile_executor_pause()'s comment. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_PROFILE);

@@ -36,8 +36,13 @@ same commit as this module -- see that doc's WT-A/WT-C section):
     ``{"username": str, "reset_token": str, "new_password": str}``
     (form-urlencoded). Success: HTTP 200, JSON ``{"ok": true}``. Any
     failure (expired/wrong/reused token, password policy rejection): HTTP
-    400, JSON ``{"ok": false}`` -- deliberately generic per the plan (the one exception: a weak-password refusal adds ``"reason": "weak_password"`` and leaves the token UNSPENT, so the caller may retry with the same token)
-    ("never distinguishes wrong token from bad password").
+    400, JSON ``{"ok": false}`` -- generic for a bad/expired/reused token. The one
+    exception is a weak-password refusal: ``{"ok": false, "reason": "weak_password"}``,
+    token left UNSPENT so the caller may retry. The firmware evaluates password
+    strength BEFORE and independently of token validation, so this reply is
+    identical whether the token is good or bad and reveals nothing about token
+    validity ("never reveals whether the TOKEN was wrong"; it does distinguish
+    a weak password, which the caller supplied and can fix).
   * Both OPEN routes: a rate-limit refusal from the shared
     ``login_ip_scope.c`` ladder is HTTP 429 with that ladder's existing
     PLAIN-TEXT body (``web_auth_login_http.c``'s login 429 site), reused

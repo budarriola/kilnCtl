@@ -21,6 +21,8 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### MED-1. `profile_executor_resume()` has no start gate (LD-01 class on the resume path)
 
+**Status: FIXED: resume shares `relay_authority_start_blocked()`; refuses with run left PAUSED. Tests cover down/uninit/ESP_FAIL/NULL link and the up-link success.**
+
 - `profile_executor_status.c` `profile_executor_resume()` checks neither `relay_authority_on_blocked()` nor `relay_authority_start_blocked()`.
 - It sets `PROFILE_EXEC_RUNNING` (`profile_executor_status.c:409`, one of only two places that set RUNNING) and calls `heat_enable_acquire_since()`.
 - On a link that is down or not yet confirmed, the acquire fails. The executor still reports RUNNING with heat pending, and `heat_enable_reconcile()` keeps retrying.
@@ -31,6 +33,8 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### LOW-1. The `safety_link_get_status()` return-code check is not covered by any test (negtest A2 MISSED)
 
+**Status: FIXED: error stubs return link-up-looking 0xFF garbage in both prestart tests.**
+
 - The new stubs in both `test_autotune_engine_prestart.c` and `test_profile_executor_prestart.c` memset `*out` even when they return an error.
 - So a mutation that ignores the return code still reads `link_up=false` and refuses (A2 below: exit 0, MISSED).
 - The real `safety_link_get_status()` leaves `*out` untouched on `ESP_ERR_INVALID_STATE` and on `ESP_FAIL`. The caller's `st` is an uninitialised stack variable, so dropping the rc check on target would read garbage and could pass the gate.
@@ -38,10 +42,14 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### LOW-2. Gate tests miss two refusal causes and one heat-request assertion
 
+**Status: FIXED: no-heat-request assertion plus NULL-safety and ESP_FAIL cases in both tests.**
+
 - `test_run_refuses_unless_link_positively_up` (profile) asserts the refusal and its text. It does not assert "no heat-enable request", which the autotune twin does.
 - Neither suite exercises a NULL safety pointer or the `ESP_FAIL` lock-failure path.
 
 ### LOW-3. The other relay-ON paths still gate on fault sources only
+
+**Status: BY DESIGN: aux, manual relay and UART safety enable gate on fault sources only; link state is not a refusal there because those paths do not depend on heat_enable. No code change.**
 
 - These paths gate on `relay_authority_on_blocked()` only, not on positive link-up:
   - aux outputs (`profile_executor_relay_io.c:633`)
@@ -52,10 +60,14 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### LOW-4. No commit-time recheck between the gate and RUNNING
 
+**Status: FIXED: `profile_executor_run.c` rechecks the start gate right before RUNNING and unwinds the claims.**
+
 - `profile_executor_run.c` gates at line 397 but commits RUNNING at line 1534, after validation and plan work, without re-checking the gate.
 - A link drop inside that window gives the same state as MED-1 (RUNNING, heat pending). `heat_enable` refuses on a down link, so the effect is minor.
 
 ### LOW-5. `GET /api/wifi/status` buffer not grown for the new fields (F3)
+
+**Status: FIXED: formatter moved to `wifi_prov_status_json_format()` (cap 1024, 500 on truncation) with a worst-case host test.**
 
 - `wifi_provision_http.c:365` `json_cap` is still 680 B. The comment above it records a measured worst case of 677 B + NUL before this change.
 - F3 appends `,"saved_nets_refused":false` (+26 B). When refused it appends `true` plus `,"recovery_hint":"<~105 B>"` (about +150 B).
@@ -65,12 +77,16 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### LOW-6. F2 is partial: a 429 still discards a reset token the firmware has not spent
 
+**Status: FIXED: a 429 keeps the reset token and stays on step 2 (`app.js`, node test group 7a3).**
+
 - `app.js` `onStep2Submit` now keeps `retryToken` on a 400 `reason:weak_password`.
 - But every TOTP failure, including the weak-password refusal, takes the per-IP backoff, and the first step is 5 s.
 - A user who retries within 5 s gets a 429, and the 429 branch still calls `forgotBackToStep1()`, which drops the token the firmware has not spent. The new message invites a retry "if it says to try again later".
 - Fix: keep the token on 429 as well.
 
 ### INFO-1. The weak_password reason is a narrow oracle on an OPEN route
+
+**Status: FIXED: client docstring and plan row no longer claim the weak_password reply reveals token validity.**
 
 - The new 400 `{"reason":"weak_password"}` makes a weak-password refusal distinguishable from a bad token. The `totp_http_client.py` docstring itself states that the plan "never distinguishes" these.
 - The only extra fact it leaks is whether the candidate equals the AP password or fails the strength rules, behind the TOTP backoff and a valid code.
@@ -84,10 +100,14 @@ This is a review only; nothing was fixed. It was done on origin/dev at `f1d9d256
 
 ### INFO-3. The bounded read retry has no delay
 
+**Status: FIXED: 20 ms `hal_time_delay_ms` between the 3 read attempts.**
+
 - `nvs_load_saved_nets_from()` retries 3 times back to back. A transient condition that lasts longer than three NVS calls still latches refused for the boot.
 - A few ms of delay would make the retry meaningful.
 
 ### INFO-4. F8 is partial: fake_kv still diverges on non-string types, and its header comment is stale
+
+**Status: FIXED: fake_kv keys are typed (blob/str/u8/u32); any crossing is NOT_FOUND; header comment corrected.**
 
 - `fake_kv.c do_get` now refuses a get_blob on a string-written key and a get_str on a blob, matching target NVS.
 - u8/u32 values are still stored as non-string blobs, so `get_blob` on a u8 key, or `get_u8`/`get_u32` on a blob key, still succeed in the fake. On target NVS keys are typed and these reads fail.

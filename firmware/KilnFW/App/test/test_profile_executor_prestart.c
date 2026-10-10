@@ -668,14 +668,19 @@ static safety_link_status_t g_stub_safety_st;
  * Default: link up, so the many tests that reach the gate stay unaffected; aux_tick_case() turns
  * it off to keep its explicit rc/st control, and the LD-01 test drives g_stub_link_mode. */
 static bool g_stub_force_link_up = true;
-static int g_stub_link_mode = 0; /* 0 = up, 1 = never up (link_up false), 2 = uninitialised (INVALID_STATE) */
+static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INVALID_STATE), 3 = ESP_FAIL, 4 = NULL link (INVALID_ARG) */
 
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
     if (g_stub_force_link_up) {
+        /* LOW-1: error returns leave garbage that looks link-up (the real function leaves *out untouched). */
+        if (g_stub_link_mode >= 2) {
+            if (out) memset(out, 0xFF, sizeof(*out));
+            return g_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE
+                 : g_stub_link_mode == 3 ? ESP_FAIL : ESP_ERR_INVALID_ARG; /* 4 = NULL link */
+        }
         if (out) memset(out, 0, sizeof(*out));
-        if (g_stub_link_mode == 2) return ESP_ERR_INVALID_STATE;
         if (out) out->link_up = (g_stub_link_mode == 0);
         return ESP_OK;
     }
@@ -2272,6 +2277,29 @@ static void test_pause_keeps_claim_resume_reclaims_it(void)
               "resume() must reclaim RELAY_OWNER_PROFILE over the same mask");
 }
 
+/* REVIEW_LD01_WWFIX MED-1: resume shares the start gate. A down/unconfirmed/unreadable link refuses and
+ * leaves the run PAUSED with no heat request; the same call succeeds once the link is positively up. */
+static void test_resume_refuses_unless_link_positively_up(void)
+{
+    TEST_SECTION("profile_executor_resume() is gated on the link being positively up (LD-01 MED-1)");
+    for (int mode = 1; mode <= 4; mode++) {
+        reset_relay_claim_test_state();
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.safety = NULL;
+        s_exec.state = PROFILE_EXEC_PAUSED;
+        s_exec.claimed_relay_mask = 0x05;
+        s_test_relay_authority_blocked = false;
+        g_request_enable_true_calls = 0;
+        g_stub_link_mode = mode;
+        TEST_CHECK(!profile_executor_resume(), "resume refused while the link is not positively up");
+        TEST_CHECK(s_exec.state == PROFILE_EXEC_PAUSED, "run stays PAUSED after a refused resume");
+        TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request on a refused resume");
+    }
+    g_stub_link_mode = 0;
+    TEST_CHECK(profile_executor_resume(), "resume succeeds once the link is up");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "state is RUNNING after the link-up resume");
+}
+
 // guard9_assert_stale_tick_fault() tests (audit 2026-08-27 item 2) --
 // guard9_assert_stale_tick_fault() is a plain static function, same
 // "reachable without a real task loop" case as escalate_guard_trip() above
@@ -2808,8 +2836,10 @@ static void test_run_decodes_fault_sources_instead_of_hex(void)
 static void test_run_refuses_unless_link_positively_up(void)
 {
     TEST_SECTION("profile_executor_run() refuses when the link is not positively up even with no fault source (LD-01)");
-    for (int mode = 1; mode <= 2; mode++) {
+    for (int mode = 1; mode <= 4; mode++) {
         reset_relay_claim_test_state();
+        g_request_enable_true_calls = 0;
+        s_exec.safety = NULL;
         s_exec.lock = xSemaphoreCreateMutex();
         s_exec.state = PROFILE_EXEC_IDLE;
         memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
@@ -2824,6 +2854,7 @@ static void test_run_refuses_unless_link_positively_up(void)
         TEST_CHECK(!ok, mode == 1 ? "never-up/stale link refuses the start" : "uninitialised link refuses the start");
         TEST_CHECK(strstr(err, "safety link is down") != NULL, "the refusal is decoded and names the safety link");
         TEST_CHECK(strstr(err, "0x") == NULL, "no bare hex");
+        TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request");
         g_stub_link_mode = 0;
         s_test_profiles_http_get_ok = false;
         s_test_zones_config_valid = false;
@@ -12244,6 +12275,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_unless_link_positively_up();
+    test_resume_refuses_unless_link_positively_up();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();

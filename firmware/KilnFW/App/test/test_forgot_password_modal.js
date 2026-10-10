@@ -491,6 +491,32 @@ function flush() {
     assert(rs.length === 2 && /reset_token=tok-weak/.test(rs[1].init.body), 'retry reuses the same token');
   }
 
+  // Group 7a3 (LOW-6): a 429 on the reset submit keeps the unspent token and stays on step 2.
+  {
+    const { ctx, dom, fetchCalls } = makeContext({
+      fetchResponses: [
+        { status: 202, json: { reset_token: 'tok-429' } },
+        { status: 429, text: 'try again in 5s' },
+        { status: 200, json: { ok: true } },
+      ],
+    });
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-username'].value = 'bench';
+    dom.registry['kc-forgot-code'].value = '654321';
+    dom.registry['kc-forgot-step1'].dispatch('submit');
+    await flush();
+    dom.registry['kc-forgot-newpass'].value = 'An0ther-good-pw-2';
+    dom.registry['kc-forgot-newpass2'].value = 'An0ther-good-pw-2';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    assert(dom.registry['kc-forgot-step2'].hidden === false, '429 on reset stays on step 2');
+    assert(ctx.forgotResetToken === 'tok-429', '429 on reset keeps the unspent token');
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    const rs = fetchCalls.filter((c) => c.url === '/api/auth/reset');
+    assert(rs.length === 2 && /reset_token=tok-429/.test(rs[1].init.body), 'retry after backoff reuses the token');
+  }
+
   // Group 7c: the page-lifetime keydown listener is inert while hidden.
   {
     const { ctx, dom, resumeCalls } = makeContext({});

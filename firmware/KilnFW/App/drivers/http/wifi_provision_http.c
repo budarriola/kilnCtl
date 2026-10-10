@@ -350,53 +350,41 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * radio, same disclosure class as ap_clients just above it. */
     bool ap_pending_teardown = wifi_prov_get_ap_pending_teardown();
 
-    /* +64 over the previous size for the two new booleans and their keys, +24
-     * more for ap_pending_teardown's own key+value. */
-    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case). Measured
-     * worst-case rendered length with every escaped field at its maximum is
-     * 677 B + NUL = 678 B, so this buffer grew 672 -> 680 B (+8 B, kept rather
-     * than streaming the response: it is well inside the httpd stack budget,
-     * check_httpd_task_stack_budget.ps1). dns/dns2 are formatted inline below
-     * instead of through wifi_prov_status_redact_field(): that helper needs a
-     * caller-supplied buffer per field, and two more 19 B buffers on this
-     * handler's stack buy nothing since the values are already quote-safe
-     * dotted quads (validated before storage). */
-    /* HEAP, not stack (httpd 8 KB stack): ~680 B; freed on every return path. */
-    const size_t json_cap = 352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8;
+    /* LOW-5 (REVIEW_LD01_WWFIX): layout and cap live in wifi_prov.h (WIFI_PROV_STATUS_JSON_CAP, worst case
+     * ~830 B pinned by a host test with every field at maximum). HEAP, not stack (httpd 8 KB stack). */
+    const size_t json_cap = WIFI_PROV_STATUS_JSON_CAP;
     char *json = persist_scratch_alloc(json_cap);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
     }
-    int n = snprintf(json, json_cap,
-                     "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
-                     "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
-                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
-                     "\"static_netmask\":%s,\"static_gateway\":%s,"
-                     "\"static_dns\":%s%s%s,\"static_dns2\":%s%s%s,"
-                     "\"ap_password_known\":%s,\"ap_password_set\":%s,"
-                     "\"ap_pending_teardown\":%s,\"saved_nets_refused\":%s%s%s%s}",
-                     mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
-                     sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
-                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
-                     static_gateway_field,
-                     /* dns fields: same redaction rule as the three above (JSON null unless
-                      * may_disclose), written inline to avoid two more stack buffers. */
-                     may_disclose ? "\"" : "", may_disclose ? wifi_prov_get_static_dns() : "null",
-                     may_disclose ? "\"" : "", may_disclose ? "\"" : "",
-                     may_disclose ? wifi_prov_get_static_dns2() : "null", may_disclose ? "\"" : "",
-                     on_ap ? "true" : "false",
-                     wifi_prov_get_ap_password()[0] ? "true" : "false",
-                     ap_pending_teardown ? "true" : "false",
-                     wifi_prov_saved_nets_recovery_hint() ? "true" : "false",
-                     wifi_prov_saved_nets_recovery_hint() ? ",\"recovery_hint\":\"" : "",
-                     wifi_prov_saved_nets_recovery_hint() ? wifi_prov_saved_nets_recovery_hint() : "",
-                     wifi_prov_saved_nets_recovery_hint() ? "\"" : "");
+    /* dns fields: same redaction rule as the three above (JSON null unless may_disclose). */
+    char static_dns_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_dns2_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_dns(), static_dns_field, sizeof(static_dns_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_dns2(), static_dns2_field,
+                                  sizeof(static_dns2_field));
+    const wifi_prov_status_json_in_t in = {
+        .mode = mode_name(wifi_prov_get_mode()), .state = state_name(wifi_prov_get_state()),
+        .ssid_field = ssid_field, .sta_ip_field = sta_ip_field, .ap_ssid_escaped = ap_ssid_escaped,
+        .ap_password_escaped = ap_password_escaped, .ip_mode = ip_mode, .static_ip_field = static_ip_field,
+        .static_netmask_field = static_netmask_field, .static_gateway_field = static_gateway_field,
+        .static_dns_field = static_dns_field, .static_dns2_field = static_dns2_field,
+        .sta_connected = sta_connected, .ap_password_known = on_ap,
+        .ap_password_set = wifi_prov_get_ap_password()[0] != ' ', .ap_pending_teardown = ap_pending_teardown,
+        .sta_rssi = (int)sta_rssi, .ap_clients = (unsigned)ap_clients,
+        .recovery_hint = wifi_prov_saved_nets_recovery_hint(),
+    };
+    int n = wifi_prov_status_json_format(json, json_cap, &in);
     if (n < 0) {
         n = 0;
     }
     if ((size_t)n >= json_cap) {
-        n = (int)json_cap - 1; /* truncated is fine for a status readout; never overrun */
+        /* Never send a truncated (invalid JSON) body as a 200: the cap is pinned above the measured worst
+         * case, so this is unreachable short of a layout change the host test would have caught. */
+        free(json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status too large");
+        return ESP_OK;
     }
     httpd_resp_set_type(req, "application/json");
     esp_err_t sent = httpd_resp_send(req, json, n);

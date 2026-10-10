@@ -163,7 +163,7 @@ plan's own count."
 | Route | Method | Tier | Notes |
 |---|---|---|---|
 | `POST /api/auth/forgot` | POST | OPEN | body: `{"username","code"}`. Verifies the TOTP code (section 3) against that user's enrolled secret. On success, issues a short-lived (2-minute), single-use reset token (random, `esp_random()`-derived, held in RAM only — no NVS write for a token this short-lived). **Always returns 202** whether or not the user/secret exists or the code matched, to avoid an oracle for "is TOTP enrolled" — same anti-oracle property the email plan already established for "is email configured." |
-| `POST /api/auth/reset` | POST | OPEN | body: `{"username","reset_token","new_password"}`. Consumes the token (single-use, expires at 2 minutes), sets the password via the existing `security_backend_web_auth.c` `set_web_password` path, invalidates all sessions. Generic 400 on any failure (expired/wrong token, bad password policy) — never distinguishes "wrong token" from "bad password" to an unauthenticated caller. |
+| `POST /api/auth/reset` | POST | OPEN | body: `{"username","reset_token","new_password"}`. Consumes the token (single-use, expires at 2 minutes), sets the password via the existing `security_backend_web_auth.c` `set_web_password` path, invalidates all sessions. Generic 400 `{"ok":false}` on a bad/expired/reused token. A weak password answers 400 `{"ok":false,"reason":"weak_password"}` and leaves the token unspent; strength is checked before and independently of the token, so that reply never reveals token validity. |
 
 Net **2 new routes** against the current **160 of 170** (10 spare,
 reconfirmed 2026-09-24 with `check_uri_handler_cap.ps1`'s own method:

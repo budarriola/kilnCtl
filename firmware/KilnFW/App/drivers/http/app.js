@@ -1009,6 +1009,13 @@
         if (resp.status === 429) {
           return resp.text().then(function (text) {
             if (gen !== forgotGeneration) return;
+            // LOW-6: the 429 is refused before the token is looked up, so the token is still
+            // unspent -- keep it and stay on step 2 so the user can retry after the backoff.
+            if (retryToken) {
+              forgotResetToken = retryToken;
+              forgotErrorEl2.textContent = kcForgotStatusMessage(429, text);
+              return;
+            }
             forgotBackToStep1(kcForgotStatusMessage(429, text));
           });
         }

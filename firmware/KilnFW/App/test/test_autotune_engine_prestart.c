@@ -263,8 +263,13 @@ static int s_stub_link_mode = 0;
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
+    /* LOW-1 (REVIEW_LD01_WWFIX): like the real function, leave *out as garbage that LOOKS link-up on an
+     * error return, so a caller that ignores the return code reads link_up and starts. */
+    if (s_stub_link_mode >= 2) {
+        if (out) memset(out, 0xFF, sizeof(*out));
+        return s_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE : ESP_FAIL;
+    }
     if (out) memset(out, 0, sizeof(*out));
-    if (s_stub_link_mode == 2) return ESP_ERR_INVALID_STATE;
     if (out) out->link_up = (s_stub_link_mode == 0);
     return ESP_OK;
 }
@@ -3820,7 +3825,7 @@ static void test_begin_run_refuses_on_down_link_with_latched_link_source(void)
 static void test_begin_run_refuses_unlatched_link_down(void)
 {
     TEST_SECTION("autotune begin-run: link not positively up, no fault source latched -- refuses, no heat (LD-01)");
-    for (int mode = 1; mode <= 2; mode++) {
+    for (int mode = 1; mode <= 4; mode++) { /* 1 never-up, 2 uninit, 3 ESP_FAIL, 4 NULL safety */
         static MAX31856BusClass bus;
         static SafetyLinkClass safety;
         reset_heat_enable_recorder(false);
@@ -3828,23 +3833,23 @@ static void test_begin_run_refuses_unlatched_link_down(void)
         memset(&bus, 0, sizeof(bus));
         memset(&safety, 0, sizeof(safety));
         bus.initialized = true;
-        safety.initialized = (mode == 1);
+        safety.initialized = (mode != 2);
         safety.fault_sources = 0;
         s_at.thermo_bus = &bus;
-        s_at.safety = &safety;
+        s_at.safety = (mode == 4) ? NULL : &safety;
         s_at.lock = xSemaphoreCreateMutex();
         s_stub_max_temp_c = 0.0f;
         s_stub_min_temp_c = 0.0f;
         s_stub_ch0_ok = true;
         s_stub_blocked_real_semantics = true;
-        s_stub_link_mode = mode;
+        s_stub_link_mode = (mode == 4) ? 1 : mode;
         char errbuf[128] = {0};
         bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
         s_stub_blocked_real_semantics = false;
         s_stub_link_mode = 0;
         TEST_CHECK(!ok, "start refused while the link is not positively up");
         TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
-        TEST_CHECK(strstr(errbuf, "safety link is down") != NULL, "refusal names the safety link");
+        TEST_CHECK(mode == 4 || strstr(errbuf, "safety link is down") != NULL, "refusal names the safety link");
         TEST_CHECK(strstr(errbuf, "0x") == NULL, "decoded, not hex");
     }
 }

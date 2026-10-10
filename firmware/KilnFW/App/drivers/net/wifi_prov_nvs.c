@@ -14,6 +14,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "hal_time.h"
 /* nvs_flash.h kept for NVS_DEFAULT_PART_NAME only -- see wifi_prov.c's
  * identical comment; every actual nvs_*() call in this file below now goes
  * through hal_kv_*() instead. */
@@ -445,6 +446,7 @@ static esp_err_t nvs_load_saved_nets_once(const char *partition, saved_nets_blob
 
 /* F3: a transient read error is retried (bounded) before latching refused. */
 #define SAVED_NETS_LOAD_ATTEMPTS 3
+#define SAVED_NETS_LOAD_RETRY_DELAY_MS 20 /* INFO-3: back-to-back retries hit the same transient window */
 static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob_t *out_blob)
 {
     esp_err_t e = ESP_OK;
@@ -452,6 +454,9 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
         e = nvs_load_saved_nets_once(partition, out_blob);
         if (!s_saved_nets_refused || !s_saved_nets_refused_transient) {
             break;
+        }
+        if (i + 1 < SAVED_NETS_LOAD_ATTEMPTS) {
+            (void)hal_time_delay_ms(SAVED_NETS_LOAD_RETRY_DELAY_MS);
         }
     }
     return e;

@@ -37,14 +37,12 @@
  *
  * Type/error injection decisions (contract points hal_kv.h leaves to the
  * fake, since NVS's own byte-for-byte typing isn't part of the header):
- *  - get_blob accepts a key regardless of whether it was written via
- *    set_blob or set_str (both are just bytes on flash) -- this is the
- *    "blob size-probe" path kiln_cfg_store.c and touch_cal_store.c use on
- *    values that may have been written either way.
- *  - get_str requires the key was last written via set_str; calling it on
- *    a set_blob key returns HAL_NOT_FOUND, matching ESP-IDF 6.0.2 (a typed
- *    read of a key of another type ends in NOT_FOUND, never a type error)
- *    rather than silently reinterpreting the bytes.
+ *  - Keys are TYPED like real NVS: each get requires the type the key was
+ *    last written with (blob, str, u8, u32). Any crossing (get_blob on a
+ *    set_str/set_u8/set_u32 key, get_str on a blob, get_u8 on a u32, ...)
+ *    returns HAL_NOT_FOUND, matching ESP-IDF 6.0.2 (a typed read of a key
+ *    of another type ends in NOT_FOUND, never a type error) rather than
+ *    silently reinterpreting the bytes.
  *  - fake_kv_script_corrupt_key() marks a COMMITTED value corrupted; any
  *    get_* on it (once no newer pending write shadows it) returns HAL_IO
  *    until overwritten by a fresh set_*+commit, modeling flash bit-rot

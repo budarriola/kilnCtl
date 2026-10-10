@@ -1463,6 +1463,21 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* LD-01 follow-up (REVIEW_LD01_WWFIX LOW-4): the start gate near the top of this function ran before
+     * validation and plan work; a link drop since then would otherwise commit RUNNING with heat pending.
+     * Recheck right before the commit, unwinding the claims exactly like the refusal above. */
+    if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "a firing cannot start")) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "safety link went down while the firing was starting -- start it again");
+        }
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: start gate closed meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
     /* relay_authority's own per-zone latch is a SEPARATE module, not touched
      * by the s_exec.zones memset above -- release it for every zone this run
      * is about to activate. Without this, a zone whose per-zone guard
