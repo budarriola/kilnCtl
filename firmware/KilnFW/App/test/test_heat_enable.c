@@ -1097,6 +1097,13 @@ static void test_pico_reboot_cause_holds_or_retries(void)
         heat_enable_note_pico_boot(2u, true, (uint8_t)(SAFETY_LINK_DIAG_BOOT_POWERON | fatal_bits[i]), 2000u);
         TEST_CHECK(heat_enable_reboot_hold(), "every fatal boot-reason bit holds");
     }
+    /* MED-A: a fatal-reboot hold on a standing grant owes the wire a REQUEST_ENABLE(false). */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() >= 1, "fatal reboot hold sends REQUEST_ENABLE(false) for the standing grant");
     reset_all(true);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_note_pico_boot(1u, true, 0u, 1000u);
@@ -1145,8 +1152,8 @@ static void test_executor_wires_k4_and_reboot_state(void)
     TEST_CHECK(seq && since && br, "reboot seq / diag-since-reboot / boot reason come from safety_status");
     const char *boot = strstr(text, "heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason,");
     const char *state = strstr(text, "heat_enable_note_pico_state(safety_diag_valid,");
-    const char *hold = strstr(text, "profile_executor_pause_with_reason(\"pico_fatal_reboot\")");
-    const char *unc = strstr(text, "profile_executor_pause_with_reason(\"heat_grant_unconfirmed\")");
+    const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
     const char *rec = strstr(text, "heat_enable_reconcile();");
     TEST_CHECK(boot && state && boot < state, "note_pico_boot runs before note_pico_state");
     TEST_CHECK(hold && unc && state && rec && state < hold && hold < unc && unc < rec,

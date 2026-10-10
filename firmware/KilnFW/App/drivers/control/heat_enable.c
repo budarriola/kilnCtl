@@ -721,6 +721,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
             if ((boot_reason & fatal) != 0u) {
                 s_he.reboot_hold = true;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
+                if (s_he.granted || s_he.pending) {
+                    /* A false reboot detection must not leave the Pico grant standing:
+                     * owe the wire a REQUEST_ENABLE(false). */
+                    s_he.release_pending = true;
+                }
                 s_he.granted = false;
                 s_he.pending = false;
                 s_he.warned_pending = false;

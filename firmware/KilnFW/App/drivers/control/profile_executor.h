@@ -554,6 +554,9 @@ bool profile_executor_pause(void);
  * most 47 chars) in /api/profile_exec's pause_reason so an executor-initiated
  * pause is distinguishable from an operator pause. */
 bool profile_executor_pause_with_reason(const char *reason);
+/* Watchdog-task variant: s_exec.lock take bounded to 1 s (returns false on timeout) so a wedged
+ * control task cannot block guard 9 / the 30 s link abort. */
+bool profile_executor_pause_with_reason_bounded(const char *reason);
 bool profile_executor_resume(void);
 
 

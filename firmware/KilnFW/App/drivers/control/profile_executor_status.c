@@ -275,14 +275,18 @@ bool profile_executor_pause(void)
     return profile_executor_pause_with_reason(NULL);
 }
 
-bool profile_executor_pause_with_reason(const char *reason)
+static bool pause_with_reason_impl(const char *reason, TickType_t lock_wait)
 {
     /* See profile_executor_run()'s guard comment above. */
     if (s_exec.lock == NULL) {
         ESP_LOGW(PE_TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
         return false;
     }
-    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (xSemaphoreTake(s_exec.lock, lock_wait) != pdTRUE && lock_wait != portMAX_DELAY) {
+        /* Only reachable on the bounded (watchdog) path: a wedged holder must not block guard 9. */
+        ESP_LOGE(PE_TAG, "pause(%s): s_exec.lock not obtained within the bound -- not paused", reason ? reason : "");
+        return false;
+    }
     if (s_exec.state != PROFILE_EXEC_RUNNING) {
         xSemaphoreGive(s_exec.lock);
         return false;
@@ -331,6 +335,16 @@ bool profile_executor_pause_with_reason(const char *reason)
      * the ramp/dwell clock stopped -- the periodic refresh is RUNNING-only. */
     run_state_note(RUN_STATE_PHASE_PAUSED, &pause_snap.snap);
     return true;
+}
+
+bool profile_executor_pause_with_reason(const char *reason)
+{
+    return pause_with_reason_impl(reason, portMAX_DELAY);
+}
+
+bool profile_executor_pause_with_reason_bounded(const char *reason)
+{
+    return pause_with_reason_impl(reason, pdMS_TO_TICKS(1000));
 }
 
 bool profile_executor_resume(void)
