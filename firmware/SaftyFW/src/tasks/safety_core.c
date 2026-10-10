@@ -22,6 +22,7 @@
 // for the precedent this follows.
 #include "safety_core.h"
 #include "link_frame.h" // link_frame_next_trip_seq(), F4
+#include "hal_barrier.h" // HAL_DMB(): publish/acquire of the trip-event fields across cores, F5
 
 #include <math.h>
 #include <stdio.h> // snprintf -- clear-trip outcome log line, see safety_core_task()
@@ -1452,6 +1453,8 @@ static void safety_core_task(void *arg)
             s_trip_tc_c = input.tc_valid ? input.tc_c : NAN;
             s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
                                                                             &s_guard_cfg);
+            // F5: release -- every field above must be visible to the other core before the seq is.
+            HAL_DMB();
             s_trip_seq = link_frame_next_trip_seq(s_trip_seq); // wraps 255 -> 1, never 0 (F4)
 
             // Step 4 of SAFETY_MODEL.md section 6's 4-step trip order:
@@ -1727,6 +1730,7 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
     // torn mix of one trip's seq with another trip's fields, because the
     // writer always finishes writing every field before bumping the seq.
     uint8_t seq = s_trip_seq;
+    HAL_DMB(); // F5: acquire -- the fields below are read only after the seq (pairs with the writer's DMB)
 
     if (out_trip_seq) {
         *out_trip_seq = seq;

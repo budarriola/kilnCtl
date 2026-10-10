@@ -360,6 +360,28 @@ static void test_next_trip_seq(void)
     TEST_CHECK(!hit_zero, "1000 trips never produce seq 0");
 }
 
+static void test_trip_event_publish_barrier(void)
+{
+    TEST_SECTION("F5: safety_core.c publishes the trip fields with a release barrier before the seq, and acquires after reading it -- source-text scan");
+    static const char *const cands[] = {"../src/tasks/safety_core.c", "src/tasks/safety_core.c",
+                                         "firmware/SaftyFW/src/tasks/safety_core.c"};
+    char *text = test_read_source_anchored(__FILE__, "../src/tasks/safety_core.c", cands, 3);
+    TEST_CHECK(text != NULL, "safety_core.c readable");
+    if (text) {
+        /* CRLF-tolerant: distance checks, not exact whitespace. */
+        const char *w = strstr(text, "s_trip_seq = link_frame_next_trip_seq(s_trip_seq)");
+        const char *dw = NULL;
+        for (const char *q = text; w && (q = strstr(q, "HAL_DMB();")) != NULL && q < w; q++) {
+            dw = q;
+        }
+        TEST_CHECK(w != NULL && dw != NULL && (size_t)(w - dw) < 40u, "writer: HAL_DMB() immediately before the seq bump");
+        const char *r = strstr(text, "uint8_t seq = s_trip_seq;");
+        const char *dr = r ? strstr(r, "HAL_DMB();") : NULL;
+        TEST_CHECK(r != NULL && dr != NULL && (size_t)(dr - r) < 40u, "reader: HAL_DMB() right after reading the seq");
+        free(text);
+    }
+}
+
 static void test_trip_mask_for_reason(void)
 {
     TEST_SECTION("link_frame_trip_mask_for_reason -- single-bit mapping");
@@ -826,6 +848,7 @@ void run_test_link_frame(void)
     test_nan_survives();
     test_versions_compatible();
     test_next_trip_seq();
+    test_trip_event_publish_barrier();
     test_trip_mask_for_reason();
     test_decide_clear_trip();
     test_counts_for_liveness();
