@@ -98,6 +98,13 @@ class WifiGateTests(unittest.TestCase):
             self.assertEqual(f.calls, [])
             self.assertTrue(w.wifi_forget("a", confirm=True, allow_running=True).startswith("ok"))
 
+    def test_executor_no_answer_refuses(self):
+        f = _Fake(nets=["a"])
+        with um.patch.multiple(w._srv, _wifi=f, _profiles=types.SimpleNamespace(
+                get_exec_status=lambda timeout=2.0: None), create=True):
+            self.assertIn("could not be read", w.wifi_forget("a", confirm=True))
+        self.assertEqual(f.calls, [])
+
     def test_forget_unreadable_readback_fails(self):
         f = _Fake(nets=["a"])
         f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))

@@ -43,6 +43,7 @@ class FixtureRelayTests(unittest.TestCase):
         f.get_relays.return_value = {"other": True}
         with um.patch.object(fx, "_get_fixture", return_value=f):
             self.assertIn("FAILED", fx.fixture_set_relay("r", True, confirm=True))
+            self.assertIn("FAILED", fx.fixture_set_relay("r", False, confirm=True))
         f.get_relays.side_effect = OSError("x")
         with um.patch.object(fx, "_get_fixture", return_value=f):
             self.assertIn("FAILED", fx.fixture_set_relay("r", True, confirm=True))

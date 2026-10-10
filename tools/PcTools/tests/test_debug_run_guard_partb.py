@@ -56,7 +56,7 @@ class RunGuardTests(unittest.TestCase):
             with um.patch.object(debug_probe, "read_memory", return_value=(True, "MEMRD 0x3fc00000 0x00000005")):
                 self.assertIn("read-back OK", dbg.debug_write_memory(peer="esp", address=0x3FC00000, value=5, confirm=True))
             with um.patch.object(debug_probe, "read_memory", return_value=(True, "MEMRD 0x3fc00000 0x00000006")):
-                self.assertIn("FAILED", dbg.debug_write_memory(peer="esp", address=0x3FC00000, value=5, confirm=True))
+                self.assertTrue(dbg.debug_write_memory(peer="esp", address=0x3FC00000, value=5, confirm=True).startswith("FAILED"))
             with um.patch.object(debug_probe, "read_memory", return_value=(False, "")):
                 self.assertIn("UNVERIFIED", dbg.debug_write_memory(peer="esp", address=0x3FC00000, value=5, confirm=True))
 
