@@ -81,6 +81,8 @@ function Build-And-Run {
 function Test-Mutant {
     param([string]$File, [string]$Needle, [string]$Replacement, [string]$Tag)
     $src = (Get-Content (Join-Path $here $File) -Raw).Replace("`r`n", "`n")
+    $Needle = $Needle.Replace("`r`n", "`n")
+    $Replacement = $Replacement.Replace("`r`n", "`n")
     $mutant = $src.Replace($Needle, $Replacement)
     if ($mutant -eq $src) {
         throw "negative test ${Tag}: could not find '$Needle' in $File to mutate -- update this check."
