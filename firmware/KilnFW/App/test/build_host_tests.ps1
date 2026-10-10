@@ -2796,6 +2796,23 @@ try {
 
     Invoke-HostTestExe -Name "kiln_cfg_swap_worker" -ExePath $exeKcsw -BuildCmd $cmdKcsw
 
+    # ---- R2-9 / R2-10: thermo_owner and safety_link frame endian helpers ----
+    $exeTho = Join-Path $outDir "kilnctl_host_tests_thermo_owner.exe"
+    $thoObjDir = Join-Path $outDir "tho"
+    New-Item -ItemType Directory -Force -Path $thoObjDir | Out-Null
+    $cmdTho = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$thoObjDir\\`" /Fe:`"$exeTho`" `"$(Join-Path $testDir 'test_thermo_owner.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+    Invoke-HostTestExe -Name "thermo_owner" -ExePath $exeTho -BuildCmd $cmdTho
+
+    $exeSle = Join-Path $outDir "kilnctl_host_tests_safety_link_endian.exe"
+    $sleObjDir = Join-Path $outDir "sle"
+    New-Item -ItemType Directory -Force -Path $sleObjDir | Out-Null
+    $cmdSle = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$sleObjDir\\`" /Fe:`"$exeSle`" `"$(Join-Path $testDir 'test_safety_link_endian.c')`""
+    Invoke-HostTestExe -Name "safety_link_endian" -ExePath $exeSle -BuildCmd $cmdSle
+
     Complete-HostTestQueue
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
@@ -3441,7 +3458,8 @@ try {
     # 84 -> 85: test_ct_leak_alarm_service.c (round 2, R2-1)
     # 85 -> 86: test_dashboard_autotune_http_handlers.c (campaign 8 autotune)
     # 86 -> 88: test_dashboard_autotune_http_get_handlers.c, test_zone_aux_convert_http.c (c78b)
-    $totalExpected = 88
+    # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
+    $totalExpected = 90
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
