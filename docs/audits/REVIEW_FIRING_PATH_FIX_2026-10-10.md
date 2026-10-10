@@ -215,4 +215,4 @@ path fails the check.
 ### Coordinator additions (safety-link fix 2 review, MED-A / MED-B)
 - MED-A FIXED: `heat_enable_note_pico_boot` fatal branch sets `release_pending` when granted or pending, so the REQUEST_ENABLE(false) frame goes out on a false reboot detection (test_heat_enable.c, negtest CAUGHT). The executor no longer feeds `heat_enable_note_pico_boot` when the safety status read failed (no seq 0).
 - MED-B FIXED: watchdog-task pauses use `profile_executor_pause_with_reason_bounded` (1 s lock take) so a wedged control task cannot block guard 9. `profile_exec_wdt` stack ceiling 2736 to 2752 B (measured; stack stays 6144 B).
-- Not done in this batch: undecided-reboot pause_reason surfacing, tests for negtest MISSED K5/K9/K11, MED-3 estop clear read-back failure, autotune pause on hold.
+- Done afterwards in `51df2ccc1` (sl3): undecided-reboot status surfacing, K5/K9/K11 tests, MED-3 estop clear read-back failure, autotune abort on hold.

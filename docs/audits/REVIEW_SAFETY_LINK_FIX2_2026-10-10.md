@@ -70,6 +70,8 @@ If the control task wedges while holding `s_exec.lock` in that window, the watch
 
 ### LOW-A: an undecided reboot leaves the firing RUNNING with K4 open and no reason shown
 
+**Fixed in `51df2ccc1`:** the status now carries pause_reason `pico_reboot_undecided` while the classification is pending (`heat_enable_reboot_undecided()`); the run is deliberately not paused so a benign reboot still auto-resumes (owner decision 2026-10-10).
+
 While `reboot_classify_pending` is set (a new boot seen but no new-boot DIAG yet), retries are suppressed and the grant is gone. Nothing pauses the run and no `pause_reason` is set, although the commit message says the executor shows this condition.
 
 The firing sits RUNNING and cold. The only bounds are guard 1 during heating segments and the 30 s link-silence abort if the link is also silent. The classify timeout was removed deliberately (MED-1), but this window has no visible state.
@@ -80,11 +82,15 @@ The firing sits RUNNING and cold. The only bounds are guard 1 during heating seg
 
 ### LOW-C: the MED-3 estop clear is skipped when the commit was ACKed but the read-back failed
 
+**Fixed in `51df2ccc1`:** the estop-verified flag is cleared after any ACKed commit, before the read-back; a clear failure fails closed.
+
 `safety_cfg_write.c` clears the estop-verified flag only when `readback_matched` is true (about line 584; the flag is set at about line 316). A write that the Pico ACKed but whose read-back failed or timed out within `SAFETY_CFG_PERSIST_WAIT_MS` (5000) leaves the estop verification in place, even though the safety config may have changed.
 
 This fails open in the "verified" direction. Clearing on any ACKed commit would be the conservative choice.
 
 ### LOW-D: autotune is not paused on a hold or an unconfirmed grant
+
+**Fixed in `51df2ccc1`:** the profile_executor watchdog calls `autotune_engine_abort` on a fatal reboot hold and on an unconfirmed heat grant (autotune has no pause state).
 
 The new pause calls cover `profile_executor` only. An autotune run that loses its grant the same way keeps running with no reason shown. It is bounded only by autotune's own timeouts and guard 1.
 
@@ -156,13 +162,13 @@ Logs: `%TEMP%\negtest_logs\20261010_073322_86na`.
 | K2 retry allowed while classify is pending | CAUGHT |
 | K3 fatal mask drops BROWNOUT | CAUGHT |
 | K4 fatal mask drops ASSERT_FAILED | CAUGHT |
-| K5 no K4 episode reset on reboot | **MISSED** |
+| K5 no K4 episode reset on reboot | **CAUGHT** (`test_reboot_resets_k4_episode_and_undecided_is_visible`, `51df2ccc1`) |
 | K6 GRACE keeps the K4 episode | CAUGHT |
 | K7 WARN state not timed | CAUGHT |
 | K8 stale reading keeps the timer | CAUGHT |
-| K9 old-boot DIAG not fed as INIT | **MISSED** |
+| K9 old-boot DIAG not fed as INIT | **CAUGHT** (`test_executor_autotune_and_stale_diag_wiring`, `51df2ccc1`) |
 | K10 no `pico_fatal_reboot` pause | CAUGHT |
-| K11 `pause_reason` not stored | **MISSED** |
+| K11 `pause_reason` not stored | **CAUGHT** (`test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced`, `51df2ccc1`) |
 | K12 no estop clear on read-back | CAUGHT |
 | K13 read-back flag never set | CAUGHT |
 | K14 persist wait 5000 -> 3000 ms | **MISSED** |

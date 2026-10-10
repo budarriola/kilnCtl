@@ -345,3 +345,4 @@ Opus-review follow-up commit (see git log).
 - Opus review leftovers (LOW, not fixed): status-read failure feeds reboot seq 0 (nuisance
   pause); autotune is not paused on a reboot hold; a pre-commit DIAG with DIRTY clear reads
   as PERSISTED (F3 limitation); the MED-3 clear skips the read-back-failed case.
+- Update: the autotune hold, the pre-commit DIAG PERSISTED read and the MED-3 read-back-failed case were fixed in `51df2ccc1` (sl3).

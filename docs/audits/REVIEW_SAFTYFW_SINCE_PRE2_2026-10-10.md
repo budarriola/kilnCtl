@@ -35,6 +35,8 @@ calibrated by COMMIT while disarmed. Suggest: gate the current term on
 
 ### LOW-2: lost ANNOUNCE after ESP reboot silently downgrades M4 clear binding
 
+**Fixed in `51df2ccc1`:** the slow bounded re-announce (every 10 s while the trip sequence is unknown, ended by a 31-byte DIAG) is in `safety_link_frames.c`; no protocol change.
+
 `link_staging_apply_context_session()` zeroes `s_peer_announce.version` on an ESP
 boot_id change unless the ANNOUNCE came under the new boot_id. If that ANNOUNCE is
 lost, the Pico treats the peer as version 0: it sends the 30-byte DIAG (no
