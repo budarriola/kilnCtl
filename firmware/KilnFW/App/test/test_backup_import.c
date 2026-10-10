@@ -94,6 +94,8 @@ static bool s_test_restore_flag_seen_set_at_heat_read = false;
 // while it is set. Defaults clear; test_aux_outputs_store.c's refusal test sets it.
 bool g_test_reset_in_flight = false;
 bool relay_authority_reset_in_flight(void) { return g_test_reset_in_flight; }
+bool g_test_reset_refuses_writer = false;
+bool relay_authority_reset_refuses_writer(void) { return g_test_reset_refuses_writer; }
 void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
 {
     if (backup_import_restore_in_flight()) s_test_restore_flag_seen_set_at_heat_read = true;

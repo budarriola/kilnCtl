@@ -32,6 +32,7 @@
 #include "profiles_builtin.h"
 #include "cfg_save_barrier.h" /* persist_reset_barrier() -- see execute_scope() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
+#include "profiles_http.h" /* profiles_http_convert_busy() -- reset_other_writer_refuses() */
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- reset_other_writer_refuses() */
 #include "system_mode_gate.h" /* SYS_ACTION_FACTORY_RESET -- owner decision Q3, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
@@ -449,6 +450,8 @@ static bool reset_other_writer_refuses(char *reason, size_t reason_cap)
         why = "refused -- a zone current sweep is running; stop it or wait for it to finish";
     } else if (backup_import_restore_in_flight()) {
         why = "refused -- a backup restore is in progress; wait for it to finish";
+    } else if (profiles_http_convert_busy()) {
+        why = "refused -- a zone-to-aux conversion is running; wait for it to finish";
     }
     if (why != NULL && reason != NULL && reason_cap > 0) {
         snprintf(reason, reason_cap, "%s", why);

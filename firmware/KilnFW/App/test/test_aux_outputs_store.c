@@ -569,6 +569,15 @@ static void test_raw_verify_and_journal(void)
     fake_kv_script_next_write_status(HAL_IO);
     w.stage = 4;
     TEST_CHECK(!aux_convert_journal_write(&w), "a failed marker write is reported");
+    /* LOW-1 (rstfence review): the journal write honours the factory-reset writer fence. */
+    extern bool g_test_reset_refuses_writer;
+    w.stage = 5;
+    g_test_reset_refuses_writer = true;
+    TEST_CHECK(!aux_convert_journal_write(&w), "journal write refused while the reset fence is up");
+    g_test_reset_refuses_writer = false;
+    TEST_CHECK(aux_convert_journal_read(&j) && j.stage == 3, "refused journal write left the stored marker untouched");
+    TEST_CHECK(aux_convert_journal_write(&w) && aux_convert_journal_read(&j) && j.stage == 5,
+               "journal write works again once the fence is down");
     TEST_CHECK(aux_convert_journal_clear() && !aux_convert_journal_read(&j), "clear removes the marker");
 }
 

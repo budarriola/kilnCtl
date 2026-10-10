@@ -441,8 +441,22 @@ typedef struct {
     uint8_t chunk[256];
 } cfg_fs_write_scratch_t;
 
+static bool (*volatile s_write_refuse_fn)(void) = NULL;
+
+void cfg_fs_set_write_refuse_hook(bool (*fn)(void))
+{
+    s_write_refuse_fn = fn;
+}
+
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len)
 {
+    /* Factory-reset writer fence (pref_cfg_fs.h "WRITER FENCE"): this is the one raw write entry point, so
+     * kiln_cfg_store, firing_stats and the cfgfs restore job are covered without holding a save lock. The
+     * reset job's own task is exempt inside the predicate. Callers treat non-ESP_OK as "did not persist". */
+    bool (*refuse)(void) = s_write_refuse_fn;
+    if (refuse && refuse()) {
+        return ESP_ERR_INVALID_STATE;
+    }
     if (!rel_path || (!data && len > 0)) {
         return ESP_ERR_INVALID_ARG;
     }

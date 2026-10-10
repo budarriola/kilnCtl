@@ -165,6 +165,11 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
  * changes to take effect. */
 esp_err_t cfg_fs_write_atomic(const char *rel_path, const void *data, size_t len);
 
+/* Factory-reset writer fence: while the predicate returns true, cfg_fs_write_atomic() returns
+ * ESP_ERR_INVALID_STATE without touching the filesystem. main.c installs
+ * relay_authority_reset_refuses_writer(); NULL (host, recovery image) refuses nothing. */
+void cfg_fs_set_write_refuse_hook(bool (*fn)(void));
+
 esp_err_t cfg_fs_delete(const char *rel_path);
 
 /* Lists regular files directly inside `rel_dir` ("" for the base directory

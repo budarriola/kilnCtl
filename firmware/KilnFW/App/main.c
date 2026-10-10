@@ -225,6 +225,7 @@ void app_main(void)
     // Factory-reset writer fence (pref_cfg_fs.h): refuse cfg saves while the reset mark is set.
     pref_cfg_fs_set_reset_refuse_hook(relay_authority_reset_refuses_writer);
     cfg_fs_mount_set_write_refuse_hook(relay_authority_reset_refuses_writer);
+    cfg_fs_set_write_refuse_hook(relay_authority_reset_refuses_writer);
 
     static main_boot_ctx_t ctx;
 

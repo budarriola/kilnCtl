@@ -399,6 +399,10 @@ bool aux_convert_journal_read(aux_convert_journal_t *out)
 
 bool aux_convert_journal_write(const aux_convert_journal_t *j)
 {
+    /* Factory-reset writer fence: do not lazily re-init and write kiln_nvs after the reset erased it. */
+    if (relay_authority_reset_refuses_writer()) {
+        return false;
+    }
     if (j == NULL || nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
         return false;
     }

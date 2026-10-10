@@ -12143,6 +12143,33 @@ static void test_fscf_partition_absent_behaves_like_before(void)
                "the legacy run reloads from NVS alone and the failed persist did not touch it");
 }
 
+static bool s_fscf_refuse = false;
+static bool fscf_refuse_hook(void) { return s_fscf_refuse; }
+
+// MED-1 (rstfence review): the firing-stats writer's default write fn is the raw cfg_fs_write_atomic();
+// it must be refused by the factory-reset fence and allowed again (the reset job's exemption lives in the
+// predicate) when the fence is down.
+static void test_fscf_writer_refused_by_reset_fence(void)
+{
+    TEST_SECTION("firing_stats_cfg_fs: default writer refused while the reset fence is up");
+    reset_all_fscf();
+    TEST_CHECK(cfg_fs_init(FS_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    cfg_fs_set_write_refuse_hook(fscf_refuse_hook);
+    firing_stats_cfg_fs_write_fn_t w = firing_stats_cfg_fs_get_write_fn();
+    s_fscf_refuse = true;
+    TEST_CHECK(w("stats/fs9.dat", "x", 1) == ESP_ERR_INVALID_STATE, "write refused under the fence");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists("stats/fs9.dat", &exists) == ESP_OK && !exists, "nothing was written");
+    s_fscf_refuse = false;
+    TEST_CHECK(w("stats/fs9.dat", "x", 1) == ESP_OK, "write allowed again with the fence down (reset job exempt)");
+    {
+        char fp[128];
+        snprintf(fp, sizeof(fp), "%s/stats/fs9.dat", FS_SCRATCH_BASE);
+        remove(fp);
+    }
+    cfg_fs_set_write_refuse_hook(NULL);
+}
+
 static void test_fscf_migrates_then_prefers_file(void)
 {
     TEST_SECTION("firing stats cfg_fs: a legacy NVS history migrates to the file on first load; the file "
@@ -12585,6 +12612,7 @@ int main(void)
     test_task_entry_reads_before_taking_s_exec_lock();
     test_thermo_channels_read_fault_filter();
     test_fscf_partition_absent_behaves_like_before();
+    test_fscf_writer_refused_by_reset_fence();
     test_fscf_migrates_then_prefers_file();
     test_fscf_dual_write_stays_in_sync_across_repeated_persists();
     test_fscf_negative_no_file_write_means_file_never_catches_up();

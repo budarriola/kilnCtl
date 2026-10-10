@@ -26,6 +26,13 @@
 // instant uart_bridge_ext_run_on_flash_worker() is called while a job is
 // already running through it.
 #include "test_common.h"
+#include <stdio.h>
+#include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "esp_err.h"
 #include "esp_partition.h"
@@ -221,8 +228,46 @@ static void test_write_atomic_device_rejects_null_path(void)
     TEST_CHECK(err == ESP_ERR_INVALID_ARG, "NULL rel_path refused before ever touching the dispatch path");
 }
 
+static bool s_tcm_refuse = false;
+static bool tcm_refuse_hook(void) { return s_tcm_refuse; }
+
+// LOW-2 (rstfence review): cfg_fs_write_job_run()'s own on-the-worker refusal, independent of the
+// cfg_fs.c-level fence (not installed here). cfg_fs is mounted on a scratch dir so a write that
+// gets through is visible.
+static void test_write_job_refused_under_reset_fence(void)
+{
+    s_stub_bx_busy = false;
+    s_stub_on_flash_worker = false;
+    const char *base = "cfg_fs_test_mount_fence";
+#ifdef _WIN32
+    _mkdir(base);
+#else
+    mkdir(base, 0755);
+#endif
+    char tmpd[128];
+    snprintf(tmpd, sizeof(tmpd), "%s/.tmp", base);
+#ifdef _WIN32
+    _mkdir(tmpd);
+#else
+    mkdir(tmpd, 0755);
+#endif
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "scratch cfg_fs mounts");
+    cfg_fs_mount_set_write_refuse_hook(tcm_refuse_hook);
+    s_tcm_refuse = true;
+    TEST_CHECK(cfg_fs_write_atomic_device("job_fence.dat", "x", 1) == ESP_ERR_INVALID_STATE,
+               "job refused while the hook says so");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists("job_fence.dat", &exists) == ESP_OK && !exists, "refused job wrote nothing");
+    s_tcm_refuse = false;
+    TEST_CHECK(cfg_fs_write_atomic_device("job_fence.dat", "x", 1) == ESP_OK, "job runs with the hook clear");
+    remove("cfg_fs_test_mount_fence/job_fence.dat");
+    cfg_fs_mount_set_write_refuse_hook(NULL);
+    cfg_fs_deinit();
+}
+
 void run_test_cfg_fs_mount_reentrancy(void)
 {
+    test_write_job_refused_under_reset_fence();
     test_write_atomic_device_reentrant_call_does_not_redispatch();
     test_write_atomic_device_dispatches_when_not_on_worker();
     test_write_atomic_device_rejects_null_path();

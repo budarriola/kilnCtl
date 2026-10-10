@@ -454,6 +454,9 @@ bool relay_authority_heat_sweep_active(void) { return g_stub_heat_sweep_active; 
 // backup_restore_state.h -- factory_reset.c refuses while a backup restore is in flight.
 static bool g_stub_restore_in_flight = false;
 bool backup_import_restore_in_flight(void) { return g_stub_restore_in_flight; }
+// profiles_http.h -- factory_reset.c refuses while a zone-to-aux conversion is running (LOW-1).
+static bool g_stub_convert_busy = false;
+bool profiles_http_convert_busy(void) { return g_stub_convert_busy; }
 void relay_authority_reset_in_flight_end(void)
 {
     if (g_reset_in_flight_depth > 0) {
@@ -1507,6 +1510,13 @@ static void test_factory_reset_execute_refused_by_sweep_or_restore(void)
     g_stub_restore_in_flight = false;
     TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a backup restore in flight refuses the reset");
     TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a restore");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+
+    g_stub_convert_busy = true;
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_convert_busy = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a running zone-to-aux conversion refuses the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a conversion");
     TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
 }
 

@@ -218,6 +218,19 @@ static void test_zone_claim_arbitrates_profile_vs_autotune_per_zone(void)
 
 // HTTP audit L37 follow-up (LOW-5): the factory-reset in-flight mark and the sweep claim accessor,
 // against the REAL relay_authority.c counter (the factory_reset/sweep/starter tests use fakes).
+static void test_reset_refuses_writer_exempts_reset_job_task(void)
+{
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "no mark: nothing refused");
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "mark set, no job registered: refused");
+    relay_authority_reset_job_enter();
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "the registered reset-job task itself is exempt");
+    relay_authority_reset_job_exit();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "after the job exits the exemption is gone");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "mark cleared: nothing refused");
+}
+
 static void test_reset_in_flight_counter_is_a_depth_count(void)
 {
     TEST_CHECK(!relay_authority_reset_in_flight(), "clean slate: no reset in flight");
@@ -264,6 +277,7 @@ int main(void)
     test_never_seen_counts_as_down();
     test_traffic_resets_the_timer();
     test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
+    test_reset_refuses_writer_exempts_reset_job_task();
     test_reset_in_flight_counter_is_a_depth_count();
     test_heat_sweep_active_follows_the_sweep_claim();
 
