@@ -25,13 +25,13 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 194.
+Gate rows: 195.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 180 |
+| NEGATIVE-TESTED | 183 |
 | PARTIAL | 0 |
-| REVIEWED, NOT MUTATED | 14 |
+| REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
 | NOT AUDITED (pass 12 pending) | 0 |
 
@@ -122,7 +122,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/KilnFW_recovery/main/check_recovery_pico_proto.ps1` | NEGATIVE-TESTED | rest-10-08 | SRAM upper bound widened | RED; hand-restored; PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_upload.ps1` | NEGATIVE-TESTED | rest-10-08 | max_len + 1 | RED; hand-restored; PASS |
 | `firmware/KilnFW_recovery/main/check_recovery_wifi_policy.ps1` | NEGATIVE-TESTED | rest-10-08 | storage_rc >= 0 | RED; hand-restored; PASS |
-| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | heavy aggregator of individually audited host tests | see audit |
+| `firmware/SaftyFW/test/check_00_saftyfw_host_tests.ps1` | NEGATIVE-TESTED | fw-10-08 (release_gate_vacuity_audit_fw_2026-10-08) | link_frame trip mask shift | CAUGHT (RED), restored by negtest |
 | `firmware/SaftyFW/test/check_00_saftyfw_target_build.ps1` | NEGATIVE-TESTED | 09-17 | garbage top-level token inserted in link_frame.c | RED, ninja errors, exit 1; hand-restored; deleted build/ and rebuilt PASS 477/477 |
 | `firmware/SaftyFW/test/check_01_saftyfw_pushed_build.ps1` | REVIEWED, NOT MUTATED | 09-18 | cannot be driven locally (builds origin/main) | not exercised; a deliberate FAIL would need a broken commit pushed to origin/main |
 | `firmware/SaftyFW/test/check_no_sim_plant_guard_disable.ps1` | NEGATIVE-TESTED | rest-10-08 | fabricated header: macro 0 PASS, macro 1 FAIL, macro absent FAIL | hand test |
@@ -130,7 +130,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `firmware/SaftyFW/test/check_saftyfw_task_stack_budgets.ps1` | NEGATIVE-TESTED | 09-16c | 128 B volatile local in log_task_fn, from-scratch ARM rebuild | +128 B exactly, RED 600 B > 472 B; rebuilt from deleted build/ to 472 B |
 | `firmware/SaftyFW/test/test_regsp_margin_against_declared.py` | NEGATIVE-TESTED | rest-10-08 | margin compared to 10**9 | RED; hand-restored |
 | `firmware/SaftyFW/test/test_regsp_stale_literal.py` | NEGATIVE-TESTED | rest-10-08 | _invalidate_clobbered_regs call removed | RED; hand-restored |
-| `firmware/SaftyFW/tools/check_bootloader_builds.ps1` | REVIEWED, NOT MUTATED | rest-10-08 | full cmake/ninja pico bootloader build; not mutated in time | build failure propagates via throw/exit 1 |
+| `firmware/SaftyFW/tools/check_bootloader_builds.ps1` | NEGATIVE-TESTED | fw-10-08 (release_gate_vacuity_audit_fw_2026-10-08) | include renamed -> compile error | CAUGHT (RED), restored by negtest |
 | `firmware/SaftyFW/tools/check_guard_input_producers.ps1` | NEGATIVE-TESTED | 09-16c | tc_valid initializer line commented out in safety_core_build_input | RED, field named as having no producer; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_isolation.ps1` | NEGATIVE-TESTED | 09-16c | (a) link_task.h include in safety_core.c; (b) GPIO6 reference in link_task.c | both RED naming file and line; hand-restored; PASS |
 | `firmware/SaftyFW/tools/check_link_impl_isolation.ps1` | NEGATIVE-TESTED | 09-16c | CRC-named function added to safety_core.c | RED; hand-restored; PASS |
@@ -216,6 +216,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/PcTools/selfcheck.py` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | crc16.py poly 0x1021->0x1023; protocol.py FRAME_DELIM 0x7E->0x7F | RED both ([FAIL] lines) |
 | `tools/PcTools/tests/check_web_commission_cdp_driver.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | _web_commission_cdp.mjs aria-label === -> .includes, and css querySelector -> querySelectorAll().pop() (both MISSED 20/20 before: fixture had no decoys; fixture and test now add decoys and 3 assertions); postCursor reset to 0 | RED on assertion FAIL lines with the fix; GREEN without it; cursor mutation RED |
 | `firmware/KilnFW/App/test/check_ui_content_smoke.ps1` | NEGATIVE-TESTED | negtest 2026-10-08 (tools/negtest.ps1; docs/audits/release_gate_vacuity_audit_ui_2026-10-08.md) | zones_page.html auxrow class renamed; readiness_page.html class="fix" renamed; diagnostics_page.html set(flashChip) removed; nav.js /readiness href changed | RED on all 4 |
+| `tools/check_build_gate_reentrant.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (salvage of abandoned gatefix work) | build_gate.ps1 Exit-KilnBuildGate: `if ($Gate.Reentrant)` -> `if ($false)` (inner Exit tears down the outer slot) | CAUGHT (exit 1, assertion failure); baseline PASS; real tree unchanged |
 | `tools/check_build_gate_usage.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | check_commonfw_ctest.ps1: Start-Sleep inserted between gate enter and exit | RED; check returned to PASS on restore |
 | `tools/check_main_baseline.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | main_baseline_lib.ps1: other-lineage ancestor rule disabled | RED; check returned to PASS on restore; 2026-10-08 hardening (exact merge-base, signatures, start-state, forward-only pointer, host check) each reverted by hand, RED on its cases, restored |
 | `tools/check_build_lock_holder.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | build_lock.ps1: fail-loud throw stopped naming the holder (scenario 3) | RED (FAILED: 3: failure did not name the holder pid); check returned to PASS on restore |
