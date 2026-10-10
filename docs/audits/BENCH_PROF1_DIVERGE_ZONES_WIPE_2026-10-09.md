@@ -40,6 +40,6 @@ Most plausible given recent commits: path 1 or 2, i.e. an older firmware reading
 Verdict: cause unknown. The defect class is real: a boot that loses its only copy runs on all-zero config silently, and backup_import and load_config_preset cannot then recover it (backup_import.c:990,1338,1433 count-0 500 partial write; "no timing_profiles").
 
 Proposed fixes:
-- On a rejected zones file, keep a copy (zones.json.bad) instead of leaving it to be overwritten, and latch a visible load fault for the cfg-file path too (store.c:366 latches only for the NVS partition).
+- FIXED ab210508: On a rejected zones file, keep a copy (zones.json.bad) instead of leaving it to be overwritten, and latch a visible load fault for the cfg-file path too (store.c:366 latches only for the NVS partition).
 - Let backup_import and load_config_preset seed from a count-0 config (treat it as defaults and create the timing profiles first).
-- Capture the boot log of any zones load with `trustworthy=false` in diagnostics so the next wipe is attributable.
+- FIXED ab210508 (fix 4: ESP_LOGE naming the path; log_store holds binary firing/autotune records only, so the line reaches the UART log bridge, not a persisted store): Capture the boot log of any zones load with `trustworthy=false` in diagnostics so the next wipe is attributable.
