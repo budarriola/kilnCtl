@@ -987,27 +987,35 @@ def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wai
         return f"ok-started: {started}; not polling (wait_s={wait_s:g}); read recovery_apply_status"
     deadline = _monotonic() + wait_s
     last: Optional[dict] = None
+    lost_in_finalizing: Optional[dict] = None
     while True:
         _sleep(poll_interval_s)
         try:
             last = rhc.get_apply_status(resolved)
         except rhc.RecoveryHttpError as exc:
             if last is not None and last.get("phase") == "finalizing":
-                # The set_boot step was reached and the board restarts 1.5 s after
-                # "done"; a poller slower than that sees the SoftAP drop instead.
-                return (f"PROBABLE-OK: {started}; lost contact ({exc}) after the apply reached "
-                        f"'finalizing' (the set_boot step; last: {_fmt_apply(last)}), which is the "
-                        f"expected restart window. Not confirmed: check that the application came "
-                        f"up (get_heap_status / the board's fw_build) before relying on it")
+                lost_in_finalizing = last
+            if exc.status == 404 and lost_in_finalizing is not None:
+                return (f"PROBABLE-OK: {started}; apply_status now answers 404 after 'finalizing' (the "
+                        f"application is probably up; last: {_fmt_apply(lost_in_finalizing)}). Not confirmed: "
+                        f"check get_heap_status / fw_build")
             if exc.status == 404:
                 return (f"UNKNOWN: {started}; apply_status now answers 404 (the application may be up) but "
                         f"done was never observed (last: {_fmt_apply(last) if last else 'none'}) -- check "
                         f"by hand")
+            if _monotonic() >= deadline and lost_in_finalizing is not None:
+                # set_boot can still fail after 'finalizing' (set_boot_failed), so
+                # only contact staying lost through the whole deadline counts.
+                return (f"PROBABLE-OK: {started}; lost contact ({exc}) after the apply reached "
+                        f"'finalizing' and never regained it by the deadline (last: "
+                        f"{_fmt_apply(lost_in_finalizing)}), the expected restart window. Not confirmed: "
+                        f"check that the application came up (get_heap_status / fw_build) before relying on it")
             if _monotonic() >= deadline:
                 return (f"UNKNOWN: {started}; lost contact ({exc}) and done was never observed (last: "
                         f"{_fmt_apply(last) if last else 'none'}) -- the board may be rebooting or hung; "
                         f"check by hand")
             continue
+        lost_in_finalizing = None
         phase = last.get("phase")
         if phase == "done":
             return (f"ok - {started}; apply done: {_fmt_apply_final(last)}. The board now reboots into the "

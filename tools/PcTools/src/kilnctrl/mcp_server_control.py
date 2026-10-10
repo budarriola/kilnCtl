@@ -516,9 +516,12 @@ def control_set_zone_model(zone: int, k_dc: float, tau_s: float, dead_time_s: fl
     z = _zone_by_index(zones_json.get("zones") or [], zone)
     if z is None:
         return f"FAILED: zone {zone} missing from the GET /api/zones read-back (host={resolved})"
+    # model_k_dc prints %.9g (real values 1e-5..1e-2), so an absolute 0.06 would
+    # call a non-landed write verified; tau/dead time print %.1f.
     bad = [f"{n}: wanted {w}, board reports {z.get(n)!r}"
-           for n, w in (("model_k_dc", k_dc), ("model_tau_s", tau_s), ("model_dead_time_s", dead_time_s))
-           if not _close_enough(w, z.get(n), 0.06)]
+           for n, w, tol in (("model_k_dc", k_dc, 1e-9), ("model_tau_s", tau_s, 0.06),
+                             ("model_dead_time_s", dead_time_s, 0.06))
+           if not _close_enough(w, z.get(n), tol)]
     if bad:
         return (f"FAILED: zone {zone} model write was acknowledged but read-back disagrees -- "
                 + "; ".join(bad) + f" (host={resolved}). Do not trust this as applied.")

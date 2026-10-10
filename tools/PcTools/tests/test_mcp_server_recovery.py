@@ -1034,6 +1034,14 @@ class ApplyStagedTest(_ApplyBase):
         self.assertTrue(out.startswith("PROBABLE-OK"), out)
         self.assertIn("application came up", out)
 
+    def test_finalizing_then_lost_then_failed_reports_failed(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable(),
+                                  _apply(phase="failed", result="set_boot_failed")],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("set_boot_failed", out)
+
     def test_lost_before_finalizing_is_still_unknown(self):
         board = ApplyBoard(apply=[_apply(), _apply(phase="copying"), _unreachable()],
                            post_reply=_accepted())

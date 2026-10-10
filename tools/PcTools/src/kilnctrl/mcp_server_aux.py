@@ -20,6 +20,7 @@ from typing import Optional
 
 from . import aux_http_client as ahc
 from . import mcp_server_core as _core
+from . import readiness_http_client
 from . import zones_http_client
 from .io_expander import IoQueryError
 
@@ -282,6 +283,13 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
             return (f"DRY RUN (pass confirm=True, exactly, to resume) -- would ask the firmware to finish the "
                     f"interrupted conversion of zone {zone} to aux relay {resume_relay} (host={resolved})")
         try:
+            zones_before = zones_http_client.get_zones(resolved)
+            aux_before = ahc.get_aux_outputs(resolved)
+        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+            return f"error: precheck read failed before resume (host={resolved}): {exc}; nothing written"
+        zb_self = _zone_entry(zones_before, zone)
+        want_tc = zone if zb_self and zb_self.get("thermo_mask") else -1
+        try:
             ack = ahc.post_move_zone_to_aux(resolved, zone, resume_relay=resume_relay)
         except ahc.AuxHttpError as exc:
             return _gate_or_error(exc, "POST /api/zones move_zone_to_aux resume", resolved)
@@ -291,7 +299,9 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
             zones_after = zones_http_client.get_zones(resolved)
             aux_after = ahc.get_aux_outputs(resolved)
             profiles_after = ahc.get_stored_profile_rules(resolved)
-        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+            readiness_after = readiness_http_client.get_readiness(resolved)
+        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError,
+                readiness_http_client.ReadinessHttpError) as exc:
             return (f"error: resume POST answered ok, but the confirming re-read failed (host={resolved}): "
                     f"{exc} -- state UNKNOWN, re-check zones, aux outputs and profiles before trusting this")
         bad = []
@@ -299,9 +309,24 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
         if za is None or za.get("zone_type") != 0 or za.get("relay_mask") != 0:
             bad.append(f"zone {zone} is not a relay-less heater (zone_type={za and za.get('zone_type')!r}, "
                        f"relay_mask={za and za.get('relay_mask')!r})")
+        for i in range(3):
+            zb, zn = _zone_entry(zones_before, i), _zone_entry(zones_after, i)
+            if i != zone and zb is not None:
+                for k in ("zone_type", "relay_mask", "thermo_mask"):
+                    if (zb or {}).get(k) != (zn or {}).get(k):
+                        bad.append(f"zone {i} {k} changed")
         ea = ahc.aux_entry(aux_after, resume_relay)
-        if ea is None or not ea.get("enabled") or ea.get("conflicted"):
-            bad.append(f"aux relay {resume_relay} does not read enabled/unconflicted: {ea!r}")
+        if (ea is None or not ea.get("enabled") or ea.get("conflicted")
+                or ea.get("tc_zone") != want_tc):
+            bad.append(f"aux relay {resume_relay} does not read enabled/unconflicted with "
+                       f"tc_zone={want_tc}: {ea!r}")
+        for r in range(1, ahc.AUX_RELAY_COUNT + 1):
+            if r != resume_relay and ahc.aux_entry(aux_before, r) != ahc.aux_entry(aux_after, r):
+                bad.append(f"aux relay {r} entry changed")
+        marker = next((it for it in readiness_after.get("items", [])
+                       if it.get("key") == "zone_aux_conversion"), None)
+        if marker is not None:
+            bad.append(f"readiness still lists zone_aux_conversion ({marker.get('detail')!r})")
         if _count_rules(profiles_after, zone):
             bad.append(f"{_count_rules(profiles_after, zone)} rule(s) still target zone {zone}")
         if bad:

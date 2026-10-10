@@ -86,6 +86,23 @@ class ControlSetZoneModelHappyPathTests(unittest.TestCase):
         self.assertIn("model_tau_s", result)
 
 
+class ControlSetZoneModelKdcToleranceTests(unittest.TestCase):
+    def test_small_k_dc_not_landed_fails(self):
+        with _idle(), _host(), _http(k=0.002), unittest.mock.patch.object(
+            mcp_server._control, "set_zone_model", return_value=OkReason(ok=True)
+        ):
+            result = mcp_server.control_set_zone_model(1, 0.005, 300.0, 15.0, confirm=True)
+        self.assertTrue(result.startswith("FAILED"), result)
+        self.assertIn("model_k_dc", result)
+
+    def test_small_k_dc_landed_ok(self):
+        with _idle(), _host(), _http(k=0.00500001), unittest.mock.patch.object(
+            mcp_server._control, "set_zone_model", return_value=OkReason(ok=True)
+        ):
+            result = mcp_server.control_set_zone_model(1, 0.005, 300.0, 15.0, confirm=True)
+        self.assertTrue(result.startswith("ok"), result)
+
+
 class ControlSetZoneModelMalformedFrameTests(unittest.TestCase):
     """The reply this tool's client waits on is decoded by
     devices.parse_control_response(); prove a truncated SET_ZONE_MODEL reply

@@ -204,9 +204,12 @@ class ConvertTest(unittest.TestCase):
             p.assert_not_called()
             g.assert_not_called()
 
-    def _resume(self, zones_after=None, aux_after=None):
+    def _resume(self, zones_after=None, aux_after=None, readiness=None, zones_before=None, aux_before=None):
+        zs = [zones_before or _zones_after(), zones_after or _zones_after()]
+        ax = [aux_before or _aux_after(), aux_after or _aux_after()]
         with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p,              unittest.mock.patch.object(zones_http_client, "get_zones",
-                                        return_value=zones_after or _zones_after()),              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=aux_after or _aux_after()),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value={0: []}):
+                                        side_effect=zs),              unittest.mock.patch.object(ahc, "get_aux_outputs", side_effect=ax),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value={0: []}),              unittest.mock.patch.object(ma.readiness_http_client, "get_readiness",
+                                        return_value=readiness or {"items": []}):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
         return r, p
 
@@ -223,9 +226,34 @@ class ConvertTest(unittest.TestCase):
         r, _ = self._resume(aux_after=_aux())
         self.assertTrue(r.startswith("FAILED"), r)
 
+    def test_resume_wrong_tc_zone_fails_loud(self):
+        r, _ = self._resume(aux_after=_aux_after(tc=2))
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("tc_zone", r)
+
+    def test_resume_marker_still_present_fails_loud(self):
+        r, _ = self._resume(readiness={"items": [{"key": "zone_aux_conversion", "detail": "stage 2"}]})
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("zone_aux_conversion", r)
+
+    def test_resume_other_zone_changed_fails_loud(self):
+        za = _zones_after()
+        za["zones"][2]["relay_mask"] = 0
+        r, _ = self._resume(zones_after=za)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("zone 2", r)
+
+    def test_resume_other_aux_changed_fails_loud(self):
+        aa = _aux({RELAY: {"enabled": True, "tc_zone": ZONE}, 1: {"enabled": True}})
+        r, _ = self._resume(aux_after=aa)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("aux relay 1", r)
+
     def test_resume_409_is_a_refusal(self):
         exc = ahc.AuxHttpError("x", 409, "no interrupted conversion is recorded -- nothing to resume")
-        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", side_effect=exc):
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", side_effect=exc), \
+             unittest.mock.patch.object(zones_http_client, "get_zones", return_value=_zones()), \
+             unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
         self.assertTrue(r.startswith("refused"), r)
 

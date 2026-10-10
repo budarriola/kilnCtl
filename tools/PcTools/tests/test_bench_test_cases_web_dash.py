@@ -342,10 +342,14 @@ class Dash10to12(unittest.TestCase):
         self.assertEqual(run("WEB-DASH-10", mkc({"recovery_mode": True})).verdict, Verdict.INCONCLUSIVE)
 
     def test_11(self):
-        pages = {"/app.js": "kc-setup-banner /api/readiness 'not_done'"}
+        pages = {"/app.js": "kc-setup-banner /api/readiness 'not_done' setSetupBanner(incomplete) href = '/setup'"}
 
-        def mkc(s):
-            return mk({"/api/readiness": (200, {"items": [{"key": "a", "status": s}]})}, pages)
+        def mkc(s, pg=pages):
+            return mk({"/api/readiness": (200, {"items": [{"key": "a", "status": s}]})}, pg)
+
+        weak = {"/app.js": "kc-setup-banner /api/readiness 'not_done'"}
+        self.assertEqual(run("WEB-DASH-11", mkc("not_done", weak)).verdict, Verdict.FAIL)
+        self.assertEqual(run("WEB-DASH-11", mkc("ok", weak)).verdict, Verdict.PASS)
 
         self.assertEqual(run("WEB-DASH-11", mkc("not_done")).verdict, Verdict.PASS)
         self.assertEqual(run("WEB-DASH-11", mkc("pending")).verdict, Verdict.FAIL)

@@ -519,7 +519,9 @@ def _case_dash11(ctx: dict) -> CaseResult:
     obs = {"banner_expected": expected, "item_count": len(items)}
     needed = ["kc-setup-banner", "/api/readiness", "'not_done'"]
     if expected:
-        needed.append("kc-setup-banner")  # banner expected visible: its element must exist in the served script
+        # Banner expected visible: the served script must also carry the code that
+        # shows it from the not_done scan, and the wizard link it offers.
+        needed += ["setSetupBanner(incomplete)", "href = '/setup'"]
     missing, err = _static_missing(ctx, "/app.js", needed)
     if err:
         return CaseResult(Verdict.FAIL, reason=err, observed=obs)

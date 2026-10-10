@@ -2650,6 +2650,21 @@ def _case_ote11(ctx: dict) -> CaseResult:
         if str(push_text).lstrip().lower().startswith("ok-with-warning"):
             reason += f"; push reported a WARNING: {str(push_text)[:300]}"
             observed["push_warning"] = True
+            # The warning means boot_guard was not cleared; only a read-back
+            # showing persisted_count 0 turns that into a pass.
+            try:
+                bg = (ctx.get("_boot_guard_fn") or
+                      (lambda: _ota_client(ctx).get_boot_guard_status(app_host)))()
+                pc = bg.get("persisted_count") if isinstance(bg, dict) else None
+            except Exception as exc:
+                pc = None
+                observed["boot_guard_readback_error"] = f"{type(exc).__name__}: {exc}"
+            observed["boot_guard_persisted_count"] = pc
+            if pc != 0:
+                final = CaseResult(Verdict.INCONCLUSIVE, observed=observed,
+                                   reason=reason + f"; boot_guard NOT cleared and the read-back shows "
+                                          f"persisted_count={pc!r} (need 0), so a recovery loop is possible")
+                return final
         final = CaseResult(Verdict.PASS, reason=reason, observed=observed)
         return final
     finally:

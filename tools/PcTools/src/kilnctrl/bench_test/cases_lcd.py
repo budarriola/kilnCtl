@@ -6678,9 +6678,13 @@ _NEUTRAL_RGB = (0x9A, 0xA0, 0xAE)  # UI_THEME_COLOR_NEUTRAL == TEXT_SECONDARY
 _LCD18_WARN_DX = -40  # warning slot sits one icon (36 px) + 4 px gap left of the gear
 
 
-def _judge_lcd07(page, states, running: bool) -> CaseResult:
-    """states: per-pill 'on' | 'neutral' | 'other' | None (unsampled)."""
-    obs = {"page": page, "pill_states": list(states), "running": running}
+def _judge_lcd07(page, states, running: bool, expected_pills=None) -> CaseResult:
+    """states: per-pill 'on' | 'neutral' | 'other' | None (unsampled).
+    expected_pills: 0-based pill indices (relays) of the running profile's zones,
+    aux pills already excluded; None means the legacy zone-0-only expectation."""
+    expected = {0} if expected_pills is None else set(expected_pills)
+    obs = {"page": page, "pill_states": list(states), "running": running,
+           "expected_on_pills": sorted(expected)}
     if page != "home":
         return CaseResult(Verdict.FAIL, reason=f"expected page 'home', got {page!r}", observed=obs)
     if any(s is None for s in states):
@@ -6688,10 +6692,15 @@ def _judge_lcd07(page, states, running: bool) -> CaseResult:
     if any(s == "other" for s in states):
         return CaseResult(Verdict.INCONCLUSIVE, reason="a rail pill reads neither ON nor NEUTRAL (rail geometry or camera cast); not judged as FAIL", observed=obs)
     if running:
-        if states[0] == "on":
+        if not expected:
+            return CaseResult(Verdict.INCONCLUSIVE, reason="running profile drives no non-aux relay pill; nothing to judge", observed=obs)
+        stray = [i for i, st in enumerate(states) if st == "on" and i not in expected]
+        if stray:
+            return CaseResult(Verdict.FAIL, reason=f"pill(s) {stray} ON but their relays are not driven by the running profile's zones", observed=obs)
+        off = [i for i in sorted(expected) if states[i] != "on"]
+        if not off:
             return CaseResult(Verdict.PASS, observed=obs)
-        if states[0] == "neutral":
-            return CaseResult(Verdict.INCONCLUSIVE, reason="zone 0 relay pill OFF at sample time (PWM off-window); not a defect by itself", observed=obs)
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"expected pill(s) {off} OFF at sample time (PWM off-window); not a defect by itself", observed=obs)
     if not running and all(s == "neutral" for s in states):
         return CaseResult(Verdict.PASS, observed=obs)
     return CaseResult(Verdict.FAIL, reason="idle rail pills are not all NEUTRAL" if not running else "unexpected pill state", observed=obs)
@@ -6705,10 +6714,25 @@ def _case_lcd07(ctx: dict) -> CaseResult:
     if page != "home":
         return _judge_lcd07(page, [None] * 4, False)
     try:
-        running = srv._profiles.get_exec_status().state_name == "running"
+        exec_status = srv._profiles.get_exec_status()
+        running = exec_status.state_name == "running"
     except Exception as exc:  # noqa: BLE001
         return CaseResult(Verdict.INCONCLUSIVE,
                           reason=f"executor state unreadable ({type(exc).__name__}); cannot tell idle from running")
+    expected_pills = None
+    if running:
+        # Relay pills driven by the running profile: relay_mask of every zone in its zone_mask.
+        try:
+            from .. import zones_http_client
+            zones = zones_http_client.get_zones(ctx.get("host")) if ctx.get("_get_zones_config") is None                 else ctx["_get_zones_config"](ctx.get("host"))
+            rmask = 0
+            for z in zones.get("zones") or []:
+                if (exec_status.zone_mask >> z.get("index", -1)) & 1:
+                    rmask |= int(z.get("relay_mask") or 0)
+            expected_pills = {i for i in range(4) if (rmask >> i) & 1}
+        except Exception as exc:  # noqa: BLE001
+            return CaseResult(Verdict.INCONCLUSIVE,
+                              reason=f"zone relay masks unreadable ({type(exc).__name__}); cannot tell which pills should be ON")
     image_path = _capture(ctx, "lcd07_rail.jpg")
     if not image_path:
         return CaseResult(Verdict.INCONCLUSIVE, reason="camera capture failed")
@@ -6732,7 +6756,9 @@ def _case_lcd07(ctx: dict) -> CaseResult:
     # from the all-off check.
     aux = set(ctx.get("lcd07_aux_pills") or ())
     judged_states = [("neutral" if (i in aux and st == "on") else st) for i, st in enumerate(states)]
-    result = _judge_lcd07(page, judged_states, running)
+    if expected_pills is not None:
+        expected_pills -= aux
+    result = _judge_lcd07(page, judged_states, running, expected_pills)
     if aux:
         result.observed = dict(result.observed or {}, aux_pills_excluded=sorted(aux), raw_pill_states=list(states))
     result.evidence = [image_path]

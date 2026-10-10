@@ -30,6 +30,17 @@ class Lcd07(unittest.TestCase):
     def test_running_zone0_off_inconclusive(self):
         self.assertEqual(C._judge_lcd07("home", ["neutral"] * 4, True).verdict, V.INCONCLUSIVE)
 
+    def test_running_requires_all_expected_pills(self):
+        on_off = ["on", "neutral", "neutral", "neutral"]
+        self.assertEqual(C._judge_lcd07("home", on_off, True, {0, 1}).verdict, V.INCONCLUSIVE)
+        self.assertEqual(C._judge_lcd07("home", ["on", "on", "neutral", "neutral"], True, {0, 1}).verdict, V.PASS)
+
+    def test_running_stray_pill_fails(self):
+        self.assertEqual(C._judge_lcd07("home", ["on", "neutral", "on", "neutral"], True, {0}).verdict, V.FAIL)
+
+    def test_running_zone1_only_zone0_pill_not_enough(self):
+        self.assertEqual(C._judge_lcd07("home", ["on", "neutral", "neutral", "neutral"], True, {1}).verdict, V.FAIL)
+
     def test_other_color_inconclusive_not_fail(self):
         self.assertEqual(C._judge_lcd07("home", ["other"] + ["neutral"] * 3, False).verdict, V.INCONCLUSIVE)
 

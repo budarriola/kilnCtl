@@ -58,6 +58,17 @@ def _ctx(**over):
 
 
 class Ote11Test(unittest.TestCase):
+    def test_warning_without_boot_guard_clear_is_inconclusive(self):
+        for bg in ({"persisted_count": 2}, {}):
+            c = _ctx(_recovery_push_fn=lambda: "ok-with-warning - boot_guard was NOT cleared",
+                     _boot_guard_fn=lambda bg=bg: bg)
+            r = C._case_ote11(c)
+            self.assertEqual(r.verdict, Verdict.INCONCLUSIVE, (bg, r.reason))
+
+    def test_warning_with_boot_guard_zero_passes(self):
+        c = _ctx(_recovery_push_fn=lambda: "ok-with-warning - x", _boot_guard_fn=lambda: {"persisted_count": 0})
+        self.assertEqual(C._case_ote11(c).verdict, Verdict.PASS)
+
     def test_registered(self):
         self.assertIsNotNone(get_case("OT-E11").judge)
         self.assertIsNotNone(get_case("LCD-20").judge)
