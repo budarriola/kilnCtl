@@ -25,7 +25,7 @@
  * timed out simply never copies out, leaving the next one to overwrite it.
  * Declared extern in wifi_prov_internal.h: wifi_prov.c's owner_task() also
  * passes this straight to do_scan() for the CMD_SCAN case. */
-wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
+EXT_RAM_BSS_ATTR wifi_prov_scan_result_t s_scan_stage[WIFI_OWNER_SCAN_STAGE_MAX];
 
 /* How long a scan's producer waits. A full active scan of every 2.4GHz
  * channel at 50-150ms dwell is seconds, not milliseconds, and the existing
@@ -937,7 +937,7 @@ esp_err_t do_scan(wifi_prov_scan_result_t *results, size_t max_results, size_t *
         found = (uint16_t)max_results;
     }
 
-    static wifi_ap_record_t records[20];
+    static EXT_RAM_BSS_ATTR wifi_ap_record_t records[20]; /* driver memcpy target, not DMA */
     uint16_t to_fetch = found > (sizeof(records) / sizeof(records[0]))
                             ? (uint16_t)(sizeof(records) / sizeof(records[0]))
                             : found;

@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
 #include "esp_log.h"
 
@@ -132,7 +133,7 @@ typedef struct {
     uint32_t last_activity_ms;
     login_backoff_state_t backoff;
 } login_lockout_slot_t;
-static login_lockout_slot_t s_login_lockouts[LOGIN_LOCKOUT_MAX_IPS];
+static EXT_RAM_BSS_ATTR login_lockout_slot_t s_login_lockouts[LOGIN_LOCKOUT_MAX_IPS];
 
 // Reserved shared slot for every client classified LOGIN_IP_SCOPE_REMOTE
 // (login_ip_scope.h) -- deliberately NOT one of s_login_lockouts[] above,

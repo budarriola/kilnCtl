@@ -4,6 +4,7 @@
 #include <assert.h>
 
 #include "esp_log.h"
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- s_touch_groups: LVGL-task only, no ISR/DMA/flash */
 
 /* ui_theme.c -- companion to ui_theme.h's constants, TODO.md 10.4 ("Touch
  * hit-testing"). See ui_theme.h's "Touch hit-area sizing" comment block for
@@ -90,7 +91,7 @@ typedef struct {
     size_t count;
 } touch_group_t;
 
-static touch_group_t s_touch_groups[UI_THEME_TOUCH_GROUP_MAX_GROUPS];
+static EXT_RAM_BSS_ATTR touch_group_t s_touch_groups[UI_THEME_TOUCH_GROUP_MAX_GROUPS];
 static size_t s_touch_group_count = 0;
 
 void ui_theme_register_touch_group(lv_obj_t **widgets, size_t count)

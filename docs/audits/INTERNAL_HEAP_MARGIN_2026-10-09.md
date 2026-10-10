@@ -70,3 +70,8 @@ Offsetting shrinkage in the same diff: `s_profiles` -3396, `adaptive_tune_zones`
 - Biggest safe lever: shrink `kiln_cfg_swap` and `pico_auto_update` to measured high-water (each 8 kB, cannot go to PSRAM). Needs a bench run to measure, so deferred.
 - Cheapest PSRAM candidates that avoid flash paths: web-auth tables (~2.7 kB), `s_touch_groups` (1.9 kB), scan buffers (1.8 kB); audit each against the persist_scratch.h rule (never pass a PSRAM pointer as a flash write source).
 - To close the remaining uncertainty: take a `heap stage` boot-log series on the current build and on one built from `402ab01a5123` in a clean worktree.
+
+### 5c. PSRAM moves applied (no board, no target build)
+
+Moved to `EXT_RAM_BSS_ATTR` (`CONFIG_SPIRAM_ALLOW_BSS_SEG_EXTERNAL_MEMORY=y`; host stub defines it empty): `s_login_lockouts`, `s_totp_lockouts`, `s_web_auth_table` (~2.7 kB; plain data, locks are separate handles), `s_touch_groups` (1904 B; LVGL task only), `s_scan_stage`, `records[20]` in `do_scan` (driver memcpy target, not DMA), `scan_results[20]` in `wifi_prov_link.c` (~3 kB together). Expected `.dram0.bss` reduction about 7.6 kB; NOT measured (target build is not run by this pass, rules forbid it) -- measure with `xtensa-esp32s3-elf-size -A` on the next full build and ratchet `check_kilnfw_dram_bss_budget`.
+Left alone: `pico_image_source.c s_scan_buf` (passed straight to `esp_partition_read`). `kiln_cfg_swap` worker is a persistent queue worker (serves on-demand applies), so it cannot self-delete without a lazy-spawn redesign; flash writes, so not PSRAM. `pico_auto_update` uses dynamic `xTaskCreate` + `vTaskDelete(NULL)`, so its 8 kB stack is freed after the idle task reaps it.

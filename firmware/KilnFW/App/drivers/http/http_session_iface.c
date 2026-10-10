@@ -20,6 +20,7 @@
 #include "http_session_iface.h"
 
 #include <string.h>
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
 #include "psa/crypto.h"
 
@@ -27,7 +28,7 @@
 #include "web_auth_session.h"
 #include "web_auth_store.h" // web_auth_policy_t, web_auth_store_load_policy()
 
-static web_auth_table_t s_web_auth_table;
+static EXT_RAM_BSS_ATTR web_auth_table_t s_web_auth_table;
 static bool s_web_auth_table_init_done = false;
 
 web_auth_table_t *http_session_table(void) {

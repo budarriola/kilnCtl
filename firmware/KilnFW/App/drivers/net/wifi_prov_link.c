@@ -17,6 +17,7 @@
 
 #include <ctype.h>
 #include <string.h>
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -283,7 +284,7 @@ static void select_and_apply_join_candidate(void)
     int best_idx = -1;
     int8_t best_rssi = INT8_MIN;
 
-    static wifi_prov_scan_result_t scan_results[20];
+    static EXT_RAM_BSS_ATTR wifi_prov_scan_result_t scan_results[20];
     size_t scan_count = 0;
     esp_err_t scan_err =
         do_scan(scan_results, sizeof(scan_results) / sizeof(scan_results[0]), &scan_count);

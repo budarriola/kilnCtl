@@ -63,6 +63,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
 #include "esp_log.h"
 
@@ -191,7 +192,7 @@ typedef struct {
     uint32_t last_activity_ms;
     totp_backoff_state_t backoff;
 } totp_lockout_slot_t;
-static totp_lockout_slot_t s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS];
+static EXT_RAM_BSS_ATTR totp_lockout_slot_t s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS];
 static totp_lockout_slot_t s_remote_totp_slot;
 static SemaphoreHandle_t s_totp_lock;
 
