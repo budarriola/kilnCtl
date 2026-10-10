@@ -217,7 +217,21 @@ def adaptive_tune_revert(zone: int, confirm: bool = False, host: Optional[str] =
         return f"error: {exc} (host={resolved})"
     if not result.get("ok"):
         return f"error: board reported failure: {result.get('reason', result)} (host={resolved})"
-    return f"ok - zone {zone} adaptive-tune refinement reverted (host={resolved})"
+    # Read back: a successful revert consumes the stored prior gains, so the
+    # zone's revert_available must now read False (same idiom as set_enabled).
+    try:
+        rows = at_http.get_status(resolved)
+        row = next((r for r in rows if getattr(r, "zone", None) == zone), None)
+    except Exception as exc:  # noqa: BLE001
+        return (f"UNVERIFIED - zone {zone} adaptive-tune revert POST accepted but the read-back failed "
+                f"({exc}); gains UNKNOWN (host={resolved})")
+    if row is None:
+        return (f"UNVERIFIED - zone {zone} adaptive-tune revert POST accepted but GET /api/adaptive_tune "
+                f"has no row for the zone; gains UNKNOWN (host={resolved})")
+    if bool(row.revert_available):
+        return (f"FAILED - zone {zone} adaptive-tune revert POST accepted but status still reads "
+                f"revert_available=True, so the gains were not restored (host={resolved})")
+    return f"ok - zone {zone} adaptive-tune refinement reverted, read back verified (host={resolved})"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

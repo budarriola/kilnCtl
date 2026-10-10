@@ -104,11 +104,30 @@ class RevertConfirmGateTest(unittest.TestCase):
         mock_revert.assert_not_called()
 
     def test_proceeds_with_confirm_true(self):
-        with unittest.mock.patch.object(at_http, "revert",
-                                         return_value={"ok": True}) as mock_revert:
+        row = unittest.mock.MagicMock(zone=2, revert_available=False)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]),                 unittest.mock.patch.object(at_http, "revert",
+                                           return_value={"ok": True}) as mock_revert:
             result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
         mock_revert.assert_called_once_with("10.0.0.5", 2)
         self.assertTrue(result.startswith("ok"))
+        self.assertIn("read back verified", result)
+
+    def test_mismatch_reports_failed(self):
+        row = unittest.mock.MagicMock(zone=2, revert_available=True)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]),                 unittest.mock.patch.object(at_http, "revert", return_value={"ok": True}):
+            result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("FAILED"), result)
+
+    def test_reread_failure_reports_unverified(self):
+        with unittest.mock.patch.object(
+                at_http, "get_status", side_effect=at_http.AdaptiveTuneHttpError("boom")),                 unittest.mock.patch.object(at_http, "revert", return_value={"ok": True}):
+            result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("UNVERIFIED"), result)
+
+    def test_missing_row_reports_unverified(self):
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[]),                 unittest.mock.patch.object(at_http, "revert", return_value={"ok": True}):
+            result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("UNVERIFIED"), result)
 
     def test_board_failure_reason_surfaced(self):
         with unittest.mock.patch.object(
