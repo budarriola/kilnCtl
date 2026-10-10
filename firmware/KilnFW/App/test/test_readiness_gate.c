@@ -511,8 +511,45 @@ static void test_messages_are_json_safe(void)
                "READINESS_GATE_OK maps to no item key -- nothing blocked, nothing to point at");
 }
 
+/* fwbatch13 LOW-2: every profile-start caller sizes its refusal buffer from READINESS_GATE_MSG_CAP. */
+static void test_start_callers_size_buffers_from_cap(void)
+{
+    TEST_SECTION("profile-start callers size err_msg from READINESS_GATE_MSG_CAP");
+    static const struct { const char *rel; const char *needle; } files[] = {
+        { "../drivers/bridge/uart_bridge_ext_control.c", "static char err_msg[READINESS_GATE_MSG_CAP];\n                err_msg[0] = '\\0';\n                bool ok = profile_executor_run" },
+        { "../drivers/http/dashboard_exec_http.c", "static char err_msg[READINESS_GATE_MSG_CAP];\n    err_msg[0] = '\\0';" },
+        { "../drivers/ui/ui_page_home_actions.c", "char err_msg[READINESS_GATE_MSG_CAP]" },
+        { "../drivers/ui/ui_page_profile_detail.c", "char err_msg[READINESS_GATE_MSG_CAP]" },
+    };
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char path[600];
+        snprintf(path, sizeof(path), "%s", __FILE__);
+        char *slash = strrchr(path, '/');
+        char *bslash = strrchr(path, '\\');
+        if (bslash && (!slash || bslash > slash)) slash = bslash;
+        TEST_CHECK(slash != NULL, "cannot derive the test directory from __FILE__");
+        if (!slash) return;
+        snprintf(slash + 1, sizeof(path) - (size_t)(slash + 1 - path), "%s", files[i].rel);
+        FILE *f = fopen(path, "rb");
+        TEST_CHECK(f != NULL, "caller source readable");
+        if (!f) return;
+        static char src[600000];
+        size_t n = fread(src, 1, sizeof(src) - 1, f);
+        fclose(f);
+        src[n] = 0;
+        /* normalise CRLF so the multi-line needle matches */
+        size_t w = 0;
+        for (size_t r = 0; r < n; r++) if (src[r] != '\r') src[w++] = src[r];
+        src[w] = 0;
+        char msg[200];
+        snprintf(msg, sizeof(msg), "%s sizes its readiness refusal buffer from READINESS_GATE_MSG_CAP", files[i].rel);
+        TEST_CHECK(strstr(src, files[i].needle) != NULL, msg);
+    }
+}
+
 int main(void)
 {
+    test_start_callers_size_buffers_from_cap();
     test_fully_ready_board_is_allowed();
     test_recovery_mode_alone_refuses();
     test_safety_trip_alone_refuses();

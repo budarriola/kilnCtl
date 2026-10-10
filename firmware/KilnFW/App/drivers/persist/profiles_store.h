@@ -46,6 +46,12 @@ bool profiles_http_get(uint8_t id, profile_t *out);
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap);
 
+/* Same as profiles_http_save(), plus *out_persisted (may be NULL): false when the slot was applied in RAM but
+ * the storage save failed ("applied live, will not survive a reboot"). Callers that discard their only copy of
+ * the data on success (live-edit save_as / overwrite) must check it and keep that copy when false. */
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
+
 /* Same erase-and-clear profile_delete_post_handler() runs. Returns false
  * (no-op) for an out-of-range or already-unused id. Pure storage, but kept
  * here alongside get/save (rather than only in profiles_http.h) because a

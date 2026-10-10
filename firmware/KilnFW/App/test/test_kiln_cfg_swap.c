@@ -478,6 +478,8 @@ bool zones_config_export_blob(void *out, size_t out_cap)
     memcpy(out, s_live_blob, s_live_blob_len);
     return true;
 }
+#define ZONES_IMPORT_REASON_RUN_CLAIMED "a profile or autotune run is active -- retry when it ends"
+static int s_zones_import_claimed_from_call = 0; /* >0: calls from this number on are refused as RUN_CLAIMED */
 static bool s_zones_import_should_fail = false;
 static bool s_import_writes_wrong_bytes = false;
 static int s_zones_import_call_count = 0;
@@ -485,6 +487,12 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
 {
     s_zones_import_call_count++;
     s_import_time_autosave_override = s_autosave_override;
+    if (s_zones_import_claimed_from_call > 0 && s_zones_import_call_count >= s_zones_import_claimed_from_call) {
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "%s", ZONES_IMPORT_REASON_RUN_CLAIMED);
+        }
+        return false;
+    }
     if (s_zones_import_should_fail) {
         if (reason_out && reason_cap) {
             snprintf(reason_out, reason_cap, "forced import failure");
@@ -758,6 +766,24 @@ static void test_rollback_autosave_targets_previous_slot_not_target(void)
     TEST_CHECK(s_autosave_override == KILN_CFG_AUTOSAVE_OVERRIDE_NONE,
               "override cleared again after the rollback's reimport");
     s_import_writes_wrong_bytes = false;
+}
+
+static void test_rollback_claim_refusal_is_refused_not_failed(void)
+{
+    TEST_SECTION("rollback re-import refused only by the run claim reports ROLLBACK REFUSED, not ROLLBACK FAILED "
+                 "(review 15 LOW-1)");
+    reset_state();
+    s_active_id = 3;
+    s_import_writes_wrong_bytes = true;   /* forces rollback(esp_was_committed=true) */
+    s_zones_import_claimed_from_call = 2; /* the forward import lands, the rollback re-import is claim-refused */
+    char reason[KILN_CFG_SWAP_REASON_MAX];
+    bool diverged = false;
+    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
+    s_zones_import_claimed_from_call = 0;
+    s_import_writes_wrong_bytes = false;
+    TEST_CHECK(!ok, "swap not applied");
+    TEST_CHECK(strstr(reason, "ROLLBACK REFUSED") != NULL, "claim refusal is reported as REFUSED");
+    TEST_CHECK(strstr(reason, "ROLLBACK FAILED") == NULL, "claim refusal is not reported as FAILED");
 }
 
 static void test_diverged_ceiling_moves_active_id_but_leaves_pending(void)
@@ -1752,6 +1778,7 @@ int main(void)
     test_swap_during_firing_refused();
     test_esp_readback_mismatch_rolls_back();
     test_rollback_autosave_targets_previous_slot_not_target();
+    test_rollback_claim_refusal_is_refused_not_failed();
     test_diverged_ceiling_moves_active_id_but_leaves_pending();
     test_generation_race_forces_rollback();
     test_swap_completes_with_pico_armed_never_disarmed();

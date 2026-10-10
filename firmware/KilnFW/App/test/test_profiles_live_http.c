@@ -128,6 +128,7 @@ void profiles_slot_clear(uint8_t id)
 static profile_t g_fake_slots[PROFILES_MAX_COUNT];
 static bool g_fake_profiles_http_get_fail = false;
 static bool g_fake_profiles_http_save_fail = false;
+static bool g_fake_profiles_http_save_unpersisted = false;
 
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
@@ -137,9 +138,19 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     *out = g_fake_slots[id];
     return true;
 }
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id, uint8_t *out_warning_count,
                          char *err_msg, size_t err_cap)
 {
+    return profiles_http_save_ex(requested_id, candidate, out_id, out_warning_count, NULL, err_msg, err_cap);
+}
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
+{
+    if (out_persisted) {
+        *out_persisted = !g_fake_profiles_http_save_unpersisted;
+    }
     if (g_fake_profiles_http_save_fail) {
         snprintf(err_msg, err_cap, "save refused (test)");
         return false;
@@ -470,6 +481,7 @@ static void reset_fakes(void)
     memset(g_fake_slots, 0, sizeof(g_fake_slots));
     g_fake_profiles_http_get_fail = false;
     g_fake_profiles_http_save_fail = false;
+    g_fake_profiles_http_save_unpersisted = false;
     g_fake_parse_ok = true;
     g_fake_builtin_on = false;
     g_fake_no_server = false;
@@ -665,6 +677,21 @@ static void test_decide_save_as_success(void)
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "save_as ok:true");
     TEST_CHECK(profiles_slot_used(1), "landed in the next free slot (0 is origin)");
+}
+
+static void test_decide_save_as_persist_failure_is_500_and_keeps_edit(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- save_as whose storage save fails is 500 and keeps the working copy");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_profiles_http_save_unpersisted = true;
+
+    httpd_req_t req = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "save_as does not report ok:true");
+    TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 on a failed storage save");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "the pending edit is kept");
 }
 
 static void test_decide_overwrite_builtin_403(void)
@@ -1320,6 +1347,7 @@ int main(void)
     test_decide_nothing_pending_409();
     test_decide_discard();
     test_decide_save_as_missing_name_400();
+    test_decide_save_as_persist_failure_is_500_and_keeps_edit();
     test_decide_save_as_success();
     test_decide_overwrite_builtin_403();
     test_decide_overwrite_missing_confirm_400();

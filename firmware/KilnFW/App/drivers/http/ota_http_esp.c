@@ -815,8 +815,6 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     char body[96];
     int n = snprintf(body, sizeof(body), "{\"ok\":true,\"status\":\"rebooting\",\"version_before\":\"%s\"}",
                       version_before);
-    httpd_resp_set_type(req, "application/json");
-    ota_http_send_json_clamped(req, body, n, sizeof(body));
 
     // The mutex is intentionally left held across the reboot -- there is no
     // "release it after the transfer" moment here the way ota_esp_do_
@@ -824,20 +822,31 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // out from under this claim entirely. A fresh boot starts with
     // s_update_claim reset to OTA_UPDATE_NONE (ota_http_start()), so there
     // is nothing left to release.
+    //
+    // The reply is sent only AFTER the reboot task exists (campaign 9b LOW):
+    // the task waits 500 ms before rebooting, so the response still goes out
+    // first, but a creation failure is now reported as 500 instead of an
+    // "ok / rebooting" the board will never act on.
     dram_watch_log_task("ota_rollback_reboot", "before-create");
-    if (dram_watch_task_after("ota_rollback_reboot",
-                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 4096, NULL,
-                                          tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) != pdPASS) {
-        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
-                      "board will NOT reboot, still running the current image", ip);
-        ota_http_update_end();
-    }
+    bool task_started = dram_watch_task_after("ota_rollback_reboot",
+                                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 4096, NULL,
+                                                          tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) == pdPASS;
     /* Registered unconditionally, success or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time, so a creation failure
      * just reads back alive=false rather than needing a second branch here.
      * 4096 must match the xTaskCreate() literal above. */
     stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 4096);
-
+    if (!task_started) {
+        ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
+                      "board will NOT reboot, still running the current image", ip);
+        ota_http_update_end();
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to start the reboot task; the board was not rebooted\"}");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    ota_http_send_json_clamped(req, body, n, sizeof(body));
     return ESP_OK;
 }
 

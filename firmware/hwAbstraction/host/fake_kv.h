@@ -196,6 +196,13 @@ void fake_kv_script_silent_erase_noops(unsigned count);
  * Consumed one call at a time; cleared by fake_kv_reset_all(). */
 void fake_kv_script_silent_set_noops(unsigned count);
 
+/* Target-fidelity switch: ESP-IDF's typed nvs_get_blob() on a key stored as U8 ends in NOT_FOUND (the
+ * lookup keeps scanning past the type mismatch), whereas this fake stores by raw size and would return
+ * the 1 byte as a blob. While armed, hal_kv_get_blob() reports HAL_NOT_FOUND for any key whose stored
+ * length is exactly 1 (what a hal_kv_set_u8() key looks like). hal_kv_get_u8() is unaffected.
+ * Cleared by fake_kv_reset_all(). */
+void fake_kv_script_blob_get_misses_size1(bool on);
+
 /* hal_kv_get_u32/set_u32 (profiles_builtin.c's NVS_KEY_HIDDEN mask) are
  * modeled as a plain 4-byte blob under the same key-slot storage
  * hal_kv_get/set_blob use -- no separate scalar storage needed. */

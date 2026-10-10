@@ -89,6 +89,7 @@ static bool take_write_fail(void)
 static bool                   s_lossy_uncommitted = false;
 static unsigned               s_silent_erase_noops = 0u;
 static unsigned               s_silent_set_noops = 0u;
+static bool                   s_blob_get_misses_size1 = false;
 /* One-shot hal_kv_open() failure injection, scoped to a single namespace
  * name so scripting a failure for one namespace (e.g. the boot_guard legacy
  * namespace) can't accidentally also fail an unrelated open the same test
@@ -184,6 +185,7 @@ void fake_kv_reset_all(void)
     s_lossy_uncommitted = false;
     s_silent_erase_noops = 0u;
     s_silent_set_noops = 0u;
+    s_blob_get_misses_size1 = false;
     s_get_call_count = 0u;
     s_next_open_fail_armed = false;
     s_next_open_fail_status = HAL_OK;
@@ -497,8 +499,20 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
     return HAL_OK;
 }
 
+void fake_kv_script_blob_get_misses_size1(bool on)
+{
+    s_blob_get_misses_size1 = on;
+}
+
 hal_status_t hal_kv_get_blob(hal_kv_handle_t *h, const char *key, void *buf, size_t *out_len)
 {
+    if (s_blob_get_misses_size1) {
+        size_t probe = 0;
+        hal_status_t pe = do_get(get_handle(h), key, false, NULL, &probe);
+        if (pe == HAL_OK && probe == 1u) {
+            return HAL_NOT_FOUND;
+        }
+    }
     return do_get(get_handle(h), key, false, buf, out_len);
 }
 

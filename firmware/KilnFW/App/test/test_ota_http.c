@@ -511,6 +511,7 @@ static int g_reset_job_depth = 0;
 static int g_barrier_calls = 0;
 static int g_barrier_saw_mark = 0;
 void relay_authority_reset_job_enter(void) { g_reset_job_depth++; }
+void relay_authority_reset_set_erases_kiln_nvs(bool erases) { (void)erases; }
 void relay_authority_reset_job_exit(void) { g_reset_job_depth--; }
 void persist_reset_barrier(void)
 {
@@ -1064,6 +1065,68 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     // otherwise every test after this one in the same process sees an
     // update "already in progress" that never clears.
     s_update_claim = OTA_UPDATE_NONE;
+}
+
+static void test_reboot_handlers_reply_only_after_task_created(void)
+{
+    TEST_SECTION("rollback / recovery_exit -- reply ok:true 'rebooting' only after the reboot task exists and "
+                 "the boot-guard clear verified; otherwise 500 (campaign 9b LOW)");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    /* --- rollback: task creation fails -> 500, claim released, no ok:true --- */
+    s_test_sweep_active = false;
+    s_update_claim = OTA_UPDATE_NONE;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    s_fake_rollback_possible = true;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    g_test_stub_xtaskcreate_result = 0; /* pdFAIL */
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed task create answers 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
+               "rollback never claims ok:true when no reboot task was created");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the task cannot start");
+
+    /* --- rollback: success path still replies ok:true rebooting --- */
+    g_test_stub_xtaskcreate_result = 1;
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "rollback success replies rebooting");
+    TEST_CHECK(s_last_resp_status[0] == '\0', "rollback success keeps the default 200 status");
+    s_update_claim = OTA_UPDATE_NONE;
+    s_fake_rollback_possible = false;
+    ota_http_safety = NULL;
+
+    /* --- recovery_exit --- */
+    s_stub_recovery_mode = true;
+    s_stub_mark_healthy_result = true;
+    g_test_stub_xtaskcreate_result = 0;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "recovery_exit with a failed task create answers 500");
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"ok\":true") == NULL, "recovery_exit never claims ok:true without a task");
+
+    g_test_stub_xtaskcreate_result = 1;
+    s_stub_mark_healthy_result = false;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "recovery_exit with an unverified boot-guard clear answers 500");
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"ok\":true") == NULL, "no ok:true when the clear did not verify");
+
+    s_stub_mark_healthy_result = true;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"status\":\"rebooting\"") != NULL, "recovery_exit success replies rebooting");
+    TEST_CHECK(s_last_resp_status[0] == '\0', "recovery_exit success keeps status 200");
+    s_stub_recovery_mode = false;
 }
 
 static void test_pico_rollback_status_reports_idle_before_any_request(void)
@@ -3038,6 +3101,7 @@ void run_test_ota_http(void)
     }
 
     test_pico_rollback_post_returns_pending_without_blocking();
+    test_reboot_handlers_reply_only_after_task_created();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();

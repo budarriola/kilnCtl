@@ -518,6 +518,13 @@ static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, si
     /* Mark first, then re-check: see reset_mode_gate_refuses(). From here on a run start refuses with
      * "factory reset in progress" until this mark is cleared (only on a path where nothing was erased)
      * or the board reboots. */
+    bool erases_kiln_nvs = false;
+    for (const char *const *p = scope->partitions; p && *p; p++) {
+        if (strcmp(*p, KILN_NVS_PARTITION) == 0) {
+            erases_kiln_nvs = true;
+        }
+    }
+    relay_authority_reset_set_erases_kiln_nvs(erases_kiln_nvs); /* before the mark: see relay_authority.h */
     relay_authority_reset_in_flight_begin();
     if (reset_mode_gate_refuses(mode_reason, mode_reason_cap)) {
         relay_authority_reset_in_flight_end();

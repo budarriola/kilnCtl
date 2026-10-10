@@ -215,7 +215,8 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
  * firing_shadow, kiln_cfg_swap, adaptive_tune, run_state and every other kiln_nvs writer. */
 static bool kiln_nvs_reset_refuses_write(const char *partition)
 {
-    return partition != NULL && strcmp(partition, "kiln_nvs") == 0 && relay_authority_reset_refuses_writer();
+    return partition != NULL && strcmp(partition, "kiln_nvs") == 0 &&
+           relay_authority_reset_refuses_kiln_nvs_writer();
 }
 
 void app_main(void)

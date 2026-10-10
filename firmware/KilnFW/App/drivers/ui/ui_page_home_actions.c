@@ -7,6 +7,7 @@
  * page's overall design history. */
 #include "ui_page_home_internal.h"
 #include "ui_lcd_lock.h"
+#include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "ui_page_edit_firing.h" /* owner request 2026-09-28 -- Edit-firing button */
 #include "ui_page_live_decide.h" /* "Keep?" -- end-of-run Discard/Save as/Overwrite */
 #include "profiles_live_http.h" /* profiles_live_decide_status() */
@@ -123,7 +124,7 @@ static void ui_home_do_start(void)
         return;
     }
 
-    char err_msg[160] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
+    char err_msg[READINESS_GATE_MSG_CAP] = ""; /* 64 -> 160, 2026-09-09: the readiness interlock's refusals (readiness_gate.h) name an item AND a remedy; at 64 the remedy was cut off. */
     if (!profile_executor_run(id, err_msg, sizeof(err_msg))) {
         ESP_LOGW(UI_HOME_TAG, "profile_executor_run(%u) refused: %s", id, err_msg);
         /* Same "Cannot Start" modal ui_page_profile_detail.c's confirm_start_cb()

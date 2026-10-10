@@ -24,6 +24,7 @@
 // hal_spi_pico executable is.
 #include <stddef.h>
 #include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <windows.h>
 
@@ -31,6 +32,7 @@
 
 #include "config_store.h"
 #include "config_store_flash_host_stubs.h"
+#include "config_params.h"
 #include "discrete_pin_policy.h"
 #include "fake_flash.h"
 // The production decision -> wire-reason mapping, exercised here against a
@@ -167,6 +169,36 @@ static void test_fallback_seeded_at_boot_before_any_write(void)
     TEST_CHECK(snap.calibration_missing == false,
                "the fallback path returns the persisted calibration_missing, not the fail-safe "
                "'true' every getter falls back to when config_store_seqlock_read() returns false");
+}
+
+static void test_boot_load_reports_clamped_tc_offset(void)
+{
+    TEST_SECTION("config_store_flash: an out-of-range committed tc_offset_c is clamped at boot and "
+                 "config_store_tc_offset_was_clamped() reports it (guard-fix3 review LOW-A1)");
+    reset_all();
+    config_store_boot_load();
+    TEST_CHECK(!config_store_tc_offset_was_clamped(), "blank flash: not clamped");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.tc_offset_c = 12.5f;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: in-range commit");
+    config_store_test_reset_fallback_state();
+    config_store_boot_load();
+    TEST_CHECK(!config_store_tc_offset_was_clamped(), "in-range offset: not reported clamped");
+
+    rec.tc_offset_c = 80.0f; /* beyond CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C */
+    bool wrote = config_store_write(&rec, &reason);
+    config_store_test_reset_fallback_state();
+    config_store_boot_load();
+    if (wrote) {
+        TEST_CHECK(config_store_tc_offset_was_clamped(), "out-of-range committed offset is reported clamped");
+        TEST_CHECK(config_store_get_tc_offset_c() == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "and the value is clamped");
+    } else {
+        TEST_CHECK(false, "fixture: the store accepted an out-of-range offset commit");
+    }
 }
 
 static void test_write_refused_while_armed(void)
@@ -2092,6 +2124,10 @@ static void test_volatile_gate_tightening_direction_and_off_values(void)
     n = base; n.abs_max_temp_c = 1101.0f;
     TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1101 refused");
     gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = nextafterf(base.abs_max_temp_c, INFINITY);
+    TEST_CHECK(n.abs_max_temp_c > base.abs_max_temp_c, "fixture: one-ulp raise is really larger");
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise by ONE ulp refused (pins <= exactly, INFO-1)");
+    gate_setup_baseline(&base);
     n = base; n.abs_max_temp_c = 1150.0f;
     TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1150 refused");
     gate_setup_baseline(&base);
@@ -2130,6 +2166,10 @@ static void test_volatile_gate_tightening_direction_and_off_values(void)
     gate_setup_baseline(&base);
     n = base; n.max_rate_c_per_min = 20.5f;
     TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 20.5 refused");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = nextafterf(base.max_rate_c_per_min, INFINITY);
+    TEST_CHECK(n.max_rate_c_per_min > base.max_rate_c_per_min, "fixture: one-ulp raise is really larger");
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise by ONE ulp refused (pins <= exactly, INFO-1)");
     gate_setup_baseline(&base);
     n = base; n.max_rate_c_per_min = 30.0f;
     TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 30 refused");
@@ -2195,6 +2235,7 @@ int main(void)
     test_boot_load_blank_sector_is_default();
     test_write_then_reload_round_trips();
     test_fallback_seeded_at_boot_before_any_write();
+    test_boot_load_reports_clamped_tc_offset();
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();

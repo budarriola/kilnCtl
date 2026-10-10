@@ -4,6 +4,7 @@
 // infrastructure (flash-safe executor, little-endian/reply helpers) this
 // file uses via uart_bridge_ext_* names. MOVE-ONLY: no logic, ordering, or
 // visibility change beyond the widening rename the split required.
+#include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "uart_bridge.h"
 #include "uart_bridge_ext_internal.h"
 
@@ -563,7 +564,10 @@ static void profiles_handle_message(void *vargs)
                     uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, false, "truncated");
                     break;
                 }
-                char err_msg[96] = "";
+                /* static: off the stack of the task running this (check_system_uart_bridge_stack_budget.ps1);
+                 * profiles_handle_message() only ever runs on the single flash worker. */
+                static char err_msg[READINESS_GATE_MSG_CAP];
+                err_msg[0] = '\0';
                 bool ok = profile_executor_run(msg.payload[1], err_msg, sizeof(err_msg));
                 uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_PROFILES, subcmd, ok, err_msg);
                 break;

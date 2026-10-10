@@ -244,7 +244,7 @@ const uint8_t profiles_page_html_gz_end[1] = { 0 };
 // profiles_http_start()/profiles_list_get_handler() are called), but every
 // symbol profiles_http.c references anywhere in the file must resolve at
 // link time.
-static char s_chunk_capture[16384];
+static char s_chunk_capture[32768];
 static size_t s_chunk_capture_len = 0;
 static bool s_chunk_capture_on = false;
 
@@ -2638,6 +2638,30 @@ static void test_v1_blob_loads_and_preserves_all_fields(void)
     assert_profiles_equal(&out.profiles[0], &src, "v1 regression");
 }
 
+// rf4 follow-up: on target a blob read of a legacy u8 `used` key is NOT_FOUND, not INVALID_ARG.
+static void test_legacy_u8_used_key_with_target_not_found(void)
+{
+    TEST_SECTION("used_bitmap_load -- legacy u8 prof_used key whose blob read is NOT_FOUND (target) still loads");
+
+    nvs_stub_reset();
+    profile_t src = make_stored_profile();
+    profile_persisted_v1_t v1;
+    v1.version = 1;
+    v1.profile = to_v2(&src);
+    stage_profile_blob(0, &v1, sizeof(v1));
+    stage_bitmap(0x01);
+    fake_kv_script_blob_get_misses_size1(true);
+
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t err = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    fake_kv_script_blob_get_misses_size1(false);
+
+    TEST_CHECK(err == ESP_OK, "no NVS error");
+    TEST_CHECK(any_found, "the legacy u8 used key counts as present");
+    TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot 0 still used via the get_u8 fallback");
+}
+
 // ---------------------------------------------------------------------------
 // Test 2 -- version == 0 is rejected, not installed as a used slot.
 // ---------------------------------------------------------------------------
@@ -3007,6 +3031,41 @@ static void test_profile_detail_json_valid_at_max_capacity(void)
     TEST_CHECK(len >= 2 && s_send_capture[len - 1] == '}' && s_send_capture[len - 2] == ']',
               "the response must end with the closing \"]}\" of on_off_rules/the outer object, "
               "not be cut off mid-array/mid-object");
+}
+
+static void test_profiles_list_reports_rev_unknown(void)
+{
+    TEST_SECTION("profiles_list_get_handler -- rev_unknown per slot surfaces the degraded state (stack review S2)");
+    nvs_stub_reset();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    for (int i = 0; i < 2; i++) {
+        profile_t *p = &s_profiles.profiles[i];
+        memset(p, 0, sizeof(*p));
+        strncpy(p->name, i ? "bad" : "good", PROFILE_NAME_MAX_LEN);
+        p->zone_mask = 0x01;
+        p->segment_count = 1;
+        p->segments[0].target_c = 100.0f;
+        p->segments[0].ramp_c_per_hr = 50.0f;
+        p->segments[0].dwell_min = 5;
+        profiles_slot_bitmap_set(&s_profiles.used_bitmap, (uint8_t)i);
+    }
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[1] = true;
+    s_chunk_capture_len = 0;
+    s_chunk_capture[0] = '\0';
+    s_chunk_capture_on = true;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    esp_err_t err = profiles_list_get_handler(&req);
+    s_chunk_capture_on = false;
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    TEST_CHECK(err == ESP_OK, "handler ok");
+    const char *g = strstr(s_chunk_capture, "\"name\":\"good\"");
+    const char *b = strstr(s_chunk_capture, "\"name\":\"bad\"");
+    TEST_CHECK(g && b, "both entries listed");
+    TEST_CHECK(g && strstr(g, "\"rev_unknown\":false") != NULL && (!b || strstr(g, "\"rev_unknown\":false") < b),
+               "slot 0 rev_unknown:false");
+    TEST_CHECK(b && strstr(b, "\"rev_unknown\":true") != NULL, "slot 1 rev_unknown:true");
 }
 
 static void test_profiles_list_carries_last_run_started_unix_s(void)
@@ -5398,6 +5457,7 @@ void run_test_profiles_http(void)
 {
     test_fuzz_profile_post_hostile();
     profiles_http_test_set_loaded(true); /* tests below exercise runnable checks without a boot sequence */
+    test_legacy_u8_used_key_with_target_not_found();
     test_v1_blob_loads_and_preserves_all_fields();
     test_profiles_refused_until_boot_load_done();
     profiles_http_test_set_loaded(true);
@@ -5414,6 +5474,7 @@ void run_test_profiles_http(void)
     test_profiles_list_json_valid_with_escape_heavy_names();
     test_profile_detail_json_valid_at_max_capacity();
     test_profiles_list_carries_last_run_started_unix_s();
+    test_profiles_list_reports_rev_unknown();
     test_validate_io_segment_zone_ownership();
     test_validate_on_off_rules_aux_targets();
     test_aux_rule_survives_real_save_and_load();

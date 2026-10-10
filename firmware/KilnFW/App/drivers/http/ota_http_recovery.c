@@ -145,17 +145,17 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
     // removes any dependency on that background task's timing for this
     // explicit, operator-requested exit.
     if (!boot_guard_mark_healthy()) {
-        /* 2026-09-08 recovery-loop audit: this is no longer trusted to be a
-         * harmless no-op -- an operator explicitly asking to exit recovery
-         * mode deserves to know the clear did not verify, even though the
-         * reboot below proceeds regardless (the background confirm task,
-         * main_network_http.c, keeps retrying across this reboot's own
-         * lifetime too). */
-        ESP_LOGW(OTA_HTTP_TAG, "recovery_exit: boot-guard clear did not verify this call -- rebooting anyway; "
-                      "the background confirm task will keep retrying on the next boot");
+        /* 2026-09-08 recovery-loop audit, campaign 9b LOW: the clear did not
+         * verify, so a reboot would land straight back in recovery mode.
+         * Report it (500) instead of "ok / rebooting" and do NOT reboot; the
+         * background confirm task (main_network_http.c) keeps retrying. */
+        ESP_LOGW(OTA_HTTP_TAG, "recovery_exit: boot-guard clear did not verify this call -- NOT rebooting; "
+                      "the background confirm task keeps retrying, call again once it has cleared");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"boot-guard clear did not verify; not rebooting\"}");
+        return ESP_OK;
     }
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"rebooting\"}");
     /* Plain xTaskCreate -- an INTERNAL-RAM stack, deliberately, exactly like
      * ota_rollback_reboot_task() above. This task calls esp_restart(), which
      * goes through spi_flash_disable_interrupts_caches_and_other_cpu(); a
@@ -164,14 +164,14 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
      * this stack in PSRAM to save 2 KB of internal DRAM would mean the
      * recovery-mode escape hatch panics the board instead of rebooting it.
      * (Same trap that produced a real crash in profile_executor.c earlier
-     * the same day; see its task-creation comment.) */
+     * the same day; see its task-creation comment.)
+     *
+     * The reply is sent only AFTER the task exists (campaign 9b LOW); the
+     * task delays before rebooting, so the response still goes out first. */
     dram_watch_log_task("recovery_exit", "before-create");
-    if (dram_watch_task_after("recovery_exit",
-                              xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
-                                          tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task)) != pdPASS) {
-        ESP_LOGE(OTA_HTTP_TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
-                      "reboot; power-cycle it, the counter is already cleared");
-    }
+    bool task_started = dram_watch_task_after("recovery_exit",
+                                              xTaskCreate(ota_recovery_exit_reboot_task, "recovery_exit_reboot", 2048, NULL,
+                                                          tskIDLE_PRIORITY + 1, &s_recovery_exit_reboot_task)) == pdPASS;
     /* Registered unconditionally, success or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time, so a creation failure
      * just reads back alive=false rather than needing a second branch here.
@@ -181,6 +181,16 @@ esp_err_t ota_recovery_exit_post_handler(httpd_req_t *req)
      * STACK_MARGIN_NAME_MAX (20) leaves only 19 usable, which would
      * silently truncate it to "recovery_exit_rebo". */
     stack_margin_register("recovery_exit", &s_recovery_exit_reboot_task, 2048);
+    if (!task_started) {
+        ESP_LOGE(OTA_HTTP_TAG, "recovery-mode exit: failed to start the reboot task -- board will NOT "
+                      "reboot; the counter is already cleared, retry or power-cycle");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to start the reboot task; the board was not rebooted\"}");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true,\"status\":\"rebooting\"}");
     return ESP_OK;
 }
 

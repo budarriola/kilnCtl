@@ -816,7 +816,14 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
     size_t len = 0;
     hal_status_t err = hal_kv_get_blob(h, NVS_KEY_USED, NULL, &len);
     if (err == HAL_NOT_FOUND) {
-        return HAL_NOT_FOUND;
+        /* On target a blob read of a key stored as U8 ends in NOT_FOUND (ESP-IDF skips the type mismatch),
+         * so NOT_FOUND may still be the legacy single-byte format: try it before declaring the key absent. */
+        uint8_t legacy_nf = 0;
+        if (hal_kv_get_u8(h, NVS_KEY_USED, &legacy_nf) != HAL_OK) {
+            return HAL_NOT_FOUND;
+        }
+        profiles_slot_bitmap_from_u32(out, legacy_nf);
+        return HAL_OK;
     }
     if (err == HAL_OK && len == sizeof(*out)) {
         size_t full_len = sizeof(*out);
@@ -1759,6 +1766,15 @@ static bool profiles_http_slot_used_cb(void *ctx, uint8_t id)
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
+    return profiles_http_save_ex(requested_id, candidate, out_id, out_warning_count, NULL, err_msg, err_cap);
+}
+
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
+{
+    if (out_persisted) {
+        *out_persisted = true;
+    }
     if (!candidate || !out_id) {
         if (err_msg) snprintf(err_msg, err_cap, "internal error");
         return false;
@@ -1931,6 +1947,9 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
         /* Still applied -- same convention as profile_post_handler(). */
+        if (out_persisted) {
+            *out_persisted = false;
+        }
     }
 
     *out_id = target_id;

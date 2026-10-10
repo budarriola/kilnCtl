@@ -296,7 +296,8 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
                                      * +37 (PROFILE_SLOTS_100.md task 8) for
                                      * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max);
                                      * base recomputed to 230 for N3's *6 name-escaping term above,
-                                     * +121 slack (matching the original margin) = 351, rounded to 352 */
+                                     * +121 slack (matching the original margin) = 351, rounded to 352;
+                                     * +20 for ",\"rev_unknown\":false" (review S2) fits the slack */
 
 /* Chunked (2026-09-19, 100-slot plan task 2): the old shape built the ENTIRE
  * user-slot section into one stack-local `json[PROFILES_MAX_COUNT *
@@ -339,9 +340,10 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
         char chunk[PROFILE_LIST_ENTRY_MAX];
         int n = snprintf(chunk, sizeof(chunk),
                          "%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
-                         "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
+                         "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu,\"rev_unknown\":%s}",
                          first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
-                         exceeds ? "true" : "false", (unsigned long)last_run);
+                         exceeds ? "true" : "false", (unsigned long)last_run,
+                         s_profile_rev_unknown[id] ? "true" : "false");
         err = send_chunk_checked(req, chunk, n, sizeof(chunk), "profile list entry");
         first = false;
     }

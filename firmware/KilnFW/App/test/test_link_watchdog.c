@@ -231,6 +231,26 @@ static void test_reset_refuses_writer_exempts_reset_job_task(void)
     TEST_CHECK(!relay_authority_reset_refuses_writer(), "mark cleared: nothing refused");
 }
 
+static void test_kiln_nvs_fence_only_when_scope_erases_it(void)
+{
+    relay_authority_reset_set_erases_kiln_nvs(false);
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "generic fence still set for a non-kiln scope");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "wifi/profiles scope: kiln_nvs writes are NOT refused");
+    relay_authority_reset_in_flight_end();
+    relay_authority_reset_set_erases_kiln_nvs(true);
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "kiln/all scope: other-task kiln_nvs write refused");
+    relay_authority_reset_job_enter();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "the reset job's own task is exempt");
+    relay_authority_reset_job_exit();
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "mark cleared: nothing refused, flag cleared");
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "the erase flag does not leak into the next reset");
+    relay_authority_reset_in_flight_end();
+}
+
 static void test_reset_in_flight_counter_is_a_depth_count(void)
 {
     TEST_CHECK(!relay_authority_reset_in_flight(), "clean slate: no reset in flight");
@@ -277,6 +297,7 @@ int main(void)
     test_never_seen_counts_as_down();
     test_traffic_resets_the_timer();
     test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
+    test_kiln_nvs_fence_only_when_scope_erases_it();
     test_reset_refuses_writer_exempts_reset_job_task();
     test_reset_in_flight_counter_is_a_depth_count();
     test_heat_sweep_active_follows_the_sweep_claim();

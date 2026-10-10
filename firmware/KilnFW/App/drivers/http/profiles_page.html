@@ -354,6 +354,7 @@ above what a zone can reach.</p>
 </div>
 <div id="importMsg"></div>
 <div id="tuneNotice" class="tune-notice" style="display:none"></div>
+<div id="revNotice" class="tune-notice" style="display:none"></div>
 <div id="bulkBar">
   <button id="modeExportBtn" type="button" class="small">Select to export</button>
   <button id="modeDeleteBtn" type="button" class="small">Select to delete</button>
@@ -1443,6 +1444,13 @@ function refreshAll() {
     rb.style.display = hiddenCount > 0 ? '' : 'none';
     rb.textContent = 'Restore ' + hiddenCount + ' removed';
 
+    var revUnknown = savedProfiles.some(function (p) { return p.rev_unknown === true; });
+    var rn = document.getElementById('revNotice');
+    if (rn) {
+      rn.style.display = revUnknown ? '' : 'none';
+      rn.textContent = 'Some saved profiles are in a degraded state (revision unknown) and cannot be ' +
+        'edited or saved until the board repairs them. Reboot, or restore from a backup if this persists.';
+    }
     var notice = document.getElementById('tuneNotice');
     if (anyUnknown) {
       notice.style.display = '';

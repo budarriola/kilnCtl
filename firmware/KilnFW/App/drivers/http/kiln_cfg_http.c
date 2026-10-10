@@ -223,12 +223,18 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     }
     int32_t id_or_negative = -1;
     {
+        /* Same strict parse as parse_required_id() (F7/F9): -2 (bad escape /
+         * too long), a leading '+' or space, ERANGE and out-of-range are all
+         * refused, never treated as an absent id (which saves a NEW slot). */
         char id_val[16];
         int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
+        if (id_len == -2) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
+            return ESP_OK;
+        }
         if (id_len > 0) {
-            char *end = NULL;
-            long v = strtol(id_val, &end, 10);
-            if (end == id_val || *end != '\0' || v < 0 || v > INT32_MAX) {
+            long v = 0;
+            if (id_val[0] == '+' || !http_form_parse_long(id_val, id_len, 0, INT32_MAX, &v)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
                 return ESP_OK;
             }

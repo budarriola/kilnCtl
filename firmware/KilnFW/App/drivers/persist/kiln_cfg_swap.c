@@ -533,6 +533,18 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
         kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
         kiln_cfg_store_unlock();
         if (!imported) {
+            if (strcmp(sub, ZONES_IMPORT_REASON_RUN_CLAIMED) == 0) {
+                /* Review 15 LOW-1: the re-import was refused ONLY because a profile/autotune run holds the claim --
+                 * the previous config is valid, it just could not be written right now. Report a distinct
+                 * REFUSED outcome (still false: the ESP side is still on the target, the journal is kept and
+                 * boot recovery retries the rollback) instead of "ROLLBACK FAILED", which reads as the previous
+                 * config being rejected. */
+                snprintf(reason_out, reason_cap,
+                         "ROLLBACK REFUSED (a run holds the zones claim; the previous config is valid and "
+                         "the rollback is retried when the run ends or at next boot): %.60s",
+                         sub);
+                return false;
+            }
             snprintf(reason_out, reason_cap, "ROLLBACK FAILED (ESP would not re-accept the previous config): %.136s",
                      sub);
             return false;

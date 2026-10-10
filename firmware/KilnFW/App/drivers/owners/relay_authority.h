@@ -313,6 +313,15 @@ void relay_authority_reset_job_enter(void);
 void relay_authority_reset_job_exit(void);
 bool relay_authority_reset_refuses_writer(void);
 
+/* kiln_nvs fence refinement (fwbatch13 LOW-4): main.c's hal_kv hook refuses a kiln_nvs mutation from another
+ * task only when the in-flight reset's scope ERASES kiln_nvs ("kiln"/"all"); a "wifi" or "profiles" reset
+ * leaves kiln_nvs alone, so wear counters / lockout counters / boot_guard keep writing normally. The caller
+ * (factory_reset.c) sets the flag BEFORE relay_authority_reset_in_flight_begin(); the last _end() clears it.
+ * Remaining behaviour for an erasing scope: every other-task kiln_nvs write between the mark and the reboot
+ * (~500 ms after the erase) is refused and lost -- there are no shutdown handlers. */
+void relay_authority_reset_set_erases_kiln_nvs(bool erases);
+bool relay_authority_reset_refuses_kiln_nvs_writer(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -126,10 +126,14 @@ bool kiln_cfg_store_slot_hardware_differs(int32_t id, char *msg, size_t msg_cap)
     if (msg && msg_cap) snprintf(msg, msg_cap, "hardware differs (stub)");
     return g_stub_hardware_differs;
 }
+int g_stub_save_calls = 0;
+int32_t g_stub_save_last_id = -99;
 bool kiln_cfg_store_save_current(const char *name, int32_t id_or_negative, int32_t *out_id,
                                  char *reason_out, size_t reason_cap)
 {
-    (void)name; (void)id_or_negative;
+    (void)name;
+    g_stub_save_calls++;
+    g_stub_save_last_id = id_or_negative;
     if (out_id) *out_id = 1;
     if (reason_out && reason_cap) reason_out[0] = '\0';
     return true;
@@ -520,8 +524,45 @@ static void test_apply_hostile_bodies_never_reach_swap(void)
     TEST_CHECK(s_test_err_called && g_stub_swap_submit_calls == 0, "100000-byte Content-Length refused");
 }
 
+// Review fwbatch13 LOW-1: optional save id is parsed strictly; a malformed id must not save a NEW slot.
+static void test_save_optional_id_strict(void)
+{
+    TEST_SECTION("save_post_handler optional id -- strict parse");
+    static const char *const bad[] = {
+        "name=a&id=%zz", "name=a&id=+5", "name=a&id=%205", "name=a&id=99999999999",
+        "name=a&id=-1", "name=a&id=1x", "name=a&id=2147483648", "name=a&id=%2B5",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        test_reset();
+        g_stub_save_calls = 0;
+        snprintf(s_test_post_body, sizeof(s_test_post_body), "%s", bad[i]);
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.content_len = (long long)strlen(bad[i]);
+        (void)save_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "save body '%s' refused without saving", bad[i]);
+        TEST_CHECK(s_test_err_called && g_stub_save_calls == 0, msg);
+    }
+    test_reset();
+    g_stub_save_calls = 0;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "name=a&id=7");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(s_test_post_body);
+    (void)save_post_handler(&req);
+    TEST_CHECK(g_stub_save_calls == 1 && g_stub_save_last_id == 7, "valid id=7 reaches the store");
+    test_reset();
+    g_stub_save_calls = 0;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "name=a");
+    req.content_len = (long long)strlen(s_test_post_body);
+    (void)save_post_handler(&req);
+    TEST_CHECK(g_stub_save_calls == 1 && g_stub_save_last_id == -1, "absent id saves a new slot (-1)");
+}
+
 int main(void)
 {
+    test_save_optional_id_strict();
     test_apply_hostile_bodies_never_reach_swap();
     test_apply_nonexistent_id_refused_before_mode_gate();
     test_apply_refused_by_mode_gate_before_interlock();

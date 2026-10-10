@@ -819,7 +819,10 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
                       "a hung task during this firing will NOT reboot the board", id);
     }
 
-    char err_msg[128] = "";
+    /* static: off the shared httpd worker's stack (check_httpd_task_stack_budget.ps1); httpd runs one worker
+     * task, so this handler is never re-entered concurrently (same convention as kiln_cfg_http.c). */
+    static char err_msg[READINESS_GATE_MSG_CAP];
+    err_msg[0] = '\0';
     if (!profile_executor_run((uint8_t)id, err_msg, sizeof(err_msg))) {
         return start_send_run_failure(req, err_msg);
     }

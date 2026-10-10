@@ -608,10 +608,18 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         working->name[sizeof(working->name) - 1] = '\0';
         uint8_t id = 0;
         uint8_t warn_count = 0;
-        bool saved = profiles_http_save(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count, err, err_cap);
+        bool persisted = true;
+        bool saved = profiles_http_save_ex(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count,
+                                           &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
             return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+        }
+        if (!persisted) {
+            /* S5: the slot is live in RAM but not in storage; keep the working copy (do NOT clear it) so the
+             * edit is not lost, and do not report success. */
+            snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
+            return LIVE_DECIDE_SERVER_ERROR;
         }
         char clear_err[64];
         live_profile_clear(clear_err, sizeof(clear_err));
@@ -644,10 +652,15 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         }
         uint8_t id = 0;
         uint8_t warn_count = 0;
-        bool saved = profiles_http_save(rec.origin_id, working, &id, &warn_count, err, err_cap);
+        bool persisted = true;
+        bool saved = profiles_http_save_ex(rec.origin_id, working, &id, &warn_count, &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
             return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+        }
+        if (!persisted) {
+            snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
+            return LIVE_DECIDE_SERVER_ERROR;
         }
         char clear_err[64];
         live_profile_clear(clear_err, sizeof(clear_err));

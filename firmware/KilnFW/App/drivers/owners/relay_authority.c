@@ -238,6 +238,7 @@ void relay_authority_heat_run_active(bool *profile, bool *autotune)
 /* Factory reset in flight -- relay_authority.h's doc comment above these declarations has the "why".
  * Shares s_heat_claim_mux with the heat claims it pairs against. */
 static uint8_t s_reset_in_flight_depth = 0;
+static bool s_reset_erases_kiln_nvs = false;
 
 void relay_authority_reset_in_flight_begin(void)
 {
@@ -253,6 +254,9 @@ void relay_authority_reset_in_flight_end(void)
     portENTER_CRITICAL(&s_heat_claim_mux);
     if (s_reset_in_flight_depth > 0) {
         s_reset_in_flight_depth--;
+    }
+    if (s_reset_in_flight_depth == 0) {
+        s_reset_erases_kiln_nvs = false;
     }
     portEXIT_CRITICAL(&s_heat_claim_mux);
 }
@@ -287,6 +291,23 @@ bool relay_authority_reset_refuses_writer(void)
     void *me = (void *)xTaskGetCurrentTaskHandle();
     portENTER_CRITICAL(&s_heat_claim_mux);
     bool refuse = (s_reset_in_flight_depth != 0) && (s_reset_job_task == NULL || s_reset_job_task != me);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return refuse;
+}
+
+void relay_authority_reset_set_erases_kiln_nvs(bool erases)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_reset_erases_kiln_nvs = erases;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_refuses_kiln_nvs_writer(void)
+{
+    void *me = (void *)xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool refuse = (s_reset_in_flight_depth != 0) && s_reset_erases_kiln_nvs &&
+                  (s_reset_job_task == NULL || s_reset_job_task != me);
     portEXIT_CRITICAL(&s_heat_claim_mux);
     return refuse;
 }
