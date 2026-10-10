@@ -2275,6 +2275,23 @@ try {
 
     Invoke-HostTestExe -Name "cfg_fs_mount_reentrancy" -ExePath $exe32 -BuildCmd $cmd32
 
+    # ---- test_cfg_fs_mount_state.c: cfg_fs_mount.c's FORMAT STATE MACHINE
+    # (round 2, R2-F, docs/audits/HOST_TEST_COVERAGE_GAPS_ROUND2_2026-10-10.md).
+    # #includes cfg_fs_mount.c itself so the static scan/auto-format/confirm
+    # helpers are reachable, links the REAL cfg_fs_format_gate.c, and scripts
+    # every littlefs/partition/FreeRTOS/flash-worker seam. Own executable for
+    # the same reason as cfg_fs_mount_reentrancy: it defines those seams.
+    $exeCms = Join-Path $outDir "kilnctl_host_tests_cfg_fs_mount_state.exe"
+    $cmsObjDir = Join-Path $outDir "cms"
+    New-Item -ItemType Directory -Force -Path $cmsObjDir | Out-Null
+    $cmdCms = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$cmsObjDir\\`" /Fe:`"$exeCms`" " +
+            "`"$(Join-Path $testDir 'test_cfg_fs_mount_state.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
+
+    Invoke-HostTestExe -Name "cfg_fs_mount_state" -ExePath $exeCms -BuildCmd $cmdCms
+
     # ---- test_recovery_start_refusal.c retired 2026-09-27 (mode-gate slice
     # 2, docs/SYSTEM_MODE_GATE.md section 3.6): its subject,
     # App/drivers/http/recovery_start_refusal.h, was deleted -- its two HTTP
@@ -3507,7 +3524,8 @@ try {
     # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
     # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
     # 93 -> 94: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
-    $totalExpected = 94
+    # 94 -> 95: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    $totalExpected = 95
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
