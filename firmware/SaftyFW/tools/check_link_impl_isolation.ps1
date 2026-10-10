@@ -347,7 +347,11 @@ $allowlistPaths = @(
     # forwards to ric_crc32() above (on target it is the esp_rom wrapper). It is a
     # delegation, not a CRC implementation, and exists only so the shared
     # stage_header.c links in the host test. Allowlisted by path with this reason.
-    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_ota_image_crc_double.c")
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_ota_image_crc_double.c"),
+    # test_link_task_fuzz.c: recording fake returning 0 (config_store_get_config_crc, one
+    # line) and a make_stuffed wrapper that only calls CommonFW kilnlink_stuff; it copies
+    # no CRC or stuffing code. Allowlisted by path with this reason.
+    (Join-Path $firmwareRoot "SaftyFW\test\test_link_task_fuzz.c")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight
