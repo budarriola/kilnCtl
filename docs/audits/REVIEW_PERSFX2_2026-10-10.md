@@ -43,7 +43,7 @@ Summary: 0 HIGH, 3 MED, 5 LOW, several INFO.
 - Add it to `cfg_convert.py`. Either pass it through in `ADDITIVE_TOP_LEVEL_KEYS`, or name it in the conversion report.
 - Negative-test the check after the change.
 
-## MED-2: the 409 `store_unreadable_at_boot` is decided by the global degraded count, not by the store that failed (FIXED in e57a11e58)
+## MED-2: the 409 `store_unreadable_at_boot` is decided by the global degraded count, not by the store that failed (FIXED in 703173bb2)
 
 `firmware/KilnFW/App/drivers/common/cfg_fs_refusal_http.h:56-70`: `cfg_fs_http_persist_failed()` returns 409 "store_unreadable_at_boot ... reboot" whenever `cfg_fs_degraded_count() > 0`, whatever the error was and whichever store it came from.
 
@@ -69,7 +69,7 @@ The opposite case also exists, where a genuine unreadable-store refusal still co
 - Register profile rev-unknown in the degraded table.
 - Apply the same rule in the `_adopted` variant.
 
-## MED-3: MED-3 (no stale NVS adoption for retired stores) covers only the read-error branch (FIXED in e57a11e58)
+## MED-3: MED-3 (no stale NVS adoption for retired stores) covers only the read-error branch (FIXED in 703173bb2)
 
 `firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c:461-503`: `adopt_nvs_if_unreadable=false` takes effect only when `cfg_fs_read` returns an error (line 475). The `!file_valid` branch (486-503) still copies the frozen NVS bytes into RAM and writes them back as the file through `pref_cfg_fs_save()`. That branch is taken when:
 
@@ -104,7 +104,7 @@ On the next boot the enabled rule (or an old `ki_baseline`, iter_tune state or C
 
 The second is simpler and matches the cfg dual-write close owner decision.
 
-## LOW-1: the zones undecided check runs after the Pico ceiling raise (FIXED in e57a11e58)
+## LOW-1: the zones undecided check runs after the Pico ceiling raise (FIXED in 703173bb2)
 
 `firmware/KilnFW/App/drivers/http/zones_http_post.c:765-780`: the `zones_config_is_undecided()` refusal runs inside `zones_cfg_lock`, after the slow safety-ceiling raise. On refusal, `zones_post_track_ceiling_lower()` undoes the raise on a best-effort basis.
 
@@ -114,7 +114,7 @@ The owner rule ("Pico ceiling same or looser") allows this outcome, so it is LOW
 
 **Fix:** add an unlocked pre-check of `zones_config_is_undecided()` before the ceiling raise. Keep the locked re-check.
 
-## LOW-2: the refusal text names no recovery route beyond reboot (FIXED in e57a11e58)
+## LOW-2: the refusal text names no recovery route beyond reboot (FIXED in 703173bb2)
 
 `zones_http_post.c:778` and `cfg_fs_refusal_http.h:65` say only "reboot the controller to retry". If the read error persists across reboots (bad sector, persistent OOM at that boot stage), the user has no stated escape:
 
@@ -139,7 +139,7 @@ The previous `error` text was human-readable ("could not be saved to flash"). Th
 
 **Fix:** render `reason || error` in those handlers (a shared helper in `app.js`), or keep `error` human-readable and add a separate `code` field.
 
-## LOW-4: MCP and PcTools do not recognise the new codes or marker (FIXED in e57a11e58)
+## LOW-4: MCP and PcTools do not recognise the new codes or marker (FIXED in 703173bb2)
 
 - `tools/PcTools/src/kilnctrl/mcp_server_control.py:812-825` classifies only `safety_ceiling_raise_failed` and the system-mode-gate 409. `zones_config_undecided` and `store_unreadable_at_boot` fall through to the generic `error: POST /api/zones failed: {exc}`. The text is shown, but it carries no guidance and is not distinguishable from a transport fault.
 - No PcTools file reads `stale_or_unknown_stores`:
@@ -151,7 +151,7 @@ The previous `error` text was human-readable ("could not be saved to flash"). Th
 - Have `backup_export` print the marker list when non-empty.
 - Have `backup_import` warn, or refuse unless confirmed, when importing a backup whose marker lists stores.
 
-## LOW-5: narrow zones setters still change RAM while undecided (pre-existing) (FIXED in e57a11e58)
+## LOW-5: narrow zones setters still change RAM while undecided (pre-existing) (FIXED in 703173bb2)
 
 `firmware/KilnFW/App/drivers/persist/zones_config_accessors.c:49-54` (`zones_config_set_max_ramp` and siblings) apply the change through `*_no_save` and then call `nvs_save()`. While undecided, `nvs_save()` refuses with `ESP_ERR_INVALID_STATE`, so the setter returns false but RAM keeps the new value. A later firing in the same boot runs on a value the caller was told was not saved.
 
