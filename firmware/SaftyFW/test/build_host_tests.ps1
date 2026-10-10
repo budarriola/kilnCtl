@@ -9,8 +9,9 @@
 # corrupt each other's objects and produce a link error that looks like a code
 # defect. Give each concurrent run its own directory. Mirrors the same
 # parameter on KilnFW/App/test/build_host_tests.ps1.
-param([string]$OutDir = "")
+param([string]$OutDir = "", [int]$TestTimeoutSec = 300)
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "../../../tools/host_test_exec.ps1")
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 if (-not (Test-Path $vcvars)) {
@@ -335,8 +336,7 @@ try {
                 $script:buildFailures += $it.Name
                 continue
             }
-            & $it.Exe
-            $script:exitCodes[$it.Name] = $LASTEXITCODE
+            $script:exitCodes[$it.Name] = Invoke-HostTestProcess -Name $it.Name -ExePath $it.Exe -TimeoutSec $TestTimeoutSec
         }
         $hostQueue.Clear()
     }

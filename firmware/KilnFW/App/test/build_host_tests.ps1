@@ -26,7 +26,7 @@
 # name, build command (test source names) or, for "main", source list matches
 # the regex (e.g. -Only test_update_stage). Selected ones are printed; a regex
 # matching none is an error. Absent = full run, behavior unchanged.
-param([string]$OutDir = "", [string]$Only = "")
+param([string]$OutDir = "", [string]$Only = "", [int]$TestTimeoutSec = 300)
 $ErrorActionPreference = "Stop"
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
@@ -41,6 +41,7 @@ $outDir = if ($OutDir) { $OutDir } else { Join-Path $testDir "build" }
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
 . (Join-Path $PSScriptRoot "../../../../tools/build_lock.ps1")
+. (Join-Path $PSScriptRoot "../../../../tools/host_test_exec.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/build_gate.ps1")
 $buildLockName = "kilnfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
 # vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
@@ -544,8 +545,7 @@ try {
         New-Item -ItemType Directory -Force -Path $script:hostScratchCwd | Out-Null
         Push-Location $script:hostScratchCwd
         try {
-            & $ExePath
-            $exeExit = $LASTEXITCODE
+            $exeExit = Invoke-HostTestProcess -Name $Name -ExePath $ExePath -TimeoutSec $TestTimeoutSec
         } finally {
             Pop-Location
         }
