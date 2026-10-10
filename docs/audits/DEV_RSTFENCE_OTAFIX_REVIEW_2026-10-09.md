@@ -18,7 +18,7 @@ No HIGH findings.
   - `cfg_fs_write_job_run()` refuses, i.e. `cfg_fs_write_atomic_device()`.
 - **Local refusals** inside the save sections: unit_pref, time_sync, profiles_favorites, zones_config_store (three sites) and profiles_http.
 
-### MED-1: three cfg-file writers bypass both central refusals
+### MED-1: three cfg-file writers bypass both central refusals (fixed in 04848cd9)
 
 Only zones_config_cfg_fs, pref_cfg_fs and profiles_cfg_fs are pointed at `cfg_fs_write_atomic_device` (`persist/cfg_fs_mount.c:61-63`). These three writers call raw `cfg_fs_write_atomic()` instead. They hold no registered save lock and check no reset mark, so neither the barrier nor either refusal stops them.
 
@@ -42,7 +42,7 @@ Only zones_config_cfg_fs, pref_cfg_fs and profiles_cfg_fs are pointed at `cfg_fs
 
 Add one test per writer.
 
-### LOW-1: an aux conversion can leave its journal on a wiped kiln_nvs
+### LOW-1: an aux conversion can leave its journal on a wiped kiln_nvs (fixed in 04848cd9)
 
 **Cause.**
 - `factory_reset.c` `reset_other_writer_refuses()` refuses a reset for a zone sweep or a backup restore, but not for a running zone-to-aux conversion (`profiles_http_convert_busy()`).
@@ -60,7 +60,7 @@ Resume is manual, so this is LOW.
 
 **Suggested fix.** In `reset_other_writer_refuses()`, also refuse while `profiles_http_convert_busy()` is set. Or make `aux_convert_journal_write()` and `aux_convert_journal_clear()` refuse under the mark.
 
-### LOW-2: the fence's two new hooks have no tests
+### LOW-2: the fence's two new hooks have no tests (fixed in 04848cd9)
 
 **Gaps.**
 - No test exercises `relay_authority_reset_refuses_writer()`, i.e. the reset-job task exemption.
@@ -92,6 +92,93 @@ The local check is defense in depth. The test proves the central fence, not the 
 - **NULL hook.** Host builds and the recovery image (`firmware/KilnFW_recovery` links neither factory_reset.c, pref_cfg_fs.c nor cfg_save_barrier.c) do not install the hooks, so nothing is refused there. That is correct: there is no factory-reset path in those builds.
 - **Registry capacity.** 32 slots, about 11 used. Overflow only logs. Informational.
 - **NVS stores outside the fence** (wifi_prov, relay_cycles, touch_cal, safety_cfg_store, boot_guard): the partition erase de-inits NVS, so later writes fail. ota_record and run_state re-init lazily. Benign: they hold diagnostics and run state, not reset-scoped user data.
+
+### Review of fix 04848cd9 (MED-1, LOW-1, LOW-2)
+
+Read-only Opus review of origin/dev `04848cd9`. The fix holds for MED-1, LOW-1 and LOW-2. No HIGH or MED findings.
+
+**What the fix does.**
+- `cfg_fs_set_write_refuse_hook()` puts the refusal inside `cfg_fs_write_atomic()` itself. It returns `ESP_ERR_INVALID_STATE`, the same code as "not mounted". This is the closed-against-future-writers option from MED-1.
+- main.c installs it next to the other two hooks.
+- `reset_other_writer_refuses()` (factory_reset.c) now also refuses while `profiles_http_convert_busy()`.
+- `aux_convert_journal_write()` refuses under the fence.
+- Tests are added for each hook.
+
+**1. Every `cfg_fs_write_atomic` caller treats a refusal as "not persisted".**
+- The `POST /api/cfgfs/file` job (`diagnostics_http.c` `cfgfs_file_post_handler`) answers 500 `{"ok":false,"error":"ESP_ERR_INVALID_STATE"}`, never success.
+- The kiln-config store (`kiln_cfg_store.c` `nvs_save_store()`) bumps `s_kiln_cfg_rev` only on ESP_OK. Its mutators roll RAM back on failure.
+- `firing_stats_persist()` returns without updating its cache.
+- The zones, profiles and prefs writers already went through the device path, and their failure handling is unchanged.
+- Several call sites treat `INVALID_STATE` as benign (it already meant "unmounted"). All are safe:
+  - Boot-resolve write-backs in kiln_cfg_store_cfg_fs, firing_stats_cfg_fs and the pref, profiles and zones cfg_fs resolvers. The mark is always 0 at boot.
+  - The relay-names v1 upgrade (`zones_config_store.c:1252`), which also runs at boot.
+  - A delete in `profiles_http.c:1498`.
+  - `backup_import.c:3811`, which reports "not written".
+
+**2. Hook install order.** main.c:226-228 installs all three hooks at the very start of `app_main`, before `main_boot_early` and before any task exists. That also covers boot_guard recovery mode.
+
+The recovery image (`firmware/KilnFW_recovery`) links neither cfg_fs, relay_authority nor factory_reset, so it needs no hook.
+
+**3. The reset-job exemption cannot leak.**
+- `s_reset_job_task` is set only between `relay_authority_reset_job_enter()` and `_exit()`.
+- Both calls sit inside the linear `execute_scope_job()` on the persistent flash worker, which runs one job at a time.
+- Exit clears the exemption. After exit every task is refused until reboot.
+
+A reused task handle cannot pick it up, because no task is created or deleted while the exemption is set.
+
+**4. Leaving `cfg_fs_delete()` and `aux_convert_journal_clear()` unfenced is safe.**
+- Every delete caller moves state toward the post-reset state: the kiln and profiles scope deletes, `pref_cfg_fs`, `profiles_builtin`, `profiles_cfg_fs` and `firing_stats_cfg_fs`.
+- A journal clear only removes the marker.
+- Every journal write and clear runs inside convert busy, which the reset now refuses.
+- The convert sets busy (`_Atomic`, seq_cst) before its mode check. The reset sets the mark and then reads busy. That Dekker-style pairing means at least one side refuses.
+
+So the busy refusal is the real LOW-1 fix. The `journal_write` fence is defence in depth. Its check sits outside any lock, but the pairing above closes that TOCTOU.
+
+**5. The NVS-side writers are not fenced.** See LOW-6.
+
+**Negative test.** I ran `tools\negtest.ps1` against `build_host_tests.ps1 -Only 'test_cfg_fs|aux_outputs_store|ota_http|link_watchdog|prestart'` (8 executables, baseline passed), with expect pattern `RUN FAILURES`.
+
+| Mutation | Result |
+|---|---|
+| `cfg_fs_write_atomic` refusal disabled (`if (0 && refuse && refuse())`) | CAUGHT |
+| `aux_convert_journal_write` fence disabled | CAUGHT |
+| factory_reset convert-busy refusal disabled | CAUGHT |
+| exemption dropped (`refuses_writer` returns true for the job task too) | CAUGHT |
+| exemption ignores task identity (`s_reset_job_task == NULL` only, so nobody is refused while the job is entered) | MISSED |
+
+The MISSED row is expected, because the host tests are single-threaded. See INFO-4.
+
+#### LOW-6: a lazily re-inited kiln_nvs lets unfenced NVS writers survive a kiln or all reset
+
+**Cause.**
+- The partition erase de-inits kiln_nvs, and `hal_kv_open()` does not re-init it.
+- Several readers do re-init kiln_nvs lazily, though: the dual-write status readers in ramp_assist_cfg, time_sync, display_power_cfg and aux_outputs_cfg, plus `run_state` and `aux_convert_journal_clear()`.
+- Once one of them runs, kiln_nvs writers that check no reset mark can land in the roughly 500 ms before `reboot_task` restarts the board.
+
+**Writers that check no mark.**
+- `persist()` in `drivers/safety/estop_verification.c:76`, reached by `POST /api/estop/verify`. Its own header says a kiln or all reset is exactly what must invalidate the record. A surviving record would show "E-stop verified" after the reset.
+- `firing_shadow_store_persist()` in `drivers/control/firing_shadow.c:136`. This is the diagnostic verdict summary.
+- The swap-pending record write at `persist/kiln_cfg_swap.c:196`. It could raise a spurious boot-time "swap interrupted" banner.
+- adaptive_tune and run_state writes.
+
+This is LOW because it needs a concurrent request inside a sub-second window after the erase.
+
+**Suggested fix.** Make `estop_verification` `persist()` check `relay_authority_reset_refuses_writer()`, at minimum. Or fence `hal_kv_set_*` for the kiln_nvs partition centrally, the same way 04848cd9 fenced `cfg_fs_write_atomic()`.
+
+#### LOW-7: nothing pins the main.c hook installs
+
+All three refusals rely on the three setter calls at main.c:226-228. No check script or test fails if one is removed. The host tests install the hook themselves, so they would stay green.
+
+The gap already existed for the two earlier hooks.
+
+**Suggested fix.** Add a source-text check, or a line in an existing check, that requires all three calls in `app_main`.
+
+#### INFO
+
+- **INFO-1.** Under the fence, `aux_outputs_http_core.c:152` maps `INVALID_STATE` to 409 "zone conflict or quarantined store". That text is misleading, but it is not a success. It predates 04848cd9.
+- **INFO-2.** The refused `POST /api/cfgfs/file` answers 500, not 409. A restore client sees a server error rather than "try later".
+- **INFO-3.** `firing_stats_persist()` is refused cleanly. The `firing_shadow_finish_firing()` NVS write just before it is not (LOW-6).
+- **INFO-4.** Only a multi-task test could cover the task identity in the exemption (the MISSED mutation). Because of item 3, the practical risk is nil.
 
 ## Part B: otafix
 
