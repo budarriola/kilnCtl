@@ -591,6 +591,13 @@ bool link_frame_versions_compatible(uint16_t self_protocol, uint16_t self_min_co
 // numbering.
 uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason);
 
+// Safety link review 2026-10-09 F4: next trip-event sequence number. 0 means
+// "no trip yet this boot" (safety_core_get_trip_event() returns false, DIAG
+// reports no trip, the ESP treats seq 0 as the unbound/none value), so the
+// uint8_t counter must wrap 255 -> 1, never back to 0: a wrap to 0 made the
+// 256th trip look like "never tripped" and its event was never reported.
+uint8_t link_frame_next_trip_seq(uint8_t current);
+
 // --- CLEAR_TRIP validation (link_task_handle_clear_trip() shared logic) ----
 // Factored out of link_task_handle_clear_trip() (src/tasks/link_task.c) so
 // this session's guard-test-matrix pass (commit 9a6d3e9) can host-test the

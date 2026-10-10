@@ -344,6 +344,22 @@ static void test_versions_compatible(void)
 // link_task_send_diag()'s single-bit degraded trip_mask approximation so
 // link_task_handle_clear_trip()'s mismatch check (link_task.c) uses the
 // exact same mapping DIAG frames report. TODO.md Phase 7's CLEAR_TRIP item.
+static void test_next_trip_seq(void)
+{
+    TEST_SECTION("F4: link_frame_next_trip_seq -- wraps 255 -> 1, never back to 0 (0 = no trip yet)");
+    TEST_CHECK(link_frame_next_trip_seq(0u) == 1u, "first trip -> 1");
+    TEST_CHECK(link_frame_next_trip_seq(1u) == 2u, "1 -> 2");
+    TEST_CHECK(link_frame_next_trip_seq(254u) == 255u, "254 -> 255");
+    TEST_CHECK(link_frame_next_trip_seq(255u) == 1u, "255 wraps to 1, not 0");
+    uint8_t s = 0u;
+    bool hit_zero = false;
+    for (int i = 0; i < 1000; i++) {
+        s = link_frame_next_trip_seq(s);
+        if (s == 0u) hit_zero = true;
+    }
+    TEST_CHECK(!hit_zero, "1000 trips never produce seq 0");
+}
+
 static void test_trip_mask_for_reason(void)
 {
     TEST_SECTION("link_frame_trip_mask_for_reason -- single-bit mapping");
@@ -809,6 +825,7 @@ void run_test_link_frame(void)
     test_hostile_inputs();
     test_nan_survives();
     test_versions_compatible();
+    test_next_trip_seq();
     test_trip_mask_for_reason();
     test_decide_clear_trip();
     test_counts_for_liveness();
