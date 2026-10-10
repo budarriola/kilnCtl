@@ -204,6 +204,22 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
     }
 }
 
+/* MED-2 (FIRING_PATH_AUDIT_2026-10-10): a start from DONE overwrites the finished run's state before
+ * several later refusals. done_snap is a copy of s_exec taken just before that overwrite (NULL when
+ * the state was not DONE); a refusal restores it so the DONE run and its fs_persisted flag survive
+ * untouched. Lock-protected fields only: last_tick_tick is written by the control task without the
+ * lock, so it keeps its live value. Caller holds s_exec.lock; this releases it. */
+static void run_refuse_unlock(s_exec_state_t *done_snap)
+{
+    if (done_snap != NULL) {
+        TickType_t live_tick = s_exec.last_tick_tick;
+        memcpy(&s_exec, done_snap, sizeof(s_exec));
+        s_exec.last_tick_tick = live_tick;
+        heap_caps_free(done_snap);
+    }
+    xSemaphoreGive(s_exec.lock);
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
     /* Zones config generation before ANY config read below; re-checked under zones_cfg_lock()
@@ -421,6 +437,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                                        &warm_start_coolest_captured,
                                        &ambient_valid, &ambient_c_captured);
 
+    s_exec_state_t *done_snap = NULL; /* MED-2: see run_refuse_unlock() */
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
 
     if (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) {
@@ -671,6 +688,17 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
+    if (s_exec.state == PROFILE_EXEC_DONE) {
+        done_snap = heap_caps_malloc(sizeof(s_exec), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (done_snap == NULL) done_snap = heap_caps_malloc(sizeof(s_exec), MALLOC_CAP_8BIT);
+        if (done_snap == NULL) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) snprintf(err_msg, err_cap, "out of memory preparing the start -- try again");
+            return false;
+        }
+        memcpy(done_snap, &s_exec, sizeof(s_exec));
+    }
+
     s_exec.profile = p;
     s_exec.profile_id = profile_id;
     s_exec.segment_index = 0;
@@ -830,7 +858,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
     if (n_heating_zones == 0) {
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         /* Name the real cause: a monitor-only zone (relay moved to an aux
          * output) has a control mode but no heater relay, so "control mode
          * OFF" alone would send the operator to the wrong field. Both
@@ -888,7 +916,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             if (aux_seen_mask & (1u << b)) n_aux++;
         }
         if (n_aux > 0 && (uint16_t)n_on_off_zones + n_aux >= cap_for_on_off_check) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 snprintf(err_msg, err_cap,
                          "this profile has %u on/off zone(s) and %u aux output(s) but "
@@ -903,7 +931,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             return false;
         }
         if (n_on_off_zones >= cap_for_on_off_check) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 snprintf(err_msg, err_cap,
                          "this profile has %u on/off zone(s) but max_simultaneous_relays is %u -- "
@@ -952,7 +980,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             }
         }
         if (any_rule) continue;
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap,
                      "zone %u is typed on/off but no on/off rule in this profile targets it: "
@@ -1307,7 +1335,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     {
         uint8_t conflict_mask = 0;
         if (!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask, &conflict_mask)) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 uint8_t conflict_zone = 0;
                 for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -1340,7 +1368,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * (non-race) case. */
     if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE)) {
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap,
                      "a zone current sweep is running -- it cannot run at the same time as a firing");
@@ -1357,7 +1385,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         return false;
     }
 
@@ -1373,7 +1401,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (backup_import_restore_in_flight()) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         sys_mode_snapshot_t late_snap;
         memset(&late_snap, 0, sizeof(late_snap));
         late_snap.restore_in_flight = true;
@@ -1390,7 +1418,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (danger_mode_blocks_start()) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         sys_mode_snapshot_t late_snap;
         memset(&late_snap, 0, sizeof(late_snap));
         late_snap.danger_mode_active = true;
@@ -1407,7 +1435,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (relay_authority_reset_in_flight()) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap, "factory reset in progress -- the controller reboots when it finishes");
         }
@@ -1426,7 +1454,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (zones_config_changed_since(gen_at_entry)) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap, "the zones configuration changed while the firing was starting -- start it again");
         }
@@ -1539,6 +1567,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * rather than requesting K4 for a firing that no longer exists. See
      * heat_enable.h's release-epoch section. */
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    if (done_snap != NULL) heap_caps_free(done_snap);
     xSemaphoreGive(s_exec.lock);
     if (!heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch)) {
         ESP_LOGW(PE_TAG, "start: heat_enable_acquire_since() failed -- run starts with heat blocked until "

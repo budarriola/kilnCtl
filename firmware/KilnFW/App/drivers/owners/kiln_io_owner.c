@@ -100,6 +100,8 @@ typedef struct {
 
 typedef struct {
     cmd_type_t type;
+    uint32_t off_epoch; /* kiln_io_relay_off_epoch() sampled when an AUTHORIZED command was posted;
+                         * a later all-off makes a still-queued ON stale (LOW-3) */
     int slot; /* index into s_slots[] -- module-owned result storage and
                * semaphore, assigned by post_and_wait() via
                * owner_slot_pool_alloc(). Never a pointer into the caller's
@@ -465,10 +467,23 @@ static void owner_task(void *arg)
             /* No ownership/safety gate -- see kiln_io_owner.h's top comment.
              * The caller (profile_executor.c/autotune_engine.c) already
              * applied its own zone-level gate before posting this. */
-            r.err = kiln_io_set_relay_mask(s_io, cmd.args.set_relay_mask.mask,
-                                           cmd.args.set_relay_mask.value);
-            if (r.err == ESP_OK) {
-                relay_off_tracker_note_write(cmd.args.set_relay_mask.mask, cmd.args.set_relay_mask.value);
+            {
+                uint8_t auth_value = cmd.args.set_relay_mask.value;
+                bool stale = cmd.off_epoch != kiln_io_relay_off_epoch();
+                if (stale) {
+                    /* LOW-3: a fail-safe all-off ran after this was posted (the caller may have
+                     * timed out and moved on). Never close a relay on its behalf; the OFF bits
+                     * of the mask are still safe to write. */
+                    auth_value = 0;
+                    ESP_LOGW(TAG, "stale AUTHORIZED relay command dropped to OFF (all-off ran since it was queued)");
+                }
+                r.err = kiln_io_set_relay_mask(s_io, cmd.args.set_relay_mask.mask, auth_value);
+                if (r.err == ESP_OK) {
+                    relay_off_tracker_note_write(cmd.args.set_relay_mask.mask, auth_value);
+                    if (stale && cmd.args.set_relay_mask.value != 0) {
+                        r.err = ESP_ERR_INVALID_STATE; /* the requested ON did not happen */
+                    }
+                }
             }
             break;
         case CMD_SET_IO:
@@ -753,6 +768,7 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, 
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value)
 {
     owner_cmd_t cmd = { .type = CMD_SET_RELAY_MASK_AUTHORIZED,
+                        .off_epoch = kiln_io_relay_off_epoch(),
                         .args.set_relay_mask = { .mask = mask, .value = value } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {

@@ -568,8 +568,16 @@ static esp_err_t kiln_io_all_relays_off_locked(kiln_io_t *io)
     return kiln_io_track(io, err);
 }
 
+static volatile uint32_t s_relay_off_epoch;
+
+uint32_t kiln_io_relay_off_epoch(void)
+{
+    return s_relay_off_epoch;
+}
+
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
 {
+    s_relay_off_epoch++; /* before anything can fail: a queued ON stamped earlier is now stale */
     /* Deliberately the ONE call that does not require a fully initialized
      * board: this is the fail-safe path, and refusing to drop the relays
      * because bring-up did not finish would be exactly backwards. It needs an

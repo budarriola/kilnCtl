@@ -3090,6 +3090,67 @@ static void test_run_refuses_when_factory_reset_in_flight(void)
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
 }
+// MED-2 (FIRING_PATH_AUDIT_2026-10-10): a start refused from DONE must leave the finished run, its
+// fs_persisted flag and its zone accumulators exactly as they were (the next DONE tick would otherwise
+// persist a firing-stats record for the refused profile and feed adaptive tune a fabricated clean run).
+static void med2_arrange_done(void)
+{
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.profile_id = 7;
+    s_exec.profile.zone_mask = 0x02;
+    s_exec.fs_persisted = true;
+    s_exec.total_elapsed_s = 1234.0f;
+    s_exec.zones[1].active = true;
+    s_exec.zones[0].active = false;
+    s_exec.run_started_unix_s = 1700000000u;
+}
+static void med2_check_done_untouched(const char *why)
+{
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_DONE, why);
+    TEST_CHECK(s_exec.profile_id == 7, "DONE run's profile id survives a refused start");
+    TEST_CHECK(s_exec.profile.zone_mask == 0x02, "DONE run's profile copy survives a refused start");
+    TEST_CHECK(s_exec.fs_persisted, "fs_persisted stays true so no bogus firing-stats record is written");
+    TEST_CHECK(s_exec.total_elapsed_s == 1234.0f, "DONE run's elapsed time survives a refused start");
+    TEST_CHECK(s_exec.zones[1].active && !s_exec.zones[0].active, "DONE run's zone set survives a refused start");
+    TEST_CHECK(s_exec.run_started_unix_s == 1700000000u, "DONE run's start stamp survives a refused start");
+}
+static void test_run_refused_from_done_leaves_done_state_untouched(void)
+{
+    TEST_SECTION("MED-2 -- a start refused from DONE (late commit refusal) leaves the finished run untouched");
+    med2_arrange_done();
+    s_test_reset_in_flight = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "late refusal refuses");
+    TEST_CHECK(strstr(err, "factory reset in progress") != NULL, "late refusal names the factory reset");
+    med2_check_done_untouched("state stays DONE after a late refusal");
+
+    TEST_SECTION("MED-2 -- a start refused from DONE (no heating zone) leaves the finished run untouched");
+    med2_arrange_done();
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_OFF;
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(!ok, "no-heating-zone start refuses");
+    med2_check_done_untouched("state stays DONE after the no-heating-zone refusal");
+
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
 // LCD review R2: the early gate saw danger mode closed, danger_mode_request_start() then opened its window
 // before the RUNNING commit. The commit-side recheck (after the heat claim is published) must refuse and
 // release every claim.
@@ -12180,6 +12241,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_when_zones_config_changes_during_start();
     test_run_refuses_when_factory_reset_in_flight();
+    test_run_refused_from_done_leaves_done_state_untouched();
     test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();

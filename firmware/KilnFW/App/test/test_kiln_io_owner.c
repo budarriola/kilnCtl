@@ -117,9 +117,12 @@ esp_err_t SX1509_get_interrupt_source(SX1509Class *e, uint16_t *out_mask, bool c
     (void)e; (void)clear; if (out_mask) *out_mask = 0; return ESP_OK;
 }
 esp_err_t SX1509_write_port(SX1509Class *e, uint16_t value) { (void)e; (void)value; return ESP_OK; }
+static uint16_t g_sx_dir_shadow = 0xFFFFu;
+static uint16_t g_sx_last_masked_value;
+static int g_sx_masked_writes;
 esp_err_t SX1509_write_masked(SX1509Class *e, uint16_t mask, uint16_t value)
 {
-    (void)e; (void)mask; (void)value; return ESP_OK;
+    (void)e; (void)mask; g_sx_last_masked_value = value; g_sx_masked_writes++; return ESP_OK;
 }
 esp_err_t SX1509_read_port(SX1509Class *e, uint16_t *out_value)
 {
@@ -136,7 +139,7 @@ esp_err_t SX1509_led_driver(SX1509Class *e, uint8_t pin, bool enable, uint8_t in
 }
 esp_err_t SX1509_reset(SX1509Class *e, bool hard) { (void)e; (void)hard; return ESP_OK; }
 uint16_t SX1509_get_shadow(const SX1509Class *e) { (void)e; return 0; }
-uint16_t SX1509_get_dir_shadow(const SX1509Class *e) { (void)e; return 0xFFFFu; }
+uint16_t SX1509_get_dir_shadow(const SX1509Class *e) { (void)e; return g_sx_dir_shadow; }
 bool SX1509_irq_asserted(const SX1509Class *e) { (void)e; return false; }
 int SX1509_get_irq_gpio(const SX1509Class *e) { (void)e; return -1; }
 esp_err_t SX1509_scan(i2c_master_bus_handle_t bus, uint8_t *out_addrs, size_t max_addrs, size_t *out_count)
@@ -705,6 +708,32 @@ static void test_owner_task_dispatch_write_reg_relay_on_gate(void)
     s_stub_safety_blocked = false; s_stub_safety_sources = 0;
 }
 
+static void test_authorized_on_queued_before_all_off_is_dropped(void)
+{
+    TEST_SECTION("LOW-3 -- an AUTHORIZED ON queued before a direct all-off must not close a relay afterward");
+    owner_cmd_t c;
+    owner_result_t r;
+    memset(&c, 0, sizeof(c));
+    c.type = CMD_SET_RELAY_MASK_AUTHORIZED;
+    c.args.set_relay_mask.mask = 0x01u;
+    c.args.set_relay_mask.value = 0x01u;
+
+    s_dispatch_io.initialized = true;
+    g_sx_dir_shadow = 0; /* relay pins read as outputs so an ON is not refused early */
+    c.off_epoch = kiln_io_relay_off_epoch();
+    g_sx_masked_writes = 0;
+    r = dispatch(c);
+    TEST_CHECK(r.err == ESP_OK, "ON stamped with the current epoch executes");
+    TEST_CHECK(g_sx_masked_writes == 1 && g_sx_last_masked_value != 0, "current-epoch ON drove a relay pin high");
+
+    (void)kiln_io_all_relays_off(&s_dispatch_io); /* the watchdog's direct all-off */
+    g_sx_masked_writes = 0;
+    r = dispatch(c); /* the stale ON (stamped before the all-off) lands now */
+    TEST_CHECK(r.err != ESP_OK, "stale ON reports failure");
+    TEST_CHECK(g_sx_masked_writes == 0 || g_sx_last_masked_value == 0, "stale ON did not drive any relay pin high");
+    g_sx_dir_shadow = 0xFFFFu;
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
@@ -727,6 +756,7 @@ int main(void)
     test_relays_off_ms_saturates_below_the_relay_on_sentinel();
     test_owner_task_dispatch_refuses_relay_pin_reconfig();
     test_owner_task_dispatch_write_reg_relay_on_gate();
+    test_authorized_on_queued_before_all_off_is_dropped();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

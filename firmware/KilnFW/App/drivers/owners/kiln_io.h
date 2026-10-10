@@ -191,6 +191,12 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value);
  * half-succeed. */
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io);
 
+/* LOW-3 (FIRING_PATH_AUDIT_2026-10-10): generation bumped at the START of every
+ * kiln_io_all_relays_off() call (even a refused/failed one -- fail toward off).
+ * An owner command that sampled an older value before queueing predates a
+ * fail-safe all-off and must not close a relay afterward. */
+uint32_t kiln_io_relay_off_epoch(void);
+
 /* Re-runs bring-up after the expander was reset/POR'd (K7-03): reset (the hard
  * ~RESET pulse when the GPIO is wired, else soft -- K7 NIT-1), relays latched
  * OFF, relay pins back to outputs, verified by chip read-back. Marks the board
