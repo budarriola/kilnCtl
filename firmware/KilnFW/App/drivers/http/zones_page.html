@@ -2651,8 +2651,17 @@ function loadCurrent() {
 document.getElementById('thermoCount').addEventListener('change', renderZones);
 document.getElementById('relayCount').addEventListener('change', renderZones);
 
+/* Optional guard/model/tuning fields: zones_http_post_parse.c omit-PRESERVES each one, but
+   a blank value ("z0_driftperiod=") is "present" and fails its range parse with a misleading
+   400. A blank optional field is therefore left out of the POST (keeps the stored value). */
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+function omitBlankOptionalParams(params) {
+  return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
+}
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');
+  var saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl.disabled) return;
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
   var maxSimultaneous = parseInt(document.getElementById('maxSimultaneous').value, 10) || 0;
@@ -2894,9 +2903,12 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('relay' + (r + 1) + '_type=' + encodeURIComponent(tval));
   });
   msg.textContent = 'Saving…';
+  saveBtnEl.disabled = true;
+  params = omitBlankOptionalParams(params);
   fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) {
+    saveBtnEl.disabled = false;
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
     /* 3.5: an inheriting zone was just re-resolved from its source above,
        whether or not that source's own values changed this edit -- say so,
@@ -2908,6 +2920,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       : '');
     loadCurrent();
   }).catch(function (e) {
+    saveBtnEl.disabled = false;
     /* POST /api/zones's safety-ceiling-raise refusal (owner request
        2026-09-10) answers 409 with a JSON body ({"ok":false,"reason":...})
        rather than the plain-text bodies most other refusals here use --

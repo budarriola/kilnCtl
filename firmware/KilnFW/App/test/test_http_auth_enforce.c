@@ -694,10 +694,30 @@ static void test_host_allowlist(void) {
     TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "IP-prefixed hostname refused");
     f.host = "1.2.3";
     TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "3-octet refused");
-    f.host = "kilnctl.local.evil.example";
-    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mdns-prefixed hostname refused");
+    f.host = "kilnctl";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "bare hostname passes");
+    f.host = "KilnCtl.lan:8080";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "router DNS name.lan with port passes");
+    f.host = "kilnctl.home";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "name.home passes");
+    f.host = "kilnctlx.lan";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "label extension refused");
+    f.host = "evil.kilnctl.lan";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "name as non-first label refused");
+    f.host = "kiln";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "label prefix refused");
+    f.host = "captive.apple.com";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "captive probe host refused");
     f.host = NULL;
     TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "missing Host not refused here");
+    {
+        char loc[32];
+        TEST_CHECK(http_captive_location(loc, sizeof(loc), 0x0104a8c0u) && strcmp(loc, "http://192.168.4.1/") == 0, "captive Location absolute to AP IP");
+        TEST_CHECK(!http_captive_location(loc, sizeof(loc), 0) && strcmp(loc, "/") == 0, "captive Location falls back to / without an IP");
+        char tiny[8];
+        TEST_CHECK(!http_captive_location(tiny, sizeof(tiny), 0x0104a8c0u) && strcmp(tiny, "/") == 0, "captive Location small buffer falls back");
+        TEST_CHECK(http_captive_location(loc, sizeof(loc), 0xff0a0a0au) && strcmp(loc, "http://10.10.10.255/") == 0, "captive Location multi-digit octets");
+    }
     /* The attack: matching evil Origin + Host passes the Origin compare, not the Host gate. */
     fake_hdrs_t atk = {"http://rebind.attacker.example", NULL, "rebind.attacker.example"};
     TEST_CHECK(!http_origin_request_is_cross_origin(&atk, fake_len, fake_str), "matching evil Origin+Host passes origin compare");

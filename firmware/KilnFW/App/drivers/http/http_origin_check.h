@@ -7,7 +7,8 @@
 // host[:port] must equal the Host header's (host case-insensitive, missing port
 // = 80). Origin absent -> Referer's scheme://host[:port] gets the same compare.
 // Both absent -> allowed (MCP tools, curl and the LCD send neither).
-// Separately (F4) the Host itself must be an IP literal, localhost or <mdns>.local.
+// Separately (F4) the Host itself must be an IP literal, localhost, or a name whose first
+// label is the board's hostname (<mdns>.local, router DNS kilnctl / kilnctl.lan, ...).
 #ifndef KILNCTL_HTTP_ORIGIN_CHECK_H
 #define KILNCTL_HTTP_ORIGIN_CHECK_H
 
@@ -170,7 +171,9 @@ static inline bool http_origin_request_is_cross_origin(void *c, http_origin_hdr_
 // Origin==Host compare above passes. Refusing any Host that is not one of the board's
 // own names closes it: an attacker needs a DNS name, an IP literal is never theirs.
 // Allowed: IPv4 literal (a.b.c.d, optional :port), bracketed IPv6 literal,
-// "localhost", and "<mdns_name>.local" when mdns_name != NULL. Missing Host -> allowed
+// "localhost", and any name whose FIRST label equals mdns_name (case-insensitive:
+// "<name>", "<name>.local", "<name>.lan", "<name>.home", ... any suffix, for router DNS)
+// when mdns_name != NULL. Other names stay refused. Missing Host -> allowed
 // (HTTP/1.0 non-browser clients; a browser always sends one).
 static inline bool http_origin_host_is_ipv4_literal_(const char *h) {
     int dots = 0, digits = 0;
@@ -207,8 +210,7 @@ static inline bool http_origin_host_name_allowed(const char *host, const char *m
     }
     if (mdns_name != NULL && mdns_name[0] != '\0') {
         size_t n = strlen(mdns_name);
-        if (n + 6 <= sizeof(hp.host) && strlen(hp.host) == n + 6 &&
-            strcmp(hp.host + n, ".local") == 0) {
+        if (n <= strlen(hp.host) && (hp.host[n] == '\0' || hp.host[n] == '.')) {
             for (size_t i = 0; i < n; i++) {
                 if (http_origin_lc_(mdns_name[i]) != hp.host[i]) {
                     return false;
@@ -233,6 +235,42 @@ static inline bool http_origin_request_host_refused(void *c, http_origin_hdr_len
         return true;
     }
     return !http_origin_host_name_allowed(host, mdns_name);
+}
+
+// ---- Captive-portal redirect target ----
+// The 302 must be ABSOLUTE to the SoftAP IP: a relative "/" keeps the OS probe's Host
+// (captive.apple.com), under which every POST would then fail the Host allow-list.
+// ip4_nbo: esp_ip4_addr_t.addr (first octet in the low byte). Writes "http://a.b.c.d/";
+// returns false (buf = "/") when the address is 0 or buf is too small.
+static inline bool http_captive_location(char *buf, size_t cap, unsigned ip4_nbo) {
+    if (cap < 2) {
+        return false;
+    }
+    buf[0] = '/';
+    buf[1] = '\0';
+    if (ip4_nbo == 0 || cap < 24) {
+        return false;
+    }
+    size_t o = 0;
+    const char *pre = "http://";
+    for (size_t i = 0; pre[i] != '\0'; i++) {
+        buf[o++] = pre[i];
+    }
+    for (int k = 0; k < 4; k++) {
+        char t[3];
+        int n = 0;
+        unsigned x = (ip4_nbo >> (8 * k)) & 0xffu;
+        do {
+            t[n++] = (char)('0' + x % 10u);
+            x /= 10u;
+        } while (x != 0);
+        while (n > 0) {
+            buf[o++] = t[--n];
+        }
+        buf[o++] = (k < 3) ? '.' : '/';
+    }
+    buf[o] = '\0';
+    return true;
 }
 
 #ifdef __cplusplus

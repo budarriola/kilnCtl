@@ -10,6 +10,8 @@
 #include "persist_scratch.h" /* persist_scratch_alloc() -- scan_get response */
 #include "esp_heap_caps.h" /* heap_caps_malloc() -- networks_get_handler() below */
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "http_origin_check.h" /* http_captive_location() */
 #include "esp_http_server.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
@@ -876,7 +878,15 @@ static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t e
         return ESP_OK;
     }
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
+    /* Absolute to the SoftAP IP so the page loads under an IP Host (the F4 Host
+     * allow-list refuses captive.apple.com & co. for POST /provision etc.). */
+    char loc[32] = "/";
+    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    esp_netif_ip_info_t ipi;
+    if (ap != NULL && esp_netif_get_ip_info(ap, &ipi) == ESP_OK) {
+        (void)http_captive_location(loc, sizeof(loc), (unsigned)ipi.ip.addr);
+    }
+    httpd_resp_set_hdr(req, "Location", loc);
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }

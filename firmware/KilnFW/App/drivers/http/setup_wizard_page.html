@@ -1509,8 +1509,17 @@ function renderStep11() {
           renderErrList(errEl, [(r.body && r.body.error) || 'Save refused -- see status above and try again.']);
           return;
         }
-        msgEl.textContent = 'Saved. Read back: web login is now ' + (wantEnable ? 'ON' : 'off') + '.';
-        postStepState(11, 'done').then(function () { loadAll(); });
+        // Re-read the policy: the text below reports what the board says, not what was sent.
+        fetch('/api/auth/config').then(function (rb) {
+          if (!rb.ok) throw new Error('read-back refused');
+          return rb.json();
+        }).then(function (cfg) {
+          msgEl.textContent = wizardLoginReadBackText(wantEnable, cfg);
+        }, function () {
+          msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
+        }).then(function () {
+          return postStepState(11, 'done');
+        }).then(function () { loadAll(); });
       }).catch(function (err) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
           renderErrList(errEl, ['Sign-in cancelled.']);
@@ -1524,6 +1533,17 @@ function renderStep11() {
       postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
     });
   });
+}
+
+/* Step 11 read-back text. cfg = parsed GET /api/auth/config, or null when it could not be read
+ * (401, network): then only "sent" is claimed. Pure; unit-tested. */
+function wizardLoginReadBackText(wantEnable, cfg) {
+  if (!cfg || typeof cfg.web_enabled === 'undefined') {
+    return 'Saved. The setting was sent but could not be read back to confirm it.';
+  }
+  var on = !!cfg.web_enabled;
+  return 'Saved. Read back: web login is now ' + (on ? 'ON' : 'off') + '.' +
+    (on !== !!wantEnable ? ' This differs from what was requested.' : '');
 }
 
 /* ---- Step 7 (safety processor commissioning, embedded per owner decision).

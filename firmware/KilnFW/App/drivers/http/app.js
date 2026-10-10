@@ -1128,6 +1128,17 @@
     return pendingLogin;
   }
 
+  var hostRefusalShown = false;
+  // Maps the firmware's 403 {"error":"cross_origin"|"bad_host"} bodies to one message
+  // (http_auth_http.c); null for any other body. Pure; unit-tested.
+  window.kcHostRefusalText = function (body) {
+    if (body && (body.error === 'cross_origin' || body.error === 'bad_host')) {
+      return 'The controller refused this request because of the address it was opened ' +
+        'from. Open the controller by its IP address or <name>.local and try again.';
+    }
+    return null;
+  };
+
   window.fetch = function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     if (isAuthExemptUrl(url)) {
@@ -1240,6 +1251,19 @@
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
         return promptThenRetry('Administrator login required');
+      }
+      // F4/MED-1 refusals (cross_origin, bad_host): a 403 JSON body, no auth-reason
+      // header. Tell the operator once what to do instead of a silent failed save.
+      if (resp.status === 403 && !alreadyRetried && typeof resp.clone === 'function') {
+        try {
+          resp.clone().json().then(function (b) {
+            var msg = window.kcHostRefusalText(b);
+            if (msg && !hostRefusalShown) {
+              hostRefusalShown = true;
+              window.kcAlert(msg, { title: 'Address not accepted' });
+            }
+          }, function () {});
+        } catch (e) { /* body unreadable: leave the raw 403 to the caller */ }
       }
       return resp;
     });
