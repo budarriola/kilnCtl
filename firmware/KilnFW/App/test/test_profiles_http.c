@@ -4088,7 +4088,7 @@ static void test_profile_post_handler_rejects_malformed_id(void)
     TEST_SECTION("profile_post_handler() -- id=abc / id=1abc / overlong id / id=%00 are refused with 400");
     memset(&s_profiles, 0, sizeof(s_profiles));
     const char *rest = "&name=StrictId&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
-    const char *ids[] = { "id=abc", "id=1abc", "id=123456789", "id=-2", "id=100", "id=1%002" };
+    const char *ids[] = { "id=abc", "id=1abc", "id=123456789", "id=-2", "id=100", "id=127", "id=129", "id=1%002" };
     for (size_t k = 0; k < sizeof(ids) / sizeof(ids[0]); k++) {
         char body[256];
         snprintf(body, sizeof(body), "%s%s", ids[k], rest);
@@ -4097,6 +4097,25 @@ static void test_profile_post_handler_rejects_malformed_id(void)
         TEST_CHECK(s_last_err_code == 400, "malformed id answers 400");
         TEST_CHECK(!profiles_slot_used(0) && !profiles_slot_used(1), "nothing was written to any slot");
     }
+}
+
+// Built-in copy: id=<builtin id> saves into the first free slot (same as -1)
+// and never touches the built-in; non-builtin ids above the slot range stay 400.
+static void test_profile_post_builtin_id_copies_to_first_free(void)
+{
+    TEST_SECTION("profile_post_handler() -- id=128 (builtin) saves into first free slot, builtin untouched");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    g_fake_builtin_on = true;
+    char body[256];
+    snprintf(body, sizeof(body),
+             "id=%d&name=BuiltinCopy&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5",
+             (int)PROFILE_BUILTIN_ID_BASE);
+    s_last_err_code = 0;
+    TEST_CHECK(run_profile_post(body) == ESP_OK, "handler replies itself");
+    TEST_CHECK(s_last_err_code != 400, "builtin id is not a 400");
+    TEST_CHECK(profiles_slot_used(0), "copy landed in the first free slot");
+    g_fake_builtin_on = false;
 }
 
 static void test_profile_name_nul_refused(void)
@@ -4944,6 +4963,7 @@ void run_test_profiles_http(void)
     test_profiles_http_save_allows_builtin_name();
     test_profiles_http_save_allows_editing_existing_slot_named_like_builtin();
     test_profile_post_handler_rejects_malformed_id();
+    test_profile_post_builtin_id_copies_to_first_free();
     test_profile_name_nul_refused();
     test_profile_rule_temp_nan_refused_even_with_cmp_none();
     test_profile_favorite_empty_slot_refused();

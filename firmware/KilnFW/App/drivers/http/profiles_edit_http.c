@@ -531,7 +531,25 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     char id_val[8];
     int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
     long requested_id = -1;
-    if (id_len == -2 || (id_len > 0 && !http_form_parse_long(id_val, id_len, -1, PROFILES_MAX_COUNT - 1, &requested_id))) {
+    /* A built-in id (PROFILE_BUILTIN_ID_BASE + index) is accepted explicitly
+     * and means "new slot / first free" (same as -1): that is the "copy
+     * built-in" feature profiles_page.html relies on (copyBuiltin() and
+     * loadIntoEditor()+Save both post id=<builtin id>). The built-in itself
+     * is never written. Every other out-of-range id is still a 400. */
+    bool id_ok = (id_len <= 0);
+    if (id_len > 0) {
+        long parsed = -1;
+        if (http_form_parse_long(id_val, id_len, -1, 255, &parsed)) {
+            if (parsed <= PROFILES_MAX_COUNT - 1) {
+                requested_id = parsed;
+                id_ok = true;
+            } else if (profiles_builtin_id_valid((uint8_t)parsed)) {
+                requested_id = -1; /* builtin copy -> first free slot */
+                id_ok = true;
+            }
+        }
+    }
+    if (id_len == -2 || !id_ok) {
         free(body);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id invalid");
         return ESP_OK;
