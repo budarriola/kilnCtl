@@ -5139,6 +5139,21 @@ static void test_profiles_refused_until_boot_load_done(void)
     profiles_http_test_set_loaded(false);
     TEST_CHECK(!profiles_http_slot_runnable(4), "user slot not runnable before load finished");
     TEST_CHECK(!profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "rev check refuses before load finished");
+    /* review 14 LOW-5: every writer is refused for the whole pre-load window, not only while s_boot_loading */
+    {
+        uint32_t rev_pre = profiles_http_slot_rev(4);
+        TEST_CHECK(!profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)) && strncmp(err, "busy:", 5) == 0,
+                   "save refused busy before the boot load finished");
+        TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_BUSY, "delete refused busy before the boot load finished");
+        profiles_retarget_counts_t rc;
+        TEST_CHECK(!profiles_retarget_zone_to_aux_commit(0, 1, true, &rc, err, sizeof(err)) &&
+                       strncmp(err, "busy:", 5) == 0,
+                   "retarget commit refused busy before the boot load finished");
+        TEST_CHECK(!profiles_retarget_zone_to_aux_resume(0, 1, true, &rc, err, sizeof(err)),
+                   "retarget resume refused before the boot load finished");
+        TEST_CHECK(!profiles_retarget_zone_to_aux_revert(0, 1), "retarget revert refused before the boot load finished");
+        TEST_CHECK(profiles_http_slot_rev(4) == rev_pre && profiles_slot_used(4), "refused writers left slot 4 untouched");
+    }
     profiles_http_test_set_loaded(true);
     TEST_CHECK(profiles_http_slot_runnable(4), "runnable once loaded");
     /* profiles_http_start() runs the load and publishes the flag (the stub then returns INVALID_STATE). */

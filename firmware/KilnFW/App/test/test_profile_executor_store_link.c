@@ -120,6 +120,8 @@ static void pex_store_then_run(uint8_t slot, const profile_t *want, const char *
     uint8_t out_id = 0xFF;
     uint8_t warns = 0;
 
+    /* Review 14 LOW-5: writers are refused until the boot load published; the real firmware runs it first. */
+    (void)profiles_http_start();
     bool saved = profiles_http_save(slot, want, &out_id, &warns, err, sizeof(err));
     if (!saved) printf("  save error: %s\n", err);
     TEST_CHECK(saved, "profiles_http_save must accept the profile");

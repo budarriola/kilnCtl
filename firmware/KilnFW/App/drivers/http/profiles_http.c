@@ -89,6 +89,14 @@ static _Atomic bool s_profiles_loaded;
 static _Atomic bool s_boot_loading; /* review LOW-9: boot load writes RAM slots unlocked; saves are refused meanwhile */
 
 bool profiles_http_loaded(void) { return atomic_load(&s_profiles_loaded); }
+
+/* Review 14 LOW-5: every profile WRITER (save, delete, retarget commit/resume/revert) is refused for the whole
+ * pre-load window -- not just while s_boot_loading is set -- because the boot load writes RAM slots without the
+ * save lock and POST /api/zones (move_zone_to_aux) is registered before profiles_http_start() runs it. */
+static bool profiles_writers_blocked(void)
+{
+    return atomic_load(&s_boot_loading) || !atomic_load(&s_profiles_loaded);
+}
 #ifdef KILNCTL_PROFILES_LOADED_TEST_HOOK /* host test only; compiled out of the target (review LOW-7) */
 void profiles_http_test_set_loaded(bool v)
 {
@@ -1859,7 +1867,7 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         snprintf(err_msg, err_cap, "busy: zone conversion running, retry");
         return false;
     }
-    if (atomic_load(&s_boot_loading)) { /* review LOW-9: a save would race the unlocked boot load writes */
+    if (profiles_writers_blocked()) { /* review LOW-9 / 14 LOW-5: a save would race the unlocked boot load writes */
         snprintf(err_msg, err_cap, "busy: profiles still loading, retry");
         return false;
     }
@@ -2024,6 +2032,9 @@ profiles_delete_result_t profiles_delete_slot(uint8_t id)
      * profiles_builtin.h. Refuse rather than pretend. */
     if (profiles_builtin_id_valid(id)) {
         return PROFILES_DELETE_BUILTIN;
+    }
+    if (profiles_writers_blocked()) {
+        return PROFILES_DELETE_BUSY; /* review 14 LOW-5: boot load still owns the slots */
     }
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
         return PROFILES_DELETE_NOT_FOUND;
@@ -2522,6 +2533,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
                             profiles_retarget_counts_t *counts, char *err, size_t err_cap)
 {
     profiles_retarget_counts_t plan;
+    if (profiles_writers_blocked()) {
+        snprintf(err, err_cap, "busy: profiles still loading, retry");
+        if (counts) memset(counts, 0, sizeof(*counts));
+        return false;
+    }
     profile_t *trial = persist_scratch_alloc(sizeof(*trial));
     if (!trial) {
         snprintf(err, err_cap, "out of memory");
@@ -2623,7 +2639,7 @@ bool profiles_retarget_zone_to_aux_resume(uint8_t zone, uint8_t relay, bool zone
 bool profiles_retarget_zone_to_aux_revert(uint8_t zone, uint8_t relay)
 {
     uint8_t dest = profile_rule_target_from_aux_relay(relay);
-    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT) {
+    if (dest == 0xFFu || zone >= MAX31856_CHANNEL_COUNT || profiles_writers_blocked()) {
         return false;
     }
     uint8_t journal[PROFILES_MAX_COUNT];
