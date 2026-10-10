@@ -217,6 +217,9 @@ def get_heap_status(host: Optional[str] = None) -> str:
             if crash.get("crash_uptime_known")
             else "crash_uptime_s=unknown"
         )
+        stale_note = dashboard_http_client.crash_report_stale_note(crash)
+        if stale_note:
+            lines.append(f"!!! {stale_note} !!!")
         lines.append(
             "!!! UNACKNOWLEDGED CRASH REPORT !!! exc_task="
             f"{crash.get('exc_task')!r} exc_cause_str={crash.get('exc_cause_str')!r} "
@@ -298,8 +301,10 @@ def _describe_crash_report(rec: dict) -> str:
         if rec.get("crash_uptime_known")
         else "crash_uptime_s=unknown"
     )
+    stale_note = dashboard_http_client.crash_report_stale_note(rec)
     return (
-        f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
+        (f"[{stale_note}] " if stale_note else "")
+        + f"reset_reason={rec.get('found_on_boot_reset_reason')!r} "
         f"exc_task={rec.get('exc_task')!r} exc_cause_str={rec.get('exc_cause_str')!r} "
         f"exc_pc={rec.get('exc_pc')!r} exc_addr={rec.get('exc_addr')!r} "
         f"fw_build={rec.get('fw_build')!r} {uptime_bit} dump_id={rec.get('dump_id')} "

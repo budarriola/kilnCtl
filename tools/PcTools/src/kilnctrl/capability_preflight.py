@@ -468,6 +468,14 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
             f"exc_cause_str={crash.get('exc_cause_str')!r} "
             f"reset_reason={crash.get('found_on_boot_reset_reason')!r}"
         )
+        if crash.get("stale_image") is True or crash.get("image_match") == "mismatch":
+            # Old dump from another image: still unacknowledged (so still blocks until a
+            # human acks/clears it) but never described as a crash of the running build.
+            crash_summary += (
+                " [STALE IMAGE: coredump is from a different firmware image, not the running one"
+                + (f"; dump elf sha256 prefix {crash.get('dump_elf_sha')}" if crash.get("dump_elf_sha") else "")
+                + "]"
+            )
 
     # THE READINESS FIRING INTERLOCK (see BoardInfo.readiness_blocked).
     # One more GET, tolerated absent exactly like /api/crash_report above.

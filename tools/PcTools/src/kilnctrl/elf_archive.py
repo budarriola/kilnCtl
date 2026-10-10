@@ -1687,6 +1687,27 @@ def list_recovery_elf_paths(archive_dir: Optional[str] = None) -> list[str]:
     return sorted(glob.glob(os.path.join(d, "recovery-*.elf")))
 
 
+def find_elf_by_sha_prefix(sha_prefix: str) -> tuple[Optional[str], str]:
+    """Archived KilnFW/recovery ELF whose content sha256 starts with sha_prefix
+    (a crash record's dump_elf_sha, the coredump's own app ELF sha256 hex
+    prefix; archive files are named <prefix>-<sha12>.elf from the same hash).
+    Needs >= 6 hex chars; ambiguity or no match returns (None, reason)."""
+    p = (sha_prefix or "").strip().lower()
+    if len(p) < 6 or any(c not in "0123456789abcdef" for c in p):
+        return None, f"dump elf sha prefix {sha_prefix!r} is too short/not hex"
+    hits = []
+    for path in list_all_kiln_elf_paths() + list_recovery_elf_paths():
+        key = os.path.basename(path).rsplit("-", 1)[-1][:-4]  # <prefix>-<key12>.elf
+        n = min(len(p), len(key))
+        if key[:n] == p[:n]:
+            hits.append(path)
+    if len(hits) == 1:
+        return hits[0], f"found {hits[0]} (matches the coredump's own app ELF sha256 prefix {p})"
+    if not hits:
+        return None, f"no archived ELF has sha256 prefix {p}"
+    return None, f"{len(hits)} archived ELFs share sha256 prefix {p}: {hits}"
+
+
 def find_recovery_elf_for_build(fw_build: str, archive_dir: Optional[str] = None) -> tuple[Optional[str], str]:
     """Recovery-archive counterpart of find_kiln_elf_for_build()."""
     d = archive_dir or recovery_archive_dir()

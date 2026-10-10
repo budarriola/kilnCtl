@@ -106,6 +106,25 @@ UNCLEAN_RESET_REASONS = frozenset({
 })
 
 
+STALE_IMAGE_NOTE = (
+    "STALE IMAGE: this coredump comes from a DIFFERENT firmware image than the one running now "
+    "(image_match=mismatch); fw_build/reset_reason/uptime of this boot are NOT attributed to it. "
+    "It is not a crash of the running firmware"
+)
+
+
+def crash_report_stale_note(rec: dict) -> str:
+    """Plain-language note for a GET /api/crash_report record whose coredump
+    was written by another image (stale_image true / image_match "mismatch"),
+    else ''. Includes the dump's own ELF sha prefix when known."""
+    if not isinstance(rec, dict):
+        return ""
+    if rec.get("stale_image") is True or rec.get("image_match") == "mismatch":
+        sha = rec.get("dump_elf_sha")
+        return STALE_IMAGE_NOTE + (f" (dump elf sha256 prefix {sha})" if sha else "")
+    return ""
+
+
 def get_crash_report(host: str, timeout: float = DASHBOARD_HTTP_TIMEOUT_S) -> dict:
     """GET /api/crash_report and return the full decoded JSON object
     (diagnostics_http.c: crash_report_get_handler -- ``{"present": false}``

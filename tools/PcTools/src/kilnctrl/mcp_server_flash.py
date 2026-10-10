@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -2075,7 +2075,8 @@ def debug_check_partition_table(host: Optional[str] = None, csv_path: Optional[s
 
 
 @_core._tool()
-def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -> str:
+def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None,
+                   dump_elf_sha: Optional[str] = None) -> str:
     """Finds the ELF that matches the ESP's CURRENTLY RUNNING firmware, so a
     coredump/panic backtrace can be symbolized against the right file instead
     of `build/KilnCtrl.elf` (whatever was built most recently -- confidently
@@ -2094,6 +2095,12 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     as every ota_*/adaptive_tune_* tool: explicit host, else STA IP, else the
     fallback AP address).
 
+    `dump_elf_sha` (crash_report's dump_elf_sha): the coredump's OWN app ELF
+    sha256 prefix. When given -- or when GET /api/crash_report at `host`
+    carries one and no `fw_build` was passed -- the ELF is looked up by that
+    sha first, since it identifies the image that actually crashed (a dump
+    flagged stale_image comes from another build than the running one).
+
     Fails LOUD with no match rather than falling back to KilnCtrl-latest.elf
     or the newest-by-mtime file -- either would silently reproduce the exact
     failure mode (confident wrong line numbers) this tool exists to prevent.
@@ -2108,6 +2115,22 @@ def find_crash_elf(host: Optional[str] = None, fw_build: Optional[str] = None) -
     use `find_crash_elf_for_coredump()` instead, which verifies against the
     coredump's own embedded SHA256 rather than trusting any externally
     reported build identity."""
+    sha_authoritative = dump_elf_sha is not None  # caller named the dump: no fallback to the running build
+    if dump_elf_sha is None and fw_build is None:
+        from .mcp_server_ota import _ota_resolve_host  # local import
+        try:
+            rec = dashboard_http_client.get_crash_report(_ota_resolve_host(host))
+            if isinstance(rec, dict) and rec.get("present") and rec.get("dump_elf_sha"):
+                dump_elf_sha = rec["dump_elf_sha"]
+                sha_authoritative = rec.get("stale_image") is True  # foreign dump: running build is no substitute
+        except Exception:  # noqa: BLE001 -- best effort; fall back to the running fw_build
+            pass
+    if dump_elf_sha:
+        spath, smessage = elf_archive.find_elf_by_sha_prefix(dump_elf_sha)
+        if spath is not None:
+            return smessage
+        if sha_authoritative:
+            return f"error: {smessage} (the dump's own image is not archived; the running build is NOT a substitute)"
     if fw_build is None:
         from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
         resolved = _ota_resolve_host(host)

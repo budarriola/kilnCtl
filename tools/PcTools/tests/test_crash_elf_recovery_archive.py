@@ -83,6 +83,23 @@ class RecoveryArchiveTest(unittest.TestCase):
         self.assertIn(elf, out)
         self.assertFalse(out.startswith("error"))
 
+    def test_find_crash_elf_by_dump_sha_prefix(self):
+        elf = self._put_elf(b"recovery-elf-C")
+        self._put_elf(b"recovery-elf-D")
+        prefix = _sha(b"recovery-elf-C")[:9]
+        out = mcp_server_flash.find_crash_elf(dump_elf_sha=prefix)
+        self.assertIn(elf, out)
+        out = mcp_server_flash.find_crash_elf(dump_elf_sha="ffffffff1")
+        self.assertTrue(out.startswith("error"))
+        self.assertIn("NOT a substitute", out)
+
+    def test_find_crash_elf_prefers_stale_dump_sha_from_board(self):
+        elf = self._put_elf(b"recovery-elf-E")
+        rec = {"present": True, "stale_image": True, "dump_elf_sha": _sha(b"recovery-elf-E")[:9]}
+        with unittest.mock.patch.object(mcp_server_flash.dashboard_http_client, "get_crash_report", return_value=rec),                 unittest.mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"):
+            out = mcp_server_flash.find_crash_elf()
+        self.assertIn(elf, out)
+
 
 if __name__ == "__main__":
     unittest.main()
