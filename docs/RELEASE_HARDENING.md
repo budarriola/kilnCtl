@@ -521,7 +521,7 @@ zero. All 7 checked by hand and found NOT genuinely unwired: 5
 `rate_guard_auto_compute`, `zones_http.c`'s `tuning_rec_body_len`) are
 `static` helpers called only from elsewhere in their own defining file --
 the script's exclude-defining-file rule produced a false zero, not a real
-one; 2 are genuinely indirect-dispatch: `time_sync.c`'s `tz_file_validate`
+one; 2 are genuinely indirect-dispatch: `time_sync.c`'s `tz_file_validate` (now `time_sync_tz_file_validate`, declared in `cfgfs_file_validators.h` and also called by `cfgfs_file_validate.c`'s PREF_FILE_RULES)
 is passed by name as a callback to `pref_cfg_fs_load_raw(...)`, and `zones_
 http.c`'s `sweep_status_get_handler` is registered in a static
 `httpd_uri_t` table (`.handler = sweep_status_get_handler`) -- both reached

@@ -37,6 +37,7 @@ import base64
 import io
 import sys
 import unittest.mock
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -199,9 +200,8 @@ if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
 
 
-def test_validated_files_are_posted_without_raw_and_others_with_raw():
-    """Files the firmware validates (cfgfs_file_validate.c) must not carry raw=1;
-    files with no validator still need it."""
+def test_every_file_is_posted_with_raw_flag():
+    """The firmware enforces its validators regardless of raw=1, so every file carries it."""
     urls: list = []
 
     def fake_urlopen(req, timeout=None):
@@ -209,12 +209,29 @@ def test_validated_files_are_posted_without_raw_and_others_with_raw():
         return _FakeResponse(b"{\"ok\":true}")
 
     files = {n: {"size_bytes": 1, "data_base64": base64.b64encode(b"x").decode()}
-             for n in ("zones.json", "aux_out.dat", "profiles/hidden.json", "unit_pref.dat", "relay_names.dat")}
+             for n in ("zones.json", "aux_out.dat", "unit_pref.dat", "relay_names.dat")}
     with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
         ok, message, _ = fbb.restore_cfgfs_files("10.0.0.5", files, 5.0)
     assert ok, message
-    by_name = {u.split("name=")[1].split("&")[0]: u for u in urls}
-    for n in ("zones.json", "aux_out.dat", "profiles/hidden.json"):
-        assert "raw=1" not in by_name[n], n
-    for n in ("unit_pref.dat", "relay_names.dat"):
-        assert by_name[n].endswith("&raw=1"), n
+    assert len(urls) == len(files)
+    for u in urls:
+        assert u.endswith("&raw=1"), u
+
+
+def test_refused_file_does_not_abort_rest_of_restore():
+    """A 400 on one file is recorded, the rest are still written, result is a failure naming it."""
+    posted: list = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        if "name=b&" in url:
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, io.BytesIO(b""))
+        posted.append(url)
+        return _FakeResponse(b"{\"ok\":true}")
+
+    files = {n: {"size_bytes": 1, "data_base64": base64.b64encode(b"x").decode()} for n in ("a", "b", "c")}
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok, message, _ = fbb.restore_cfgfs_files("10.0.0.5", files, 5.0)
+    assert ok is False
+    assert len(posted) == 2 and any("name=c&" in u for u in posted)
+    assert "b (HTTP 400)" in message and "2 of 3" in message

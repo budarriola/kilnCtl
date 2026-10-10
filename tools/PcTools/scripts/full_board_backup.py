@@ -207,14 +207,6 @@ def _capture_cfgfs_files(host: str, timeout: float, cfgfs_status) -> tuple[dict,
     return files, errors
 
 
-# Mirrors cfgfs_file_validate.c (zones.json + PREF_FILE_RULES): files the firmware validates.
-CFGFS_VALIDATED_FILES = frozenset({
-    "zones.json", "ki_base.dat", "ramp_assist.dat", "tz.dat", "aux_out.dat", "display_power.dat",
-    "profiles/hidden.json", "prof_fav.bin", "relay_cycles.dat", "setup_wiz.bin", "update_repo.dat",
-    "ct_verify.bin", "iter_tune.bin",
-})
-
-
 def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry_run: bool = False):
     """Restores every captured cfg-filesystem file back onto a board via
     POST /api/cfgfs/file?name=<name>.
@@ -244,20 +236,26 @@ def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry
     if dry_run:
         return True, f"validated {len(decoded)} cfg file(s), dry run -- nothing written", decoded
 
+    refused: list = []
     for name, raw in decoded.items():
         url = f"http://{host}/api/cfgfs/file?name={urllib.parse.quote(name)}"
-        if name not in CFGFS_VALIDATED_FILES:
-            # Audit M7: firmware validates the content of these files (raw=1 never
-            # waives that); every other file has no validator and needs raw=1.
-            url += "&raw=1"
+        # Always raw=1: files with no firmware validator need it, and for the
+        # rest the firmware enforces its validator regardless (raw=1 never waives it).
+        url += "&raw=1"
         req = urllib.request.Request(url, data=raw, method="POST")
         try:
             with http_auth.urlopen(req, timeout=timeout) as resp:
                 resp.read()
         except http_auth.HttpAuthError as e:
             return False, f"cfg file '{name}': authentication failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
+        except urllib.error.HTTPError as e:
+            # Firmware refused this one file (e.g. 400 validator): record it and keep going.
+            refused.append(f"{name} (HTTP {e.code})")
         except (urllib.error.URLError, OSError) as e:
             return False, f"cfg file '{name}': POST failed after {list(decoded).index(name)} prior file(s) already written: {e}", decoded
+    if refused:
+        return False, (f"{len(decoded) - len(refused)} of {len(decoded)} cfg file(s) restored; "
+                       f"firmware refused: {', '.join(refused)}"), decoded
     return True, f"restored {len(decoded)} cfg file(s)", decoded
 
 

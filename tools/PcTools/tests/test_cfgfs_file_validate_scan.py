@@ -1,5 +1,5 @@
 """Source scans for POST /api/cfgfs/file: audit L6 (reply escapes the client-supplied
-name) and parity between the firmware validator table and full_board_backup.py."""
+name) and full_board_backup.py always sending raw=1."""
 import re
 import sys
 from pathlib import Path
@@ -18,13 +18,9 @@ def test_cfgfs_post_reply_escapes_name():
     assert re.search(r"kiln_json_escape_ctl\(\s*name,\s*name_esc", src)
 
 
-def test_backup_validated_set_matches_firmware_table():
-    src = (DRV / "persist/cfgfs_file_validate.c").read_text(encoding="utf-8", errors="replace")
-    body = src[src.index("PREF_FILE_RULES[] = {"):]
-    body = body[: body.index("};")]
-    consts = dict(re.findall(r'#define\s+(\w+)\s+"([^"]+)"', "".join(
-        p.read_text(encoding="utf-8", errors="replace") for p in DRV.rglob("*.h"))))
-    names = {"zones.json"}
-    for tok in re.findall(r"\{\s*([A-Z0-9_]+|\"[^\"]+\")\s*,", body):
-        names.add(tok.strip('"') if tok.startswith('"') else consts[tok])
-    assert names == set(fbb.CFGFS_VALIDATED_FILES)
+def test_backup_always_sends_raw_flag():
+    import inspect
+    src = inspect.getsource(fbb.restore_cfgfs_files)
+    assert 'url += "&raw=1"' in src
+    assert "CFGFS_VALIDATED_FILES" not in src
+    assert not hasattr(fbb, "CFGFS_VALIDATED_FILES")

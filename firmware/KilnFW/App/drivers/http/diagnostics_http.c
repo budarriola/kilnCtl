@@ -1864,9 +1864,10 @@ extern bool uart_bridge_ext_is_on_flash_worker(void);
  * Audit M7: the body is validated by the firmware's own loader for that file
  * (cfgfs_file_check_write) BEFORE anything is written; a failure answers 400
  * and writes nothing. A name with no validator is refused with 400 unless the
- * request carries raw=1, which writes the bytes unchecked (full_board_backup.py
- * sends it for every file but zones.json). raw=1 never waives a validator that
- * exists. */
+ * request carries raw=1, which writes the bytes unchecked. full_board_backup.py
+ * always sends raw=1; the firmware still enforces every rule in cfgfs_file_validate.c
+ * (zones.json plus the flat pref files; aux_out.dat also refuses a newer
+ * version here), because raw=1 never waives a validator that exists. */
 static bool cfgfs_file_raw_flag(httpd_req_t *req)
 {
     char query[96], v[4];

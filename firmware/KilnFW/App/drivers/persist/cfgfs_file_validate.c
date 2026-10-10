@@ -47,7 +47,22 @@ static cfgfs_file_check_t check_zones(const uint8_t *body, size_t len, const cha
     return CFGFS_FILE_CHECK_INVALID;
 }
 
-/* Flat pref files: 4-byte LE rev + item, judged by the validator the owning
+/* aux_out.dat for the POST rule only: the loader's validator accepts a NEWER
+ * version (so start() can quarantine it), but writing one over HTTP would
+ * quarantine aux at the next boot, so refuse it here. Byte 0 of the item is
+ * the blob version. */
+static bool aux_outputs_post_validate(const void *bytes, size_t len)
+{
+    if (len < 1 || ((const uint8_t *)bytes)[0] > AUX_OUTPUTS_CFG_VERSION) {
+        return false;
+    }
+    return aux_outputs_cfg_file_validate(bytes, len);
+}
+
+/* Subdirectory files (profiles/hidden.json) are out of scope: cfgfs_file_name_get
+ * refuses '/', so POST /api/cfgfs/file can never address them.
+ *
+ * Flat pref files: 4-byte LE rev + item, judged by the validator the owning
  * module hands pref_cfg_fs_load_raw() (which itself rejects a wrong size). */
 typedef struct {
     const char *name;
@@ -59,9 +74,8 @@ static const pref_file_rule_t PREF_FILE_RULES[] = {
     { ADAPTIVE_TUNE_KIBASE_FILE_PATH, adaptive_tune_kibase_file_validate, "ki_base.dat fails validation" },
     { RAMP_ASSIST_FILE_PATH, ramp_assist_cfg_file_validate, "ramp_assist.dat fails validation" },
     { TIME_SYNC_TZ_FILE_PATH, time_sync_tz_file_validate, "tz.dat fails validation" },
-    { AUX_OUTPUTS_FILE_PATH, aux_outputs_cfg_file_validate, "aux_out.dat fails validation" },
+    { AUX_OUTPUTS_FILE_PATH, aux_outputs_post_validate, "aux_out.dat fails validation" },
     { DISPLAY_POWER_FILE_PATH, display_power_cfg_file_validate, "display_power.dat fails validation" },
-    { "profiles/hidden.json", profiles_builtin_hidden_file_validate, "profiles/hidden.json fails validation" },
     { PROFILES_FAVORITES_FILE_PATH, profiles_favorites_file_validate, "prof_fav.bin fails validation" },
     { RELAY_CYCLES_FILE_PATH, relay_cycles_file_validate, "relay_cycles.dat fails validation" },
     { SETUP_WIZARD_PROGRESS_FILE_PATH, setup_wizard_progress_file_validate, "setup_wiz.bin fails validation" },
