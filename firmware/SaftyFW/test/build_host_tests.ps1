@@ -554,6 +554,71 @@ try {
         "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
     Add-HostBuild -Name "bootloader_recovery_update_tests.exe" -ExePath $blRecoveryExe -BuildCmd $blRecoveryCmd
 
+    # Campaign 3 -- the REAL thermo_task.c loop, driven through the task
+    # harness (stubs\task_harness: captured xTaskCreate, scripted
+    # ulTaskNotifyTake/gpio) against max31856.c + fake_spi.c. A SEPARATE exe:
+    # the harness defines xTaskCreate/xSemaphore*/gpio_* which the main exe's
+    # stubs (freertos_min, hardware_gpio_min) also define. Own main().
+    $harnessDir = Join-Path $testDir "stubs\task_harness"
+    $thermoTaskExe = Join-Path $outDir "thermo_task_tests.exe"
+    $thermoTaskObjDir = Join-Path $outDir "thermo_task_obj"
+    New-Item -ItemType Directory -Force -Path $thermoTaskObjDir | Out-Null
+    $thermoTaskSources = @(
+        (Join-Path $testDir "test_thermo_task_main.c"),
+        (Join-Path $testDir "test_thermo_task_faults.c"),
+        (Join-Path $testDir "test_thermo_task_stubs.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\thermo_task.c"),
+        (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c"),
+        (Join-Path $srcDir "safety_guards.c"),
+        (Join-Path $srcDir "max31856.c"),
+        (Join-Path $srcDir "max31856_decode.c"),
+        (Join-Path $srcDir "max31856_tc_type_policy.c"),
+        (Join-Path $srcDir "max31856_tc_range_policy.c"),
+        (Join-Path $srcDir "max31856_fault_pin_policy.c"),
+        (Join-Path $srcDir "max31856_reconfig_retry.c"),
+        (Join-Path $srcDir "max31856_live_check.c"),
+        (Join-Path $testDir "fake_log_task.c"),
+        (Join-Path $hwAbstractionHostDir "fake_spi.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $thermoTaskSourceArgs = ($thermoTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $thermoTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$thermoTaskObjDir\\`" /Fe:`"$thermoTaskExe`" $thermoTaskSourceArgs"
+    Add-HostBuild -Name "thermo_task_tests.exe" -ExePath $thermoTaskExe -BuildCmd $thermoTaskCmd
+
+    # Campaign 4 -- the REAL watchdog_task.c (deadline table, tick-wrap
+    # elapsed, feed withholding, overdue latch, LED) plus the end-to-end
+    # "task stops kicking -> hardware watchdog fires" chain via fake_wdt.
+    # SEPARATE exe, same reason as thermo_task_tests.exe above. Own main().
+    $wdTaskExe = Join-Path $outDir "watchdog_task_tests.exe"
+    $wdTaskObjDir = Join-Path $outDir "watchdog_task_obj"
+    New-Item -ItemType Directory -Force -Path $wdTaskObjDir | Out-Null
+    $wdTaskSources = @(
+        (Join-Path $testDir "test_watchdog_task_main.c"),
+        (Join-Path $testDir "test_watchdog_task_loop.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\watchdog_task.c"),
+        (Join-Path $srcDir "tasks\watchdog_gate.c"),
+        (Join-Path $srcDir "watchdog_overdue_diag.c"),
+        (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
+        (Join-Path $hwAbstractionHostDir "fake_wdt.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $wdTaskSourceArgs = ($wdTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $wdTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$wdTaskObjDir\\`" /Fe:`"$wdTaskExe`" $wdTaskSourceArgs"
+    Add-HostBuild -Name "watchdog_task_tests.exe" -ExePath $wdTaskExe -BuildCmd $wdTaskCmd
+
     Complete-HostBuilds
     if ($buildFailures.Count -gt 0) {
         Write-Host "SAFTYFW HOST TESTS: BUILD FAILED -- $($buildFailures -join ', ')"
@@ -566,6 +631,8 @@ try {
     $blRecoveryExit = $exitCodes["bootloader_recovery_update_tests.exe"]
     $safetyCoreHostExit = $exitCodes["safety_core_host_tests.exe"]
     $linkTaskFuzzExit = $exitCodes["link_task_fuzz_tests.exe"]
+    $thermoTaskExit = $exitCodes["thermo_task_tests.exe"]
+    $wdTaskExit = $exitCodes["watchdog_task_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -581,6 +648,8 @@ try {
         "bootloader_recovery_update_tests.exe" = $blRecoveryExit
         "safety_core_host_tests.exe"   = $safetyCoreHostExit
         "link_task_fuzz_tests.exe"     = $linkTaskFuzzExit
+        "thermo_task_tests.exe"        = $thermoTaskExit
+        "watchdog_task_tests.exe"      = $wdTaskExit
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
@@ -609,7 +678,13 @@ try {
     if ($linkTaskFuzzExit -ne 0) {
         exit $linkTaskFuzzExit
     }
-    exit $blRecoveryExit
+    if ($blRecoveryExit -ne 0) {
+        exit $blRecoveryExit
+    }
+    if ($thermoTaskExit -ne 0) {
+        exit $thermoTaskExit
+    }
+    exit $wdTaskExit
 } finally {
     Exit-BuildLock -Lock $buildLock
 }
