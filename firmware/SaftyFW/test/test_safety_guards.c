@@ -239,7 +239,7 @@ static void test_s5_fault_bit_terms(void)
         TEST_CHECK(s.s5_bad_streak == 1, cases[i].name);
         in.fault_bits = 0;
         (void)safety_guards_tick(&s, &cfg, &in);
-        TEST_CHECK(s.s5_bad_streak == 0, "clean read after it resets the streak");
+        TEST_CHECK(s.s5_bad_streak == 0, cases[i].name);  /* clean read after it resets the streak */
     }
 }
 
@@ -3320,6 +3320,28 @@ static void test_try_clear(void)
         bool cleared = safety_guards_try_clear(&s, &cfg, &released);
         TEST_CHECK(cleared, "E-stop released: try_clear succeeds");
         TEST_CHECK(!s.is_tripped, "successful clear: is_tripped false");
+    }
+
+    /* S5 (guard_condition_still_immediate -> s5_bad_read_now): a latched S5
+     * trip with a fault-bit bad read still present refuses the clear; a clean
+     * read lets it hold. Covers the helper's try_clear path directly. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.fault_bits = SAFETY_THERMO_FAULT_OVUV;
+        for (int i = 0; i < 5000 && !s.is_tripped; i++) {
+            (void)safety_guards_tick(&s, &cfg, &bad);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "sanity: S5 tripped on OVUV");
+
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "S5: OVUV still present, try_clear refuses");
+        TEST_CHECK(s.is_tripped, "S5 refused clear: still tripped");
+
+        safety_guard_input_t clean = base_input();
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &clean), "S5: clean read, try_clear succeeds");
+        TEST_CHECK(!s.is_tripped, "S5 successful clear: is_tripped false");
     }
 
     /* A graduated guard (S1, 3-tick over-ceiling streak) still physically

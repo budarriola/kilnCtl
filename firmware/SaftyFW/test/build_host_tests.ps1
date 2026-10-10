@@ -298,6 +298,7 @@ try {
     function Add-HostBuild {
         param([string]$Name, [string]$ExePath, [string]$BuildCmd)
         $script:allHostNames += $Name
+        $script:queuedBuildCount++
         if (Test-Path $ExePath) { Remove-Item -Force $ExePath }
         $safe = [regex]::Replace($Name, '[^A-Za-z0-9]+', '_')
         $cmdFile = Join-Path $outDir ("job_" + $safe + ".cmd.txt")
@@ -322,6 +323,7 @@ try {
     }
     $exitCodes = @{}
     $allHostNames = @()
+    $queuedBuildCount = 0
     $buildFailures = @()
     function Complete-HostBuilds {
         Start-HostQueueItems
@@ -648,7 +650,6 @@ try {
         Write-Host "SAFTYFW HOST TESTS: BUILD FAILED -- $($buildFailures -join ', ')"
         exit 1
     }
-    $mainExit = $exitCodes["saftyfw_host_tests.exe"]
     $fuzzExit = $exitCodes["kilnlink_fuzz_payloads.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
@@ -659,13 +660,20 @@ try {
     # executable that failed, so the printed tail always matches the exit code.
     # Derived from every Add-HostBuild registration, so a new executable can
     # never be silently ignored. A missing entry (never ran) counts as failure.
+    # Fail closed: an empty or short registered list (lost registration) must
+    # never read as "all passed".
+    $regCount = @($allHostNames).Count
+    if ($regCount -eq 0 -or $regCount -ne $queuedBuildCount) {
+        Write-Host "SAFTYFW HOST TESTS: FAILED -- registered $regCount executables but queued $queuedBuildCount builds"
+        exit 1
+    }
     $results = [ordered]@{}
     foreach ($n in $allHostNames) {
-        $results[$n] = if ($exitCodes.ContainsKey($n)) { $exitCodes[$n] } else { 1 }
+        $results[$n] = if ($exitCodes.ContainsKey($n)) { $exitCodes[$n] } else { -1 }
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
-        $names = ($failed | ForEach-Object { "$($_.Key) (exit $($_.Value))" }) -join ", "
+        $names = ($failed | ForEach-Object { if ($_.Value -eq -1) { "$($_.Key) (did not run)" } else { "$($_.Key) (exit $($_.Value))" } }) -join ", "
         Write-Host "SAFTYFW HOST TESTS: FAILED -- $names"
     } else {
         Write-Host "SAFTYFW HOST TESTS: all passed"
@@ -675,7 +683,7 @@ try {
         Write-Host "kilnlink_fuzz_payloads.exe failed: rerun with KILNLINK_FUZZ_SEED=<seed printed above> to reproduce."
     }
     foreach ($e in $results.GetEnumerator()) {
-        if ($e.Value -ne 0) { exit $e.Value }
+        if ($e.Value -ne 0) { if ($e.Value -lt 0) { exit 1 } else { exit $e.Value } }
     }
     exit 0
 } finally {

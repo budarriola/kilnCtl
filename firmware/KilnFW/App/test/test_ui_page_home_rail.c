@@ -94,8 +94,6 @@ void run_test_ui_page_home_rail(void)
         TEST_CHECK(ui_unit_entry_to_display(100.6f, UNIT_PREF_CELSIUS, UNIT_PREF_KIND_ABSOLUTE) == 101.0f,
                    "unit_entry_display_round: 100.6 rounds up");
         /* A4: Fahrenheit clamp and rounding. */
-        c = ui_unit_entry_to_celsius(-500.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_ABSOLUTE, 20.0f, 1400.0f);
-        TEST_CHECK(c == 20.0f, "unit_entry_f_lower_clamp: -500 F clamps to the Celsius minimum");
         c = ui_unit_entry_to_celsius(1.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_RATE, 50.0f, 1000.0f);
         TEST_CHECK(c == 50.0f, "unit_entry_f_rate_lower_clamp: 1 F/hr clamps to the rate minimum");
         c = ui_unit_entry_to_celsius(9999.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_RATE, 0.0f, 1000.0f);

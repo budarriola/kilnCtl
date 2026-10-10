@@ -51,6 +51,11 @@ void th_run_captured_task(void)
         fflush(stderr);
         exit(2);
     }
+    if (s_running) {
+        fprintf(stderr, "task_harness: nested th_run_captured_task()\n");
+        fflush(stderr);
+        exit(2);
+    }
     if (setjmp(s_jmp) == 0) {
         s_running = true;
         s_task_fn(NULL);

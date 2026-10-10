@@ -88,7 +88,11 @@ class RunningGuardsFailClosedTests(unittest.TestCase):
         at = um.MagicMock(state=at_state)
         at.state_name = f"at{at_state}"
         stale = um.MagicMock(stale=False)
-        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(exec_state)),              um.patch.object(m_dbg._srv._autotune, "get_status", return_value=at),              um.patch.object(m_dbg.stale_check, "check_saftyfw_stale", return_value=stale),              um.patch.object(m_dbg, "_archive_flashed_safty_elf", return_value=""),              um.patch.object(m_dbg.debug_probe, "program", return_value=(True, "ok")) as prog:
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(exec_state)), \
+             um.patch.object(m_dbg._srv._autotune, "get_status", return_value=at), \
+             um.patch.object(m_dbg.stale_check, "check_saftyfw_stale", return_value=stale), \
+             um.patch.object(m_dbg, "_archive_flashed_safty_elf", return_value=""), \
+             um.patch.object(m_dbg.debug_probe, "program", return_value=(True, "ok")) as prog:
             out = m_dbg.debug_program("pico", confirm=True, **kw)
         return out, prog
 
