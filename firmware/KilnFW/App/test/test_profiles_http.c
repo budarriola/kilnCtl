@@ -2063,6 +2063,13 @@ static esp_err_t l23_delete_fn(const char *rel_path)
 // Seqlock generation: a start that captured the slot generation before its copy
 // is refused after ANY RAM assign, including a save whose persist FAILED (RAM
 // changed, published rev unchanged), and while an assign is in flight (odd).
+static uint32_t s_gen_seen_in_write = 0;
+static esp_err_t gen_probe_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_gen_seen_in_write = profiles_http_slot_rev(4);
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+
 static void test_profiles_slot_gen_seqlock(void)
 {
     TEST_SECTION("slot generation: failed save and in-flight assign refuse a captured start");
@@ -2078,6 +2085,15 @@ static void test_profiles_slot_gen_seqlock(void)
     TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4");
     uint32_t cap = profiles_http_slot_rev(4);
     TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "captured generation runnable");
+
+    /* The generation is odd for the whole RAM-assign + file-write window. */
+    s_gen_seen_in_write = 0;
+    profiles_cfg_fs_set_write_fn(gen_probe_write_fn);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4 (probe)");
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK((s_gen_seen_in_write & 1u) == 1u, "generation is odd while the assign/persist is in flight");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "successful save after capture: old copy refused");
+    cap = profiles_http_slot_rev(4);
 
     /* Failed save: persist refused, RAM still takes the new content. */
     s_profile_rev_unknown[4] = true;
