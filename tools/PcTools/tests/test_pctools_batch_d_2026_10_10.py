@@ -137,7 +137,8 @@ class RunningGuardsFailClosedTests(unittest.TestCase):
 
 class PicoGpioWriteUnverifiedTests(unittest.TestCase):
     def test_readback_exception_not_ok(self):
-        with um.patch.object(m_pgp.pico_gpio_probe, "write"), \
+        with um.patch.object(m_pgp.debug_probe, "pico_armed_state", return_value=(False, "not armed")), \
+             um.patch.object(m_pgp.pico_gpio_probe, "write"), \
              um.patch.object(m_pgp.pico_gpio_probe, "read", side_effect=RuntimeError("x")):
             out = m_pgp.pico_gpio_write(4, True, confirm=True)
         self.assertTrue(out.startswith("UNVERIFIED"), out)

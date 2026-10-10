@@ -74,7 +74,8 @@ class PicoGpioConfirmTests(unittest.TestCase):
         m.assert_not_called()
 
     def test_write_readback_warning(self):
-        with um.patch.object(pg.pico_gpio_probe, "write"), \
+        with um.patch.object(pg.debug_probe, "pico_armed_state", return_value=(False, "not armed")), \
+                um.patch.object(pg.pico_gpio_probe, "write"), \
                 um.patch.object(pg.pico_gpio_probe, "read", return_value=False):
             self.assertIn("FAILED", pg.pico_gpio_write(4, True, confirm=True))
 

@@ -84,9 +84,12 @@ class DebugWriteMemoryArmedGateTests(unittest.TestCase):
     # --- peer="esp" is untouched by this additive guard -------------------
 
     def test_esp_peer_never_consults_pico_armed_state(self):
+        idle = unittest.mock.MagicMock(state=0)  # never reach the live board
         with unittest.mock.patch.object(debug_probe, "pico_armed_state") as armed_mock, self._patch_write(
             ok=True, output="wrote"
-        ) as write:
+        ) as write, unittest.mock.patch.object(
+            dbg._srv._profiles, "get_exec_status", return_value=idle
+        ), unittest.mock.patch.object(dbg, "_esp_profile_running_refusal", return_value=None),                 unittest.mock.patch.object(dbg, "_write_readback_note", return_value=""):
             result = dbg.debug_write_memory(peer="esp", address=0x3FC00000, value=1, confirm=True)
         armed_mock.assert_not_called()
         write.assert_called_once_with("esp", 0x3FC00000, 1, 32)
