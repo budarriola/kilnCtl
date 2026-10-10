@@ -3402,6 +3402,38 @@ static void test_tc_offset_magnitude_bound(void)
     TEST_CHECK(!config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -400 C offset fails validation");
 }
 
+// 2026-10-09 guard-fixes review LOW-1: a stored record whose tc_offset_c is
+// beyond the +/-50 C write bound must load (clamped), not fall back to
+// defaults and lose abs_max_temp_c. NaN is still refused.
+static void test_unpack_clamps_out_of_bound_tc_offset(void)
+{
+    TEST_SECTION("config_store_unpack -- stored tc_offset_c beyond the write bound is clamped, not rejected (LOW-1)");
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1300.0f;
+    rec.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C;
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t back;
+
+    rec.tc_offset_c = 80.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "record with tc_offset_c=+80 still loads");
+    TEST_CHECK(back.tc_offset_c == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "+80 clamps to +bound");
+    TEST_CHECK(back.abs_max_temp_c == 1300.0f, "abs_max_temp_c survives (no fall back to defaults)");
+
+    rec.tc_offset_c = -80.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "record with tc_offset_c=-80 still loads");
+    TEST_CHECK(back.tc_offset_c == -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "-80 clamps to -bound");
+
+    rec.tc_offset_c = 12.5f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back) && back.tc_offset_c == 12.5f, "in-bound offset untouched");
+
+    { const uint32_t nan_bits = 0x7FC00000u; memcpy(&rec.tc_offset_c, &nan_bits, sizeof nan_bits); }
+    config_store_pack(&rec, record);
+    TEST_CHECK(!config_store_unpack(record, &back), "NaN offset still refused");
+}
 void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
@@ -3459,4 +3491,5 @@ void run_test_config_store(void)
     test_config_params_get_config_page_roundtrip();
     test_config_params_is_set_through_get_config_page();
     test_config_params_commit_refused_while_armed();
+    test_unpack_clamps_out_of_bound_tc_offset();
 }

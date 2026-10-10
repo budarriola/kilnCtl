@@ -731,6 +731,26 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
     return config_store_unpack_ex(in, out, NULL);
 }
 
+// 2026-10-09 guard-fixes review LOW-1. config_params_validate_ranges() bounds
+// tc_offset_c to +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C for NEW writes. A record
+// already stored by a build that allowed a larger offset must not be rejected
+// at load: a rejected slot falls back to defaults and loses abs_max_temp_c
+// and every other commissioned threshold. Clamp a finite out-of-bound offset
+// to the bound on load instead (same stance as max_rate_c_per_min, which load
+// does not reject either). A non-finite offset is left alone so validation
+// still refuses it. The bound itself is unchanged for writes.
+static void config_store_clamp_stored_tc_offset(config_store_record_t *rec)
+{
+    const float v = rec->tc_offset_c;
+    if (!(v == v) || v > 3.0e38f || v < -3.0e38f) {
+        return; // NaN / inf: validation refuses
+    }
+    if (v > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
+        rec->tc_offset_c = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    } else if (v < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
+        rec->tc_offset_c = -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    }
+}
 bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
                              config_store_record_t *out,
                              config_store_reject_info_t *out_reject)
@@ -799,6 +819,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // never be silent.
         const char *field = NULL;
         const char *rule = NULL;
+        config_store_clamp_stored_tc_offset(&scratch);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
@@ -865,6 +886,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // on a board that is, in fact, configured.
         const char *field = NULL;
         const char *rule = NULL;
+        config_store_clamp_stored_tc_offset(&scratch);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
@@ -933,6 +955,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // re-check is just as much a "found and refused" case as a v2 one.
         const char *field = NULL;
         const char *rule = NULL;
+        config_store_clamp_stored_tc_offset(&scratch);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
