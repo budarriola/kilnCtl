@@ -7,6 +7,7 @@
 
 #include "zones_http_internal.h"
 
+#include <string.h>
 #include "esp_log.h"
 #include "relay_authority.h"
 #include "system_mode_gate.h"
@@ -131,13 +132,22 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         received += (size_t)ret;
     }
     body[received] = '\0';
+    /* A raw NUL or a "%00" escape would truncate a value at the C-string layer
+     * ("zone=1%002" reads as zone 1); refuse rather than guess (audit L3/A5). */
+    if (memchr(body, '\0', received) != NULL || strstr(body, "%00") != NULL) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "embedded NUL not allowed");
+        return ESP_OK;
+    }
 
     uint8_t zone_index;
     if (!zones_config_json_parse_u8_field(body, "zone", 0, MAX31856_CHANNEL_COUNT - 1, &zone_index)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone missing or out of range");
         return ESP_OK;
     }
-    if (zone_index >= s_zones.cfg.thermo_count) {
+    zones_cfg_lock();
+    const uint8_t thermo_count_now = s_zones.cfg.thermo_count;
+    zones_cfg_unlock();
+    if (zone_index >= thermo_count_now) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone is not configured");
         return ESP_OK;
     }

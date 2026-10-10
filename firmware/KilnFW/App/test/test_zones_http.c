@@ -2047,6 +2047,16 @@ static void test_zones_pid_post_accepts_while_idle(void)
     TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
 }
 
+static void test_zones_pid_post_refuses_embedded_nul(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- %00 escape and raw NUL are refused (audit L3/A5)");
+    seed_two_zone_pid_baseline();
+    run_zones_pid_post("zone=1%002&kp=0.03&ki=0.0001&kd=0.8");
+    TEST_CHECK(s_test_err_called && !s_test_ok_called, "%00 in the body must be refused");
+    run_zones_pid_post("zone=0&kp=0.03%00&ki=0.0001&kd=0.8");
+    TEST_CHECK(s_test_err_called && !s_test_ok_called, "%00 in a gain must be refused");
+}
+
 static void test_zones_pid_post_bumps_generation(void)
 {
     TEST_SECTION("POST /api/zones/pid -- the generation counter bumps, so profile_executor will observe the change");
@@ -16361,6 +16371,7 @@ void run_test_zones_http(void)
     test_zones_pid_post_refused_while_autotune_running();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
+    test_zones_pid_post_refuses_embedded_nul();
     test_zones_pid_post_bumps_generation();
     test_zones_pid_post_rejects_kp_over_bound();
     test_zones_pid_post_rejects_negative_ki();
