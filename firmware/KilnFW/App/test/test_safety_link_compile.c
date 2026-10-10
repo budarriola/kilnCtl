@@ -2968,6 +2968,7 @@ static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
     TEST_SECTION("LOW-2 -- boot clear on a >= 17 peer does not spend an attempt on a 30-byte DIAG");
     SafetyLinkClass link = boot_clear_test_setup();
     low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false; // low_fw_version's boot_id change sets it; isolate the gate's own request
     unsigned base = s_stub_broadcast_count;
     TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
                "30-byte DIAG from a v17 peer: no clear sent");
