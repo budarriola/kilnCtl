@@ -239,6 +239,8 @@ def parse(objdump, elf):
     out = result.stdout
     sizes = symbol_sizes(objdump, elf)
     frames, calls, seen_entry, cur = {}, {}, set(), None
+    entry_addrs = set()   # every FN_RE address: the only legal long-call edge targets
+    pending_lc = {}       # cur -> {(addr, name)}
     lct = stack_budget_common.lib.LongCallTracker()
     cur_end = None  # first address PAST the current function per the ELF
                     # symbol table; None means "size unknown, unbounded".
@@ -251,6 +253,7 @@ def parse(objdump, elf):
             cur_end = (addr + size) if size else None
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
+            entry_addrs.add(addr)
             lct.reset()
             continue
         if cur is None:
@@ -276,11 +279,20 @@ def parse(objdump, elf):
             calls[cur].add(c.group(1))
         lc = lct.feed(line)
         if lc is not None:
-            # Resolved l32r+callx long call(s): union of every literal. A
-            # "sym+0xNN" caption means the target lies INSIDE sym, so credit
-            # sym itself (never skip it: that added 0 B silently).
-            for _addr, tname in lc[0]:
-                calls[cur].add(tname.split("+", 1)[0])
+            # Resolved l32r+callx long call(s): union of every literal.
+            pending_lc.setdefault(cur, set()).update(lc[0])
+    # Review F7/F8 (2026-10-09): a long-call literal is an edge only when it
+    # is EXACTLY a function entry. A "sym+0xNN" caption (a windowed call can
+    # only target an `entry`) or a data/MMIO/callback literal is not a call
+    # to sym; crediting sym fabricated edges (the _stext class above).
+    for fn, lits in pending_lc.items():
+        for laddr, tname in lits:
+            if laddr in entry_addrs and "+" not in tname:
+                calls[fn].add(tname)
+    # Review F2: edges that run only on the bx_flash_worker task.
+    for caller, callees in stack_budget_common.lib.WORKER_ONLY_EDGES.items():
+        for callee in callees:
+            calls.get(caller, set()).discard(callee)
     return frames, calls
 
 

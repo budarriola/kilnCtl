@@ -93,7 +93,7 @@ CALL_RE = re.compile(r"\bcall(?:4|8|12)\t([0-9a-f]+)(?: <([^>]+)>)?")
 # 752 B against an 8192 B stack; bx_flash_worker, recovery_exit,
 # backlight_pwm, i2c_owner_*) whose real depth lives almost entirely behind
 # exactly this kind of call.
-CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
+CALLX_RE = re.compile(r"\bcallx(?:0|4|8|12)\b")
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +111,13 @@ CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
 # direction for this checker).
 # ---------------------------------------------------------------------------
 L32R_RE = re.compile(r"\tl32r\t(a\d+),\s*[0-9a-f]+(?: <[^>]*>)? \(([0-9a-f]+) <([^>]+)>\)")
-CALLX_REG_RE = re.compile(r"\tcallx(?:4|8|12)\t(a\d+)")
+CALLX_REG_RE = re.compile(r"\tcallx(?:0|4|8|12)\t(a\d+)")
 _INSN_RE = re.compile(r"^[0-9a-f]+:\t[0-9a-f ]+\t(\S+)\s+(a\d+)\b")
 _NON_WRITING = ("s32", "s16", "s8", "ssi", "ssx", "b", "j", "call", "ret", "nop", "memw",
-                "isync", "dsync", "esync", "rsync", "wsr", "wur", "xsr", "ill")
+                "isync", "dsync", "esync", "rsync", "wsr", "wur", "ill")
+# Opcodes that start with a _NON_WRITING prefix yet write their AR operand
+# (review F6): xsr* exchanges, s32c1i stores the old memory value back.
+_WRITING_EXCEPTIONS = ("xsr", "s32c1i")
 
 
 class LongCallTracker:
@@ -146,7 +149,8 @@ class LongCallTracker:
                 return None
             return sorted(ent[0]), ent[1]
         m = _INSN_RE.match(line)
-        if m and self.regs and not m.group(1).startswith(_NON_WRITING):
+        if m and self.regs and (m.group(1).startswith(_WRITING_EXCEPTIONS)
+                                or not m.group(1).startswith(_NON_WRITING)):
             ent = self.regs.get(m.group(2))
             if ent is not None:
                 ent[1] = True
@@ -256,7 +260,8 @@ class ParsedElf:
     """Address-keyed frame sizes + call graph, plus a name->[addresses] index
     for root resolution."""
 
-    def __init__(self, frames, calls, names, name_addrs, indirect):
+    def __init__(self, frames, calls, names, name_addrs, indirect, bodyless=None):
+        self.bodyless = bodyless or {}  # {addr -> {name}}: resolved ROM long-call targets with no body (F3)
         self.frames = frames          # {addr:int -> frame_bytes:int}
         self.calls = calls            # {addr:int -> set(addr:int)}
         self.names = names            # {addr:int -> name:str}  (display only)
@@ -265,6 +270,45 @@ class ParsedElf:
                                        # disassembly contains a callx4/8/12 (indirect call
                                        # through a register -- a function pointer this walk
                                        # cannot resolve a target address for at all)
+
+
+# Review F2 (2026-10-09): edges that exist in the object code but run ONLY
+# under the bx_flash_worker root. check_all_task_stack_budgets.py's
+# DECLARED_EDGES is the inverse (adds them back for that one row).
+WORKER_ONLY_EDGES = {"nvs_save": ["zones_autosave_job"]}
+
+# ESP32-S3 mask ROM. A resolved long call here has a symbol but no body in
+# the disassembly, so it contributes 0 B (review F3).
+ROM_ADDR_RANGE = (0x40000000, 0x40060000)
+
+
+def drop_worker_only_edges(parsed, resolve):
+    """A copy of `parsed` without WORKER_ONLY_EDGES. `resolve(name)` -> addr;
+    a name that does not resolve is skipped (the edge cannot exist then)."""
+    import copy
+    view = copy.copy(parsed)
+    view.calls = {k: set(v) for k, v in parsed.calls.items()}
+    for caller, callees in WORKER_ONLY_EDGES.items():
+        try:
+            ca = resolve(caller)
+        except ValueError:
+            continue
+        for callee in callees:
+            try:
+                view.calls.get(ca, set()).discard(resolve(callee))
+            except ValueError:
+                pass
+    return view
+
+
+def bodyless_calls(root_addr, parsed):
+    """Sorted names of resolved ROM long-call targets reachable from root_addr
+    whose frame is unknown (counted as 0 B by deepest()). A warning list, not
+    a verdict (review F3)."""
+    out = set()
+    for a in reachable_addrs(root_addr, parsed):
+        out.update(parsed.bodyless.get(a, ()))
+    return sorted(out)
 
 
 class ElfParseError(RuntimeError):
@@ -315,6 +359,7 @@ def parse(objdump, elf):
     out = result.stdout
     sizes = symbol_sizes(objdump, elf)
     frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
+    pending_lc = {}   # cur -> {(addr, name)}: long-call literals, filtered after the pass
     seen_entry = set()
     lct = LongCallTracker()
     cur = None
@@ -357,13 +402,22 @@ def parse(objdump, elf):
             calls[cur].add(int(c.group(1), 16))
         lc = lct.feed(line)
         if lc is not None:
-            for t in lc[0]:
-                calls[cur].add(t[0])   # resolved long call: an edge, not a dead end
+            pending_lc.setdefault(cur, set()).update(lc[0])
             if lc[1]:
                 indirect[cur] = True   # a non-l32r write also reached the call
         elif CALLX_RE.search(line):
             indirect[cur] = True
-    return ParsedElf(frames, calls, names, name_addrs, indirect)
+    # Review F8: a long-call literal is an edge only when it is a function
+    # entry (a data/MMIO literal or a callback address merely loaded into the
+    # register is not). F3: a ROM target has no body -> recorded, not silent.
+    bodyless = {}
+    for fn, lits in pending_lc.items():
+        for addr, name in lits:
+            if addr in frames:
+                calls[fn].add(addr)
+            elif ROM_ADDR_RANGE[0] <= addr < ROM_ADDR_RANGE[1]:
+                bodyless.setdefault(fn, set()).add(name)
+    return ParsedElf(frames, calls, names, name_addrs, indirect, bodyless)
 
 
 def reachable_addrs(root_addr, parsed):

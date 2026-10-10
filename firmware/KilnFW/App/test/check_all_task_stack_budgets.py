@@ -1434,7 +1434,9 @@ def main():
             errors.append(f"{tname}: could not derive declared stack size from source: {e}")
             continue
 
-        walk_parsed = parsed
+        def _resolve_any(n):
+            return lib.resolve_root(parsed, n, args.elf, addr2line)
+        walk_parsed = lib.drop_worker_only_edges(parsed, _resolve_any)
         if task.get("declared_edges"):
             def _resolve_declared(n):
                 return lib.resolve_root(parsed, n, args.elf, addr2line)
@@ -1486,11 +1488,12 @@ def main():
 
         total = own_total + extra_total
         indirect = lib.has_unresolved_dispatch(root_addr, walk_parsed)
+        rom_unknown = lib.bodyless_calls(root_addr, walk_parsed)
         overhead = UNMODELED_OVERHEAD_BYTES
         honest_free = declared - total - overhead
         results.append(dict(task=task, declared=declared, own_total=own_total, total=total,
                              path_addrs=path_addrs, root_addr=root_addr, overhead=overhead,
-                             honest_free=honest_free, indirect=indirect,
+                             honest_free=honest_free, indirect=indirect, rom_unknown=rom_unknown,
                              extra_total=extra_total, extra_label=extra_label))
 
     if errors:
@@ -1611,6 +1614,11 @@ def main():
               "without a documented reason for accepting the new margin.")
         return 1
 
+    # Review F3: WARNING only (never a failure): resolved ROM calls count 0 B.
+    n_rom = sum(1 for r in results if r.get("rom_unknown"))
+    rom_names = sorted({n for r in results for n in r.get("rom_unknown", ())})
+    print(f"check_all_task_stack_budgets: WARNING count: {n_rom} of {len(results)} tasks reach "
+          f"resolved ROM calls with unknown stack depth (counted 0 B): {', '.join(rom_names[:6])}")
     confident = len(results) - len(indeterminate)
     if indeterminate:
         print(f"check_all_task_stack_budgets: OK -- {confident} of {len(results)} tasks fully "

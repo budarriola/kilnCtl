@@ -193,12 +193,14 @@ class LongCallTrackerTest(unittest.TestCase):
         self.assertEqual(t.feed("1c:\t0008e0        \tcallx8\ta8"),
                          ([(0x200, "f"), (0x300, "g")], True))
 
-    def test_legacy_sym_plus_off_resolves_to_base(self):
-        import check_main_task_stack_budget as legacy
-        t = legacy.stack_budget_common.lib.LongCallTracker()
-        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000204 <far_fn+0x4>)")
-        r = t.feed("16:\t0008e0        \tcallx8\ta8")
-        self.assertEqual({n.split("+", 1)[0] for _a, n in r[0]}, {"far_fn"})
+    def test_callx0_pairs_and_xsr_s32c1i_taint(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:	c90c81        	l32r	a8, 00000004 <x> (00000200 <far_fn>)")
+        self.assertEqual(t.feed("16:	0008c0        	callx0	a8"), ([(0x200, "far_fn")], False))
+        for op in ("xsr.sar	a8", "s32c1i	a8, a1, 4"):
+            t.feed("13:	c90c81        	l32r	a8, 00000004 <x> (00000200 <far_fn>)")
+            t.feed("14:	0008e0        	" + op)
+            self.assertEqual(t.feed("16:	0008e0        	callx8	a8"), ([(0x200, "far_fn")], True), op)
 
     def test_store_does_not_drop_the_literal(self):
         t = addr_keyed.LongCallTracker()
@@ -230,6 +232,81 @@ class LongCallParseTest(unittest.TestCase):
             frames, calls = legacy.parse("objdump", "fake.elf")
         self.assertEqual(calls["caller_fn"], {"far_fn", "other_fn"})
         self.assertEqual(legacy.deepest("caller_fn", frames, calls)[0], 32 + 64)
+
+
+FILTER_D = """
+Disassembly of section .flash.text:
+
+00000010 <caller_fn>:
+10:	006136        	entry	a1, 32
+13:	c90c81        	l32r	a8, 00000004 <x> (00000200 <far_fn>)
+16:	0008e0        	callx8	a8
+19:	c90c81        	l32r	a9, 00000008 <x> (00000204 <far_fn+0x4>)
+1c:	0009e0        	callx8	a9
+1f:	c90c81        	l32r	a10, 0000000c <x> (40000400 <memcpy>)
+22:	000ae0        	callx8	a10
+25:	c90c81        	l32r	a11, 0000000c <x> (00000300 <cb_fn>)
+28:	000be0        	callx0	a12
+2b:	f01d          	retw.n
+
+00000200 <far_fn>:
+200:	006236        	entry	a1, 48
+203:	f01d          	retw.n
+
+00000300 <cb_fn>:
+300:	006236        	entry	a1, 64
+303:	f01d          	retw.n
+"""
+
+
+class LongCallFilterTest(unittest.TestCase):
+    def _run(self, **kw):
+        return mock.Mock(returncode=0, stderr="", stdout="")
+
+    def _parse(self, mod, text):
+        def run(cmd, capture_output=True, text_=True, check=False, **k):
+            return mock.Mock(returncode=0, stderr="", stdout="" if "-t" in cmd else text)
+        with mock.patch.object(mod.subprocess, "run", side_effect=run),                 mock.patch("os.path.getsize", return_value=len(text)):
+            return mod.parse("objdump", "fake.elf")
+
+    def test_legacy_rejects_offset_caption_and_keeps_entry_edges(self):
+        frames, calls = self._parse(legacy, FILTER_D)
+        self.assertIn("far_fn", calls["caller_fn"])           # exact entry 0x200
+        self.assertNotIn("memcpy", calls["caller_fn"])        # not a function in this image
+        # F7: the +0x4 caption must not be credited to far_fn on its own
+        d = FILTER_D.replace("(00000200 <far_fn>)", "(00000204 <far_fn+0x4>)")
+        _f, c2 = self._parse(legacy, d)
+        self.assertNotIn("far_fn", c2["caller_fn"])
+
+    def test_addr_keyed_literal_must_be_function_entry_and_rom_is_flagged(self):
+        parsed = self._parse(addr_keyed, FILTER_D)
+        self.assertEqual(parsed.calls[0x10], {0x200})          # F8: 0x204 / 0x40000400 not edges
+        self.assertEqual(addr_keyed.bodyless_calls(0x10, parsed), ["memcpy"])   # F3
+        self.assertNotIn(0x300, parsed.calls[0x10])            # cb_fn literal: never called via a reg
+        self.assertTrue(parsed.indirect[0x10])                 # callx0 a12 is indirect (F5)
+
+    def test_worker_only_edge_dropped_outside_worker_root(self):
+        p = addr_keyed.ParsedElf({1: 8, 2: 8}, {1: {2}, 2: set()}, {1: "nvs_save", 2: "zones_autosave_job"},
+                                 {"nvs_save": [1], "zones_autosave_job": [2]}, {1: False, 2: False})
+        v = addr_keyed.drop_worker_only_edges(p, lambda n: p.name_addrs[n][0])
+        self.assertEqual(v.calls[1], set())
+        self.assertEqual(p.calls[1], {2})                      # original untouched (worker row re-adds)
+        d = FILTER_D + """
+00000400 <nvs_save>:
+400:	006236        	entry	a1, 16
+403:	000000        	call8	00000500 <zones_autosave_job>
+406:	000000        	call8	00000200 <far_fn>
+409:	f01d          	retw.n
+
+00000500 <zones_autosave_job>:
+500:	006236        	entry	a1, 16
+503:	f01d          	retw.n
+"""
+        _f, c = self._parse(legacy, d)
+        self.assertEqual(c["nvs_save"], {"far_fn"})
+        # legacy parse applies the same table
+        self.assertEqual(legacy.stack_budget_common.lib.WORKER_ONLY_EDGES,
+                         {"nvs_save": ["zones_autosave_job"]})
 
 
 class DeclaredEdgesTest(unittest.TestCase):
