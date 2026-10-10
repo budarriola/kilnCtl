@@ -1,4 +1,4 @@
-# Unchecked persist result audit, 2026-10-09
+﻿# Unchecked persist result audit, 2026-10-09
 
 Scope: the "logging unchecked success" class named in CLAUDE.md, in
 `firmware/KilnFW/App/**` and `firmware/SaftyFW/src/**`, audited at origin/dev
@@ -135,7 +135,7 @@ same pattern here, or roll RAM back on a failed save.
 
 ### L2. Current sweep: ESP-side CT provenance writes are unchecked (cosmetic / provenance)
 
-**FIXED (L2 commit, see git log):** every site is checked; a failure is logged and sets `esp_persist_failed` in `/api/zones/current_sweep/status` (surfaced by `zone_current_sweep_status` as a WARNING). `zone_ct_map_clear`/`zone_k_ct_clear` now return bool. Nothing sent to the Pico changed.
+**FIXED in 4d79ff1a:** every site is checked; a failure is logged and sets `esp_persist_failed` in `/api/zones/current_sweep/status` (surfaced by `zone_current_sweep_status` as a WARNING). `zone_ct_map_clear`/`zone_k_ct_clear` now return bool. Nothing sent to the Pico changed.
 
 `firmware/KilnFW/App/drivers/control/zones_current_sweep_task.c` discards these
 results:
@@ -180,9 +180,9 @@ adaptive-tune training data, with a single entry.
 Fix direction: on a false return from the load, skip the persist, or refuse it
 unless the record is genuinely absent.
 
-### L4. SaftyFW update metadata write: return code checked, but no read-back or erased-slot check (cosmetic / update reliability) -- FIXED (see Fix status below)
+### L4. SaftyFW update metadata write: return code checked, but no read-back or erased-slot check (cosmetic / update reliability) -- FIXED in b6dbcf41
 
-**FIXED 2026-10-09:** `update_task_metadata_write_verified()` (`update_task_metadata_write.c`, host-tested by `test_update_task_metadata_write.c`) adds the erased-slot check and byte-for-byte read-back; `update_metadata_write_cb` maps any failure to `HAL_IO`, so no COMPLETE is reported.
+**FIXED 2026-10-09 in b6dbcf41:** `update_task_metadata_write_verified()` (`update_task_metadata_write.c`, host-tested by `test_update_task_metadata_write.c`) adds the erased-slot check and byte-for-byte read-back; `update_metadata_write_cb` maps any failure to `HAL_IO`, so no COMPLETE is reported.
 
 `firmware/SaftyFW/src/tasks/update_task.c:534-549` (`update_metadata_write_cb`)
 and `:584-590` check `hal_flash_safe_execute()` and `args.result`. Unlike the D2
