@@ -517,7 +517,9 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         ESP_LOGW(TAG, "reset refused (weak password) from %s", ip);
         httpd_resp_set_status(req, "400 Bad Request");
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_sendstr(req, "{\"ok\":false}");
+        /* F2: tells the web client the token is still unspent. Safe: the check runs before
+         * the token is looked up, so this says nothing about token validity. */
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"weak_password\"}");
     }
 
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());

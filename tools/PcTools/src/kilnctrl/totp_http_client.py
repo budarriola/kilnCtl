@@ -36,7 +36,7 @@ same commit as this module -- see that doc's WT-A/WT-C section):
     ``{"username": str, "reset_token": str, "new_password": str}``
     (form-urlencoded). Success: HTTP 200, JSON ``{"ok": true}``. Any
     failure (expired/wrong/reused token, password policy rejection): HTTP
-    400, JSON ``{"ok": false}`` -- deliberately generic per the plan
+    400, JSON ``{"ok": false}`` -- deliberately generic per the plan (the one exception: a weak-password refusal adds ``"reason": "weak_password"`` and leaves the token UNSPENT, so the caller may retry with the same token)
     ("never distinguishes wrong token from bad password").
   * Both OPEN routes: a rate-limit refusal from the shared
     ``login_ip_scope.c`` ladder is HTTP 429 with that ladder's existing

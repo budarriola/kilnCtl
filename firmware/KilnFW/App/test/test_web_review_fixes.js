@@ -121,6 +121,19 @@ function makeCtx(responses) {
     'sweep completion and autotune Accept both go through reloadUnlessDirty');
   assert(/current = data;\s*zonesFormDirty = false;/.test(ZONES), 'a successful board render clears the dirty flag');
 
+  // ---- F5: relay names/types (#relayNames) live outside #zones and must mark the form dirty ----
+  {
+    const wire = ZONES.match(/\['zones',[^\]]*\]\.forEach\(function \(id\) \{[\s\S]*?\n\}\);/)[0];
+    const els = {};
+    const doc = { getElementById: (id) => (els[id] = els[id] || { ls: {}, addEventListener(t, fn) { this.ls[t] = fn; } }) };
+    new Function('document', 'markZonesFormDirty', wire)(doc, () => { dReloads += 100; });
+    const rn = els['relayNames'];
+    assert(rn && typeof rn.ls.input === 'function' && typeof rn.ls.change === 'function',
+      '#relayNames gets input and change listeners');
+    const before = dReloads; rn.ls.input(); rn.ls.change();
+    assert(dReloads === before + 200, '#relayNames edits invoke markZonesFormDirty');
+  }
+
   // ---- guardFieldHidden (DOM half of LOW-2) ----
   const gh = ZONES.match(/var ZONE_GUARD_INPUT_CLASS = \{[\s\S]*?\};\r?\nfunction guardFieldHidden\(zi, suffix\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
   const mkDoc = (display, hasWrap) => ({ querySelector: (sel) => /data-index="1"/.test(sel) ? {

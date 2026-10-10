@@ -290,6 +290,7 @@ extern struct wifi_prov_legacy_single s_legacy_single;
 void apply_ap_config(void);
 bool parse_ipv4(const char *s, esp_ip4_addr_t *out);
 bool wifi_prov_parse_strict_ipv4(const char *s, esp_ip4_addr_t *out);
+const char *wifi_prov_static_ip_config_problem(const char *ip, const char *netmask, const char *gateway);
 bool wifi_prov_static_ip_config_valid(const char *ip, const char *netmask, const char *gateway);
 bool wifi_prov_dns_query_acceptable(const uint8_t *buf, int len, uint32_t src_addr_net, uint16_t src_port_host);
 /* LOW-2: true when the saved-networks record exists but could not be loaded

@@ -461,6 +461,36 @@ function flush() {
     assert(rs.length === 1 && /reset_token=tok-keep/.test(rs[0].init.body), 'retry with a strong password sends the SAME token');
   }
 
+  // Group 7a2 (F2): the board's weak_password refusal (AP SSID / AP password rule the client cannot
+  // check) leaves the token unspent, so the operator stays on step 2 and retries with the SAME token.
+  {
+    const { ctx, dom, fetchCalls } = makeContext({
+      fetchResponses: [
+        { status: 202, json: { reset_token: 'tok-weak' } },
+        { status: 400, text: '{"ok":false,"reason":"weak_password"}' },
+        { status: 200, json: { ok: true } },
+      ],
+    });
+    ctx.openForgotPasswordModal();
+    dom.registry['kc-forgot-username'].value = 'bench';
+    dom.registry['kc-forgot-code'].value = '654321';
+    dom.registry['kc-forgot-step1'].dispatch('submit');
+    await flush();
+    dom.registry['kc-forgot-newpass'].value = 'Sh0rt-but-ok-1';
+    dom.registry['kc-forgot-newpass2'].value = 'Sh0rt-but-ok-1';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    assert(dom.registry['kc-forgot-step2'].hidden === false, 'weak_password refusal stays on step 2');
+    assert(ctx.forgotResetToken === 'tok-weak', 'weak_password refusal keeps the token');
+    assert(/refused that password/i.test(dom.registry['kc-forgot-error2'].textContent), 'weak_password refusal explains');
+    dom.registry['kc-forgot-newpass'].value = 'An0ther-good-pw-2';
+    dom.registry['kc-forgot-newpass2'].value = 'An0ther-good-pw-2';
+    dom.registry['kc-forgot-step2'].dispatch('submit');
+    await flush();
+    const rs = fetchCalls.filter((c) => c.url === '/api/auth/reset');
+    assert(rs.length === 2 && /reset_token=tok-weak/.test(rs[1].init.body), 'retry reuses the same token');
+  }
+
   // Group 7c: the page-lifetime keydown listener is inert while hidden.
   {
     const { ctx, dom, resumeCalls } = makeContext({});

@@ -375,7 +375,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                      "\"static_netmask\":%s,\"static_gateway\":%s,"
                      "\"static_dns\":%s%s%s,\"static_dns2\":%s%s%s,"
                      "\"ap_password_known\":%s,\"ap_password_set\":%s,"
-                     "\"ap_pending_teardown\":%s}",
+                     "\"ap_pending_teardown\":%s,\"saved_nets_refused\":%s%s%s%s}",
                      mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
                      sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
                      (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
@@ -387,7 +387,11 @@ static esp_err_t status_get_handler(httpd_req_t *req)
                      may_disclose ? wifi_prov_get_static_dns2() : "null", may_disclose ? "\"" : "",
                      on_ap ? "true" : "false",
                      wifi_prov_get_ap_password()[0] ? "true" : "false",
-                     ap_pending_teardown ? "true" : "false");
+                     ap_pending_teardown ? "true" : "false",
+                     wifi_prov_saved_nets_recovery_hint() ? "true" : "false",
+                     wifi_prov_saved_nets_recovery_hint() ? ",\"recovery_hint\":\"" : "",
+                     wifi_prov_saved_nets_recovery_hint() ? wifi_prov_saved_nets_recovery_hint() : "",
+                     wifi_prov_saved_nets_recovery_hint() ? "\"" : "");
     if (n < 0) {
         n = 0;
     }
@@ -609,6 +613,10 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid contains a NUL byte");
             return ESP_OK;
         }
+        if (err == ESP_ERR_NOT_SUPPORTED && wifi_prov_saved_nets_recovery_hint()) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, wifi_prov_saved_nets_recovery_hint());
+            return ESP_OK;
+        }
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not forget network");
         return ESP_OK;
     }
@@ -711,6 +719,12 @@ static esp_err_t ip_config_post_handler(httpd_req_t *req)
          * its own regardless of caller. */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "ip must not be in 192.168.4.0/24 (the setup AP's subnet)");
+        return ESP_OK;
+    }
+
+    const char *problem = wifi_prov_static_ip_config_problem(ip, netmask, gateway);
+    if (problem) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, problem);
         return ESP_OK;
     }
 
@@ -849,6 +863,8 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid or password contains a NUL byte");
         } else if (err == ESP_ERR_NO_MEM) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "saved network list is full");
+        } else if (err == ESP_ERR_NOT_SUPPORTED && wifi_prov_saved_nets_recovery_hint()) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, wifi_prov_saved_nets_recovery_hint());
         } else {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
         }

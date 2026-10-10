@@ -1921,8 +1921,88 @@ static void test_status_ap_password_gate(void)
     TEST_CHECK(wifi_prov_status_ap_password_view(true, NULL)[0] == '\0', "NULL password is empty");
 }
 
+extern bool fake_kv_script_next_open_status(const char *namespace_name, hal_status_t status);
+
+static void test_refused_record_never_readopts_legacy(void)
+{
+    TEST_SECTION("F1: refused (newer) saved_nets record + surviving legacy wifi_cfg: legacy is never adopted or erased");
+    seed_legacy_default_wifi();
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION) == HAL_OK, "open wifi_nvs");
+    TEST_CHECK(hal_kv_set_u8(&h, NVS_KEY_MODE, 1) == HAL_OK, "user-chosen mode (differs from legacy 0)");
+    saved_nets_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = SAVED_NETS_VERSION + 1;
+    b.count = 1;
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAVED_NETS, &b, sizeof(b)) == HAL_OK, "newer record");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+    for (int boot = 0; boot < 2; boot++) {
+        boot_wifi_migration();
+        TEST_CHECK(s_saved_nets_refused, "record stays refused");
+        uint8_t mode = 99;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, WIFI_NVS_PARTITION) == HAL_OK, "reopen wifi_nvs");
+        TEST_CHECK(hal_kv_get_u8(&h, NVS_KEY_MODE, &mode) == HAL_OK && mode == 1, "wifi_nvs mode not overwritten by legacy");
+        hal_kv_close(&h);
+        char ssid[40];
+        size_t len = sizeof(ssid);
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "legacy namespace survives");
+        TEST_CHECK(hal_kv_get_str(&h, NVS_KEY_SSID, ssid, &len) == HAL_OK && strcmp(ssid, "oldnet") == 0,
+                   "legacy ssid not erased");
+        hal_kv_close(&h);
+    }
+    memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+    s_saved_nets_refused = false;
+}
+
+static void test_transient_read_error_is_retried_and_hint(void)
+{
+    TEST_SECTION("F3: a transient open error is retried before latching refused; refused exposes a recovery hint");
+    saved_nets_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = SAVED_NETS_VERSION;
+    b.count = 1;
+    strcpy(b.nets[0].ssid, "home");
+    put_raw_saved_nets(&b, sizeof(b));
+    reset_state();
+    TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "script one open failure");
+    saved_nets_blob_t rb;
+    TEST_CHECK(nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) == ESP_OK && rb.count == 1 &&
+                   strcmp(rb.nets[0].ssid, "home") == 0,
+               "load succeeded on retry");
+    TEST_CHECK(!s_saved_nets_refused, "transient error did not latch refused");
+    TEST_CHECK(wifi_prov_saved_nets_recovery_hint() == NULL, "no hint when healthy");
+    b.version = SAVED_NETS_VERSION + 1;
+    put_raw_saved_nets(&b, sizeof(b));
+    nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb);
+    TEST_CHECK(s_saved_nets_refused, "newer record refused (not retried into success)");
+    const char *hint = wifi_prov_saved_nets_recovery_hint();
+    TEST_CHECK(hint && strstr(hint, "factory reset") && strstr(hint, "wifi"), "hint names factory reset scope wifi");
+    s_saved_nets_refused = false;
+}
+
+static void test_static_ip_problem_text(void)
+{
+    TEST_SECTION("F4: static IP problem names the specific rule");
+    const char *nm = "255.255.255.0";
+    TEST_CHECK(wifi_prov_static_ip_config_problem("192.168.1.50", nm, "192.168.1.1") == NULL, "valid -> NULL");
+    const char *p = wifi_prov_static_ip_config_problem("192.168.1.50", nm, "192.168.2.1");
+    TEST_CHECK(p && strstr(p, "gateway is outside"), "off-subnet gateway");
+    p = wifi_prov_static_ip_config_problem("192.168.1.50", "255.255.255.255", "192.168.1.1");
+    TEST_CHECK(p && strstr(p, "/31"), "/32 mask");
+    p = wifi_prov_static_ip_config_problem("192.168.001.50", nm, "192.168.1.1");
+    TEST_CHECK(p && strstr(p, "leading zeros"), "leading-zero octet");
+    p = wifi_prov_static_ip_config_problem("192.168.1.50", "255.0.255.0", "192.168.1.1");
+    TEST_CHECK(p && strstr(p, "contiguous"), "non-contiguous mask");
+    p = wifi_prov_static_ip_config_problem("192.168.1.255", nm, "192.168.1.1");
+    TEST_CHECK(p && strstr(p, "ip is not a usable"), "broadcast ip");
+}
+
 void run_test_wifi_prov(void)
 {
+    test_refused_record_never_readopts_legacy();
+    test_transient_read_error_is_retried_and_hint();
+    test_static_ip_problem_text();
     test_static_ip_confirmed_false_at_boot();
     test_wifi_prov_start_sets_ram_storage();
     test_static_wrong_address_keeps_ap_up();

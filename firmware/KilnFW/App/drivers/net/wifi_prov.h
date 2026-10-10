@@ -177,6 +177,14 @@ wifi_prov_mode_t wifi_prov_get_mode(void);
  * session; only the true zero-credential state opens these routes. */
 bool wifi_prov_is_unprovisioned(void);
 
+/* F4: NULL if ip/netmask/gateway form a valid static config, else the specific
+ * rule that failed (for the HTTP 400 body). */
+const char *wifi_prov_static_ip_config_problem(const char *ip, const char *netmask, const char *gateway);
+
+/* F3: non-NULL (a recovery hint) when the saved-networks record exists but is
+ * unreadable/newer and add/forget are refused; NULL otherwise. */
+const char *wifi_prov_saved_nets_recovery_hint(void);
+
 /* NULL-terminated. There is no longer one canonical "the" saved network --
  * this now returns the active/most-recently-attempted SSID (the one
  * apply_sta_config() last configured for a join), or if nothing is currently

@@ -258,7 +258,10 @@ static void apply_connect_job_result(void)
 
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_add_network(%s) failed: %s", s_connect_job_ssid, esp_err_to_name(err));
-        const char *msg = (err == ESP_ERR_NO_MEM) ? "Saved network list is full" : "Could not save credentials";
+        const char *msg = (err == ESP_ERR_NO_MEM) ? "Saved network list is full"
+                          : (err == ESP_ERR_NOT_SUPPORTED && wifi_prov_saved_nets_recovery_hint())
+                                ? "Saved Wi-Fi record unreadable. Factory reset scope wifi to recover"
+                                : "Could not save credentials";
         lv_label_set_text(s_connect_status_label, msg);
         return;
     }

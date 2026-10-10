@@ -777,6 +777,13 @@ bool wifi_prov_is_unprovisioned(void)
     return s_wifi.state == WIFI_PROV_STATE_UNPROVISIONED && s_wifi.saved_nets.count == 0 && !s_saved_nets_refused;
 }
 
+const char *wifi_prov_saved_nets_recovery_hint(void)
+{
+    return s_saved_nets_refused
+               ? "The saved Wi-Fi record is unreadable or from newer firmware; factory reset with scope wifi to recover"
+               : NULL;
+}
+
 const char *wifi_prov_get_saved_ssid(void)
 {
     if (s_wifi.active_ssid[0] != '\0') {

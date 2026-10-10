@@ -487,7 +487,7 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
     /* Matches ESP-IDF 6.0.2: Storage::findItem keeps scanning past a page
      * TYPE_MISMATCH and ends in NOT_FOUND, so a typed read of a key stored
      * with another type is NOT_FOUND on target, not a type error. */
-    if (want_str && !is_str) return HAL_NOT_FOUND;
+    if (want_str != is_str) return HAL_NOT_FOUND;
 
     if (buf == NULL) { /* size probe */
         *out_len = len;

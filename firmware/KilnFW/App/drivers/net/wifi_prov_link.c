@@ -189,27 +189,43 @@ static bool ipv4_usable_host(uint32_t a, uint32_t mask)
 /* LOW-4: whole static configuration makes sense: all three strictly dotted
  * quad, netmask a contiguous run of ones no longer than /30, ip and gateway
  * usable hosts of the same subnet, gateway distinct from ip. */
-bool wifi_prov_static_ip_config_valid(const char *ip, const char *netmask, const char *gateway)
+/* F4: returns NULL when valid, else a short operator-facing reason naming the
+ * specific rule that failed. */
+const char *wifi_prov_static_ip_config_problem(const char *ip, const char *netmask, const char *gateway)
 {
     esp_ip4_addr_t a_ip, a_mask, a_gw;
     if (!wifi_prov_parse_strict_ipv4(ip, &a_ip) || !wifi_prov_parse_strict_ipv4(netmask, &a_mask) ||
         !wifi_prov_parse_strict_ipv4(gateway, &a_gw)) {
-        return false;
+        return "ip/netmask/gateway must each be four plain decimal octets 0-255 (no leading zeros, e.g. 192.168.1.50)";
     }
     uint32_t ip_h = ipv4_host_order(&a_ip);
     uint32_t mask_h = ipv4_host_order(&a_mask);
     uint32_t gw_h = ipv4_host_order(&a_gw);
     uint32_t inv = ~mask_h;
-    if (mask_h == 0 || (inv & (inv + 1u)) != 0 || inv < 3u) {
-        return false; /* empty, non-contiguous, or longer than /30 */
+    if (mask_h == 0 || (inv & (inv + 1u)) != 0) {
+        return "netmask must be a contiguous run of ones (e.g. 255.255.255.0)";
     }
-    if (!ipv4_usable_host(ip_h, mask_h) || !ipv4_usable_host(gw_h, mask_h)) {
-        return false;
+    if (inv < 3u) {
+        return "netmask /31 and /32 are not supported; use /30 or shorter";
     }
-    if ((ip_h & mask_h) != (gw_h & mask_h) || ip_h == gw_h) {
-        return false;
+    if (!ipv4_usable_host(ip_h, mask_h)) {
+        return "ip is not a usable host address (network, broadcast, loopback, multicast or 0.x)";
     }
-    return true;
+    if (!ipv4_usable_host(gw_h, mask_h)) {
+        return "gateway is not a usable host address (network, broadcast, loopback, multicast or 0.x)";
+    }
+    if ((ip_h & mask_h) != (gw_h & mask_h)) {
+        return "gateway is outside the ip/netmask subnet";
+    }
+    if (ip_h == gw_h) {
+        return "gateway must differ from the ip";
+    }
+    return NULL;
+}
+
+bool wifi_prov_static_ip_config_valid(const char *ip, const char *netmask, const char *gateway)
+{
+    return wifi_prov_static_ip_config_problem(ip, netmask, gateway) == NULL;
 }
 
 static esp_err_t clear_backup_dns_cb(void *ctx)

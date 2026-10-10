@@ -964,6 +964,7 @@
       // Single use: the token leaves this closure exactly once, in this
       // request's body. Any retry has to go back through step 1.
       var token = forgotResetToken;
+      var retryToken = token; // restored only when the board refuses a weak password (it does not spend the token then)
       forgotResetToken = null;
       forgotSubmit2El.disabled = true;
       var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
@@ -989,6 +990,22 @@
             forgotBackToStep1(KC_FORGOT_GENERIC_FAIL);
           });
         }
+        if (resp.status === 400) {
+          // F2: the firmware checks strength (including the AP SSID / AP password rule the
+          // client cannot see) BEFORE spending the token and says so with reason=weak_password.
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            var weak = false;
+            try { weak = JSON.parse(text).reason === 'weak_password'; } catch (e) { weak = false; }
+            if (weak && retryToken) {
+              forgotResetToken = retryToken;
+              forgotErrorEl2.textContent = 'The board refused that password (too weak, or it matches the Wi-Fi name or password). ' +
+                'Choose a different one; wait a few seconds if it says to try again later.';
+              return;
+            }
+            forgotBackToStep1(kcForgotStatusMessage(400, null));
+          });
+        }
         if (resp.status === 429) {
           return resp.text().then(function (text) {
             if (gen !== forgotGeneration) return;
@@ -1006,6 +1023,7 @@
         if (gen !== forgotGeneration) return;
         forgotBackToStep1('Network error.');
       }).then(function () {
+        retryToken = null;
         if (gen !== forgotGeneration) return;
         forgotSubmit2El.disabled = false;
       });

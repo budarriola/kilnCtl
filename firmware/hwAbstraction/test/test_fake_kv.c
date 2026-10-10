@@ -137,8 +137,9 @@ int main(void)
     CHECK(hal_kv_key_exists(&h, "cal") == HAL_OK);
     CHECK(hal_kv_key_exists(&h, "no_such_key") == HAL_NOT_FOUND);
     len = sizeof(strbuf);
-    CHECK(hal_kv_get_blob(&h, "name", strbuf, &len) == HAL_OK); /* blob accepts either */
-    CHECK(len == strlen("kiln1") + 1 && memcmp(strbuf, "kiln1", len) == 0);
+    /* F8: get_blob on a key written as a string is NOT_FOUND on target too
+     * (Storage::findItem skips TYPE_MISMATCH items). */
+    CHECK(hal_kv_get_blob(&h, "name", strbuf, &len) == HAL_NOT_FOUND);
 
     /* --- set_str(NULL) -> HAL_INVALID_ARG --- */
     CHECK(hal_kv_set_str(&h, "name", NULL) == HAL_INVALID_ARG);

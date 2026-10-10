@@ -2747,7 +2747,7 @@ function handleSaveAbort(e, msgEl) {
   showSaveTimeoutNotice(msgEl);
   return true;
 }
-['zones', 'thermoCount', 'relayCount', 'maxSimultaneous', 'continueOnZoneTrip'].forEach(function (id) {
+['zones', 'relayNames', 'thermoCount', 'relayCount', 'maxSimultaneous', 'continueOnZoneTrip'].forEach(function (id) {
   var el = document.getElementById(id);
   if (!el) return;
   el.addEventListener('input', markZonesFormDirty);
