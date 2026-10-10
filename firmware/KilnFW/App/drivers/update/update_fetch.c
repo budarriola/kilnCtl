@@ -837,6 +837,10 @@ static void fetch_task(void *arg)
 {
     (void)arg;
     const job_params_t p = s_c->params;
+    // Only buffers THIS job may have handed to the writer are abandoned on a wedge. A job that starts with the
+    // writer already wedged never reaches it (wr_start refuses), so its buffers are freed like any other job's;
+    // otherwise every check/download after a wedge leaked another 2 KiB of internal RAM until reboot.
+    const bool wedged_at_start = s_c->wr_wedged;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
@@ -858,9 +862,12 @@ static void fetch_task(void *arg)
         wr_stop();
     }
     if (s_c->wr_wedged) {
-        // The writer may still be reading these; abandon them (a reboot recovers) rather than race it.
-        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
         err = "writer_wedged_reboot_required";
+    }
+    if (s_c->wr_wedged && !wedged_at_start) {
+        // This job's writer op timed out and may still be reading these; abandon them (a reboot recovers)
+        // rather than race it.
+        ESP_LOGE(TAG, "flash writer wedged: leaking job buffers, update claim released");
     } else {
         heap_caps_free(scratch);
         heap_caps_free(body);

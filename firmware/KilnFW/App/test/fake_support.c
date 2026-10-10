@@ -111,21 +111,36 @@ void fr_reset(void)
 
 // ---------------------------------------------------------------------------------------------------------
 // heap
+volatile long g_fr_heap_live;
 void *heap_caps_malloc(size_t size, uint32_t caps)
 {
     if ((caps & MALLOC_CAP_INTERNAL) && g_fr_internal_alloc_fail) {
         return NULL;
     }
-    return malloc(size);
+    void *p = malloc(size);
+    if (p != NULL) {
+        InterlockedIncrement(&g_fr_heap_live);
+    }
+    return p;
 }
 void *heap_caps_calloc(size_t n, size_t size, uint32_t caps)
 {
     if ((caps & MALLOC_CAP_INTERNAL) && g_fr_internal_alloc_fail) {
         return NULL;
     }
-    return calloc(n, size);
+    void *p = calloc(n, size);
+    if (p != NULL) {
+        InterlockedIncrement(&g_fr_heap_live);
+    }
+    return p;
 }
-void heap_caps_free(void *p) { free(p); }
+void heap_caps_free(void *p)
+{
+    if (p != NULL) {
+        InterlockedDecrement(&g_fr_heap_live);
+    }
+    free(p);
+}
 size_t heap_caps_get_free_size(uint32_t caps) { return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u; }
 size_t heap_caps_get_largest_free_block(uint32_t caps)
 {

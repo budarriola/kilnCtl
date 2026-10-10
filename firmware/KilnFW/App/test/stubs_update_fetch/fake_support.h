@@ -49,6 +49,7 @@ extern bool g_fr_clock_synced;
 extern char g_fr_repo[96];
 extern size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
 extern bool g_fr_internal_alloc_fail;
+extern volatile long g_fr_heap_live;        // heap_caps_* blocks currently allocated (leak checks)
 
 // ---- tasks ----
 extern const char *g_fr_fail_task;         // xTaskCreate*() with this name fails

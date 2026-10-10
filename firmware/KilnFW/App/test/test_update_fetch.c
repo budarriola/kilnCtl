@@ -469,6 +469,7 @@ static void test_writer_wedge(void)
     CHECK(g_fr_flash_blocked_n >= 1, "the abandoned writer is still parked in flash");
 
     // a NEW job is refused: no second writer next to the parked one
+    const long heap_before = g_fr_heap_live;
     int r = POST("/api/update/download", NULL);
     if (r == 202) {
         WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0 && strstr(g_rq.resp, "\"busy\":false")));
@@ -478,6 +479,12 @@ static void test_writer_wedge(void)
     CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0 || resp_has("writer_wedged_reboot_required"),
           "new download refused: writer_wedged_reboot_required");
     expect_claim_balanced("second wedged job");
+    WAIT_FOR(g_fr_live_tasks <= 1); // only the parked writer remains
+    CHECK(g_fr_heap_live == heap_before, "a job started after the wedge frees its buffers (never handed to the writer)");
+    CHECK(POST("/api/update/check", NULL) == 202, "check after the wedge accepted");
+    WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0 || strcmp(g_state, "done") == 0));
+    WAIT_FOR(g_fr_live_tasks <= 1);
+    CHECK(g_fr_heap_live == heap_before, "a check after the wedge frees its buffers");
 
     CHECK(stage_phase() == UPDATE_STAGE_UPLOADING, "wedged writer holds the stage in UPLOADING");
     upload(g_img, IMG_LEN);
