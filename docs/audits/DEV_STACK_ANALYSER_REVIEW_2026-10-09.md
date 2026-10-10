@@ -26,6 +26,22 @@ removed, and functions marked indirect going from 930 to 1696 (of 10353).
 `test_stack_budget_symbol_bounds` passes (16 tests). The bench board was read
 once (`get_stack_margin`, read-only).
 
+## Status (fixes)
+
+Fixed in 0380c7d5 (analyser), dcbcf2f3 (boot path) and c3d3bf67 (ceilings), SHAs as committed on the fix branch before rebase onto dev:
+
+- F9 fixed (dcbcf2f3): `nvs_load_files_only`/`nvs_load_all_from` hold their `profile_t` scratch on the heap
+  (`persist_scratch_alloc`, OOM = slots unexamined and refused). `check_main_task_stack_budget` 6464 B -> 5568 B.
+- F2 fixed (0380c7d5, c3d3bf67): `WORKER_ONLY_EDGES` drops `nvs_save -> zones_autosave_job` everywhere except the
+  bx_flash_worker root. Executor 3920 B -> 3408 B, httpd 4496 B -> 4448 B; both ceilings lowered to the measurement.
+- F3 fixed as a warning only (0380c7d5): `check_all_task_stack_budgets` prints "WARNING count: 33 of 33 tasks reach
+  resolved ROM calls". Not a failure: all 33 tasks are already INDETERMINATE, so a failure would only add noise.
+- F5, F6, F7, F8 fixed (0380c7d5) with new tests in `test_stack_budget_symbol_bounds.py`; F7 negative-tested with
+  negtest (mutation `if True:` in the legacy edge rule CAUGHT).
+- Also re-baselined four `check_all` ceilings that had drifted on dev with no analyser change (bx_flash_worker 6144 ->
+  6160, http_async_job 7552 -> 7632, lvgl 7472 -> 7488, screen_idle 3888 -> 3904); the unmodified analyser fails the same four.
+- F4 left open (no instance).
+
 ## Findings
 
 ### F1 HIGH: check_httpd_task_stack_budget fails at c094c089
