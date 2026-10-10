@@ -27,7 +27,7 @@
 
 int g_test_failures = 0;
 int g_test_count = 0;
-#define CHK(c) TEST_CHECK((c), #c)
+#define CHECK(c) TEST_CHECK((c), #c)
 
 static uint32_t s_tick;
 static jmp_buf s_task_jmp;
@@ -125,13 +125,13 @@ static void test_before_init(void)
 {
     TEST_SECTION("danger_mode before init");
     s_tick = 1000;
-    CHK(!danger_mode_request_start());
-    CHK(!danger_mode_active());
-    CHK(danger_mode_remaining_ms() == 0);
-    CHK(!danger_mode_touch());
-    CHK(!danger_mode_set_heat_enable_request(true));
-    CHK(!danger_mode_get_heat_requested());
-    CHK(s_enable_calls == 0);
+    CHECK(!danger_mode_request_start());
+    CHECK(!danger_mode_active());
+    CHECK(danger_mode_remaining_ms() == 0);
+    CHECK(!danger_mode_touch());
+    CHECK(!danger_mode_set_heat_enable_request(true));
+    CHECK(!danger_mode_get_heat_requested());
+    CHECK(s_enable_calls == 0);
 }
 
 static void test_lifecycle(void)
@@ -139,109 +139,109 @@ static void test_lifecycle(void)
     TEST_SECTION("danger_mode start / touch / expiry / stop");
     g_test_stub_semaphore_take_default = 1;
     danger_mode_init((SafetyLinkClass *)0);
-    CHK(s_dm.initialized);
+    CHECK(s_dm.initialized);
     reset_counters();
 
     s_tick = 10000;
-    CHK(!danger_mode_active());
-    CHK(!danger_mode_touch()); /* nothing to touch */
+    CHECK(!danger_mode_active());
+    CHECK(!danger_mode_touch()); /* nothing to touch */
 
     /* enable refused outside the window, nothing sent */
-    CHK(!danger_mode_set_heat_enable_request(true));
-    CHK(s_enable_calls == 0);
+    CHECK(!danger_mode_set_heat_enable_request(true));
+    CHECK(s_enable_calls == 0);
 
-    CHK(danger_mode_request_start());
-    CHK(danger_mode_active());
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
-    CHK(!danger_mode_get_heat_requested());
+    CHECK(danger_mode_request_start());
+    CHECK(danger_mode_active());
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
+    CHECK(!danger_mode_get_heat_requested());
 
     /* time passes, remaining shrinks */
     s_tick = 10000 + 100000;
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS - 100000u);
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS - 100000u);
     /* touch resets the full window */
-    CHK(danger_mode_touch());
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
+    CHECK(danger_mode_touch());
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
 
     /* heat-enable inside the window: sent, recorded, and extends window */
     s_tick += 50000;
-    CHK(danger_mode_set_heat_enable_request(true));
-    CHK(s_enable_calls == 1 && s_enable_last == true);
-    CHK(danger_mode_get_heat_requested());
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
+    CHECK(danger_mode_set_heat_enable_request(true));
+    CHECK(s_enable_calls == 1 && s_enable_last == true);
+    CHECK(danger_mode_get_heat_requested());
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
 
     /* link refuses enable=true: reported false, flag unchanged */
     s_enable_result = ESP_ERR_INVALID_STATE;
-    CHK(danger_mode_set_heat_enable_request(true) == false);
-    CHK(danger_mode_get_heat_requested()); /* still the earlier request */
+    CHECK(danger_mode_set_heat_enable_request(true) == false);
+    CHECK(danger_mode_get_heat_requested()); /* still the earlier request */
     /* release always succeeds from this module's view */
     s_enable_result = ESP_OK;
-    CHK(danger_mode_set_heat_enable_request(false));
-    CHK(!danger_mode_get_heat_requested());
+    CHECK(danger_mode_set_heat_enable_request(false));
+    CHECK(!danger_mode_get_heat_requested());
 
     /* re-entry while open: stays open, full window. F6-1: the re-entry clears heat_requested, so it
      * must also send the matching release (display and wire agree). */
-    CHK(danger_mode_set_heat_enable_request(true));
+    CHECK(danger_mode_set_heat_enable_request(true));
     reset_counters();
-    CHK(danger_mode_request_start());
-    CHK(danger_mode_active());
-    CHK(!danger_mode_get_heat_requested());
-    CHK(s_enable_calls == 1 && s_enable_last == false);
+    CHECK(danger_mode_request_start());
+    CHECK(danger_mode_active());
+    CHECK(!danger_mode_get_heat_requested());
+    CHECK(s_enable_calls == 1 && s_enable_last == false);
     /* re-entry with no outstanding request sends nothing */
     reset_counters();
-    CHK(danger_mode_request_start());
-    CHK(s_enable_calls == 0);
+    CHECK(danger_mode_request_start());
+    CHECK(s_enable_calls == 0);
 
     /* active() reads false at the deadline but does NOT self-close */
     s_tick += DANGER_MODE_WINDOW_MS;
-    CHK(!danger_mode_active());
-    CHK(danger_mode_remaining_ms() == 0);
-    CHK(s_dm.window_open);
+    CHECK(!danger_mode_active());
+    CHECK(danger_mode_remaining_ms() == 0);
+    CHECK(s_dm.window_open);
     reset_counters();
     run_task_once();
-    CHK(!s_dm.window_open);
-    CHK(s_relays_off_calls == 1);
-    CHK(s_enable_calls == 1 && s_enable_last == false);
+    CHECK(!s_dm.window_open);
+    CHECK(s_relays_off_calls == 1);
+    CHECK(s_enable_calls == 1 && s_enable_last == false);
     /* second pass: already closed, no second release */
     run_task_once();
-    CHK(s_relays_off_calls == 1 && s_enable_calls == 1);
-    CHK(!danger_mode_touch());
+    CHECK(s_relays_off_calls == 1 && s_enable_calls == 1);
+    CHECK(!danger_mode_touch());
 
     /* task one ms before the deadline does nothing; at the deadline expires */
-    CHK(danger_mode_request_start());
+    CHECK(danger_mode_request_start());
     s_tick += DANGER_MODE_WINDOW_MS - 1;
     reset_counters();
     run_task_once();
-    CHK(s_dm.window_open && s_relays_off_calls == 0);
+    CHECK(s_dm.window_open && s_relays_off_calls == 0);
     s_tick += 1;
     run_task_once();
-    CHK(!s_dm.window_open && s_relays_off_calls == 1);
+    CHECK(!s_dm.window_open && s_relays_off_calls == 1);
 
     /* stop: releases only when open */
     reset_counters();
     danger_mode_stop("test");
-    CHK(s_relays_off_calls == 0 && s_enable_calls == 0);
-    CHK(danger_mode_request_start());
-    CHK(danger_mode_set_heat_enable_request(true));
+    CHECK(s_relays_off_calls == 0 && s_enable_calls == 0);
+    CHECK(danger_mode_request_start());
+    CHECK(danger_mode_set_heat_enable_request(true));
     reset_counters();
     danger_mode_stop(NULL);
-    CHK(!danger_mode_active());
-    CHK(!danger_mode_get_heat_requested());
-    CHK(s_relays_off_calls == 1 && s_enable_calls == 1 && s_enable_last == false);
-    CHK(!danger_mode_set_heat_enable_request(true)); /* refused after stop */
+    CHECK(!danger_mode_active());
+    CHECK(!danger_mode_get_heat_requested());
+    CHECK(s_relays_off_calls == 1 && s_enable_calls == 1 && s_enable_last == false);
+    CHECK(!danger_mode_set_heat_enable_request(true)); /* refused after stop */
 
     /* stop with a failing owner still attempts the enable release */
-    CHK(danger_mode_request_start());
+    CHECK(danger_mode_request_start());
     reset_counters();
     s_relays_off_result = ESP_ERR_TIMEOUT;
     danger_mode_stop("fail");
-    CHK(s_relays_off_calls == 1 && s_enable_calls == 1);
-    CHK(!s_dm.window_open);
+    CHECK(s_relays_off_calls == 1 && s_enable_calls == 1);
+    CHECK(!s_dm.window_open);
 
     /* start refused while a firing is active */
     reset_counters();
     s_firing_active = true;
-    CHK(!danger_mode_request_start());
-    CHK(!danger_mode_active());
+    CHECK(!danger_mode_request_start());
+    CHECK(!danger_mode_active());
     s_firing_active = false;
 }
 
@@ -251,19 +251,19 @@ static void test_clock_wrap(void)
     reset_counters();
     /* start 1 s before the tick counter wraps */
     s_tick = 0xFFFFFFFFu - 999u;
-    CHK(danger_mode_request_start());
-    CHK(danger_mode_active());
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
+    CHECK(danger_mode_request_start());
+    CHECK(danger_mode_active());
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS);
     s_tick += 2000u; /* wrapped past zero */
-    CHK(s_tick < 5000u);
-    CHK(danger_mode_active());
-    CHK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS - 2000u);
+    CHECK(s_tick < 5000u);
+    CHECK(danger_mode_active());
+    CHECK(danger_mode_remaining_ms() == DANGER_MODE_WINDOW_MS - 2000u);
     run_task_once();
-    CHK(s_dm.window_open && s_relays_off_calls == 0);
+    CHECK(s_dm.window_open && s_relays_off_calls == 0);
     s_tick += DANGER_MODE_WINDOW_MS - 2000u;
-    CHK(!danger_mode_active());
+    CHECK(!danger_mode_active());
     run_task_once();
-    CHK(!s_dm.window_open && s_relays_off_calls == 1);
+    CHECK(!s_dm.window_open && s_relays_off_calls == 1);
 }
 
 static void test_lock_timeout(void)
@@ -272,13 +272,13 @@ static void test_lock_timeout(void)
     reset_counters();
     s_tick = 500;
     g_test_stub_semaphore_fail_nth = 1;
-    CHK(!danger_mode_request_start());
-    CHK(!s_dm.window_open);
-    CHK(danger_mode_request_start());
+    CHECK(!danger_mode_request_start());
+    CHECK(!s_dm.window_open);
+    CHECK(danger_mode_request_start());
     g_test_stub_semaphore_fail_nth = 1;
-    CHK(!danger_mode_active());
+    CHECK(!danger_mode_active());
     g_test_stub_semaphore_fail_nth = 1;
-    CHK(!danger_mode_touch());
+    CHECK(!danger_mode_touch());
     danger_mode_stop("cleanup");
 }
 
@@ -289,41 +289,41 @@ static void test_heat_claim_exclusion(void)
     reset_counters();
     s_tick = 500000;
     danger_mode_stop("test"); /* window closed */
-    CHK(!danger_mode_blocks_start());
+    CHECK(!danger_mode_blocks_start());
 
     /* R1: an autotune (or profile) heat claim refuses a fresh open and leaves the window CLOSED */
     s_heat_autotune_claim = true;
-    CHK(!danger_mode_request_start());
-    CHK(!s_dm.window_open);
-    CHK(!danger_mode_blocks_start());
-    CHK(s_enable_calls == 0 && s_relays_off_calls == 0); /* must not cut the claimant's run */
+    CHECK(!danger_mode_request_start());
+    CHECK(!s_dm.window_open);
+    CHECK(!danger_mode_blocks_start());
+    CHECK(s_enable_calls == 0 && s_relays_off_calls == 0); /* must not cut the claimant's run */
     s_heat_autotune_claim = false;
     s_heat_profile_claim = true; /* R2: PAUSED/RUNNING profile claim, executor peek reads idle */
-    CHK(!danger_mode_request_start());
-    CHK(!s_dm.window_open);
-    CHK(s_enable_calls == 0 && s_relays_off_calls == 0);
+    CHECK(!danger_mode_request_start());
+    CHECK(!s_dm.window_open);
+    CHECK(s_enable_calls == 0 && s_relays_off_calls == 0);
     s_heat_profile_claim = false;
 
     /* with no claim it opens, and blocks_start reports it */
-    CHK(danger_mode_request_start());
-    CHK(danger_mode_blocks_start());
+    CHECK(danger_mode_request_start());
+    CHECK(danger_mode_blocks_start());
     /* a claim appearing while already open refuses the re-entry but keeps the open window and flag */
-    CHK(danger_mode_set_heat_enable_request(true));
+    CHECK(danger_mode_set_heat_enable_request(true));
     reset_counters();
     s_heat_autotune_claim = true;
-    CHK(!danger_mode_request_start());
-    CHK(s_dm.window_open && danger_mode_get_heat_requested());
+    CHECK(!danger_mode_request_start());
+    CHECK(s_dm.window_open && danger_mode_get_heat_requested());
     s_heat_autotune_claim = false;
 
     /* R3: expired reads clear; lock timeout reads BLOCKED while danger_mode_active() still reads inactive */
     s_tick += DANGER_MODE_WINDOW_MS;
-    CHK(!danger_mode_blocks_start());
+    CHECK(!danger_mode_blocks_start());
     danger_mode_stop("test");
     g_test_stub_semaphore_take_default = 0;
-    CHK(danger_mode_blocks_start());
-    CHK(!danger_mode_active());
+    CHECK(danger_mode_blocks_start());
+    CHECK(!danger_mode_active());
     g_test_stub_semaphore_take_default = 1;
-    CHK(!danger_mode_blocks_start());
+    CHECK(!danger_mode_blocks_start());
 }
 
 int main(void)
