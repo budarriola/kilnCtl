@@ -21,6 +21,8 @@ All paths below are under `firmware/KilnFW/App/` unless stated otherwise. Line n
 
 ### 1. HIGH: `update_fetch.c` and `update_http.c` have no host build
 
+**ADDRESSED 2026-10-09:** `test/test_update_fetch.c` (registered in `build_host_tests.ps1`) compiles both files plus the real stage code against fakes for the HTTP client, sha256, tasks, stage flash and update claim (`test/fake_support.c`). It covers short_body and sha256_mismatch stage aborts, claim release on every failure, the 400/409 handler responses, stage upload/clear, abandoned-op writer cleanup and writer_wedged_reboot_required refusing new jobs. It exposed two real bugs, both fixed: the stage upload handler's unscoped abort clobbered a wedged fetch owner's phase (now owner-scoped), and `wr_call` overwrote an abandoned op's command before checking the wedge flag, so its late cleanup was skipped (check now first). The gap text below is the original finding.
+
 `build_host_tests.ps1:246-255` compiles the following, each with a real test:
 
 - `update_semver`
