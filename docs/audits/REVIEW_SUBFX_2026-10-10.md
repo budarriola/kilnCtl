@@ -141,3 +141,7 @@ ui_page_touch_cal.c, would close all three.
 - **Does land block when the pin check FAILs?** Yes. Exit 1 -> `Finish 1` before the push, with
   `submodule_pins:"fail"`; I saw this in the S-3 mutation's output. It is untested (S-3/S-4) and it also
   fires on a script crash (S-6).
+
+## Fix status (toolfx3)
+
+Fixed in the commits ending at ad517c152: S-2a (differing .gitmodules test), S-2b (unnamed gitlink FAIL), S-1a (origin probe: origin answers + submodule host down = FAIL; ssh BatchMode), S-6 (test only; fixed by toolfx2), S-4a (only exit 3 warns in land and dev_promote), S-3/S-4 (check_land pin case), A1-a (multi-line caller match). All mutations CAUGHT by negtest.
