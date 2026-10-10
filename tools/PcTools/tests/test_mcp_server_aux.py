@@ -188,6 +188,8 @@ class SetAuxManualTest(_Base):
     def test_409_mid_run_is_a_refusal(self):
         exc = ahc.AuxHttpError("x", 409, GATE_TEXT)
         with unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_snap({4: {"enabled": True}})), \
+             unittest.mock.patch.object(ma._srv._info, "get_wifi_status",
+                                        return_value=unittest.mock.Mock(connected=True, ip="10.0.0.5")), \
              unittest.mock.patch.object(ahc, "post_aux_manual", side_effect=exc):
             r = ma.control_set_aux_manual(relay=4, on=True, confirm=True)
         self.assertTrue(r.startswith("refused: system_mode_gate"), r)
@@ -206,10 +208,48 @@ class SetAuxManualTest(_Base):
         self.assertTrue(r.startswith("FAILED"), r)
         self.assertIn("i2c_failed", r)
 
-    def test_board_identity_mismatch_fails(self):
-        r, _ = self._run(_snap({4: {"enabled": True}}), True, uart_ip="10.0.0.9", relay=4, on=True, confirm=True)
-        self.assertTrue(r.startswith("FAILED"), r)
+    def test_board_identity_mismatch_refuses_before_post(self):
+        r, post = self._run(_snap({4: {"enabled": True}}), True, uart_ip="10.0.0.9", relay=4, on=True, confirm=True)
+        self.assertTrue(r.startswith("refused"), r)
         self.assertIn("10.0.0.9", r)
+        post.assert_not_called()
+
+    def _run_wifi(self, wifi=None, exc=None, **kw):
+        with unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_snap({4: {"enabled": True}})), \
+             unittest.mock.patch.object(ahc, "post_aux_manual", return_value=True) as post, \
+             unittest.mock.patch.object(ma._srv._info, "get_wifi_status", return_value=wifi, side_effect=exc), \
+             unittest.mock.patch.object(ma._srv._io, "read", return_value=self._io(True)):
+            r = ma.control_set_aux_manual(relay=4, on=True, confirm=True, **kw)
+        return r, post
+
+    def test_not_connected_refuses_before_post(self):
+        r, post = self._run_wifi(unittest.mock.Mock(connected=False, ip="10.0.0.5"))
+        self.assertTrue(r.startswith("refused"), r)
+        post.assert_not_called()
+
+    def test_wifi_exception_refuses_not_matches(self):
+        r, post = self._run_wifi(exc=RuntimeError("uart down"))
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("uart down", r)
+        post.assert_not_called()
+
+    def test_ap_mode_no_ip_refuses(self):
+        r, post = self._run_wifi(unittest.mock.Mock(connected=True, ip=""))
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("AP-fallback", r)
+        post.assert_not_called()
+
+    def test_host_normalization_accepts_scheme_port(self):
+        for h in ("http://10.0.0.5", "10.0.0.5:80", "http://10.0.0.5:8080/x"):
+            r, post = self._run_wifi(unittest.mock.Mock(connected=True, ip="10.0.0.5"), host=h)
+            self.assertTrue(r.startswith("ok"), (h, r))
+            post.assert_called_once()
+
+    def test_unresolvable_host_refuses(self):
+        with unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
+            r, post = self._run_wifi(unittest.mock.Mock(connected=True, ip="10.0.0.5"), host="no-such-host.invalid")
+        self.assertTrue(r.startswith("refused"), r)
+        post.assert_not_called()
 
     def test_bad_args(self):
         for kw in ({"relay": 0, "on": True}, {"relay": 4, "on": 1}):

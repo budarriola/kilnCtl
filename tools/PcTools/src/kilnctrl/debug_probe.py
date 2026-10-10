@@ -838,43 +838,51 @@ def read_symbol(peer: str, symbol: str, count: Optional[int] = None, width: int 
     return read_memory(peer, address, count=count, width=width, leave_halted=leave_halted)
 
 
-def write_memory(peer: str, address: int, value: int, width: int = 32) -> "tuple[bool, str]":
+def write_memory(peer: str, address: int, value: int, width: int = 32,
+                 leave_halted: bool = False) -> "tuple[bool, str]":
     """Writes one ``width``-bit ``value`` at ``address``.
 
     NOTE: this bare function has no ARMED-state gate of its own -- that policy
     (peer="pico" only: refuse if ``pico_armed_state()`` reports armed, or
     can't confidently determine the state) lives one layer up, in
-    ``mcp_server.py``'s ``debug_write_memory()`` MCP wrapper, matching where
-    this codebase's other write-time policy (e.g. ``debug_halt``'s
-    profile-running guard) already lives. Call ``pico_armed_state()``
-    yourself first if you're calling this directly rather than through the
-    MCP tool.
+    ``mcp_server_debug.debug_write_memory()``. The ARMED check there is a
+    single read before this call (same window as every write here).
+
+    The core is halted for the write and, by default, ALWAYS resumed (halt and
+    write are catch-wrapped so neither can skip the resume). The ``KCTL_*``
+    markers printed by the Tcl are authoritative: a failed resume / still
+    halted core and a failed write are reported whether or not OpenOCD's own
+    ``Error:`` heuristic marked the run not-ok (OpenOCD logs ``Error:`` even
+    for errors a Tcl ``catch`` handles). ``leave_halted=True`` skips the
+    resume deliberately (an operator who halted the core on purpose).
     """
     cmd = _MEM_WIDTH_WRITE_CMDS.get(width)
     if cmd is None:
         raise ValueError(f"width must be one of {sorted(_MEM_WIDTH_WRITE_CMDS)}, got {width!r}")
     peer_cfg = resolve_peer(peer)
-    # Owner rule: halt via probe, ALWAYS resume. The write is catch-wrapped so a
-    # failing write cannot skip the resume tail; the resume outcome is printed
-    # and checked below so a core left halted is reported loudly, not silently.
+    resume = (
+        "" if leave_halted else
+        f'if {{[catch {{{_RESUME_TCL}}} _kctl_rerr]}} {{puts "KCTL_RESUME_ERR $_kctl_rerr"}}; sleep 100; '
+    )
     tcl = (
-        f"{_adapter_prefix(peer_cfg)}init; halt; "
+        f"{_adapter_prefix(peer_cfg)}init; "
+        'if {[catch {halt} _kctl_herr]} {puts "KCTL_HALT_ERR $_kctl_herr"}; '
         f'if {{[catch {{{cmd} 0x{address:x} 0x{value:x}}} _kctl_werr]}} {{puts "KCTL_WRITE_ERR $_kctl_werr"}}; '
-        f'if {{[catch {{{_RESUME_TCL}}} _kctl_rerr]}} {{puts "KCTL_RESUME_ERR $_kctl_rerr"}}; '
-        "sleep 100; "
+        f"{resume}"
         "foreach _kctl_t [target names] { "
         "if {[catch {set _kctl_s [$_kctl_t curstate]}]} {set _kctl_s unknown}; "
         'puts "KCTL_AFTER $_kctl_t $_kctl_s" }; exit'
     )
     ok, output = _run(peer, tcl)
-    werr = [ln for ln in (output or "").splitlines() if ln.startswith("KCTL_WRITE_ERR")]
-    rerr = [ln for ln in (output or "").splitlines() if ln.startswith("KCTL_RESUME_ERR")]
-    halted = [ln.split()[1] for ln in (output or "").splitlines()
+    lines = (output or "").splitlines()
+    werr = [ln for ln in lines if ln.startswith("KCTL_WRITE_ERR")]
+    rerr = [ln for ln in lines if ln.startswith("KCTL_RESUME_ERR")]
+    halted = [ln.split()[1] for ln in lines
               if len(ln.split()) == 3 and ln.startswith("KCTL_AFTER") and ln.split()[2] != "running"]
-    if ok and (rerr or halted):
-        return False, (f"{output}\nERROR: write_memory RESUME FAILED -- target(s) {halted or 'unknown'} may still be "
-                       f"HALTED ({'; '.join(rerr) or 'state not running'}). Run debug_resume now.")
-    if ok and werr:
+    if not leave_halted and (rerr or halted):
+        return False, (f"{output}\nERROR: write_memory RESUME FAILED / still halted -- target(s) {halted or 'unknown'} "
+                       f"may still be HALTED ({'; '.join(rerr) or 'state not running'}). Run debug_resume now.")
+    if werr:
         return False, f"{output}\nERROR: {werr[0]}"
     if not ok and not (output or "").count("KCTL_AFTER"):
         return ok, output + "\nWARNING: write_memory could not confirm the core was resumed; run debug_resume."

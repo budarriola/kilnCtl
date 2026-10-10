@@ -27,6 +27,8 @@ Severity scale:
 
 ### MED-1: write_memory reports a halted core only when OpenOCD exits clean
 
+**Status: FIXED (mcpfx3): write_memory evaluates the KCTL_* markers whether or not OpenOCD counted the run ok; tests for ok=False + halted / write error.**
+
 **Where:** `tools/PcTools/src/kilnctrl/debug_probe.py:874-881`, together with `pico_gpio_probe.py:142-145`.
 
 **Scenario:**
@@ -47,6 +49,8 @@ A failure the other way round is also possible: an unrelated `Error:` line, afte
 
 ### MED-2: the aux identity check runs after the POST, and always fails in AP mode
 
+**Status: FIXED (mcpfx3): identity check runs before the POST, host normalized (scheme/port/name), AP-fallback / not connected / Wi-Fi exception refuse (no board-unique ID is shared by UART and HTTP, so AP mode refuses with a clear message).**
+
 **Where:** `tools/PcTools/src/kilnctrl/mcp_server_aux.py:180-193` and `:231-253`.
 
 **Scenario:**
@@ -66,6 +70,8 @@ A failure the other way round is also possible: an unrelated `Error:` line, afte
 
 ### MED-3: mcpfx1 broke two existing pico_gpio_write tests, and on the bench they would reach the Pico
 
+**Status: FIXED (mcpfx3, 43cf6c767): both tests mock pico_armed_state; the ESP write_memory test also mocks the profile and read-back seams.**
+
 **Where:**
 - `tools/PcTools/tests/test_gate_flag_strictness_partb.py:79` (`PicoGpioConfirmTests::test_write_readback_warning`);
 - `tools/PcTools/tests/test_pctools_batch_d_2026_10_10.py:143` (`PicoGpioWriteUnverifiedTests::test_readback_exception_not_ok`).
@@ -80,6 +86,8 @@ mcpfx1's own tests mocked the gate, but these two older callers were not updated
 
 ### LOW-1: `halt` before the write is not catch-wrapped
 
+**Status: FIXED (mcpfx3): halt is catch-wrapped; resume always follows.**
+
 **Where:** `debug_probe.py:861`.
 
 **Scenario:** if `halt` throws, the rest of the Tcl string (write, resume, `KCTL_AFTER`) never runs. The WARNING branch covers this ("could not confirm resumed"). Nothing was written, but the core may be left halted by a partial halt on a multi-core target.
@@ -87,6 +95,8 @@ mcpfx1's own tests mocked the gate, but these two older callers were not updated
 **Fix:** wrap it, or run `_RESUME_TCL` in that error branch too.
 
 ### LOW-2: write_memory now resumes a core the operator halted on purpose
+
+**Status: FIXED (mcpfx3): leave_halted=False option on write_memory / debug_write_memory (default resumes).**
 
 **Where:** `debug_probe.py:841-868`.
 
@@ -97,6 +107,8 @@ mcpfx1's own tests mocked the gate, but these two older callers were not updated
 - Or add an explicit `leave_halted=False` parameter and document it.
 
 ### LOW-3: ARMED gate TOCTOU across several OpenOCD sessions
+
+**Status: DOCUMENTED (mcpfx3): single ARMED read before the write is the same window as debug_write_memory; stated in both docstrings.**
 
 **Where:** `mcp_server_pico_gpio_probe.py:111` and `:139`, with `pico_gpio_probe.set_mode`.
 

@@ -40,6 +40,35 @@ class WriteMemoryResumeTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("KCTL_WRITE_ERR", out)
 
+    def test_ok_false_with_halted_core_still_reported(self):
+        # OpenOCD prints Error: for handled errors, so ok=False is the common case.
+        _, (ok, out) = self._tcl("Error: x\nKCTL_AFTER core0 halted\n", ok=False)
+        self.assertFalse(ok)
+        self.assertIn("RESUME FAILED / still halted", out)
+
+    def test_ok_false_write_error_reported(self):
+        _, (ok, out) = self._tcl("Error: x\nKCTL_WRITE_ERR bad\nKCTL_AFTER core0 running\n", ok=False)
+        self.assertFalse(ok)
+        self.assertIn("KCTL_WRITE_ERR", out)
+
+    def test_halt_is_catch_wrapped_and_resume_follows(self):
+        tcl, _ = self._tcl()
+        self.assertIn("catch {halt}", tcl)
+        self.assertLess(tcl.index("catch {halt}"), tcl.index("resume;"))
+
+    def test_leave_halted_skips_resume(self):
+        with unittest.mock.patch.object(debug_probe, "_run",
+                                        return_value=(True, "KCTL_AFTER core0 halted\n")) as run:
+            ok, _ = debug_probe.write_memory("pico", 0x40014004, 5, 32, leave_halted=True)
+        self.assertTrue(ok)
+        self.assertNotIn("resume;", run.call_args[0][1])
+
+    def test_pico_gpio_write_word_surfaces_halted(self):
+        with unittest.mock.patch.object(debug_probe, "_run", return_value=(False, "Error: x\nKCTL_AFTER core0 halted\n")):
+            with self.assertRaises(RuntimeError) as cm:
+                pico_gpio_probe._write_word("pico", 0x40014004, 5)
+        self.assertIn("RESUME FAILED", str(cm.exception))
+
 
 class PicoGpioArmedGateTest(unittest.TestCase):
     def _call(self, fn, armed, *args):

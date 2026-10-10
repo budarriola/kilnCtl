@@ -177,18 +177,47 @@ def control_set_aux_output(
     return f"ok - {_fmt_entry(got)} (confirmed by read-back; host={resolved})"
 
 
+def _host_ip(host: str):
+    """Normalize an HTTP host spec (scheme/port/path/brackets, name or IP) to an
+    ipaddress object, or None if it cannot be resolved (callers fail closed)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    h = host.strip()
+    try:
+        h = urlsplit(h if "//" in h else "//" + h).hostname or ""
+    except ValueError:
+        return None
+    if not h:
+        return None
+    try:
+        return ipaddress.ip_address(h)
+    except ValueError:
+        pass
+    try:
+        return ipaddress.ip_address(socket.getaddrinfo(h, None, socket.AF_INET)[0][4][0])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
 def _board_identity_mismatch(resolved: str) -> Optional[str]:
     """None only when the UART link's reported station IP equals the HTTP host the
-    write went to (both then name the same board); else a reason string."""
+    write will go to (both then name the same board); else a reason string. Run
+    BEFORE the POST. With no station IP (AP-only / not connected) there is no
+    board-unique ID shared by UART and HTTP, so it refuses rather than guess."""
     try:
         wifi = _srv._info.get_wifi_status()
     except Exception as exc:  # noqa: BLE001
         return f"could not read the UART link's board identity ({exc})"
     ip = getattr(wifi, "ip", None)
     if not getattr(wifi, "connected", False) or not ip:
-        return "the UART-linked board reports no station IP to compare with the HTTP host"
-    if ip != resolved:
-        return f"UART-linked board is at {ip} but the write went to {resolved}"
+        return ("the UART-linked board reports no station IP to compare with the HTTP host "
+                "(AP-fallback / not on Wi-Fi: no board-unique ID is shared by UART and HTTP)")
+    uart_ip, http_ip = _host_ip(str(ip)), _host_ip(resolved)
+    if uart_ip is None or http_ip is None:
+        return f"could not normalize UART address {ip!r} / HTTP host {resolved!r} to compare them"
+    if uart_ip != http_ip:
+        return f"UART-linked board is at {ip} but the write would go to {resolved}"
     return None
 
 
@@ -201,8 +230,9 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
     an enabled, unconflicted aux output. At firing start the profile rule takes
     over and at run end aux goes OFF (plan sec 14 item 12), so this is never a
     hold. After the write it reads the relay shadow (io_read) and FAILS LOUD unless
-    it equals `on`, neither relay_state_unknown nor i2c_failed is set, and the UART
-    link's station IP equals the HTTP host written to. Never prints a credential."""
+    it equals `on` and neither relay_state_unknown nor i2c_failed is set. BEFORE the
+    write it refuses unless the UART link's station IP equals the HTTP host (scheme,
+    port and name normalized); with no station IP (AP-fallback) it refuses. Never prints a credential."""
     if not _is_int(relay) or not 1 <= relay <= ahc.AUX_RELAY_COUNT:
         return f"refused: relay={relay!r} must be an integer 1..{ahc.AUX_RELAY_COUNT}"
     if not isinstance(on, bool):
@@ -227,6 +257,11 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
         return (f"DRY RUN (pass confirm=True, exactly, to actually write) -- would switch aux relay "
                 f"{relay} {'ON' if on else 'OFF'} (host={resolved})")
 
+    mismatch = _board_identity_mismatch(resolved)
+    if mismatch is not None:
+        return (f"refused: cannot tie the UART read-back to the HTTP board before writing -- {mismatch} "
+                f"(host={resolved}). Nothing was written.")
+
     try:
         ok = ahc.post_aux_manual(resolved, relay, on)
     except ahc.AuxHttpError as exc:
@@ -244,10 +279,6 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
                                 ("i2c_failed", state.i2c_failed)) if f]
         return (f"FAILED: POST returned ok, but the io read reports {', '.join(flags)} (host={resolved}) -- the "
                 f"relay shadow is not trustworthy (unknown is a fault, not OFF). Do not trust this.")
-    mismatch = _board_identity_mismatch(resolved)
-    if mismatch is not None:
-        return (f"FAILED: POST returned ok, but the UART read-back cannot be tied to the HTTP board -- {mismatch} "
-                f"(host={resolved}). State UNVERIFIED; do not trust this.")
     if state.relay(relay) != on:
         return (f"FAILED: POST returned ok, but the relay shadow reads {'ON' if state.relay(relay) else 'OFF'} "
                 f"for relay {relay}, wanted {'ON' if on else 'OFF'} (host={resolved}). Do not trust this.")
