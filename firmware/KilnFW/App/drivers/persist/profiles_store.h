@@ -69,7 +69,8 @@ bool profiles_http_slot_runnable(uint8_t id);
  * caller's profiles_http_get() copy and its s_exec.lock section is "used"
  * again but holds different content. Call profiles_http_slot_rev() BEFORE
  * profiles_http_get(), then profiles_http_slot_runnable_rev() under s_exec.lock:
- * it is profiles_http_slot_runnable() plus "the save revision is unchanged".
+ * it is profiles_http_slot_runnable() plus "the slot generation (a seqlock
+ * counter, not the persisted save revision) is unchanged and even".
  * Lock-free (atomic load). A spurious refusal (save landed mid-copy) is safe. */
 uint32_t profiles_http_slot_rev(uint8_t id);
 /* Seqlock bracket around every RAM assign of a user slot (call under the save
@@ -78,6 +79,8 @@ uint32_t profiles_http_slot_rev(uint8_t id);
  * generation; an odd or changed value refuses a start. */
 void profiles_slot_gen_begin(uint8_t id);
 void profiles_slot_gen_end(uint8_t id);
+/* Host-test hook: force the "boot load finished" flag profiles_http_slot_runnable() checks. */
+void profiles_http_test_set_loaded(bool v);
 bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev);
 
 /* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----

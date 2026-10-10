@@ -303,7 +303,9 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
     if (!link || !safety_lock(link)) {
         return;
     }
-    if (!safety_link_up_locked(link)) {
+    /* review LOW-3: the up window scales with poll_period_ms; the fixed SAFETY_LINK_STALE_MS bound the rest of
+     * the firmware uses must also trigger the clear, so a slow-poll config cannot keep stale peer info. */
+    if (!safety_link_up_locked(link) || safety_link_is_stale(safety_age_ms_locked(link), SAFETY_LINK_STALE_MS)) {
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;

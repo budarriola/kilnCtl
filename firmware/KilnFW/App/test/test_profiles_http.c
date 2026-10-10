@@ -4931,9 +4931,36 @@ static void test_builtin_json_emits_seg_kind_and_resolved_zone_mask(void)
     g_stub_thermo_count = 8;
 }
 
+static void test_profiles_refused_until_boot_load_done(void)
+{
+    TEST_SECTION("profile starts refused until the boot load finished (review LOW-1)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4");
+    profiles_http_test_set_loaded(false);
+    TEST_CHECK(!profiles_http_slot_runnable(4), "user slot not runnable before load finished");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "rev check refuses before load finished");
+    profiles_http_test_set_loaded(true);
+    TEST_CHECK(profiles_http_slot_runnable(4), "runnable once loaded");
+    /* profiles_http_start() runs the load and publishes the flag (the stub then returns INVALID_STATE). */
+    profiles_http_test_set_loaded(false);
+    (void)profiles_http_start();
+    TEST_CHECK(profiles_http_slot_runnable(4), "profiles_http_start publishes loaded after the boot load");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u, "boot load bracket leaves the generation even");
+}
+
 void run_test_profiles_http(void)
 {
+    profiles_http_test_set_loaded(true); /* tests below exercise runnable checks without a boot sequence */
     test_v1_blob_loads_and_preserves_all_fields();
+    test_profiles_refused_until_boot_load_done();
+    profiles_http_test_set_loaded(true);
     test_version_zero_rejected();
     test_length_mismatch_rejected();
     test_bad_crc_rejected();

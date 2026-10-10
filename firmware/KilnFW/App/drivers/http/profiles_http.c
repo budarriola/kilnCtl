@@ -76,18 +76,24 @@ NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
 
 uint32_t s_profile_rev[PROFILES_MAX_COUNT];
 bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
-/* Lock-free published copy of s_profile_rev[] for profiles_http_slot_rev() (L23
- * residual: delete + re-save under the same id between a start's copy and its
- * s_exec.lock section). Stored AFTER s_profile_rev under the save lock. */
-static _Atomic uint32_t s_slot_rev_pub[PROFILES_MAX_COUNT];
 /* Seqlock-style generation per slot (profile start vs RAM assign). ODD while a
  * RAM assign + persist is in flight, bumped again (EVEN) after every path
  * (success, failure, revert). profiles_http_slot_rev() returns it; a start that
  * captured gen G before its unlocked copy passes the recheck only if gen is
  * still G and even, so a copy that overlapped or preceded any assign (including
- * a FAILED save, which leaves RAM changed but s_slot_rev_pub unchanged) is refused. */
+ * a FAILED save, which leaves RAM changed) is refused. gen_begin/gen_end are
+ * atomic RMWs (seq_cst); the reader pairs them with an acquire fence. */
 static _Atomic uint32_t s_slot_gen[PROFILES_MAX_COUNT];
+/* False until profiles_http_start() finished the boot load/migration; every profile start is refused until then. */
+static _Atomic bool s_profiles_loaded;
 
+void profiles_http_test_set_loaded(bool v)
+{
+    atomic_store(&s_profiles_loaded, v);
+}
+
+/* Ordering: both are seq_cst RMWs under the save lock; a reader must acquire-fence between its unlocked
+ * copy and the generation recheck (profiles_http_slot_runnable_rev). */
 void profiles_slot_gen_begin(uint8_t id)
 {
     if (id < PROFILES_MAX_COUNT) {
@@ -1281,7 +1287,6 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
         return ferr;
     }
     s_profile_rev[id] = new_rev;
-    atomic_store(&s_slot_rev_pub[id], new_rev);
     return ESP_OK;
 }
 
@@ -1362,7 +1367,6 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
      * (bx_flash_worker stack ceiling). */
     uint32_t old_rev = s_profile_rev[id];
     s_profile_rev[id] = new_rev;
-    atomic_store(&s_slot_rev_pub[id], new_rev);
     profiles_slot_bitmap_t nvs_used;
     memset(&nvs_used, 0, sizeof(nvs_used));
     kv_err = used_bitmap_load(&h, &nvs_used);
@@ -1416,8 +1420,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
     hal_kv_close(&h);
     if (kv_err != HAL_OK) {
         s_profile_rev[id] = old_rev;
-        atomic_store(&s_slot_rev_pub[id], old_rev);
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
+            ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
         return hal_status_to_esp_err(kv_err);
     }
 
@@ -1862,6 +1865,9 @@ static void delete_pending_release(uint8_t id)
 
 bool profiles_http_slot_runnable(uint8_t id)
 {
+    if (!atomic_load(&s_profiles_loaded)) {
+        return false; /* boot load/migration still writing slots */
+    }
     if (profiles_builtin_id_valid(id)) {
         return true;
     }
@@ -1887,6 +1893,9 @@ bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
     if (!profiles_http_slot_runnable(id)) {
         return false;
     }
+    /* review LOW-4: order the caller's unlocked copy before the generation re-read below (pairs with the
+     * seq_cst RMWs in profiles_slot_gen_begin/end). */
+    atomic_thread_fence(memory_order_acquire);
     /* Any assign since the capture (or one in flight: odd) makes the copy stale. */
     if ((captured_rev & 1u) != 0u) {
         return false;
@@ -1995,7 +2004,7 @@ void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,
  * rev 1 and a later NVS recovery would delete it as stale. Refusing saves
  * instead was rejected: it would strand the operator on a board whose files are
  * perfectly readable. Host tests include this file and call it directly. */
-static esp_err_t profiles_boot_load(void)
+static esp_err_t profiles_boot_load_body(void)
 {
     esp_err_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != ESP_OK) {
@@ -2033,9 +2042,25 @@ static esp_err_t profiles_boot_load(void)
     return err;
 }
 
+/* Boot load/migration writes RAM slots and persists while /api/profile_exec/start is already registered.
+ * Bracket every slot so an overlapping start sees an odd/changed generation, and
+ * profiles_http_slot_runnable() refuses until s_profiles_loaded is published. */
+static esp_err_t profiles_boot_load(void)
+{
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profiles_slot_gen_begin(id);
+    }
+    esp_err_t r = profiles_boot_load_body();
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        profiles_slot_gen_end(id);
+    }
+    return r;
+}
+
 esp_err_t profiles_http_start(void)
 {
     (void)profiles_boot_load();
+    atomic_store(&s_profiles_loaded, true); /* load writes done; route registration below touches no slot */
     esp_err_t err;
 
     httpd_handle_t server = wifi_provision_http_get_server();
