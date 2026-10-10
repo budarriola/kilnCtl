@@ -39,6 +39,7 @@
 #include "esp_log.h"
 
 #include "dram_margin.h"
+#include "flash_worker.h"
 #include "kiln_io.h"
 #include "safety_link.h"
 #include "uart_log_bridge.h"
@@ -211,6 +212,13 @@ void app_main(void)
     // see uart_log_bridge_start() (main_bridges_bringup.c) for when the
     // backlog actually flushes.
     uart_log_bridge_early_init();
+
+    // Before any task that can enter a cfg save section exists (LVGL, httpd,
+    // the bridges, main_boot_early's deferred tasks): makes every save section
+    // reserve the flash worker even if it begins before main_control_bringup()
+    // starts that worker. Only creates a static mutex and installs two hooks,
+    // so it is safe in recovery mode too. See uart_bridge_ext.c.
+    uart_bridge_ext_save_reservation_init();
 
     static main_boot_ctx_t ctx;
 

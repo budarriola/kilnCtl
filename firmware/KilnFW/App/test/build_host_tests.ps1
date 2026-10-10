@@ -1868,6 +1868,24 @@ try {
 
     Invoke-HostTestExe -Name "uart_bridge_ext_control_gate" -ExePath $exeUartBridgeControlGate -BuildCmd $cmdUartBridgeControlGate
 
+    # ---- test_uart_bridge_ext_worker.c: its own separate executable ----------
+    # #includes uart_bridge_ext.c directly (static bx_worker_iteration() and
+    # the save-section hooks have no other seam) with fake FreeRTOS primitives
+    # (recursive mutex with owner/depth/counters, one-slot queue, a done
+    # semaphore that runs one worker pass) to pin the flash-worker save-section
+    # reservation: reservation before the worker starts, reserve/release
+    # balance, recursive give counts, the timeout path giving nothing back, and
+    # a posted job delayed not dropped while reserved
+    # (docs/audits/FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09.md follow-ups).
+    $exeUartBridgeWorker = Join-Path $outDir "kilnctl_host_tests_uart_bridge_ext_worker.exe"
+    $uartBridgeWorkerObjDir = Join-Path $outDir "uartbridgeworker"
+    New-Item -ItemType Directory -Force -Path $uartBridgeWorkerObjDir | Out-Null
+    $cmdUartBridgeWorker = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$uartBridgeWorkerObjDir\\`" /Fe:`"$exeUartBridgeWorker`" " +
+            "`"$(Join-Path $testDir 'test_uart_bridge_ext_worker.c')`""
+
+    Invoke-HostTestExe -Name "uart_bridge_ext_worker" -ExePath $exeUartBridgeWorker -BuildCmd $cmdUartBridgeWorker
+
     # ---- test_ft6336u.c: its own 24th, separate executable --------------------
     # HAL Phase 1b (docs/HW_ABSTRACTION.md): FT6336U.c was rewritten to go
     # through interface/hal_i2c.h instead of driver/i2c_master.h + i2c_owner.c
@@ -3163,8 +3181,10 @@ try {
     # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
     # 70 -> 71: added test_update_fetch.c (real update_fetch.c/update_http.c over fakes).
     # 71 -> 72: added test_http_form.c (strict form parse helpers).
+    # 72 -> 73: added test_uart_bridge_ext_worker.c's own Invoke-HostTestExe
+    # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
-    $totalExpected = 72
+    $totalExpected = 73
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
