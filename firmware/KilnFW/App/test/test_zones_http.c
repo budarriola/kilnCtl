@@ -3295,6 +3295,15 @@ static void test_cfg_fs_refusal_helper(void)
     TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "mounted persist failure is a 500");
     TEST_CHECK(strstr(s_last_resp_body, "could not be saved to flash") != NULL, "500 body names the cause");
 
+    /* LOW-5: adopted-but-not-persisted is distinguishable from not adopted. */
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed_adopted(&req, true);
+    TEST_CHECK(strcmp(s_test_last_status, "500 Internal Server Error") == 0, "adopted failure is a 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"adopted\":true") != NULL, "adopted:true reported");
+    test_post_hooks_reset();
+    (void)cfg_fs_http_persist_failed_adopted(&req, false);
+    TEST_CHECK(strstr(s_last_resp_body, "\"adopted\":false") != NULL, "adopted:false reported");
+
     cfg_fs_deinit();
     test_post_hooks_reset();
     TEST_CHECK(cfg_fs_http_refuse_if_unmounted(&req), "unmounted cfg must be refused");

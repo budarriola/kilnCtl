@@ -283,6 +283,12 @@ typedef enum {
                                                     * for a retry next boot. Display-only, heat not gated. */
 } kiln_cfg_swap_boot_fault_kind_t;
 
+/* Highest enum value, and the buffer size (NUL included) every name from
+ * kiln_cfg_swap_boot_fault_kind_name() must fit; dashboard_http.h's
+ * kiln_cfg_swap_boot_fault_kind[] is static-asserted against it. */
+#define KILN_CFG_SWAP_BOOT_FAULT_KIND_LAST KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED
+#define KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX 32
+
 typedef struct {
     bool occurred;
     kiln_cfg_swap_boot_fault_kind_t kind;

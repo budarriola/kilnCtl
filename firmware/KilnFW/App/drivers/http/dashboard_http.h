@@ -183,7 +183,7 @@ typedef struct {
     /* LOW-1: kiln_cfg_swap_boot_fault_kind_name() of the latched kind
      * ("active_id_unsaved" is display-only: both processors agree, heat is
      * not gated, retried at each boot). Empty when no fault latched. */
-    char     kiln_cfg_swap_boot_fault_kind[24];
+    char     kiln_cfg_swap_boot_fault_kind[32]; /* >= KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX (static-asserted in dashboard_http.c) */
 
     /* ROADMAP.md M6 "GUI shows safety temperature, enclosure temperature and
      * power" -- read straight from safety_link_get_status()'s cache

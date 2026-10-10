@@ -35,6 +35,24 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
 /* Post-failure response for a save that failed. 503 with the cfg text when
  * the partition is unmounted, else 500 naming a flash write failure. Never a
  * fake success. Returns ESP_OK so a handler can `return` it directly. */
+static inline esp_err_t cfg_fs_http_persist_failed(httpd_req_t *req);
+
+/* Same as cfg_fs_http_persist_failed(), for a writer that can report whether the new value was
+ * nonetheless ADOPTED into RAM (file read back with it, live state matches) even though the
+ * save as a whole failed. Mounted case adds "adopted":true|false to the 500 JSON; the
+ * unmounted 503 is unchanged (adopted cannot be told apart there). */
+static inline esp_err_t cfg_fs_http_persist_failed_adopted(httpd_req_t *req, bool adopted)
+{
+    if (!cfg_fs_is_available()) {
+        return cfg_fs_http_persist_failed(req);
+    }
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_status(req, "500 Internal Server Error");
+    httpd_resp_sendstr(req, adopted ? "{\"ok\":false,\"adopted\":true,\"error\":\"could not be saved to flash\"}"
+                                    : "{\"ok\":false,\"adopted\":false,\"error\":\"could not be saved to flash\"}");
+    return ESP_OK;
+}
+
 static inline esp_err_t cfg_fs_http_persist_failed(httpd_req_t *req)
 {
     if (!cfg_fs_is_available()) {

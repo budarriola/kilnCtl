@@ -40,6 +40,8 @@
 #include "uart_task_ids.h"
 #include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- self_protocol_version below is this firmware's ESP<->Pico link version, not the PC<->ESP UART_PROTOCOL_VERSION */
 #include "kiln_cfg_swap.h"
+_Static_assert(sizeof(((dashboard_status_t *)0)->kiln_cfg_swap_boot_fault_kind) >= KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX,
+               "kiln_cfg_swap_boot_fault_kind[] too small for the longest kind name");
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"

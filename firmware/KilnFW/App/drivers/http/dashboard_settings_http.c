@@ -79,7 +79,7 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
          * matches it). No NVS fallback: an error, never ok. */
         ESP_LOGW(DASH_TAG, "unit preference save not verified -- %s",
                  adopted ? "live value now matches the file" : "live value unchanged");
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_adopted(req, adopted);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }

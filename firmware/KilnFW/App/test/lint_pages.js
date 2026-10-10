@@ -169,7 +169,7 @@ function hardcoded_background_literals(code, label, line0) {
 
 /* Extra page roots (argv[3..], e.g. firmware/KilnFW_recovery) get the same parse/style checks. */
 const page_roots = [dir, ...process.argv.slice(3)];
-for (const root of page_roots) for (const fullPath of walk_files(root).filter(p => /\.(html|js|css)$/.test(p) && !/[\/](build|managed_components)[\/]/.test(p))) {
+for (const root of page_roots) for (const fullPath of walk_files(root).filter(p => /\.(html|js|css)$/.test(p) && !/[\\/](build|managed_components)[\\/]/.test(p))) {
   const f = path.relative(root, fullPath).split(path.sep).join('/');
   let src = fs.readFileSync(fullPath, 'utf8');
   const scripts = [], styles = [];
@@ -185,10 +185,17 @@ for (const root of page_roots) for (const fullPath of walk_files(root).filter(p 
      * syntax error in a file that is fine. */
     src = src.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '));
 
-    const sre = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
+    const sre = /<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/gi;
     let m;
     while ((m = sre.exec(src))) {
-      scripts.push({ code: m[1], line: src.slice(0, m.index).split('\n').length });
+      /* Only a script with no type, text/javascript or module is JS; any other
+       * type (json, importmap, template, ...) is data and is not parsed. */
+      const tm = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[1]);
+      if (tm) {
+        const t = (tm[1] ?? tm[2] ?? tm[3]).trim().toLowerCase();
+        if (t !== '' && t !== 'text/javascript' && t !== 'module') continue;
+      }
+      scripts.push({ code: m[2], line: src.slice(0, m.index).split('\n').length });
     }
     const yre = /<style[^>]*>([\s\S]*?)<\/style>/gi;
     while (root === dir && (m = yre.exec(src))) { /* theme/style rules are main-UI only */

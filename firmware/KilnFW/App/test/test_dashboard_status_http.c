@@ -653,8 +653,29 @@ static void test_status_factory_reset_in_flight_field(void)
               "reset in flight -- factory_reset_in_flight:true");
 }
 
+// MED-2: the longest swap boot-fault kind name must reach /api/status whole.
+static void test_status_swap_boot_fault_kind_not_truncated(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- swap boot fault kind carried in full");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_status.kiln_cfg_swap_boot_fault = true;
+    strncpy(s_fake_status.kiln_cfg_swap_boot_fault_kind, "rollback_active_id_unsaved",
+            sizeof(s_fake_status.kiln_cfg_swap_boot_fault_kind) - 1);
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strstr(s_last_resp_body, "\"kiln_cfg_swap_boot_fault_kind\":\"rollback_active_id_unsaved\"") != NULL,
+              "full kind string in /api/status JSON");
+}
+
 static void run_test_dashboard_status_http(void)
 {
+    test_status_swap_boot_fault_kind_not_truncated();
     test_status_factory_reset_in_flight_field();
     test_status_cfg_fs_format_pending_field();
     test_status_touch_cal_supported_reports_each_state();

@@ -1711,6 +1711,11 @@ static void test_low1_boot_fault_kind_names(void)
     TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED),
                       "esp_done_unconfirmed") == 0, "esp_done_unconfirmed");
     TEST_CHECK(strcmp(kiln_cfg_swap_boot_fault_kind_name(KILN_CFG_SWAP_BOOT_FAULT_NONE), "none") == 0, "none");
+    /* MED-2: every kind name (and "unknown") must fit the /api/status buffer. */
+    for (int k = 0; k <= (int)KILN_CFG_SWAP_BOOT_FAULT_KIND_LAST + 1; k++) {
+        const char *nm = kiln_cfg_swap_boot_fault_kind_name((kiln_cfg_swap_boot_fault_kind_t)k);
+        TEST_CHECK(strlen(nm) + 1 <= KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX, "kind name fits the status buffer");
+    }
     reset_state();
     memset(&s_boot_fault, 0, sizeof(s_boot_fault));
     TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_NONE, "no fault -> NONE");
