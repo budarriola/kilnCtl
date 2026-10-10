@@ -173,6 +173,23 @@ static void run_snapshot_is_fresh_tests(void)
     test_snapshot_freshness_wraparound();
 }
 
+static void test_reboot_grace_expires_once_no_wrap_rearm(void)
+{
+    bool ev = false;
+    uint32_t ea = 0u;
+    TEST_CHECK(!reboot_grace_evaluate(false, 0u, 100u, 5000u, &ev, &ea),
+               "never announced -> no grace");
+    TEST_CHECK(reboot_grace_evaluate(true, 1000u, 2000u, 5000u, &ev, &ea),
+               "inside window -> grace active");
+    TEST_CHECK(!reboot_grace_evaluate(true, 1000u, 6000u, 5000u, &ev, &ea),
+               "age == window -> expired");
+    // Tick wraps ~49.7 days later: raw (now - announced) is small again.
+    TEST_CHECK(!reboot_grace_evaluate(true, 1000u, 1000u + 100u, 5000u, &ev, &ea),
+               "after expiry a wrapped small age must NOT re-arm the grace window (F7)");
+    TEST_CHECK(reboot_grace_evaluate(true, 9000u, 9100u, 5000u, &ev, &ea),
+               "a genuinely new announcement is honoured after an expiry");
+}
+
 void run_test_tick_timing(void)
 {
     TEST_SECTION("tick_dt_compute_s -- 2026-08-27 audit item 1, measured (not compile-time-"
@@ -182,4 +199,7 @@ void run_test_tick_timing(void)
     TEST_SECTION("snapshot_is_fresh -- 2026-08-27 audit item 2, consumer-side staleness for "
                   "thermo/current snapshots");
     run_snapshot_is_fresh_tests();
+
+    TEST_SECTION("reboot_grace_evaluate -- guard review F7, wrap-safe expire-once");
+    test_reboot_grace_expires_once_no_wrap_rearm();
 }

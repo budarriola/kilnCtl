@@ -16,6 +16,8 @@
 // == false -> safety_guard_input_t.tc_valid == false), which KilnFW's own
 // driver structurally cannot produce.
 #include "thermo_task.h"
+#include "thermo_inject_gate.h" // injection gate (tc not installed AND not ARMED), host-tested
+#include "relay_owner.h" // ARMED/energized check for the injection gate
 
 #include <math.h>
 
@@ -294,7 +296,7 @@ bool thermo_task_get_snapshot(thermo_snapshot_t *out)
     if (s_inject_active) {
         config_store_record_t rec;
         config_store_get_full_record(&rec);
-        if (rec.safety_tc_installed == 0u) {
+        if (thermo_inject_allowed(rec.safety_tc_installed, thermo_relay_armed_or_energized())) {
             *out = s_inject_snapshot;
         } else {
             // The gate closed underneath an active injection (safety_tc_
@@ -313,6 +315,11 @@ bool thermo_task_get_snapshot(thermo_snapshot_t *out)
     return true;
 }
 
+static bool thermo_relay_armed_or_energized(void)
+{
+    return relay_owner_get_state() == RELAY_OWNER_STATE_ARMED || relay_owner_is_energized();
+}
+
 bool thermo_task_inject_reading(bool tc_valid, float tc_c, float cj_c, uint8_t fault_bits)
 {
     // Structural gate: refuse unless the operator has declared the safety
@@ -323,7 +330,7 @@ bool thermo_task_inject_reading(bool tc_valid, float tc_c, float cj_c, uint8_t f
     // to check on its own.
     config_store_record_t rec;
     config_store_get_full_record(&rec);
-    if (rec.safety_tc_installed != 0u) {
+    if (!thermo_inject_allowed(rec.safety_tc_installed, thermo_relay_armed_or_energized())) {
         return false;
     }
 

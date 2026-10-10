@@ -484,9 +484,10 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
     // tc_offset_c: same "unbounded beyond finiteness" treatment as its
     // sibling tc_expected_offset_c (0x020A) -- see this file's own header
     // comment on that field and config_store.h's struct comment on this one
-    // for why no magnitude/sign bound is invented here. Not fields_set-gated
+    // for why no sign bound is invented here. Magnitude IS bounded to
+    // +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C (guard review F2). Not fields_set-gated
     // (0.0f is a safe "no correction" default).
-    case 0x010Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->tc_offset_c = value.f32_val; return true;
+    case 0x010Au: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); if (value.f32_val > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || value.f32_val < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) { return false; } rec->tc_offset_c = value.f32_val; return true;
 
     case 0x0201u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->firing_margin_c = value.f32_val; return true;
     case 0x0202u: CHECK_TYPE(KILNLINK_PARAM_TYPE_F32); CHECK_F32_FINITE(); rec->overshoot_margin_c = value.f32_val; return true;
@@ -777,6 +778,9 @@ bool config_params_validate_ranges(const config_store_record_t *rec,
     RANGE_F32_FINITE(rec->tc_disagreement_c, "tc_disagreement_c");
     RANGE_F32_FINITE(rec->tc_expected_offset_c, "tc_expected_offset_c");
     RANGE_F32_FINITE(rec->tc_offset_c, "tc_offset_c");
+    if (rec->tc_offset_c > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || rec->tc_offset_c < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
+        RANGE_FAIL("tc_offset_c", "magnitude beyond CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C (a larger offset can hide the real temperature from every guard)");
+    }
     RANGE_F32_FINITE(rec->cj_warn_c, "cj_warn_c");
     RANGE_F32_FINITE(rec->cj_max_c, "cj_max_c");
     RANGE_F32_FINITE(rec->k_ct_v_per_a[0], "k_ct_v_per_a[0]");

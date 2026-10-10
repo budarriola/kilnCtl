@@ -4209,6 +4209,89 @@ static void test_warn_mask(void)
     }
 }
 
+/* Guard review 2026-10-09 F3/F4/F6. */
+static void test_guard_review_2026_10_09(void)
+{
+    TEST_SECTION("guard review F3 -- S9 runs without ESP context");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t verify = base_input();
+        verify.context_valid = false; /* ESP dead */
+        verify.relay_deenergized = true;
+        verify.any_current_present = true;
+        verify.dt_s = 3.0f;
+        bool escalated = false;
+        for (int i = 0; i < 8 && !escalated; i++) {
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
+        TEST_CHECK(escalated, "welded contactor escalates to S9 with context_valid=false");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason is SAFETY_TRIP_INEFFECTIVE");
+    }
+
+    TEST_SECTION("guard review F4 -- unknown cold junction is never a pass");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t hot = base_input();
+        hot.cj_c = 90.0f;
+        hot.dt_s = 30.0f;
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        safety_guards_tick(&s, &cfg, &hot);
+        bool t1 = safety_guards_tick(&s, &cfg, &unk);
+        TEST_CHECK(!t1 && s.s12_warn, "unknown cj raises the S12 WARN");
+        bool t2 = safety_guards_tick(&s, &cfg, &hot);
+        TEST_CHECK(t2 && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "unknown cj holds (does not reset) the S12 accumulator: 30+30s trips");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t hot = base_input();
+        hot.cj_c = 90.0f;
+        hot.dt_s = 61.0f;
+        safety_guards_tick(&s, &cfg, &hot);
+        TEST_CHECK(s.is_tripped, "sanity: S12 tripped");
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &unk), "S12 clear refused while cj is unknown");
+        TEST_CHECK(s.is_tripped, "still latched");
+        safety_guard_input_t cool = base_input();
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "S12 clear succeeds once cj is known and cool");
+    }
+
+    TEST_SECTION("guard review F6 -- S5 bad read does not suspend TC-independent guards");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.stuck_on_time_s = 3.0f;
+        safety_guard_input_t in = base_input();
+        in.tc_valid = false;
+        in.tc_c = (float)NAN;
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.dt_s = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LOAD_STUCK_ON,
+                   "S3 still trips during a continuous bad TC read");
+    }
+}
+
 void run_test_safety_guards(void)
 {
     test_s1();
@@ -4243,4 +4326,5 @@ void run_test_safety_guards(void)
     test_deciding_threshold();
     test_ct_disabled_guards();
     test_warn_mask();
+    test_guard_review_2026_10_09();
 }

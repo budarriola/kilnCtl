@@ -36,3 +36,21 @@ bool snapshot_is_fresh(uint32_t now_ms, uint32_t timestamp_ms, uint32_t max_age_
     uint32_t age_ms = now_ms - timestamp_ms;
     return age_ms < max_age_ms;
 }
+
+bool reboot_grace_evaluate(bool announced, uint32_t announced_at_ms, uint32_t now_ms,
+                           uint32_t window_ms, bool *expired_valid, uint32_t *expired_at_ms)
+{
+    if (!announced) {
+        return false;
+    }
+    if (*expired_valid && *expired_at_ms == announced_at_ms) {
+        return false; // this announcement already expired once; never re-arm
+    }
+    uint32_t age_ms = now_ms - announced_at_ms;
+    if (age_ms < window_ms) {
+        return true;
+    }
+    *expired_valid = true;
+    *expired_at_ms = announced_at_ms;
+    return false;
+}

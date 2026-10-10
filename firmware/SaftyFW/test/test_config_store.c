@@ -3373,8 +3373,38 @@ static void test_tc_type_voltage_mode_clamp_v1_migration(void)
     TEST_CHECK(out.tc_type == 0x03u, "real v1 tc_type passes through the clamp unchanged");
 }
 
+// SaftyFW guard review 2026-10-09, F2: |tc_offset_c| is bounded.
+static void test_tc_offset_magnitude_bound(void)
+{
+    TEST_SECTION("tc_offset_c -- magnitude bounded at SET_PARAM time and at load/validate time");
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+    config_store_default(&rec);
+    v.f32_val = -4.25f;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "a real few-degree correction is accepted");
+    v.f32_val = -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "exactly -bound is accepted (inclusive)");
+    v.f32_val = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "exactly +bound is accepted (inclusive)");
+    config_store_default(&rec);
+    v.f32_val = -400.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "-400 C offset is refused at SET_PARAM");
+    TEST_CHECK(rec.tc_offset_c == 0.0f, "rec untouched by the refused write");
+    v.f32_val = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C + 0.5f;
+    TEST_CHECK(!config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "just above +bound is refused");
+
+    // Load/validate-time half: a record that bypassed SET_PARAM.
+    config_store_default(&rec);
+    rec.tc_offset_c = -4.25f;
+    const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;
+    TEST_CHECK(config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -4.25 C offset still validates");
+    rec.tc_offset_c = -400.0f;
+    TEST_CHECK(!config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -400 C offset fails validation");
+}
+
 void run_test_config_store(void)
 {
+    test_tc_offset_magnitude_bound();
     test_pack_unpack_roundtrip();
     test_unpack_hostile();
     test_default();

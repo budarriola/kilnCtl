@@ -876,8 +876,14 @@ static safety_guard_input_t safety_core_build_input(void)
         // correctly in uint32_t arithmetic regardless of which side is
         // numerically larger, identical to how link_task.c already reasons
         // about its own tick-based age calculations.
-        uint32_t age_ms = now_ms - announced_at_ms;
-        reboot_grace_active = age_ms < REBOOT_GRACE_WINDOW_MS;
+        // F7 (guard review 2026-10-09): expire-once so the 32-bit tick wrap
+        // cannot re-arm an old announcement's grace window.
+        static bool     s_grace_expired_valid = false;
+        static uint32_t s_grace_expired_at_ms = 0u;
+        reboot_grace_active = reboot_grace_evaluate(true, announced_at_ms, now_ms,
+                                                    REBOOT_GRACE_WINDOW_MS,
+                                                    &s_grace_expired_valid,
+                                                    &s_grace_expired_at_ms);
     }
 
     // --- Context from link_task (SAFETY_MODEL.md section 5) ----------------
@@ -1332,6 +1338,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .tc_valid = thermo.valid && thermo_fresh,
         .tc_c = thermo.tc_c,
         .cj_c = thermo.cj_c,
+        .cj_invalid = !thermo.cj_valid,
         .fault_bits = thermo.fault_bits,
         .spi_failed = thermo.spi_failed,
         .safety_tc_not_installed_declared = safety_tc_not_installed_declared,

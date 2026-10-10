@@ -210,6 +210,7 @@ try {
         (Join-Path $testDir "test_max31856_live_check.c"),
         (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
         (Join-Path $testDir "test_thermo_task_drdy_recovery.c"),
+        (Join-Path $testDir "test_thermo_inject_gate.c"),
         (Join-Path $srcDir "link_diag_flags.c"),
         (Join-Path $testDir "test_link_diag_flags.c"),
         (Join-Path $srcDir "current_presence_policy.c"),

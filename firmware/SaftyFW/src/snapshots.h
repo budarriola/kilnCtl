@@ -11,6 +11,7 @@
 #define SAFTYFW_SNAPSHOTS_H
 
 #include <stdbool.h>
+#include <math.h> // isfinite(), context_reduce_zones() F5
 #include <stddef.h> // NULL, for context_reduce_zones()/current_any_present() below
 #include <stdint.h>
 
@@ -200,6 +201,14 @@ static inline void context_reduce_zones(const context_snapshot_t *ctx, float tc_
             const context_zone_t *z = &ctx->zones[i];
             bool eligible = (z->flags & CONTEXT_ZONE_FLAG_ACTIVE) != 0u &&
                             (z->flags & CONTEXT_ZONE_FLAG_MEASURED_VALID) != 0u;
+            /* Guard review 2026-10-09 F5: a non-finite setpoint/measured
+             * float from the wire would poison max_setpoint / nearest (NaN
+             * makes every later > comparison false, silencing S2/S10), so
+             * such a zone is ineligible. Skipping it can only lower
+             * max_setpoint (tighter S2), never raise it. */
+            if (eligible && (!isfinite(z->setpoint_c) || !isfinite(z->measured_c))) {
+                eligible = false;
+            }
             if (!eligible) {
                 continue;
             }

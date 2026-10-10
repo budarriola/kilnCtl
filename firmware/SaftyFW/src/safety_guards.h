@@ -332,6 +332,9 @@ typedef struct {
     bool     tc_valid;
     float    tc_c;         /* NaN when !tc_valid */
     float    cj_c;         /* NaN when !tc_valid */
+    bool     cj_invalid;   /* true when the cold junction reading is not valid (thermo_snapshot_t.cj_valid
+                            * false). Inverted sense so a zero-initialised input means "valid". Guard
+                            * review F4: S12 treats this (or a NaN cj_c) as unknown, never as a pass. */
     uint8_t  fault_bits;   /* SAFETY_THERMO_FAULT_* bits, SR register */
     bool     spi_failed;
 

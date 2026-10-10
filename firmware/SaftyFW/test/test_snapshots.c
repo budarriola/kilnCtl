@@ -54,6 +54,34 @@ static void test_reduce_zones_invalid_context(void)
     TEST_CHECK(nearest == 0.0f, "invalid context -> nearest_measured_c left at 0.0f");
 }
 
+// Guard review F5: a NaN/Inf setpoint or measured in zone 0 must not poison
+// the reduction (NaN would silence S2/S10).
+static void test_reduce_zones_non_finite_floats_ineligible(void)
+{
+    TEST_SECTION("context_reduce_zones -- NaN/Inf setpoint or measured makes the zone ineligible (guard review F5)");
+    const uint8_t f = CONTEXT_ZONE_FLAG_ACTIVE | CONTEXT_ZONE_FLAG_MEASURED_VALID;
+    context_snapshot_t ctx = empty_context();
+    ctx.valid = true;
+    ctx.zone_count = 3;
+    ctx.zones[0] = make_zone(0, f, NAN, 500.0f);
+    ctx.zones[1] = make_zone(1, f, 900.0f, 880.0f);
+    ctx.zones[2] = make_zone(2, f, 700.0f, NAN);
+    uint8_t count = 0;
+    float max_setpoint = -1.0f, nearest = -1.0f;
+    context_reduce_zones(&ctx, 890.0f, &count, &max_setpoint, &nearest);
+    TEST_CHECK(count == 1u, "only the fully finite zone is eligible");
+    TEST_CHECK(max_setpoint == 900.0f, "NaN setpoint in zone 0 does not poison max_setpoint");
+    TEST_CHECK(nearest == 880.0f, "NaN measured in zone 2 does not poison nearest_measured");
+
+    ctx.zones[0] = make_zone(0, f, INFINITY, 500.0f);
+    context_reduce_zones(&ctx, 890.0f, &count, &max_setpoint, &nearest);
+    TEST_CHECK(max_setpoint == 900.0f, "+Inf setpoint in zone 0 does not silence S2");
+
+    ctx.zone_count = 1;
+    context_reduce_zones(&ctx, 890.0f, &count, &max_setpoint, &nearest);
+    TEST_CHECK(count == 0u, "all zones non-finite -> zone_count 0");
+}
+
 static void test_reduce_zones_null_context(void)
 {
     TEST_SECTION("context_reduce_zones -- ctx == NULL -> zone_count 0, no crash");
@@ -554,6 +582,7 @@ static void test_borrowed_type_zone_index_not_array_position(void)
 void run_test_snapshots(void)
 {
     test_reduce_zones_invalid_context();
+    test_reduce_zones_non_finite_floats_ineligible();
     test_reduce_zones_null_context();
     test_reduce_zones_no_eligible_zones();
     test_reduce_zones_max_setpoint();

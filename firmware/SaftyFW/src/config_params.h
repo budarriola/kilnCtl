@@ -124,6 +124,15 @@ bool config_params_set(config_store_record_t *rec, uint16_t id, uint8_t type,
 // that state, and kiln_cfg packages re-push it verbatim via SET_PARAM. Only a
 // calibrated channel must carry gain > 0.
 #define CONFIG_PARAMS_CT_CAL_GAIN_MAX 10.0f
+
+// tc_offset_c magnitude bound (SaftyFW guard review 2026-10-09, F2).
+// tc_offset_c is added to the hot-junction reading before EVERY guard sees
+// it, so an unbounded offset (e.g. -400) rescales S1's abs_max_temp_c
+// bound away entirely. A calibration correction for a K/N/S thermocouple is
+// a few degrees (owner's bench value: -4.25 C); +/-50 C leaves an order of
+// magnitude of headroom for any real correction while making a blinding
+// offset unreachable. Enforced at SET_PARAM time and at load/validate time.
+#define CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C 50.0f
 #define CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A 50.0f
 
 // True iff one channel's (calibrated, gain, offset) triple is acceptable to

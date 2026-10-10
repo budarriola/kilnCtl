@@ -143,6 +143,19 @@ float tick_dt_compute_s(uint32_t now_ms, uint32_t prev_now_ms, bool have_prev_no
 // already documents for thermo_task_get_snapshot().
 bool snapshot_is_fresh(uint32_t now_ms, uint32_t timestamp_ms, uint32_t max_age_ms);
 
+// Guard review 2026-10-09 F7: wrap-safe ANNOUNCE_REBOOT grace window.
+// reboot_announce keeps its timestamp for the whole boot, so a bare
+// (now - announced) < window test silently RE-ARMS the S6b grace
+// suppression when the 32-bit ms tick wraps (~49.7 days of uptime) and the
+// old announcement's age reads small again. This helper expires an
+// announcement once: after the first evaluation that finds its age >= window
+// it records the announcement's timestamp in *expired_at_ms / *expired_valid
+// and ignores that same timestamp from then on. A genuinely new announcement
+// (different timestamp) is honoured again. Caller owns the two state words
+// (single task, no locking).
+bool reboot_grace_evaluate(bool announced, uint32_t announced_at_ms, uint32_t now_ms,
+                           uint32_t window_ms, bool *expired_valid, uint32_t *expired_at_ms);
+
 #ifdef __cplusplus
 }
 #endif

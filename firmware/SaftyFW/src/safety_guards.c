@@ -230,8 +230,11 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                       * whether heat happens to be commanded on this exact tick. */
         return in->tc_valid && state->s11_window_active && in->tc_c == state->s11_last_c;
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
-        return in->tc_valid && !isnan(in->cj_c) &&
-               in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
+        /* F4: an unknown cold junction (NaN / cj_invalid) means the
+         * enclosure condition cannot be shown to have cleared -> still
+         * immediate, so the clear is refused. */
+        return in->cj_invalid || isnan(in->cj_c) ||
+               (in->tc_valid && in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT));
     case SAFETY_TRIP_BORROWED_STALE: /* S13 -- channel still not producing fresh samples */
         return (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE ||
                 cfg->tc_source == SAFETY_TC_SOURCE_BOTH) &&
@@ -378,11 +381,12 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * no debounce, no context_valid gate, and no check that the
                  * current measurement itself was trustworthy.
                  *
-                 * in->context_valid is required (S3, the guard this one most
-                 * resembles -- "current present with nothing that should
-                 * produce it" -- gates on context_valid at this file's
-                 * context block below; S9 must too, since any_current_present
-                 * is the same caller-computed fact S3 trusts).
+                 * in->context_valid is deliberately NOT required (2026-10-09
+                 * review F3, superseding the c3542d97 rationale): S3 needs
+                 * the ESP's heat command, S9 only the Pico's own
+                 * de-energize command. The current-trust concern is
+                 * covered by the debounce streak and the commissioned split
+                 * below.
                  *
                  * The debounce streak (S9_CURRENT_PRESENT_STREAK_TO_TRIP
                  * consecutive ticks, below) catches a TRANSIENT spurious
@@ -411,8 +415,11 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * once latched, it is still refused unconditionally by
                  * safety_guards_try_clear() and link_frame_decide_clear_trip().
                  * This only changes what evidence is required to set it. */
-                if (state->s9_verify_elapsed_s >= verify_th && in->context_valid &&
-                    in->any_current_present) {
+                /* No in->context_valid gate (guard review 2026-10-09, F3): S9
+                 * reasons about the Pico's OWN de-energize command, which it
+                 * always knows. Gating on ESP context made S9 blind in exactly
+                 * the case it exists for (K4 welded while the ESP is dead). */
+                if (state->s9_verify_elapsed_s >= verify_th && in->any_current_present) {
                     if (in->current_sensing_disabled) {
                         /* No CT is fitted. any_current_present here is the
                          * op-amp offset floor read through an uncalibrated
@@ -565,6 +572,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * falling through to S1/S11/S12 below with an un-flagged garbage
      * value. */
     bool bad_read = s5_bad_read_now(in);
+    bool tc_usable = true; /* false on a bad read: S2/S10 hold, see context_guards */
 
     if (bad_read) {
         if (state->s5_bad_streak < UINT16_MAX) {
@@ -617,11 +625,16 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             }
         }
 
-        /* A bad read can't feed S1/S11/S12 below a real number -- skip the
-         * rest of this tick's checks rather than reasoning about a value
-         * that isn't trustworthy (same discipline thermal_guard.c's guard 6
-         * uses for guards 1/2/3/4/7 below it). */
-        return false;
+        /* A bad read can't feed S1/S11/S12/S8 below a real number -- skip
+         * those rather than reasoning about a value that isn't
+         * trustworthy (same discipline thermal_guard.c's guard 6 uses for
+         * guards 1/2/3/4/7 below it). 2026-10-09 review F6: the
+         * TC-independent context guards (S3, S4, S13, S14, S15) must NOT
+         * be suspended by a blind TC, so jump to the context block; S2 and
+         * S10 inside it consume tc_c and hold their state while
+         * tc_usable is false. */
+        tc_usable = false;
+        goto context_guards;
     }
 
     state->s5_bad_streak = 0;
@@ -691,7 +704,15 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         float cj_max = effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
         float cj_warn = effective_f(cfg->cj_warn_c, CJ_WARN_C_DEFAULT);
 
-        if (in->cj_c > cj_max) {
+        if (in->cj_invalid || isnan(in->cj_c)) {
+            /* Guard review F4: an unknown cold junction (CJRANGE, i.e.
+             * enclosure beyond the part's range -- the hottest possible
+             * S12 case) is never a pass. Raise the WARN and HOLD the
+             * accumulator (neither advance nor reset), and
+             * guard_condition_still_immediate() refuses to clear an S12
+             * trip while cj is unknown. */
+            state->s12_warn = true;
+        } else if (in->cj_c > cj_max) {
             state->s12_warn = true;
             state->s12_over_max_elapsed_s += in->dt_s;
             if (state->s12_over_max_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
@@ -801,6 +822,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * value at all until S5 either clears or this whole guard set is
      * latched by S5's own trip. */
 
+context_guards:
     /* --- Context-dependent guards: S2, S3, S4, S10, S13 -----------------------
      * SAFETY_MODEL.md section 5, rule 2: "stale context is no context" -- and
      * ARCHITECTURE.md section 9: context-dependent guards report *inactive*
@@ -849,7 +871,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
          * zone_count == 0 means "no active zones this tick", same inactive
          * treatment as stale context. */
-        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+        if (!tc_usable) {
+            /* bad TC read: hold the S2 accumulator (F6), as before this tick's early return */
+        } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
             if (in->tc_c > in->max_zone_setpoint_c + margin) {
@@ -905,7 +929,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
          * 4, S10). Compares against the caller-supplied *nearest* valid zone
          * reading, never the mean -- kilns stratify. */
-        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+        if (!tc_usable) {
+            /* bad TC read: hold the S10 state (F6) */
+        } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float disagree_c = effective_f(cfg->tc_disagreement_c, TC_DISAGREEMENT_C_DEFAULT);
             float diff = in->tc_c - in->nearest_zone_measured_c;

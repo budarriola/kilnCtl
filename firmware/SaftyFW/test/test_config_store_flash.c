@@ -1821,6 +1821,54 @@ static void test_identical_write_still_refused_while_armed(void)
     TEST_CHECK(decision != CONFIG_STORE_WRITE_OK, "decision is a refusal, not WRITE_OK");
 }
 
+// 2026-10-09 guard review F1: while ARMED, a volatile install may not change
+// any trip-relevant field (safety_tc_installed gates INJECT_TC, so flipping
+// it blinds the Pico's own thermocouple under a live K4).
+typedef void (*f1_mutate_fn)(config_store_record_t *r);
+static void f1_tc_installed(config_store_record_t *r) { r->safety_tc_installed = 0u; }
+static void f1_ct_installed(config_store_record_t *r) { r->ct_installed = 0u; r->fields_set |= CONFIG_STORE_SET_CT_INSTALLED; }
+static void f1_ct_topology(config_store_record_t *r) { r->ct_topology = (uint8_t)(r->ct_topology ^ 1u); }
+static void f1_tc_offset(config_store_record_t *r) { r->tc_offset_c = -40.0f; }
+static void f1_cj_max(config_store_record_t *r) { r->cj_max_c += 10.0f; }
+static void f1_cj_warn(config_store_record_t *r) { r->cj_warn_c += 10.0f; }
+static void f1_oc_pct(config_store_record_t *r) { r->overcurrent_pct = (uint16_t)(r->overcurrent_pct + 50u); }
+static void f1_oc_time(config_store_record_t *r) { r->overcurrent_time_s += 30u; }
+static void f1_fire_margin(config_store_record_t *r) { r->firing_margin_c += 20.0f; }
+static void f1_over_margin(config_store_record_t *r) { r->overshoot_margin_c += 20.0f; }
+static void f1_disagree(config_store_record_t *r) { r->tc_disagreement_c += 20.0f; }
+
+static void test_volatile_armed_refuses_trip_field_changes(void)
+{
+    TEST_SECTION("config_store_flash: ARMED volatile install refuses trip-field changes (guard review F1)");
+    static const struct { f1_mutate_fn fn; const char *name; } cases[] = {
+        { f1_tc_installed, "safety_tc_installed" }, { f1_ct_installed, "ct_installed" },
+        { f1_ct_topology, "ct_topology" },          { f1_tc_offset, "tc_offset_c" },
+        { f1_cj_max, "cj_max_c" },                  { f1_cj_warn, "cj_warn_c" },
+        { f1_oc_pct, "overcurrent_pct" },           { f1_oc_time, "overcurrent_time_s" },
+        { f1_fire_margin, "firing_margin_c" },      { f1_over_margin, "overshoot_margin_c" },
+        { f1_disagree, "tc_disagreement_c" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        reset_all();
+        config_store_boot_load();
+        config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+        config_store_record_t base;
+        config_store_default(&base);
+        TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: unarmed baseline install");
+        config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+
+        TEST_CHECK(config_store_write_volatile(&base, NULL) == true,
+                   "ARMED: an identical resend is not a change and is accepted");
+
+        config_store_record_t next = base;
+        cases[i].fn(&next);
+        const char *reason = NULL;
+        bool ok = config_store_write_volatile(&next, &reason);
+        printf("  F1 case %s -> %s\n", cases[i].name, ok ? "ACCEPTED" : "refused");
+        TEST_CHECK(ok == false, "ARMED: changing this trip field via volatile install is refused");
+    }
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -1857,6 +1905,7 @@ int main(void)
     test_identical_write_skips_flash();
     test_identical_write_after_volatile_clears_dirty();
     test_identical_write_still_refused_while_armed();
+    test_volatile_armed_refuses_trip_field_changes();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

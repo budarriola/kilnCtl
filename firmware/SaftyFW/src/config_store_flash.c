@@ -1666,6 +1666,31 @@ static bool config_store_volatile_would_loosen_safety(const config_store_record_
         return true; // changing (or un-committing) an already-commissioned TC type
     }
 
+    // 2026-10-09 guard review F1: every other trip-relevant field is
+    // refused on ANY change while ARMED (no per-field "tighter" proof is
+    // attempted: if in doubt, refuse). An identical resend is not a change.
+    // safety_tc_installed in particular gates INJECT_TC, so flipping it
+    // would let the ESP blind the Pico's thermocouple under a live K4.
+    // NaN compares as changed (!(a == b)).
+    if (cur->safety_tc_installed != next->safety_tc_installed ||
+        cur->ct_installed != next->ct_installed ||
+        ((cur->fields_set ^ next->fields_set) &
+         (CONFIG_STORE_SET_CT_INSTALLED | CONFIG_STORE_SET_ZONE_CT_CHANNEL |
+          CONFIG_STORE_SET_CT_CHANNEL_MAP)) != 0u ||
+        cur->ct_topology != next->ct_topology ||
+        memcmp(cur->zone_ct_channel, next->zone_ct_channel, sizeof cur->zone_ct_channel) != 0 ||
+        !(cur->tc_offset_c == next->tc_offset_c) ||
+        !(cur->cj_max_c == next->cj_max_c) ||
+        !(cur->cj_warn_c == next->cj_warn_c) ||
+        cur->cj_time_s != next->cj_time_s ||
+        cur->overcurrent_pct != next->overcurrent_pct ||
+        cur->overcurrent_time_s != next->overcurrent_time_s ||
+        !(cur->firing_margin_c == next->firing_margin_c) ||
+        !(cur->overshoot_margin_c == next->overshoot_margin_c) ||
+        !(cur->tc_disagreement_c == next->tc_disagreement_c)) {
+        return true;
+    }
+
     return false;
 }
 

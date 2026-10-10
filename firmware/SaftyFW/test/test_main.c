@@ -38,6 +38,7 @@ void run_test_max31856_fault_pin_policy(void);
 void run_test_max31856_reconfig_retry(void);
 void run_test_max31856_live_check(void);
 void run_test_thermo_task_drdy_recovery(void);
+void run_test_thermo_inject_gate(void);
 void run_test_max31856_hal_spi(void);
 void run_test_link_diag_flags(void);
 void run_test_current_presence_policy(void);
@@ -107,6 +108,7 @@ int main(void)
     run_test_max31856_reconfig_retry();
     run_test_max31856_live_check();
     run_test_thermo_task_drdy_recovery();
+    run_test_thermo_inject_gate();
     run_test_max31856_hal_spi();
     run_test_link_diag_flags();
     run_test_current_presence_policy();
