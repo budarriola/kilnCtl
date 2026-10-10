@@ -1032,6 +1032,109 @@ def control_set_zone_type(
 
 
 # ---------------------------------------------------------------------------
+# control_set_zone_relay_mask -- narrow writer for one zone's relay_mask only,
+# modeled directly on control_set_zone_type() above (same GET-merge-POST
+# /api/zones path, confirm gate, mode gate, collateral read-back). Built so the
+# aux bench case AX-C03 (a zone relay_mask containing aux relay 4 must be
+# refused 400) can run, and restore the original mask, with no whole-page
+# preset write. The firmware owns the validity rules (unconfigured relay,
+# relay claimed by an enabled aux output, overlap); this tool range-checks the
+# integer only and reports a firmware refusal as "refused by firmware (HTTP n)".
+# ---------------------------------------------------------------------------
+ZONE_RELAY_MASK_MAX = 0xFFFF
+
+
+@_core._tool()
+def control_set_zone_relay_mask(
+    zone: int,
+    relay_mask: int,
+    confirm: bool = False,
+    host: Optional[str] = None,
+) -> str:
+    """Set ONE zone's relay_mask (bit N-1 = relay N) over GET-merge-POST
+    /api/zones, touching only that field. Same discipline as
+    control_set_zone_type(): refused unless `confirm is True` exactly (dry run
+    otherwise), refused mid-run (precheck plus the system_mode_gate 409), zone
+    must be one GET reports, and a confirmed write FAILS LOUD unless relay_mask
+    reads back exactly as posted with nothing else in /api/zones changed. The
+    firmware's own refusals (e.g. a mask containing a relay an enabled aux
+    output owns) come back as "refused by firmware (HTTP <status>): <detail>".
+    """
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import
+
+    if (isinstance(relay_mask, bool) or not isinstance(relay_mask, int)
+            or not 0 <= relay_mask <= ZONE_RELAY_MASK_MAX):
+        return f"refused: relay_mask={relay_mask!r} must be an integer in 0..{ZONE_RELAY_MASK_MAX}"
+
+    resolved = _ota_resolve_host(host)
+
+    running_reason = _profile_or_autotune_running_reason()
+    if running_reason is not None:
+        return f"refused: {running_reason} -- relay_mask is not changed mid-run (host={resolved})"
+
+    try:
+        before = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: GET /api/zones failed (host={resolved}): {exc}"
+
+    zones = before.get("zones") or []
+    valid_indices = sorted(z.get("index") for z in zones if "index" in z)
+    if zone not in valid_indices:
+        return f"refused: zone {zone} is out of range -- board reports zones {valid_indices} (host={resolved})"
+
+    current = _zone_by_index(zones, zone) or {}
+    current_mask = current.get("relay_mask")
+
+    if confirm is not True:
+        return (f"DRY RUN (pass confirm=True, exactly, to actually write) -- would set zone {zone}: "
+                f"relay_mask={relay_mask} (current: relay_mask={current_mask!r}; host={resolved})")
+
+    try:
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [{"index": zone, "relay_mask": relay_mask}]}), None)
+    except zones_http_client.ZonesHttpError as exc:
+        return f"error: could not build POST body from the GET snapshot: {exc}"
+
+    try:
+        post_result = zones_http_client.post_zones(resolved, body)
+    except zones_http_client.ZonesHttpError as exc:
+        if exc.status == 409 and zones_http_client.is_system_mode_gate_refusal(exc.detail):
+            return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
+                    f"a firing or autotune run started after this tool's own precheck "
+                    f"(host={resolved})")
+        if exc.status is not None and 400 <= exc.status < 500:
+            return f"refused by firmware (HTTP {exc.status}): {exc.detail or exc} (host={resolved})"
+        return f"error: POST /api/zones failed (host={resolved}): {exc}"
+    if post_result != "ok":
+        return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
+
+    try:
+        after = zones_http_client.get_zones(resolved)
+    except zones_http_client.ZonesHttpError as exc:
+        return (f"error: POST /api/zones returned ok, but the confirming re-fetch of GET "
+                f"/api/zones failed (host={resolved}): {exc} -- state UNKNOWN, re-check before "
+                f"trusting this")
+
+    after_zone = _zone_by_index(after.get("zones") or [], zone)
+    if after_zone is None:
+        return f"FAILED: zone {zone} missing from the re-fetched GET /api/zones response (host={resolved})"
+
+    got = after_zone.get("relay_mask")
+    if got != relay_mask:
+        return (f"FAILED: POST /api/zones returned ok, but read-back does not confirm it "
+                f"landed -- relay_mask: wanted {relay_mask}, board now reports {got!r} "
+                f"(host={resolved}). Do not trust this as applied.")
+
+    collateral = _zone_collateral_diff(before, after, zone, {"relay_mask"})
+    if collateral:
+        return (f"FAILED: zone {zone}'s relay_mask landed correctly, but other field(s) changed "
+                f"unexpectedly -- {'; '.join(collateral)} (host={resolved}). This tool must touch "
+                f"only relay_mask; investigate before trusting this board's config.")
+
+    return f"ok - zone {zone}: relay_mask={got} (was {current_mask!r}; confirmed by read-back; host={resolved})"
+
+
+# ---------------------------------------------------------------------------
 # control_set_zone_coupling -- narrow writer for ONE coupling-matrix cell,
 # modeled directly on control_set_zone_type()/control_set_zone_limits() above
 # (same GET-merge-POST /api/zones path, zones_http_client.build_post_body(),

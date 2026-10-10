@@ -439,19 +439,52 @@ def _case_ax_c02(ctx: dict) -> CaseResult:
     return CaseResult(Verdict.PASS, observed=obs)
 
 
+def _default_zone_mask_fns(ctx: dict):
+    """Build (post_fn, restore_fn) over control_set_zone_relay_mask: pick the first zone GET
+    /api/zones reports, post its current mask | relay 4's bit, and restore the original on an
+    accepted write. Returns None when the zones cannot be read."""
+    from .. import zones_http_client as zhc
+    from ..mcp_server_aux import _resolve_host
+    srv = _srv(ctx)
+    try:
+        host = _resolve_host(ctx.get("host"))
+        zones = zhc.get_zones(host).get("zones") or []
+        z = next(z for z in zones if "index" in z and isinstance(z.get("relay_mask"), int))
+    except Exception:  # noqa: BLE001
+        return None
+    zone, orig = z["index"], z["relay_mask"]
+    bad = orig | (1 << (AUX_RELAY - 1))
+
+    def post():
+        out = str(srv.control_set_zone_relay_mask(zone=zone, relay_mask=bad, confirm=True))
+        m = re.search(r"refused by firmware \(HTTP (\d+)\)", out)
+        if m:
+            return int(m.group(1)), out
+        return (200 if out.startswith("ok") else None), out
+
+    def restore():
+        return str(srv.control_set_zone_relay_mask(zone=zone, relay_mask=orig, confirm=True)).startswith("ok")
+
+    return post, restore
+
+
 def _case_ax_c03(ctx: dict) -> CaseResult:
     """Plan step 5b: a zone relay_mask containing relay 4 is refused (400).
-    No narrow relay_mask writer exists, so the write is injected via
-    ``ctx["aux_zone_mask_post_fn"]() -> (status, body)`` and SKIPs without it.
-    An accepted write is undone via optional ``ctx["aux_zone_mask_restore_fn"]()`` and
-    always taints the run."""
+    Uses the narrow control_set_zone_relay_mask tool on the first zone; the write can be
+    injected via ``ctx["aux_zone_mask_post_fn"]() -> (status, body)``. An accepted write is
+    undone (the original mask is restored) and always taints the run. A status other than
+    400/2xx (tool precheck refusal, transport error) is INCONCLUSIVE, never PASS."""
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
     fn = ctx.get("aux_zone_mask_post_fn")
     if fn is None:
-        return CaseResult(Verdict.SKIP, reason="no zone relay_mask writer injected (no narrow tool exists)")
-    status, _body = fn()
+        pair = _default_zone_mask_fns(ctx)
+        if pair is None:
+            return CaseResult(Verdict.SKIP, reason="could not read a zone relay_mask from GET /api/zones")
+        fn = pair[0]
+        ctx.setdefault("aux_zone_mask_restore_fn", pair[1])
+    status, body = fn()
     if status == 400:
         return CaseResult(Verdict.PASS, observed={"status": status})
     restored = None
@@ -462,6 +495,9 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
             restored = bool(rfn()) if rfn is not None else False
         except Exception:  # noqa: BLE001
             restored = False
+    else:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"no firmware verdict (status {status}): {str(body)[:120]}",
+                          observed={"status": status})
     return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 400"
                       + ("" if restored is None else f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
                          " -- run tainted"), observed={"status": status, "restored": restored})

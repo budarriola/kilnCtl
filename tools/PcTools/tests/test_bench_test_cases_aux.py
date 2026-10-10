@@ -245,9 +245,12 @@ class ConfigureAndConflictTest(unittest.TestCase):
         self.assertFalse(srv.r1)
         self.assertNotIn("_tainted", ctx)
 
-    def test_c03_skips_without_writer_and_judges_status(self):
+    def test_c03_skips_when_zones_unreadable_and_judges_status(self):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
         srv = FakeSrv()
-        self.assertEqual(C._case_ax_c03(_ctx(srv)).verdict, Verdict.SKIP)
+        with um.patch.object(zhc, "get_zones", side_effect=zhc.ZonesHttpError("down")),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            self.assertEqual(C._case_ax_c03(_ctx(srv)).verdict, Verdict.SKIP)
         self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (400, {}))).verdict, Verdict.PASS)
         self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (200, {}))).verdict, Verdict.FAIL)
 
@@ -657,3 +660,37 @@ _ORIG_RESTORE = C._restore
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class C03DefaultWriterTest(unittest.TestCase):
+    """AX-C03 no longer SKIPs: with no injected fn it drives control_set_zone_relay_mask."""
+
+    def _run(self, answers):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        calls = []
+
+        class Srv(FakeSrv):
+            def control_set_zone_relay_mask(self, zone, relay_mask, confirm):
+                calls.append((zone, relay_mask, confirm))
+                return answers.pop(0)
+
+        ctx = {"srv": Srv(), "aux_confirm": True, "sleep_fn": lambda s: None}
+        with um.patch.object(zhc, "get_zones", return_value={"zones": [{"index": 0, "relay_mask": 1}]}),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            return C._case_ax_c03(ctx), calls, ctx
+
+    def test_firmware_400_passes_and_posts_relay4_bit(self):
+        res, calls, _ = self._run(["refused by firmware (HTTP 400): claimed by an aux output"])
+        self.assertEqual(res.verdict, Verdict.PASS)
+        self.assertEqual(calls, [(0, 0b1001, True)])
+
+    def test_accepted_write_fails_restores_and_taints(self):
+        res, calls, ctx = self._run(["ok - zone 0: relay_mask=9", "ok - zone 0: relay_mask=1"])
+        self.assertEqual(res.verdict, Verdict.FAIL)
+        self.assertEqual(calls[-1], (0, 1, True))
+        self.assertTrue(ctx["_tainted"])
+        self.assertIn("restore ok", res.reason)
+
+    def test_precheck_refusal_is_inconclusive_not_pass(self):
+        res, _calls, _ = self._run(["refused: a profile is running -- relay_mask is not changed mid-run"])
+        self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
