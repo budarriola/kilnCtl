@@ -74,6 +74,9 @@ esp_err_t cfg_fs_write_atomic_device(const char *rel_path, const void *data, siz
  * than `cfg`. */
 bool cfg_fs_mount_format_confirmation_pending(void);
 
+/* Factory-reset writer fence: predicate checked on the flash worker right before each device cfg write. */
+void cfg_fs_mount_set_write_refuse_hook(bool (*fn)(void));
+
 /* Human-readable reason the last mount attempt refused to auto-format (e.g.
  * "LittleFS superblock signature found"), or "" if nothing is pending.
  * Surfaced by cfg_fs_format_http.c's GET /api/cfgfs/format_pending for the
