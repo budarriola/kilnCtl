@@ -34,6 +34,8 @@ No HIGH or MEDIUM findings.
 
 ### LOW-1. `profiles_http_drop_unpersisted()` drops outside the save critical section
 
+**Status: fixed in e6201482f (fwfx17).**
+
 `profiles_http.c:1946` (save_ex releases the save lock before returning
 `persisted=false`) and `profiles_http.c:1963-1975` (the drop retakes it);
 caller `profiles_live_http.c:680`.
@@ -57,6 +59,8 @@ MISSED (test_profiles_http / test_profiles_live_http still pass).
 
 ### LOW-2. The "already in progress" refusal and its 409 mapping are untested
 
+**Status: fixed in e6201482f (fwfx17).**
+
 `test_ota_http.c:518` declares `g_stub_try_begin_enforce = false`; no test sets
 it true, so the fake `try_begin` always succeeds. `factory_reset.c:529-533`
 (refuse when `try_begin` fails, `FACTORY_RESET_ERR_MODE_GATE_REFUSED`) and the
@@ -68,6 +72,8 @@ a factory reset, and asserts 409 with "already in progress" and that nothing was
 erased; or delete the dead flag.
 
 ### LOW-3. A-INFO-1 is marked fixed but `LINK_PROTOCOL.md` was not changed
+
+**Status: fixed in e6201482f (fwfx17).**
 
 `ff7027608` marks A-INFO-1 "Fixed in 2695eac4a (fwlow16). Wording corrected" in
 `REVIEW_SMALL_BATCH_2026-10-10.md:72`, and the commit message lists "A-INFO-1
@@ -82,6 +88,8 @@ disarmed board too, since `link_task_heat_possible_probe()` does not check ARMED
 then keep or re-mark the status line.
 
 ## INFO
+
+**fwfx17 (e6201482f):** fixed the stale relay_authority.h comments, the UART refusal log text, host_test_exec.ps1 header (124) and the SaftyFW nested-child stderr path (now beside the test exe). Not done: profiles_page.html notice, redundant fuzz assert, cfg_fs verify-after-rename note.
 
 - `relay_authority.h:304` still says the depth counter exists so "two concurrent
   resets (HTTP and UART) cannot clear each other's mark"; a second reset is now
