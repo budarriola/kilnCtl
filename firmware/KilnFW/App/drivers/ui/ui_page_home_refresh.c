@@ -1104,7 +1104,8 @@ void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_statu
 
         bool valid = (i < ds->channel_count) && ds->channels[i].valid;
         char temp_buf[16];
-        ui_page_home_rail_format_zone_temp(valid, ds->channels[i].temp_c, temp_buf, sizeof(temp_buf));
+        ui_page_home_rail_format_zone_temp(valid, valid && ds->channels[i].stale, ds->channels[i].temp_c, ds->temp_unit,
+                                           temp_buf, sizeof(temp_buf));
         if (ui_page_home_rail_text_changed(lv_label_get_text(s_ui_home_rail_zone_temp[i]), temp_buf)) {
             lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
         }

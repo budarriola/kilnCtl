@@ -150,6 +150,9 @@ typedef struct {
     bool relays_energized;     // any relay shadow bit set, OR the relay state could not be read (an
                                 // unreadable relay is never assumed off) -- consulted only by
                                 // SYS_ACTION_RECOVERY_BOOT, unused by every other rule
+    bool danger_mode_active;   // danger_mode_active() -- consulted ONLY by SYS_ACTION_START_PROFILE (LCD review N2):
+                                // relay_on_blocked() skips every safety/OTA gate while the window is open and it can
+                                // expire-and-reboot mid-firing, so no start path may begin a firing into it
     bool safety_tripped;       // ARMED-latch trip state -- reserved, unused by this pass's rules
     bool readiness_gate_ready; // !readiness_gate_refuses_start() -- reserved, unused by this pass's rules
 } sys_mode_snapshot_t;

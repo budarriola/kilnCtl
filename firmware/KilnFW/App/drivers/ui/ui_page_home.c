@@ -184,6 +184,8 @@
 
 #include "ui_page_home_internal.h"
 #include "ui_page_profile_picker.h" /* ui_page_profile_picker_set_pick_cb() -- UI_PLAN.md 6.1 */
+#include "lcd_auth_state.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_safety.h" /* ui_page_safety_open() -- trip strip tap */
 
 const char *UI_HOME_TAG = "ui_page_home";
@@ -218,11 +220,22 @@ uint8_t s_ui_home_zone_count; /* zones_config_get_thermo_count() at build time *
 lv_obj_t *s_ui_home_trip_strip;
 bool s_ui_home_trip_strip_is_safety;
 
+static void trip_strip_gated_open_cb(void *user_data)
+{
+    (void)user_data;
+    ui_page_safety_open(false); /* Back must go home, not to the hub */
+}
+
 static void trip_strip_clicked_cb(lv_event_t *e)
 {
     (void)e;
     if (s_ui_home_trip_strip_is_safety) {
-        ui_page_safety_open(false); /* ungated entry: Back must go home, not to the hub */
+        /* LCD review N5 (owner 2026-10-09): USER PIN like any non-dashboard page. */
+        if (lcd_safety_strip_needs_pin(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER))) {
+            ui_lcd_lock_run_gated("Enter PIN to view safety", LCD_PIN_ROLE_USER, trip_strip_gated_open_cb, NULL);
+        } else {
+            trip_strip_gated_open_cb(NULL);
+        }
     }
 }
 

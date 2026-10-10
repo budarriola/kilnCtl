@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "unit_pref.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -74,7 +76,12 @@ int ui_page_home_rail_duty_pct(float duty_fraction);
  * its real last-known number (staleness is surfaced by MEMORY.md's
  * "idealized test input" caution elsewhere on this page via colour, not by
  * blanking a real number here -- this helper only owns the digits). */
-void ui_page_home_rail_format_zone_temp(bool valid, float temp_c, char *out, size_t out_cap);
+/* LCD review N3/N4: temp_c is Celsius and is converted to `unit` with the unit
+ * suffix appended ("1832F", whole degrees to fit the rail); a stale reading
+ * (age >= KILN_TEMP_STALE_AGE_MS) renders "--.-" like an invalid one, the same
+ * rule the Temperature page applies (valid && !stale). */
+void ui_page_home_rail_format_zone_temp(bool valid, bool stale, float temp_c, unit_pref_t unit, char *out,
+                                        size_t out_cap);
 
 /* Formats the rail's single kiln-total watts line into `out`, or writes an
  * empty string (out[0] = '\0') when `power_valid` is false -- the caller

@@ -6,6 +6,7 @@
 #include "esp_log.h"
 
 #include "kiln_ui.h"
+#include "lcd_auth_state.h"
 #include "lvgl_port.h"
 #include "touch_cal_store.h"
 #include "ui_lcd_lock.h"
@@ -179,7 +180,7 @@ static void finish_calibration(void)
      * (never calibrated) save stays open since the PIN keypad needs touch. */
     if (touch_cal_store_is_calibrated() && !ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)) {
         ESP_LOGW(TAG, "calibration not saved: admin session required");
-        kiln_ui_show("config");
+        kiln_ui_show(lcd_touch_cal_exit_target(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER), "config"));
         return;
     }
     err = touch_cal_store_save(&cal);
@@ -192,7 +193,7 @@ static void finish_calibration(void)
      * checked by eye (trace a square, see if the drawn line follows the
      * finger) before trusting every other page's buttons to it. Its own
      * "Done" button goes to "home" from there. */
-    kiln_ui_show("touch_test");
+    kiln_ui_show(lcd_touch_cal_exit_target(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER), "touch_test"));
 }
 
 /* The whole point of this page's design: normal LVGL hit-testing needs an
@@ -240,7 +241,8 @@ static void cancel_press_cb(lv_event_t *e)
     (void)e;
     ESP_LOGI(TAG, "calibration cancelled by user at point=%d/%d pass=%d/%d",
               s_current_point + 1, POINT_COUNT, s_current_cycle + 1, CAL_CYCLES);
-    kiln_ui_show("config");
+    /* LCD review N1: no PIN held -> home, never the Config hub. */
+    kiln_ui_show(lcd_touch_cal_exit_target(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER), "config"));
 }
 
 /* Fired every time this screen is loaded (kiln_ui.c builds a page's screen

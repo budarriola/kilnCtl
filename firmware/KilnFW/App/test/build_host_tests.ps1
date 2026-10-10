@@ -268,6 +268,7 @@ try {
         (Join-Path $driversDir "control/profile_feasibility.c"),
         (Join-Path $driversDir "ui/ui_page_home_graph.c"),
         (Join-Path $driversDir "ui/ui_page_home_rail.c"),
+        (Join-Path $driversDir "ui/ui_unit_entry.c"),
         (Join-Path $driversDir "ui/ui_profile_list_order.c"),
         (Join-Path $driversDir "ui/ui_page_safety_logic.c"),
         (Join-Path $driversDir "ui/ui_page_temperature_safety.c"),

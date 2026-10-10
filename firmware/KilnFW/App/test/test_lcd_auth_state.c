@@ -355,8 +355,20 @@ static void test_relock_edge_full_lcd19_sequence(void)
                "LCD-19 bench sequence: keypad survives the relock edge end-to-end");
 }
 
+static void test_touch_cal_exit_and_safety_strip(void)
+{
+    TEST_SECTION("lcd_touch_cal_exit_target / lcd_safety_strip_needs_pin (LCD review N1, N5)");
+    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(false, "config"), "home") == 0, "no role: config -> home");
+    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(false, "touch_test"), "home") == 0, "no role: touch_test -> home");
+    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(true, "config"), "config") == 0, "role held: config kept");
+    TEST_CHECK(strcmp(lcd_touch_cal_exit_target(true, NULL), "home") == 0, "NULL target -> home");
+    TEST_CHECK(lcd_safety_strip_needs_pin(false), "no USER role: trip strip needs the PIN");
+    TEST_CHECK(!lcd_safety_strip_needs_pin(true), "USER role held: trip strip opens directly");
+}
+
 void run_test_lcd_auth_state(void)
 {
+    test_touch_cal_exit_and_safety_strip();
     test_pin_entry();
     test_verify_seam();
     test_keypad_submit_outcomes();

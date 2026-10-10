@@ -10,6 +10,7 @@
 #include "ui_page_profile_builder_review.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_theme.h"
+#include "ui_unit_entry.h"
 #include "ui_topbar.h"
 #include "unit_pref.h"
 
@@ -221,7 +222,9 @@ static void target_done_cb(bool accepted, const char *text, float value, void *u
     (void)text;
     (void)user_data;
     if (!accepted) return;
-    draft()->segments[s_cur_seg].target_c = value;
+    float min_c, max_c;
+    profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
+    draft()->segments[s_cur_seg].target_c = ui_unit_entry_to_celsius(value, unit_pref_get(), UNIT_PREF_KIND_ABSOLUTE, min_c, max_c);
     refresh();
 }
 
@@ -230,7 +233,9 @@ static void ramp_done_cb(bool accepted, const char *text, float value, void *use
     (void)text;
     (void)user_data;
     if (!accepted) return;
-    draft()->segments[s_cur_seg].ramp_c_per_hr = value;
+    float min_r, max_r;
+    profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
+    draft()->segments[s_cur_seg].ramp_c_per_hr = ui_unit_entry_to_celsius(value, unit_pref_get(), UNIT_PREF_KIND_RATE, min_r, max_r);
     refresh();
 }
 
@@ -264,12 +269,16 @@ static void target_card_cb(lv_event_t *e)
     (void)e;
     float min_c, max_c;
     profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
+    /* LCD review N8: the pad is in the display unit; target_done_cb() converts back to Celsius. */
+    const unit_pref_t pref = unit_pref_get();
+    static char s_target_caption[16];
+    snprintf(s_target_caption, sizeof(s_target_caption), "Target %s", unit_pref_suffix(pref));
     ui_num_pad_params_t params = {
-        .caption = "Target C",
+        .caption = s_target_caption,
         .mode = UI_NUM_PAD_MODE_NUMBER,
-        .initial_value = draft()->segments[s_cur_seg].target_c,
-        .min = min_c,
-        .max = max_c,
+        .initial_value = ui_unit_entry_to_display(draft()->segments[s_cur_seg].target_c, pref, UNIT_PREF_KIND_ABSOLUTE),
+        .min = ui_unit_entry_to_display(min_c, pref, UNIT_PREF_KIND_ABSOLUTE),
+        .max = ui_unit_entry_to_display(max_c, pref, UNIT_PREF_KIND_ABSOLUTE),
         .decimals = 0,
         .on_done = target_done_cb,
     };
@@ -285,12 +294,15 @@ static void ramp_card_cb(lv_event_t *e)
     (void)e;
     float min_r, max_r;
     profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
+    const unit_pref_t pref = unit_pref_get();
+    static char s_ramp_caption[20];
+    snprintf(s_ramp_caption, sizeof(s_ramp_caption), "Ramp %s/hr", unit_pref_suffix(pref));
     ui_num_pad_params_t params = {
-        .caption = "Ramp C/hr",
+        .caption = s_ramp_caption,
         .mode = UI_NUM_PAD_MODE_NUMBER,
-        .initial_value = draft()->segments[s_cur_seg].ramp_c_per_hr,
-        .min = min_r,
-        .max = max_r,
+        .initial_value = ui_unit_entry_to_display(draft()->segments[s_cur_seg].ramp_c_per_hr, pref, UNIT_PREF_KIND_RATE),
+        .min = ui_unit_entry_to_display(min_r, pref, UNIT_PREF_KIND_RATE),
+        .max = ui_unit_entry_to_display(max_r, pref, UNIT_PREF_KIND_RATE),
         .decimals = 0,
         .on_done = ramp_done_cb,
     };

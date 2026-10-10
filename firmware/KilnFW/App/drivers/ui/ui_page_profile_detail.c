@@ -15,6 +15,7 @@
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_home_graph.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_segments.h"
@@ -501,9 +502,9 @@ static void confirm_start_cb(void *user_data)
     kiln_ui_show("home");
 }
 
-static void start_btn_cb(lv_event_t *e)
+static void start_btn_gated_cb(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     profile_t prof;
     const builtin_profile_t *b = NULL;
     if (!load_current(&prof, &b)) {
@@ -546,6 +547,14 @@ static void start_btn_cb(lv_event_t *e)
         .user_data = NULL,
     };
     ui_confirm_show(&params);
+}
+
+/* LCD review N1: Start needs its own USER-role gate -- it must not rely on every path into
+ * this page having passed the home Profiles/Menu gate (touch_cal exits once skipped it). */
+static void start_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Enter PIN to start firing", LCD_PIN_ROLE_USER, start_btn_gated_cb, NULL);
 }
 
 static lv_obj_t *build_action_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb)

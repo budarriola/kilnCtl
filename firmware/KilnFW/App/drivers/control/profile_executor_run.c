@@ -16,6 +16,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "danger_mode.h"
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
                                     * A4 review follow-up A */
 #include "heat_enable.h"
@@ -254,6 +255,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * while backup_import.c has one in flight, same choke point as the
          * recovery-mode check just above. */
         mode_snap.restore_in_flight = backup_import_restore_in_flight();
+        mode_snap.danger_mode_active = danger_mode_active(); /* LCD review N2 */
         if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, err_msg, err_cap)) {
             ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode or restore)",
                      (unsigned)profile_id);

@@ -1544,6 +1544,12 @@ bool backup_import_restore_in_flight(void)
     return s_test_restore_in_flight;
 }
 
+static bool s_test_danger_mode_active = false;
+bool danger_mode_active(void)
+{
+    return s_test_danger_mode_active;
+}
+
 // ---------------------------------------------------------------------------
 // Tests -- profile_executor_start() is DELIBERATELY never called anywhere in
 // this file. s_exec is a static struct with internal linkage in
@@ -1620,6 +1626,16 @@ static void test_run_refused_by_restore_in_flight(void)
     run_and_expect_gate_refusal("a backup restore in flight refuses a firing at run()",
                                 "backup restore is in progress");
     s_test_restore_in_flight = false;
+}
+
+static void test_run_refused_by_danger_mode(void)
+{
+    /* LCD review N2: danger mode refuses a start at the shared choke point (LCD/UART/web). */
+    TEST_SECTION("profile_executor_run() is refused by the system mode gate -- danger mode active");
+    reset_readiness_facts_to_ready();
+    s_test_danger_mode_active = true;
+    run_and_expect_gate_refusal("danger mode refuses a firing at run()", "danger mode is active");
+    s_test_danger_mode_active = false;
 }
 
 static void test_run_refused_by_readiness_safety_trip(void)
@@ -11815,6 +11831,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_before_start();
     test_run_refused_by_readiness_recovery_mode();
     test_run_refused_by_restore_in_flight();
+    test_run_refused_by_danger_mode();
     test_run_refused_by_readiness_safety_trip();
     test_run_refused_by_readiness_crash_report();
     test_run_refused_by_readiness_estop_unverified();

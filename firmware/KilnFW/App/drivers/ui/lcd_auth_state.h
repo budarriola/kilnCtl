@@ -250,6 +250,20 @@ bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_p
 // this one tick has consumed it (one-shot).
 bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pending_lock_gate);
 
+// Touch-calibration page exits (LCD review N1, 2026-10-09). The first-boot
+// touch_cal page is shown BEFORE home, so a user who never entered a PIN
+// can leave it for "config" (Cancel, refused save) and then reach Profiles
+// and Start with no relock edge ever firing. Every exit therefore goes to
+// "home" unless a USER role is held; with the role (or auth disabled, which
+// ui_lcd_lock_has_role() already folds in) the page's own `wanted` target
+// stands. Never NULL.
+const char *lcd_touch_cal_exit_target(bool has_user_role, const char *wanted);
+
+// Home trip strip -> Safety page (LCD review N5, owner decision 2026-10-09):
+// opening the page needs the USER PIN like any non-dashboard page. True when a
+// PIN prompt is required first (no USER role held).
+bool lcd_safety_strip_needs_pin(bool has_user_role);
+
 #ifdef __cplusplus
 }
 #endif

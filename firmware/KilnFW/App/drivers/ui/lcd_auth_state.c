@@ -201,6 +201,19 @@ bool lcd_lock_keypad_raise_is_lock_gate(bool currently_locked, bool force_lock_p
     return currently_locked || force_lock_pending;
 }
 
+const char *lcd_touch_cal_exit_target(bool has_user_role, const char *wanted)
+{
+    if (!has_user_role || wanted == NULL) {
+        return "home";
+    }
+    return wanted;
+}
+
+bool lcd_safety_strip_needs_pin(bool has_user_role)
+{
+    return !has_user_role;
+}
+
 bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pending_lock_gate)
 {
     if (!keypad_open) {

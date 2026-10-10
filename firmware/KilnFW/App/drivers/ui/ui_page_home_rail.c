@@ -32,16 +32,18 @@ int ui_page_home_rail_duty_pct(float duty_fraction)
     return (int)lroundf(duty_fraction * 100.0f);
 }
 
-void ui_page_home_rail_format_zone_temp(bool valid, float temp_c, char *out, size_t out_cap)
+void ui_page_home_rail_format_zone_temp(bool valid, bool stale, float temp_c, unit_pref_t unit, char *out,
+                                        size_t out_cap)
 {
     if (out == NULL || out_cap == 0) {
         return;
     }
-    if (!valid || isnan(temp_c)) {
+    if (!valid || stale || isnan(temp_c)) {
         snprintf(out, out_cap, "--.-");
         return;
     }
-    snprintf(out, out_cap, "%.1f", (double)temp_c);
+    snprintf(out, out_cap, "%.0f%s", (double)unit_pref_convert(temp_c, unit, UNIT_PREF_KIND_ABSOLUTE),
+             unit_pref_suffix(unit));
 }
 
 void ui_page_home_rail_format_kiln_watts(bool power_valid, float power_w, char *out, size_t out_cap)

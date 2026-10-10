@@ -422,8 +422,24 @@ static void test_reason_truncation_is_safe(void)
     TEST_CHECK(strlen(tiny) < sizeof(tiny), "reason is NUL-terminated within the small buffer");
 }
 
+static void test_start_danger_mode(void)
+{
+    TEST_SECTION("SYS_ACTION_START_PROFILE -- danger mode refuses (LCD review N2); autotune unaffected");
+    sys_mode_snapshot_t snap = good_snapshot();
+    char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason)) == false,
+               "danger mode off: start allowed");
+    snap.danger_mode_active = true;
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason)) == true,
+               "danger mode on: profile start refused");
+    TEST_CHECK(strstr(reason, "danger mode is active") != NULL, "reason names danger mode");
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, NULL, 0) == false,
+               "autotune start not gated by danger mode (its web route never refused)");
+}
+
 int main(void)
 {
+    test_start_danger_mode();
     test_null_snapshot_refuses();
     test_relay_write_allowed_when_idle();
     test_relay_write_refused_cross_product();
