@@ -123,7 +123,10 @@ PY_CHAIN_RE = re.compile(
 # bare `tmp_path / "a.c"`.
 TMP_FIXTURE_BASENAMES = {"tmp_path", "tmp_path_factory", "tmpdir"}
 PY_CHAIN_LITERALS_RE = re.compile(r'"([^"/\\]+)"')
-PS_JOIN_PATH_RE = re.compile(r'Join-Path\s+\S+\s+"([^"]+)"')
+PS_JOIN_PATH_RE = re.compile(r'Join-Path\s+(\S+)\s+"([^"]+)"')
+# A Join-Path rooted at a scratch dir ($tmp, $tmpDir, $tempDir...) names a
+# synthetic fixture file, never a checked-in source file.
+PS_TMP_BASE_RE = re.compile(r'^\$(?:tmp|temp)\w*$', re.IGNORECASE)
 SKIP_GUARD_RE = re.compile(
     r'if\s+not\s+[\w.\(\)_]+\.is_file\(\)\s*:\s*[\r\n]+\s*(?:self\.)?(?:skipTest|skip)\('
     r'|(?:self\.)?skipTest\('
@@ -281,7 +284,9 @@ def scan_ps1_file(repo_root: Path, path: Path, refs_counter: list, problems: lis
     rel = path.relative_to(repo_root).as_posix()
 
     for m in PS_JOIN_PATH_RE.finditer(text):
-        lit = m.group(1)
+        if PS_TMP_BASE_RE.match(m.group(1)):
+            continue
+        lit = m.group(2)
         if not is_source_literal(lit):
             continue
         refs_counter[0] += 1

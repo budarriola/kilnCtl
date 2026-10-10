@@ -1783,31 +1783,98 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     return true;
 }
 
-bool profiles_http_delete(uint8_t id)
+/* ---- Delete-in-flight mark (HTTP input parsing audit L23) -----------------
+ *
+ * The race: a delete checks "is the executor running this slot" and then
+ * erases it, while profile_executor_run() copies the slot (profiles_http_get)
+ * and later commits RUNNING under s_exec.lock. Holding s_exec.lock across the
+ * check AND the erase would close it, but is unsafe: the erase reaches the
+ * flash worker / save lock, and the lock order is
+ *
+ *     flash worker (s_bx_lock) -> profiles save lock -> s_exec.lock
+ *
+ * (cfg_save_lock.h: never take a save lock under s_exec.lock;
+ * profile_executor.c's relay_cycles_maybe_persist() comment records the
+ * deadlock that holding s_exec.lock across a worker wait caused). So nothing
+ * here ever holds s_exec.lock across anything else; instead:
+ *
+ *   delete: (1) set this slot's bit in s_delete_pending (seq_cst RMW),
+ *           (2) read the executor's active id (takes and drops s_exec.lock),
+ *               refusing (and clearing the bit) if it is this slot,
+ *           (3) erase, clear the used bit, (4) clear the pending bit.
+ *   start:  under s_exec.lock, after the RUNNING/FAULTED checks and before
+ *           committing RUNNING, profiles_http_slot_runnable() refuses when the
+ *           bit is set or the used bit is already clear.
+ *
+ * Both sides meet in s_exec.lock: if start's locked section comes first it
+ * has committed RUNNING and step (2) refuses the delete; if step (2)'s section
+ * comes first, the bit (set before it) is visible to start's section, or, if
+ * the delete already finished, the cleared used bit is (it is written before
+ * the seq_cst bit clear in step (4)). Same shape as relay_authority's
+ * factory-reset in-flight mark. A second delete of the same slot while one is
+ * in flight is refused BUSY (atomic_fetch_or saw the bit set). */
+#define PROFILES_DELETE_PENDING_WORDS ((PROFILES_MAX_COUNT + 31) / 32)
+static _Atomic uint32_t s_delete_pending[PROFILES_DELETE_PENDING_WORDS];
+
+static bool delete_pending_claim(uint8_t id)
+{
+    uint32_t bit = 1u << (id % 32u);
+    return (atomic_fetch_or(&s_delete_pending[id / 32u], bit) & bit) == 0;
+}
+
+static void delete_pending_release(uint8_t id)
+{
+    (void)atomic_fetch_and(&s_delete_pending[id / 32u], ~(1u << (id % 32u)));
+}
+
+bool profiles_http_slot_runnable(uint8_t id)
+{
+    if (profiles_builtin_id_valid(id)) {
+        return true;
+    }
+    if (id >= PROFILES_MAX_COUNT) {
+        return false;
+    }
+    if ((atomic_load(&s_delete_pending[id / 32u]) & (1u << (id % 32u))) != 0) {
+        return false;
+    }
+    return profiles_slot_used(id);
+}
+
+profiles_delete_result_t profiles_delete_slot(uint8_t id)
 {
     /* A builtin is read-only and cannot be deleted -- it is a const table in
      * flash. The user-facing equivalent is hiding it
      * (POST /api/profile/builtin/hide), which is reversible; see
      * profiles_builtin.h. Refuse rather than pretend. */
     if (profiles_builtin_id_valid(id)) {
-        return false;
+        return PROFILES_DELETE_BUILTIN;
     }
     if (id >= PROFILES_MAX_COUNT || !profiles_slot_used(id)) {
-        return false;
+        return PROFILES_DELETE_NOT_FOUND;
     }
-    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
+    /* Step (1) of the mark protocol above: claim BEFORE the running check. */
+    if (!delete_pending_claim(id)) {
+        return PROFILES_DELETE_BUSY;
+    }
+    /* A concurrent delete may have finished between the used check above and
+     * the claim. */
+    if (!profiles_slot_used(id)) {
+        delete_pending_release(id);
+        return PROFILES_DELETE_NOT_FOUND;
+    }
+    /* Step (2). Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
      * delete a slot the executor is currently running or has paused --
      * deleting it out from under an in-progress firing would leave
      * profile_executor_run()'s copied-at-start name/segments as the only
      * surviving record of what is actually executing, and a later re-save
-     * of this id would silently relabel that run's history. Same check as
-     * profiles_edit_http.c's web delete handler. */
-    /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
-     * profile_exec_status_t stack local. */
+     * of this id would silently relabel that run's history. The narrow
+     * accessor avoids a 1464-byte profile_exec_status_t stack local; it takes
+     * and drops s_exec.lock, and nothing is held here while it does. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
-        return false;
+        delete_pending_release(id);
+        return PROFILES_DELETE_RUNNING;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
      * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
@@ -1827,12 +1894,14 @@ bool profiles_http_delete(uint8_t id)
      * (the slot reads unused). nvs_erase_slot() prunes again (idempotent). */
     esp_err_t serr = firing_stats_erase((uint8_t)id);
     if (serr != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "profiles_http_delete(%u): firing stats prune failed: %s -- slot kept, retry", id,
+        ESP_LOGE(PROFILES_TAG, "profiles_delete_slot(%u): firing stats prune failed: %s -- slot kept, retry", id,
                  esp_err_to_name(serr));
-        return false;
+        delete_pending_release(id);
+        return PROFILES_DELETE_PERSIST_FAILED;
     }
-    /* Persistent erase BEFORE dropping RAM state: on failure the slot stays fully
-     * live and the caller can retry; only after it succeeds is the slot cleared. */
+    /* Step (3). Persistent erase BEFORE dropping RAM state: on failure the slot
+     * stays fully live and the caller can retry; only after it succeeds is the
+     * slot cleared. */
     profiles_save_lock();
     esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
     if (err == ESP_OK) {
@@ -1840,11 +1909,18 @@ bool profiles_http_delete(uint8_t id)
         memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     }
     profiles_save_unlock();
+    /* Step (4): only after the used bit is clear (or the slot is known kept). */
+    delete_pending_release(id);
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u) failed: %s -- slot kept, retry", id, esp_err_to_name(err));
-        return false;
+        return PROFILES_DELETE_PERSIST_FAILED;
     }
-    return true;
+    return PROFILES_DELETE_OK;
+}
+
+bool profiles_http_delete(uint8_t id)
+{
+    return profiles_delete_slot(id) == PROFILES_DELETE_OK;
 }
 
 void profiles_http_get_bounds(float *out_target_c_min, float *out_target_c_max,

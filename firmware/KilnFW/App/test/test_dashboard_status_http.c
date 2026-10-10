@@ -126,6 +126,9 @@ bool safety_ceiling_sync_is_standing_diverged(char *reason_out, size_t reason_ca
 }
 bool watchdog_cfg_panic_disabled(void) { return false; }
 bool boot_guard_is_recovery_mode(void) { return false; }
+// relay_authority.h -- the factory reset in flight mark /api/status reports (HTTP audit L37 follow-up).
+static bool s_fake_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void) { return s_fake_reset_in_flight; }
 const char *unit_pref_suffix(unit_pref_t pref) { (void)pref; return "C"; }
 size_t safety_cfg_store_param_count(void) { return 0; }
 bool safety_cfg_store_get_by_index(size_t index, safety_cfg_param_t *out)
@@ -622,8 +625,37 @@ static void test_status_cfg_fs_format_pending_field(void)
               "auth on, ADMIN session -- flag and reason both present");
 }
 
+// HTTP audit L37 follow-up (LOW-1): factory_reset_in_flight follows relay_authority's reset mark.
+static void test_status_factory_reset_in_flight_field(void)
+{
+    TEST_SECTION("dashboard_status_get_handler -- factory_reset_in_flight follows the reset mark");
+    web_auth_policy_t policy = { .web_enabled = false, .lcd_enabled = false,
+                                  .web_timeout_s = -1, .lcd_timeout_s = -1 };
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default nvs partition");
+    TEST_CHECK(web_auth_store_set_policy(&policy) == HAL_OK, "setup: policy persisted");
+    httpd_req_t req;
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_reset_in_flight = false;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no reset)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"factory_reset_in_flight\":false") != NULL,
+              "no reset in flight -- factory_reset_in_flight:false");
+
+    reset_fake_status_with_known_build_identity();
+    stub_headers_reset();
+    s_fake_reset_in_flight = true;
+    memset(&req, 0, sizeof(req));
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reset in flight)");
+    s_fake_reset_in_flight = false;
+    TEST_CHECK(strstr(s_last_resp_body, "\"factory_reset_in_flight\":true") != NULL,
+              "reset in flight -- factory_reset_in_flight:true");
+}
+
 static void run_test_dashboard_status_http(void)
 {
+    test_status_factory_reset_in_flight_field();
     test_status_cfg_fs_format_pending_field();
     test_status_touch_cal_supported_reports_each_state();
     test_status_web_auth_off_shows_build_identity();

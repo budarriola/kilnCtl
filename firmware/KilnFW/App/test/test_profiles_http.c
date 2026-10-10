@@ -653,8 +653,16 @@ void profile_executor_get_status(profile_exec_status_t *out)
  * state the profile_executor_get_status() fake above uses, so every
  * existing "delete refused because it's the running/paused slot" test
  * keeps exercising the identical scenario through the new call path. */
+static uint8_t s_l23_id;                    /* L23 race test below */
+static int s_l23_runnable_at_exec_check = -1; /* runnable seen by the running check */
+static bool s_l23_probe_exec;
 bool profile_executor_get_active_id(uint8_t *out_id)
 {
+    /* First call only: the delete's running check. Later calls (from the
+     * erase path) must not overwrite what that check saw. */
+    if (s_l23_probe_exec && s_l23_runnable_at_exec_check < 0) {
+        s_l23_runnable_at_exec_check = profiles_http_slot_runnable(s_l23_id) ? 1 : 0;
+    }
     bool active = (g_fake_exec_state == PROFILE_EXEC_RUNNING || g_fake_exec_state == PROFILE_EXEC_PAUSED);
     if (out_id) {
         *out_id = g_fake_exec_profile_id;
@@ -2020,6 +2028,72 @@ static void test_profiles_http_delete_refuses_running_slot(void)
 }
 
 // ---------------------------------------------------------------------------
+// HTTP input parsing audit L23: delete vs profile start. The delete marks the
+// slot in flight BEFORE its running check (which takes s_exec.lock); the start
+// re-checks profiles_http_slot_runnable() under s_exec.lock before committing
+// RUNNING. These pin the delete side of that protocol (the start side is
+// test_profile_executor_prestart.c's test_run_refuses_slot_being_deleted()).
+static int s_l23_runnable_at_erase = -1; /* runnable seen mid-erase */
+static int s_l23_nested_delete = -1;     /* second delete's result mid-erase */
+
+static esp_err_t l23_delete_fn(const char *rel_path)
+{
+    s_l23_runnable_at_erase = profiles_http_slot_runnable(s_l23_id) ? 1 : 0;
+    s_l23_nested_delete = (int)profiles_delete_slot(s_l23_id);
+    return cfg_fs_delete(rel_path);
+}
+
+static void test_profiles_delete_start_race_l23(void)
+{
+    TEST_SECTION("L23: a start is refused while a delete of the slot is in flight; delete refused while running");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    s_l23_id = 4;
+    s_profiles.profiles[4] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+    TEST_CHECK(nvs_save_slot(4) == ESP_OK, "save slot 4");
+    TEST_CHECK(profiles_http_slot_runnable(4), "an idle used slot is runnable");
+    TEST_CHECK(!profiles_http_slot_runnable(5), "an unused slot is not runnable");
+
+    s_l23_runnable_at_exec_check = -1;
+    s_l23_runnable_at_erase = -1;
+    s_l23_nested_delete = -1;
+    s_l23_probe_exec = true;
+    profiles_cfg_fs_set_delete_fn(l23_delete_fn);
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4");
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    s_l23_probe_exec = false;
+    TEST_CHECK(s_l23_runnable_at_exec_check == 0,
+               "the in-flight mark is set BEFORE the running check (a start in that window is refused)");
+    TEST_CHECK(s_l23_runnable_at_erase == 0, "a start during the erase is refused");
+    TEST_CHECK(s_l23_nested_delete == (int)PROFILES_DELETE_BUSY, "a second delete of the same slot mid-erase is BUSY");
+    TEST_CHECK(!profiles_http_slot_runnable(4), "after the delete the slot is not runnable");
+
+    /* Delete refused while running releases the mark: the slot stays runnable. */
+    s_profiles.profiles[4] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+    TEST_CHECK(nvs_save_slot(4) == ESP_OK, "re-save slot 4");
+    g_fake_exec_state = PROFILE_EXEC_RUNNING;
+    g_fake_exec_profile_id = 4;
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_RUNNING, "delete refused while the executor runs slot 4");
+    TEST_CHECK(profiles_slot_used(4) && profiles_http_slot_runnable(4), "refused delete leaves the slot and no mark");
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    /* A failed erase releases the mark too. */
+    s_profile_rev_unknown[4] = true;
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_PERSIST_FAILED, "erase refusal reported");
+    s_profile_rev_unknown[4] = false;
+    TEST_CHECK(profiles_http_slot_runnable(4), "failed delete leaves the slot runnable");
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "retry succeeds");
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_NOT_FOUND, "deleting it again is NOT_FOUND");
+}
+
+// ---------------------------------------------------------------------------
 // Review fold-in (PROFILE_SLOTS_100.md section 7): favorite-clear must
 // run BEFORE slot erase, not after. Runtime behavior is identical either way
 // on the happy path -- the bug this guards against is a power cut landing
@@ -2061,13 +2135,14 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
     TEST_CHECK(http_text != NULL, "could not locate profiles_http.c from the host test's working directory");
     if (http_text) {
         size_t len = 0;
-        const char *body = find_function_body(http_text, "bool profiles_http_delete(uint8_t id)", &len);
-        TEST_CHECK(body != NULL, "could not find profiles_http_delete()'s function body -- update this test "
+        /* Both delete doors share profiles_delete_slot() since the L23 fix. */
+        const char *body = find_function_body(http_text, "profiles_delete_result_t profiles_delete_slot(uint8_t id)", &len);
+        TEST_CHECK(body != NULL, "could not find profiles_delete_slot()'s function body -- update this test "
                                   "if it was renamed/restructured");
         if (body) {
             char *fn = dup_range(body, len);
             if (fn) {
-                assert_favorite_clear_precedes_erase(fn, "profiles_http_delete()");
+                assert_favorite_clear_precedes_erase(fn, "profiles_delete_slot()");
                 free(fn);
             }
         }
@@ -2090,7 +2165,12 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
         if (body) {
             char *fn = dup_range(body, len);
             if (fn) {
-                assert_favorite_clear_precedes_erase(fn, "profile_delete_post_handler()");
+                /* The web door must go through the shared sequence, never a
+                 * private erase that skips the delete-in-flight mark (L23). */
+                TEST_CHECK(strstr(fn, "profiles_delete_slot(") != NULL,
+                           "profile_delete_post_handler() delegates to profiles_delete_slot()");
+                TEST_CHECK(strstr(fn, "nvs_erase_slot") == NULL && strstr(fn, "profiles_slot_clear") == NULL,
+                           "profile_delete_post_handler() has no private erase path");
                 free(fn);
             }
         }
@@ -4692,6 +4772,7 @@ void run_test_profiles_http(void)
     test_favorites_refused_when_unmounted();
     test_favorites_legacy_nvs_migrates();
     test_profiles_http_delete_refuses_running_slot();
+    test_profiles_delete_start_race_l23();
     test_delete_clears_favorite_before_erase_wiring();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();

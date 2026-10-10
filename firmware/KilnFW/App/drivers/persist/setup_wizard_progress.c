@@ -12,6 +12,7 @@
 #include "hal_time.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
 
 static const char *TAG = "setup_wiz_progress";
@@ -573,8 +574,13 @@ static esp_err_t persist_all(void)
     setup_wizard_progress_blob_t blob;
     steps_to_blob(&blob);
     uint32_t new_rev = s_rev + 1;
-    esp_err_t err = pref_cfg_fs_commit(SETUP_WIZARD_PROGRESS_FILE_PATH, &blob, sizeof(blob), new_rev,
-                                       "setup wizard progress");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(SETUP_WIZARD_PROGRESS_FILE_PATH, &blob, sizeof(blob), new_rev,
+                                 "setup wizard progress");
+    }
     if (err == ESP_OK) {
         s_rev = new_rev;
     }

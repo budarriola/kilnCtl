@@ -282,6 +282,21 @@ void profiles_save_unlock(void);
 esp_err_t nvs_erase_slot_locked(uint8_t id); /* caller holds profiles_save_lock(); no stats prune */
 esp_err_t nvs_save_slot_locked(uint8_t id); /* caller holds profiles_save_lock() */
 
+/* The one delete sequence behind POST /api/profile/delete
+ * (profile_delete_post_handler) and benchproto PROFILES DELETE
+ * (profiles_http_delete). Defined in profiles_http.c; see its comment for the
+ * delete-in-flight mark that closes the delete-vs-start race (HTTP input
+ * parsing audit L23) and the lock order. */
+typedef enum {
+    PROFILES_DELETE_OK = 0,
+    PROFILES_DELETE_BUILTIN,        /* builtin catalogue id: read-only */
+    PROFILES_DELETE_NOT_FOUND,      /* out of range or unused slot */
+    PROFILES_DELETE_RUNNING,        /* executor is running/paused on this slot */
+    PROFILES_DELETE_BUSY,           /* another delete of this slot is in flight */
+    PROFILES_DELETE_PERSIST_FAILED, /* stats prune or erase failed: slot kept, retryable */
+} profiles_delete_result_t;
+profiles_delete_result_t profiles_delete_slot(uint8_t id);
+
 /* True iff some ZONE_RAMP segment's target_c exceeds the CURRENTLY
  * configured max_temp_c of one of its zone_mask zones -- advisory-only
  * check shared by the list/detail JSON (profiles_catalog_http.c) and the

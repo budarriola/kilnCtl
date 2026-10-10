@@ -118,11 +118,17 @@ static void system_bridge_task(void *arg)
                      * already happened), making "nothing erased" a lie on
                      * that overlap -- see factory_reset.h's doc comment on
                      * FACTORY_RESET_ERR_MODE_GATE_REFUSED. */
-                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused by system mode gate -- "
-                                  "a firing or autotune run is active, nothing erased",
+                    ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused -- a firing, autotune run, "
+                                  "zone current sweep or backup restore is active, nothing erased",
                              msg->payload[1]);
+                } else if (err == FACTORY_RESET_ERR_REBOOT_FAILED) {
+                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u: storage erased, reboot failed -- "
+                                  "power-cycle now (rebooting inline)",
+                             msg->payload[1]);
+                    factory_reset_reboot_fallback();
                 } else if (err != ESP_OK) {
-                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u erase failed: %s -- rebooting anyway",
+                    ESP_LOGE(TAG, "system: FACTORY_RESET scope %u failed: %s -- a reboot follows only if the "
+                                  "erase was dispatched",
                              msg->payload[1], esp_err_to_name(err));
                 } else {
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u requested by host -- erasing and rebooting",

@@ -877,6 +877,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     /* 2026-10-09 route tier review LOW-3: recovery_mode lives here (OPEN,
      * dashboard) so GET /api/ota/esp/status can be ADMIN. Fixed for the boot. */
     APPEND(",\"recovery_mode\":%s", boot_guard_is_recovery_mode() ? "true" : "false");
+    /* HTTP audit L37 follow-up (LOW-1): true from the moment a factory reset sets relay_authority's
+     * in-flight mark until the board reboots (or the reset is refused before any erase). Run starts,
+     * sweep starts and the guarded config writers refuse while it is set. */
+    APPEND(",\"factory_reset_in_flight\":%s", relay_authority_reset_in_flight() ? "true" : "false");
     APPEND(",\"safety_build_known\":%s", ds->safety_build_known ? "true" : "false");
     if (ds->safety_build_known) {
         APPEND(",\"safety_config_version\":%u", (unsigned)ds->safety_config_version);

@@ -1057,6 +1057,9 @@ void ui_home_profile_label_refresh(const profile_exec_status_t *st)
  * this function's OWN small locals, not ui_home_refresh_cb()'s -- see this
  * function's prototype (ui_page_home_internal.h) for why it is kept
  * out-of-line rather than inlined into that callback's body. */
+_Static_assert(UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT == KILN_IO_RELAY_COUNT,
+               "aux caption table must cover every relay");
+
 void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_status_t *st)
 {
     for (uint32_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
@@ -1084,12 +1087,16 @@ void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_statu
         if (!zones_config_get_name((uint8_t)i, name_buf, sizeof(name_buf)) || name_buf[0] == '\0') {
             snprintf(name_buf, sizeof(name_buf), "Zone %u", (unsigned)(i + 1));
         }
-        lv_label_set_text(s_ui_home_rail_zone_name[i], name_buf);
+        if (ui_page_home_rail_text_changed(lv_label_get_text(s_ui_home_rail_zone_name[i]), name_buf)) {
+            lv_label_set_text(s_ui_home_rail_zone_name[i], name_buf);
+        }
 
         bool valid = (i < ds->channel_count) && ds->channels[i].valid;
         char temp_buf[16];
         ui_page_home_rail_format_zone_temp(valid, ds->channels[i].temp_c, temp_buf, sizeof(temp_buf));
-        lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
+        if (ui_page_home_rail_text_changed(lv_label_get_text(s_ui_home_rail_zone_temp[i]), temp_buf)) {
+            lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
+        }
 
         int pct = st->zones[i].active ? ui_page_home_rail_duty_pct(st->zones[i].duty) : 0;
         lv_bar_set_value(s_ui_home_rail_zone_bar[i], pct, LV_ANIM_OFF);

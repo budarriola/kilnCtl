@@ -447,6 +447,20 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* HTTP input parsing audit L23: `p` was copied before this lock, so a
+     * profile delete (profiles_delete_slot(), profiles_http.c) may be erasing
+     * the slot right now, or may have finished since. The delete sets its
+     * in-flight mark BEFORE its own running check, which takes this same lock;
+     * this re-check sits in the same locked section that commits RUNNING
+     * below, so one side always sees the other. Lock-free read only: never
+     * take the profiles save lock or wait on the flash worker under
+     * s_exec.lock (order: flash worker -> save lock -> s_exec.lock). */
+    if (!profiles_http_slot_runnable(profile_id)) {
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) snprintf(err_msg, err_cap, "profile is being deleted or was deleted -- not started");
+        return false;
+    }
+
     /* Re-run TODO.md section 5's feasibility check against every
      * participating zone's *current* ceiling -- 6A.5: a profile is only
      * feasible if every one of its zones can sustain the requested rate. */

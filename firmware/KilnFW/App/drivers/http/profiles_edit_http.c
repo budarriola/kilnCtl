@@ -11,9 +11,6 @@
 #include "MAX31856.h"
 #include "http_form.h"
 #include "live_profile.h" /* live_edit_name_collides() -- profile_post_handler()'s dup-name refusal */
-#include "profile_executor.h" /* profile_executor_get_status() -- Opus review item 2,
-                                 * PROFILE_SLOTS_100.md section 7: refuse to delete
-                                 * the slot the executor is currently running/paused on. */
 #include "profiles_builtin.h"
 #include "profiles_favorites.h"
 #include "cfg_fs_refusal_http.h"
@@ -767,52 +764,34 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing or out of range");
         return ESP_OK;
     }
-    if (!profiles_slot_used(id)) {
+    /* The whole sequence -- running check, favorite clear, stats prune, erase,
+     * and the delete-in-flight mark that a concurrent profile start checks
+     * under s_exec.lock (HTTP input parsing audit L23) -- lives in
+     * profiles_delete_slot() (profiles_http.c), shared with benchproto's
+     * profiles_http_delete(). No lock is held here across the call; see that
+     * function's comment for the lock order. */
+    switch (profiles_delete_slot((uint8_t)id)) {
+    case PROFILES_DELETE_OK:
+        return httpd_resp_sendstr(req, "ok");
+    case PROFILES_DELETE_NOT_FOUND:
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
-    }
-    /* Opus review item 2 (PROFILE_SLOTS_100.md section 7): refuse to
-     * delete a slot the executor is currently running or has paused. Same
-     * check as profiles_http.c's benchproto profiles_http_delete(). */
-    /* Only "is this id currently running/paused" is needed here -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
-     * profile_exec_status_t stack local on the httpd task. */
-    uint8_t active_id = 0;
-    if (profile_executor_get_active_id(&active_id) && active_id == id) {
+    case PROFILES_DELETE_RUNNING:
         /* Set explicitly rather than via httpd_resp_send_err(): esp_http_server
          * has no HTTPD_409_CONFLICT enumerator (kiln_cfg_http.c's identical
          * comment/pattern). */
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_sendstr(req, "profile is currently running -- stop it before deleting");
-    }
-
-    /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
-     * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window
-     * where a power cut between the two steps could survive with the slot
-     * erased but its favorite bit still set -- an import that later lands on
-     * this same id inherits that orphaned favorite (profiles_favorites.h's
-     * lifecycle keeps favorites across import, deliberately, unlike delete).
-     * A failed save is logged inside the module and does not fail the
-     * delete. */
-    (void)profiles_favorites_set((uint8_t)id, false);
-    /* Prune firing history before the slot is touched so a failure leaves the
-     * slot in place and the delete retryable (see profiles_http_delete()). */
-    if (firing_stats_erase((uint8_t)id) != ESP_OK) {
+    case PROFILES_DELETE_BUSY:
+        httpd_resp_set_status(req, "409 Conflict");
+        return httpd_resp_sendstr(req, "busy: this profile is already being deleted, retry");
+    case PROFILES_DELETE_BUILTIN:
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "built-in schedules are read-only and cannot be deleted");
+        return ESP_OK;
+    case PROFILES_DELETE_PERSIST_FAILED:
+    default:
         return cfg_fs_http_persist_failed(req);
     }
-    profiles_save_lock();
-    esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
-    if (err == ESP_OK) {
-        profiles_slot_clear(id);
-        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    }
-    profiles_save_unlock();
-    if (err != ESP_OK) {
-        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%ld) failed: %s -- slot kept, retry", id,
-                 esp_err_to_name(err));
-        return cfg_fs_http_persist_failed(req);
-    }
-    return httpd_resp_sendstr(req, "ok");
 }
 
 /* ---- Builtin hide / unhide / restore ---------------------------------------
