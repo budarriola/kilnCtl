@@ -158,6 +158,8 @@ This pass was a read-only Opus review. It covered the parts the first pass left 
 
 ### R2-L1 (LOW): recovery exit and boot_guard reset fail outright when kiln_nvs failed to init in recovery
 
+**Status: FIXED in SHA: exit and boot_guard_reset now use `boot_guard_clear_or_na()`; a real write/verify failure is still a failure. Host-pinned by `check_recovery_wifi_policy.ps1` source scan + mutant.**
+
 `boot_guard_reset_post` and `recovery_exit_post` in `firmware/KilnFW_recovery/main/recovery_http.c` call plain `clear_boot_guard()`. They do not call `boot_guard_clear_or_na()`, which treats the `RECOVERY_NVS_FAIL_KILN` init-failure bit as "not applicable".
 
 If kiln_nvs failed to init, `nvs_open_from_partition()` returns `ESP_ERR_NVS_PART_NOT_FOUND`, not `ESP_ERR_NVS_NOT_FOUND`. As a result exit always answers 500 and never selects `app`. The same state does not block apply and direct upload, because both use the `_or_na` variant. After a first-boot power cut, exit is the documented operator action. The only way out of this state is to re-upload or re-apply an app image.
@@ -165,6 +167,8 @@ If kiln_nvs failed to init, `nvs_open_from_partition()` returns `ESP_ERR_NVS_PAR
 The `_or_na` assumption is sound (see R2-I2), so exit could use it too.
 
 ### R2-L2 (LOW): recovery Wi-Fi reset can be undone by the app's legacy adoption
+
+**Status: FIXED in SHA: `wifi_reset_post` also erases the default-partition `wifi_cfg` namespace (`nvs_erase_all`) and answers success only through `rhp_wifi_reset_ok()`; an unreachable default partition counts as not applicable. Pinned by the policy check + mutants.**
 
 `wifi_reset_post` erases the `WIFI_RESET_KEYS` in `wifi_nvs`/`wifi_cfg` only. On the next boot, the app's `wifi_prov_migrate_from_default_partition()` (`firmware/KilnFW/App/drivers/net/wifi_prov_nvs.c`) sets `adopt = !nvs_saved_nets_record_present(...)`. The reset just erased `saved_nets`, so `adopt` is true. Any legacy `wifi_cfg` copy still in the default `nvs` partition is then adopted, and the forgotten network comes back.
 
@@ -177,11 +181,15 @@ Suggested fixes, either of which closes it:
 
 ### R2-L3 (LOW, test vacuity): `ric_boot_guard_decode` version check is untested
 
+**Status: FIXED in SHA: the wrong-version vector now carries a valid CRC; negtest of the version comparison is CAUGHT.**
+
 In `test_recovery_image_check.c`, the wrong-version vector sets `rec[0]=2` without recomputing the CRC. The CRC check therefore rejects the vector before the version check is reached. A negtest that deleted the version comparison was MISSED (table below).
 
 The impact is limited to the boot_guard count shown on the status page and LCD. The recovery image never acts on that count. The fix is to recompute the CRC in that vector.
 
 ### R2-I1 (INFO): direct ESP upload has no boot_guard pre-clear probe
+
+**Status: FIXED in SHA: `ota_esp_post` clears the boot counter before streaming into `app`; failure refuses with `app` untouched and the body unread (same existing pattern as the no-app-partition refusal), no new failure mode. A rejected upload leaves the counter cleared, which is harmless.**
 
 `ota_esp_post` streams and overwrites `app` first, and only then calls `boot_guard_clear_or_na()`. Apply probes before it writes; this is the M1 ordering it was fixed to follow. If the clear fails here, the new image sits in `app` unselected, and with R2-L1 exit fails too.
 
@@ -199,11 +207,15 @@ So when recovery cannot open kiln_nvs, skipping the clear does not walk the app 
 
 ### R2-I3 (INFO): stale docs on Pico contact and S6b
 
+**Status: FIXED in SHA: `docs/OTA_SINGLE_SLOT.md` section 6 corrected (update/status/reboot frames, never arm/heat); expected S6b latch documented there and in `docs/RECOVERY_IMAGE_PLAN.md`.**
+
 `docs/OTA_SINGLE_SLOT.md:126` says the recovery image "contains no code that can talk to the Pico at all". That is no longer true: `recovery_pico.c` sends kilnlink frames. It sends only `UPDATE_*`, `ANNOUNCE_VERSION` (0x0F), `GET_STATUS` and `REBOOT` (0x29), and no arm or heat command, so the safety conclusion still holds.
 
 Neither `docs/RECOVERY_IMAGE_PLAN.md` nor `docs/GITHUB_RELEASE_UPDATE_PLAN.md` says that an S6b (link-dead) latch is the expected result of any recovery dwell. Nor do they say that it needs a clear after exit; the owner decision is to clear it without asking when the cause is the recovery image. Both points are worth a sentence in the plan.
 
 ### R2-I4 (INFO, test vacuity): apply copy erase granularity is not pinned
+
+**Status: FIXED in SHA: `test_recovery_apply.c` asserts exactly two 64 KiB app erases plus yields; negtest of the erase-ahead clamp is CAUGHT.**
 
 `recovery_apply.c` erases `app` in 64 KB blocks just ahead of the copy and yields between blocks. A negtest that replaced this with a single erase of the whole remaining partition was MISSED: the host test still passed (194/0). Under that mutation a long blocking erase would starve the httpd/watchdog. Nothing would catch it before a bench run.
 
