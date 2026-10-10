@@ -89,7 +89,14 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: draw boot_id from the RP2040 ROSC / `get_rand_32()`, and/or
   have the ESP also treat a `diag_uptime_ms` regression as a reboot.
 
-### M2. COMMIT_CONFIG / APPLY_CONFIG_VOLATILE silently revert an earlier SET_CONFIG or SET_CT_CAL (two copies of one record)
+### M2. COMMIT_CONFIG / APPLY_CONFIG_VOLATILE silently revert an earlier SET_CONFIG or SET_CT_CAL (two copies of one record) -- FIXED in 70451274
+
+- Fix: staging is now a list of SET_PARAM edits (`link_staging.c`), not a
+  record. COMMIT/APPLY build the candidate at commit time from the
+  currently enforced record plus those edits, so an unstaged field always
+  keeps its committed value. A successful SET_CONFIG/SET_CT_CAL also drops
+  earlier staged edits of the fields it changed or targeted, so the later
+  write wins. Tests: `test_link_staging.c`.
 
 - `link_task.c:488-498`: `s_staged_config` is seeded from the committed
   record once per Pico boot (`s_staged_config_init`, reset only at line
@@ -124,7 +131,14 @@ stale, or a legitimate command sequence whose state goes out of step.
   direct `config_store_write*()` in link_task, or have both direct writers go
   through the staging path.
 
-### M3. Staged SET_PARAMs outlive the ESP boot that sent them (reset-one-side across processors)
+### M3. Staged SET_PARAMs outlive the ESP boot that sent them (reset-one-side across processors) -- FIXED in 70451274
+
+- Fix: `link_task_handle_push_context()` discards staged edits when the
+  ESP boot_id changes or PUSH_CONTEXT stopped for at least
+  `LINK_TASK_CONTEXT_MAX_AGE_MS` (a same-id reboot, or link loss). The
+  guard accumulators are still not reset there. The sweep repair in
+  `zones_current_sweep_task.c` still covers the same-session case; its
+  comment now says so. Tests: `test_link_staging.c`.
 
 - `link_task.c:488-498` and `:3325`: staging is reset only when the Pico
   boots. The Pico computes an ESP boot_id change in
@@ -224,7 +238,15 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: refuse `gain <= 0` (and bound `|offset|`) in
   `config_params_set()` and `config_params_validate_ranges()`.
 
-### L3. Flash-writing commands are not idempotent or rate-limited; a stale comment says a no-op write cannot happen
+### L3. Flash-writing commands are not idempotent or rate-limited; a stale comment says a no-op write cannot happen -- FIXED in 51101ad0
+
+- Fix: after the write decision, `config_store_write_ex()` compares the
+  packed candidate (with the persisted seq) against the current slot's
+  flash bytes and, when they match, updates RAM and returns OK with no
+  erase or program. An identical write is still refused while ARMED. Real
+  writes keep the erased-slot check and read-back. The comment is
+  corrected. Not rate-limited: a changed record still writes every time.
+  Tests: `test_config_store_flash.c` (three `audit L3` cases).
 
 - `config_store_flash.c:1380-1390`: the comment says "a no-op write is not
   on any call path here". Yet a COMMIT_CONFIG with nothing staged (`1D`), a
