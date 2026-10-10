@@ -27,7 +27,7 @@ from kilnctrl.coordinated_gpio_test import GpioTestPreflight  # noqa: E402
 
 def _ok_gpio_preflight(host=None):
     """A GpioTestPreflight with every precondition satisfied -- refusal_reasons() == []."""
-    return GpioTestPreflight(
+    return GpioTestPreflight(autotune_active=False, 
         safety_armed=False, profile_running_or_paused=False, profile_state_name="idle",
         ota_interlock_ok=True, ota_interlock_reason="ok", link_up=True,
     )

@@ -3287,7 +3287,7 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             # cases) and is NOT by itself a safe gate for starting an
             # unsolicited firing here; ctx["lcd19_allow_heat"] is the
             # separate, default-False opt-in specific to this sub-check.
-            allow_heat = bool(ctx.get("allow_heat")) and bool(ctx.get("lcd19_allow_heat"))
+            allow_heat = ctx.get("allow_heat") is True and ctx.get("lcd19_allow_heat") is True
             if not firing_active:
                 # Scope-addition, 2026-09-30 review: the `set_policy`
                 # enable above (line ~2866) trips the same tick_timer_cb

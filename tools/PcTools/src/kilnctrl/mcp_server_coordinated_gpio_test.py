@@ -68,6 +68,12 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
     except Exception:  # noqa: BLE001
         running_or_paused = None
         state_name = "(unknown)"
+    try:
+        at_state = _srv._autotune.get_status().state_name
+        autotune_active = at_state not in ("idle", "done", "aborted")
+    except Exception:  # noqa: BLE001
+        at_state = "(unknown)"
+        autotune_active = None
     resolved_host = _gpio_test_resolve_host(host)
     try:
         interlock = ota_http.get_interlock(resolved_host)
@@ -86,6 +92,8 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
         ota_interlock_reason=ota_reason,
         link_up=link_up,
         ota_interlock_needs_ack=ota_needs_ack,
+        autotune_active=autotune_active,
+        autotune_state_name=at_state,
     )
 
 

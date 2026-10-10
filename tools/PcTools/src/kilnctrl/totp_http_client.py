@@ -132,8 +132,9 @@ def _parse_json_body(path: str, status: int, body: str) -> dict:
             # code alone is what the caller branches on.
             return {}
         raise TotpHttpError(
-            f"POST {path} returned HTTP {status} but the body was not JSON: {body!r}",
-            status, body) from exc
+            f"POST {path} returned HTTP {status} but the body was not JSON "
+            f"({len(body)} bytes, body not echoed)",
+            status, "") from exc
     if not isinstance(parsed, dict):
         if not 200 <= status < 300:
             return {}

@@ -846,8 +846,9 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
     before_persisted: object = None
     try:
         before_data = ota_http.get_boot_guard_status(resolved)
-        before_persisted = before_data.get("persisted_count")
-    except (ota_http.OtaHttpError, http_auth.HttpAuthError) as exc:
+        before_persisted = (before_data.get("persisted_count")
+                            if isinstance(before_data, dict) else _BOOT_GUARD_GET_FAILED)
+    except (ota_http.OtaHttpError, http_auth.HttpAuthError, OSError) as exc:
         before_persisted = _BOOT_GUARD_GET_FAILED
         _srv._session_log.warning("flash_firmware: pre-reset GET /api/boot_guard failed (informational "
                                    "only, does not block the reset call): %s", exc)
@@ -863,11 +864,15 @@ def _maybe_reset_boot_guard(host: Optional[str], pre_flash_host: Optional[str],
         # this is reported as a skip, never as a lost flash result.
         _srv._session_log.warning("flash_firmware: boot_guard_reset skipped, no admin session: %s", exc)
         return "boot_guard reset skipped: no admin session"
-    except ota_http.OtaHttpError as exc:
+    except (ota_http.OtaHttpError, OSError) as exc:
         _srv._session_log.warning("flash_firmware: boot_guard_reset call failed: %s", exc)
         return (f"WARNING: boot_guard_reset call failed ({exc}) -- the flash itself landed fine, "
                 f"but the recovery-mode counter was NOT cleared by this flash (persisted counter "
                 f"before this attempt: {before_str}).")
+    if not isinstance(body, dict):
+        return (f"WARNING: boot_guard_reset answered with an unexpected non-object body ({body!r}) -- "
+                "the flash itself landed fine, but the recovery-mode counter was NOT confirmed "
+                f"cleared (persisted before={before_str}).")
     after_str = _fmt_persisted(body.get("persisted_count"))
     if body.get("ok"):
         return (f"boot_guard_reset: persisted counter cleared and verified "
@@ -1026,6 +1031,8 @@ def flash_firmware(
     allow_partition_offset_mismatch: bool = False,
     erase_partitions: Optional["list[str]"] = None,
     confirm_erase: bool = False,
+    confirm: bool = False,
+    allow_unreadable_board_state: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -1041,6 +1048,16 @@ def flash_firmware(
     does NOT do a bare full-chip erase), ending in a reset so the board boots
     the new app immediately. A pre-flight size check refuses, naming both
     byte counts, if `KilnCtrl.bin` is larger than that partition.
+
+    `confirm` must be exactly True (default False refuses before OpenOCD is
+    touched): a flash resets the main board, so a firing must never be in
+    progress. After the adapter check this also reads the live board state
+    (same read as `flash_recovery`, `_recovery_board_state_refusals`): a
+    running/paused profile, autotune, an energized relay or a latched trip
+    is a hazard no flag overrides; a safety-link-down state is waived (a
+    dual reflash and bring-up legitimately have it); state that merely
+    cannot be READ refuses unless `allow_unreadable_board_state=True`
+    (bring-up of a board whose HTTP/UART link is not up).
 
     Requires `idf.py build` to have already produced KilnFW/build/*.bin --
     this tool does not build, only flashes.
@@ -1339,9 +1356,25 @@ def flash_firmware(
         except ValueError as exc:
             return f"error: {exc}"
 
+    if confirm is not True:
+        return (
+            "error: refusing to flash without confirm=True (exactly True) -- a flash "
+            "resets the main board and must never happen during a firing or autotune."
+        )
+
     adapter_refusal = _refuse_if_adapter_absent(MAIN_BOARD_JTAG_SERIAL, "main board (ESP32-S3)")
     if adapter_refusal:
         return adapter_refusal
+
+    hazards, unreadable, _state_notes = _recovery_board_state_refusals(host, allow_link_down=True)
+    if hazards:
+        return ("error: refusing to flash -- observed hazard (no flag overrides this): "
+                + "; ".join(hazards))
+    if unreadable and allow_unreadable_board_state is not True:
+        return ("error: refusing to flash -- board state could not be read: "
+                + "; ".join(unreadable)
+                + ". Pass allow_unreadable_board_state=True only for bring-up of a board whose "
+                "HTTP/UART link is not up.")
 
     # M1 (2026-09-15 review): flash_provenance.json used to live at
     # <build_dir>/flash_provenance.json -- inside build/, exactly like the
@@ -1970,7 +2003,16 @@ def fixture_flash(
             return f"error: {exc}"
         images.append((partition_table_bin, f"0x{fixture_partition_table_offset:x}"))
     if app_bin:
-        images.append((app_bin, "0x810000"))
+        # Resolved from the fixture's own partitions.csv, never a hardcoded
+        # offset: 0x810000 was the long-dead pre-single-slot `factory` slot
+        # and silently pointed elsewhere after the table redesign (same class
+        # as the flash_firmware() incident). No table = no guess.
+        try:
+            fixture_app_target = _resolve_app_flash_target(fixture_root)
+        except ValueError as exc:
+            return (f"error: cannot determine where to flash the fixture app image -- {exc}. "
+                    "Refusing to guess an offset.")
+        images.append((app_bin, f"0x{fixture_app_target.offset:x}"))
     if not images:
         return (
             "error: no image path given -- pass at least one of bootloader_bin, "

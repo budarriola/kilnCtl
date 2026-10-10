@@ -35,7 +35,8 @@ refused. Built to restore the bench coupling cells the backup-import bug
 fixed in `fee835fa`/`b4bad2c7` zeroed, without `load_config_preset()`'s
 whole-page write. GET-merge-POST like `control_set_zone_type`, except that it
 strips the fields `zones_http_post_parse.c` omit-preserves (every other
-coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`)
+coupling cell, the `k`/`tau`/`deadtime` plant model, `coupling_diag_k_dc`,
+and `hystc`/`coilpower`)
 so the firmware keeps them bit-exact instead of taking GET's rounded print;
 required fields such as PID gains are re-posted from GET's lossless `%.9g` print (tau/deadtime print at `%.1f` but are omit-preserved). Refuses unless `confirm is True`,
 refuses mid-run (precheck plus the `system_mode_gate` 409), and fails loud
@@ -288,7 +289,9 @@ the toolchain invocations do not have to be rediscovered. Flashing is
 instead — `debug_program(peer="esp")` now **refuses immediately**, before touching
 OpenOCD at all, because that generic single-ELF path reliably fails flash-bank
 detection/verify on this board (confirmed repeatedly); `flash_firmware()` is the
-sanctioned working path, still OpenOCD, never esptool.
+sanctioned working path, still OpenOCD, never esptool. It now requires
+`confirm=True` (exactly), refuses on a recovery-image or unreadable board state
+(`allow_unreadable_board_state=True` overrides only the unreadable case).
 
 `flash_firmware()` accepts an optional `kiln_fw_root` override (absolute path
 to a `firmware/KilnFW`-shaped directory whose `build/` already holds the
@@ -355,7 +358,10 @@ Full procedure and rationale: `docs/MCP_SERVERS.md`'s flash section,
 `firmware/SaftyFW/docs/ARCHITECTURE.md`'s "Correction, 2026-08-27 audit"
 section.
 
-`ota_rollback_esp()` itself has a hazard, 2026-09-04: rolling back past a
+`ota_rollback_esp()` itself has a hazard, 2026-09-04 (historical: on the current
+single-slot design rollback is unavailable and the update path is stage +
+`recovery_enter` + `recovery_apply_staged`; this applies to any older dual-slot
+image): rolling back past a
 `zones_cfg` schema bump (e.g. v22, `ZONES_CFG_VERSION` in
 `firmware/KilnFW/App/drivers/persist/zones_config_json.h`) makes the older firmware
 refuse the newer-than-it-knows blob and run that boot on **firmware-default

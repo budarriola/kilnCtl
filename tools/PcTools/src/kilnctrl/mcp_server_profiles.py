@@ -76,7 +76,7 @@ from . import mcp_server_core as _core
 def profiles_list() -> str:
     """List every profile on the board: id, name, zone_mask, segment count.
 
-    Covers both id spaces -- the 8 writable user slots (ids 0-7) and the
+    Covers both id spaces -- the 100 writable user slots (ids 0-99) and the
     read-only firing schedules that ship in flash (ids 128+). The listing is
     paged over the link because the full catalogue does not fit in one frame;
     that is handled here. Schedules the user has hidden are not listed.
@@ -108,7 +108,7 @@ def profiles_list() -> str:
 def profiles_get(profile_id: int) -> str:
     """Read one profile's full segment list (target_c, ramp_c_per_hr, dwell_min per segment).
 
-    ``profile_id`` is either a writable user slot (0-7) or one of the
+    ``profile_id`` is either a writable user slot (0-99) or one of the
     read-only firing schedules shipped in flash (ids 128 and up -- see
     profiles_list). A built-in reports the zone mask it would run with, taken
     from the configured zones.
@@ -130,8 +130,11 @@ def profiles_get(profile_id: int) -> str:
 
 
 @_core._tool()
-def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str) -> str:
-    """Create (profile_id=-1) or overwrite a user profile (slots 0-7).
+def profiles_save(
+    profile_id: int, name: str, zone_mask: int, segments_json: str,
+    host: Optional[str] = None, allow_strip: bool = False,
+) -> str:
+    """Create (profile_id=-1) or overwrite a user profile (slots 0-99).
 
     ``segments_json`` is a JSON array of
     ``{"target_c": .., "ramp_c_per_hr": .., "dwell_min": ..}`` objects, one per
@@ -140,6 +143,14 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
     Passing a built-in id (128+) does NOT overwrite the shipped schedule --
     those are read-only flash -- it saves the submitted profile as a copy into
     the first free user slot. The reply names the slot it landed in.
+
+    This UART path carries only plain segments: overwriting a slot that holds
+    aux/on-off rules or relay-IO segments would silently STRIP them (the
+    save rebuilds the profile from the submitted segments alone). The existing
+    slot is read over HTTP first and the save is REFUSED if it holds either,
+    or if it cannot be read (fail closed); allow_strip=True (exactly True)
+    overrides. After a successful save the slot is read back over UART and the
+    name and segment count compared.
 
     Not confirm-gated by design: saving a profile is a routine, recoverable edit; the board validates and locks it.
     """
@@ -158,6 +169,10 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         return f"error: could not parse segments_json: {exc}"
     pid = PROFILES_SAVE_ID_NEW if profile_id < 0 else profile_id
+    if pid != PROFILES_SAVE_ID_NEW and not profile_id_is_builtin(pid) and allow_strip is not True:
+        refusal = _profile_slot_strip_refusal(pid, host)
+        if refusal is not None:
+            return refusal
     try:
         result = _srv._profiles.save(pid, name, zone_mask, segments)
     except ProfilesQueryError as exc:
@@ -165,12 +180,50 @@ def profiles_save(profile_id: int, name: str, zone_mask: int, segments_json: str
     if not result.ok:
         return f"refused: {result.error}"
     suffix = f", {result.warning_count} warning(s)" if result.warning_count else ""
-    return f"ok - saved as #{result.id}{suffix}"
+    try:
+        got = _srv._profiles.get(result.id)
+    except Exception:  # noqa: BLE001
+        got = None
+    if got is None:
+        return f"ok - saved as #{result.id}{suffix} (read-back unavailable; UNVERIFIED)"
+    if got.name != name or len(got.segments) != len(segments):
+        return (f"FAILED - board reported ok for #{result.id} but read-back differs "
+                f"(name {got.name!r}, {len(got.segments)} segment(s); wanted {name!r}, {len(segments)})")
+    return f"ok - saved as #{result.id}{suffix}, read back verified"
+
+
+def _profile_slot_strip_refusal(pid: int, host: Optional[str]) -> Optional[str]:
+    """Refusal text if overwriting user slot ``pid`` over UART would strip aux
+    rules / relay-IO segments (or the slot cannot be inspected), else None."""
+    from . import aux_http_client as ahc  # local: keeps module import light
+    from .mcp_server_ota import _ota_resolve_host  # local: circular, same convention as mcp_server_aux
+    try:
+        resolved = _ota_resolve_host(host)
+        detail = ahc._get_json(resolved, f"/api/profile?id={pid}", ahc.AUX_HTTP_TIMEOUT_S)
+    except ahc.AuxHttpError as exc:
+        if exc.status == 404:
+            return None  # empty slot: nothing to strip
+        return (f"refused: could not read existing slot #{pid} over HTTP ({exc}) to check for aux rules / "
+                "relay-IO segments that this UART save would strip; pass allow_strip=True to save anyway")
+    except Exception as exc:  # noqa: BLE001 - host unresolved etc: fail closed
+        return (f"refused: could not inspect slot #{pid} ({type(exc).__name__}: {exc}); "
+                "pass allow_strip=True to save anyway")
+    if not isinstance(detail, dict):
+        return f"refused: slot #{pid} read-back was not an object; pass allow_strip=True to save anyway"
+    rules = detail.get("on_off_rules")
+    segs = detail.get("segments")
+    relay_io = [i + 1 for i, sg in enumerate(segs if isinstance(segs, list) else [])
+                if isinstance(sg, dict) and sg.get("seg_kind") == 1]
+    if (isinstance(rules, list) and rules) or relay_io:
+        return (f"refused: slot #{pid} holds {len(rules) if isinstance(rules, list) else 0} aux/on-off rule(s) "
+                f"and relay-IO segment(s) {relay_io}; a UART save rebuilds the profile from plain segments and "
+                "would STRIP them. Edit via the web UI / POST /api/profile, or pass allow_strip=True.")
+    return None
 
 
 @_core._tool()
 def profiles_delete(profile_id: int) -> str:
-    """Delete a saved user profile (slots 0-7). Refused if it is the one currently running.
+    """Delete a saved user profile (slots 0-99). Refused if it is the one currently running.
 
     Built-in schedules (ids 128+) cannot be deleted -- they are const data in
     flash. Hide one instead, via the web UI / POST /api/profile/builtin/hide,
@@ -223,7 +276,7 @@ def profiles_start(profile_id: int) -> str:
     """Start firing a profile. This is the tool that turns on heat --
     same interlocks as the GUI/HTTP start button, nothing weaker.
 
-    ``profile_id`` is a user slot (0-7) or one of the read-only schedules
+    ``profile_id`` is a user slot (0-99) or one of the read-only schedules
     shipped in flash (ids 128+); both run the same way. A built-in fires every
     configured zone, since the catalogue itself is zone-agnostic.
 
@@ -248,7 +301,7 @@ def profiles_stop() -> str:
     if result.ok:
         return "ok - stopped"
     detail = f": {result.reason}" if result.reason else ""
-    return f"refused - nothing running to stop{detail}"
+    return f"refused - could not stop{detail or ' (board gave no reason; it may have nothing running)'}"
 
 
 @_core._tool()
@@ -261,7 +314,7 @@ def profiles_pause() -> str:
     if result.ok:
         return "ok - paused"
     detail = f": {result.reason}" if result.reason else ""
-    return f"refused - nothing running to pause{detail}"
+    return f"refused - could not pause{detail or ' (board gave no reason; it may have nothing running)'}"
 
 
 @_core._tool()
@@ -274,7 +327,7 @@ def profiles_resume() -> str:
     if result.ok:
         return "ok - resumed"
     detail = f": {result.reason}" if result.reason else ""
-    return f"refused - nothing paused to resume{detail}"
+    return f"refused - could not resume{detail or ' (board gave no reason; it may have nothing paused)'}"
 
 
 @_core._tool()

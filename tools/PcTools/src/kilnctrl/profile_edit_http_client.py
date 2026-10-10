@@ -188,6 +188,10 @@ def post_profile(
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
         raise ProfileEditHttpError(f"POST /api/profile unreachable: {detail}") from exc
+    except (http_auth.HttpAuthError, TimeoutError, OSError) as exc:
+        # A login failure, read timeout or socket error is still a transport
+        # failure: callers catch only ProfileEditHttpError.
+        raise ProfileEditHttpError(f"POST /api/profile failed: {type(exc).__name__}: {exc}") from exc
     try:
         parsed = json.loads(body_text)
     except Exception as exc:

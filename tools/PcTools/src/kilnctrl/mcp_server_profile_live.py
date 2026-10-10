@@ -4,9 +4,9 @@ profile_live_http_client.py. See that client module's docstring for the full
 wire contract; this module is a thin MCP layer over it: host resolution,
 confirm-gating on writes, and echoing the board's own response text.
 
-NOT YET VERIFIED AGAINST REAL HARDWARE -- request construction/response
-parsing are unit-tested with mocked HTTP only (see
-tools/PcTools/tests/test_profile_live_http_client.py).
+Request construction/response parsing are unit-tested with mocked HTTP
+(tools/PcTools/tests/test_profile_live_http_client.py). Each write tool reads
+the live status back afterwards and says so in its reply.
 """
 from __future__ import annotations
 
@@ -31,6 +31,26 @@ def _profile_live_resolve_host(host: Optional[str]) -> str:
     except WifiUartQueryError:
         pass
     return "192.168.4.1"
+
+
+def _live_readback(resolved: str, expect: str, name: Optional[str] = None) -> str:
+    """GET the live status (and content for edit) after a write and compare.
+    Returns a suffix: "; read-back OK", or a FAILED / UNVERIFIED note."""
+    try:
+        st = profile_live_http.get_live_status(resolved)
+        if expect == "edit":
+            body = profile_live_http.get_live_content(resolved)
+    except Exception as exc:  # noqa: BLE001 - the write already happened
+        return f"; read-back UNVERIFIED ({type(exc).__name__}: {exc})"
+    if not isinstance(st, dict):
+        return "; read-back UNVERIFIED (status was not an object)"
+    if expect == "fork":
+        ok = bool(st.get("active")) and st.get("working_id", -1) not in (-1, None)
+    elif expect == "edit":
+        ok = isinstance(body, dict) and body.get("name") == name
+    else:  # decide: the pending working copy is resolved
+        ok = not st.get("pending_decision")
+    return "; read-back OK" if ok else f"; FAILED read-back: live status {st!r} does not show the {expect} took effect"
 
 
 @_core._tool()
@@ -85,7 +105,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'fork')}"
 
 
 @_core._tool()
@@ -134,7 +154,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'edit', name)}"
 
 
 @_core._tool()
@@ -179,7 +199,7 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved})"
+    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'decide')}"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

@@ -176,7 +176,7 @@ of this fix.
 1. Restart the `kilnctrl` MCP server so `fixture_*` is published.
 2. Fixture only: `fixture_list_relays()` then `fixture_get_relays()` should
    read all-high (de-energized) at boot.
-3. `fixture_set_relay("U4:P00", true)` then `fixture_get_relays()` — confirm
+3. `fixture_set_relay("U4:P00", true, confirm=true)` then `fixture_get_relays()` — confirm
    the bit flips (nothing externally wired to observe yet).
 4. Run `SCAN` to confirm U5's real address — `DEFAULT_RELAY_MAP` assumed
    0x21 without hardware confirmation.

@@ -352,7 +352,7 @@ def _case_fl10(ctx: dict) -> CaseResult:
         return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-10")
 
     srv = _srv(ctx)
-    kwargs = {"verify": True}
+    kwargs = {"verify": True, "confirm": True}
     kiln_fw_root = ctx.get("kiln_fw_root")
     if kiln_fw_root:
         kwargs["kiln_fw_root"] = kiln_fw_root

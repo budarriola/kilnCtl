@@ -96,7 +96,7 @@ def clear_sessions() -> None:
     _SESSIONS.clear()
 
 
-def credentials() -> Tuple[str, str]:
+def credentials(password_override: Optional[str] = None) -> Tuple[str, str]:
     """Return ``(username, password)`` from the environment.
 
     Raises :class:`HttpAuthError` naming both variables if either is missing
@@ -104,7 +104,7 @@ def credentials() -> Tuple[str, str]:
     and reporting the board's rejection instead of the real cause.
     """
     username = os.environ.get(USERNAME_ENV) or ""
-    password = os.environ.get(PASSWORD_ENV) or ""
+    password = password_override or os.environ.get(PASSWORD_ENV) or ""
     if not username or not password:
         missing = [name for name, value in ((USERNAME_ENV, username), (PASSWORD_ENV, password))
                    if not value]
@@ -185,14 +185,14 @@ def _set_cookie_values(resp) -> "list[str]":
     return [value] if value else []
 
 
-def _login(origin: str, timeout: Optional[float]) -> str:
+def _login(origin: str, timeout: Optional[float], password_override: Optional[str] = None) -> str:
     """Log in at ``origin`` and return the session cookie value.
 
     Raises :class:`HttpAuthError` for a missing credential, a refused login,
     an unreachable board, or a 200 that carried no session cookie. Never
     retries: one attempt, then a clear error.
     """
-    username, password = credentials()
+    username, password = credentials(password_override)
     body = urllib.parse.urlencode({"username": username, "password": password}).encode("ascii")
     req = urllib.request.Request(
         origin + LOGIN_PATH, data=body, method="POST",
@@ -231,7 +231,7 @@ def _login(origin: str, timeout: Optional[float]) -> str:
         f"POST {origin}{LOGIN_PATH} succeeded but returned no {SESSION_COOKIE_NAME} cookie")
 
 
-def login(origin: str, timeout: Optional[float] = None) -> str:
+def login(origin: str, timeout: Optional[float] = None, password_override: Optional[str] = None) -> str:
     """Public wrapper around the same one-shot login :func:`urlopen` uses
     internally on a 401. For a caller that needs the raw session cookie
     VALUE up front -- rather than an authenticated response -- e.g. to hand
@@ -241,7 +241,7 @@ def login(origin: str, timeout: Optional[float] = None) -> str:
     call through :func:`urlopen` for the same origin reuses it rather than
     logging in twice.
     """
-    return _login(origin, timeout)
+    return _login(origin, timeout, password_override)
 
 
 def logout(origin: str, timeout: Optional[float] = None) -> bool:

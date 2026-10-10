@@ -62,6 +62,32 @@ from .thermo import ThermoClient, ThermoQueryError
 from . import mcp_server_core as _core
 
 
+def _wifi_write_refusal(confirm: object, what: str, allow_running: object = False) -> Optional[str]:
+    """Common gate for Wi-Fi writes: confirm is True exactly, and not mid-firing
+    (a join/mode switch can drop the AP/STA link the operator is watching the
+    firing through)."""
+    if confirm is not True:
+        return f"error: {what} refused without confirm=True -- it changes the board's network configuration"
+    if allow_running is not True:
+        try:
+            status = _srv._profiles.get_exec_status(timeout=2.0)
+        except Exception:  # noqa: BLE001 - unreachable executor must not block
+            status = None
+        if status is not None and status.state in (1, 2):
+            return (f"error: {what} refused while a profile is {status.state_name} -- a Wi-Fi change can "
+                    "drop the link mid-firing. Stop the profile first or pass allow_running=True.")
+    return None
+
+
+def _wifi_readback_networks(ssid: str) -> "Optional[bool]":
+    """True/False if ssid is in the saved list, None if unreadable."""
+    try:
+        entries, _trunc = _srv._wifi.get_networks()
+    except Exception:  # noqa: BLE001
+        return None
+    return any(e.ssid == ssid for e in entries)
+
+
 # ---------------------------------------------------------------------------
 # WIFI (task 11) -- status/scan/provision/forget over UART
 #
@@ -106,7 +132,9 @@ def wifi_get_status(host: Optional[str] = None) -> str:
     ap_pending_teardown = "unknown (no host given and no STA IP)"
     if http_host:
         try:
-            data = wifi_prov_http_client.get_status(http_host)
+            # An explicit caller-supplied host is not established as the board:
+            # trusted=False sends no credential and never records it as default.
+            data = wifi_prov_http_client.get_status(http_host, trusted=host is None)
         except wifi_prov_http_client.WifiProvHttpError:
             ap_pending_teardown = "unknown (unreachable over HTTP)"
         else:
@@ -141,7 +169,9 @@ def wifi_scan() -> str:
 
 
 @_core._tool()
-def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None) -> str:
+def wifi_add_network(
+    ssid: Optional[str] = None, password: Optional[str] = None, confirm: bool = False, allow_running: bool = False
+) -> str:
     """Save a network and immediately attempt to join it -- this is the
     one-step way to connect the board to a specific scanned network; no
     separate wifi_set_mode() call is needed first. If the board is currently
@@ -158,8 +188,15 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
     saved from the GUI's Wi-Fi Settings popup (see wifi_credentials.py) --
     fails with a clear error if nothing has been saved that way yet.
 
-    Not confirm-gated by design: network credentials are not destructive and are re-addable; passwords are never echoed (note: the password travels as a tool parameter, which MCP clients may log -- prefer the settings page or an env-var-fed path for a real credential).
+    Requires confirm=True (exactly) and refuses while a profile is running or
+    paused (allow_running=True overrides): joining can drop the link. After a
+    success the saved list is read back. Passwords are never echoed (note: the
+    password travels as a tool parameter, which MCP clients may log -- prefer
+    the settings page or an env-var-fed path for a real credential).
     """
+    refusal = _wifi_write_refusal(confirm, "wifi_add_network", allow_running)
+    if refusal is not None:
+        return refusal
     if ssid is None:
         saved = wifi_credentials.load()
         if saved is None:
@@ -170,15 +207,23 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
-        return f"ok - saved {ssid!r}"
+        present = _wifi_readback_networks(ssid)
+        if present is False:
+            return f"FAILED - board reported ok for {ssid!r} but it is not in the saved list on read-back"
+        note = "" if present else " (read-back unavailable; unverified)"
+        return f"ok - saved {ssid!r}{note}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not save {ssid!r}{detail}"
 
 
 @_core._tool()
-def wifi_set_mode(mode: str) -> str:
+def wifi_set_mode(mode: str, confirm: bool = False, allow_running: bool = False) -> str:
     """Switch between "home" (join a saved network) and "ap" (host the
-    provisioning access point) mode."""
+    provisioning access point) mode. Requires confirm=True and refuses
+    mid-firing (allow_running=True overrides); the mode is read back."""
+    refusal = _wifi_write_refusal(confirm, "wifi_set_mode", allow_running)
+    if refusal is not None:
+        return refusal
     mode_map = {"home": WIFI_MODE_HOME, "ap": WIFI_MODE_AP}
     mode_val = mode_map.get(mode.strip().lower())
     if mode_val is None:
@@ -188,6 +233,12 @@ def wifi_set_mode(mode: str) -> str:
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        try:
+            got = _srv._wifi.get_status().mode_name
+        except Exception:  # noqa: BLE001
+            return f"ok - mode set to {mode} (read-back unavailable; unverified)"
+        if got != mode.strip().lower():
+            return f"FAILED - board reported ok but mode reads back as {got!r}, wanted {mode!r}"
         return f"ok - mode set to {mode}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not set mode to {mode}{detail}"
@@ -231,16 +282,22 @@ def wifi_get_networks() -> str:
 
 
 @_core._tool()
-def wifi_forget(ssid: str) -> str:
-    """Delete a saved network."""
+def wifi_forget(ssid: str, confirm: bool = False, allow_running: bool = False) -> str:
+    """Delete a saved network. Requires confirm=True and refuses mid-firing
+    (allow_running=True overrides); the saved list is read back."""
+    refusal = _wifi_write_refusal(confirm, "wifi_forget", allow_running)
+    if refusal is not None:
+        return refusal
     try:
         result = _srv._wifi.forget(ssid)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        if _wifi_readback_networks(ssid) is True:
+            return f"FAILED - board reported ok but {ssid!r} is still in the saved list"
         return f"ok - forgot {ssid!r}"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - no such saved network {ssid!r}{detail}"
+    detail = f": {result.reason}" if result.reason else " (no reason given; the board may simply not have that network saved)"
+    return f"refused - could not forget {ssid!r}{detail}"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

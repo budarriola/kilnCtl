@@ -77,6 +77,6 @@ def require_attended(ctx: dict, reason: str = "requires --attended"):
     blocking on, or failing, an operator-only case."""
     from .registry import CaseResult, Verdict  # local import: avoid a cycle
 
-    if not ctx.get("attended"):
+    if ctx.get("attended") is not True:
         return CaseResult(verdict=Verdict.SKIP, reason=reason)
     return None

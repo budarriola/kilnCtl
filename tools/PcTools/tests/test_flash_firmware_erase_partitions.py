@@ -205,7 +205,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.addCleanup(self._provenance_path_patch.stop)
 
     def test_erase_without_confirm_is_refused_before_openocd(self):
-        result = mf.flash_firmware(
+        result = mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["nvs"], confirm_erase=False,
         )
         self.assertTrue(result.startswith("error:"))
@@ -214,7 +214,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.run_mock.assert_not_called()
 
     def test_disallowed_partition_is_refused_before_openocd(self):
-        result = mf.flash_firmware(
+        result = mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["app"], confirm_erase=True,
         )
         self.assertTrue(result.startswith("error:"))
@@ -223,7 +223,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.run_mock.assert_not_called()
 
     def test_partition_absent_from_csv_is_refused_before_openocd(self):
-        result = mf.flash_firmware(
+        result = mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False,
             erase_partitions=["not_a_real_partition"], confirm_erase=True,
         )
@@ -231,7 +231,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.run_mock.assert_not_called()
 
     def test_confirmed_nvs_erase_flashes_and_appends_program_esp_in_order(self):
-        result = mf.flash_firmware(
+        result = mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["nvs"], confirm_erase=True,
         )
         self.assertIn("flashed and verified OK", result)
@@ -250,7 +250,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.assertIn("verify", commands[erase_idx])
 
     def test_multiple_partitions_all_appear_after_app_before_reset(self):
-        mf.flash_firmware(
+        mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False,
             erase_partitions=["nvs", "kiln_nvs"], confirm_erase=True,
         )
@@ -266,7 +266,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.assertNotIn("reset exit", commands[nvs_idx])
 
     def test_result_names_each_erased_partition(self):
-        result = mf.flash_firmware(
+        result = mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["nvs"], confirm_erase=True,
         )
         self.assertIn("nvs", result)
@@ -274,7 +274,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.assertIn("0x6000", result)
 
     def test_provenance_json_records_erased_partitions(self):
-        mf.flash_firmware(
+        mf.flash_firmware(confirm=True, 
             kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["nvs", "cfg"], confirm_erase=True,
         )
         prov = mf.flash_provenance.read_provenance_json(self.prov_path)
@@ -286,7 +286,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
         self.assertEqual(erased[0]["size"], 0x6000)
 
     def test_no_erase_partitions_omits_field_from_provenance(self):
-        mf.flash_firmware(kiln_fw_root=self.kiln_fw_root, verify=False)
+        mf.flash_firmware(confirm=True, kiln_fw_root=self.kiln_fw_root, verify=False)
         prov = mf.flash_provenance.read_provenance_json(self.prov_path)
         self.assertIsNotNone(prov)
         self.assertIsNone(prov["erased_partitions"])
@@ -305,7 +305,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
             return path
 
         with unittest.mock.patch.object(mf, "_write_blank_partition_file", side_effect=_spy):
-            mf.flash_firmware(
+            mf.flash_firmware(confirm=True, 
                 kiln_fw_root=self.kiln_fw_root, verify=False, erase_partitions=["nvs"], confirm_erase=True,
             )
         self.assertIn("nvs", captured_paths)
@@ -314,7 +314,7 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
 
     def test_flash_failure_still_cleans_up_and_does_not_write_erased_partitions_as_ok(self):
         with unittest.mock.patch.object(mf, "_run_openocd", return_value=(False, "Verify Failed")) as fail_mock:
-            result = mf.flash_firmware(
+            result = mf.flash_firmware(confirm=True, 
                 kiln_fw_root=self.kiln_fw_root, verify=False, retry_once=False,
                 erase_partitions=["nvs"], confirm_erase=True,
             )

@@ -956,9 +956,9 @@ def _heat_opted_in(ctx: dict) -> "tuple[bool, str]":
     """OT-E07/E08 start a real firing/autotune only when BOTH ctx["allow_heat"]
     and the OT-specific, default-False ctx["ota_allow_heat"] are true (same
     shape as LCD-19/LCD-22: allow_heat alone defaults True in bench_test_run)."""
-    if not ctx.get("allow_heat"):
+    if ctx.get("allow_heat") is not True:
         return False, OTA_HEAT_SKIP_NO_ALLOW
-    if not ctx.get("ota_allow_heat"):
+    if ctx.get("ota_allow_heat") is not True:
         return False, OTA_HEAT_SKIP_NO_OTA_ALLOW
     return True, ""
 

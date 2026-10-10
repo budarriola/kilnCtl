@@ -120,6 +120,15 @@ def _ota_resolve_host(host: Optional[str]) -> str:
 def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
     """Push a new ESP32-S3 firmware image over Wi-Fi -- POST /api/ota/esp.
 
+    SINGLE-SLOT BOARD (docs/OTA_SINGLE_SLOT.md): there is no inactive OTA
+    slot any more. The APPLICATION image refuses this route with a 409 naming
+    that design (since 2026-10-03); the route only works against the RECOVERY
+    image, where it writes the `app` partition. To update a running board use
+    the stage path: update_stage_upload()/update_stage_release() to fill the
+    `stage` partition, then recovery_enter() and recovery_apply_staged(); or
+    recovery_enter() followed by recovery_push_esp_image(). The remainder of
+    this text describes the legacy dual-slot behaviour.
+
     DESTRUCTIVE-ADJACENT: this streams `image_path` (a raw ESP-IDF .bin,
     e.g. KilnCtrl.bin) straight into the inactive OTA slot and sets it as
     the next boot partition on success. Refused by the board itself unless
@@ -167,6 +176,14 @@ def ota_update_esp(image_path: str, host: Optional[str] = None) -> str:
 def ota_rollback_esp(host: Optional[str] = None) -> str:
     """Explicitly revert the ESP32-S3 to its PREVIOUS firmware image, right
     now -- POST /api/ota/esp/rollback.
+
+    UNAVAILABLE ON THE SINGLE-SLOT BOARD (docs/OTA_SINGLE_SLOT.md): with one
+    `app` partition there is no previous image to boot, so the board answers
+    "no previous valid image to roll back to". Going back to older firmware
+    means pushing that image again through the stage path
+    (update_stage_upload()/update_stage_release() + recovery_enter() +
+    recovery_apply_staged()) or recovery_push_esp_image(). The remainder of
+    this text describes the legacy dual-slot behaviour.
 
     This is the OTHER half of the rollback story: ota_rollback_confirm_task()
     (App/main.c) already handles the "don't auto-revert a healthy new image"
@@ -373,8 +390,9 @@ def sw_reset_esp(confirm: bool = False, host: Optional[str] = None) -> str:
     if not body.get("ok"):
         return f"error: board reported failure: {body} (host={resolved})"
     return (f"ok - sw_reset accepted (host={resolved}); board detail: {body.get('detail')!r} -- "
-            f"expect ~10-15s unreachable, then an S6a trip to clear with safety_clear_trip() "
-            f"once trip_mask is confirmed to be exactly 0x0020")
+            f"expect ~10-15s unreachable; then check safety_get_status() -- an S6a trip is NOT "
+            f"expected (none was observed for sw_reset, 2026-10-01), but if one latched, clear it "
+            f"with safety_clear_trip() only once trip_mask is confirmed to be exactly 0x0020")
 
 
 @_core._tool()
@@ -390,8 +408,8 @@ def ota_update_pico(image_path: str, host: Optional[str] = None,
     DESTRUCTIVE-ADJACENT, and this is the SAFETY PROCESSOR: refused unless
     the same interlocks as ota_update_esp() hold, checked independently by
     BOTH processors (the Pico does not take the ESP's word for it). A
-    refusal (wrong password, an interlock, or a concurrent update already
-    in progress) comes back as a specific board-reported reason.
+    refusal (an interlock, a protocol-version mismatch, or a concurrent
+    update already in progress) comes back as a specific board-reported reason.
 
     ROUTE_TIER_ADMIN is the only auth this route requires -- the
     AP-password HMAC challenge/response scheme it used to also perform was

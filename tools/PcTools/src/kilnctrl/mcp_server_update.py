@@ -76,8 +76,8 @@ def update_status(host: Optional[str] = None) -> str:
     pre-WP2 partition table has no stage and answers 404 (reported as an
     error). The board refuses an image whose project name is not
     KilnCtrl (wrong_project); sha256 catches corruption.
-    Nothing here installs anything; the apply step (recovery image, WP5) has
-    no tool yet."""
+    Nothing here installs anything; the apply step runs in the recovery
+    image: recovery_enter(), then recovery_apply_staged()."""
     resolved = _resolve_host(host)
     try:
         st = uhc.get_stage_status(resolved)

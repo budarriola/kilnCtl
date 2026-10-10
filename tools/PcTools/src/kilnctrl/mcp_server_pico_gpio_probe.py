@@ -81,7 +81,7 @@ from . import mcp_server_core as _core
 # is what stands in for that guard rail today.
 # ---------------------------------------------------------------------------
 @_core._tool()
-def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
+def pico_gpio_set_mode(gpio_num: int, mode: str, confirm: bool = False) -> str:
     """Configure a Pico (RP2040) GPIO as input / input_pullup / input_pulldown
     / output, over SWD -- no SaftyFW build flag needed, this works against
     any Pico regardless of firmware.
@@ -89,8 +89,11 @@ def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
     ``mode`` is one of "input", "input_pullup", "input_pulldown", "output".
     Refused unconditionally for GPIO6 (`saftyRelay`, drives K4's pilot relay
     coil) -- there is no override. Halts the core to perform the register
-    writes (same as debug_write_memory).
+    writes (same as debug_write_memory). Requires confirm=True (exactly),
+    like debug_write_memory.
     """
+    if confirm is not True:
+        return "error: pico_gpio_set_mode refused without confirm=True -- it halts the Pico core and rewrites pad registers"
     mode_val = mode.strip().lower()
     try:
         pico_gpio_probe.set_mode(gpio_num, mode_val)
@@ -105,12 +108,16 @@ def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
 
 
 @_core._tool()
-def pico_gpio_write(gpio_num: int, level: bool) -> str:
+def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     """Drive a Pico (RP2040) GPIO high or low, over SWD.
 
     Refused unconditionally for GPIO6. Refused for any other pin not already
     configured OUTPUT via :func:`pico_gpio_set_mode` in this same process.
+    Requires confirm=True (exactly). The input level is read back afterwards;
+    a mismatch is a WARNING (a loaded pin can legitimately differ).
     """
+    if confirm is not True:
+        return "error: pico_gpio_write refused without confirm=True -- it drives a live Pico pin"
     try:
         pico_gpio_probe.write(gpio_num, level)
     except pico_gpio_probe.PicoGpioProbeRefused as exc:
@@ -118,7 +125,13 @@ def pico_gpio_write(gpio_num: int, level: bool) -> str:
     except RuntimeError as exc:
         return f"error: {exc}"
     _srv._session_log.warning("pico_gpio_write: gpio%d = %s", gpio_num, "high" if level else "low")
-    return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}"
+    note = ""
+    try:
+        if bool(pico_gpio_probe.read(gpio_num)) != bool(level):
+            note = " (WARNING: input level reads back different -- pin loaded, or the write did not take)"
+    except Exception:  # noqa: BLE001
+        note = " (read-back unavailable; UNVERIFIED)"
+    return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}{note}"
 
 
 @_core._tool()

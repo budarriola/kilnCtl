@@ -278,7 +278,12 @@ def web_auth_setup(host: Optional[str] = None, confirm: bool = False,
         except wac.WebAuthSetupHttpError as exc:
             return f"error: login check failed (host={resolved}): {_describe_login_error(exc)}\n{state_line}"
         if ok:
-            return f"already configured, credentials valid\n{state_line}"
+            off_note = ""
+            if config_readable and not web_enabled and enable_web_auth:
+                off_note = ("\nNOTE: enable_web_auth=True was NOT applied -- an admin record already exists and web "
+                            "auth reads OFF; this tool never writes over an existing record. Turn it on from the "
+                            "settings page (or POST /api/auth/security set_policy).")
+            return f"already configured, credentials valid{off_note}\n{state_line}"
         return (f"failed: administrator credential already configured, but the environment "
                 f"credential was refused (401) -- never retried\n{state_line}")
 

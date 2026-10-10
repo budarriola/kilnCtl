@@ -5,10 +5,9 @@ most recent tools in this package were (``estop_verify``, ``boot_guard_get``
 -- see ``mcp_server_info.py``): a small, self-contained module, imported for
 its ``@_core._tool()`` side effects by ``mcp_server.py``.
 
-WT-A (the firmware routes themselves) does not exist yet -- see
+The firmware routes (``auth_totp_http.c``) exist; see
 ``totp_http_client.py``'s module docstring for the request/response
-contract this module assumes, which WT-C is choosing and recording in
-``docs/TOTP_PASSWORD_RESET_PLAN.md`` in the same commit as this file.
+contract and ``docs/TOTP_PASSWORD_RESET_PLAN.md``.
 
 Enrollment itself is deliberately NOT exposed here -- the plan's owner
 decision is that enrollment (generating a secret, showing the QR/manual
@@ -68,8 +67,8 @@ _USERNAME_ENV = http_auth.USERNAME_ENV
 def totp_enroll_status(host: Optional[str] = None) -> str:
     """READ-ONLY: report whether TOTP is enrolled for the board's
     administrator account (GET /api/auth/totp_status, ROUTE_TIER_ADMIN --
-    docs/TOTP_PASSWORD_RESET_PLAN.md section 7, WT-A route not yet
-    implemented in firmware). Reports ``{"enrolled": bool}`` plus the
+    docs/TOTP_PASSWORD_RESET_PLAN.md section 7, firmware route in
+    ``auth_totp_http.c``). Reports ``{"enrolled": bool}`` plus the
     board's reported time and SNTP sync state -- the plan's section 3 makes
     TOTP verification meaningless without a synced clock, so an operator
     deciding whether the reset flow will even work needs both facts
@@ -231,18 +230,13 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
     # login attempt below cannot accidentally reuse a cookie issued under
     # the credential that was just replaced.
     http_auth._SESSIONS.pop(origin, None)
-    env_backup = os.environ.get(http_auth.PASSWORD_ENV)
-    os.environ[http_auth.PASSWORD_ENV] = new_password
+    # Never touch os.environ (other threads' logins would see the new
+    # password mid-flight): hand the credential straight to the login.
     try:
-        http_auth.login(origin)
+        http_auth.login(origin, password_override=new_password)
         login_ok = True
     except http_auth.HttpAuthError:
         login_ok = False
-    finally:
-        if env_backup is None:
-            os.environ.pop(http_auth.PASSWORD_ENV, None)
-        else:
-            os.environ[http_auth.PASSWORD_ENV] = env_backup
 
     if login_ok:
         return f"ok - password reset via TOTP and verified by login (host={resolved})"

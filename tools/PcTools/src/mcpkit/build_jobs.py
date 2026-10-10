@@ -152,6 +152,14 @@ def start_job(tool: str, runner: "Callable[[], str]", params: "dict[str, Any]",
             job["report"], job["finished"], job["state"] = report, finished_at, state
             job["done"].set()
 
+    # RUNNING marker: the job thread is a daemon, so an MCP restart kills it
+    # silently. A marker on disk lets job_status tell "interrupted" from
+    # "never existed" and shows what was running (params carry the case id).
+    try:
+        marker = {k: v for k, v in job.items() if k not in _NON_PERSISTED}
+        _write_result(job_id, marker)
+    except Exception:  # noqa: BLE001 - best-effort
+        pass
     with _lock:
         _jobs[job_id] = job
         finished = [j for j in _jobs.values() if j["state"] != "running"]
@@ -200,6 +208,12 @@ def job_status(job_id: str, wait_s: float = 0.0, noun: str = "build-job",
             return (f"{noun} {job_id}: unknown -- not in this server's memory and no "
                     f"result file (the server may have restarted mid-run; check the "
                     f"build/run directory)")
+        if job.get("state") == "running":
+            return (f"{noun} {job_id} ({job.get('tool')}): INTERRUPTED -- a RUNNING marker "
+                    f"exists but this server is not tracking the job, so the MCP server "
+                    f"restarted mid-run and the job thread died with it. params="
+                    f"{job.get('params')!r}. The board may be left mid-case; check its "
+                    f"state before retrying.")
     elif wait_s > 0 and job["state"] == "running":
         job["done"].wait(min(wait_s, MAX_WAIT_S))
     state = job["state"]

@@ -283,7 +283,7 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
 
     def test_verify_false_skips_verification_entirely(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         verify_mock.assert_not_called()
         self.assertIn("flashed and verified OK", result)
 
@@ -292,14 +292,14 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
             mf, "_verify_flash_landed",
             side_effect=RuntimeError("running partition 'ota_0', not 'factory' -- call ota_rollback_esp()"),
         ):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("ota_0", result)
         self.assertIn("ota_rollback_esp", result)
 
     def test_verify_true_warning_is_appended_not_a_failure(self):
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value="WARNING: board unreachable"):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING: board unreachable", result)
 
@@ -509,7 +509,7 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
     def test_preflash_address_is_passed_through_to_verification(self):
         self.preflash_mock.return_value = "192.168.1.156"
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value="") as verify_mock:
-            mf.flash_firmware(verify=True)
+            mf.flash_firmware(confirm=True, verify=True)
         self.assertEqual(verify_mock.call_args[0][2], "192.168.1.156")
 
     def test_preflash_probe_runs_even_when_verify_is_false(self):
@@ -525,7 +525,7 @@ class PreFlashProbeWiringTest(FlashFirmwareVerifyWiringTest):
         the actual, intended behaviour instead of re-asserting the
         superseded one."""
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock:
-            mf.flash_firmware(verify=False)
+            mf.flash_firmware(confirm=True, verify=False)
         verify_mock.assert_not_called()
         self.preflash_mock.assert_called()
 
@@ -565,7 +565,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 1, "persisted_count": 0}) as reset_mock:
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         status_mock.assert_called_once_with("192.168.1.156")
         reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
@@ -593,7 +593,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 1, "persisted_count": 0}) as reset_mock:
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         reset_mock.assert_called_once_with("192.168.1.156")
         self.assertNotIn("error:", result)
         # The GET itself raised -- distinct from a GET that succeeded but
@@ -615,7 +615,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": True, "boot_count": 2}):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertNotIn("error:", result)
         self.assertIn("before=not reported (older firmware or read failure)", result)
         self.assertIn("after=not reported (older firmware or read failure)", result)
@@ -628,7 +628,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         with unittest.mock.patch.object(mf, "_verify_flash_landed", return_value=""), \
              unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True, reset_boot_guard=False)
+            result = mf.flash_firmware(confirm=True, verify=True, reset_boot_guard=False)
         status_mock.assert_not_called()
         reset_mock.assert_not_called()
         self.assertNotIn("boot_guard_reset", result)
@@ -645,7 +645,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                                          return_value="WARNING: board unreachable"), \
              unittest.mock.patch.object(mf.ota_http, "get_boot_guard_status") as status_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            mf.flash_firmware(verify=True)
+            mf.flash_firmware(confirm=True, verify=True)
         status_mock.assert_not_called()
         reset_mock.assert_not_called()
 
@@ -658,7 +658,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
                 mf, "_verify_flash_landed",
                 side_effect=RuntimeError("board is running partition 'ota_0', not 'factory'")), \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         reset_mock.assert_not_called()
         self.assertTrue(result.startswith("error:"))
 
@@ -669,7 +669,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
         strength of NO evidence the new build is running at all."""
         with unittest.mock.patch.object(mf, "_verify_flash_landed") as verify_mock, \
              unittest.mock.patch.object(mf.ota_http, "boot_guard_reset_esp") as reset_mock:
-            mf.flash_firmware(verify=False)
+            mf.flash_firmware(confirm=True, verify=False)
         verify_mock.assert_not_called()
         reset_mock.assert_not_called()
 
@@ -686,7 +686,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  return_value={"ok": False, "boot_count": 2}):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING", result)
         self.assertIn("NOT confirmed cleared", result)
@@ -703,7 +703,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  side_effect=mf.ota_http.OtaHttpError("unreachable")):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("WARNING", result)
         self.assertIn("boot_guard_reset call failed", result)
@@ -723,7 +723,7 @@ class BootGuardResetWiringTest(FlashFirmwareVerifyWiringTest):
              unittest.mock.patch.object(
                  mf.ota_http, "boot_guard_reset_esp",
                  side_effect=mf.http_auth.HttpAuthError("no credentials")):
-            result = mf.flash_firmware(verify=True)
+            result = mf.flash_firmware(confirm=True, verify=True)
         self.assertFalse(result.startswith("error:"))
         self.assertIn("boot_guard reset skipped: no admin session", result)
 
@@ -809,19 +809,19 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         self.addCleanup(self._provenance_path_patch.stop)
 
     def test_missing_kiln_fw_root_path_is_refused(self):
-        result = mf.flash_firmware(kiln_fw_root=os.path.join(self.tmp_root, "does-not-exist"), verify=False)
+        result = mf.flash_firmware(kiln_fw_root=os.path.join(self.tmp_root, "does-not-exist"), verify=False, confirm=True)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("does not exist", result)
 
     def test_non_absolute_kiln_fw_root_is_refused(self):
-        result = mf.flash_firmware(kiln_fw_root="relative/path/firmware/KilnFW", verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root="relative/path/firmware/KilnFW", verify=False)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("absolute", result)
 
     def test_kiln_fw_root_missing_binaries_is_refused(self):
         empty_root = os.path.join(self.tmp_root, "empty", "firmware", "KilnFW")
         os.makedirs(empty_root)
-        result = mf.flash_firmware(kiln_fw_root=empty_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=empty_root, verify=False)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("missing build output", result)
         self.assertIn("override", result)
@@ -837,7 +837,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         os.makedirs(build_dir)
         with open(os.path.join(build_dir, "KilnCtrl.bin"), "wb") as f:
             f.write(b"\x00" * 16)
-        result = mf.flash_firmware(kiln_fw_root=partial_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=partial_root, verify=False)
         self.assertTrue(result.startswith("error:"))
         self.assertIn("missing build output", result)
         self.assertIn("before 2026-09-23", result)
@@ -848,7 +848,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         with unittest.mock.patch.object(
             mf.flash_provenance, "capture_tree_state", wraps=mf.flash_provenance.capture_tree_state
         ) as capture_mock:
-            result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+            result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         # cwd for the OpenOCD invocation must be the OVERRIDE tree, not the
         # main tree's firmware/KilnFW.
@@ -859,7 +859,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         capture_mock.assert_called_with(repo_root=expected_repo_root)
 
     def test_provenance_json_records_the_override_path(self):
-        mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         prov = mf.flash_provenance.read_provenance_json(self.prov_path)
         self.assertIsNotNone(prov)
         self.assertEqual(prov["kiln_fw_root_override"], self.override_kiln_fw_root)
@@ -871,7 +871,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         THIS tree's own partitions.csv (0x210000 in the fixture above), not
         any hardcoded constant. Sabotaging the resolution (see the negative
         test in the report) turns this red."""
-        mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("build/KilnCtrl.bin 0x210000 verify", tcl)
 
@@ -882,7 +882,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         oversized = 0x800000 + 1
         with open(os.path.join(self.build_dir, "KilnCtrl.bin"), "wb") as f:
             f.truncate(oversized)
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertTrue(result.startswith("error:"))
         self.assertIn(str(oversized), result)
         self.assertIn(str(0x800000), result)
@@ -892,7 +892,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         # Default path (no override) must still write None -- proves the
         # field is not just always the main tree's path by accident.
         with unittest.mock.patch.object(mf, "_kiln_fw_root", return_value=self.override_kiln_fw_root):
-            mf.flash_firmware(verify=False)
+            mf.flash_firmware(confirm=True, verify=False)
         prov = mf.flash_provenance.read_provenance_json(self.prov_path)
         self.assertIsNotNone(prov)
         self.assertIsNone(prov["kiln_fw_root_override"])
@@ -905,7 +905,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         """CONFIG_PARTITION_TABLE_OFFSET in sdkconfig, set to something other
         than IDF's 0x8000 default, must be the offset actually written to."""
         self._write_sdkconfig("CONFIG_PARTITION_TABLE_OFFSET=0x10000\n")
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
@@ -916,7 +916,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         IDF's default (0x8000) and the fallback is noted in the result, not
         silently assumed."""
         # setUp() never writes an sdkconfig for override_kiln_fw_root.
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
@@ -924,7 +924,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
 
     def test_partition_table_offset_absent_key_in_present_file_falls_back_with_note(self):
         self._write_sdkconfig("CONFIG_SOMETHING_ELSE=y\n")
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("partition_table/partition-table.bin 0x8000 verify", tcl)
@@ -934,7 +934,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         """A present but unparsable value must refuse loudly rather than
         guess -- never silently fall back to the default."""
         self._write_sdkconfig("CONFIG_PARTITION_TABLE_OFFSET=not_a_number\n")
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertTrue(result.startswith("error:"), result)
         self.assertIn("CONFIG_PARTITION_TABLE_OFFSET", result)
         self.run_mock.assert_not_called()
@@ -944,7 +944,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         (as some Kconfig editors write, e.g. `="0x10000"`) must still parse,
         not be treated as garbage and refused."""
         self._write_sdkconfig('CONFIG_PARTITION_TABLE_OFFSET="0x10000"\n')
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("partition_table/partition-table.bin 0x10000 verify", tcl)
@@ -957,7 +957,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
         build_sdkconfig = os.path.join(self.build_dir, "sdkconfig")
         with open(build_sdkconfig, "w", encoding="utf-8") as f:
             f.write("CONFIG_PARTITION_TABLE_OFFSET=0x20000\n")
-        result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         self.assertIn("partition_table/partition-table.bin 0x20000 verify", tcl)
@@ -980,7 +980,7 @@ class KilnFwRootOverrideTest(unittest.TestCase):
             return real_open(path, *a, **kw)
 
         with unittest.mock.patch.object(mf, "open", side_effect=_raise_permission_error, create=True):
-            result = mf.flash_firmware(kiln_fw_root=self.override_kiln_fw_root, verify=False)
+            result = mf.flash_firmware(confirm=True, kiln_fw_root=self.override_kiln_fw_root, verify=False)
         self.assertIn("flashed and verified OK", result)
         tcl = self.run_mock.call_args.args[2]
         # Must fall back to the plain default (0x8000), not read the value

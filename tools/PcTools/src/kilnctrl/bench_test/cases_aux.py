@@ -64,7 +64,7 @@ def _gate(ctx: dict, heat: bool) -> Optional[CaseResult]:
         return CaseResult(Verdict.SKIP, reason=SKIP_TAINTED)
     if not _confirmed(ctx):
         return CaseResult(Verdict.SKIP, reason=f"{CONFIRM_ENV}=1 not set (aux cases write board config)")
-    if heat and not ctx.get("allow_heat"):
+    if heat and ctx.get("allow_heat") is not True:
         return CaseResult(Verdict.SKIP, reason="allow_heat=False")
     return None
 

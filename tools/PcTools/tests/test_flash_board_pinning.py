@@ -160,14 +160,14 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
 
     def test_refuses_before_touching_openocd_when_serial_absent(self) -> None:
         with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         self.assertTrue(result.startswith("error:"))
         self.assertIn(mf.MAIN_BOARD_JTAG_SERIAL, result)
         self.run_mock.assert_not_called()
 
     def test_tcl_pins_adapter_serial_when_board_present(self) -> None:
         with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG]):
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         self.assertIn("flashed and verified OK", result)
         self.run_mock.assert_called_once()
         _openocd_exe, _board_cfg, tcl = self.run_mock.call_args.args[:3]
@@ -181,7 +181,7 @@ class FlashFirmwareAdapterPinningTest(unittest.TestCase):
         with unittest.mock.patch.object(
             mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG, _UNRELATED_303A]
         ):
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         self.assertIn("flashed and verified OK", result)
 
 
@@ -211,7 +211,7 @@ class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
         oversized = self._APP_PARTITION_SIZE + 1
         with unittest.mock.patch.object(mf.os.path, "getsize", return_value=oversized), \
              unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG]):
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         self.assertTrue(result.startswith("error:"), result)
         self.assertIn(str(oversized), result)
         self.assertIn(str(self._APP_PARTITION_SIZE), result)
@@ -222,7 +222,7 @@ class FlashFirmwareSizePreflightTest(FlashFirmwareAdapterPinningTest):
         is a refusal (mirrors the production `>` in mcp_server_flash.py)."""
         with unittest.mock.patch.object(mf.os.path, "getsize", return_value=self._APP_PARTITION_SIZE), \
              unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_MAIN_BOARD_JTAG]):
-            result = mf.flash_firmware(verify=False)
+            result = mf.flash_firmware(confirm=True, verify=False)
         self.assertIn("flashed and verified OK", result)
         self.run_mock.assert_called_once()
 
@@ -245,6 +245,27 @@ class FixtureFlashTest(unittest.TestCase):
         self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
+
+        self._target_patch = unittest.mock.patch.object(
+            mf, "_resolve_app_flash_target",
+            return_value=mf.partition_table.PartitionEntry(
+                name="app", type=0, subtype=0x10, offset=0x210000, size=0x400000))
+        self._target_patch.start()
+        self.addCleanup(self._target_patch.stop)
+
+    def test_app_offset_comes_from_resolved_partition_not_hardcoded(self) -> None:
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
+            mf.fixture_flash(app_bin="fake/App.bin")
+        tcl = self.run_mock.call_args.args[2]
+        self.assertIn("0x210000", tcl)
+        self.assertNotIn("0x810000", tcl)
+
+    def test_unresolvable_app_offset_refuses(self) -> None:
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]), \
+                unittest.mock.patch.object(mf, "_resolve_app_flash_target", side_effect=ValueError("no csv")):
+            result = mf.fixture_flash(app_bin="fake/App.bin")
+        self.assertTrue(result.startswith("error:"))
+        self.run_mock.assert_not_called()
 
     def test_no_paths_given_is_an_error(self) -> None:
         with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):

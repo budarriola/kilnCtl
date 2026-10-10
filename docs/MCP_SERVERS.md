@@ -362,7 +362,9 @@ process -- and left a second live consequence (a client/firmware field
 mismatch on `/api/zones` that blocks `load_config_preset` for every preset).
 
 `flash_firmware()` (`kilnctrl/mcp_server_flash.py`, guard logic in
-`kilnctrl/flash_provenance.py`) now:
+`kilnctrl/flash_provenance.py`) requires `confirm=True` (exactly), refuses
+on a recovery-image or unreadable board state unless
+`allow_unreadable_board_state=True`, and now:
 
 1. **Always records** `git status --porcelain` (unscoped -- the whole repo,
    not just KilnFW/CommonFW the way `stale_check.py`'s staleness comparison

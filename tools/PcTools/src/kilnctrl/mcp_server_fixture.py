@@ -54,19 +54,31 @@ def fixture_list_relays() -> str:
 
 
 @_core._tool()
-def fixture_set_relay(name: str, on: bool) -> str:
+def fixture_set_relay(name: str, on: bool, confirm: bool = False) -> str:
     """Energize (``on=True``) or de-energize one fixture relay by name.
 
     Connects to the fixture on first use (own USB-UART bridge, separate from
     the main kilnCtl board -- see docs/UNIT_TEST_FIXTURE_PLAN.md "PC
     connection identity"). A bad relay name is refused before anything is
     sent.
+
+    Requires confirm=True (exactly): a fixture relay can cut a board's supply
+    or short a pin. The pin state is read back afterwards and a mismatch is
+    reported as FAILED.
     """
+    if confirm is not True:
+        return "error: fixture_set_relay refused without confirm=True -- a fixture relay can cut a board's supply or short a pin"
     try:
         fixture = _get_fixture()
         fixture.set_relay(name, on)
     except FixtureError as exc:
         return f"error: {exc}"
+    try:
+        got = fixture.get_relays().get(name)
+    except Exception:  # noqa: BLE001 - the write already happened
+        return f"ok - {name} {'energized' if on else 'de-energized'} (read-back unavailable; UNVERIFIED)"
+    if got is not None and bool(got) != bool(on):
+        return f"FAILED - {name} commanded {'on' if on else 'off'} but reads back {'energized' if got else 'de-energized'}"
     return f"ok - {name} {'energized' if on else 'de-energized'}"
 
 

@@ -198,3 +198,22 @@ def cold_bench(bench):
           f"(target {report['target_c']:.2f} C, ambient ref {report['ambient_c']:.2f} C) "
           f"after {report['waited_s']:.0f} s")
     yield bench
+
+
+_FLASH_FIRMWARE_E2E_MODULES = {
+    "test_flash_board_pinning", "test_flash_firmware_erase_partitions",
+    "test_flash_firmware_verify", "test_mcp_server_flash_partition_guard",
+    "test_pico_image_provenance_note",
+}
+
+
+@pytest.fixture(autouse=True)
+def _flash_firmware_idle_board(request, monkeypatch):
+    """flash_firmware() reads the live board state (profile/ARMED/interlock)
+    before touching OpenOCD. The end-to-end flash tests have no board: model
+    an idle one so they keep testing what they were written for. Tests of the
+    state gate itself live in test_flash_firmware_confirm_gate.py."""
+    if request.module.__name__.split(".")[-1] in _FLASH_FIRMWARE_E2E_MODULES:
+        from kilnctrl import mcp_server_flash as mf
+        monkeypatch.setattr(mf, "_recovery_board_state_refusals",
+                            lambda host, allow_link_down=False: ([], [], []))
