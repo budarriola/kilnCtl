@@ -132,14 +132,14 @@ class HappyPathTest(_Base):
         after = copy.deepcopy(before)
         after["zones"][0]["zone_type"] = 1
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body") as build_mock, \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="z0_zone_type=1&z0_pid_kp=1.5&z0_k=0.5&z0_tau=9&z0_coupling_c1=0.2&z0_hystc=3") as build_mock, \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok") as post_mock:
             result = mc.control_set_zone_type(zone=0, zone_type=1, confirm=True)
         self.assertIn("ok - zone 0", result)
         self.assertIn("zone_type=1", result)
         self.assertIn("refused at start (HP-02", result)
         build_mock.assert_called_once_with(before, {"zones": [{"index": 0, "zone_type": 1}]})
-        post_mock.assert_called_once_with("10.0.0.5", "body")
+        post_mock.assert_called_once_with("10.0.0.5", "z0_zone_type=1&z0_pid_kp=1.5")
 
     def test_set_back_to_heater(self):
         before = _snapshot([_zone(0, zone_type=1)])

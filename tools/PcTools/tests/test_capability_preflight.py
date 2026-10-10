@@ -352,7 +352,7 @@ class ManifestMatchesApplyPresetTest(unittest.TestCase):
 
     def test_manifest_matches_apply_preset_ramp_assist_pin(self):
         import inspect
-        src = inspect.getsource(config_presets.apply_preset)
+        src = inspect.getsource(config_presets._apply_preset_stages)
         # apply_preset() only calls ramp_assist_http_client.set_enabled(...)
         # inside its `if zones_host:` branch -- confirm that call site is
         # still there and still gated the way this manifest assumes.
@@ -360,7 +360,7 @@ class ManifestMatchesApplyPresetTest(unittest.TestCase):
         set_enabled_idx = src.index("ramp_assist_http_client.set_enabled")
         self.assertGreater(
             set_enabled_idx, if_zones_idx,
-            "apply_preset() no longer pins ramp_assist_enabled inside its "
+            "_apply_preset_stages() no longer pins ramp_assist_enabled inside its "
             "'if zones_host:' branch -- capability_preflight.py's "
             "_CAPABILITY_MANIFEST precondition for 'ramp_assist' is now "
             "stale and must be updated to match (see this module's "
