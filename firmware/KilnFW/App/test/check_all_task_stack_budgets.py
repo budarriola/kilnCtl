@@ -1064,7 +1064,10 @@ CEILING_BYTES = {
     # NUMBERS, RECONCILED" comment before quoting any of them as safe.
     # Deliberately NOT raised to reconcile them: that is what this table's
     # own comment above calls papering over a regression.
-    "profile_exec_wdt": 2688,
+    # 2026-10-10, safety link review F1: the watchdog loop now calls
+    # heat_enable_note_pico_state() (K4 reconcile) before heat_enable_reconcile(),
+    # measured 2688 -> 2704 B (26.7% of the 4096 B stack still free). Re-pinned.
+    "profile_exec_wdt": 2704,
     "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
