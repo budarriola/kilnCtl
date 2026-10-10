@@ -168,3 +168,26 @@ egtest.ps1` with
 Both runs ended with negtest's "REAL TREE CHANGED" error. The only differences were this review
 file and the reviewer's own `hostbuild/` output, both created in the worktree during the runs.
 No source file changed, so the CAUGHT/MISSED verdicts stand.
+
+## Fix status (persfx2 batch)
+
+Fixed in `@@SHA@@`. Host tests 86/86 (the earlier "83/83" was a stale count).
+
+- MED-2: `POST /api/zones` answers 409 `zones_config_undecided` before the commit point while the boot could not
+  decide the stored config, and the load fault is cleared only after `nvs_save()` returns ESP_OK. Test:
+  `test_zones_post_refused_while_load_undecided_keeps_fault`.
+- MED-1: a degraded-store registry (`cfg_fs_degraded_*`, `cfg_fs.c`) records every rev-unknown store and the
+  undecided zones config. `GET /api/cfgfs` reports `degraded_count`/`degraded`; the shared HTTP persist-failure
+  helper answers 409 `store_unreadable_at_boot` ("reboot to retry") instead of the generic 500. The bounded
+  boot-read retry was deliberately not added: it would change the existing OOM/injection timing tests for a
+  transient that a reboot already clears.
+- MED-3: `pref_cfg_fs_resolve_nvs_retired()` keeps the store at its safe default (and marked unknown) on an
+  unreadable file. Used by aux_outputs, ramp_assist, ki_base (adaptive_tune), iter_tune and ct_verify. NVS
+  adoption stays (stale is harmless) for the display/unit/relay-name/preference stores and relay_cycles,
+  which are cosmetic or wear counters that only ever raise.
+- LOW-1: a failed periodic relay_cycles persist stamps the attempt time, so the retry waits a full interval.
+- LOW-2/3: rev-floor and unknown-mark asserts now discriminate (mutations A and B).
+- LOW-4: both zones OOM cannot-decide paths latch the load fault.
+- LOW-5: backup export lists `stale_or_unknown_stores` when any store is degraded.
+- NITs: loud log on unknown-table overflow, test inject seam excluded under `ESP_PLATFORM`, stale comment
+  rewritten, `zones_page.html` indent.

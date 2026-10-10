@@ -2,6 +2,8 @@
 #include "persist_scratch.h"
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -287,6 +289,91 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists)
     return ESP_OK;
 }
 
+#define CFG_FS_DEGRADED_MAX 40
+#define CFG_FS_DEGRADED_NAME_MAX 48
+static char s_degraded[CFG_FS_DEGRADED_MAX][CFG_FS_DEGRADED_NAME_MAX];
+static portMUX_TYPE s_degraded_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void cfg_fs_degraded_set(const char *name, bool degraded)
+{
+    if (!name || name[0] == '\0') {
+        return;
+    }
+    bool overflow = false;
+    portENTER_CRITICAL(&s_degraded_mux);
+    int free_slot = -1;
+    bool done = false;
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] == '\0') {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (strncmp(s_degraded[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            if (!degraded) {
+                s_degraded[i][0] = '\0';
+            }
+            done = true;
+            break;
+        }
+    }
+    if (degraded && !done) {
+        if (free_slot >= 0) {
+            strncpy(s_degraded[free_slot], name, CFG_FS_DEGRADED_NAME_MAX - 1);
+            s_degraded[free_slot][CFG_FS_DEGRADED_NAME_MAX - 1] = '\0';
+        } else {
+            overflow = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    if (overflow) {
+        ESP_LOGE("cfg_fs", "degraded-store table full: %s not listed (its saves are still refused)", name);
+    }
+}
+
+int cfg_fs_degraded_count(void)
+{
+    int n = 0;
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0') {
+            n++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return n;
+}
+
+bool cfg_fs_degraded_name(int idx, char *out, size_t cap)
+{
+    bool ok = false;
+    if (!out || cap == 0 || idx < 0) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    int seen = 0;
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0') {
+            if (seen == idx) {
+                strncpy(out, s_degraded[i], cap - 1);
+                out[cap - 1] = '\0';
+                ok = true;
+                break;
+            }
+            seen++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return ok;
+}
+
+void cfg_fs_degraded_clear_for_test(void)
+{
+    portENTER_CRITICAL(&s_degraded_mux);
+    memset(s_degraded, 0, sizeof(s_degraded));
+    portEXIT_CRITICAL(&s_degraded_mux);
+}
+
+#ifndef ESP_PLATFORM /* host-test fault injection only; never compiled into firmware */
 static char s_inject_path[CFG_FS_PATH_MAX];
 static bool s_inject_any;
 static esp_err_t s_inject_err;
@@ -303,16 +390,19 @@ void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int coun
     s_inject_err = err;
     s_inject_count = count > 0 ? count : 0;
 }
+#endif
 
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len)
 {
     if (!rel_path || !buf || cap == 0) {
         return ESP_ERR_INVALID_ARG;
     }
+#ifndef ESP_PLATFORM
     if (s_inject_count > 0 && (s_inject_any || strcmp(rel_path, s_inject_path) == 0)) {
         s_inject_count--;
         return s_inject_err;
     }
+#endif
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;
     }

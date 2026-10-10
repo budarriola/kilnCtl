@@ -1185,6 +1185,9 @@ static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
     } else {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.dirty = true;
+        /* persfx LOW-1: back off. Without this a failing persist stays "due" and is retried (and logged) every
+         * tick of a firing; stamping the attempt time makes the retry wait a full persist interval. */
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
         xSemaphoreGive(s_rc.lock);
     }
 

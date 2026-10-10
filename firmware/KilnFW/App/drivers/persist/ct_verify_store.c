@@ -279,7 +279,7 @@ esp_err_t ct_verify_store_start(void)
     ct_verify_blob_t resolved;
     uint32_t rev = 0;
     bool used_file = false;
-    if (pref_cfg_fs_resolve(CT_VERIFY_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
+    if (pref_cfg_fs_resolve_nvs_retired(CT_VERIFY_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
                             ct_verify_blob_validate, &resolved, &rev, &used_file)) {
         s_blob = resolved;
         s_rev = rev;

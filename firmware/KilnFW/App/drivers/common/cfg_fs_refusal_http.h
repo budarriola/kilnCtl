@@ -57,6 +57,12 @@ static inline esp_err_t cfg_fs_http_persist_failed(httpd_req_t *req)
 {
     if (!cfg_fs_is_available()) {
         cfg_fs_http_send_not_mounted(req);
+    } else if (cfg_fs_degraded_count() > 0) {
+        /* persfx MED-1: a store the boot could not read refuses every save until reboot (ESP_ERR_INVALID_STATE
+         * from pref_cfg_fs_save()/zones nvs_save()). That is a conflict with device state, not a flash failure. */
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the controller to retry (see GET /api/cfgfs degraded)\"}");
     } else {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "500 Internal Server Error");

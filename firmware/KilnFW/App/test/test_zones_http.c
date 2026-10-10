@@ -2105,6 +2105,32 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     test_cfg_rows_reset();
 }
 
+/* persfx MED-2: on an undecided boot (stored config unreadable) a POST must NOT commit to RAM, mark the config
+ * valid or clear the load fault -- that would lift the firing refusal while every save stays refused. */
+static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
+{
+    TEST_SECTION("POST /api/zones -- an undecided boot refuses 409, commits nothing, keeps the load fault latched "
+                 "and the config invalid (persfx MED-2)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    s_zones_config_valid = false;
+    uint32_t gen_before = s_config_generation;
+    zones_cfg_t before = s_zones.cfg;
+    run_zones_post(body);
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided POST answered 409");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "refusal names the cause");
+    TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault is still latched");
+    TEST_CHECK(!s_zones_config_valid, "the config is still not marked valid (firing stays refused)");
+    TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched");
+    TEST_CHECK(s_config_generation == gen_before, "generation not bumped");
+    TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
+    zones_config_load_fault_reset_for_test();
+    s_zones_config_valid = true;
+}
+
 /* HTTP audit E1 finding 1: a firing or autotune that starts DURING the slow Pico ceiling raise
  * (after the entry mode gate passed) must not get the config committed under it: the commit
  * re-reads the heat claim under zones_cfg_lock(), refuses 409 and restores the Pico ceiling. */
@@ -17192,6 +17218,7 @@ void run_test_zones_http(void)
     test_zones_cfg_lock_covers_commit_and_setters();
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
+    test_zones_post_refused_while_load_undecided_keeps_fault();
     test_zones_post_refuses_run_started_during_ceiling_raise();
     test_zones_post_refused_while_rollback_pending();
     test_zones_post_refused_while_restore_in_flight();

@@ -1077,6 +1077,7 @@ static void oom_setup_file_rev5_and_stale_nvs(void)
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero(); /* deterministic: a skipped rev floor would restamp rev 1 */
+    zones_config_load_fault_reset_for_test(); /* a stale latched fault must not satisfy the LOW-4 asserts */
     zones_cfg_t c;
     fill_valid_cfg(&c, "newer_file", 4.0f);
     c.version = ZONES_CFG_VERSION;
@@ -1089,6 +1090,12 @@ static void oom_setup_file_rev5_and_stale_nvs(void)
  * hold the new content, proving the load did not rewind the rev floor. */
 static void oom_check_rev_floor_kept(void)
 {
+    /* persfx LOW-2/LOW-4: assert the floor itself (the primed RAM rev is 0, the staged NVS rev is 1), straight after
+     * the failed load -- a later clean reload re-derives the rev from the file and would hide a dropped floor. A
+     * cannot-decide load also latches the UNREADABLE fault, so the banner and the firing refusal exist. */
+    TEST_CHECK(zones_config_rev_for_test() >= 1, "persfx LOW-2: the OOM'd load kept the NVS rev floor");
+    zones_cfg_load_fault_t lf0;
+    TEST_CHECK(zones_config_get_load_fault(&lf0), "persfx LOW-4: a cannot-decide load latches a load fault");
     stage("after_oom", 9.0f);
     /* Review 2026-10-10 L1: the load could not decide, so a save is refused (it would write a near-empty
      * config over the higher-rev file); a later clean load decides and saves land again. */
@@ -1212,8 +1219,8 @@ static void test_nvs_conversion_scratch_oom_is_not_corrupt(void)
     scratch_oom_disarm();
     TEST_CHECK(e == ESP_ERR_NO_MEM && !valid, "load fails with NO_MEM, nothing adopted");
     zones_cfg_load_fault_t lf;
-    TEST_CHECK(!zones_config_get_load_fault(&lf) || lf.kind != ZONES_CFG_LOAD_FAULT_UNREADABLE,
-               "no UNREADABLE fault was latched for an OOM that judged nothing");
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "persfx LOW-4: a conversion OOM that cannot decide latches the fault (safe: no firing on a zeroed config)");
     uint32_t rev = 0;
     zones_cfg_t raw;
     bool raw_valid = false;

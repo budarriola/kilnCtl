@@ -762,6 +762,23 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
         free(body);
         return ESP_OK;
     }
+    if (zones_config_is_undecided()) {
+        /* MED-2 (review persfx 2026-10-10): this boot could not read the stored config, so nvs_save() would refuse
+         * and the submission would live only in RAM -- and committing it would mark the config valid and clear the
+         * load fault, lifting the firing refusal. Refuse instead; the fault stays latched until a clean reload. */
+        float live_max_temp_c[MAX31856_CHANNEL_COUNT];
+        for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
+            live_max_temp_c[i] = (i < s_zones.cfg.thermo_count) ? s_zones.cfg.zones[i].max_temp_c : 0.0f;
+        }
+        zones_cfg_unlock();
+        zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones undecided 409");
+        ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones refused: the stored zones config could not be read this boot");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config could not be read at boot, so a save would be lost or overwrite it; reboot the controller to retry\"}");
+        free(body);
+        return ESP_OK;
+    }
     /* Commit point: every rejection above returned before touching s_zones,
      * so this is the first and only line at which the submission becomes the
      * live config -- and therefore the only place in this handler the
@@ -777,8 +794,6 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
      * contract: true after either a real successful load OR a fresh valid
      * save. */
     s_zones_config_valid = true;
-    /* Review 11 LOW-3: a trusted config is live; a stale load-fault banner must not outlive it. */
-    zones_config_load_fault_clear();
     s_config_generation++;
     zones_cfg_unlock();
     /* RELAY_LIFE_BUDGET.md, "on every successful save": this
@@ -791,7 +806,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
      * or not the NVS write that would make it survive a reboot succeeds. */
     zones_config_push_all_relay_types();
     esp_err_t err = nvs_save();
-    if (err != ESP_OK) {
+    if (err == ESP_OK) {
+        /* Review 11 LOW-3, narrowed by persfx MED-2: only a config that actually persisted retires a stale
+         * load-fault banner; a failed save leaves the fault latched (the config lives in RAM only). */
+        zones_config_load_fault_clear();
+    } else {
         ESP_LOGE(ZONES_HTTP_TAG, "nvs_save failed: %s -- config applied live but will not survive a reboot",
                  esp_err_to_name(err));
         /* Still applied above, but the save failed: reported as an error

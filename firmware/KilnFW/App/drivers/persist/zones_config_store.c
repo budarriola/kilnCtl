@@ -105,6 +105,7 @@ static void zones_cfg_load_fault_latch(zones_cfg_load_fault_kind_t kind, uint8_t
 static void zones_cfg_mark_undecided(const char *why, bool latch_fault)
 {
     s_zones_cfg_undecided = true;
+    cfg_fs_degraded_set("zones.json", true); /* persfx MED-1 */
     if (latch_fault && !s_zones_cfg_load_fault.occurred) {
         zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_UNREADABLE, 0, why);
     }
@@ -114,6 +115,17 @@ void zones_config_load_fault_reset_for_test(void)
 {
     memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
     s_zones_cfg_undecided = false;
+    cfg_fs_degraded_set("zones.json", false);
+}
+
+bool zones_config_is_undecided(void)
+{
+    return s_zones_cfg_undecided;
+}
+
+uint32_t zones_config_rev_for_test(void)
+{
+    return s_zones_cfg_rev;
 }
 
 void zones_config_load_fault_clear(void)
@@ -597,7 +609,8 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     bool migrated_from_nvs = false;
     uint8_t on_disk_version_before = 0;
     bool nvs_refused_as_newer = false;
-    s_zones_cfg_undecided = false; /* re-evaluated by this load; set again below on any cannot-decide exit */
+    s_zones_cfg_undecided = false;
+    cfg_fs_degraded_set("zones.json", false); /* re-evaluated by this load; set again below on any cannot-decide exit */
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
@@ -605,7 +618,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
         /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
          * be compared against nothing), keep the rev floor, fail the load. */
         s_zones_cfg_rev = zones_cfg_rev_load();
-        zones_cfg_mark_undecided("cannot decide: NVS decode ran out of memory", false);
+        zones_cfg_mark_undecided("cannot decide: NVS decode ran out of memory", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -632,7 +645,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
     if (!resolved) {
         s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
-        zones_cfg_mark_undecided("cannot decide: scratch allocation failed", false);
+        zones_cfg_mark_undecided("cannot decide: scratch allocation failed", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;

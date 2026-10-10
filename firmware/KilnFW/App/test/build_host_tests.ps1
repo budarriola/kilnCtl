@@ -1293,6 +1293,7 @@ try {
     # definition per executable; ota_http.c's own HMAC use already supplies
     # one in this executable (test_ota_http.c), so no new definition is added.
 
+    $cmd8 += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
     # ---- test_ota_http_refusals.c: campaign 9b. #includes test_ota_http.c (and so every OTA handler .c and its
@@ -1499,6 +1500,7 @@ try {
     # only, no size change), and this executable #includes kiln_io_owner.c
     # directly.
 
+    $cmd11 += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
 
     # ---- test_kiln_io_sx_fake.c: real kiln_io.c + real SX1509.c over a fake I2C chip
@@ -1917,6 +1919,7 @@ try {
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmd24kcfg += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
 
     # ---- test_diagnostics_http.c: its own separate executable ------------------
@@ -1929,6 +1932,7 @@ try {
     $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`""
 
+    $cmdDiag += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
     # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
     # Task 1a (docs/SYSTEM_MODE_GATE.md known gap): adaptive_tune_http.c's
@@ -1950,6 +1954,7 @@ try {
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmdAtGate += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
 
     # ---- test_uart_bridge_ext_control_gate.c: its own separate executable -----
@@ -3210,6 +3215,7 @@ try {
             "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
+    $cmdIth += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
 
     # ---- test_firing_compare_alloc.c: its own SEPARATE executable ---------
@@ -3308,6 +3314,7 @@ try {
     $cmdUr = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
             "/Fo:`"$urObjDir\\`" /Fe:`"$exeUr`" " + ($urSrcs -join " ")
 
+    $cmdUr += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "update_http_refusals" -ExePath $exeUr -BuildCmd $cmdUr
 
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec

@@ -183,6 +183,20 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
         APPEND(",\"capacity\":{\"known\":false}");
     }
 
+    /* persfx MED-1: stores frozen this boot (file unreadable / zones undecided): saves to them are refused until
+     * reboot. At most 6 names listed, the count is exact. */
+    {
+        int dn = cfg_fs_degraded_count();
+        APPEND(",\"degraded_count\":%d,\"degraded\":[", dn);
+        for (int i = 0; i < dn && i < 6; i++) {
+            char dname[48];
+            if (cfg_fs_degraded_name(i, dname, sizeof(dname))) {
+                APPEND("%s\"%s\"", i == 0 ? "" : ",", dname);
+            }
+        }
+        APPEND("]");
+    }
+
     APPEND(",\"file_count\":%lu,\"files\":[", (unsigned long)file_count);
     for (size_t i = 0; i < file_count; i++) {
         long sz = file_size_or_unknown(base_dir_for_sizes, NULL, files[i].name);

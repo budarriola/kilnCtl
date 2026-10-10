@@ -208,7 +208,7 @@ esp_err_t iter_tune_store_start(void) {
             resolved_rev = nvs_rev;
         }
     } else {
-        have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
+        have = pref_cfg_fs_resolve_nvs_retired(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
                                    validate_and_note, &resolved, &resolved_rev, &used_file);
     }
     if (have) {

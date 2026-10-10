@@ -122,7 +122,7 @@ esp_err_t ramp_assist_cfg_start(void)
     uint8_t resolved_raw = nvs_raw;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve(RAMP_ASSIST_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
+    bool have_value = pref_cfg_fs_resolve_nvs_retired(RAMP_ASSIST_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
                                            ramp_assist_cfg_file_validate, &resolved_raw, &resolved_rev, &used_file);
     if (!have_value) {
         return load_err ? ESP_FAIL : ESP_OK; // neither side had anything trustworthy -- disabled default stands

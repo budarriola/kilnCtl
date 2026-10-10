@@ -227,6 +227,15 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
                           uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
                           bool *out_used_file);
 
+// persfx MED-3: same as pref_cfg_fs_resolve(), except that when the cfg file is present but UNREADABLE the NVS copy
+// is NOT adopted (the path is still marked rev-unknown and out_bytes is zeroed, return false => caller uses its safe
+// defaults). For control/safety-relevant stores whose NVS writer was retired (aux_outputs, ramp_assist, ki_base,
+// iter_tune, ct_verify): their surviving NVS copy is frozen at the 2026-10-06 dual-write close and may be stale-unsafe
+// (e.g. an aux rule the operator has since disabled). Stores where stale is harmless keep pref_cfg_fs_resolve().
+bool pref_cfg_fs_resolve_nvs_retired(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
+                                     uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes,
+                                     uint32_t *out_rev, bool *out_used_file);
+
 // Writes `bytes` (`item_size` bytes, must already be validated -- this
 // function does not call `validate`) to the file at `rel_path`, at `rev`.
 // No-op returning ESP_ERR_INVALID_STATE if cfg_fs never mounted -- callers

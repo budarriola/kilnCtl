@@ -1468,7 +1468,7 @@ void adaptive_tune_init(void)
     adaptive_tune_kibase_blob_t resolved;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
+    bool have_value = pref_cfg_fs_resolve_nvs_retired(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
                                            adaptive_tune_kibase_file_validate, &resolved, &resolved_rev, &used_file);
     if (have_value) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {

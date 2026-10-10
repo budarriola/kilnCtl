@@ -1191,6 +1191,19 @@ static void test_cfg_write_failure_is_loud_and_rev_unadvanced(void)
     TEST_CHECK(relay_cycles_flush() == ESP_OK, "the retry lands");
     read_cycles_file(&raw, &rev, &valid);
     TEST_CHECK(valid && rev == 2 && raw.counts[0] == 2, "file now at rev 2 with the new count");
+
+    /* persfx LOW-1: a failing periodic persist backs off a full interval instead of retrying every tick. */
+    s_rc.counts[0] = 3;
+    s_rc.dirty = true;
+    s_rc.last_persist_us = (int64_t)hal_time_now_us() - (int64_t)RELAY_CYCLES_PERSIST_INTERVAL_S * 1000000 - 1;
+    pref_cfg_fs_set_write_fn(rc_failing_write_fn);
+    relay_cycles_maybe_persist();
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_rc.dirty, "failed periodic persist leaves the counts dirty");
+    relay_cycles_maybe_persist();
+    read_cycles_file(&raw, &rev, &valid);
+    TEST_CHECK(valid && rev == 2 && s_rc.dirty,
+               "the next tick does NOT retry (backoff): file still rev 2, still dirty");
 }
 
 static void test_cfg_fs_reset_all_composes_with_migration_never_loses_counts(void)

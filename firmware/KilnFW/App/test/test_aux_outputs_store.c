@@ -435,6 +435,37 @@ static void test_dual_write_and_file_tiebreak(void)
 }
 
 /* WP-9: the helper the ESP uses to strip aux-bound relays from every mask it sends the Pico. */
+/* persfx MED-3: the NVS aux blob is frozen at the 2026-10-06 dual-write close. When the cfg file is present but
+ * unreadable, adopting that stale (possibly ENABLED) rule could switch on a relay the operator has since disabled;
+ * the store must fall back to all-disabled and refuse saves until a clean reload. */
+static void test_unreadable_file_does_not_adopt_frozen_nvs_enabled_rule(void)
+{
+    TEST_SECTION("unreadable aux file + stale ENABLED NVS blob: all aux stay disabled, saves refused (persfx MED-3)");
+    fresh_board();
+    aux_outputs_blob_t stale = make_blob_one_enabled(0);
+    stash_blob(&stale, sizeof(stale), 5);
+    aux_outputs_blob_t disabled;
+    memset(&disabled, 0, sizeof(disabled));
+    disabled.version = AUX_OUTPUTS_CFG_VERSION;
+    disabled.crc32 = blob_checksum(&disabled);
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &disabled, sizeof(disabled), 9) == ESP_OK,
+               "file: operator-disabled rule at rev 9");
+    simulate_reboot();
+    cfg_fs_test_inject_read_error(AUX_OUTPUTS_FILE_PATH, ESP_FAIL, 8);
+    aux_outputs_cfg_start(0);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "the frozen NVS enabled rule is NOT adopted");
+    TEST_CHECK(pref_cfg_fs_rev_unknown(AUX_OUTPUTS_FILE_PATH), "the store stays marked rev-unknown");
+    aux_output_entry_t e = on_entry();
+    TEST_CHECK(aux_outputs_cfg_set(1, &e, 0) != ESP_OK, "a save over the unreadable file is refused");
+    simulate_reboot();
+    aux_outputs_cfg_start(0);
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0 && !pref_cfg_fs_rev_unknown(AUX_OUTPUTS_FILE_PATH),
+               "a clean reload reads the rev-9 disabled file and clears the unknown mark");
+    cfg_fs_deinit();
+    pref_cfg_fs_reset_write_fn_for_test();
+}
+
 static void test_pico_mask_strips_aux(void)
 {
     TEST_SECTION("safety_pico_relay_mask: aux bits stripped, non-aux bits untouched, tracks live config");
@@ -611,6 +642,7 @@ void run_test_aux_outputs_store(void)
     test_corrupt_blob_defaults();
     test_set_without_cfg_partition_fails_loud();
     test_dual_write_and_file_tiebreak();
+    test_unreadable_file_does_not_adopt_frozen_nvs_enabled_rule();
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();
     test_raw_verify_and_journal();

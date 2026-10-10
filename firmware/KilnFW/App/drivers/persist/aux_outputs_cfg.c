@@ -193,7 +193,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     aux_outputs_blob_t resolved = nvs_blob;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
+    bool have_value = pref_cfg_fs_resolve_nvs_retired(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
                                           aux_outputs_cfg_file_validate, &resolved, &resolved_rev, &used_file);
     ao_lock(s_lock);
     apply_defaults();

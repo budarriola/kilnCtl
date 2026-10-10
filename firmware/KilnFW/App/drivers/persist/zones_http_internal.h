@@ -227,6 +227,9 @@ extern SafetyLinkClass *s_hw_safety;
 
 esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
+/* true while this boot could not decide the stored zones config (nvs_save() refuses until a clean reload). */
+bool zones_config_is_undecided(void);
+uint32_t zones_config_rev_for_test(void); /* the in-RAM rev floor the next save stamps from */
 void zones_config_load_fault_reset_for_test(void); /* clears the boot-latched zones_cfg_load_fault_t */
 esp_err_t nvs_save(void);
 

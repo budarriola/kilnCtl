@@ -451,6 +451,32 @@ static void test_pref_cfg_fs(void)
     disarm_oom();
     pref_cfg_fs_load_raw("big.bin", BIG, v_first1, bout, &rev, &valid);
     TEST_CHECK(rok && valid && rev == 9, "resolve scratch OOM: NVS kept in RAM, file untouched");
+    /* persfx LOW-3: the scratch-alloc failure branch must ALSO mark the path rev-unknown and refuse saves. */
+    TEST_CHECK(pref_cfg_fs_rev_unknown("big.bin"), "resolve scratch OOM: path marked rev-unknown");
+    TEST_CHECK(pref_cfg_fs_save("big.bin", bnvs, BIG, 4) == ESP_ERR_INVALID_STATE,
+               "resolve scratch OOM: a save over the unreadable file is refused");
+    /* persfx MED-3: a control/safety store whose NVS writer is retired gets defaults, not the frozen copy. */
+    {
+        uint8_t zero[BIG];
+        memset(zero, 0, sizeof(zero));
+        memset(bout, 0xEE, sizeof(bout));
+        uint32_t rev2 = 77;
+        bool used2 = true;
+        arm_oom(BIG, 1);
+        bool rok2 = pref_cfg_fs_resolve_nvs_retired("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev2, &used2);
+        disarm_oom();
+        TEST_CHECK(!rok2 && !used2 && rev2 == 0 && memcmp(bout, zero, BIG) == 0,
+                   "MED-3: scratch OOM + retired-NVS store: frozen NVS copy NOT adopted (defaults)");
+        TEST_CHECK(pref_cfg_fs_rev_unknown("big.bin"), "MED-3: the path stays rev-unknown");
+        /* unreadable file (injected I/O error), same policy */
+        memset(bout, 0xEE, sizeof(bout));
+        cfg_fs_test_inject_read_error("big.bin", ESP_FAIL, 8);
+        rok2 = pref_cfg_fs_resolve_nvs_retired("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev2, &used2);
+        bool rok3 = pref_cfg_fs_resolve("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev2, &used2);
+        cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+        TEST_CHECK(!rok2, "MED-3: I/O error + retired-NVS store: no adoption");
+        TEST_CHECK(rok3, "MED-3 control: the ordinary resolve still adopts the NVS copy (stale is harmless there)");
+    }
     {
         char p[300];
         snprintf(p, sizeof(p), "%s/big.bin", BASE);

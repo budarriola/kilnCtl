@@ -148,7 +148,18 @@ esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_l
 /* Test-only fault injection: the next `count` cfg_fs_read() calls whose rel_path equals `rel_path`
  * (NULL = any path) return `err` instead of reading. count 0 clears it. Lets host tests produce a
  * transient I/O error (ESP_FAIL), which a real temp directory cannot. No on-device caller. */
+/* persfx MED-1: stores whose saved state could not be decided this boot (cfg file unreadable / zones undecided).
+ * Their saves are refused until reboot; this registry makes that visible (GET /api/cfgfs "degraded", and the
+ * HTTP save refusal answers 409 instead of a generic 500). `name` is copied (<= 47 chars). Thread-safe. */
+void cfg_fs_degraded_set(const char *name, bool degraded);
+int cfg_fs_degraded_count(void);
+/* Copies the idx-th degraded name (0-based) into out; false when idx >= count. */
+bool cfg_fs_degraded_name(int idx, char *out, size_t cap);
+void cfg_fs_degraded_clear_for_test(void);
+
+#ifndef ESP_PLATFORM /* host builds only */
 void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count);
+#endif
 
 /* Atomic write: `<base>/.tmp/<flattened rel_path>` written+fsynced, then
  * renamed onto `<base>/<rel_path>`. On any failure before the rename, the
