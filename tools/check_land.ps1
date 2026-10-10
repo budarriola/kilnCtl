@@ -254,6 +254,7 @@ try {
     git -C $c add .gitmodules *>$null
     git -C $c update-index --add --cacheinfo "160000,1111111111111111111111111111111111111111,m" *>$null
     git -C $c commit -q -m "pin" *>$null
+    New-Item -ItemType Directory -Path (Join-Path $c 'm') -Force | Out-Null
     $before = OriginHead
     $r = Run-Land $c @("-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail (out: $($r.Out.Trim() -replace '\s+',' '))"
