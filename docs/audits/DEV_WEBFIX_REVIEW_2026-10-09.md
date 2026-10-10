@@ -61,7 +61,7 @@ So the answer to "can the wizard still report success after a refusal" is yes, f
 
 Fix: add `.then(function (r) { if (stepSaveFailed(r)) return; ... })` to each of these sites, as steps 0/8/9/11 already do.
 
-### MEDIUM-2: run-queue stabilized-profile rewrite of a builtin id now silently creates a copy
+### MEDIUM-2: run-queue stabilized-profile rewrite of a builtin id now silently creates a copy (FIXED in f561a4dc)
 
 `tools/PcTools/src/kilnctrl/run_queue.py:546` (`save_profile_segments`) and `:580-676` (`ensure_stabilized_profile`), called from `run_entry` at about line 1293 whenever `entry.stabilize` is True, which is the default. Both are documented as overwriting the profile IN PLACE, and they POST `id=<entry profile id>`. Neither checks that the reply's `id` equals the requested one.
 
@@ -72,7 +72,7 @@ Failure scenario: a run-queue entry names builtin 128.
 
 Fix: the client should refuse builtin ids (>=128), or compare the returned id with the requested one and fail on a mismatch.
 
-### LOW-1: zones page comment is wrong; blanking xzone now disables guard 8 with a 200
+### LOW-1: zones page comment is wrong; blanking xzone now disables guard 8 with a 200 (FIXED firmware/PcTools side in f561a4dc; zones_page.html comment left to its owner)
 
 `firmware/KilnFW/App/drivers/http/zones_page.html:2654-2660`. The comment says omitting a blank optional field "keeps the stored value". That holds for `pc_link_abort_silence_ms` (`zones_http_post.c:488` keeps the stored value). It does not hold for the guard fields and xzone: `zones_http_post.c:317` zeroes `tmp`, so an omitted field becomes 0.
 - For the guard fields, 0 means the firmware default.
@@ -82,7 +82,7 @@ Failure scenario: an operator clears the xzone input (about line 1517, posted at
 
 Fix: either refuse a blank xzone (keep it required-when-present), or make blank keep the stored value as `pc_link` does. Correct the comment either way.
 
-### LOW-2: PcTools `zones_http_client._format_scalar` passes `""` through, and it is now accepted as 0
+### LOW-2: PcTools `zones_http_client._format_scalar` passes `""` through, and it is now accepted as 0 (FIXED in f561a4dc)
 
 `tools/PcTools/src/kilnctrl/zones_http_client.py:~705`. A preset or call that carries `""` for a guard or xzone field used to get a 400. Now it is silently accepted as 0, meaning default or disabled. Same root cause as LOW-1, on the PC side.
 
@@ -94,7 +94,7 @@ Fix: either refuse a blank xzone (keep it required-when-present), or make blank 
 
 Suggest `heap_caps_malloc(RESET_BODY_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)` with an internal fallback, matching the profile handler.
 
-### INFO
+### INFO (stale 0..7 comments, builtin-id test strengthening, note=%00 message FIXED in f561a4dc)
 
 - `profiles_edit_http.c:~526` and `tools/PcTools/src/kilnctrl/profile_edit_http_client.py:122` still say the valid ids are "0..7". They are stale; user slots are 0..99, and builtins now map to -1.
 - `test_profiles_http.c`: the new builtin-id test asserts only that slot 0 is used and that the reply is not a 400. It does not check the returned `id` or the saved contents, and it does not check that the builtin is unchanged.
