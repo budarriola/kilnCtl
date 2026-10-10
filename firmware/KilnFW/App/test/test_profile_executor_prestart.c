@@ -352,6 +352,17 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     return true;
 }
 #endif
+// L23 (HTTP input parsing audit): profile_executor_run()'s locked re-check that
+// the copied slot is not being (or has not been) deleted. Default true so every
+// other test reaches past it unchanged.
+static bool s_test_slot_runnable = true;
+#ifndef PEX_STORE_LINK_TEST
+bool profiles_http_slot_runnable(uint8_t id)
+{
+    (void)id;
+    return s_test_slot_runnable;
+}
+#endif
 
 // Settable for the M13 fault-source-decode negative test below -- see
 // s_test_profiles_http_get_ok's comment for the pattern. Default false
@@ -2525,6 +2536,42 @@ static void test_run_refuses_while_zone_sweep_is_active(void)
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
     s_test_sweep_active = false;
+}
+
+// L23 (HTTP input parsing audit): a profile delete that is in flight (its
+// mark set before its own running check) or already finished since `p` was
+// copied must refuse the start in the same s_exec.lock section that would
+// commit RUNNING. profiles_http_slot_runnable() is the delete side's answer.
+static void test_run_refuses_slot_being_deleted(void)
+{
+    TEST_SECTION("profile_executor_run() refuses a slot whose delete is in flight (L23)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_slot_runnable = false;
+
+    char err[128];
+    err[0] = '\0';
+    bool ok = profile_executor_run(3, err, sizeof(err));
+    TEST_CHECK(!ok, "L23: a start racing a delete of the same slot is refused");
+    TEST_CHECK(strstr(err, "deleted") != NULL, "the refusal names the delete");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused run never leaves IDLE");
+
+    // Control: with no delete in flight the refusal (if any, further down this
+    // stubbed path) is not the delete one.
+    s_test_slot_runnable = true;
+    err[0] = '\0';
+    profile_executor_run(3, err, sizeof(err));
+    TEST_CHECK(strstr(err, "deleted") == NULL, "control: no delete in flight, no delete refusal");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
 }
 
 // ROADMAP.md M13: the "heat is blocked" refusal used to show the operator a
@@ -11774,6 +11821,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();
     test_run_refuses_while_zone_sweep_is_active();
+    test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
