@@ -25,34 +25,17 @@ and four executing tests (items 1-4 below).
 | 9 | `security_page`, `wifi_provision_page`, `ota_page` status-code handlers (31 `.ok/.status` sites): password change, Wi-Fi join, stage/install refusal text; only the OTA poll-auth and update-page cards have tests | UNTESTED |
 | 10 | Mojibake / encoding: no check catches double-encoded UTF-8 in page sources; D6 shipped unnoticed | UNTESTED; suggest a `lint_pages.js` rule |
 
-## Defects found (reported, not fixed; pages are not touched by this change)
+## Defects found and fixed (ab687431c)
 
-- D1. `settings_page.html` reset, software-reset and cfg-fs-format handlers: when the sign-in
-  prompt is cancelled the catch arm `return`s silently, leaving the status line on the
-  in-progress text ("Erasing and rebooting...", "Rebooting both processors...",
-  "Formatting...") although nothing was sent. `backup_page.html` already handles this with
-  "Sign-in cancelled -- nothing was restored."; copy that.
-- D2. Same handlers (factory reset and software reset): every non-auth rejection, including a
-  transport failure before the request left the browser, shows "Request sent -- the board may
-  already be rebooting, so this connection dropped." That is true only after a send; a
-  failed send reads as a reboot in progress. (The format handler's wording is correct.)
-- D3. `backup_page.html`: a 500 from `/api/backup/import` is a partial write, but the page
-  prints "Restore refused: <text>". "Refused" implies nothing changed. It should say the
-  restore may be partially applied. Test pins only "no success claim, server text shown".
-- D4. `live_profile_page.html` save/fork/decide: `r.json()` runs before any status check, so a
-  refusal with a non-JSON body (401/403 CSRF or auth refusal, a 500 page) lands in the catch arm
-  and shows "Save failed -- could not reach the board." Wrong reason for a refusal.
-- D5. `live_profile_page.html`: sign-in cancel on save leaves "Saving..." (same class as D1);
-  "Discard working copy" posts immediately with no kcConfirm, one click loses all edits.
-- D6. `live_profile_page.html` has four double-encoded UTF-8 ellipses ("Loading..." etc.
-  bytes `c3 a2 e2 82 ac c2 a6`); the browser renders "Loadingâ€¦", "Savingâ€¦", "Forkingâ€¦",
-  "Workingâ€¦". No other page matched the byte pattern. (It is also visible in the new test's
-  KNOWN-DEFECT output.)
-- D7. No `beforeunload` guard anywhere (item 5).
+- D1 FIXED ab687431c. settings_page.html: sign-in cancel on factory reset, software reset and cfg-fs format now shows "Sign-in cancelled" (the in-progress text is cleared).
+- D2 FIXED ab687431c. "Request sent -- the board may already be rebooting" only for a dropped connection (fetch TypeError); any other failure shows "Request failed: <real error>".
+- D3 FIXED ab687431c. backup_page.html: a 500 from the real import POST says "Restore failed partway -- some settings may have changed"; other refusals stay "Restore refused".
+- D4 FIXED ab687431c. live_profile_page.html: save/fork/decide read the body as text and parse defensively; a non-JSON refusal shows "HTTP <status>: <body>".
+- D5 FIXED ab687431c. Sign-in cancel clears Saving/Forking/Working; "Discard working copy" goes through kcConfirm.
+- D6 FIXED ab687431c. Four double-encoded ellipses replaced with "..."; lint_pages.js now flags U+00E2 U+20AC in any page (test_lint_mojibake.js).
+- D7 PARTLY FIXED ab687431c. live_profile_page.html has a beforeunload guard (dirty after a segment edit, cleared on load/save/decide). settings_page.html has no editable form fields, so there is nothing to guard. FOLLOW-UP: the same guard for profiles_page, setup_wizard_page, safety_config_page, kiln_configs_page, settings_display_page and zones_page (zones_page was left alone because another fixer owns it).
 
-Tests print `KNOWN-DEFECT (present)` for D1, D2, D4, D5 (discard); when a page is fixed the line
-flips to `KNOWN-DEFECT FIXED (update audit)`, which prompts removal of the entry here. D3 and D6
-are not asserted.
+All tests now hard-assert these; the KNOWN-DEFECT markers are gone.
 
 ## Negative tests (tools/negtest.ps1, each CAUGHT by an assertion `FAIL:` line, not a crash)
 
