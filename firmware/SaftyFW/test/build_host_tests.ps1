@@ -644,6 +644,24 @@ try {
         "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
         "/Fo:`"$dtTaskObjDir\\`" /Fe:`"$dtTaskExe`" $dtTaskSourceArgs"
     Add-HostBuild -Name "discrete_task_tests.exe" -ExePath $dtTaskExe -BuildCmd $dtTaskCmd
+    # R2-5 (HOST_TEST_COVERAGE_GAPS_ROUND2): the REAL saftyfw_image_identity_record.c
+    # (test_link_task_fuzz.c stubs the accessor) round-tripped through the real
+    # CommonFW scanner. Own exe: stubs\identity_record_host supplies a fixed
+    # saftyfw_build_info.h (commit "0123456789ab", dirty 1).
+    $idRecStubDir = Join-Path $testDir "stubs\identity_record_host"
+    $idRecExe = Join-Path $outDir "saftyfw_image_identity_record_tests.exe"
+    $idRecObjDir = Join-Path $outDir "saftyfw_image_identity_record_obj"
+    New-Item -ItemType Directory -Force -Path $idRecObjDir | Out-Null
+    $idRecSources = @(
+        (Join-Path $testDir "test_saftyfw_image_identity_record.c"),
+        (Join-Path $updateDir "saftyfw_image_identity_record.c"),
+        (Join-Path $commonSrcDir "saftyfw_image_identity.c")
+    )
+    $idRecSourceArgs = ($idRecSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $idRecCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$idRecStubDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$updateDir`" /I `"$bootDir`" /I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" " +
+        "/Fo:`"$idRecObjDir\\`" /Fe:`"$idRecExe`" $idRecSourceArgs"
+    Add-HostBuild -Name "saftyfw_image_identity_record_tests.exe" -ExePath $idRecExe -BuildCmd $idRecCmd
 
     Complete-HostBuilds
     if ($buildFailures.Count -gt 0) {
