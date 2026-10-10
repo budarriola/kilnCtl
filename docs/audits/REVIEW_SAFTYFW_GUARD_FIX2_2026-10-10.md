@@ -245,3 +245,5 @@ removed.
 | LOW-C | LOW | tests miss the tightening direction (abs_max +100, max_rate +10 pass) and 2 of 3 clamp sites |
 | NIT-A | NIT | probe comment says GRACE/INIT/TRIPPED never trigger the gate; with the probe they do (fail-closed) |
 | NIT-B | NIT | mains_voltage_v "no guard" row omits its calibration_missing (enable gate) role |
+
+All findings fixed in 2d469f412 (rebased from the first commit; tests prove abs_max/max_rate raise, off-values, k_ct, v2 clamp CAUGHT by negtest). LOW-C v1-branch clamp removal is an equivalent mutant (v1 has no offset), documented in a comment, not catchable.
