@@ -423,8 +423,9 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
  *
  * `volatile_install` (item 15, added 2026-09-14): when true, the commit leg
  * sends SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) instead of COMMIT_CONFIG --
- * installs into the Pico's live RAM record, never refused for ARMED, never
- * reaches flash. confirm_commit_landed() below needs no changes for this:
+ * installs into the Pico's live RAM record, never reaches flash. The Pico
+ * refuses it (REJECT_ARMED on the wire) only while heat is POSSIBLE and the
+ * install changes a trip-relevant field; an idle, de-energized board accepts it. confirm_commit_landed() below needs no changes for this:
  * it only ever forces a live GET_CONFIG_PAGE re-fetch and compares values,
  * which is identical regardless of which command produced the live state.
  * Every existing caller passes false (unchanged behaviour); only kiln_cfg_
@@ -645,8 +646,8 @@ bool safety_cfg_write_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16
  *
  * ITEM 15 LANDED 2026-09-14: `volatile_install` selects which command this
  * function's forced commit sends -- true for SAFETY_CMD_APPLY_CONFIG_
- * VOLATILE (0x2D, installs into the Pico's live RAM record, never refused
- * for ARMED, never reaches flash), false for the original COMMIT_CONFIG ->
+ * VOLATILE (0x2D, installs into the Pico's live RAM record, never reaches flash;
+ * refused only while heat is possible and a trip-relevant field changes), false for the original COMMIT_CONFIG ->
  * config_store_write() flash path (still unconditionally refused while the
  * Pico is ARMED). kiln_cfg_swap.c passes true for the swap's own forward
  * push and rollback-restore (the owner's "Pico never leaves ARMED" rule)

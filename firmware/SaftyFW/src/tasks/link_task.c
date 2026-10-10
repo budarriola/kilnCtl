@@ -2799,16 +2799,19 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
 // reason this sibling command exists instead of a flag that would have to
 // thread an ARMED-bypass through config_store_write() itself.
 //
-// CORRECTION (2026-09-14 review, Finding A): this comment used to say "there
-// is no ARMED refusal branch here at all" -- that was true of the flash-
-// stall gate, but config_store_write_volatile() now DOES refuse a narrow
-// class of installs while ARMED (raising/clearing abs_max_temp_c or
-// max_rate_c_per_min, or any tc_type change -- see that function's own doc
-// comment in config_store.h). This handler now has to check its return
-// value for exactly that reason, reported on the existing SAFETY_CMD_
-// COMMIT_CONFIG_REJECTED frame with KILNLINK_COMMIT_CONFIG_REJECT_ARMED --
-// no new wire value, no protocol bump: that reason already existed for
-// COMMIT_CONFIG and was simply unreachable via this path until now.
+// CORRECTION (2026-09-14 review, Finding A; widened 2026-10-09, guard-fixes
+// review HIGH-1/MED-1): config_store_write_volatile() DOES refuse installs,
+// but only while heat is POSSIBLE (this file's link_task_heat_is_safe_for_
+// tc_type_change() says no: relay energized, a heat request or profile
+// running, stale context, or current flowing), NOT merely while ARMED --
+// ARMED is the normal idle state from 60 s after boot, and an idle, de-
+// energized board accepts any validated install. While heat is possible the
+// install is refused if ANY trip-relevant field differs from the running
+// record, other than a few provable tightenings and an explicit allowlist of
+// non-safety fields (see config_store_volatile_would_loosen_safety() in
+// config_store.c). This handler checks the return value for that reason,
+// reported on the existing SAFETY_CMD_COMMIT_CONFIG_REJECTED frame with
+// KILNLINK_COMMIT_CONFIG_REJECT_ARMED -- no new wire value, no protocol bump.
 static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame)
 {
     kilnlink_apply_config_volatile_t msg;
@@ -2861,16 +2864,15 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_params_finalize_i_present_a(&to_write);
     to_write.calibration_missing = !config_params_all_required_set(&to_write);
 
-    // config_store_write_volatile() can still fail for exactly one reason
-    // now (Finding A's ARMED-loosening carve-out): it cannot fail flash I/O
-    // (never touches flash), so any refusal here is that carve-out, never a
-    // storage failure -- report it the same way COMMIT_CONFIG's ARMED
-    // refusal is reported.
+    // config_store_write_volatile() can fail for exactly one reason: the
+    // heat-possible gate (it never touches flash, so it cannot fail flash
+    // I/O). Any refusal here is that gate, never a storage failure -- report
+    // it the same way COMMIT_CONFIG's ARMED refusal is reported.
     uint8_t prev_tc_type = config_store_get_tc_type(); // captured BEFORE the write, see tc_type_reapply_policy.h
     const char *reason = NULL;
     if (!config_store_write_volatile(&to_write, &reason)) {
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile",
-                     reason ? reason : "refused: would loosen a safety threshold while ARMED");
+                     reason ? reason : "refused: heat is possible and this install changes a trip-relevant field");
         link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_ARMED);
         return; // writes NOTHING -- the staged edits are kept for a retry
     }

@@ -1006,6 +1006,13 @@ honoured just because a well-formed frame was sent. This codec
 (`kilnlink_inject_tc.{c,h}`) only serializes the payload bytes; it has no
 opinion about, and cannot see, whether the gate is currently open.
 
+The Pico additionally refuses INJECT_TC while its relay is ARMED or energized
+(thermo_inject_allowed). That is deliberately stricter than the heat-possible
+signal that gates `APPLY_CONFIG_VOLATILE` (0x2D): while heat is possible the Pico
+refuses a volatile install (reported as COMMIT_CONFIG_REJECTED / REJECT_ARMED)
+that changes any trip-relevant field outside a short allowlist; an idle,
+de-energized board accepts it.
+
 ---
 
 ## 5. The fault line (out of band)

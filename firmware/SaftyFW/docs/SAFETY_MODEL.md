@@ -690,9 +690,9 @@ any contactor drop-out delay).
 
 S9 needs **no ESP context** (guard review 2026-10-09 F3): it reasons about the
 Pico's own de-energize command, so it runs with `context_valid == false`. The
-related hardening from the same review: a volatile config install while ARMED
-refuses any change to the thermocouple/CT/margin fields (F1), `INJECT_TC` is
-refused while ARMED or energized, `tc_offset_c` is bounded to +/-50 C (F2), S12
+related hardening from the same review: a volatile config install while heat is possible
+refuses any trip-relevant field change not on a short allowlist (fail-closed, F1), `INJECT_TC` is
+refused while ARMED or energized (deliberately stricter than the heat-possible signal), `tc_offset_c` is bounded to +/-50 C (F2), S12
 treats an unknown cold junction as a hold-and-warn, never a pass or a clearable
 trip (F4), non-finite CONTEXT floats make a zone ineligible (F5), an S5 bad read
 no longer suspends S3/S4/S13/S14/S15 (F6), and the S6b reboot grace expires once

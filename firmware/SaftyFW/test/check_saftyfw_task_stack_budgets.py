@@ -370,7 +370,11 @@ CEILING_BYTES = {
     # true; }` block ahead of S6a, mirroring S6a/S7's existing shape --
     # moving the measured total 2176 -> 2184 B. Re-pinned to the new
     # measured value, same convention.
-    "safety_core": 2184,
+    #
+    # 2026-10-10, guard-fixes review pass (F6 bad-read hold, tc_offset_c
+    # load-time clamp): measured total 2184 -> 2208 B. Re-pinned to the new
+    # measured value, same convention.
+    "safety_core": 2208,
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured
