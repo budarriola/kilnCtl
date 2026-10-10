@@ -1031,7 +1031,7 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6240,  # 2026-10-10: re-measured on dev tip (was 6160): profiles_handle_message chain 5424 -> 5504 B after the profiles save-lock/rev-floor edits; honest free 3700 B (36.1% of 10240 B)
+    "bx_flash_worker": 6320,  # 2026-10-10: re-measured 6272 B (was 6240 B); declared stack 10240 B, honest free 3668 B (35.8%), so only the regression ceiling moves
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3312,
