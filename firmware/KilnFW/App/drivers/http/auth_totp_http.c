@@ -65,6 +65,7 @@
 #include <string.h>
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "hal_sysinfo.h" // hal_sysinfo_fill_random()
@@ -349,8 +350,7 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
-            totp_secure_zero(body, RESET_BODY_MAX);
-            free(body);
+            totp_secure_zero(body, sizeof(body));
             totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
@@ -463,7 +463,10 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
-    char *body = (char *)malloc(RESET_BODY_MAX);
+    char *body = (char *)heap_caps_malloc(RESET_BODY_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        body = (char *)heap_caps_malloc(RESET_BODY_MAX, MALLOC_CAP_8BIT);
+    }
     if (body == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;
@@ -472,6 +475,8 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
+            totp_secure_zero(body, RESET_BODY_MAX);
+            free(body);
             totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
