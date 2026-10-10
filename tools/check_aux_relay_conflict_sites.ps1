@@ -52,9 +52,9 @@ $mustCall = @{
 # path PUTS BACK a relay mask, so it is the one place in zones_http_post.c that can re-create a conflict.
 $mustCallInFunc = @(
     @{ File = 'zones_http_post.c'; Func = 'zones_http_zone_restore_after_aux'; Rx = 'zones_config_json_aux_conflict_mask\s*\(' }
-    # The ordinary POST /api/zones commit (`s_zones.cfg = tmp`, no validate). Without this entry the file-level
+    # The ordinary POST /api/zones commit (in zones_post_apply_body; zones_post_apply is only the alloc wrapper). Without this entry the file-level
     # $mustCall below was satisfied by the restore function's call alone (vacuity audit 2026-10-07).
-    @{ File = 'zones_http_post.c'; Func = 'zones_post_apply'; Rx = 'zones_config_json_aux_conflict_mask\s*\(' }
+    @{ File = 'zones_http_post.c'; Func = 'zones_post_apply_body'; Rx = 'zones_config_json_aux_conflict_mask\s*\(' }
 )
 
 function Get-FunctionBody([string]$text, [string]$fname) {
