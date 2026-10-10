@@ -68,3 +68,20 @@ All three confirmed by probe runs of the fake.
 - Test status: the current behaviour (flag cleared, no release) is NOT
   asserted either way; `test_lifecycle` only checks the flag. Left out of the
   assertions pending an owner decision on the intended behaviour.
+
+## Campaign 9: `diagnostics_http.c` (test_diagnostics_http.c)
+
+No defect found. 147 checks across crash report get/ack/clear, estop verify,
+coredump info/chunk, watchdog and ramp-assist POST, relay-cycles reset/restore,
+danger mode start/stop/relay/enable, cfgfs status/file GET/POST, nvs keys and
+route registration all matched the handlers' documented behaviour.
+
+Scope notes, not defects:
+
+- The estop_verify handler has no refusal rules of its own. The "refused unless
+  safety_trip is ok" and `confirm` rules live in the MCP tool, so the handler
+  test only checks that it calls `estop_verification_confirm()` and reports its
+  result honestly.
+- The v3-crash-record-after-upgrade scenario (DEV_FIRMWARE_REVIEW_14 MED-1) is
+  decided in `crash_report.c`'s loader, not in these handlers. The handlers only
+  render whatever `crash_report_get()` returns, so it is not reachable here.

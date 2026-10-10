@@ -1,4 +1,4 @@
-﻿# Builds and runs the host-side unit tests for pid.c / thermal_guard.c /
+# Builds and runs the host-side unit tests for pid.c / thermal_guard.c /
 # heater_output.c / thermo_combine.c / ota_auth.c / ota_interlock.c /
 # pid_autotune.c / profile_feasibility.c (+ the sim_plant.c closed-loop
 # check) with MSVC, entirely off-target -- no ESP-IDF, no hardware.
@@ -1835,6 +1835,17 @@ try {
 
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
 
+    # ---- test_diagnostics_http.c: its own separate executable ------------------
+    # docs/audits/HOST_TEST_COVERAGE_GAPS_2026-10-09.md campaign 9: #includes
+    # diagnostics_http.c directly (static handlers, no other seam) and fakes
+    # its whole dependency surface.
+    $exeDiag = Join-Path $outDir "kilnctl_host_tests_diagnostics_http.exe"
+    $diagObjDir = Join-Path $outDir "diaghttp"
+    New-Item -ItemType Directory -Force -Path $diagObjDir | Out-Null
+    $cmdDiag = "cl /I`"$(Join-Path $testDir 'stubs_diagnostics_http')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$diagObjDir\\`" /Fe:`"$exeDiag`" `"$(Join-Path $testDir 'test_diagnostics_http.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'host/fake_kv.c')`""
+
+    Invoke-HostTestExe -Name "diagnostics_http" -ExePath $exeDiag -BuildCmd $cmdDiag
     # ---- test_adaptive_tune_http_gate.c: its own separate executable ----------
     # Task 1a (docs/SYSTEM_MODE_GATE.md known gap): adaptive_tune_http.c's
     # enable_post_handler()/revert_post_handler() system_mode_gate wiring

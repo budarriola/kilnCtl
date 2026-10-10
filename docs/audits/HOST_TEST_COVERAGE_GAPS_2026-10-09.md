@@ -40,7 +40,7 @@ referenced), X no execution test (none, or source-text only).
 | 8 | KilnFW `drivers/http/aux_outputs_http.c` (211 L) | Spare-relay aux outputs GET/POST (drives relays) | R N P | X (no test names it) | Whole handler: field parse, range refusal, mode-gate 409, readback |
 | 9 | KilnFW `http/zone_aux_convert_http.c` (179 L), `http/dashboard_exec_http.c` (914 L) | Zone-to-aux convert; exec pause/ack, safety clear trip, history CSV | R P N S | T (convert only via test_zones_http; exec 2/13) | `profile_exec_pause_post_handler`, `dashboard_safety_clear_trip`, `profile_exec_ack_last_run_post_handler`, firing_history / history_csv handlers |
 | 10 | KilnFW `http/dashboard_autotune_http.c` (575 L) | Autotune start/abort/accept/status/trace | R P N | T (1/6) | `autotune_start_post_handler` gating, `_abort_`, `_accept_` (writes gains), trace CSV |
-| 11 | KilnFW `http/diagnostics_http.c` (2302 L, 26 handlers) | Crash report ack/clear, estop verify, NVS keys, cfgfs, coredump | P N S | X (not compiled) | `estop_verify_post_handler` refusal rules, crash_report_clear, nvs_keys kiln_auth refusal |
+| 11 | KilnFW `http/diagnostics_http.c` (2302 L, 26 handlers) | Crash report ack/clear, estop verify, NVS keys, cfgfs, coredump | P N S | T (test_diagnostics_http.c, 2026-10-09) | `estop_verify_post_handler` refusal rules, crash_report_clear, nvs_keys kiln_auth refusal |
 | 12 | KilnFW `http/dashboard_http.c` (990 L) | Dashboard status, relay POST | R N S | T (2/7) | `dashboard_set_relay`, `dashboard_http_get_safety_trip`, `_estop_asserted` |
 | 13 | KilnFW `control/adaptive_tune_model.c` (827 L) | Adaptive tuning, writes zone gains | P R | T (3/12) | `apply_zone_plan`, `apply_coupled_plan`, `commit_*_locked`, breadcrumb mid-solve recovery |
 | 14 | KilnFW `persist/cfg_fs_mount.c` (607 L) | LittleFS mount, format gate | P | T (6/13) | `format_*` state accessors, confirmation-pending path, auto-format deferral |
@@ -98,7 +98,7 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
    fields give 400, the system-mode gate gives 409, auth-tier refusal holds,
    success reads back, and no persistent write happens on any refusal (count
    stub store writes).
-9. **diagnostics_http and ota/update handler refusals (KilnFW).** Compile
+9. **(diagnostics_http part done 2026-10-09, test_diagnostics_http.c; ota/update part open.) diagnostics_http and ota/update handler refusals (KilnFW).** Compile
    `diagnostics_http.c` with stubs: estop_verify refused unless safety_trip is
    ok, crash_report_clear refused when unacknowledged, nvs_keys refuses
    `kiln_auth`; ota_esp / rollback and `update_http_*gate_refuses` refuse during
