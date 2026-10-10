@@ -830,6 +830,11 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
     }
+    if (err == HAL_OK && len != 1) {
+        /* A blob exists but is neither the 16-byte shape nor a legacy single byte: corrupt. Falling through to
+         * the u8 read would answer NOT_FOUND (type mismatch) and read as "no bitmap yet" -- silent slot loss. */
+        return HAL_IO;
+    }
     /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
      * was written by a pre-task-6 hal_kv_set_u8()) or the host fake's
      * size-based equivalent (err == HAL_OK, len == 1) -- both mean "old

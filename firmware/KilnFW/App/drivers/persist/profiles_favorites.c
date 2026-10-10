@@ -106,13 +106,12 @@ static hal_status_t favorites_load_user_mask(hal_kv_handle_t *h, profiles_slot_b
 {
     size_t len = 0;
     hal_status_t err = hal_kv_get_blob(h, NVS_KEY_FAV_USER, NULL, &len);
-    if (err == HAL_NOT_FOUND) {
-        return HAL_OK;
-    }
     if (err == HAL_OK && len == sizeof(*out)) {
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_FAV_USER, out, &full_len);
     }
+    /* NOT_FOUND is NOT "absent" yet: on target (and the now-typed host fake) a blob read of a key stored
+     * as U32 ends in NOT_FOUND, so the legacy uint32 form must be tried before declaring the key missing. */
     uint32_t legacy = 0;
     hal_status_t legacy_err = hal_kv_get_u32(h, NVS_KEY_FAV_USER, &legacy);
     if (legacy_err == HAL_NOT_FOUND) {
