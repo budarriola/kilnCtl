@@ -117,3 +117,7 @@ interrupted firing, not unsafe heat. No second source is tried before declaring 
 `7cc343260` committed an unterminated string literal (a raw newline inside `"..."`) in
 `mcp_server_debug.py`, so the module failed to import until `979d05a63` two minutes later. Any bisect
 landing on 7cc34326 sees the whole kilnctrl MCP server broken. Nothing to fix now.
+
+## Fix status
+
+Fixed in <SHA> (post-rebase): B1-1 (autotune read failure refuses when the exec read answered; test + negtest CAUGHT), S-1 (prompts disabled, bounded git, only DNS/connect/timeout is SKIP, bad URL/not found/auth is FAIL), S-2 (.gitmodules read from the commit; gitlinks without .gitmodules FAIL), S-3 (land.ps1 passes -RepoPath/-Commit; dev_promote already did), S-4 (land final JSON carries submodule_pins), A1-1 (tools/check_touch_cal_exit_target_caller.ps1, negtested). B1-2, A1-2, S-5 unchanged (residual/info).

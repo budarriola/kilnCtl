@@ -365,10 +365,8 @@ def _esp_profile_running_refusal(action: str, unreadable_warnings: "Optional[lis
     try:
         at = _srv._autotune.get_status()
     except Exception as exc:  # noqa: BLE001
-        if unreadable_warnings is not None:
-            unreadable_warnings.append(
-                f"WARNING: the ESP autotune state could not be read ({exc}); proceeding.")
-            return None
+        # The exec read already answered over the same link, so the ESP is readable: an
+        # autotune read failure refuses (B1-1); the warning path is only for an unreadable exec read.
         return (f"error: refusing to {action} ESP -- autotune state could not be read ({exc}). "
                 + override)
     if at.state not in (0, 5, 6):

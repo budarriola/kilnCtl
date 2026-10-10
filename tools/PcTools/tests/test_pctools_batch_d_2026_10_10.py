@@ -58,6 +58,13 @@ class RunningGuardsFailClosedTests(unittest.TestCase):
         self.assertIn("could not be read", out)
         self.assertIn("programmed pico OK", out)
 
+    def test_debug_program_pico_exec_idle_autotune_unreadable_refused(self):
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(0)),              um.patch.object(m_dbg._srv._autotune, "get_status", side_effect=TimeoutError("t")),              um.patch.object(m_dbg.debug_probe, "program") as prog:
+            out = m_dbg.debug_program("pico", confirm=True)
+        prog.assert_not_called()
+        self.assertTrue(out.startswith("error: refusing"), out)
+        self.assertIn("autotune state could not be read", out)
+
     def test_debug_program_pico_confirmed_running_refused_unreadable_does_not_mask(self):
         with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(1)), \
              um.patch.object(m_dbg.debug_probe, "program") as prog:

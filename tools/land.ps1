@@ -89,6 +89,7 @@ $script:allowedFails = @()
 $script:knownFails = @()
 $script:newFails = @()
 $script:sha = $null
+$script:subPins = 'not-run'
 
 function Finish([int]$code, [string]$err, [bool]$landed = $false) {
     $o = [ordered]@{
@@ -99,6 +100,7 @@ function Finish([int]$code, [string]$err, [bool]$landed = $false) {
         known_fails   = @($script:knownFails)
         new_fails     = @($script:newFails)
         dry_run       = [bool]$DryRun
+        submodule_pins = $script:subPins
         error         = $(if ($err) { $err } else { $null })
     }
     if ($err) { Write-Host "REFUSED/FAILED: $err" -ForegroundColor Red }
@@ -338,9 +340,10 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
     Step "submodule pins pushed"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1")
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1") -RepoPath $top -Commit (git rev-parse HEAD).Trim()
+    $script:subPins = $(if ($LASTEXITCODE -eq 0) { 'pass' } elseif ($LASTEXITCODE -eq 1) { 'fail' } else { 'skipped' })
     if ($LASTEXITCODE -eq 1) { Finish 1 "a submodule pin is not on its remote; push the submodule commit first (nothing pushed)" }
-    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
+    if ($LASTEXITCODE -ne 0) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
 
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)

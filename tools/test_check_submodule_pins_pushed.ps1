@@ -36,11 +36,36 @@ try {
         elseif ($c.want -eq 1 -and $out -notmatch 'push the submodule commit to its remote before landing') { Write-Host "FAIL: $($c.n): message missing"; $fails++ }
         else { Write-Host "ok: $($c.n)" }
     }
-    # unreachable remote must SKIP (3), never PASS
-    Set-Content -Path (Join-Path $sup '.gitmodules') -Value "[submodule `"m`"]`n`tpath = m`n`turl = $($root -replace [regex]::Escape('\'),'/')/nonexistent`n"
-    G -C $sup add .gitmodules; G -C $sup commit -q -m unreach
+    function RunNew($name, $want, $gm, $rx) {
+        Set-Content -Path (Join-Path $sup '.gitmodules') -Value $gm
+        G -C $sup add .gitmodules; G -C $sup commit -q -m $name
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
+        if ($LASTEXITCODE -ne $want -or $out -match 'PASS: all' -or ($rx -and $out -notmatch $rx)) { Write-Host "FAIL: ${name}: exit $LASTEXITCODE, want $want`n$out"; $script:fails++ } else { Write-Host "ok: $name" }
+    }
+    $rp = $root -replace [regex]::Escape('\'),'/'
+    # genuine network failure (unresolvable host) -> SKIP (3)
+    RunNew 'dns-outage' 3 "[submodule `"m`"]`n`tpath = m`n`turl = https://nonexistent-host.invalid/x.git`n" 'SKIP:'
+    # missing repository / invalid URL -> FAIL (1), never SKIP
+    RunNew 'repo-not-found' 1 "[submodule `"m`"]`n`tpath = m`n`turl = $rp/nonexistent`n" 'not a network outage'
+    RunNew 'invalid-url' 1 "[submodule `"m`"]`n`tpath = m`n`turl = nosuchscheme://x`n" 'not a network outage'
+    # auth failure (HTTP 401/403/404 from a local server is not available offline); a file:// non-repo stands in for "rejected"
+    RunNew 'rejected-url' 1 "[submodule `"m`"]`n`tpath = m`n`turl = file:///$rp/nonexistent2`n" 'not a network outage'
+    # timeout: a listening socket that never answers -> SKIP, bounded
+    $lis = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0); $lis.Start()
+    $port = $lis.LocalEndpoint.Port
+    $env:KILNCTL_SUBPIN_TIMEOUT_SEC = '3'
+    try { RunNew 'timeout' 3 "[submodule `"m`"]`n`tpath = m`n`turl = http://127.0.0.1:$port/x.git`n" 'timed out' } finally { $lis.Stop(); Remove-Item Env:KILNCTL_SUBPIN_TIMEOUT_SEC }
+    # S-2: .gitmodules read from the commit; gitlink without .gitmodules at that commit -> FAIL
+    G -C $sup rm -q -f .gitmodules; G -C $sup commit -q -m nogm
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
-    if ($LASTEXITCODE -ne 3 -or $out -match 'PASS: all') { Write-Host "FAIL: unreachable: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: unreachable" }
+    if ($LASTEXITCODE -ne 1 -or $out -match 'PASS') { Write-Host "FAIL: gitlink-no-gitmodules: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: gitlink-no-gitmodules" }
+    # S-2: working tree .gitmodules differs from the commit: the commit's wins
+    Set-Content -Path (Join-Path $sup '.gitmodules') -Value "[submodule `"m`"]`n`tpath = m`n`turl = $($remote -replace [regex]::Escape('\'),'/')`n"
+    G -C $sup add .gitmodules; G -C $sup commit -q -m regood
+    G -C $sup update-index --add --cacheinfo "160000,$lost,m"; G -C $sup commit -q -m badpin
+    Set-Content -Path (Join-Path $sup '.gitmodules') -Value ''
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1) { Write-Host "FAIL: commit-gitmodules: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: commit-gitmodules" }
 } catch { Write-Host "ERROR: $_"; $fails++ } finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
 if ($fails) { Write-Host "$fails FAILED"; exit 1 }
 Write-Host "all passed"; exit 0
