@@ -674,6 +674,35 @@ esp_err_t history_csv_get_handler(httpd_req_t *req)
     return ESP_OK;
 }
 
+/* The three JSON refusal bodies of profile_exec_start_post_handler() live in
+ * noinline helpers so their snprintf buffers (288 + 192 + 257 B) are not part
+ * of the handler's own frame, which sits under profile_executor_run() on the
+ * shared 8 KB httpd stack (check_httpd_task_stack_budget). The helpers run only
+ * on the refusal paths, after which the handler returns; they are never on the
+ * stack together with profile_executor_run(). */
+static __attribute__((noinline)) esp_err_t start_send_gate_refusal(httpd_req_t *req, const char *item_key,
+                                                                    const char *msg)
+{
+    char json[192 + 96];
+    int n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                     item_key ? item_key : "", msg);
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+static __attribute__((noinline)) esp_err_t start_send_run_failure(httpd_req_t *req, const char *err_msg)
+{
+    char json[192];
+    char err_escaped[128 * 2 + 1];
+    json_escape(err_msg, err_escaped, sizeof(err_escaped));
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 {
     /* system_mode_gate (slice 2): checked first, before even reading the
@@ -695,13 +724,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
     mode_snap.recovery_mode = facts.recovery_mode;
     if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, recovery_err, sizeof(recovery_err))) {
         ESP_LOGW(DASH_TAG, "profile_exec/start refused by the system mode gate (recovery mode)");
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_gate_refusal(req, READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h). profile_executor_run()
@@ -740,13 +763,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
          * doubled ~400-byte scratch buffer on this shared stack -- the exact
          * httpd-stack-blob class CLAUDE.md warns about -- to protect against
          * an input that cannot occur. */
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         item_key ? item_key : "", recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_gate_refusal(req, item_key, recovery_err);
     }
 
     if (req->content_len <= 0 || req->content_len > 32) {
@@ -802,13 +819,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
 
     char err_msg[128] = "";
     if (!profile_executor_run((uint8_t)id, err_msg, sizeof(err_msg))) {
-        char json[192];
-        char err_escaped[128 * 2 + 1];
-        json_escape(err_msg, err_escaped, sizeof(err_escaped));
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return start_send_run_failure(req, err_msg);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }

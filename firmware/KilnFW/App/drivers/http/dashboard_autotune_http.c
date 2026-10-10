@@ -198,6 +198,33 @@ esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* JSON refusal bodies of autotune_start_post_handler() live in noinline
+ * helpers so their snprintf buffers are not part of the handler's own frame
+ * on the shared 8 KB httpd stack (check_httpd_task_stack_budget). They run only
+ * on refusal paths, never under autotune_engine_run*(). */
+static __attribute__((noinline)) esp_err_t autotune_send_gate_refusal(httpd_req_t *req, const char *item_key,
+                                                                       const char *msg)
+{
+    char json[192 + 96];
+    int n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                     item_key ? item_key : "", msg);
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+static __attribute__((noinline)) esp_err_t autotune_send_run_failure(httpd_req_t *req, const char *err_msg)
+{
+    char json[192];
+    char err_escaped[128 * 2 + 1];
+    json_escape(err_msg, err_escaped, sizeof(err_escaped));
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 esp_err_t autotune_start_post_handler(httpd_req_t *req)
 {
     /* system_mode_gate (slice 2): same explicit recovery-mode enforcement as
@@ -216,13 +243,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     mode_snap.recovery_mode = facts.recovery_mode;
     if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, recovery_err, sizeof(recovery_err))) {
         ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode)");
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return autotune_send_gate_refusal(req, READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h), extended to autotune the
@@ -263,13 +284,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
          * the same reason as there: readiness_gate_evaluate()'s messages are
          * compile-time constants proven free of '"'/'\\'
          * (test_readiness_gate.c's test_messages_are_json_safe()). */
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         item_key ? item_key : "", recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return autotune_send_gate_refusal(req, item_key, recovery_err);
     }
 
     /* Raised from 64 when the relay method arrived: its form carries
@@ -398,13 +413,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     }
 
     if (!started) {
-        char json[192];
-        char err_escaped[128 * 2 + 1];
-        json_escape(err_msg, err_escaped, sizeof(err_escaped));
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return autotune_send_run_failure(req, err_msg);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }

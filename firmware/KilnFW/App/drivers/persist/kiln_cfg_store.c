@@ -1058,17 +1058,23 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
             e->pkg_schema = 0;
             return;
         }
-        uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+        /* Heap, not stack: this runs on the shared 8 KB httpd stack
+         * (check_httpd_task_stack_budget); an alloc failure is the same
+         * "canonical encoding failed" outcome below. Freed on every path. */
+        uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE);
         size_t canonical_len = 0;
-        if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+        if (!canonical || !zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len)) {
+            free(canonical);
             ESP_LOGW(TAG, "kiln_cfg_store: canonical ESP-half encoding failed for '%s' while keeping "
                           "the existing Pico half -- package hash left unchanged",
                      e->name);
             return;
         }
         uint32_t hash = 0;
-        if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
-            hash != 0) {
+        bool hash_ok =
+            kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash);
+        free(canonical);
+        if (hash_ok && hash != 0) {
             e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
             e->pkg_hash = hash;
         } else {
@@ -1102,9 +1108,10 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
      * e->blob itself is UNCHANGED -- still the raw struct, still what
      * kiln_cfg_store_apply() hands to zones_config_import_blob(), which does
      * its own CRC/version checking independently of this hash. */
-    uint8_t canonical[ZONES_CONFIG_BLOB_MAX_SIZE];
+    uint8_t *canonical = persist_scratch_alloc(ZONES_CONFIG_BLOB_MAX_SIZE); /* heap: httpd stack budget */
     size_t canonical_len = 0;
-    if (!zones_config_export_canonical(cfg, canonical, sizeof(canonical), &canonical_len)) {
+    if (!canonical || !zones_config_export_canonical(cfg, canonical, ZONES_CONFIG_BLOB_MAX_SIZE, &canonical_len)) {
+        free(canonical);
         memset(&e->pico, 0, sizeof(e->pico));
         e->pico_populated = 0;
         e->pkg_schema = 0;
@@ -1125,8 +1132,10 @@ static void populate_pico_half_and_hash(kiln_cfg_entry_t *e, const zones_cfg_t *
      * this slot to the same "not yet captured" state an unreachable capture
      * failure already produces above, rather than a half-marked one. */
     uint32_t hash = 0;
-    if (kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash) &&
-        hash != 0) {
+    bool hash_ok =
+        kiln_package_compute_hash(KILN_PKG_SCHEMA_VERSION, canonical, (uint16_t)canonical_len, &e->pico, &hash);
+    free(canonical);
+    if (hash_ok && hash != 0) {
         e->pico_populated = 1;
         e->pkg_schema = KILN_PKG_SCHEMA_VERSION;
         e->pkg_hash = hash;
