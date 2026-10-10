@@ -525,13 +525,16 @@ static bool zone_ct_map_committed_value(uint8_t ch, uint8_t *out)
 
 /* H3 fix (opus review, 2026-08-28): a SET_PARAM that fails PART WAY through
  * the three-channel push used to just `break`, which leaves the Pico's
- * link_task.c s_staged_config holding whatever channels DID stage. That
- * buffer is a persistent baseline -- seeded once from the committed record
- * and only re-seeded by a SUCCESSFUL COMMIT_CONFIG or a reboot
- * (link_task.c's s_staged_config_init, reset only at task start) -- so the
- * next unrelated COMMIT_CONFIG, e.g. the operator saving one field on the
- * commissioning page, would have carried this abandoned sweep's leftover
- * ct_channel_map[] into flash as though it had been commissioned.
+ * link_task.c staging area holding whatever channels DID stage. Those edits
+ * persist until a SUCCESSFUL COMMIT_CONFIG / APPLY_CONFIG_VOLATILE, a Pico
+ * reboot, or a new ESP session (KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M3: the
+ * Pico discards staged edits when the ESP's PUSH_CONTEXT boot_id changes or
+ * PUSH_CONTEXT stops for its max age) -- so within this ESP boot, the next
+ * unrelated COMMIT_CONFIG, e.g. the operator saving one field on the
+ * commissioning page, would carry this abandoned sweep's leftover
+ * ct_channel_map[] into flash as though it had been commissioned. The
+ * Pico-side discard only covers the cross-boot case; this repair is still the
+ * only thing that covers the same-session one.
  *
  * The link protocol has no "discard staged config" command (uart_task_ids.h
  * enumerates every subcommand on this wire; SET_CONFIG/SET_CT_CAL/COMMIT are

@@ -143,6 +143,9 @@ try {
         (Join-Path $testDir "test_link_task_tc_type_gate.c"),
         (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
         (Join-Path $testDir "test_link_task_commit_reject.c"),
+        # SET_PARAM staging as an edit list (KILNLINK_ROBUSTNESS_AUDIT M2/M3).
+        (Join-Path $srcDir "tasks\link_staging.c"),
+        (Join-Path $testDir "test_link_staging.c"),
         (Join-Path $srcDir "tasks\link_task_announce_eval.c"),
         (Join-Path $testDir "test_link_task_announce_eval.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),

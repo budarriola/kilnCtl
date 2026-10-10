@@ -155,6 +155,9 @@ set(SAFTYFW_APP_SOURCES
     # host-testable (test/test_link_task_commit_reject.c) -- see
     # link_task_commit_reject.h.
     src/tasks/link_task_commit_reject.c
+    # SET_PARAM staging as an edit list, pure and host-testable
+    # (test/test_link_staging.c) -- see link_staging.h.
+    src/tasks/link_staging.c
     # Pure ANNOUNCE_VERSION decode-to-verdict (peer version + degraded_no_
     # context), split out of link_task_handle_announce_version() so it is
     # host-testable (test/test_link_task_announce_eval.c) -- see

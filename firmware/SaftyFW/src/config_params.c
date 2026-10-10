@@ -756,7 +756,7 @@ bool config_params_validate_ex(const config_store_record_t *rec, const char **ou
         if (out_field) *out_field = "rec";
         if (out_rule) *out_rule = "NULL record";
         // No CONFIG_PARAMS_REJECT_* value fits "not even a record" --
-        // link_task.c never calls this with a NULL rec (s_staged_config is
+        // link_task.c never calls this with a NULL rec (the staged candidate is
         // always a real object), so *out_reason is deliberately left at
         // CONFIG_PARAMS_REJECT_NONE here; the wire mapping in link_task.c
         // treats that as KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN, its own

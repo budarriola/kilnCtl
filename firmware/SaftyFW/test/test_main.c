@@ -56,6 +56,7 @@ void run_test_reboot_in_place_wiring(void);
 void run_test_tc_type_reapply_policy(void);
 void run_test_link_task_tc_type_gate(void);
 void run_test_link_task_commit_reject(void);
+void run_test_link_staging(void);
 void run_test_link_task_announce_eval(void);
 void run_test_update_task_reboot_policy(void);
 void run_test_update_task_erase_plan(void);
@@ -124,6 +125,7 @@ int main(void)
     run_test_tc_type_reapply_policy();
     run_test_link_task_tc_type_gate();
     run_test_link_task_commit_reject();
+    run_test_link_staging();
     run_test_link_task_announce_eval();
     run_test_update_task_reboot_policy();
     run_test_update_task_erase_plan();

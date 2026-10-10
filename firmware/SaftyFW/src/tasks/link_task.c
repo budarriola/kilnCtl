@@ -78,6 +78,7 @@
 #include "safety_core.h"
 #include "link_task_announce_eval.h" // pure ANNOUNCE_VERSION -> degraded verdict, see link_task_handle_announce_version()
 #include "link_task_commit_reject.h" // pure write-decision -> wire-reason mapping, see link_task_handle_commit_config()
+#include "link_staging.h" // SET_PARAM staging as an edit list, see link_task_handle_set_param()/_commit_config()
 #include "link_task_tc_type_gate.h"
 #include "snapshots.h"
 #include "thermo_task.h"
@@ -476,25 +477,33 @@ static uint64_t s_wall_clock_epoch_ms = 0;
 
 // Commissioning staging (docs/COMMISSIONING.md section 2: "Staged in RAM,
 // then committed as one record"). Single-writer, same reasoning as every
-// other plain static above: only SET_PARAM/COMMIT_CONFIG's handlers below
-// ever touch this, both on link_task's own thread. Lazily seeded from
-// config_store_get_full_record() (the currently COMMITTED record) the first
-// time either handler runs, so a board that has never had a single
-// SET_PARAM this boot starts staging from what is actually enforced, not
-// from a blank record that would silently discard every field a PRIOR boot
-// already committed. After a successful COMMIT_CONFIG, this becomes the new
-// baseline for whatever SET_PARAM comes next -- exactly "staged, then
-// committed as one record, then staged again from there."
-static config_store_record_t s_staged_config;
-static bool s_staged_config_init = false;
+// other plain static above: only link_task's own thread touches it.
+//
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M2: this used to be a whole staged
+// RECORD seeded once from the committed record. SET_CONFIG and SET_CT_CAL
+// write flash directly and never refreshed it, so the next COMMIT_CONFIG /
+// APPLY_CONFIG_VOLATILE wrote the stale copy back and silently reverted
+// them (tc_type included). It is now a list of the edits SET_PARAM actually
+// staged (link_staging.h); the record a COMMIT writes is built at commit time
+// from the CURRENTLY ENFORCED record plus those edits, so a field nobody
+// staged always carries the committed value. A successful direct write also
+// drops any earlier staged edit of a field it changed, so the later write
+// wins. Discarded on an ESP boot_id change (audit M3, see
+// link_task_handle_push_context()).
+static link_staging_t s_staging;
+// Scratch record SET_PARAM validates an edit against; static rather than on
+// link_task's stack (config_store_record_t is several hundred bytes).
+static config_store_record_t s_staging_scratch;
 
-static void link_task_ensure_staged_config(void)
+// Builds the COMMIT_CONFIG / APPLY_CONFIG_VOLATILE candidate: the record
+// currently enforced (config_store_get_full_record(): flash, or a prior
+// volatile install) with every staged edit applied on top. Returns false if
+// an edit no longer applies -- impossible for an edit link_staging_stage()
+// accepted, so a caller treats it as "write nothing".
+static bool link_task_build_staged_candidate(config_store_record_t *out)
 {
-    if (s_staged_config_init) {
-        return;
-    }
-    config_store_get_full_record(&s_staged_config);
-    s_staged_config_init = true;
+    config_store_get_full_record(out);
+    return link_staging_apply(&s_staging, out);
 }
 
 // --- TX ----------------------------------------------------------------
@@ -1334,11 +1343,33 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
     // sooner, never later. Wiring boot_id_changed to force a reset here
     // would LOOSEN every one of those guards by giving a fast-rebooting ESP
     // a free correlation-window reset on demand -- exactly the wrong
-    // direction for a safety guard. So `boot_id_changed` stays computed and
-    // discarded on purpose; this comment is the record that the omission was
+    // direction for a safety guard. So `boot_id_changed` never reaches the
+    // guard accumulators; this comment is the record that the omission was
     // considered, not overlooked.
-    bool boot_id_changed = s_context_boot_id_known && snap.boot_id != s_last_context_boot_id;
-    (void)boot_id_changed; // suppress unused-variable-as-error; see comment above
+    //
+    // The ONE thing a new ESP session does reset is the SET_PARAM staging
+    // area (KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M3). Staging is not a guard
+    // accumulator: it is a set of uncommitted edits the previous ESP boot
+    // made, and carrying them into the next boot's COMMIT_CONFIG would commit
+    // values the operator never confirmed. Discarding them can only make a
+    // later COMMIT write the committed record instead, so the "safe
+    // direction" argument above does not apply to it. A context gap of at
+    // least LINK_TASK_CONTEXT_MAX_AGE_MS also counts as a new session, which
+    // covers an ESP reboot that drew the same 8-bit boot_id and a link loss.
+    // KilnFW's zones_current_sweep_task.c repairs its own mid-sweep leftovers
+    // inside one session; this covers the cross-boot case it cannot.
+    bool context_gap =
+        s_context_boot_id_known &&
+        (xTaskGetTickCount() - s_last_context_rx_tick) >= pdMS_TO_TICKS(LINK_TASK_CONTEXT_MAX_AGE_MS);
+    if (link_staging_new_esp_session(s_context_boot_id_known, s_last_context_boot_id, snap.boot_id,
+                                     context_gap) &&
+        link_staging_count(&s_staging) > 0u) {
+        char discard_msg[64];
+        snprintf(discard_msg, sizeof(discard_msg), "new ESP session: discarded %u staged edit(s)",
+                 (unsigned)link_staging_count(&s_staging));
+        log_task_log(LOG_LEVEL_WARN, "push_context", discard_msg);
+        link_staging_reset(&s_staging);
+    }
     s_last_context_boot_id = snap.boot_id;
     s_context_boot_id_known = true;
 
@@ -1854,6 +1885,10 @@ static void link_task_handle_set_config(const kilnlink_frame_t *frame)
         config_store_write_ex(&rec, link_task_heat_is_safe_for_tc_type_change(), &reason, NULL);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_config", "accepted");
+        // Audit M2: this write wins over any earlier staged edit of a field
+        // it changed, and always over a staged tc_type edit (0x0105).
+        (void)link_staging_drop_superseded(&s_staging, &committed, &rec);
+        (void)link_staging_drop_id(&s_staging, 0x0105u);
         // Take effect immediately, not after a reboot -- thermo_task.c's own
         // comment on thermo_task_request_tc_type_reapply() explains the
         // fail-safe path this rides: max31856_configure() clears
@@ -1960,6 +1995,13 @@ static void link_task_handle_set_ct_cal(const kilnlink_frame_t *frame)
     bool written = config_store_write(&rec, &reason);
     if (written) {
         log_task_log(LOG_LEVEL_INFO, "set_ct_cal", "accepted");
+        // Audit M2: this write wins over any earlier staged edit of a field
+        // it changed, and always over this channel's staged gain/offset/
+        // calibrated edits (0x0310+ch, 0x0313+ch, 0x0316+ch).
+        (void)link_staging_drop_superseded(&s_staging, &committed, &rec);
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0310u + msg.channel));
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0313u + msg.channel));
+        (void)link_staging_drop_id(&s_staging, (uint16_t)(0x0316u + msg.channel));
         // Take effect immediately, not after a reboot -- current_task.c's
         // own comment on current_task_reload_ct_cal() explains why a live
         // commissioning session needs this. tc_type now gets the same
@@ -2463,13 +2505,13 @@ static void link_task_handle_inject_tc(const kilnlink_frame_t *frame)
 }
 
 // SAFETY_CMD_SET_PARAM (0x1C), docs/COMMISSIONING.md section 2 -- stages one
-// (param_id, value) pair into the in-RAM record, per config_params.c's id
-// table. Nothing here reaches flash: config_params_set() only mutates
-// s_staged_config, and config_store_write() is called ONLY from
-// COMMIT_CONFIG's handler below, after that whole staged record passes
-// cross-field validation. An unknown id or a type that does not match the
-// field's own wire type is refused individually (config_params_set()
-// returns false, s_staged_config left untouched) -- COMMISSIONING.md section
+// (param_id, value) edit, per config_params.c's id table. Nothing here
+// reaches flash: the edit is validated with config_params_set() against a
+// scratch copy of the committed record and recorded in s_staging, and
+// config_store_write() is called ONLY from COMMIT_CONFIG's handler below,
+// after the whole candidate record passes cross-field validation. An unknown
+// id or a type that does not match the field's own wire type is refused
+// individually (nothing staged) -- COMMISSIONING.md section
 // 2: "unknown ids are refused individually... rather than the whole
 // transfer failing," and the same treatment extends to a wrong type tag for
 // a real id, which is exactly as untrustworthy.
@@ -2483,9 +2525,8 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
         return;
     }
 
-    link_task_ensure_staged_config();
-
-    if (!config_params_set(&s_staged_config, msg.param_id, msg.type, msg.value)) {
+    config_store_get_full_record(&s_staging_scratch);
+    if (!link_staging_stage(&s_staging, &msg, &s_staging_scratch)) {
         log_task_log(LOG_LEVEL_WARN, "set_param", "refused, unknown param_id or type mismatch");
         return;
     }
@@ -2512,9 +2553,10 @@ static void link_task_handle_set_param(const kilnlink_frame_t *frame)
 // The ARMED refusal is NOT checked here -- it lives inside
 // config_store_write() itself (config_store_decide_write(), config_store.h's
 // own header comment), so a future second call site into config_store_write()
-// cannot forget it. On refusal (ARMED, or a flash failure), s_staged_config
-// is left completely UNCHANGED, so a retry (or another SET_PARAM first)
-// starts from exactly what was staged, never from a half-written record.
+// cannot forget it. On refusal (ARMED, or a flash failure), the staged edits
+// in s_staging are left completely UNCHANGED, so a retry (or another
+// SET_PARAM first) starts from exactly what was staged, never from a
+// half-written record.
 // SAFETY_CMD_COMMIT_CONFIG_REJECTED (0x20), docs/COMMISSIONING.md sec 2/3.1
 // -- ROADMAP.md "no wire codec carries a per-field COMMIT_CONFIG rejection
 // reason back to the ESP" loose end. Sent ONLY from link_task_handle_
@@ -2551,38 +2593,45 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     }
     (void)msg; // no fields
 
-    link_task_ensure_staged_config();
+    // Audit M2: the candidate is the currently enforced record plus the
+    // staged edits, built now -- never a record seeded before a later
+    // SET_CONFIG/SET_CT_CAL direct write, which used to revert that write.
+    config_store_record_t to_write;
+    if (!link_task_build_staged_candidate(&to_write)) {
+        log_task_log(LOG_LEVEL_ERROR, "commit_config", "refused, a staged edit no longer applies");
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN);
+        return;
+    }
 
     const char *field = NULL;
     const char *rule = NULL;
     config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
-    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
+    if (!config_params_validate_ex(&to_write, &field, &rule, &validate_reason)) {
         log_task_log(LOG_LEVEL_WARN, "commit_config", rule ? rule : "refused, validation failed");
         // COMMISSIONING.md sec 3.1's "names the offending field and the rule
         // it broke" -- validate_reason maps directly onto the wire enum
         // (both are "range" vs "contradiction", nothing else can come out
         // of config_params_validate_ex() here); CONFIG_PARAMS_REJECT_NONE
         // (the NULL-rec case, which link_task.c never actually triggers,
-        // since s_staged_config is always a real object) falls through to
+        // since to_write is always a real object) falls through to
         // UNKNOWN rather than silently mislabelling as RANGE.
         kilnlink_commit_config_reject_reason_t wire_reason =
             (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
             : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
                                                                      : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
         link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
-        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
 
     // Captured BEFORE this commit's staged changes are finalized/written --
     // config_params_finalize_i_normal_a_invalidation() below needs the
     // effective CT channel map as it stood BEFORE this commit, to detect a
-    // topology/channel remap that must invalidate i_normal_a[]. s_staged_
-    // config already carries this commit's own SET_PARAM changes, so it
-    // cannot serve as "before"; the last record actually committed can.
+    // topology/channel remap that must invalidate i_normal_a[]. to_write
+    // already carries this commit's own SET_PARAM changes, so it cannot
+    // serve as "before"; the last record actually committed can.
     config_store_record_t before_commit;
     config_store_get_full_record(&before_commit);
 
-    config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Must run AFTER finalize_zone_ct_channel() (so to_write's group bit is
@@ -2603,13 +2652,13 @@ static void link_task_handle_commit_config(const kilnlink_frame_t *frame)
     bool written = config_store_write_ex(&to_write, link_task_heat_is_safe_for_tc_type_change(), &reason,
                                           &decision);
     if (written) {
-        s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+        link_staging_reset(&s_staging); // committed; the next SET_PARAM starts from this record
         log_task_log(LOG_LEVEL_INFO, "commit_config", "accepted");
         // Take effect immediately, not after a reboot -- same reasoning as
         // link_task_handle_set_ct_cal()'s own call to current_task_reload_
         // ct_cal() just above. COMMIT_CONFIG is the only wire path that can
         // change i_present_a/zero_counts/k_ct_v_per_a/gain/mains_voltage_v
-        // (SET_PARAM stages them into s_staged_config; this is where they
+        // (SET_PARAM stages them into s_staging; this is where they
         // actually land in config_store), so this is the one call site that
         // needs current_task_reload_cal() -- current_task_fn()'s own boot
         // sequence is the only other caller.
@@ -2706,19 +2755,25 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     }
     (void)msg; // no fields
 
-    link_task_ensure_staged_config();
+    // Audit M2: same candidate construction as link_task_handle_commit_config().
+    config_store_record_t to_write;
+    if (!link_task_build_staged_candidate(&to_write)) {
+        log_task_log(LOG_LEVEL_ERROR, "apply_config_volatile", "refused, a staged edit no longer applies");
+        link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN);
+        return;
+    }
 
     const char *field = NULL;
     const char *rule = NULL;
     config_params_reject_reason_t validate_reason = CONFIG_PARAMS_REJECT_NONE;
-    if (!config_params_validate_ex(&s_staged_config, &field, &rule, &validate_reason)) {
+    if (!config_params_validate_ex(&to_write, &field, &rule, &validate_reason)) {
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile", rule ? rule : "refused, validation failed");
         kilnlink_commit_config_reject_reason_t wire_reason =
             (validate_reason == CONFIG_PARAMS_REJECT_CONTRADICTION) ? KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION
             : (validate_reason == CONFIG_PARAMS_REJECT_RANGE)       ? KILNLINK_COMMIT_CONFIG_REJECT_RANGE
                                                                      : KILNLINK_COMMIT_CONFIG_REJECT_UNKNOWN;
         link_task_send_commit_config_rejected(config_params_id_for_field_name(field), wire_reason);
-        return; // writes NOTHING -- s_staged_config is untouched by validate_ex()
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
 
     // See link_task_handle_commit_config()'s matching comment: this is the
@@ -2729,7 +2784,6 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
     config_store_record_t before_commit;
     config_store_get_full_record(&before_commit);
 
-    config_store_record_t to_write = s_staged_config;
     config_params_finalize_ct_channel_map(&to_write);
     config_params_finalize_zone_ct_channel(&to_write); // CT_CHANNEL_MASK.md step 2
     // Same ordering requirement as link_task_handle_commit_config(): after
@@ -2752,9 +2806,11 @@ static void link_task_handle_apply_config_volatile(const kilnlink_frame_t *frame
         log_task_log(LOG_LEVEL_WARN, "apply_config_volatile",
                      reason ? reason : "refused: would loosen a safety threshold while ARMED");
         link_task_send_commit_config_rejected(CONFIG_PARAMS_NO_PARAM_ID, KILNLINK_COMMIT_CONFIG_REJECT_ARMED);
-        return; // writes NOTHING -- s_staged_config is untouched
+        return; // writes NOTHING -- the staged edits are kept for a retry
     }
-    s_staged_config = to_write; // becomes the new baseline for the next SET_PARAM
+    // Installed; the cached record now carries these values, and the next
+    // candidate is built from it.
+    link_staging_reset(&s_staging);
     log_task_log(LOG_LEVEL_INFO, "apply_config_volatile", "accepted (volatile, no flash write)");
     // Same "take effect immediately" reasoning as link_task_handle_commit_
     // config()'s own call: CT cal / i_present_a etc. must be live the moment
@@ -3322,7 +3378,7 @@ bool link_task_start(void)
     s_wall_clock_have = false;
     s_wall_clock_epoch_ms = 0;
 
-    s_staged_config_init = false;
+    link_staging_reset(&s_staging);
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.
