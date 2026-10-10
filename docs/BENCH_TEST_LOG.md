@@ -3245,3 +3245,17 @@ Built origin/dev d93cf774a from a clean worktree, flashed with flash_firmware (v
 - update_check: FAILED http 404 (no release published in budarriola/kilnCtl). Heap was not sampled during it.
 
 After runs: executor idle, link up, no trip, heap_internal min_free 14383 B (floor 8192 ok), uptime 3318 s. Stack worst headroom: backlight_pwm 29.2% (LOW flag, 896 B free), lvgl 30.0%, httpd_worker 32.3%, info_uart_bridge 33.5%, touch_uart_bridge 35.6%; none within 10%. profile_exec_wdt 3880 B free of 6144.
+
+## 2026-10-10 -- spare-relay aux suite (bench2)
+
+Board dev firmware d93cf774a, MCP server fresh at 129586d4f with KILNCTL_AUX_BENCH_CONFIRM=1. Run `20261010T184800Z_aux_bench2` (bench_test_start suite aux), preflight OK (link up, armed, no trip, no crash report).
+
+- AX-C01 PASS (relay 4 aux configure, read-back)
+- AX-C02 PASS (aux on zone-owned relay refused)
+- AX-C03 SKIP (no zone relay_mask writer injected; no narrow tool exists)
+- AX-T01 PASS (rule toggles relay 4, min on/off honoured)
+- AX-K01 PASS (ESP path only; proves nothing about external supply wiring)
+- AX-T02 SKIP (requires --attended; trip-drops-relay case not run)
+- AX-R01 PASS (restore)
+
+Plan step 9 (convert ON_OFF zones to aux) is a one-way owner-offered conversion, not a bench step; not run. End state: idle, link up, armed, no trip; no BENCH_AUX_RULE slot (profiles_list shows only M18C_TEST, B1_THROWAWAY); aux enabled_mask 0.
