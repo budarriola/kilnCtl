@@ -46,7 +46,15 @@ stale, or a legitimate command sequence whose state goes out of step.
 
 ## Findings
 
-### M1. Pico boot_id is an 8-bit time sample, yet the ESP relies on it for reboot detection (reset-one-side)
+### M1. Pico boot_id is an 8-bit time sample, yet the ESP relies on it for reboot detection (reset-one-side) -- FIXED in f94ba9cf
+
+- Fix: `boot_id` now folds `get_rand_32()` (ROSC, unique id and time), so
+  consecutive boots no longer repeat it by construction. The 8-bit id still
+  collides 1 in 256, so the ESP also treats a backwards step in the Pico's
+  DIAG `uptime_ms` (wrap-safe, `safety_pico_uptime_regressed()`) as a reboot.
+  Both signals run the same bookkeeping in one helper,
+  `safety_note_pico_reboot_locked()`. Tests: `test_safety_link_compile.c`
+  (same-boot_id reboot, rising uptime, wrap, baseline reset).
 
 - Pico: `firmware/SaftyFW/src/tasks/link_task.c:3292`,
   `s_boot_id = (uint8_t)(time_us_64() ^ (time_us_64() >> 8));`. It is set in
@@ -166,7 +174,23 @@ stale, or a legitimate command sequence whose state goes out of step.
   argument at lines 1326-1339 does not apply to it), or add a
   DISCARD_STAGED command that the ESP sends before each staging session.
 
-### M4. CLEAR_TRIP is not bound to a specific trip occurrence; a duplicated or stale frame can clear a later trip with the same reason
+### M4. CLEAR_TRIP is not bound to a specific trip occurrence; a duplicated or stale frame can clear a later trip with the same reason -- FIXED in 0f1ef130, 0f5f222d
+
+- Fix: kilnlink 16 -> 17, compatible (`KILNLINK_MIN_COMPATIBLE` stays 7).
+  DIAG gains optional byte30 `trip_seq` (31 bytes), sent only to a peer whose
+  ANNOUNCE named >= 17; send_diag reads the seq before the trip state, so a
+  tear binds to an older seq and is refused. CLEAR_TRIP gains optional byte3
+  `trip_seq` (4 bytes); the ESP echoes it whenever its cached DIAG carried
+  one. The Pico refuses a 3-byte clear from a >= 17 peer
+  (`LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED`), and `safety_core` compares the seq
+  with the latched one at dequeue, refusing a mismatch as
+  refused-stale-occurrence (outcome 4) without running `try_clear`. Peer
+  version 0 (before ANNOUNCE) and 16 keep the 3-byte behaviour, so the
+  boot-time S6a clear still works. The PC wire and `safety_clear_trip` are
+  unchanged. Tests: CommonFW `test_clear_trip.c`/`test_diag.c`/fuzz and
+  vectors, SaftyFW `test_link_frame.c`, `test_safety_guards.c`,
+  `test_safety_core_clear_trip_binding.c`, KilnFW
+  `test_safety_link_compile.c`, PcTools `test_kilnlink_capture.py`.
 
 - `link_task.c:1511-1580` and `link_frame.c:251-265`: the payload is
   `0A mask_lo mask_hi` (`kilnlink_clear_trip.h:24-25`). The Pico accepts it
@@ -198,7 +222,15 @@ stale, or a legitimate command sequence whose state goes out of step.
   CLEAR_TRIP and refuse a mismatch on the Pico. This is a protocol version
   bump.
 
-### L1. S6b link liveness accepts any CRC-valid frame, including the Pico's own echoed output
+### L1. S6b link liveness accepts any CRC-valid frame, including the Pico's own echoed output -- FIXED in 225bc354
+
+- Fix: the liveness refresh (and dispatch) in
+  `link_task_handle_raw_frame()` now requires `src_device == ESP (0)` and
+  `dst_device == SAFETY (2)` via the pure `link_frame_counts_for_liveness()`.
+  The Pico's own frames are always the mirror image, so a TX-RX loopback no
+  longer keeps S6b quiet. The message type is still not checked, so every
+  genuine ESP frame counts. Tests: `test_link_frame.c` (predicate and
+  link_task.c wiring).
 
 - `link_task.c:2966-2967`: `s_last_valid_frame_tick` and
   `s_valid_frame_seen` are refreshed for every frame that passes
@@ -216,7 +248,15 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: refresh liveness only for frames whose `src_device` is the
   ESP and whose opcode the Pico dispatches.
 
-### L2. SET_CT_CAL / SET_PARAM accept any finite ct_cal gain or offset; gain 0 blinds the S14 over-current WARN
+### L2. SET_CT_CAL / SET_PARAM accept any finite ct_cal gain or offset; gain 0 blinds the S14 over-current WARN -- FIXED in 1bc2bbdb
+
+- Fix: SET_PARAM 0x0310-0x0315 bounds ct_cal gain to [0, 10] and offset to
+  |x| <= 50 A (finite). `config_params_validate_ex()` (COMMIT/APPLY) refuses a
+  calibrated channel with gain <= 0, naming the field, and SET_CT_CAL refuses
+  the same via `config_params_ct_cal_entry_ok()`. Gain 0 stays stageable for
+  an uncalibrated channel (kiln_cfg re-push). Load-time
+  `config_params_validate_ranges()` is unchanged, so a legacy record is never
+  discarded wholesale. Tests: `test_config_store.c`.
 
 - `config_params.c:498-503` (`CHECK_F32_FINITE` only) and `:733-738`
   (`RANGE_F32_FINITE` only), and `link_frame.c:288-299` (no value check).
