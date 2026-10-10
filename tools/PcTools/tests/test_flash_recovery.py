@@ -362,6 +362,25 @@ class LinkDownWaiverTest(unittest.TestCase):
                                        ota_interlock_needs_ack=False))
         self.assertTrue(any("OTA interlock" in x for x in h))
 
+    def test_latched_trip_in_link_down_mode_is_a_note_not_a_hazard(self):
+        notes = []
+        h, u = recovery_flash.board_state_refusals(
+            self._pf(), lambda: ["a safety trip is latched (trip_reason=7)"], allow_link_down=True, notes=notes)
+        self.assertEqual((h, u), ([], []))
+        self.assertTrue(any("trip is latched" in n for n in notes))
+
+    def test_energized_relay_in_link_down_mode_stays_a_hazard_even_with_trip(self):
+        h, _ = recovery_flash.board_state_refusals(
+            self._pf(), lambda: ["a safety trip is latched (trip_reason=7)", "relay output(s) energized: [1]"],
+            allow_link_down=True, notes=[])
+        self.assertEqual(len(h), 1)
+        self.assertIn("energized", h[0])
+
+    def test_latched_trip_without_link_down_waiver_is_still_a_hazard(self):
+        h, _ = recovery_flash.board_state_refusals(
+            self._pf(True, False), lambda: ["a safety trip is latched (trip_reason=7)"])
+        self.assertEqual(len(h), 1)
+
     def test_armed_conditions_read_failure_is_unreadable_in_link_down_mode(self):
         def boom():
             raise RuntimeError("uart")
