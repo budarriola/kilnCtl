@@ -174,7 +174,14 @@ static void test_start_step(void)
     TEST_SECTION("start (step): body bounds, field parse, defaults, rules");
     reset();
     TEST_CHECK(post(autotune_start_post_handler, "", 0, (size_t)-1, 0) == 400 && NO_START(), "empty body -> 400");
-    TEST_CHECK(post(autotune_start_post_handler, "zone=0", 193, (size_t)-1, 0) == 400 && NO_START(), "content_len 193 -> 400");
+    {
+        char big[194];
+        memset(big, 'a', 193);
+        big[193] = 0;
+        memcpy(big, "zone=0&x=", 9);
+        TEST_CHECK(post(autotune_start_post_handler, big, 193, (size_t)-1, 0) == 400 && NO_START(),
+                   "193-byte body (valid zone, delivered in full) -> 400, cap is 192");
+    }
     TEST_CHECK(post(autotune_start_post_handler, "zone=0", -1, (size_t)-1, 0) == 400 && NO_START(), "content_len -1 -> 400");
     TEST_CHECK(post(autotune_start_post_handler, "zone=0", 20, (size_t)-1, 0) == 400 && NO_START(), "truncated -> 400");
     TEST_CHECK(post(autotune_start_post_handler, "zone=0", 6, 3, 0) == 400 && NO_START(), "peer closes mid-body -> 400");

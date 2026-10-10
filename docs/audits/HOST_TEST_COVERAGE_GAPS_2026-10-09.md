@@ -39,7 +39,7 @@ referenced), X no execution test (none, or source-text only).
 | 7 | KilnFW `drivers/owners/kiln_io_owner.c` (938 L), `kiln_io.c` (523 L) | SX1509 relay/IO command owner, relay writes | R S | T (6/18, 7/15) | `command_set_relay`, `set_io_dir`, sx reset/read/scan, irq paths |
 | 8 | KilnFW `drivers/http/aux_outputs_http.c` (211 L) | Spare-relay aux outputs GET/POST (drives relays) | R N P | X (no test names it) | Whole handler: field parse, range refusal, mode-gate 409, readback |
 | 9 | KilnFW `http/zone_aux_convert_http.c` (179 L), `http/dashboard_exec_http.c` (914 L) | Zone-to-aux convert; exec pause/ack, safety clear trip, history CSV | R P N S | T (convert only via test_zones_http; exec 2/13) | `profile_exec_pause_post_handler`, `dashboard_safety_clear_trip`, `profile_exec_ack_last_run_post_handler`, firing_history / history_csv handlers |
-| 10 | KilnFW `http/dashboard_autotune_http.c` (575 L) | Autotune start/abort/accept/status/trace | R P N | T (1/6) | `autotune_start_post_handler` gating, `_abort_`, `_accept_` (writes gains), trace CSV |
+| 10 | KilnFW `http/dashboard_autotune_http.c` (575 L) | Autotune start/abort/accept/status/trace | R P N | T (campaign 8: POST start/abort/accept covered; GET status/matrix/trace not) | `autotune_start_post_handler` gating, `_abort_`, `_accept_` (writes gains), trace CSV |
 | 11 | KilnFW `http/diagnostics_http.c` (2302 L, 26 handlers) | Crash report ack/clear, estop verify, NVS keys, cfgfs, coredump | P N S | T (test_diagnostics_http.c, 2026-10-09) | `estop_verify_post_handler` refusal rules, crash_report_clear, nvs_keys kiln_auth refusal |
 | 12 | KilnFW `http/dashboard_http.c` (990 L) | Dashboard status, relay POST | R N S | T (2/7) | `dashboard_set_relay`, `dashboard_http_get_safety_trip`, `_estop_asserted` |
 | 13 | KilnFW `control/adaptive_tune_model.c` (827 L) | Adaptive tuning, writes zone gains | P R | T (3/12) | `apply_zone_plan`, `apply_coupled_plan`, `commit_*_locked`, breadcrumb mid-solve recovery |
@@ -87,11 +87,11 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
    extends, expiry at the exact ms, stop clears the heat request,
    set_heat_enable refused outside the window, init rebinds the safety class,
    get_relay_status mirrors the link state.
-7. **kiln_io_owner / kiln_io relay command path (KilnFW).** Fake I2C SX1509:
+7. **DONE (campaign 7, `test_kiln_io_sx_fake.c`, `test_kiln_io_owner.c`). kiln_io_owner / kiln_io relay command path (KilnFW).** Fake I2C SX1509:
    `command_set_relay` writes the expected bit, refuses when the owner is not
    ready or the mode gate is closed, a failed write leaves state unchanged and
    is reported. Cover set_io_dir and sx reset error returns.
-8. **Relay/aux/exec HTTP handler matrix (KilnFW).** One harness over
+8. **DONE (campaign 8: `test_aux_outputs_http_handlers.c`, `test_dashboard_exec_http_handlers.c`, `test_dashboard_autotune_http_handlers.c`; `zone_aux_convert_http` move_handler and GET handlers open). Relay/aux/exec HTTP handler matrix (KilnFW).** One harness over
    `aux_outputs_http`, `zone_aux_convert_http`, the `dashboard_http` relay
    POST, `dashboard_exec_http` pause/ack/safety_clear_trip and
    `dashboard_autotune_http` start/abort/accept. Bad, missing or oversize

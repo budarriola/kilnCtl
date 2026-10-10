@@ -97,6 +97,16 @@ Observations (design notes, not filed as defects):
 - K8-02 (INFO): stop/pause/resume/ack are deliberately ungated (stop works in recovery mode and with danger mode on); pinned by test.
 - K8-03 (INFO): the raw `relay_post_handler` route no longer exists; the raw write path is aux manual via `dashboard_set_relay()`, covered here with the board faked. `zone_aux_convert_http.c` `move_handler` (hook on POST /api/zones, not a route) is not covered at handler level; its core has its own test.
 
+### Campaign 8 addendum: autotune HTTP handlers (`test_dashboard_autotune_http_handlers.c`)
+
+84 checks, real `dashboard_autotune_http.c` and `system_mode_gate.c`, engine/readiness/danger_mode faked with call counters. Covers `POST /api/autotune/start` (recovery, danger-mode, unacknowledged-crash and latched-trip refusals all 409 with the engine never invoked, for both step and relay methods; body missing/oversize (193)/negative/truncated/recv-error; zone range 0..255 and non-numeric forms; step_duty and relay field parse; method and rule matrix incl. zn/tl refused on the step path and simc/cohen-coon refused on the relay path; setpoint_c required for relay; defaults duty 0.5, SIMC, Tyreus-Luyben, d/h 0; duplicate key first wins; engine refusal relayed as JSON 400), `abort` (never gated) and `accept` (ack_unsettled/adopt_ceiling accept only "1"/"true", bodies >= 96 B and recv failures fall back to non-opt-in, mode-gate refusal 409, all nine adoption outcome names and untruncated 1000.0 ceilings in the 128 B reply buffer).
+
+Negtests (baseline PASS): see the landing note below. Findings: no defect. Observation (INFO): a down safety link with no trip mask does not trip the readiness gate for autotune start (same as profile start); the engine's own begin-run gate is the backstop and is not covered at handler level. Not covered: GET status/matrix/trace handlers (link-stubbed), `zone_aux_convert_http.c` `move_handler` (K8-03).
+
+## Campaign 7 status note
+
+Campaign 7 (kiln_io / SX1509 relay command path) was already complete on origin/dev (`test_kiln_io_sx_fake.c`, K7-01..K7-04 fixed in 501bb0d35, plus `test_kiln_io_owner.c`); no further work was needed.
+
 ## Campaign 10: persist parsers and stores (backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store)
 
 Test: `firmware/KilnFW/App/test/test_persist_campaign10.c` (129 checks, one
