@@ -2362,6 +2362,17 @@ try {
 
     Invoke-HostTestExe -Name "heat_owner_active_decide" -ExePath $exe42 -BuildCmd $cmd42
 
+    # ---- test_danger_mode.c: own executable (HOST_TEST_COVERAGE_GAPS campaign 6) ----
+    # #includes danger_mode.c directly with a fake tick clock; the real
+    # danger_mode.c cannot join exe14 (which links a fixed-false fake of it).
+    $exeDm = Join-Path $outDir "kilnctl_host_tests_danger_mode.exe"
+    $dmObjDir = Join-Path $outDir "dm"
+    New-Item -ItemType Directory -Force -Path $dmObjDir | Out-Null
+    $cmdDm = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dmObjDir\\`" /Fe:`"$exeDm`" `"$(Join-Path $testDir 'test_danger_mode.c')`""
+
+    Invoke-HostTestExe -Name "danger_mode" -ExePath $exeDm -BuildCmd $cmdDm
+
     # ---- test_web_auth_store.c: its own 43rd, separate executable ----------
     # docs/WEB_AUTH_PLAN.md sections 2/3/11 -- the credential storage
     # foundation. Own executable (not joined into the combined $sources
@@ -3231,7 +3242,8 @@ try {
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
     # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
-    $totalExpected = 75
+    # 75 -> 76: added test_danger_mode.c (campaign 6)
+    $totalExpected = 76
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

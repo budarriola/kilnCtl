@@ -3253,6 +3253,8 @@ static void test_fault_edge_uninitialized_link_refuses(void)
     TEST_CHECK(snap.count == 0, "out is zeroed even on refusal -- never left holding poison/garbage");
 }
 
+#include "test_safety_link_payload_golden.h"
+
 int g_test_failures = 0;
 int g_test_count = 0;
 
@@ -3325,6 +3327,7 @@ int main(void)
     test_low4_link_down_invalidates_uptime_baseline();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
+    run_golden_payload_tests();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
