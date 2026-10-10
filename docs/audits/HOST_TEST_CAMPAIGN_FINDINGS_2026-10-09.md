@@ -220,6 +220,7 @@ pin either behaviour):
   hatch and the log line names the manual recovery (power cycle).
 - `ota_esp_rollback_post_handler` has the same ordering: the "rebooting" body
   goes out before the reboot task creation is checked.
+- FIXED in the pooled firmware LOW batch: both handlers now reply only after the reboot task exists (500 on creation failure), and recovery_exit answers 500 and does not reboot when the boot-guard clear does not verify (`test_reboot_handlers_reply_only_after_task_created` in `test_ota_http.c`).
 - The recovery_boot branch that releases the claim after an energized-relay
   refusal is shadowed by the mode gate (`relay_authority_heat_run_active` and
   `relays_energized` refuse first), so the post-claim authoritative re-read is

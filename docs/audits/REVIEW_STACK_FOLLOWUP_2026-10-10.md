@@ -172,3 +172,8 @@ slots are forced rev-unknown afterwards, so the result stays fail-closed.
 The M1/I1 comment corrections and the status marks in
 `STACK_FIX_BATCH_REVIEW_2026-10-09.md` and
 `DEV_STACK_ANALYSER_REVIEW_2026-10-09.md` match the code.
+
+## Fix status (pooled firmware LOW batch)
+
+- S2: FIXED in the pooled firmware LOW batch commit ("Pooled firmware LOW batch: strict kiln_cfg id, ..."). `GET /api/profiles` list entries carry `rev_unknown`, and the profiles page shows a notice; test `test_profiles_list_reports_rev_unknown`.
+- S5: FIXED in the same commit. `profiles_http_save_ex()` reports `out_persisted`; live-edit save_as/overwrite answer 500 and keep the working copy when the storage save failed.

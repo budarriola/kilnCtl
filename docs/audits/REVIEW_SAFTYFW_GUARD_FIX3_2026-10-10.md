@@ -192,3 +192,9 @@ attribution LOW-B corrected.
 | NIT-A, NIT-B | fixed |
 
 New in this review: LOW-A1, NIT-C, INFO-1 to INFO-5.
+
+## Fix status (pooled firmware LOW batch)
+
+- LOW-A1: PARTLY FIXED in the pooled firmware LOW batch commit ("Pooled firmware LOW batch: strict kiln_cfg id, ..."). The store-level test is added (`test_boot_load_reports_clamped_tc_offset` in `test_config_store_flash.c`). STILL OPEN: surfacing the accessor to the ESP as a status bit and a readiness item. All 8 bits of the kilnlink `diag_flags` byte are already used (`KILNLINK_DIAG_FLAG_*` 0x01..0x80), so this needs a link wire/protocol change and an owner decision.
+- NIT-C: FIXED (the REVIEW_SAFTYFW_GUARD_FIX2 line now cites `e6877a521`).
+- INFO-1: FIXED in the same commit. One-ulp raise tests for `abs_max_temp_c` and `max_rate_c_per_min` (`nextafterf`).

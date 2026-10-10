@@ -260,7 +260,7 @@ live-edit, auth forms) is explicit.
 
 ## Fix status (fwbatch14)
 
-- LOW-1: FIXED for the boot restore path in f7d4b08fb (a restore refused only because a run holds the claim keeps the active id). The `kiln_cfg_swap.c` rollback path still reports a claim refusal as "ROLLBACK FAILED": SKIPPED, needs its own design for the swap state machine.
+- LOW-1: FIXED for the boot restore path in f7d4b08fb (a restore refused only because a run holds the claim keeps the active id). The `kiln_cfg_swap.c` rollback path is FIXED in the pooled firmware LOW batch commit ("Pooled firmware LOW batch: strict kiln_cfg id, ..."): a re-import refused only by the run claim (`ZONES_IMPORT_REASON_RUN_CLAIMED`) reports "ROLLBACK REFUSED" instead of "ROLLBACK FAILED" (still returns false; journal kept for the boot retry).
 - LOW-2: FIXED in 3408a12ad (new outcome `REFUSED_NOT_WRITTEN`, distinct from `FAILED_TO_PERSIST`).
 - LOW-3: FIXED in 138975bee.
 - LOW-4: FIXED in e5bdb8a3c.

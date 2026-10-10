@@ -511,7 +511,8 @@ static int g_reset_job_depth = 0;
 static int g_barrier_calls = 0;
 static int g_barrier_saw_mark = 0;
 void relay_authority_reset_job_enter(void) { g_reset_job_depth++; }
-void relay_authority_reset_set_erases_kiln_nvs(bool erases) { (void)erases; }
+static int g_last_erases_kiln_nvs = -1;
+void relay_authority_reset_set_erases_kiln_nvs(bool erases) { g_last_erases_kiln_nvs = erases ? 1 : 0; }
 void relay_authority_reset_job_exit(void) { g_reset_job_depth--; }
 void persist_reset_barrier(void)
 {
@@ -1541,6 +1542,11 @@ static void test_factory_reset_execute_runs_writer_barrier_after_mark(void)
     TEST_CHECK(g_barrier_calls == 1, "barrier ran exactly once");
     TEST_CHECK(g_barrier_saw_mark == 1, "the mark was already set when the barrier ran");
     TEST_CHECK(g_reset_job_depth == 0, "job enter/exit balanced");
+    TEST_CHECK(g_last_erases_kiln_nvs == 0, "wifi scope does not arm the kiln_nvs writer fence (fwbatch13 LOW-4)");
+    g_reset_in_flight_depth = 0;
+    g_last_erases_kiln_nvs = -1;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_KILN);
+    TEST_CHECK(g_last_erases_kiln_nvs == 1, "kiln scope arms the kiln_nvs writer fence");
     g_reset_in_flight_depth = 0;
 
     g_barrier_calls = 0;

@@ -246,4 +246,4 @@ removed.
 | NIT-A | NIT | probe comment says GRACE/INIT/TRIPPED never trigger the gate; with the probe they do (fail-closed) |
 | NIT-B | NIT | mains_voltage_v "no guard" row omits its calibration_missing (enable gate) role |
 
-All findings fixed in 2d469f412 (rebased from the first commit; tests prove abs_max/max_rate raise, off-values, k_ct, v2 clamp CAUGHT by negtest). LOW-C v1-branch clamp removal is an equivalent mutant (v1 has no offset), documented in a comment, not catchable.
+All findings fixed in e6877a521 (the first commit; 2d469f412 is only the two-line v1-branch comment; LOW-A is only half fixed, see REVIEW_SAFTYFW_GUARD_FIX3 LOW-A1; tests prove abs_max/max_rate raise, off-values, k_ct, v2 clamp CAUGHT by negtest). LOW-C v1-branch clamp removal is an equivalent mutant (v1 has no offset), documented in a comment, not catchable.

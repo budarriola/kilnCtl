@@ -150,3 +150,9 @@ this review document was being written in the worktree during the run. Both the
 worktree and the shared tree were inspected afterwards; the only change is this
 document. No test-vacuity finding. Note that LOW-1 (the optional `id` path in
 `save_post_handler`) has no test, so no mutation was possible there.
+
+## Fix status (pooled firmware LOW batch)
+
+- LOW-1: FIXED in the pooled firmware LOW batch commit ("Pooled firmware LOW batch: strict kiln_cfg id, ..."). `save_post_handler` parses `id` with the same strict parse as `parse_required_id()` (bad escape, leading `+`, ERANGE, out of range all 400); new test in `test_kiln_cfg_http.c`.
+- LOW-2: FIXED in the same commit. The profile-start refusal buffers are sized from `READINESS_GATE_MSG_CAP`; the two handler buffers that would have grown the httpd/uart-bridge stacks are `static` (single worker task), pinned by `test_readiness_gate.c`.
+- LOW-4: FIXED in the same commit. The kiln_nvs writer fence is armed only when the reset scope erases `kiln_nvs` (`relay_authority_reset_set_erases_kiln_nvs()`); tests in `test_link_watchdog.c` and `test_ota_http.c`.
