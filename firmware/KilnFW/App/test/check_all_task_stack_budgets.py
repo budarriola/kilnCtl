@@ -1129,7 +1129,12 @@ CEILING_BYTES = {
     "backlight_pwm": 1168,
     "i2c_owner_ns2009": 1584,
     "i2c_owner_sx1509": 1584,
-    "kiln_io_owner": 1984,
+    # 2026-10-10 K7 relay IO fixes: 1984 -> 2160 B. The deepest walk now runs
+    # owner_task -> kiln_io_set_relay_mask -> kiln_io_reinit_locked ->
+    # relays_to_inputs -> resync -> SX1509 write chain -> ESP_LOG -> __assert_func
+    # (288 B). Measured on a target build; 1636 B (39.9%) of the 4096 B stack stays
+    # free, so the stack is not raised (internal RAM floor, owner 2026-10-01).
+    "kiln_io_owner": 2160,
     "thermo_owner": 1616,
     "telemetry_log": 3008,
     "danger_mode": 2256,
@@ -1184,7 +1189,7 @@ CEILING_BYTES = {
     # thin margin here is flagged, not just noted: if a future page or
     # callback measurably deepens this task's real worst case, treat it
     # as a hazard needing review, not a routine ceiling bump.
-    "lvgl": 7488,  # 2026-10-09: re-measured on dev tip (was 7472)
+    "lvgl": 7520,  # 2026-10-10: K7 kiln_io_lcd_dc now takes the io lock (+32 B, was 7488); 23.6% free
     # 3152 = 3008 (prior baseline, 2026-09-09) + 144, from bfa60679
     # ("Refuse to start a firing on a quarantined zones config, surface it
     # everywhere") closing the ota_rollback_esp() silent-default-PID-gains
