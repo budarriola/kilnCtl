@@ -5659,6 +5659,7 @@ void run_test_profiles_http(void)
     test_profiles_slot_gen_seqlock();
     test_save_ex_fresh_slot_rolled_back_in_lock();
     test_profile_edit_post_slot_gen();
+    test_profile_post_expected_rev();
     test_retarget_slot_gen();
     test_delete_slot_gen();
     test_delete_clears_favorite_before_erase_wiring();

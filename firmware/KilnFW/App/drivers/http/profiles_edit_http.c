@@ -692,9 +692,12 @@ esp_err_t profile_post_handler(httpd_req_t *req)
                 free(tmp);
                 httpd_resp_set_status(req, "409 Conflict");
                 httpd_resp_set_type(req, "application/json");
-                return httpd_resp_sendstr(req,
-                    "{\"ok\":false,\"error\":\"profile_changed\",\"reason\":\"this profile was changed or deleted "
-                    "elsewhere since you opened it; reload it and redo your edit\"}");
+                {
+                    static const char k409[] =
+                        "{\"ok\":false,\"error\":\"profile_changed\",\"reason\":\"this profile was changed or deleted "
+                        "elsewhere since you opened it; reload it and redo your edit\"}";
+                    return httpd_resp_send(req, k409, sizeof(k409) - 1);
+                }
             }
         }
     } else {
