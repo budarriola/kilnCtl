@@ -579,6 +579,12 @@ Test-ChainCase 65 (Test-NewStepPerBump -StoreName "iter_tune" -Baseline $itBase 
 $itRealHdr = Get-Content -Raw (Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.h")
 Test-ChainCase 66 (Test-IterTuneStoreMigrationStep -VersionHeaderText $itRealHdr) $true "" "iter_tune: the real header passes."
 
+# 67-69: aux outputs version define may live in the header or the .c; missing in both fails.
+$auxSrcOnly = '_Static_assert(sizeof(aux_outputs_blob_t) == 56, "x");' + "`n"
+Test-ChainCase 67 (Test-AuxOutputsCfgVersion -SourceText $auxSrcOnly -HeaderText "#define AUX_OUTPUTS_CFG_VERSION 1`n") $true "" "aux: define only in the header passes."
+Test-ChainCase 68 (Test-AuxOutputsCfgVersion -SourceText ("#define AUX_OUTPUTS_CFG_VERSION 1`n" + $auxSrcOnly)) $true "" "aux: define only in the .c passes."
+Test-ChainCase 69 (Test-AuxOutputsCfgVersion -SourceText $auxSrcOnly -HeaderText "int x;`n") $false "could not find" "aux NEGATIVE: define in neither file fails."
+
 # 61: the real sources must pass the whole production script (all new rules
 # run). Baseline HEAD so the test does not depend on origin being fetched.
 $env:KILNCTL_MIGCHK_BASELINE = "HEAD"
@@ -596,5 +602,5 @@ if ($failures.Count -gt 0) {
 }
 
 Write-Host ""
-Write-Host "test_check_config_migration_steps: all 66 assertions passed." -ForegroundColor Green
+Write-Host "test_check_config_migration_steps: all 69 assertions passed." -ForegroundColor Green
 exit 0

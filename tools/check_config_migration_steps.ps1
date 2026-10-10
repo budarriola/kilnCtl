@@ -357,7 +357,8 @@ function Test-SaftyConfigStoreMigrationStep {
 function Test-AuxOutputsCfgVersion {
     <#
       docs/CONFIG_MIGRATION_CHAIN.md sec 0.1 row "ESP aux outputs
-      (spare-relay on/off)": AUX_OUTPUTS_CFG_VERSION in aux_outputs_cfg.c.
+      (spare-relay on/off)": AUX_OUTPUTS_CFG_VERSION in aux_outputs_cfg.h (moved from the .c);
+      the header is searched too, so a define in either file is found.
       Version 1 has nothing older, so no converter exists. Enforced:
         - the version symbol is defined and parseable;
         - the blob's sizeof is pinned by a _Static_assert (on-flash layout);
@@ -366,9 +367,9 @@ function Test-AuxOutputsCfgVersion {
         - at version > 1, aux_outputs_migrate_v<CURRENT-1> must exist, so a
           bump cannot land without its converter.
     #>
-    param([Parameter(Mandatory = $true)][string]$SourceText)
+    param([Parameter(Mandatory = $true)][string]$SourceText, [string]$HeaderText = "")
     $failures = New-Object System.Collections.Generic.List[string]
-    $clean = Remove-CComments -Text $SourceText
+    $clean = Remove-CComments -Text ($HeaderText + "`n" + $SourceText)
     $verMatch = [regex]::Match($clean, '#define\s+AUX_OUTPUTS_CFG_VERSION\s+(\d+)')
     if (-not $verMatch.Success) {
         $failures.Add("aux outputs store: could not find '#define AUX_OUTPUTS_CFG_VERSION <N>'")
@@ -758,8 +759,9 @@ $iterTuneHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_
 $iterTuneSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\iter_tune_store.c"
 
 $auxSource = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.c"
+$auxHeader = Join-Path $repoRoot "firmware\KilnFW\App\drivers\persist\aux_outputs_cfg.h"
 
-foreach ($p in @($iterTuneHeader, $iterTuneSource, $auxSource, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
+foreach ($p in @($iterTuneHeader, $iterTuneSource, $auxSource, $auxHeader, $versionHeader, $migrateFile, $testTreeRoot, $kilnCfgVersionHeader, $kilnCfgSource,
         $profilesSource, $saftyVersionHeader, $saftySource)) {
     if (-not (Test-Path $p)) {
         Write-Host "check_config_migration_steps: FAIL -- expected path not found: $p"
@@ -803,7 +805,7 @@ $saftyResult = Test-SaftyConfigStoreMigrationStep -VersionHeaderText (Get-Conten
 
 $iterTuneResult = Test-IterTuneStoreMigrationStep -VersionHeaderText (Get-Content -Raw $iterTuneHeader)
 
-$auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource)
+$auxResult = Test-AuxOutputsCfgVersion -SourceText (Get-Content -Raw $auxSource) -HeaderText (Get-Content -Raw $auxHeader)
 
 # --- Plan sec 5.1 follow-up rules: D1 new-step-per-bump (vs baseline ref),
 # fixture-must-be-referenced, D2 expiry floor -- all four stores. ---
