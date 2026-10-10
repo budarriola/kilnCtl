@@ -116,7 +116,7 @@ Fix direction: check the result at `:612`. On failure, refuse before
 `push_and_verify_pico()`; nothing but the raised ceiling has changed yet. Then
 correct the STAGED comment.
 
-### L1. Retry after a failed save short-circuits to ESP_OK: favorites and hidden builtins (user-data-loss)
+### L1. Retry after a failed save short-circuits to ESP_OK: favorites and hidden builtins (user-data-loss) -- FIXED in 65c4f5da
 
 - `firmware/KilnFW/App/drivers/persist/profiles_favorites.c:263`
   (`profiles_favorites_set`): the `if (!changed) return ESP_OK;` comparison runs
@@ -160,7 +160,7 @@ Failure scenario:
 - `zone_sweep_plan_i_normal()` reads the ESP record, so a later partial re-sweep
   pushes only what that record still holds. The Pico keeps its own values.
 
-### L3. firing_stats_persist() ignores firing_stats_load()'s result before overwriting (user-data-loss)
+### L3. firing_stats_persist() ignores firing_stats_load()'s result before overwriting (user-data-loss) -- FIXED in 65c4f5da
 
 `firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c:810`
 discards `firing_stats_load()`'s bool: "empty blob on any failure -- still safe
@@ -202,7 +202,7 @@ Failure scenario:
 The image chunks themselves are covered by the whole-image CRC read-back at
 `:1169`.
 
-### L5. Autotune coupling-cell persist failure is log-only (cosmetic)
+### L5. Autotune coupling-cell persist failure is log-only (cosmetic) -- FIXED in 65c4f5da
 
 `firmware/KilnFW/App/drivers/control/autotune_engine_coupling.c:63-67` logs
 `ESP_LOGW` for a failed submit or for "N of M coupling cell(s) failed to persist".
@@ -217,7 +217,7 @@ write reporting `HAL_OK` while the value never landed. A journal record that
 lies would undermine M2's recovery further. The defence is worth the same
 read-back discipline `totp_config_clear()` and `boot_guard_mark_healthy()` use.
 
-### L7. UART SET_WATCHDOG_PANIC_DISABLED discards the persist result (cosmetic)
+### L7. UART SET_WATCHDOG_PANIC_DISABLED discards the persist result (cosmetic) -- FIXED in 65c4f5da
 
 `firmware/KilnFW/App/drivers/bridge/uart_bridge_system.c:151` drops the
 `esp_err_t` from `watchdog_cfg_set_panic_disabled()` and sends no reply. The
@@ -226,7 +226,7 @@ surfaces it. Over UART, a PC tool cannot tell that the flag will not survive a
 reboot. The hazard is mild: the default after a reboot is panic enabled, which
 is the safe default.
 
-### L8. boot_guard legacy-key erase commit unchecked (cosmetic)
+### L8. boot_guard legacy-key erase commit unchecked (cosmetic) -- FIXED in 65c4f5da
 
 `firmware/KilnFW/App/drivers/persist/boot_guard.c:244` uses
 `(void)hal_kv_commit(&lh)` after erasing the legacy `count` key once its value
@@ -234,7 +234,7 @@ has been migrated. If it fails, the legacy key survives, and the next boot finds
 it and migrates again. The migration is idempotent. Adding a one-line log would
 make this visible.
 
-### L9. Abandoned fetch: update_stage_clear() result ignored (cosmetic)
+### L9. Abandoned fetch: update_stage_clear() result ignored (cosmetic) -- FIXED in 65c4f5da
 
 `firmware/KilnFW/App/drivers/update/update_fetch.c:389` calls
 `(void)update_stage_clear(st)` when a late WR_FINISH lands after the job was
