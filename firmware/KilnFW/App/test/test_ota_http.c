@@ -279,6 +279,16 @@ esp_err_t kiln_scope_cfg_files_delete(int *out_deleted)
     return g_kiln_scope_cfg_delete_result;
 }
 
+// crash_report.c is not linked here: count crash_report_clear() calls so the
+// scope wiring (kiln/all yes, wifi/profiles never) is pinned.
+static int g_crash_report_clear_calls = 0;
+static esp_err_t g_crash_report_clear_result = ESP_OK;
+esp_err_t crash_report_clear(void)
+{
+    g_crash_report_clear_calls++;
+    return g_crash_report_clear_result;
+}
+
 // Same for the "profiles" scope's slot/firing-history cfg mirrors
 // (profiles_scope_cfg_files.c, covered for real by test_zone_normals_cfg_fs.c):
 // profiles exactly once, wifi/kiln/all never ("all" formats cfg instead).
@@ -1647,8 +1657,10 @@ static void test_credential_survives_factory_reset_wifi_scope(void)
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
               "factory_reset_execute(WIFI) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 0, "the wifi scope never erases the coredump/crash record");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the wifi scope never deletes the kiln_nvs cfg mirrors");
     TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the wifi scope never deletes the profiles_nvs cfg mirrors");
     assert_webauth12b_credential_survived(
@@ -1664,14 +1676,19 @@ static void test_credential_survives_factory_reset_kiln_scope(void)
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
               "factory_reset_execute(KILN) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 1, "the kiln scope clears the crash report/coredump exactly once");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 1, "the kiln scope deletes its cfg mirrors exactly once");
     TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the kiln scope never deletes the profiles_nvs cfg mirrors");
     g_kiln_scope_cfg_delete_result = ESP_FAIL;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL,
               "a cfg mirror that cannot be deleted fails the kiln reset (a stale file would undo it)");
     g_kiln_scope_cfg_delete_result = ESP_OK;
+    g_crash_report_clear_result = ESP_FAIL;
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL, "a coredump erase failure fails the kiln reset");
+    g_crash_report_clear_result = ESP_OK;
     g_stub_task_create_result = pdFAIL;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == FACTORY_RESET_ERR_REBOOT_FAILED,
               "a reboot task that cannot be created fails the reset");
@@ -1691,8 +1708,10 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
               "factory_reset_execute(PROFILES) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 0, "the profiles scope never erases the coredump/crash record");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
               "PROFILES scope must call profiles_builtin_discard_file() exactly once");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the profiles scope never deletes the kiln_nvs cfg mirrors");

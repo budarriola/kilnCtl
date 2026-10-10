@@ -16,6 +16,7 @@
                             * LittleFS partition too, see reset_scope_t's format_cfg_fs field */
 #include "legacy_default_nvs.h" /* legacy pre-split copies in the default nvs partition */
 #include "kiln_scope_cfg_files.h" /* kiln_scope_cfg_files_delete() -- "kiln" scope cfg cleanup */
+#include "crash_report.h" /* crash_report_clear() -- "kiln"/"all" scopes drop the old crash */
 #include "profiles_scope_cfg_files.h" /* profiles_scope_cfg_files_delete() -- "profiles" scope cfg cleanup */
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -130,6 +131,13 @@ typedef struct {
     bool erase_legacy_default_kiln;
     bool erase_legacy_default_profiles;
     bool erase_legacy_default_wifi; /* default partition "wifi_cfg" namespace */
+
+    /* "kiln" and "all": acknowledge the crash record and erase the stored
+     * coredump (crash_report_clear(), the same function POST
+     * /api/crash_report/clear runs), so a pre-reset crash is not re-reported
+     * after the reset (docs/audits/KILN_NVS_LOSS_2026-10-09.md). The record
+     * lives in kiln_nvs. "wifi" and "profiles" must NOT erase it. */
+    bool clear_crash_report;
 } reset_scope_t;
 
 static const char *const kWifiOnly[] = { WIFI_NVS_PARTITION, NULL };
@@ -138,10 +146,10 @@ static const char *const kProfilesOnly[] = { PROFILES_NVS_PARTITION, NULL };
 static const char *const kAll[] = { WIFI_NVS_PARTITION, KILN_NVS_PARTITION, PROFILES_NVS_PARTITION, NULL };
 
 static const reset_scope_t kScopes[] = {
-    { "wifi", kWifiOnly, false, false, false, false, false, false, true },
-    { "kiln", kKilnOnly, false, false, true, false, true, false, false },
-    { "profiles", kProfilesOnly, true, false, false, true, false, true, false },
-    { "all", kAll, true, true, false, false, true, true, true },
+    { "wifi", kWifiOnly, false, false, false, false, false, false, true, false },
+    { "kiln", kKilnOnly, false, false, true, false, true, false, false, true },
+    { "profiles", kProfilesOnly, true, false, false, true, false, true, false, false },
+    { "all", kAll, true, true, false, false, true, true, true, true },
 };
 #define NUM_SCOPES (sizeof(kScopes) / sizeof(kScopes[0]))
 
@@ -419,6 +427,19 @@ static void execute_scope_job(void *arg)
         ESP_LOGW(TAG, "profiles factory reset: %d cfg file(s) deleted", n);
         if (perr != ESP_OK && first_err == ESP_OK) {
             first_err = perr;
+        }
+    }
+
+    /* clear_crash_report: runs on the flash worker; crash_report_clear()
+     * detects that and does its flash work inline. A failure FAILS the reset
+     * like the cfg mirror deletes above. */
+    if (scope->clear_crash_report) {
+        esp_err_t cerr = crash_report_clear();
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "crash_report_clear() failed during factory reset: %s", esp_err_to_name(cerr));
+            if (first_err == ESP_OK) {
+                first_err = cerr;
+            }
         }
     }
 
