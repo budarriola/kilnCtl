@@ -664,8 +664,10 @@ switch ($Preset) {
             # Accept a bare name (check_x.ps1) the way run_all_checks discovers checks: any
             # check_*.ps1 in the tree, excluding build output, node_modules and dotted dirs.
             $bare = [IO.Path]::GetFileName($PresetArg)
-            $hits = @(Get-ChildItem -LiteralPath $RepoRoot -Filter $bare -Recurse -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like 'check_*.ps1' -and $_.FullName -notmatch '\\build\\' -and $_.FullName -notmatch '\\node_modules\\' -and $_.FullName.Substring($RepoRoot.Length) -notmatch '\\\.[^\\]+\\' })
+            # TRACKED files only (git ls-files): untracked archived copies (logs/wt_archive_*) must not make a name ambiguous.
+            $tracked = @(& git -C $RepoRoot ls-files -- "*$bare" 2>$null)
+            $hits = @($tracked | Where-Object { ($_ -split '/')[-1] -eq $bare -and $_ -like '*check_*.ps1' -and $_ -notmatch '(^|/)(build|node_modules)/' -and $_ -notmatch '(^|/)\.[^/]+/' } |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $RepoRoot $_) -ErrorAction SilentlyContinue } | Where-Object { $_ })
             if ($hits.Count -eq 0) { Finish 2 "no such check: $PresetArg" }
             if ($hits.Count -gt 1) { Finish 2 "ambiguous check name $PresetArg matches: $(($hits | ForEach-Object { $_.FullName.Substring($RepoRoot.Length).TrimStart('\') }) -join ', ')" }
             $PresetArg = $hits[0].FullName.Substring($RepoRoot.Length).TrimStart('\')
@@ -916,7 +918,7 @@ foreach ($g in $guardRoots) {
         if ($a.Hashes[$f] -ne $b.Hashes[$f]) { $guardOk = $false; Write-Line "REAL TREE CHANGED: $g\$f content changed during the run" Red }
     }
     if ($a.Status -ne $b.Status) {
-        if ($strict) { $guardOk = $false; Write-Line "REAL TREE CHANGED: git status --porcelain of $g differs from before the run" Red }
+        if ($strict) { $guardOk = $false; Write-Line "REAL TREE CHANGED: git status --porcelain of $g differs from before the run (any file written in this tree during the run counts, tracked or not -- do not write notes into the worktree while negtest runs)" Red }
         else { Write-Line "negtest: warning: shared main tree $g status changed during the run (other sessions edit it; mutated files are unchanged)" Yellow }
     }
     if ($strict -and $a.Head -ne $b.Head) { $guardOk = $false; Write-Line "REAL TREE CHANGED: HEAD of $g moved during the run" Red }
