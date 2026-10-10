@@ -1537,7 +1537,10 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * heat_enable.h's release-epoch section. */
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
+    if (!heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch)) {
+        ESP_LOGW(PE_TAG, "start: heat_enable_acquire_since() failed -- run starts with heat blocked until "
+                         "heat_enable_reconcile() succeeds");
+    }
 
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a

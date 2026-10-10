@@ -2298,6 +2298,7 @@ static void test_guard9_fault_source_cleared_on_halt(void)
 }
 
 static void test_guard9_watchdog_source_order(void);
+static void test_heat_acquire_result_not_discarded(void);
 
 // Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
 // not wait on s_exec.lock. The host stub is single-threaded, so "another task
@@ -11965,6 +11966,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fault_source_cleared_on_halt();
     test_guard9_fires_while_another_task_holds_exec_lock();
     test_guard9_watchdog_source_order();
+    test_heat_acquire_result_not_discarded();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -12747,6 +12749,37 @@ static void test_guard9_watchdog_source_order(void)
                    "the watchdog must not block forever on s_exec.lock before the stale check");
     }
     free(code);
+}
+
+/* Firing review 2026-10-09 item 7: start and resume both act on (log) a failed heat request. */
+static void test_heat_acquire_result_not_discarded(void)
+{
+    TEST_SECTION("firing review item 7: neither profile_executor_run() nor profile_executor_resume() discards "
+                 "heat_enable_acquire_since()'s result");
+    static const char *const files[] = {"profile_executor_run.c", "profile_executor_status.c"};
+    for (size_t f = 0; f < 2; f++) {
+        char rel[96], a[128], b[128], c[160];
+        snprintf(rel, sizeof(rel), "../drivers/control/%s", files[f]);
+        snprintf(a, sizeof(a), "../drivers/control/%s", files[f]);
+        snprintf(b, sizeof(b), "App/drivers/control/%s", files[f]);
+        snprintf(c, sizeof(c), "firmware/KilnFW/App/drivers/control/%s", files[f]);
+        const char *cands[] = {a, b, c};
+        char *text = test_read_source_anchored(__FILE__, rel, cands, 3);
+        if (!text) {
+            TEST_CHECK(false, "could not locate the source file to scan");
+            continue;
+        }
+        char *code = pe_strip_c_comments(text);
+        free(text);
+        if (!code) {
+            TEST_CHECK(false, "strip failed");
+            continue;
+        }
+        TEST_CHECK(strstr(code, "(void)heat_enable_acquire_since") == NULL &&
+                       strstr(code, "if (!heat_enable_acquire_since(") != NULL,
+                   "MUST GO RED if the heat request's result is cast to void again");
+        free(code);
+    }
 }
 
 int main(void)

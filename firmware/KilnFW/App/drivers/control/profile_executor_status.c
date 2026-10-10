@@ -388,7 +388,14 @@ bool profile_executor_resume(void)
      * for a run that was just stopped. See heat_enable.h. */
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
+    if (!heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch)) {
+        /* Same handling as the start path: not a reason to unwind a RUNNING run
+         * (no K4 means no heat, which fails safe), but never silent -- the zones
+         * report heat_blocked and heat_enable_reconcile() (watchdog task) retries.
+         * Firing review 2026-10-09 item 7. */
+        ESP_LOGW(PE_TAG, "resume: heat_enable_acquire_since() failed -- run resumes with heat blocked until "
+                         "heat_enable_reconcile() succeeds");
+    }
 
     /* Back to "in progress" -- and it must be written now rather than left to
      * the periodic refresh, or a brownout minutes after a resume would show
