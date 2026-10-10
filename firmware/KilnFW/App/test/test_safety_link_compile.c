@@ -1181,6 +1181,75 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
                "immediately-prior remembered state (on)");
 }
 
+// kilnlink audit 2026-10-09 M1: the 8-bit boot_id repeats 1 boot in 256, so
+// a Pico reboot must ALSO be caught by its DIAG uptime_ms stepping backwards.
+static void apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
+static void test_pico_reboot_detected_by_uptime_regression(void)
+{
+    TEST_SECTION("safety_apply_diag -- a DIAG uptime_ms regression is a Pico reboot even when "
+                 "the 8-bit boot_id repeats (kilnlink audit 2026-10-09 M1)");
+
+    TEST_CHECK(safety_pico_uptime_regressed(5000u, 4000u), "backwards step regresses");
+    TEST_CHECK(!safety_pico_uptime_regressed(5000u, 5000u), "equal (duplicate frame) does not");
+    TEST_CHECK(!safety_pico_uptime_regressed(5000u, 6000u), "forward step does not");
+    TEST_CHECK(!safety_pico_uptime_regressed(UINT32_MAX - 1000u, 500u), "32-bit wrap does not");
+    TEST_CHECK(safety_pico_uptime_regressed(UINT32_MAX - 1000u, 300000u),
+               "a far jump back from near the wrap point is still a reboot");
+
+    s_stub_relay_cycles_safety_edge_calls = 0;
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    link.reannounce_pending = false;
+
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    link.cached.trip_event_ever_received = true;
+    link.cached.trip_last_seq = 3u;
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    send_status_with_relay_bit(&link, &msg, true);
+    TEST_CHECK(link.safety_relay_state_known == true, "setup: relay baseline known");
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "rising uptime is not a reboot");
+    TEST_CHECK(link.reannounce_pending == false, "rising uptime owes no re-announce");
+
+    // The Pico reboots and draws the SAME boot_id 42: FW_VERSION alone sees no change.
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.cached.trip_last_seq == 3u, "same boot_id: FW_VERSION path alone resets nothing");
+    apply_diag_uptime(&link, 1500u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "uptime regression counted as a reboot");
+    TEST_CHECK(link.cached.trip_last_seq == 0u && link.cached.trip_event_ever_received == false,
+               "trip_seq dedup forgotten (the new boot restarts trip_seq at 0)");
+    TEST_CHECK(link.safety_relay_state_known == false, "relay-edge baseline forgotten");
+    TEST_CHECK(link.reannounce_pending == true, "ANNOUNCE_VERSION re-burst owed to the new boot");
+
+    link.reannounce_pending = false;
+    apply_diag_uptime(&link, 2500u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.reannounce_pending == false,
+               "the new boot's rising uptime is not a second reboot");
+
+    // A boot_id change clears the baseline, so the first DIAG of that boot never
+    // double-counts against the previous boot's uptime.
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(link.pico_uptime_baseline_known == false, "boot_id change clears the uptime baseline");
+    apply_diag_uptime(&link, 900u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "first DIAG after a boot_id change seeds, not counts");
+}
+
 static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown(void)
 {
     TEST_SECTION("safety_apply_fw_version -- a frame from a peer built BEFORE the "
@@ -2967,6 +3036,7 @@ int main(void)
     test_k4_edge_counting_off_on_on_off_counts_two();
     test_k4_edge_counting_first_frame_counts_zero();
     test_k4_edge_counting_boot_id_change_counts_zero();
+    test_pico_reboot_detected_by_uptime_regression();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();

@@ -57,6 +57,7 @@
 #include "task.h"
 
 #include "pico/time.h"
+#include "pico/rand.h" // get_rand_32() -- boot_id, see link_task_start() (kilnlink audit M1)
 
 #include "task_priorities.h"
 #include "watchdog_task.h"
@@ -3359,15 +3360,23 @@ static void link_task_fn(void *arg)
 
 bool link_task_start(void)
 {
-    // Pseudo-random, latched once at boot. Nothing else in this build sources
-    // an identity value (boot_reason.h only tracks trip-reason survival
-    // across a watchdog reset, not a boot counter/id) -- time_us_64() has
-    // been running since well before this call, so its low bits are a cheap,
-    // adequate source of "looks different each boot." This is diagnostic
-    // identity only (so the ESP can tell "the Pico just restarted" apart
-    // from "same Pico, still running"), not a security or safety value, so
-    // true entropy is not required.
-    s_boot_id = (uint8_t)(time_us_64() ^ (time_us_64() >> 8));
+    // Latched once at boot. This IS load-bearing (kilnlink audit 2026-10-09
+    // M1): a boot_id change is how the ESP learns the Pico rebooted, and it
+    // then resets its trip_seq dedup, its relay-edge baseline and re-sends
+    // ANNOUNCE_VERSION (safety_apply_fw_version(), KilnFW
+    // safety_link_frames.c) -- the "reset one side of a pair" class. It used
+    // to be a time_us_64() sample taken at a near-fixed point of a
+    // deterministic boot, so consecutive boots could easily draw the same
+    // value. get_rand_32() (pico_rand) mixes the ROSC random bit, the
+    // board's unique id and time, so the 8 bits are close to uniform. An
+    // 8-bit id can still collide (1 in 256), so the ESP does not rely on it
+    // alone: it also treats a backwards step in this Pico's DIAG uptime_ms
+    // as a reboot (safety_pico_uptime_regressed(), KilnFW). Not a security
+    // value -- kilnlink has no authentication either way.
+    {
+        uint32_t r = get_rand_32();
+        s_boot_id = (uint8_t)(r ^ (r >> 8) ^ (r >> 16) ^ (r >> 24));
+    }
     s_degraded_no_context = false;
     s_peer_protocol_version = 0; // unknown until this boot's own ANNOUNCE_VERSION arrives
     s_msg_index = 0;

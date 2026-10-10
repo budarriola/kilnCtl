@@ -48,6 +48,18 @@ void safety_put_u32_le(uint8_t *out, uint32_t value)
     out[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+bool safety_pico_uptime_regressed(uint32_t prev_ms, uint32_t now_ms)
+{
+    if (now_ms >= prev_ms) {
+        return false;
+    }
+    if (prev_ms > (UINT32_MAX - SAFETY_PICO_UPTIME_WRAP_BAND_MS) &&
+        now_ms < SAFETY_PICO_UPTIME_WRAP_BAND_MS) {
+        return false; /* 32-bit ms counter wrapped, same boot */
+    }
+    return true;
+}
+
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                       uint16_t peer_protocol, uint16_t peer_min_compatible)
 {

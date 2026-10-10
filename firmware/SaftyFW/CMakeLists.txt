@@ -417,6 +417,7 @@ target_link_libraries(SaftyFW PRIVATE
     hardware_flash # Phase 10, added this pass -- update_task.c's flash_range_erase()/_program(), same library bootloader/CMakeLists.txt already links
     pico_flash
     pico_multicore
+    pico_rand # get_rand_32() for link_task.c's boot_id (kilnlink audit 2026-10-09 M1)
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
     kilnlink
@@ -598,6 +599,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         hardware_flash
         pico_flash
         pico_multicore
+        pico_rand
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
         kilnlink

@@ -39,6 +39,16 @@ void safety_put_u32_le(uint8_t *out, uint32_t value);
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                       uint16_t peer_protocol, uint16_t peer_min_compatible);
 
+/* kilnlink audit 2026-10-09 M1: true when the Pico's DIAG uptime_ms stepped
+ * BACKWARDS from prev_ms to now_ms, i.e. the Pico rebooted. The 8-bit
+ * FW_VERSION boot_id alone collides 1 time in 256, so the ESP uses this as a
+ * second, independent reboot signal. The one exception is the 32-bit
+ * millisecond wrap (~49.7 days): prev within SAFETY_PICO_UPTIME_WRAP_BAND_MS
+ * of UINT32_MAX and now within the same band of 0 reads as a wrap, not a
+ * reboot. Equal values are not a regression (a duplicated frame). Pure. */
+#define SAFETY_PICO_UPTIME_WRAP_BAND_MS 120000u
+bool safety_pico_uptime_regressed(uint32_t prev_ms, uint32_t now_ms);
+
 /* Parses as much of a Pico FW_VERSION (0x0B) frame as is present, per
  * LINK_PROTOCOL.md sec 4's "read bytes 1-4 first" floor rule: protocol/
  * min_compatible are read and returned whenever the frame is at least 5

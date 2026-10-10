@@ -1610,6 +1610,19 @@ typedef struct {
     uint8_t esp_boot_id;
     uint8_t pico_boot_id;
     bool    pico_boot_id_known;
+    /* kilnlink audit 2026-10-09 M1: the last DIAG uptime_ms seen from the
+     * Pico, the baseline safety_apply_diag() compares each new DIAG against
+     * (safety_pico_uptime_regressed()). A backwards step means the Pico
+     * rebooted even when its 8-bit boot_id happened to repeat, and runs the
+     * same safety_note_pico_reboot_locked() bookkeeping a boot_id change
+     * does. Deliberately NOT cleared on link-down (a Pico that comes back
+     * still counting up is the same boot); cleared on a boot_id change,
+     * since the new boot's baseline is not yet known. Under state_lock. */
+    uint32_t pico_uptime_baseline_ms;
+    bool     pico_uptime_baseline_known;
+    /* Count of Pico reboots detected ONLY by the uptime regression (boot_id
+     * unchanged at that point) -- evidence the second signal does work. */
+    uint32_t pico_reboot_by_uptime_count;
     /* Set (under state_lock) by safety_apply_fw_version() when a boot_id
      * change means an ANNOUNCE_VERSION re-burst is owed to the peer, per the
      * comment above. Deliberately NOT sent synchronously from inside that

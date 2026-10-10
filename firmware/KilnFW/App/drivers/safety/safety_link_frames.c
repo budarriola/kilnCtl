@@ -241,6 +241,50 @@ void safety_link_send_announce_version_burst(SafetyLinkClass *link)
  * directly -- see safety_update_health(), the one place that reads
  * peer_version_known/peer_version_compatible and decides what to do about a
  * mismatch (Phase 7b.5). */
+/* Everything the ESP must forget when the Pico reboots -- the ESP-side half
+ * of each "reset one side of a pair" counter the Pico restarts at boot.
+ * Called under state_lock from both reboot signals: a FW_VERSION boot_id
+ * change (safety_apply_fw_version()) and a DIAG uptime_ms regression
+ * (safety_apply_diag(), kilnlink audit 2026-10-09 M1, for the 1-in-256 case
+ * where the 8-bit boot_id repeats). Every action here is idempotent and
+ * harmless if the "reboot" was in fact a replayed stale DIAG: at worst one
+ * extra "TRIPPED" log, a silent relay-state resync, and one extra
+ * ANNOUNCE_VERSION burst.
+ *
+ * The Pico restarted, so its trip_seq counter restarted at 0 too -- forget
+ * ours, or the dedup in safety_apply_trip_event() mistakes the new boot's
+ * first trip for one we have already seen (audit 2026-08-27: another
+ * instance of this repo's recurring "counter reset on one side of a
+ * producer/consumer pair" class). Concretely: Pico trips with seq=1,
+ * watchdog-reboots, the same condition trips again with seq=1, and
+ * safety_apply_trip_event()'s is_new_event test reads false -- so the
+ * "safety processor TRIPPED" log for a genuine second trip is never
+ * emitted, exactly in the reboot-loop scenario where that record matters
+ * most. The cached trip fields themselves still refresh, so this costs the
+ * human-visible record rather than the trip response.
+ *
+ * Only the dedup bookkeeping is cleared, deliberately NOT the cached trip
+ * DATA: a trip reported just before the reboot is still the most recent
+ * thing that actually happened, and blanking it would erase evidence rather
+ * than refresh it. */
+static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
+{
+    link->cached.trip_event_ever_received = false;
+    link->cached.trip_last_seq = 0u;
+    /* RELAY_LIFE_BUDGET.md: the Pico rebooting may have left K4 in either
+     * state before it ever comes up -- this ESP's last-observed
+     * safety_relay_state predates that reboot and must not be compared
+     * against the new boot's first status frame (same reset-one-side-of-a-
+     * pair hazard as trip_last_seq just above). Forget it;
+     * safety_apply_status() resyncs silently on the next frame, counting
+     * zero edges for that resync. */
+    link->safety_relay_state_known = false;
+    /* Owed to the peer, but NOT sent from here -- see reannounce_pending's
+     * own doc comment (safety_link.h) for why this moved off the calling
+     * task's stack 2026-09-10. */
+    link->reannounce_pending = true;
+}
+
 void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
     uint16_t peer_protocol = 0;
@@ -297,20 +341,10 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * cached trip DATA: a trip reported just before the reboot is
              * still the most recent thing that actually happened, and
              * blanking it would erase evidence rather than refresh it. */
-            link->cached.trip_event_ever_received = false;
-            link->cached.trip_last_seq = 0u;
-            /* RELAY_LIFE_BUDGET.md: the Pico rebooting may have
-             * left K4 in either state before it ever comes up -- this ESP's
-             * last-observed safety_relay_state predates that reboot and must
-             * not be compared against the new boot's first status frame
-             * (same reset-one-side-of-a-pair hazard as trip_last_seq just
-             * above). Forget it; safety_apply_status() resyncs silently on
-             * the next frame, counting zero edges for that resync. */
-            link->safety_relay_state_known = false;
-            /* Owed to the peer, but NOT sent from here -- see
-             * reannounce_pending's own doc comment (safety_link.h) for why
-             * this moved off the calling task's stack 2026-09-10. */
-            link->reannounce_pending = true;
+            safety_note_pico_reboot_locked(link);
+            /* The new boot's uptime baseline is not known yet; the next
+             * DIAG seeds it (kilnlink audit 2026-10-09 M1). */
+            link->pico_uptime_baseline_known = false;
         }
     }
     /* TODO.md owner-report item 5: only overwrite the cached build/config
@@ -979,6 +1013,18 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_warn_mask = safety_read_u16_le(&p[2]);
     link->cached.diag_trip_mask = safety_read_u16_le(&p[4]);
     link->cached.diag_uptime_ms = safety_read_u32_le(&p[6]);
+    /* kilnlink audit 2026-10-09 M1: second reboot signal, independent of
+     * the 8-bit FW_VERSION boot_id (which repeats 1 boot in 256). */
+    bool pico_reboot_by_uptime = false;
+    uint32_t pico_uptime_prev_ms = link->pico_uptime_baseline_ms;
+    if (link->pico_uptime_baseline_known &&
+        safety_pico_uptime_regressed(link->pico_uptime_baseline_ms, link->cached.diag_uptime_ms)) {
+        safety_note_pico_reboot_locked(link);
+        link->pico_reboot_by_uptime_count++;
+        pico_reboot_by_uptime = true;
+    }
+    link->pico_uptime_baseline_ms = link->cached.diag_uptime_ms;
+    link->pico_uptime_baseline_known = true;
     link->cached.diag_boot_reason = p[10];
     link->cached.diag_context_age_100ms = p[11];
     link->cached.diag_context_frames_ok = safety_read_u32_le(&p[12]);
@@ -1047,7 +1093,13 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
          * 8192 B stack. */
         link->boot_clear_pending = true;
     }
+    uint32_t pico_uptime_now_ms = link->cached.diag_uptime_ms;
     safety_unlock(link);
+    if (pico_reboot_by_uptime) {
+        ESP_LOGW(TAG, "safety processor rebooted (DIAG uptime %" PRIu32 " ms -> %" PRIu32
+                 " ms, boot_id unchanged): reset trip dedup and relay baseline, re-announcing",
+                 pico_uptime_prev_ms, pico_uptime_now_ms);
+    }
     return true;
 }
 
