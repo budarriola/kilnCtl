@@ -12,7 +12,7 @@ $tmp = Join-Path ([IO.Path]::GetTempPath()) ("relmerge_chk_" + [guid]::NewGuid()
 New-Item -ItemType Directory -Path $tmp | Out-Null
 $origin = Join-Path $tmp "origin.git"; $work = Join-Path $tmp "work"
 function Run-RelMerge([string[]]$a) {
-    $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "release_merge.ps1") -RepoPath $work @a 2>&1 | Out-String
+    $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "release_merge.ps1") -RepoPath $work @a 2>&1 | Out-String
     return [pscustomobject]@{ Rc = $LASTEXITCODE; Out = $o }
 }
 function Commit([string]$f, [string]$msg) {

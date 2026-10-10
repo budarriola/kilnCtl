@@ -22,7 +22,7 @@ try {
     $devSha = (git -C $work rev-parse HEAD).Trim(); $mainSha = (git -C $work rev-parse main).Trim()
     function Mint([string[]]$more) {
         Push-Location $work
-        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label t -WtRoot $wtroot -NoSubmodules @more 2>&1 | Out-String } finally { Pop-Location }
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label t -WtRoot $wtroot -NoSubmodules @more 2>&1 | Out-String } finally { Pop-Location }
         $m = [regex]::Match($o, '(?m)^WORKTREE:\s*(.+?)\s*$')
         if (-not $m.Success) { Write-Host $o; return $null }
         return (git -C $m.Groups[1].Value rev-parse HEAD).Trim()
@@ -43,12 +43,12 @@ try {
     Write-Host "case: -Remove (F4/F14)"
     function MintPath() {
         Push-Location $work
-        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label r -WtRoot $wtroot -NoSubmodules 2>&1 | Out-String } finally { Pop-Location }
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label r -WtRoot $wtroot -NoSubmodules 2>&1 | Out-String } finally { Pop-Location }
         return ([regex]::Match($o, '(?m)^WORKTREE:\s*(.+?)\s*$')).Groups[1].Value
     }
     function Run-MintRemove([string[]]$more, [string]$cwd = $work) {
         Push-Location $cwd
-        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Remove @more 2>&1 | Out-String; $rc = $LASTEXITCODE } finally { Pop-Location }
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Remove @more 2>&1 | Out-String; $rc = $LASTEXITCODE } finally { Pop-Location }
         return [pscustomobject]@{ Rc = $rc; Out = $o }
     }
     # clean worktree at origin/dev: removed
