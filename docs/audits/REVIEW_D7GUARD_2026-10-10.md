@@ -38,6 +38,8 @@ M4 to M7 are test gaps (L5, L6), not defects in the shipped code.
 
 ### M1 (MEDIUM): live_profile can still overwrite a newer working copy silently
 
+FIXED in b908598ca: `GET /api/profile/live` returns `generation` (RAM counter, resets on reboot); the page echoes it as `?gen=N` on edit and decide; a mismatch or malformed value is 409 "working copy changed elsewhere -- reload and re-apply your edit"; the page shows the stale banner, keeps the guard armed, and adopts the new generation from its own save response. An absent `gen` (old client) is still accepted. Residual: check-then-write is not atomic between two httpd workers. Host test `test_generation_guard` and `test_live_profile_guard.js` M1 cases; both negative-tested. The earlier L3 "FIXED" note overstated the fix; this is the real one. PcTools `profile_live_edit`/`profile_live_decide` take and the get tool shows `generation`.
+
 `live_profile_page.html` detects a "changed working copy" only by `live.working_id !==
 lastWorkingId`, but `working_id` is the constant `LIVE_EDIT_WORKING_SLOT_ID`
 (`live_profile.h:64`, `= PROFILES_MAX_COUNT`). `POST /api/profile/live`
@@ -59,6 +61,8 @@ edited drives a firing that is running.
 
 ### L1 (LOW): misleading banner after a save with edits typed while it was in flight
 
+FIXED in b908598ca: no reload banner after the page's own save; it says further edits are unsaved and keeps the guard.
+
 When `editSeq !== savedSeq`, the save handler keeps `dirty`, sets `lastWorkingId = null` and
 calls `refreshLive()`. That reaches the new dirty branch, which replaces "Saved." with "The
 working copy changed on the board ... Press Reload to discard your edits". Every later 2 s
@@ -71,6 +75,8 @@ reload) when `dirty` survives, or word the banner for that case.
 
 ### L2 (LOW): `loadWorkingCopy()` clears `dirty` unconditionally
 
+FIXED in b908598ca: the load aborts if an edit happened during the fetch.
+
 After a clean save, `refreshLive()` -> `loadWorkingCopy()` re-renders and sets
 `dirty = false` with no `editSeq` check. Edits typed between the POST resolving and the
 `?content=1` fetch resolving (well under a second) are overwritten without warning. The 2 s
@@ -78,6 +84,8 @@ poll can also start a second, duplicate `loadWorkingCopy()` in the same window. 
 small, so LOW.
 
 ### L3 (LOW): edits typed during an in-flight save on the six pages
+
+FIXED in 4fac4ad91: safety_config, zones, profiles and settings_display use an edit counter (save clears the guard and re-renders only if nothing was typed after it was sent). kiln_configs and setup_wizard keep their existing behavior: their save empties or re-renders a single field, so no typed-ahead state exists to lose.
 
 As the author said, this case is not handled. Severity by page:
 
@@ -95,6 +103,8 @@ the two "DOM kept" pages cheaply.
 
 ### L4 (LOW): zones relay name/type edits do not arm the guard
 
+FIXED in 4fac4ad91: `relayNames` added to the dirty-listener list.
+
 `zones_page.html:2750` attaches `markZonesFormDirty` to `zones`, `thermoCount`,
 `relayCount`, `maxSimultaneous` and `continueOnZoneTrip`. `#relayNames` (line 371) sits
 outside `#zones`, but Save posts its `.relaynameinput`/`.relaytypeinput` values
@@ -104,12 +114,16 @@ also overwrite those edits without warning. Fix: add `relayNames` to the list.
 
 ### L5 (LOW, test gap): no test that a failed save keeps the guard armed
 
+FIXED in 4fac4ad91: failed-save and in-flight-edit cases for every save page plus a resetEditor case. M4, M5, M6, M7 and the four in-flight mutations are CAUGHT by `tools\negtest.ps1 -RequireAssertion` (the profiles in-flight mutation is caught by a thrown exception rather than an assertion line).
+
 `test_unsaved_guard_pages.js` covers no edit, edit, and successful save for each page. It
 never covers a failed save, so moving the clear above the `!r.ok` check goes unnoticed
 (M4, M5, M7 MISSED). Its last setup_wizard lines (`fire('change')` and a second
 `postStepState`) assert nothing.
 
 ### L6 (LOW, test gap / harness): `_page_vm.js` fakes can hide real failures
+
+FIXED in 4fac4ad91: `querySelector` throws for a selector not registered through `opts.selectors`; the profiles test reaches `resetEditor` by calling it directly. `click()` stays a no-op by design.
 
 - `querySelector()` now returns a fresh fake element for any selector. A production selector
   with a typo therefore reads `''` instead of throwing, in every test that uses the shared
@@ -123,6 +137,8 @@ never covers a failed save, so moving the clear above the `!r.ok` check goes unn
 
 ### L7 (LOW): false prompts
 
+FIXED in 4fac4ad91 for the first two bullets: profile export suppresses the guard briefly; setup_wizard clears the flag on returning to the overview. The third bullet is unchanged (older, noted only).
+
 - profiles: export uses `window.location.href = profileExportUrl(id)` (around line 1786).
   With the editor dirty, the browser can raise the leave-page prompt for a download.
 - setup_wizard: a step whose config write succeeds while `postStepState` fails stays dirty.
@@ -132,6 +148,8 @@ never covers a failed save, so moving the clear above the `!r.ok` check goes unn
   replaces a dirty editor without asking. This is older than the change and noted only.
 
 ### N1 (NIT): duplicated guard code
+
+SKIPPED: app.js is deferred and page tests run the inline script alone, so a shared helper could not be loaded by the tests.
 
 Seven identical copies of the beforeunload handler now exist (live_profile, profiles,
 setup_wizard, safety_config, kiln_configs, settings_display, zones). Every page loads

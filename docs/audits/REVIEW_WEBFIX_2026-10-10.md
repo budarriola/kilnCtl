@@ -65,6 +65,8 @@ is in L5.
 
 ### L1 (LOW): the "Request sent" wording is used even when the request never left
 
+FIXED in 4fac4ad91: settings_page.html now reads "No reply -- the board may be rebooting, or the request may not have reached it."
+
 `settings_page.html:284-286`. Fetch rejects with the same `TypeError` whether the connection
 dropped after the board got the request or the request never left (board unreachable, Wi-Fi down
 on the PC, DNS failure). Both cases print "Request sent -- the board may already be rebooting".
@@ -74,6 +76,8 @@ is wording: "No reply -- the board may be rebooting, or the request may not have
 D2 narrowed the message correctly. This is what remains.
 
 ### L2 (LOW): a 500 sent before any write is labelled "failed partway"
+
+FIXED in 4fac4ad91: `backup_import.c` sets `X-Kiln-Partial-Write: 1` only where `backup_import_apply` reports a partial write; `backup_page.html` says "failed partway" only with that header, otherwise "failed before anything was written". A dropped connection after the upload now says the result is unknown.
 
 `backup_page.html:243`. Several 500 responses come before any write: `backup_import.c:4275` and
 `:4327` (out of memory in the job, before `backup_import_apply`), `:4572` and `:4603` (ctx alloc
