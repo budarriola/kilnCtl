@@ -23,18 +23,18 @@ Owner rules checked against:
 
 | ID | Sev | Area | Finding |
 |----|-----|------|---------|
-| N1 | HIGH | auth | Residual of L9. On a board offered touch calibration with none stored, leaving the touch_cal page (Cancel, or a refused save) lands on the Config hub with no PIN, and no relock edge ever sends it home. From there an unauthenticated user reaches Profiles, then a profile, then Start, which has no gate of its own. |
-| N2 | MED | mode gate | LCD Start (home and profile detail) and the UART bridge start call `profile_executor_run()` directly. They skip the web handler's `danger_mode_active()` 409 refusal, so a firing can start from the LCD while the danger-mode window is open. |
-| N3 | MED | units | Home rail zone temperatures always print raw Celsius, with no unit suffix, even when the unit preference is Fahrenheit. The chart beside them is in Fahrenheit. |
-| N4 | LOW | stale | The home rail zone temperature ignores `channels[i].stale` (age >= `KILN_TEMP_STALE_AGE_MS`, 10 s), so a frozen reading shows as live. The Temperature page and the home chart both hide stale values. |
-| N5 | LOW | auth (owner confirm) | Tapping the home trip strip opens the Safety page with no PIN, while web `/safety` is ADMIN. The Clear button stays ADMIN-gated. |
-| N6 | LOW | auth (read parity) | The LCD Diagnostics, Temperature, Network and Profiles pages need only the USER PIN (Menu), while their web equivalents are ADMIN pages and GETs, for example `GET /api/crash_report`. |
+| N1 | HIGH | auth | Residual of L9. On a board offered touch calibration with none stored, leaving the touch_cal page (Cancel, or a refused save) lands on the Config hub with no PIN, and no relock edge ever sends it home. From there an unauthenticated user reaches Profiles, then a profile, then Start, which has no gate of its own. **Status: FIXED in SHA.** |
+| N2 | MED | mode gate | LCD Start (home and profile detail) and the UART bridge start call `profile_executor_run()` directly. They skip the web handler's `danger_mode_active()` 409 refusal, so a firing can start from the LCD while the danger-mode window is open. **Status: FIXED in SHA (autotune unchanged: its web route never refused in danger mode).** |
+| N3 | MED | units | Home rail zone temperatures always print raw Celsius, with no unit suffix, even when the unit preference is Fahrenheit. The chart beside them is in Fahrenheit. **Status: FIXED in SHA.** |
+| N4 | LOW | stale | The home rail zone temperature ignores `channels[i].stale` (age >= `KILN_TEMP_STALE_AGE_MS`, 10 s), so a frozen reading shows as live. The Temperature page and the home chart both hide stale values. **Status: FIXED in SHA.** |
+| N5 | LOW | auth (owner confirm) | Tapping the home trip strip opens the Safety page with no PIN, while web `/safety` is ADMIN. The Clear button stays ADMIN-gated. **Status: FIXED in SHA (owner decision 2026-10-09).** |
+| N6 | LOW | auth (read parity) | The LCD Diagnostics, Temperature, Network and Profiles pages need only the USER PIN (Menu), while their web equivalents are ADMIN pages and GETs, for example `GET /api/crash_report`. **Status: KEPT by owner decision 2026-10-09 (LCD read access stays at USER).** |
 | N7 | INFO | stack | The LVGL task stack (10240 B) has no proven ceiling: the static budget check reports it INDETERMINATE, and the measured 6896 B was taken at boot, before the heaviest LVGL-task paths ran. |
-| N8 | INFO | units | The builder's Target and Ramp number pads are Celsius-only by design while their value labels follow the unit preference. This is documented in code, but a Fahrenheit user sees one number on the card and a different one on the pad. |
+| N8 | INFO | units | The builder's Target and Ramp number pads are Celsius-only by design while their value labels follow the unit preference. This is documented in code, but a Fahrenheit user sees one number on the card and a different one on the pad. **Status: FIXED in SHA (pads follow unit, convert to Celsius on store).** |
 
 ## Findings
 
-### N1 (HIGH) touch_cal exit lands on the Config hub with no PIN
+### N1 (HIGH) touch_cal exit lands on the Config hub with no PIN -- FIXED in SHA
 
 Where:
 - `ui/kiln_ui.c:347`-`:349`: on an offerable panel (`TOUCH_CAL_SUPPORT_SUPPORTED`, the resistive NS2009 path) with no stored calibration, boot shows `touch_cal`, not home.
@@ -64,7 +64,7 @@ Fix, either one:
 
 The first fix closes the hole; the second is defence in depth.
 
-### N2 (MED) LCD Start skips the danger-mode refusal
+### N2 (MED) LCD Start skips the danger-mode refusal -- FIXED in SHA (autotune unchanged: its web route never refused in danger mode)
 
 The web start handler (`http/dashboard_exec_http.c:804`) refuses with a 409 when `danger_mode_active()` is true. Its comment explains why:
 - While danger mode is active, `relay_on_blocked()` skips every safety-fault and OTA gate on the four relays.
@@ -86,7 +86,7 @@ Scenario:
 
 Fix: move the `danger_mode_active()` refusal into `profile_executor_run()` beside the recovery and readiness checks. That way every entry point shares it, and the HTTP handler keeps its 409 by mapping the error. The same reasoning probably applies to `autotune_engine_run()`; it was not checked here.
 
-### N3 (MED) Home rail zone temperatures ignore the unit preference
+### N3 (MED) Home rail zone temperatures ignore the unit preference -- FIXED in SHA
 
 `ui/ui_page_home_refresh.c:1105`-`:1107` passes `ds->channels[i].temp_c` (Celsius) straight to `ui_page_home_rail_format_zone_temp()` (`ui/ui_page_home_rail.c:35`-`:45`). That function prints `"%.1f"` with no conversion and no suffix.
 
@@ -99,7 +99,7 @@ Scenario: with units set to F and the kiln at 1000 C, the chart axis reads aroun
 
 Fix: convert with `unit_pref_convert(temp_c, ds->temp_unit, UNIT_PREF_KIND_ABSOLUTE)` before formatting, or pass the unit into the formatter. Add a unit case to `test/test_ui_page_home_rail.c`; today it cannot see this.
 
-### N4 (LOW) Home rail shows stale temperatures as live
+### N4 (LOW) Home rail shows stale temperatures as live -- FIXED in SHA
 
 `ui/ui_page_home_refresh.c:1105` computes `valid = ... && ds->channels[i].valid` and ignores `.stale`. `dashboard_get_status()` sets `stale` when the reading is older than `KILN_TEMP_STALE_AGE_MS` (10 s), at `http/dashboard_http.c:248`.
 
@@ -111,7 +111,7 @@ Only the rail shows a frozen number as if it were live. Scenario: a thermocouple
 
 Fix: pass `valid && !stale`, or render a stale marker.
 
-### N5 (LOW, owner confirm) Trip strip opens Safety with no PIN
+### N5 (LOW, owner confirm) Trip strip opens Safety with no PIN -- FIXED in SHA (owner decision 2026-10-09)
 
 `ui/ui_page_home.c:221`-`:227` calls `ui_page_safety_open(false)`, marked "ungated entry". The web `/safety` page is `ROUTE_TIER_ADMIN`.
 
@@ -119,7 +119,7 @@ What it exposes: trip reason, guard and age. The Clear action is still re-checke
 
 This conflicts with the letter of "dashboards only", though showing why the kiln stopped may be intended. It needs an owner decision; otherwise, gate the strip at USER.
 
-### N6 (LOW) LCD read pages are USER where the web is ADMIN
+### N6 (LOW) LCD read pages are USER where the web is ADMIN -- KEPT by owner decision 2026-10-09 (LCD read access stays at USER)
 
 The Menu gate is `LCD_PIN_ROLE_USER` (`ui/ui_page_home_actions.c:433`). Behind it, the Diagnostics page shows crash and reset data, while `GET /api/crash_report` is ADMIN on the web. Temperature, Network and Profiles are likewise ADMIN pages on the web.
 
@@ -139,7 +139,7 @@ Paths that run on this task and probably were not exercised in that measurement:
 
 Suggest a bench soak that drives those pages and then reads `get_stack_margin`.
 
-### N8 (INFO) Builder pads stay in Celsius
+### N8 (INFO) Builder pads stay in Celsius -- FIXED in SHA (pads follow unit, convert to Celsius on store)
 
 `ui/ui_page_profile_builder_segment.c:96`-`:104` shows the target and ramp in the display unit. `target_card_cb` and `ramp_card_cb` (`:262`-`:296`) open pads captioned "Target C" and "Ramp C/hr" with Celsius bounds and values.
 
