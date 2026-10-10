@@ -722,6 +722,119 @@ static void test_fix_review9_busy_defers_without_mixed_state(void)
                "F4: distinct deferred reason, not a validation rejection");
 }
 
+// R2-9 (HOST_TEST_COVERAGE_GAPS round 2): adaptive_tune_commit_zone_locked() driven directly with
+// hand-built plans. Every failed-write plan must leave the zone's applied/Ki-baseline state
+// exactly as it was; only a plan whose model AND gains landed (a persist failure still counts:
+// live in RAM) is recorded as applied.
+static adaptive_tune_zone_plan_t r2_plan(void)
+{
+    adaptive_tune_zone_plan_t p;
+    memset(&p, 0, sizeof(p));
+    p.have_model = true;
+    p.model_ok = p.pid_ok = true;
+    p.k_dc = 10.0f; p.k_blended = 12.0f; p.tau_s = 300.0f; p.dead_time_s = 20.0f;
+    p.kp = 2.5f; p.ki = 0.04f; p.kd = 0.5f;
+    p.profile_id = 7;
+    return p;
+}
+
+static void r2_clean_zone(void)
+{
+    reset_module_state();
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[1];
+    z->has_applied = false;
+    z->revert_available = true; /* pre-existing snapshot: each failure path clears or keeps it as coded */
+    z->ki_baseline_valid = false;
+    z->ki_baseline = 0.0f;
+    z->last_refusal_reason[0] = '\0';
+}
+
+static void test_r2_commit_zone_failure_paths_record_nothing(void)
+{
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[1];
+    adaptive_tune_zone_plan_t p;
+
+    r2_clean_zone();
+    p = r2_plan(); p.have_model = false;
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "no model: commit false");
+    TEST_CHECK(!z->has_applied && z->applied_k_dc == 0.0f && z->last_applied_profile_id == 0, "no model: nothing recorded");
+
+    r2_clean_zone();
+    p = r2_plan(); p.busy = true;
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "busy: commit false");
+    TEST_CHECK(!z->has_applied && !z->revert_available, "busy: not applied, revert snapshot dropped");
+    TEST_CHECK(strstr(z->last_refusal_reason, "deferred_autotune_active") != NULL, "busy: deferred reason");
+
+    r2_clean_zone();
+    p = r2_plan(); p.stale = true;
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "stale: commit false");
+    TEST_CHECK(!z->has_applied && !z->revert_available, "stale: not applied, revert dropped");
+    TEST_CHECK(strstr(z->last_refusal_reason, "another writer during the run-end apply") != NULL, "stale: reason");
+
+    r2_clean_zone();
+    p = r2_plan(); p.model_ok = false; p.pid_ok = false;
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "model rejected: commit false");
+    TEST_CHECK(!z->has_applied && !z->revert_available && !z->ki_baseline_valid, "model rejected: nothing applied, no revert, no Ki latch");
+    TEST_CHECK(strstr(z->last_refusal_reason, "zones_config_set_model() rejected 12.0000/300.0/20.0") != NULL, "model rejected: exact values in reason");
+
+    r2_clean_zone();
+    p = r2_plan(); p.pid_ok = false;
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "pid rejected: commit false");
+    TEST_CHECK(!z->has_applied && z->revert_available && !z->ki_baseline_valid, "pid rejected: not applied, revert KEPT (model half landed), no Ki latch");
+    TEST_CHECK(strstr(z->last_refusal_reason, "zones_config_set_pid() rejected 2.5000/0.0400/0.5000") != NULL, "pid rejected: exact values in reason");
+}
+
+static void test_r2_commit_zone_success_and_save_failed_record_applied(void)
+{
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[1];
+    adaptive_tune_zone_plan_t p;
+
+    r2_clean_zone();
+    p = r2_plan();
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p), "ok plan: commit true");
+    TEST_CHECK(z->has_applied && z->prior_k_dc == 10.0f && z->applied_k_dc == 12.0f && z->last_applied_profile_id == 7, "applied fields recorded");
+    TEST_CHECK_NEAR(z->last_delta_pct, 20.0f, 1e-4, "delta pct (12-10)/10 = 20");
+    TEST_CHECK(z->revert_expect_kp == 2.5f && z->revert_expect_ki == 0.04f && z->revert_expect_kd == 0.5f, "revert_expect gains");
+    TEST_CHECK(z->revert_expect_k_dc == 12.0f && z->revert_expect_tau_s == 300.0f && z->revert_expect_dead_time_s == 20.0f, "revert_expect model");
+    TEST_CHECK(z->ki_baseline_valid && z->ki_baseline == 0.04f, "Ki baseline re-latched to the written Ki");
+    TEST_CHECK(z->last_refusal_reason[0] == '\0', "refusal cleared");
+
+    r2_clean_zone();
+    p = r2_plan(); p.save_failed = true;
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p), "persist failure: live in RAM, still committed");
+    TEST_CHECK(z->has_applied && z->applied_k_dc == 12.0f, "persist failure: recorded as applied");
+
+    r2_clean_zone();
+    p = r2_plan(); p.bootstrap_baseline = true; p.bootstrap_ok = false; p.baseline_k_dc = 9.0f;
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p), "unpersisted bootstrap baseline does not block the commit");
+
+    r2_clean_zone();
+    p = r2_plan(); p.clear_gen = adaptive_tune_ki_clear_gen[1] + 1u; /* an Accept cleared the baseline mid-apply */
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p), "clear_gen mismatch: still committed");
+    TEST_CHECK(z->has_applied && !z->ki_baseline_valid, "clear_gen mismatch: stale SIMC Ki NOT re-latched");
+
+    r2_clean_zone();
+    p = r2_plan(); p.k_dc = 0.0f;
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p) && z->last_delta_pct == 0.0f, "prior k_dc 0: delta pct 0, no divide");
+}
+
+static void test_r2_commit_zone_detects_writer_after_apply(void)
+{
+    adaptive_tune_zone_t *z = &adaptive_tune_zones[1];
+    r2_clean_zone();
+    s_fake_zone_cfg[1].kp = 2.5f; s_fake_zone_cfg[1].ki = 0.04f; s_fake_zone_cfg[1].kd = 0.5f;
+    adaptive_tune_zone_plan_t p = r2_plan();
+    p.have_prior = true; p.prior_kp = 2.0f; p.prior_ki = 0.03f; p.prior_kd = 0.4f;
+    TEST_CHECK(adaptive_tune_commit_zone_locked(1, &p), "live gains equal ours: committed");
+    TEST_CHECK(z->has_applied, "applied");
+
+    r2_clean_zone();
+    s_fake_zone_cfg[1].kp = 9.0f; /* another writer landed right after our set_pid */
+    TEST_CHECK(!adaptive_tune_commit_zone_locked(1, &p), "live gains differ: refused");
+    TEST_CHECK(!z->has_applied && !z->revert_available, "no applied record, no revert snapshot over their gains");
+    TEST_CHECK(strstr(z->last_refusal_reason, "right after the run-end apply") != NULL, "reason names the post-apply writer");
+}
+
 // F2: any writer that changes the zone after the adaptive commit invalidates the revert snapshot.
 static void test_fix_review9_revert_cleared_by_external_writer(void)
 {

@@ -677,6 +677,9 @@ void run_test_adaptive_tune(void)
     TEST_SECTION("adaptive_tune: F3 follow-up -- revert vs run_end's unlocked apply window");
     test_revert_during_run_end_apply_is_refused_busy();
     test_fix_review9_busy_defers_without_mixed_state();
+    test_r2_commit_zone_failure_paths_record_nothing();
+    test_r2_commit_zone_success_and_save_failed_record_applied();
+    test_r2_commit_zone_detects_writer_after_apply();
     test_fix_review9_revert_cleared_by_external_writer();
     test_fix_review9_revert_busy_reports_firing_active();
     test_run_end_during_revert_write_skips_the_zone();
