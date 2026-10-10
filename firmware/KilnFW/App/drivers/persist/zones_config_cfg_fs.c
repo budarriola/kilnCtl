@@ -152,13 +152,19 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
     esp_err_t err = cfg_fs_read(ZONES_CFG_FILE_PATH, raw, ZCFG_FILE_BUF_MAX, &len);
     if (err != ESP_OK) {
         free(raw);
-        /* ESP_ERR_NOT_FOUND (never migrated yet), ESP_ERR_INVALID_SIZE (file
-         * larger than this buffer -- cannot happen for a well-formed file,
-         * but a corrupted length must not be trusted either), or any other
-         * read failure: none of these are "found but bad", so nothing is
-         * logged here -- the caller's resolve() logic decides whether that
-         * is worth a divergence warning (it is not, on its own; an absent
-         * file is the normal state on every board today). */
+        /* ESP_ERR_NOT_FOUND (never migrated yet) is the one "absent" answer: the normal state on
+         * every board that has not migrated, and nothing is logged. Any OTHER failure
+         * (ESP_ERR_INVALID_SIZE for a file larger than this buffer -- e.g. written by newer
+         * firmware -- or a transient I/O error) means a file may EXIST that we could not read, so
+         * it is "cannot decide", never "absent" (review 15 LOW-3): resolve() must not fall back to
+         * NVS and overwrite it. */
+        if (err != ESP_ERR_NOT_FOUND) {
+            ESP_LOGW(ZCFG_FS_TAG, "zones config file unreadable (%s) -- cannot decide, not treating it as absent",
+                     esp_err_to_name(err));
+            if (out_on_disk_version) {
+                *out_on_disk_version = ZONES_CFG_RESOLVE_OOM_VERSION;
+            }
+        }
         return;
     }
     if (len < 5) { /* need at least the rev prefix + a 1-byte version */

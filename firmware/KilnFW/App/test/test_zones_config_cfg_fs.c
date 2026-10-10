@@ -1114,6 +1114,27 @@ static void test_resolve_oom_keeps_rev_floor_and_fails_load(void)
     oom_check_rev_floor_kept();
 }
 
+/* Review 15 LOW-3: a file too large for the read buffer (newer firmware) is unreadable, not absent -- the load
+ * must fail and the file must survive byte-for-byte instead of being overwritten from the older NVS copy. */
+static void test_oversize_file_is_cannot_decide_not_absent(void)
+{
+    TEST_SECTION("zones cfg_fs: an over-size (unreadable) zones.json is 'cannot decide' and is never overwritten "
+                 "from NVS (review 15 LOW-3)");
+    oom_setup_file_rev5_and_stale_nvs();
+    static uint8_t big[1028 + 200];
+    memset(big, 0x5A, sizeof(big));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "setup: over-size file written");
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    esp_err_t e = nvs_load(&found, &valid);
+    TEST_CHECK(e == ESP_ERR_NO_MEM || !valid, "the load does not adopt the stale NVS copy as valid");
+    static uint8_t back[1028 + 400];
+    size_t blen = 0;
+    TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, back, sizeof(back), &blen) == ESP_OK && blen == sizeof(big) &&
+                   memcmp(back, big, blen) == 0,
+               "the unreadable file is untouched (not overwritten from the older NVS copy)");
+}
+
 static void test_nvs_load_resolved_oom_keeps_rev_floor(void)
 {
     TEST_SECTION("zones cfg_fs: nvs_load's own `resolved` scratch OOM keeps the rev floor (fcdfc823 review HIGH1)");
@@ -1606,6 +1627,7 @@ void run_test_zones_config_cfg_fs(void)
     test_file_cycle_is_normalized_in_ram_and_on_writeback();
     test_resolve_oom_keeps_rev_floor_and_fails_load();
     test_nvs_load_resolved_oom_keeps_rev_floor();
+    test_oversize_file_is_cannot_decide_not_absent();
     test_nvs_conversion_scratch_oom_is_not_corrupt();
     test_file_conversion_scratch_oom_does_not_overwrite_file();
     test_start_does_not_migrate_after_load_oom();
