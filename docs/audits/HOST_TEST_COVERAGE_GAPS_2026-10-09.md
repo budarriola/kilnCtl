@@ -30,8 +30,8 @@ referenced), X no execution test (none, or source-text only).
 
 | # | Module | What it does | Risk | Tested | Untested functions / branches |
 |---|---|---|---|---|---|
-| 1 | SaftyFW `src/tasks/safety_core.c` (1952 L) | Guard loop: trips S1..S14, relay command, trip latch, clear | S R | X (text-grep tests only) | Whole tick: each guard's trip/clear threshold, trip_mask derivation, relay de-energize order, clear_trip binding |
-| 2 | SaftyFW `src/tasks/link_task.c` (3592 L) | kilnlink RX/TX, frame dispatch, SET_PARAM, clear-trip, update commands | S N P | X | Dispatch table, CRC/length reject paths, commit/reject glue, TC type gate wiring (only extracted `link_task_*` helpers run) |
+| 1 | SaftyFW `src/tasks/safety_core.c` (1952 L) | Guard loop: trips S1..S14, relay command, trip latch, clear | S R | Y (campaign 1: `test_safety_core_host.c`, 771 checks; text-grep tests remain) | Whole tick: each guard's trip/clear threshold, trip_mask derivation, relay de-energize order, clear_trip binding |
+| 2 | SaftyFW `src/tasks/link_task.c` (3592 L) | kilnlink RX/TX, frame dispatch, SET_PARAM, clear-trip, update commands | S N P | T (campaign 2: `test_link_task_fuzz.c` covers enable/heat-grant, CRC, resync, seq, unknown cmds; SET_PARAM and update commands not covered) | Dispatch table, CRC/length reject paths, commit/reject glue, TC type gate wiring (only extracted `link_task_*` helpers run) |
 | 3 | SaftyFW `src/tasks/thermo_task.c` (748 L) | MAX31856 read, fault bits, DRDY recovery feeding safety | S | X | Fault-bit to guard mapping, stale-sample handling, retry path |
 | 4 | SaftyFW `src/tasks/watchdog_task.c` (344 L) | Check-in aggregation, hardware watchdog feed | S | X | Missed check-in -> no-feed branch (only `watchdog_gate` runs) |
 | 5 | KilnFW `drivers/safety/safety_link_payload.c` (337 L) | Builds status/trip/diag/stats payloads for the link | S N | T (0/5 referenced; compile test only) | `safety_link_build_status_payload`, `_trip_event_`, `_diag_`, `_stats_`, `_fw_version_` byte layouts |
@@ -62,13 +62,13 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
 
 ## Top 10 recommended test campaigns
 
-1. **safety_core guard behavior harness (SaftyFW).** Compile `safety_core.c`
+1. **DONE 2026-10-10 (`test_safety_core_host.c`). safety_core guard behavior harness (SaftyFW).** Compile `safety_core.c`
    behind existing stubs (relay_owner via fake_gpio, FreeRTOS min stub) and
    drive the tick with synthetic temps, CT and link states. For each guard
    assert the trip reason, `trip_mask == 1 << (reason-1)`, relay de-energized
    in the same tick, latch survives sensor recovery, and clear-trip is refused
    while the cause persists. Replaces the source-text tests as the evidence.
-2. **link_task frame dispatch fuzz (SaftyFW).** Feed truncated, bad-CRC,
+2. **DONE 2026-10-10 for enable/heat grant, CRC, resync, seq, unknown cmds (`test_link_task_fuzz.c`); SET_PARAM range and update-command refusals still open. link_task frame dispatch fuzz (SaftyFW).** Feed truncated, bad-CRC,
    oversize, replayed-seq and wrong-boot-id frames through a fake UART. Assert
    no state change on rejects, correct NACK codes, SET_PARAM range refusal, and
    clear-trip / update commands refused when armed.

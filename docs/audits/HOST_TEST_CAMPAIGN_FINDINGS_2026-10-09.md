@@ -251,3 +251,72 @@ after the claim is taken (stage upload) cannot be driven through the fakes;
 auth tier is a route-table property, not a handler one, and there is no
 recovery-mode gate in the update handlers; there is no apply route among the
 `update_*` handlers (apply lives in the recovery image's own handler set).
+
+## Campaign 1: safety_core guard behaviour harness
+
+New `firmware/SaftyFW/test/test_safety_core_host.c`, built by
+`build_host_tests.ps1` as its own exe `safety_core_host_tests.exe` (its fakes
+would collide with the main host exe at link time). 771 checks, 0 failed, 22
+scenarios. It compiles the real `safety_core.c` against fakes (FreeRTOS minimal
+stubs with a fiber-based task and FIFO queue fake, `pico/time.h`, relay owner,
+thermo, link output) and drives the tick with synthetic temperature, CT and
+link states.
+
+Covered: guards S1..S14 each through trip, latch and no-false-trip cases;
+`trip_reason` and `trip_mask == 1 << (reason-1)` (S6a is reason 6, 0x0020);
+relay and K4 de-energized on trip; trip latch persisting after the cause
+clears; `trip_seq` increment per trip. The S1 sustained case uses 1301 C, 1 C
+over the 1300 C ceiling.
+
+Negative test (`tools/negtest.ps1 -Preset saftyfw-host`, baseline passed, real
+tree unchanged): 5 mutations, all CAUGHT.
+
+| Mutation | Result | Caught by |
+|---|---|---|
+| S7 trip reason wrong | CAUGHT | new and old tests |
+| S7 guard disabled | CAUGHT | new and old tests |
+| S1 ceiling loosened by 50 C | CAUGHT | new test |
+| trip_mask off by one | CAUGHT | new and old tests |
+| trip_seq never increments | CAUGHT | new and old tests |
+
+Findings: no defects. Coverage limits, not defects: fibers stand in for
+FreeRTOS scheduling, so preemption and priority effects are not exercised; the
+standard build does not use ASan.
+
+## Campaign 2: link_task frame fuzz
+
+New `firmware/SaftyFW/test/test_link_task_fuzz.c`, own exe
+`link_task_fuzz_tests.exe`. 32189 checks, 0 failed. `link_task.c` is
+`#include`d into the test TU so its statics are visible. Scenarios: enable
+gating, bad CRC and truncation, resync after garbage, PUSH_CONTEXT, trip_seq
+wrap, 256 unknown commands, and a seeded fuzz (30000 iterations, 8 frame
+kinds, seed 0x1234ABCD, deterministic).
+
+Invariant checked throughout: the only route to `safety_core_request_enable(true)`
+is a CRC-valid broadcast frame ESP(0) to SAFETY(2), cmd 0x02, length exactly 2,
+payload[1] nonzero. PUSH_CONTEXT never grants. A new ESP session (boot_id
+change, or a context gap of 5 s or more) without HEAT_OWNER_ACTIVE calls
+`request_enable(false)`. trip_seq wraps 255 to 1, never 0. No unsafe frame
+granted heat in any iteration.
+
+ASan: clean. Manual recipe (not in the standard build): compile with
+`cl /fsanitize=address /Zi /Od` and put the MSVC ASan runtime DLL directory on
+PATH.
+
+Negative test: 4 mutations, all CAUGHT, each only by `link_task_fuzz_tests`
+except where noted.
+
+| Mutation | Result | Caught by |
+|---|---|---|
+| enable length check relaxed (`!= 2u` to `< 2u`) | CAUGHT | fuzz exe |
+| liveness direction changed to OR | CAUGHT | fuzz exe (and old tests) |
+| msg_type gate removed | CAUGHT | fuzz exe |
+| trip_seq compare `!=` to `>` (breaks wrap) | CAUGHT | fuzz exe |
+
+Findings: no defects. Observations, not defects:
+- The Pico has no msg_index dedup, so a duplicated enable frame counts as a
+  second request. Harmless today (the request is idempotent) but worth knowing
+  if a non-idempotent command is ever added.
+- An enable payload of 0xFF counts as a grant (any nonzero payload[1]).
+- Coverage limits: no FreeRTOS scheduling, fibers only; ASan not in the
+  standard build.
