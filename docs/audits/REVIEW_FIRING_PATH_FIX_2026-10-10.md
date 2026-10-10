@@ -189,3 +189,25 @@ None of the three failures is on a path this batch changed:
 
 `profile_exec_wdt` has zero margin. Any further growth in the watchdog
 path fails the check.
+
+## Fix batch status (2026-10-10, worktree firefx2)
+
+- F1 FIXED: `guard9_prelock_check()` records the stale age with the pending flag;
+  `guard9_merge_pending()` (called under the lock) folds a latched verdict and its
+  age into `wd_in`, so a lock-timeout pass followed by a recovered tick still FAULTS
+  the run. Behavioural test `test_guard9_pending_verdict_survives_lock_timeout`.
+- F2 FIXED: APP fault source is asserted before the relay cut; comment corrected
+  (the cut is a direct SX1509 write from the watchdog task, not owner-task serialised).
+- F3 FIXED: on the climbing branch an explicit `progress_window_s` wins over
+  `wrong_dir_window_s`; the 120 s no-model floor applies only when the window came
+  from `wrong_dir_window_s`. Tests use 60/300 and 300/60.
+- F4 FIXED: the unreadable-mask fallback excludes other zones' readable masks and
+  live aux relays; an empty fallback mask refuses (logged once, never ON);
+  `zone_off_pending_retry()` outside PAUSED drops bits now owned by another owner;
+  `zone_off_pending_mask` is cleared at run start (no host seam reaches this line).
+- Item 5 follow-up FIXED: any non-finite duty (NaN, +/-inf) renders OFF.
+- Item 6: owner decision 2026-10-10 recorded (benign Pico reboot auto-resumes heat;
+  fatal causes pause). F6 deferred to the next needed protocol bump.
+- Item 7: source scans for guard 9 order and the clamp string replaced by behavioural
+  tests. The acquire-not-void scan and the retry call-order scan remain: the executor
+  loop and run/resume are not drivable from the host test.
