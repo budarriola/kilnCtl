@@ -10,7 +10,9 @@ Scope: commit 57addc36a on origin/dev, which fixes T1-T4 from
 - T3: `heat_enable.c` treats a Pico reboot after a TRIPPED DIAG as fatal.
 - T4: S12 runs on a bad TC read when the cold junction is valid.
 
-Line numbers are for origin/dev 96e4d56d9 (nothing after it touches these files).
+SaftyFW line numbers are for origin/dev 96e4d56d9 (unchanged since). `heat_enable.c` line
+numbers are for origin/dev 08161c36f, which adds 1fcf3148e and a3c6475c1 (MED-5 reboot
+verdict that survives pause/resume) on top of the reviewed commit. Negtests ran on 96e4d56d9.
 
 ## Summary
 
@@ -23,6 +25,7 @@ Line numbers are for origin/dev 96e4d56d9 (nothing after it touches these files)
 | F5 | LOW | T4 | `cj_invalid` is not gated by `thermo_fresh`; S12 now runs on a stale CJ on the bad-read path |
 | F6 | LOW | T3 | Log text and pause reason call a lost-trip POWERON reboot a "fatal cause" |
 | F7 | LOW | T2 | The `tc_not_installed` last-good path is untested; S13 still reads the default record on a failed read |
+| F8 | LOW | T3 x MED-5 | The claim-less reboot verdict (1fcf3148e) ignores the TRIPPED snapshot, so a lost trip is laundered across a pause/resume |
 | I1 | INFO | T2 | Fail-safe at boot; stale-config window is bounded |
 | I2 | INFO | T3 | Fits the owner decision; matters for autotune only; clear and per-boot reset are correct |
 | I3 | INFO | T3 | Overlap with the rebootfx work in `heat_enable_note_pico_boot()` |
@@ -110,14 +113,14 @@ the clear is granted. Add the constant-reading test above.
 
 ### F3 (LOW) T3: a second Pico reboot before the first boot's DIAG loses the tripped snapshot
 
-`firmware/KilnFW/App/drivers/control/heat_enable.c:722`:
+`firmware/KilnFW/App/drivers/control/heat_enable.c:761`:
 
 ```c
 s_he.reboot_was_tripped = s_he.last_pico_tripped;
 ```
 
 This overwrites the snapshot on every reboot_seq change. `last_pico_tripped` is updated
-by any fresh `heat_enable_note_pico_state()` call (`heat_enable.c:801`), and the
+by any fresh `heat_enable_note_pico_state()` call (`heat_enable.c:848`), and the
 profile executor's watchdog substitutes `SAFETY_LINK_DIAG_STATE_INIT` as a fresh state
 while `!diag_since_reboot` (`profile_executor.c`, watchdog block before the
 `pico_fatal_reboot` pause at line 2514).
@@ -165,7 +168,7 @@ Fix: `.cj_invalid = !thermo.cj_valid || !thermo_fresh`.
 
 ### F6 (LOW) T3: misleading reason for a lost-trip reboot
 
-`firmware/KilnFW/App/drivers/control/heat_enable.c:742` logs the hold as a fatal boot
+`firmware/KilnFW/App/drivers/control/heat_enable.c:789` logs the hold as a fatal boot
 cause with the boot_reason byte (0x01 POWERON for this case), and the executor pauses
 with `pico_fatal_reboot` (`profile_executor.c:2514`). An operator or a bench judge reading
 "fatal cause (boot_reason 0x01)" sees a contradiction.
@@ -188,6 +191,34 @@ tick, so this is negligible today.
 Fix: extend the T2 test to assert the declared-not-installed flag survives a failed
 read. Optionally reuse the last good record for the S13 inputs too.
 
+### F8 (LOW) T3 combined with MED-5 (1fcf3148e): lost trip not carried across a release
+
+`firmware/KilnFW/App/drivers/control/heat_enable.c:768-775` (origin/dev 08161c36f). When no
+claim is held, the new MED-5 path decides the verdict from the boot reason alone:
+
+```c
+s_he.reboot_was_tripped = false;
+...
+s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u;
+```
+
+The T3 term is missing here, and `reboot_was_tripped` is only snapshotted when a claim
+is held (`:761`). When a verdict that is still pending is re-armed on the next acquire
+(`heat_enable_acquire_since()`), `reboot_was_tripped` was already cleared by the
+release (`:577`), so the later POWERON DIAG classifies benign.
+
+Scenario: autotune holds the claim, the Pico trips, the operator pauses or the claim is
+released, the Pico reboots (POWERON, trip latch lost). Either the DIAG arrives while no
+claim is held (verdict benign, nothing latched) or it arrives after the next acquire
+(re-armed pending, snapshot false, benign). Heat is re-requested on a Pico that lost its
+trip.
+
+Fix: snapshot `last_pico_tripped` into a per-reboot-seq flag on every seq change
+(claim or not, alongside `reboot_verdict_pending`), do not clear it in
+`he_release_common()`, and OR it into both `reboot_fatal_latched` and the claimed-path
+check at `:789`. Test: TRIPPED, release, reboot, POWERON DIAG, acquire, assert hold; and
+the same with the DIAG after the acquire.
+
 ### I1 (INFO) T2 is fail-safe at boot
 
 `config_store_get_full_record()` returns false only when the store is not loaded yet
@@ -204,9 +235,9 @@ failed tick during a concurrent write. No stale-config hazard beyond that. The r
   heat until a DIAG of the new boot arrives: unchanged, T3 only adds "followed a
   TRIPPED DIAG" to the fatal set.
 - Cleared after an operator trip clear: yes. The next fresh DIAG (ARMED/GRACE)
-  sets `last_pico_tripped` false (`heat_enable.c:801`); the existing test covers it.
-- Per Pico boot: the snapshot is taken on each reboot_seq change (`:722`), cleared when
-  no claim is held (`:730`) and on release (`:542`). `he_k4_reset_locked()` runs on the
+  sets `last_pico_tripped` false (`heat_enable.c:848`); the existing test covers it.
+- Per Pico boot: the snapshot is taken on each reboot_seq change (`:761`), cleared when
+  no claim is held (`:768`) and on release (`:577`). `he_k4_reset_locked()` runs on the
   same edge. No reset-one-side issue beyond F3.
 - Reach: the profile claimant never gets here, because the executor FAULTs and
   releases its claim on a fresh TRIPPED DIAG before `heat_enable_note_pico_state()`
@@ -214,19 +245,20 @@ failed tick during a concurrent write. No stale-config hazard beyond that. The r
   autotune. A new firing started after a reboot that lost the trip is still allowed;
   that waits for the next protocol bump (item F6 in the owner decision, not F6 here).
 
-### I3 (INFO) Overlap with rebootfx
+### I3 (INFO) Overlap with later reboot work
 
-The rebootfx agent is editing the same `heat_enable_note_pico_boot()` block
-(`heat_enable.c:715-760`). No commit on origin/dev touches it after 57addc36a, so there
-is no conflict yet, but whoever lands second must keep both the T3 `reboot_was_tripped`
-term and the F3 fix.
+1fcf3148e (firing audit MED-4/MED-5) and a3c6475c1 (SL3-R2) landed on origin/dev after
+the reviewed commit and edit the same `heat_enable_note_pico_boot()` block
+(`heat_enable.c:752-800`). They keep the T3 term on the claimed path but do not carry it
+into the new claim-less verdict (F8). The rebootfx agent is still working in this
+area; whoever fixes F3 and F8 should do it in one change to that block.
 
 ### I4 (INFO) T3 test does not pin the snapshot
 
 `test_pico_reboot_after_tripped_holds` (`test_heat_enable.c:1118`) feeds each reboot as
 one `heat_enable_note_pico_boot()` call with `diag_since_reboot` true, with no
 intermediate INIT tick. Replacing `s_he.reboot_was_tripped` with `s_he.last_pico_tripped`
-at `heat_enable.c:742` is therefore not caught, although the real watchdog wiring would
+at `heat_enable.c:789` is therefore not caught, although the real watchdog wiring would
 break. Add a step with `note_pico_boot(seq, false, ...)` then
 `note_pico_state(true, INIT, ...)` before the POWERON DIAG.
 
@@ -248,8 +280,8 @@ KilnFW, `tools\negtest.ps1 -Preset kilnfw-host -Mutations`, base 96e4d56d9, base
 
 | Mutation | Expected | Result |
 |----------|----------|--------|
-| `heat_enable.c:742` uses `last_pico_tripped` instead of the snapshot | MISSED (I4) | MISSED |
-| `heat_enable.c:742` drops the `reboot_was_tripped` term | CAUGHT | CAUGHT |
+| `heat_enable.c:789` uses `last_pico_tripped` instead of the snapshot | MISSED (I4) | MISSED |
+| `heat_enable.c:789` drops the `reboot_was_tripped` term | CAUGHT | CAUGHT |
 | Demo F3: double reboot (TRIPPED, reboot, INIT tick, reboot, POWERON) asserts hold | CAUGHT (bug) | CAUGHT, `test_heat_enable.c:1143` |
 | Sanity: single reboot with an INIT tick before the POWERON DIAG asserts hold | MISSED (passes) | MISSED, real wiring holds |
 
