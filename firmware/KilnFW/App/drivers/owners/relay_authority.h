@@ -304,6 +304,15 @@ void relay_authority_reset_in_flight_begin(void);
 void relay_authority_reset_in_flight_end(void);
 bool relay_authority_reset_in_flight(void);
 
+/* Writer fence (pref_cfg_fs.h "FACTORY-RESET WRITER FENCE"): the reset job records the task it runs on
+ * (_job_enter at the top of execute_scope_job(), _job_exit at the end) so its own cfg writes
+ * (profiles_builtin_restore_all()) are not refused by the mark. relay_authority_reset_refuses_writer()
+ * is the predicate main.c installs with pref_cfg_fs_set_reset_refuse_hook(): the mark is set AND the
+ * caller is not that job's task. Spinlock only. */
+void relay_authority_reset_job_enter(void);
+void relay_authority_reset_job_exit(void);
+bool relay_authority_reset_refuses_writer(void);
+
 #ifdef __cplusplus
 }
 #endif

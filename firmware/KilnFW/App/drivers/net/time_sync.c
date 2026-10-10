@@ -263,6 +263,10 @@ esp_err_t time_sync_set_tz(const char *tz)
      * unit_pref_set() -- an NVS write failure below must not leave the
      * board running the OLD timezone after reporting success. */
     cfg_save_lock_take(&s_save_lock);
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight: nothing may persist, RAM stays as is */
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     apply_tz(tz);
     uint32_t new_rev = s_tz_rev + 1;
 

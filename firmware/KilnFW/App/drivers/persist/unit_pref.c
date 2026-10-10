@@ -153,6 +153,10 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // a failed save leaves the live value, and every reader, unchanged. The whole
     // commit + publish + rev bump is one section under the save lock (MED-3).
     cfg_save_lock_take(&s_save_lock);
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight: nothing may persist, RAM stays as is */
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 

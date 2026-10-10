@@ -30,6 +30,7 @@
 #include "profile_executor.h" /* firing_stats_cache_invalidate_all() -- see the erase loop in
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"
+#include "cfg_save_barrier.h" /* persist_reset_barrier() -- see execute_scope() */
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- reset_other_writer_refuses() */
 #include "system_mode_gate.h" /* SYS_ACTION_FACTORY_RESET -- owner decision Q3, 2026-09-25 */
@@ -220,6 +221,9 @@ static void execute_scope_job(void *arg)
     const reset_scope_t *scope = ctx->scope;
     esp_err_t first_err = ESP_OK;
 
+    /* The mark is set by now and every other cfg writer is refused; this task is the one exception
+     * (profiles_builtin_restore_all() below saves through the fenced path). */
+    relay_authority_reset_job_enter();
     ESP_LOGW(TAG, "factory_reset: scope '%s' requested -- erasing", scope->name);
 
     /* Before the erase, not after: nvs_flash_erase_partition() de-initializes
@@ -417,6 +421,7 @@ static void execute_scope_job(void *arg)
         }
     }
 
+    relay_authority_reset_job_exit();
     ctx->err = first_err;
 }
 
@@ -489,6 +494,18 @@ static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, si
         relay_authority_reset_in_flight_end();
         ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a run, sweep or restore started meanwhile");
         return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
+    }
+
+    /* WRITER BARRIER (HTTP audit L37 follow-up): the erase below takes no writer's save lock, so a cfg
+     * writer that passed its own mark check just before the mark was set could still save after the
+     * erase. With the mark set, take and give every registered save lock once: a writer already inside
+     * finishes first, a later one sees the mark under its lock and refuses (pref_cfg_fs.h "WRITER
+     * FENCE"). Lock order: we hold no lock here and take them one at a time, never nested; the flash
+     * worker is not entered until the barrier is done (a writer holding a lock may need it for its
+     * commit, so the barrier must not run on the worker -- skipped if we already are, where no other
+     * worker job can be mid-commit and the per-writer refusals alone apply). */
+    if (!uart_bridge_ext_is_on_flash_worker()) {
+        persist_reset_barrier();
     }
 
     /* RE-ENTRANCY (flash_worker_lint.py's pattern 1): neither known caller

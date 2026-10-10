@@ -251,6 +251,10 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     }
 
     cfg_save_lock_take(&s_save_lock);
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight: nothing may persist, RAM stays as is */
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     bool changed;
     if (is_user) {
         bool was = profiles_slot_bitmap_test(&s_fav_user, id);

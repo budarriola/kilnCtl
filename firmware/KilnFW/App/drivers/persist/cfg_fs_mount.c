@@ -497,6 +497,13 @@ typedef struct {
 static void cfg_fs_write_job_run(void *arg)
 {
     cfg_fs_write_job_t *job = (cfg_fs_write_job_t *)arg;
+    /* Final, on-the-worker look at the factory-reset mark (pref_cfg_fs.h "WRITER FENCE"): the
+     * caller's own check ran before its dispatch, and the reset job (which also runs on this worker,
+     * so is exempt by task identity) may have run in between. Nothing is written after the erase. */
+    if (pref_cfg_fs_reset_refuses_write()) {
+        job->result = ESP_ERR_INVALID_STATE;
+        return;
+    }
     job->result = cfg_fs_write_atomic(job->rel_path, job->data, job->len);
 }
 

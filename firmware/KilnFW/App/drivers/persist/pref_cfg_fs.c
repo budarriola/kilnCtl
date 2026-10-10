@@ -5,6 +5,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 
 #include "cfg_fs.h"
 #include "persist_scratch.h"
@@ -49,6 +51,57 @@ void pref_cfg_fs_save_section_exit(bool reserved)
     if (fn) {
         fn(reserved);
     }
+}
+
+static pref_cfg_fs_reset_refuse_fn_t volatile s_reset_refuse_fn = NULL;
+
+void pref_cfg_fs_set_reset_refuse_hook(pref_cfg_fs_reset_refuse_fn_t fn)
+{
+    s_reset_refuse_fn = fn;
+}
+
+bool pref_cfg_fs_reset_refuses_write(void)
+{
+    pref_cfg_fs_reset_refuse_fn_t fn = s_reset_refuse_fn;
+    return fn ? fn() : false;
+}
+
+static void *s_lock_registry[PREF_CFG_FS_LOCK_REGISTRY_MAX];
+static size_t s_lock_registry_n = 0;
+static portMUX_TYPE s_lock_registry_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void pref_cfg_fs_lock_registry_add(void *lock)
+{
+    bool full = false;
+    portENTER_CRITICAL(&s_lock_registry_mux);
+    if (s_lock_registry_n < PREF_CFG_FS_LOCK_REGISTRY_MAX) {
+        s_lock_registry[s_lock_registry_n++] = lock;
+    } else {
+        full = true;
+    }
+    portEXIT_CRITICAL(&s_lock_registry_mux);
+    if (full) {
+        ESP_LOGE(PREF_FS_TAG, "save lock registry full: raise PREF_CFG_FS_LOCK_REGISTRY_MAX");
+    }
+}
+
+size_t pref_cfg_fs_lock_registry_count(void)
+{
+    portENTER_CRITICAL(&s_lock_registry_mux);
+    size_t n = s_lock_registry_n;
+    portEXIT_CRITICAL(&s_lock_registry_mux);
+    return n;
+}
+
+void *pref_cfg_fs_lock_registry_get(size_t i)
+{
+    void *p = NULL;
+    portENTER_CRITICAL(&s_lock_registry_mux);
+    if (i < s_lock_registry_n) {
+        p = s_lock_registry[i];
+    }
+    portEXIT_CRITICAL(&s_lock_registry_mux);
+    return p;
 }
 
 static void put_u32_le(uint8_t *p, uint32_t v)
@@ -212,6 +265,10 @@ esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_
         ESP_LOGE(PREF_FS_TAG, "%s item is %u bytes, exceeds PREF_CFG_FS_MAX_LARGE_ITEM (%u) -- refusing to write",
                  rel_path, (unsigned)item_size, (unsigned)PREF_CFG_FS_MAX_LARGE_ITEM);
         return ESP_ERR_INVALID_SIZE;
+    }
+    if (pref_cfg_fs_reset_refuses_write()) {
+        ESP_LOGW(PREF_FS_TAG, "%s write refused: factory reset in progress", rel_path);
+        return ESP_ERR_INVALID_STATE;
     }
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;

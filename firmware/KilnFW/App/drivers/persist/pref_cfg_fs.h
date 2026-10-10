@@ -122,6 +122,31 @@ void pref_cfg_fs_set_save_section_hooks(pref_cfg_fs_save_enter_fn_t enter, pref_
 bool pref_cfg_fs_save_section_enter(void);
 void pref_cfg_fs_save_section_exit(bool reserved);
 
+/* FACTORY-RESET WRITER FENCE (2026-10-09, HTTP input audit L37 follow-up). factory_reset.c sets a
+ * "reset in flight" mark (relay_authority_reset_in_flight()) and then erases storage without taking
+ * any writer's save lock, so a writer that checked the mark just before it was set could still save
+ * after the erase. Two pieces close that, both living here because every host test that links a
+ * saver already links this file:
+ *  - REFUSAL: the device installs a predicate (pref_cfg_fs_set_reset_refuse_hook(); main.c, next to the
+ *    save-section hooks) that is true while the mark is set, except on the reset job's own task (its
+ *    profiles_builtin_restore_all() must still write). A writer calls cfg_save_lock_reset_refused()
+ *    INSIDE its save lock, immediately before the persist, and returns ESP_ERR_INVALID_STATE; every
+ *    pref_cfg_fs_save()/_commit() caller is covered centrally. Without a hook nothing is refused.
+ *  - BARRIER: every cfg_save_lock_take() registers its lock here once (pref_cfg_fs_lock_registry_*);
+ *    cfg_save_barrier.c's persist_reset_barrier() takes and gives each registered lock once, AFTER the
+ *    mark is set and BEFORE the erase. A writer already inside finishes before the erase; a writer
+ *    entering later sees the mark under the lock. A lock never registered has had no writer enter it
+ *    before the mark (register precedes take), so a later first take sees the mark too.
+ * Lock order used by the barrier: caller holds nothing; each lock is taken then given before the next
+ * (no nesting), reservation outer / mutex inner as always. Never called from the flash worker. */
+typedef bool (*pref_cfg_fs_reset_refuse_fn_t)(void);
+void pref_cfg_fs_set_reset_refuse_hook(pref_cfg_fs_reset_refuse_fn_t fn);
+bool pref_cfg_fs_reset_refuses_write(void);
+#define PREF_CFG_FS_LOCK_REGISTRY_MAX 32
+void pref_cfg_fs_lock_registry_add(void *lock);       /* caller guarantees at most one add per lock */
+size_t pref_cfg_fs_lock_registry_count(void);
+void *pref_cfg_fs_lock_registry_get(size_t i);
+
 // Returns true if `bytes` (exactly `len` bytes, always == the call site's
 // item_size) is a value this build considers valid and safe to adopt --
 // same discipline as unit_pref_start()'s range check, ramp_assist_cfg_start()'s

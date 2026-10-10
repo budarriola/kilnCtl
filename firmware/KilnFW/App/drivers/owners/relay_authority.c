@@ -2,6 +2,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "freertos/task.h"
 
 /* Deliberately not MAX31856_CHANNEL_COUNT -- this module stays free of a
  * MAX31856.h dependency (see relay_authority.h's minimal-include
@@ -263,4 +264,29 @@ bool relay_authority_reset_in_flight(void)
     in_flight = (s_reset_in_flight_depth != 0);
     portEXIT_CRITICAL(&s_heat_claim_mux);
     return in_flight;
+}
+
+static void *s_reset_job_task = NULL;
+
+void relay_authority_reset_job_enter(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_reset_job_task = (void *)xTaskGetCurrentTaskHandle();
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+void relay_authority_reset_job_exit(void)
+{
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    s_reset_job_task = NULL;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+}
+
+bool relay_authority_reset_refuses_writer(void)
+{
+    void *me = (void *)xTaskGetCurrentTaskHandle();
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    bool refuse = (s_reset_in_flight_depth != 0) && (s_reset_job_task == NULL || s_reset_job_task != me);
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return refuse;
 }

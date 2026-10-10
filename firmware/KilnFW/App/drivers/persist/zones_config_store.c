@@ -810,6 +810,11 @@ esp_err_t nvs_save(void)
         return ESP_ERR_NO_MEM;
     }
     zcfg_save_lock(); /* outer lock; rev read .. rev bump below; see s_zcfg_save_mutex */
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        zcfg_save_unlock();
+        free(snap);
+        return ESP_ERR_INVALID_STATE;
+    }
     zones_cfg_lock();
     s_zones.cfg.version = ZONES_CFG_VERSION;
     memcpy(snap, &s_zones.cfg, sizeof(*snap));
@@ -1336,6 +1341,10 @@ esp_err_t relay_names_save_locked(void)
 esp_err_t relay_names_save(void)
 {
     zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        zcfg_save_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
     esp_err_t err = relay_names_save_locked();
     zcfg_save_unlock();
     return err;
@@ -1503,6 +1512,9 @@ void zone_normals_load(void)
  * neither interleave its edit into this commit nor publish a rev for it. */
 static esp_err_t zone_normals_save_locked(void)
 {
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        return ESP_ERR_INVALID_STATE;
+    }
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
     uint32_t new_rev = s_zone_normals_rev + 1;

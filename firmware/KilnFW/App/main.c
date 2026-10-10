@@ -41,6 +41,8 @@
 #include "dram_margin.h"
 #include "flash_worker.h"
 #include "kiln_io.h"
+#include "pref_cfg_fs.h"
+#include "relay_authority.h"
 #include "safety_link.h"
 #include "uart_log_bridge.h"
 
@@ -219,6 +221,8 @@ void app_main(void)
     // starts that worker. Only creates a static mutex and installs two hooks,
     // so it is safe in recovery mode too. See uart_bridge_ext.c.
     uart_bridge_ext_save_reservation_init();
+    // Factory-reset writer fence (pref_cfg_fs.h): refuse cfg saves while the reset mark is set.
+    pref_cfg_fs_set_reset_refuse_hook(relay_authority_reset_refuses_writer);
 
     static main_boot_ctx_t ctx;
 
