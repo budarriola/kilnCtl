@@ -445,7 +445,7 @@ Test: `test_autotune_engine_prestart.c`, `test_begin_run_refuses_on_down_link_wi
 (real `autotune_engine.c`; `relay_authority_on_blocked` stub has a `s_stub_blocked_real_semantics` mode
 that reproduces `relay_authority.c:16-29` by hand). Passing case committed. The failing case below is NOT committed.
 
-### LD-01 (HIGH, FIXED SHAPLACEHOLDER): begin-run gate keys only on `fault_sources != 0`, so a down link with no source latched starts and requests heat
+### LD-01 (HIGH, FIXED 804f67e85): begin-run gate keys only on `fault_sources != 0`, so a down link with no source latched starts and requests heat
 - Where: `autotune_engine.c` `autotune_begin_run_locked` (~line 1103) and `profile_executor_run.c:398` both gate on `relay_authority_on_blocked()`, which is `safety_link_get_fault_sources() != 0` (`relay_authority.c:16-29`; an uninitialised link reads 0). `SAFETY_FAULT_SRC_SAFETY_LINK` is raised only by the poll task (`safety_link_poll.c:313`, only when `fault_on_link_loss` is on), so link down and `fault_sources == 0` occurs before the first poll tick, within one poll period of the link going stale, with the bench override off-policy, and for an uninitialised link object.
 - Input: `s_at.safety` = link with `initialized` true/false, `fault_sources = 0`, `link_up` false (never up, or stale); `autotune_engine_run(0, 1.0, SIMC, ...)`.
 - Observed (all three variants: never up, stale, uninitialised): returns true (run accepted) and `safety_link_request_enable(true)` is called once (the wire layer then refuses it on a down link, so heat is pending, not granted).
@@ -453,5 +453,5 @@ that reproduces `relay_authority.c:16-29` by hand). Passing case committed. The 
 - Profile start: same gate by code inspection (identical call); not run-verified on host because `profile_executor_run()` needs the full warm-start harness to reach a successful start.
 - Mitigation in place: the HTTP start handlers also run `readiness_gate_evaluate` (`safety_link_up`), so an HTTP start on a down link is refused there; direct callers (LCD, other starters) rely on the engine gate only.
 
-### LD-02 (LOW, FIXED SHAPLACEHOLDER): no reason is given for LD-01's start
+### LD-02 (LOW, FIXED 804f67e85): no reason is given for LD-01's start
 - When the gate passes there is no refusal text at all; when it does block (a source is latched) the JSON error is decoded and specific ("heat is blocked (<source>, usually the safety link down) ..."), covered by the committed test and by `test_run_decodes_fault_sources_instead_of_hex` for profiles.
