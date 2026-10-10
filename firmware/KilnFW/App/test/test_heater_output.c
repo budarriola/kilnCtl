@@ -1,4 +1,5 @@
 #include "test_common.h"
+#include <math.h>
 #include "../drivers/control/heater_output.h"
 
 void run_test_heater_output(void)
@@ -454,5 +455,20 @@ void run_test_heater_output(void)
         TEST_CHECK(s.since_last_change_ms == 0, "denied while ON: the real OFF restarts the min_off timer");
         r = heater_output_bangbang(&s, &cfg, true, 1000);
         TEST_CHECK(r == false, "re-grant 1 s after a real OFF is held off by min_off_ms (5 s)");
+    }
+
+    /* Firing review 2026-10-09 item 5: a NaN duty is OFF, never a full window. */
+    {
+        heater_output_state_t s = {0};
+        heater_output_cfg_t cfg = {.window_ms = 60000, .min_on_ms = 100, .min_off_ms = 100};
+        heater_output_reset(&s);
+        bool r = heater_output_duty(&s, &cfg, NAN, 0);
+        TEST_CHECK(r == false && s.on_ms_this_window == 0, "NaN duty renders OFF with a zero on-time");
+        heater_output_reset(&s);
+        r = heater_output_duty(&s, &cfg, -INFINITY, 0);
+        TEST_CHECK(r == false && s.on_ms_this_window == 0, "-inf duty renders OFF");
+        heater_output_reset(&s);
+        r = heater_output_duty(&s, &cfg, INFINITY, 0);
+        TEST_CHECK(r == true && s.on_ms_this_window == 60000, "+inf duty clamps to a full window");
     }
 }

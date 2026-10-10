@@ -63,7 +63,10 @@ bool heater_output_duty_relay_step(heater_output_state_t *state, const heater_ou
 static bool heater_output_duty_ex(heater_output_state_t *state, const heater_output_cfg_t *cfg, float duty,
                                    uint32_t dt_ms, bool force_new_window)
 {
-    if (duty < 0.0f) {
+    /* NaN fails both ordered comparisons, so test the positive form: a NaN duty (a PID
+     * fed a bad reading) is OFF, never passed on to the on-time quantizer (firing review
+     * 2026-10-09 item 5). */
+    if (!(duty > 0.0f)) {
         duty = 0.0f;
     } else if (duty > 1.0f) {
         duty = 1.0f;
