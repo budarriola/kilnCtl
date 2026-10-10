@@ -1,4 +1,4 @@
-# kilnCtl Roadmap — both processors
+﻿# kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-10-05. The dated status log
 > that used to fill this block (2026-08 through 2026-09-28, about 2300 lines) was
