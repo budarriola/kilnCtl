@@ -2,12 +2,14 @@
 #include "zones_config_cfg_fs.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_log.h"
 
 #include "cfg_fs.h"
+#include "pref_cfg_fs.h"
 #include "persist_scratch.h"
 
 static const char *ZCFG_FS_TAG = "zones_cfg_fs";
@@ -29,6 +31,16 @@ zones_cfg_fs_write_fn_t zones_config_cfg_fs_get_write_fn(void)
     return s_write_fn;
 }
 
+static zones_cfg_fs_reject_t s_last_reject;
+
+bool zones_config_cfg_fs_get_last_reject(zones_cfg_fs_reject_t *out)
+{
+    if (out) {
+        *out = s_last_reject;
+    }
+    return s_last_reject.occurred;
+}
+
 /* rev(4 bytes LE) + the on-flash blob. Sized generously above
  * sizeof(zones_cfg_t) (itself capped at ZONES_CONFIG_BLOB_MAX_SIZE by
  * zones_config_accessors.h's own _Static_assert) so a future field growth
@@ -46,6 +58,47 @@ static void put_u32_le(uint8_t *p, uint32_t v)
 static uint32_t get_u32_le(const uint8_t *p)
 {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Keeps one copy of a rejected zones.json as zones.json.bad before a later save of an empty/default
+ * RAM config can overwrite it. Same write seam as the real file (the device routes it through the
+ * flash worker). Skips an identical existing copy so a file rejected every boot is not rewritten
+ * every boot, and a factory reset in flight (the reset barrier's fence). Failure is logged only. */
+static void preserve_rejected_file(const uint8_t *raw, size_t len)
+{
+    if (!raw || len == 0 || len > (size_t)ZCFG_FILE_BUF_MAX) {
+        return;
+    }
+    if (pref_cfg_fs_reset_refuses_write()) {
+        ESP_LOGW(ZCFG_FS_TAG, "rejected zones config file NOT preserved: factory reset in progress");
+        return;
+    }
+    uint8_t *old = persist_scratch_alloc(ZCFG_FILE_BUF_MAX);
+    if (old) {
+        size_t olen = 0;
+        bool same = cfg_fs_read(ZONES_CFG_BAD_FILE_PATH, old, ZCFG_FILE_BUF_MAX, &olen) == ESP_OK && olen == len &&
+                    memcmp(old, raw, len) == 0;
+        free(old);
+        if (same) {
+            return;
+        }
+    }
+    esp_err_t err = s_write_fn(ZONES_CFG_BAD_FILE_PATH, raw, len);
+    if (err == ESP_OK) {
+        ESP_LOGE(ZCFG_FS_TAG, "rejected zones config file preserved as %s (%u bytes)", ZONES_CFG_BAD_FILE_PATH,
+                 (unsigned)len);
+    } else {
+        ESP_LOGE(ZCFG_FS_TAG, "could not preserve rejected zones config file as %s: %s", ZONES_CFG_BAD_FILE_PATH,
+                 esp_err_to_name(err));
+    }
+}
+
+static void note_reject(bool newer, uint8_t ver, const char *reason)
+{
+    s_last_reject.occurred = true;
+    s_last_reject.newer = newer;
+    s_last_reject.on_disk_version = ver;
+    snprintf(s_last_reject.reason, sizeof(s_last_reject.reason), "cfg file: %s", reason ? reason : "");
 }
 
 /* Shared body for zones_config_cfg_fs_load_raw() and
@@ -71,6 +124,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
     if (out_on_disk_version) {
         *out_on_disk_version = 0;
     }
+    memset(&s_last_reject, 0, sizeof(s_last_reject));
     if (!out_cfg || !out_rev || !out_valid) {
         return;
     }
@@ -104,8 +158,10 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
         return;
     }
     if (len < 5) { /* need at least the rev prefix + a 1-byte version */
-        ESP_LOGW(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
+        ESP_LOGE(ZCFG_FS_TAG, "zones config file is %u bytes, too short to hold a rev + blob -- ignoring",
                  (unsigned)len);
+        note_reject(false, 0, "too short");
+        preserve_rejected_file(raw, len);
         free(raw);
         return;
     }
@@ -123,6 +179,10 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
      * out_cfg is re-zeroed on rejection so a caller that ignores *out_valid
      * still sees the same all-zero struct it did before. */
     zones_decode_result_t result = zones_config_json_decode_blob(raw + 4, len - 4, out_cfg, &reason);
+    if (result != ZONES_DECODE_OK && result != ZONES_DECODE_OOM) {
+        note_reject(result == ZONES_DECODE_NEWER, on_disk_version, reason);
+        preserve_rejected_file(raw, len);
+    }
     free(raw);
     if (result == ZONES_DECODE_OOM) {
         ESP_LOGW(ZCFG_FS_TAG, "zones config file decode ran out of memory -- cannot decide");
@@ -133,7 +193,7 @@ static void load_raw_impl(zones_cfg_t *out_cfg, uint32_t *out_rev, bool *out_val
         return;
     }
     if (result != ZONES_DECODE_OK) {
-        ESP_LOGW(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
+        ESP_LOGE(ZCFG_FS_TAG, "zones config file (rev %lu) REJECTED: %s -- ignoring file, NVS candidate decides",
                  (unsigned long)rev, reason);
         memset(out_cfg, 0, sizeof(*out_cfg));
         return;

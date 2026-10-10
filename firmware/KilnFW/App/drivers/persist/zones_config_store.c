@@ -28,6 +28,7 @@
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
                             * below. */
+#include "cfg_fs.h"
 #include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA.md section 5 step 5:
                             * read-through/dual-write bridge to the `cfg` LittleFS
                             * partition -- see that header for the full design. */
@@ -91,6 +92,11 @@ void zones_cfg_save_section_unlock(void) { zcfg_save_unlock(); }
  * separate, older concern, not "this boot is running on defaults instead of
  * its own tuned config." */
 static zones_cfg_load_fault_t s_zones_cfg_load_fault = {0};
+
+void zones_config_load_fault_reset_for_test(void)
+{
+    memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
+}
 
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out)
 {
@@ -604,6 +610,26 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     uint8_t file_on_disk_version = 0;
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    zones_cfg_fs_reject_t file_reject;
+    bool file_rejected = zones_config_cfg_fs_get_last_reject(&file_reject);
+    if (file_rejected && !s_zones_cfg_load_fault.occurred) {
+        zones_cfg_load_fault_latch(file_reject.newer ? ZONES_CFG_LOAD_FAULT_NEWER : ZONES_CFG_LOAD_FAULT_UNREADABLE,
+                                   file_reject.on_disk_version, file_reject.reason);
+    }
+    if (!trustworthy && !used_file && file_on_disk_version != ZONES_CFG_RESOLVE_OOM_VERSION) {
+        /* Audit (c) fix 4: name the path in the boot log -- this boot runs on a zeroed config. */
+        if (file_rejected) {
+            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s REJECTED (%s), NVS blob %s -- running "
+                          "on a zeroed config; the rejected file is kept as %s",
+                     ZONES_CFG_FILE_PATH, file_reject.reason, nvs_valid ? "usable" : "absent/invalid",
+                     ZONES_CFG_BAD_FILE_PATH);
+        } else {
+            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s %s and NVS blob absent/invalid -- "
+                          "running on a zeroed config",
+                     ZONES_CFG_FILE_PATH,
+                     cfg_fs_is_available() ? "missing/unreadable" : "unavailable (cfg not mounted)");
+        }
+    }
     if (file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION && !trustworthy && !used_file) {
         /* Resolve could not allocate: keep the rev floor and fail the load so the
          * legacy NVS copy is not adopted as valid (a later save would overwrite

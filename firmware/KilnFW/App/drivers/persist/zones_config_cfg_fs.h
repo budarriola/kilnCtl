@@ -62,6 +62,24 @@ extern "C" {
 
 #define ZONES_CFG_FILE_PATH "zones.json"
 
+/* One preserved copy of the last REJECTED zones.json (newer version, bad CRC/length, validate
+ * failure, too short), written before anything can overwrite it (BENCH_PROF1_DIVERGE audit (c) fix 1).
+ * Overwritten by a later, different rejected file; skipped while a factory reset is in flight. */
+#define ZONES_CFG_BAD_FILE_PATH "zones.json.bad"
+
+/* The last file rejection seen by a zones.json read (cleared at the start of every read). nvs_load()
+ * latches it as a zones_cfg_load_fault_t for the cfg-file path (audit (c) fix 2). `reason` holds
+ * "cfg file: " + the decoder's reason; it is truncated, never overrun, and the distinguishing prefix
+ * comes first. */
+typedef struct {
+    bool occurred;
+    bool newer;              /* ZONES_DECODE_NEWER, else corrupt/too short */
+    uint8_t on_disk_version; /* blob version byte (0 when the file was too short) */
+    char reason[96];
+} zones_cfg_fs_reject_t;
+
+bool zones_config_cfg_fs_get_last_reject(zones_cfg_fs_reject_t *out);
+
 /* Matches cfg_fs_write_atomic()'s signature (cfg_fs.h) and
  * cfg_fs_write_atomic_device()'s (cfg_fs_mount.h) -- both fit this
  * typedef, which is exactly what makes the seam below work: host tests

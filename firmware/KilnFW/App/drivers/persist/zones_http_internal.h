@@ -227,6 +227,7 @@ extern SafetyLinkClass *s_hw_safety;
 
 esp_err_t nvs_partition_init(const char *partition);
 esp_err_t nvs_load(bool *out_found, bool *out_valid);
+void zones_config_load_fault_reset_for_test(void); /* clears the boot-latched zones_cfg_load_fault_t */
 esp_err_t nvs_save(void);
 
 /* true = the zones blob re-read from the cfg file right now equals the in-RAM config byte for byte. For a

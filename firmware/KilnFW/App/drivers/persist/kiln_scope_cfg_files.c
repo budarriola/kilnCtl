@@ -23,6 +23,7 @@ static const char *KSCF_TAG = "kiln_scope_cfg";
 
 static const char *const kKilnScopeFiles[] = {
     ZONES_CFG_FILE_PATH,             /* zones_cfg blob (zones_config_cfg_fs) */
+    ZONES_CFG_BAD_FILE_PATH,         /* preserved rejected zones.json */
     KILN_CFG_STORE_FILE_PATH,        /* kiln config slots */
     RELAY_NAMES_FILE_PATH,           /* relay names */
     ZONE_NORMALS_FILE_PATH,          /* zone normals */
