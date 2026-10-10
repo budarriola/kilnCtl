@@ -1108,14 +1108,14 @@ static void test_pico_reboot_cause_holds_or_retries(void)
     heat_enable_reconcile();
     TEST_CHECK(enable_sends() == 2, "benign reboot keeps the F1 re-request");
 
-    /* No DIAG within the classify window -> treated as benign (documented fallback). */
+    /* No DIAG for a long time: still undecided (no timeout fallback), and a LATE fatal DIAG holds. */
     reset_all(true);
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_note_pico_boot(1u, true, 0u, 1000u);
     heat_enable_note_pico_boot(2u, false, 0u, 2000u);
     heat_enable_note_pico_boot(2u, false, 0u, 12100u);
     heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 12200u);
-    TEST_CHECK(!heat_enable_reboot_hold(), "classify timeout: treated as benign, a late DIAG does not reclassify");
+    TEST_CHECK(heat_enable_reboot_hold(), "a late fatal DIAG still holds: no timeout turns it benign");
 
     /* While the cause is undecided, a pending (link-down) request is not retried. */
     reset_all(false);

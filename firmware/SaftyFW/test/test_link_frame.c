@@ -387,7 +387,7 @@ static void test_trip_event_publish_barrier(void)
         TEST_CHECK(g2 != NULL && strstr(g2, "(g1 & 1u) == 0u && g1 == g2") != NULL, "reader: retries unless the generation was even and unchanged");
         const char *wg1 = strstr(text, "s_trip_gen++;");
         const char *wg2 = wg1 ? strstr(wg1 + 1, "s_trip_gen++;") : NULL;
-        TEST_CHECK(wg1 != NULL && wg2 != NULL && wg1 < w && wg2 < w, "writer: generation bumped odd before and even again before the seq bump");
+        TEST_CHECK(wg1 != NULL && wg2 != NULL && wg1 < w && wg2 > w, "writer: generation odd before, seq bumped inside the odd window, even again after");
         free(text);
     }
 }

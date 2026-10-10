@@ -69,9 +69,8 @@ static const char *TAG = "heat_enable";
 #define HE_K4_CONFIRM_MS      3000u
 #define HE_K4_MAX_RESENDS     4
 /* Safety-link fix batch 2, MED-1: a Pico reboot is classified from the DIAG
- * frame of the NEW boot; if none arrives within this long the reboot is treated
- * as benign (the pre-existing F1 behaviour) rather than blocking retries forever. */
-#define HE_REBOOT_CLASSIFY_TIMEOUT_MS 10000u
+ * frame of the NEW boot. Until one arrives the cause is undecided and heat is
+ * withheld (no timeout fallback: a late fatal DIAG must still hold). */
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -729,10 +728,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
             } else {
                 log_benign = true;
             }
-        } else if ((int32_t)(now_ms - s_he.reboot_classify_since_ms) >= (int32_t)HE_REBOOT_CLASSIFY_TIMEOUT_MS) {
-            s_he.reboot_classify_pending = false;
-            log_benign = true;
         }
+        /* No timeout fallback (Opus review MED): until a DIAG of the NEW boot arrives the
+         * cause is unknown, and a late WATCHDOG/BROWNOUT DIAG must still hold. Staying
+         * undecided only withholds heat (fail safe); the profile executor shows the
+         * condition and the operator resumes or stops. */
     }
     he_unlock(taken);
     if (log_hold) {

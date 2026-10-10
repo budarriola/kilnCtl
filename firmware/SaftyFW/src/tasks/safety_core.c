@@ -1467,9 +1467,9 @@ static void safety_core_task(void *arg)
                                                                             &s_guard_cfg);
             // F5: release -- every field above must be visible to the other core before the seq is.
             HAL_DMB();
-            s_trip_gen++; // even again: capture complete
+            s_trip_seq = link_frame_next_trip_seq(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
             HAL_DMB();
-            s_trip_seq = link_frame_next_trip_seq(s_trip_seq); // wraps 255 -> 1, never 0 (F4)
+            s_trip_gen++; // even again: capture complete
 
             // Step 4 of SAFETY_MODEL.md section 6's 4-step trip order:
             // log the trip itself. The log_task call below is a 0-tick
