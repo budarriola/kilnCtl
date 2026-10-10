@@ -2483,6 +2483,10 @@ static void test_step_slow_healthy_zone_without_model_still_false_trips_guard1(v
                  "it, i.e. this is a real behavioural difference, not a test that would pass either way");
     start_stepping_run(/*max_temp_c=*/1300.0f, /*step_duty=*/1.0f);
     s_at.guard_cfg.wrong_dir_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
+    // Firing review 2026-10-09 item 6: with no model a wrong_dir_window_s-derived window is now floored
+    // at 120 s by thermal_guard.c, so the false-trip shape needs the operator's OWN progress_window_s
+    // (honoured unchanged) to stay short.
+    s_at.guard_cfg.progress_window_s = GUARD1_FLOOR_TEST_WRONG_DIR_WINDOW_S;
     // g_stub_model_valid[0] left at this suite's default (false) -- no model
     // fitted yet, zone_model_at() returns false, climb_window_floor_s stays
     // 0.0f ("don't touch window_s"), identical to today's pre-fix behaviour

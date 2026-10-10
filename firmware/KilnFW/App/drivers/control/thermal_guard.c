@@ -349,6 +349,19 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                 if (climbing && cfg->climb_window_floor_s > window_s) {
                     window_s = cfg->climb_window_floor_s;
                 }
+                /* No trusted plant model (climb_window_floor_s == 0) AND the window came
+                 * from wrong_dir_window_s (sized for guard 2's falling case) rather than
+                 * the operator's own progress_window_s: floor it at the SAME minimum the
+                 * model path never goes below (CLIMB_WINDOW_FLOOR_MIN_S). Without this an
+                 * unmodelled slow zone with a 60 s wrong_dir_window_s gets a climbing
+                 * window shorter than its own dead time -- false HEATING_FAILED trips
+                 * (firing review 2026-10-09 item 6). Only ever lengthens window_s; an
+                 * explicit progress_window_s is honoured unchanged; a dead element is
+                 * still caught within CLIMB_WINDOW_FLOOR_MIN_S. */
+                if (climbing && cfg->climb_window_floor_s <= 0.0f && cfg->progress_window_s <= 0.0f &&
+                    cfg->wrong_dir_window_s > 0.0f && window_s < CLIMB_WINDOW_FLOOR_MIN_S) {
+                    window_s = CLIMB_WINDOW_FLOOR_MIN_S;
+                }
                 if (state->progress_window_elapsed_s >= window_s) {
                     float delta = in->measurement_c - state->progress_window_start_c;
                     float elapsed_min = state->progress_window_elapsed_s / 60.0f;

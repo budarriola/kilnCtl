@@ -600,9 +600,28 @@ void run_test_thermal_guard(void)
         /* dt_s=10, so trip_tick*10s must land at the configured 60s window
          * (tick index 5, i.e. elapsed 60s), not at 300s (tick index 29). */
         char detail[160];
-        snprintf(detail, sizeof(detail), "trip landed at tick %d (%.0fs) -- expected ~60s, not 300s", trip_tick,
-                 (trip_tick + 1) * 10.0);
-        TEST_CHECK(trip_tick >= 0 && trip_tick <= 6, detail);
+        snprintf(detail, sizeof(detail), "trip landed at tick %d (%.0fs) -- expected the 120s no-model floor, not 300s",
+                 trip_tick, (trip_tick + 1) * 10.0);
+        /* Firing review 2026-10-09 item 6: with no plant model a wrong_dir_window_s shorter than
+         * CLIMB_WINDOW_FLOOR_MIN_S (120 s) is floored to it on guard 1's climbing branch. */
+        TEST_CHECK(trip_tick >= 11 && trip_tick <= 13, detail);
+    }
+
+    /* Item 6, same scenario with an explicit progress_window_s: the operator's own value is honoured. */
+    {
+        thermal_guard_state_t s;
+        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f,
+                                    .wrong_dir_window_s = 60.0f, .progress_window_s = 60.0f};
+        thermal_guard_reset(&s);
+        thermal_guard_input_t in = base_input();
+        in.setpoint_c = 500.0f;
+        in.measurement_c = 20.0f;
+        in.commanded_duty = 1.0f;
+        int trip_tick = -1;
+        for (int i = 0; i < 40; i++) {
+            if (thermal_guard_tick(&s, &cfg, &in)) { trip_tick = i; break; }
+        }
+        TEST_CHECK(trip_tick >= 0 && trip_tick <= 6, "an explicit progress_window_s=60 is not floored by the no-model rule");
     }
 
     /* Same scenario, but with wrong_dir_window_s left at 0 ("not configured")
@@ -680,7 +699,7 @@ void run_test_thermal_guard(void)
     {
         thermal_guard_state_t s;
         thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
-                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.1f};
+                                    .progress_window_s = 30.0f, .progress_duty_min = 0.1f};
         thermal_guard_reset(&s);
         thermal_guard_input_t in = base_input();
         in.commanded_duty = 0.2f;
@@ -696,7 +715,7 @@ void run_test_thermal_guard(void)
     {
         thermal_guard_state_t s;
         thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 5.0f,
-                                    .wrong_dir_window_s = 30.0f, .progress_duty_min = 0.0f};
+                                    .progress_window_s = 30.0f, .progress_duty_min = 0.0f};
         thermal_guard_reset(&s);
         thermal_guard_input_t in = base_input();
         in.commanded_duty = 0.2f;
