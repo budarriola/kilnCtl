@@ -248,6 +248,13 @@ uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason)
     return (uint16_t)(1u << ((uint8_t)reason - 1u));
 }
 
+bool link_frame_counts_for_liveness(uint8_t src_device, uint8_t dst_device)
+{
+    // See link_frame.h: kilnlink audit 2026-10-09 L1 (a TX-RX loopback of the
+    // Pico's own frames must never refresh S6b's liveness).
+    return src_device == LINK_FRAME_DEVICE_ESP && dst_device == LINK_FRAME_DEVICE_SAFETY;
+}
+
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
                                                           uint16_t wire_trip_mask)
 {

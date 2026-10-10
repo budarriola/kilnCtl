@@ -623,6 +623,25 @@ typedef enum {
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
                                                           uint16_t wire_trip_mask);
 
+// --- S6b liveness: only frames from the expected peer count ------------------
+// kilnlink audit 2026-10-09 L1. link_task_handle_raw_frame() refreshes S6b's
+// "ESP is alive" timestamp from every frame that decodes cleanly. Before this
+// check that included the Pico's OWN telemetry looped back to its RX (a TX-RX
+// short, a mis-wired harness, a bus echo): every 100 ms Frame A would then
+// keep link_up true with the ESP dead or unplugged, masking S6b entirely.
+// A genuine ESP frame is always addressed src_device = ESP (0), dst_device =
+// SAFETY (2) -- uart_protocol_send_broadcast() writes its own_device
+// (UART_PROTO_DEVICE_ESP, safety_link.c) into src -- and every frame this
+// Pico sends is the mirror image (src SAFETY, dst ESP), so a looped-back
+// frame can never satisfy this. The message type is deliberately NOT
+// checked: any well-formed frame from the ESP still proves it is alive, same
+// as before (snapshots.h's link_task_link_up() doc comment).
+// Values mirror link_task.c's LINK_DEVICE_ESP/LINK_DEVICE_SAFETY (frozen
+// compatibility-floor wire contract, LINK_PROTOCOL.md section 3/4).
+#define LINK_FRAME_DEVICE_ESP    0u
+#define LINK_FRAME_DEVICE_SAFETY 2u
+bool link_frame_counts_for_liveness(uint8_t src_device, uint8_t dst_device);
+
 // --- ESP -> Pico: SAFETY_CMD_SET_FIRING_CEILING (0x09) -----------------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as KILNLINK_CEILING_CMD
 // (kilnlink/kilnlink_ceiling.h) -- redefined here as a local dispatch id, same

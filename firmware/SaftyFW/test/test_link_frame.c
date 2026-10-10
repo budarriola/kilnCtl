@@ -6,6 +6,7 @@
 // NULL pointers) get as much attention as the happy path, and each hostile
 // case additionally proves `*out` was left completely untouched.
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "test_common.h"
@@ -357,6 +358,61 @@ static void test_trip_mask_for_reason(void)
                 "SAFETY_TRIP_ESTOP (8) -> bit 7");
     TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_BORROWED_STALE) == (1u << 13),
                 "SAFETY_TRIP_BORROWED_STALE (14) -> bit 13, still within a u16");
+}
+
+// kilnlink audit 2026-10-09 L1: only an ESP -> Pico frame refreshes S6b's
+// liveness; the Pico's own frames looped back (src SAFETY, dst ESP) must not.
+static void test_counts_for_liveness(void)
+{
+    TEST_SECTION("link_frame_counts_for_liveness -- only ESP->Pico frames refresh S6b (audit L1)");
+    TEST_CHECK(link_frame_counts_for_liveness(LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_SAFETY),
+               "ESP (0) -> SAFETY (2): counts");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_ESP),
+               "our own frame echoed back (SAFETY -> ESP): does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_SAFETY),
+               "SAFETY -> SAFETY: does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_ESP),
+               "ESP -> ESP (not addressed to us): does NOT count");
+    TEST_CHECK(!link_frame_counts_for_liveness(1u, LINK_FRAME_DEVICE_SAFETY),
+               "HOST (1) -> SAFETY: does NOT count (only the ESP is our peer)");
+    TEST_CHECK(LINK_FRAME_DEVICE_ESP == 0u && LINK_FRAME_DEVICE_SAFETY == 2u,
+               "device ids match the frozen wire contract (LINK_PROTOCOL.md section 3)");
+}
+
+static const char *LINK_TASK_CANDIDATES_L1[] = {
+    "../src/tasks/link_task.c",
+    "src/tasks/link_task.c",
+    "firmware/SaftyFW/src/tasks/link_task.c",
+};
+
+// Wiring half of audit L1: the pure predicate above proves nothing unless
+// link_task_handle_raw_frame() actually gates the S6b liveness refresh on it.
+static void test_liveness_refresh_is_gated_in_link_task(void)
+{
+    TEST_SECTION("link_task.c gates the S6b liveness refresh on link_frame_counts_for_liveness() (audit L1)");
+    char *text = test_read_source_anchored(__FILE__, LINK_TASK_CANDIDATES_L1[0], LINK_TASK_CANDIDATES_L1,
+                                           sizeof(LINK_TASK_CANDIDATES_L1) / sizeof(LINK_TASK_CANDIDATES_L1[0]));
+    if (!text) {
+        TEST_CHECK(false, "could not locate src/tasks/link_task.c -- update the candidate paths");
+        return;
+    }
+    const char *refresh = strstr(text, "s_last_valid_frame_tick = xTaskGetTickCount();");
+    TEST_CHECK(refresh != NULL, "the liveness refresh statement exists (sanity: the scan is not chasing a rename)");
+    if (refresh) {
+        TEST_CHECK(strstr(refresh + 1, "s_last_valid_frame_tick = xTaskGetTickCount();") == NULL,
+                   "exactly one liveness refresh site");
+        // The gate must sit in the ~600 bytes immediately before the refresh,
+        // i.e. in the same function, with an early return.
+        const char *window = (refresh - text > 600) ? refresh - 600 : text;
+        const char *gate = strstr(window, "if (!link_frame_counts_for_liveness(frame.src_device, frame.dst_device)) {");
+        TEST_CHECK(gate != NULL && gate < refresh,
+                   "link_frame_counts_for_liveness() gate immediately precedes the refresh");
+        if (gate != NULL && gate < refresh) {
+            const char *ret = strstr(gate, "return;");
+            TEST_CHECK(ret != NULL && ret < refresh, "the gate returns before refreshing liveness");
+        }
+    }
+    free(text);
 }
 
 // Host tests for link_frame_decide_clear_trip() -- extracted from
@@ -718,6 +774,8 @@ void run_test_link_frame(void)
     test_versions_compatible();
     test_trip_mask_for_reason();
     test_decide_clear_trip();
+    test_counts_for_liveness();
+    test_liveness_refresh_is_gated_in_link_task();
     test_ceiling_is_active();
     test_clock_epoch_plausible();
     test_apply_set_config_changed_type_preserves_rest();

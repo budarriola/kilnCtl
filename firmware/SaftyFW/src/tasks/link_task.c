@@ -247,6 +247,9 @@
 // could plausibly drift.
 #define LINK_DEVICE_ESP     0u // UART_PROTO_DEVICE_ESP
 #define LINK_DEVICE_SAFETY  2u // UART_PROTO_DEVICE_SAFETY
+_Static_assert(LINK_DEVICE_ESP == LINK_FRAME_DEVICE_ESP, "link_frame.h liveness check mirrors LINK_DEVICE_ESP");
+_Static_assert(LINK_DEVICE_SAFETY == LINK_FRAME_DEVICE_SAFETY,
+               "link_frame.h liveness check mirrors LINK_DEVICE_SAFETY");
 #define LINK_TASK_ID_SAFETY 7u // UART_TASK_ID_SAFETY
 // LOG relay (LINK_PROTOCOL.md section 6, "Frame F"): the Pico's log_task
 // addresses ordinary BROADCAST frames to this task id, same as KilnFW's own
@@ -3029,9 +3032,15 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     }
 
     // S6b's link_up (snapshots.h's link_task_link_up() doc comment): a
-    // frame that decodes cleanly proves the ESP is alive and transmitting,
-    // regardless of whether this build goes on to act on it -- recorded
-    // before the BROADCAST-only filter just below on purpose.
+    // frame that decodes cleanly AND is addressed from the ESP to this Pico
+    // proves the ESP is alive and transmitting, regardless of whether this
+    // build goes on to act on it -- recorded before the BROADCAST-only filter
+    // just below on purpose. The direction check (kilnlink audit 2026-10-09
+    // L1, link_frame_counts_for_liveness()) keeps a TX-RX loopback of this
+    // Pico's own telemetry from masking S6b.
+    if (!link_frame_counts_for_liveness(frame.src_device, frame.dst_device)) {
+        return; // not from the ESP (e.g. our own frame echoed back) -- never acted on either
+    }
     s_last_valid_frame_tick = xTaskGetTickCount();
     s_valid_frame_seen = true;
 
