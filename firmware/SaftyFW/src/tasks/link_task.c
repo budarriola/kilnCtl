@@ -1386,8 +1386,18 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
     // A boot_id change also forgets the peer protocol version (see
     // link_staging_apply_context_session()): a rolled-back ESP that lost its
     // announce burst must not be sent the previous boot's frame formats.
-    if (link_staging_apply_context_session(&s_staging, &s_peer_announce, s_context_boot_id_known,
-                                           s_last_context_boot_id, snap.boot_id, context_gap)) {
+    bool new_esp_session =
+        link_staging_apply_context_session(&s_staging, &s_peer_announce, s_context_boot_id_known,
+                                           s_last_context_boot_id, snap.boot_id, context_gap);
+    // F2 (safety link review 2026-10-09): the K4 grant belongs to the ESP session that requested it.
+    // A new session that does not claim heat ownership must not inherit it; drop it (de-energise only,
+    // never a trip -- the new session's own REQUEST_ENABLE, or the ESP's K4 reconcile, re-asks).
+    if (link_staging_session_drops_heat_grant(new_esp_session,
+                                              (snap.flags & CONTEXT_FLAG_HEAT_OWNER_ACTIVE) != 0u)) {
+        (void)safety_core_request_enable(false);
+        log_task_log(LOG_LEVEL_INFO, "push_context", "new ESP session without heat owner: grant dropped");
+    }
+    if (new_esp_session) {
         if (staged_before > 0u) {
             char discard_msg[64];
             snprintf(discard_msg, sizeof(discard_msg),

@@ -303,6 +303,39 @@ static void test_apply_context_session(void)
                "first context under the announced boot_id keeps the version");
 }
 
+static void test_session_drops_heat_grant(void)
+{
+    TEST_SECTION("F2: a new ESP session without HEAT_OWNER_ACTIVE drops the inherited K4 grant");
+    TEST_CHECK(link_staging_session_drops_heat_grant(true, false), "new session, no owner: drop");
+    TEST_CHECK(!link_staging_session_drops_heat_grant(true, true), "new session, owner active (same firing): keep");
+    TEST_CHECK(!link_staging_session_drops_heat_grant(false, false), "same session: never drop");
+    TEST_CHECK(!link_staging_session_drops_heat_grant(false, true), "same session, owner: keep");
+    link_peer_announce_t pa = mk_peer(false, 0u, 0u);
+    link_staging_reset(&s_st);
+    TEST_CHECK(!link_staging_session_drops_heat_grant(
+                   link_staging_apply_context_session(&s_st, &pa, false, 0u, 0x33u, true), false),
+               "first context after Pico boot: nothing to drop");
+    TEST_CHECK(link_staging_session_drops_heat_grant(
+                   link_staging_apply_context_session(&s_st, &pa, true, 0x33u, 0x34u, false), false),
+               "boot_id change, no owner: drop");
+    TEST_CHECK(link_staging_session_drops_heat_grant(
+                   link_staging_apply_context_session(&s_st, &pa, true, 0x34u, 0x34u, true), false),
+               "gap, no owner: drop");
+
+    // Wiring: link_task.c must act on the decision.
+    static const char *const cands[] = {"../src/tasks/link_task.c", "src/tasks/link_task.c",
+                                         "firmware/SaftyFW/src/tasks/link_task.c"};
+    char *text = test_read_source_anchored(__FILE__, "../src/tasks/link_task.c", cands, 3);
+    TEST_CHECK(text != NULL, "link_task.c readable");
+    if (text) {
+        const char *d = strstr(text, "link_staging_session_drops_heat_grant(new_esp_session");
+        TEST_CHECK(d != NULL && strstr(d, "safety_core_request_enable(false)") != NULL &&
+                       strstr(d, "safety_core_request_enable(false)") - d < 400,
+                   "link_task.c drops the grant when the decision says so");
+        free(text);
+    }
+}
+
 static void test_apply_context_session_announce_order(void)
 {
     TEST_SECTION("announce/context ordering: version kept only for the announced boot_id");
@@ -336,6 +369,7 @@ void run_test_link_staging(void)
 {
     test_apply_context_session();
     test_apply_context_session_announce_order();
+    test_session_drops_heat_grant();
     test_new_esp_session();
     test_direct_tc_type_survives_later_commit();
     test_direct_write_supersedes_earlier_edit();

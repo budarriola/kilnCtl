@@ -155,6 +155,11 @@ void link_peer_announce_record(link_peer_announce_t *peer, uint8_t announce_boot
     }
 }
 
+bool link_staging_session_drops_heat_grant(bool new_session, bool heat_owner_active)
+{
+    return new_session && !heat_owner_active;
+}
+
 bool link_staging_apply_context_session(link_staging_t *st, link_peer_announce_t *peer,
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
                                         bool context_gap)

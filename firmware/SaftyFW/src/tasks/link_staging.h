@@ -120,6 +120,16 @@ bool link_staging_apply_context_session(link_staging_t *st, link_peer_announce_t
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
                                         bool context_gap);
 
+// Safety link review 2026-10-09 F2: the Pico's heat grant (K4, relay_owner) is
+// RAM state with no owner on this side once the ESP session that requested it
+// is gone. A new ESP session (link_staging_apply_context_session() == true:
+// boot_id change or >= 5 s context gap) whose first context does NOT carry
+// CONTEXT_FLAG_HEAT_OWNER_ACTIVE means the new session holds no heat claim, so
+// any grant left over from the previous one must be dropped (a de-energise
+// request, the fail-safe direction; never a trip). A session that resumes with
+// HEAT_OWNER_ACTIVE set (same firing, brief gap) keeps its grant.
+bool link_staging_session_drops_heat_grant(bool new_session, bool heat_owner_active);
+
 #ifdef __cplusplus
 }
 #endif
