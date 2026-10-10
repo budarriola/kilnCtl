@@ -780,7 +780,8 @@ function stageXhrOnce(bytes, ack, ov) {
     };
     xhr.onload = function () {
       if (xhr.status >= 200 && xhr.status < 300) { resolve(xhr.responseText); return; }
-      var e = new Error(xhr.responseText || ('HTTP ' + xhr.status));
+      var refusal = (xhr.status === 403 && window.kcHostRefusalFromText) ? window.kcHostRefusalFromText(xhr.responseText) : null;
+      var e = new Error(refusal || xhr.responseText || ('HTTP ' + xhr.status));
       e.status = xhr.status;
       reject(e);
     };

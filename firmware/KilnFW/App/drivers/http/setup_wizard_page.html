@@ -1517,11 +1517,16 @@ function renderStep11() {
           return rb.json();
         }).then(function (cfg) {
           msgEl.textContent = wizardLoginReadBackText(wantEnable, cfg);
+          if (!cfg || typeof cfg.web_enabled === 'undefined' || !!cfg.web_enabled !== !!wantEnable) {
+            renderErrList(errEl, ['The board does not report the requested login setting. Step 11 is NOT marked done -- check and save again.']);
+            return null;
+          }
+          return postStepState(11, 'done');
         }, function () {
           msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
-        }).then(function () {
-          return postStepState(11, 'done');
-        }).then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
+          renderErrList(errEl, ['Could not read the setting back to confirm it. Step 11 is NOT marked done -- try again.']);
+          return null;
+        }).then(function (r) { if (r && !stepSaveFailed(r)) loadAll(); });
       }).catch(function (err) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
           renderErrList(errEl, ['Sign-in cancelled.']);
@@ -1744,6 +1749,15 @@ function postStepState(stepId, state, note) {
   }); });
 }
 
+/* Chain-friendly variant: a refused progress save rejects so the step's .catch shows it
+ * instead of the "Saved." message. */
+function postStepStateOrThrow(stepId, state, note) {
+  return postStepState(stepId, state, note).then(function (r) {
+    if (r && r.ok) return r;
+    throw new Error('Could not save this step: ' + ((r && r.body && r.body.error) || 'the board refused it') + ' -- try again.');
+  });
+}
+
 /* A step save the board refused (non-2xx) must be shown, not chained into loadAll. */
 function stepSaveFailed(r) {
   if (r && r.ok) return false;
@@ -1863,7 +1877,7 @@ function renderStep1() {
         });
       }).then(function (r) {
         if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
-        return postStepState(1, 'done');
+        return postStepStateOrThrow(1, 'done');
       }).then(function () {
         armStepMessage(1, function () {
           var ok2 = document.getElementById('step1Ok');
@@ -2008,7 +2022,7 @@ function renderStep2() {
         mergedZones.push(copy);
       }
       submitZonesConfig(dataCopy, mergedZones).then(function () {
-        return postStepState(2, 'done');
+        return postStepStateOrThrow(2, 'done');
       }).then(function () {
         armStepMessage(2, function () {
           var ok2 = document.getElementById('step2Ok');
@@ -2116,7 +2130,8 @@ function renderStep3() {
       }).then(function (allVerified) {
         if (allVerified) {
           okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
-          return postStepState(3, 'done').then(function () {
+          return postStepState(3, 'done').then(function (r) {
+            if (stepSaveFailed(r)) return;
             armStepMessage(3, function () {
               var ok2 = document.getElementById('step3Ok');
               if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
@@ -2259,7 +2274,7 @@ function renderStep4() {
 
       function doSubmit() {
         submitZonesConfig(data, liveZones).then(function () {
-          return postStepState(4, 'done');
+          return postStepStateOrThrow(4, 'done');
         }).then(function () {
           armStepMessage(4, function () {
             var ok2 = document.getElementById('step4Ok');
@@ -2456,7 +2471,7 @@ function renderStep5() {
         relayNameParams.push('relay' + (parseInt(inp.dataset.relay, 10) + 1) + '_name=' + encodeURIComponent(inp.value));
       });
       submitZonesConfig(dataCopy, liveZones, relayNameParams).then(function () {
-        return postStepState(5, 'done');
+        return postStepStateOrThrow(5, 'done');
       }).then(function () {
         armStepMessage(5, function () {
           var ok2 = document.getElementById('step5Ok');
@@ -2575,7 +2590,7 @@ function renderStep6() {
           var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
           if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
           submitZonesConfig(data, liveZones).then(function () {
-            return postStepState(6, 'done');
+            return postStepStateOrThrow(6, 'done');
           }).then(function () {
             armStepMessage(6, function () {
               var ok2 = document.getElementById('step6Ok');
@@ -2933,7 +2948,8 @@ function renderStep7() {
           }).then(function (res) {
             msgEl.textContent = res.message;
             if (res.ok) {
-              postStepState(7, 'done').then(function () {
+              postStepState(7, 'done').then(function (r) {
+                if (stepSaveFailed(r)) return;
                 var savedMsg = res.message;
                 armStepMessage(7, function () {
                   var ok2 = document.getElementById('step7Ok');

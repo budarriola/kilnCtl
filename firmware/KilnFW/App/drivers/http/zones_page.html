@@ -2651,9 +2651,17 @@ function loadCurrent() {
 document.getElementById('thermoCount').addEventListener('change', renderZones);
 document.getElementById('relayCount').addEventListener('change', renderZones);
 
-/* Optional guard/model/tuning fields: zones_http_post_parse.c omit-PRESERVES each one, but
-   a blank value ("z0_driftperiod=") is "present" and fails its range parse with a misleading
-   400. A blank optional field is therefore left out of the POST (keeps the stored value). */
+/* Optional model/tuning fields: a blank value ("z0_driftperiod=") is "present" and used to fail the
+   firmware's range parse with a misleading 400, so a blank optional field is left out of the POST;
+   zones_http_post_parse.c treats an omitted (and, as the firmware is changing it, a blank) field as
+   "keep the stored value". The 8 guard thresholds are different on the page: a blank there is
+   refused client-side (blankGuardKeys), never silently submitted, so a typo or a cleared field is
+   shown to the operator instead of being dropped. */
+var ZONE_GUARD_BLANK_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
+function blankGuardKeys(params) {
+  return params.filter(function (p) { return ZONE_GUARD_BLANK_RE.test(p); })
+    .map(function (p) { return p.slice(0, p.indexOf('=')); });
+}
 var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|xzone|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
@@ -2902,12 +2910,23 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     var tval = div.querySelector('.relaytypeinput').value;
     params.push('relay' + (r + 1) + '_type=' + encodeURIComponent(tval));
   });
+  var blankGuards = blankGuardKeys(params);
+  if (blankGuards.length) {
+    msg.textContent = 'Not saved: guard threshold field(s) are blank or not a number (' +
+      blankGuards.join(', ') + '). Enter a value for each, then save again.';
+    return;
+  }
   msg.textContent = 'Saving…';
   saveBtnEl.disabled = true;
   params = omitBlankOptionalParams(params);
+  /* A stalled connection must not leave Save disabled until the browser gives up. */
+  var saveAbort = (typeof AbortController === 'function') ? new AbortController() : null;
+  var saveTimer = saveAbort ? setTimeout(function () { saveAbort.abort(); }, 30000) : null;
   fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+    signal: saveAbort ? saveAbort.signal : undefined,
   }).then(function (r) {
+    if (saveTimer) clearTimeout(saveTimer);
     saveBtnEl.disabled = false;
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
     /* 3.5: an inheriting zone was just re-resolved from its source above,
@@ -2920,7 +2939,12 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       : '');
     loadCurrent();
   }).catch(function (e) {
+    if (saveTimer) clearTimeout(saveTimer);
     saveBtnEl.disabled = false;
+    if (e && e.name === 'AbortError') {
+      msg.textContent = 'Save timed out after 30 s -- the board did not answer. Check the connection and try again.';
+      return;
+    }
     /* POST /api/zones's safety-ceiling-raise refusal (owner request
        2026-09-10) answers 409 with a JSON body ({"ok":false,"reason":...})
        rather than the plain-text bodies most other refusals here use --

@@ -646,7 +646,7 @@
             return;
           }
           return resp.text().then(function (text) {
-            loginErrorEl.textContent = text || 'Login failed.';
+            loginErrorEl.textContent = window.kcHostRefusalFromText(text) || text || 'Login failed.';
           });
         }).catch(function () {
           clearTimeout(timer);
@@ -924,6 +924,12 @@
             forgotErrorEl.textContent = kcForgotStatusMessage(429, text);
           });
         }
+        if (resp.status === 403) {
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            forgotErrorEl.textContent = window.kcHostRefusalFromText(text) || kcForgotStatusMessage(403, null);
+          });
+        }
         forgotErrorEl.textContent = kcForgotStatusMessage(resp.status, null);
       }).catch(function () {
         if (gen !== forgotGeneration) return;
@@ -981,6 +987,12 @@
           return resp.text().then(function (text) {
             if (gen !== forgotGeneration) return;
             forgotBackToStep1(kcForgotStatusMessage(429, text));
+          });
+        }
+        if (resp.status === 403) {
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            forgotBackToStep1(window.kcHostRefusalFromText(text) || kcForgotStatusMessage(403, null));
           });
         }
         forgotBackToStep1(kcForgotStatusMessage(resp.status, null));
@@ -1137,6 +1149,12 @@
         'from. Open the controller by its IP address or <name>.local and try again.';
     }
     return null;
+  };
+
+  // Same guidance for a refusal body that arrives as raw text (login/bootstrap/forgot/reset
+  // use nativeFetch and read text); null when it is not a host/origin refusal.
+  window.kcHostRefusalFromText = function (text) {
+    try { return window.kcHostRefusalText(JSON.parse(text)); } catch (e) { return null; }
   };
 
   window.fetch = function (input, init) {
