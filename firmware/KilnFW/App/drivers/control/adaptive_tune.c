@@ -65,6 +65,7 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
                               * save_kibase_job()'s caller (the flash worker) already branches on */
+#include "legacy_nvs_erase.h"
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- adaptive_tune_get_kibase_dualwrite_status() below */
 #include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see adaptive_tune_init()'s
                                  * kibase resolve call site below and flash_worker_wait.h's header comment */
@@ -1470,6 +1471,12 @@ void adaptive_tune_init(void)
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve_nvs_retired(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
                                            adaptive_tune_kibase_file_validate, &resolved, &resolved_rev, &used_file);
+    if (used_file) {
+        /* persfx3 MED-3: retire the frozen NVS ki_baseline copy once the file is the adopted source. */
+        static const char *const k_legacy[] = {ADAPTIVE_TUNE_NVS_KEY_KIBASE, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV};
+        (void)legacy_nvs_erase_keys(ADAPTIVE_TUNE_TAG, ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE,
+                                    k_legacy, 2);
+    }
     if (have_value) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (resolved.mask & (1u << zi)) {

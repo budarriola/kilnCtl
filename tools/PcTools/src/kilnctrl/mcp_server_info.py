@@ -1045,6 +1045,9 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     ]
     lines.extend(f"  {s}" for s in section_lines)
     lines.append(f"contains wifi/password-shaped fields: {sensitive}")
+    stale_note = _stale_stores_note(parsed, "this export")
+    if stale_note:
+        lines.append(stale_note)
     return "\n".join(lines)
 
 
@@ -1077,6 +1080,18 @@ def _backup_import_readback_problem(host: str, body_text: str, after_readiness: 
         if (len(g) != len(w)) if exact else (len(g) < len(w)):
             return f"{key}: backup has {len(w)} entries, board now has {len(g)}"
     return None
+
+
+def _stale_stores_note(parsed: object, where: str) -> str:
+    """persfx3 LOW-4: a backup document names, under ``stale_or_unknown_stores``, the cfg stores the board could not
+    read at boot; their exported values are frozen/default, not the operator's real settings. Empty string when
+    the key is absent or empty."""
+    names = parsed.get("stale_or_unknown_stores") if isinstance(parsed, dict) else None
+    if not isinstance(names, list) or not names:
+        return ""
+    return (f"WARNING: {where} lists stale_or_unknown_stores={names}: the board could not read those stores at boot, "
+            f"so their values in this backup are frozen/default and may NOT be the operator's real settings; do "
+            f"not treat it as a good restore point for them.")
 
 
 @_core._tool()
@@ -1196,6 +1211,13 @@ def backup_import(
     except OSError as exc:
         return f"error: could not read {path}: {exc}"
 
+    try:
+        stale_note = _stale_stores_note(json.loads(body_text), "this backup file")
+    except ValueError:
+        stale_note = ""
+    if stale_note:
+        stale_note = "\n" + stale_note
+
     t0 = time.monotonic()
     try:
         status, resp_text = backup_import_http_client.post_import(
@@ -1216,7 +1238,7 @@ def backup_import(
                 f"ok - dry run only, nothing written. plan:\n{resp_text}\n"
                 f"(POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the full job "
                 f"took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
-                f"{after_readiness}"
+                f"{after_readiness}{stale_note}"
             )
         kept_note = ""
         try:
@@ -1238,7 +1260,7 @@ def backup_import(
         return (
             f"ok - restored (read-back: readiness readable, zones/profiles counts match).{kept_note} (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
             f"full job took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
-            f"{after_readiness}"
+            f"{after_readiness}{stale_note}"
         )
 
     category = backup_import_http_client.classify_refusal(status, resp_text)

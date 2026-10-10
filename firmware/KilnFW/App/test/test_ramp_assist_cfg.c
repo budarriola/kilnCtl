@@ -276,11 +276,13 @@ static void test_nvs_fallback_when_file_absent(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() succeeds");
-    TEST_CHECK(ramp_assist_cfg_enabled(), "NVS fallback: value came from NVS since no file existed yet");
+    /* persfx3 MED-3: the frozen legacy NVS copy is never re-adopted -- safe default (disabled), and nothing
+     * is migrated into a file. */
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "no file: the frozen NVS copy is NOT adopted (disabled default)");
 
-    bool exists = false;
+    bool exists = true;
     cfg_fs_exists(RAMP_ASSIST_FILE_PATH, &exists);
-    TEST_CHECK(exists, "the NVS candidate was opportunistically migrated out to the file on this load");
+    TEST_CHECK(!exists, "the frozen NVS copy is NOT migrated into a file");
 
     cfg_fs_deinit();
 }
@@ -308,8 +310,8 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() succeeds across the diverged sides");
-    TEST_CHECK(!ramp_assist_cfg_enabled(),
-               "higher rev (NVS, rev 5) wins over the lower-rev file (rev 1) -- disabled adopted");
+    TEST_CHECK(ramp_assist_cfg_enabled(),
+               "persfx3 MED-3: the file (rev 1) wins; the frozen NVS copy (rev 5) is never a source");
 
     // The file must have been resynced to the winning (NVS) value so the
     // divergence does not persist to the next boot.
@@ -318,7 +320,12 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     bool file_valid = false;
     pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
-    TEST_CHECK(file_valid && file_raw == 0 && file_rev == 5, "the file was resynced from the winning NVS side");
+    TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1, "the file is untouched (not resynced from NVS)");
+    hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION);
+    TEST_CHECK(hal_kv_key_exists(&h, NVS_KEY_RAMP_ASSIST) != HAL_OK &&
+                   hal_kv_key_exists(&h, NVS_KEY_RAMP_ASSIST_REV) != HAL_OK,
+               "persfx3 MED-3: the frozen legacy NVS keys were erased once the file was adopted");
+    hal_kv_close(&h);
 
     cfg_fs_deinit();
 }
@@ -369,9 +376,9 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() succeeds across the equal-rev divergence");
-    TEST_CHECK(!ramp_assist_cfg_enabled(),
-               "equal rev, differing bytes: NVS (false) wins over the now-stale file (true) -- "
-               "the edit made on rolled-back firmware is NOT discarded");
+    TEST_CHECK(ramp_assist_cfg_enabled(),
+               "persfx3 MED-3: equal rev, differing bytes: the file (true) wins, the frozen NVS copy (false) is "
+               "never re-adopted");
 
     // The file must be resynced to the winning (NVS) value, same as the
     // strictly-higher-rev case above -- the divergence must not survive to
@@ -381,7 +388,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     bool file_valid = false;
     pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
-    TEST_CHECK(file_valid && file_raw == 0 && file_rev == 1, "the file was resynced from the winning NVS side");
+    TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1, "the file is untouched (not resynced from NVS)");
 
     cfg_fs_deinit();
 }
@@ -406,7 +413,7 @@ static void test_mount_failed_falls_through_to_nvs_only(void)
     simulate_reboot();
     esp_err_t err = ramp_assist_cfg_start();
     TEST_CHECK(err == ESP_OK, "start() with a FAILED mount still succeeds (non-fatal, falls back to NVS)");
-    TEST_CHECK(ramp_assist_cfg_enabled(), "mount-failed: the NVS value is still adopted correctly");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "persfx3 MED-3: mount-failed: the frozen NVS value is NOT adopted (default)");
 
     cfg_fs_deinit();
 }

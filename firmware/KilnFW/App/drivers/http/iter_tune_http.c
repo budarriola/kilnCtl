@@ -257,7 +257,7 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         // was not written: say so as a failure, never a success with a warning.
         ESP_LOGE(TAG, "restore_commissioned zone=%ld: gains applied but persisting the OFF state failed (%d)", zone,
                  (int)persist_err);
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, ITER_TUNE_CFG_FILE_PATH, persist_err);
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":true,\"kp\":%.6f,\"ki\":%.6f,\"kd\":%.6f}",
                      (double)restored.kp, (double)restored.ki, (double)restored.kd);

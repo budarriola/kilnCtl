@@ -36,6 +36,10 @@ bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
@@ -48,6 +52,9 @@ bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
 
 bool zones_config_set_max_ramp(uint8_t zone_index, float c_per_hr)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_max_ramp_no_save(zone_index, c_per_hr)) {
         return false;
     }
@@ -75,6 +82,10 @@ bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].coil_power_w = power_w;
     s_config_generation++;
     zones_cfg_unlock();
@@ -83,6 +94,9 @@ bool zones_config_set_coil_power_w_no_save(uint8_t zone_index, float power_w)
 
 bool zones_config_set_coil_power_w(uint8_t zone_index, float power_w)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_coil_power_w_no_save(zone_index, power_w)) {
         return false;
     }
@@ -108,6 +122,10 @@ bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].cal_offset_c = cal_offset_c;
     s_config_generation++;
     zones_cfg_unlock();
@@ -116,6 +134,9 @@ bool zones_config_set_cal_offset_no_save(uint8_t zone_index, float cal_offset_c)
 
 bool zones_config_set_cal_offset(uint8_t zone_index, float cal_offset_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_cal_offset_no_save(zone_index, cal_offset_c)) {
         return false;
     }
@@ -142,6 +163,10 @@ bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool ena
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].adaptive_tune_enabled = enabled ? 1 : 0;
     s_config_generation++;
     zones_cfg_unlock();
@@ -150,6 +175,9 @@ bool zones_config_set_adaptive_tune_enabled_no_save(uint8_t zone_index, bool ena
 
 bool zones_config_set_adaptive_tune_enabled(uint8_t zone_index, bool enabled)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_adaptive_tune_enabled_no_save(zone_index, enabled)) {
         return false;
     }
@@ -217,6 +245,10 @@ bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count
     }
     bool ok = false;
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (s_zones.cfg.thermo_count == 0) {
         s_zones.cfg.thermo_count = thermo_count;
         s_zones.cfg.relay_count = relay_count;
@@ -314,6 +346,10 @@ bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].tc_type = tc_type;
     s_config_generation++;
     zones_cfg_unlock();
@@ -322,6 +358,9 @@ bool zones_config_set_tc_type_no_save(uint8_t zone_index, uint8_t tc_type)
 
 bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_tc_type_no_save(zone_index, tc_type)) {
         return false;
     }
@@ -338,6 +377,9 @@ bool zones_config_set_tc_type(uint8_t zone_index, uint8_t tc_type)
  * module owns storage only). */
 bool zones_config_set_safety_tc_type(uint8_t tc_type)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (tc_type > ZONE_TC_TYPE_MAX_REAL) {
         return false;
     }
@@ -369,6 +411,10 @@ bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].relay_mask = relay_mask;
     s_config_generation++;
     zones_cfg_unlock();
@@ -377,6 +423,9 @@ bool zones_config_set_relay_mask_no_save(uint8_t zone_index, uint8_t relay_mask)
 
 bool zones_config_set_relay_mask(uint8_t zone_index, uint8_t relay_mask)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_relay_mask_no_save(zone_index, relay_mask)) {
         return false;
     }
@@ -407,6 +456,10 @@ bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mas
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].thermo_mask = thermo_mask;
     s_config_generation++;
     zones_cfg_unlock();
@@ -415,6 +468,9 @@ bool zones_config_set_thermo_mask_no_save(uint8_t zone_index, uint8_t thermo_mas
 
 bool zones_config_set_thermo_mask(uint8_t zone_index, uint8_t thermo_mask)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_thermo_mask_no_save(zone_index, thermo_mask)) {
         return false;
     }
@@ -443,6 +499,10 @@ bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].ct_mask = ct_mask;
     s_config_generation++;
     zones_cfg_unlock();
@@ -451,6 +511,9 @@ bool zones_config_set_ct_mask_no_save(uint8_t zone_index, uint8_t ct_mask)
 
 bool zones_config_set_ct_mask(uint8_t zone_index, uint8_t ct_mask)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_ct_mask_no_save(zone_index, ct_mask)) {
         return false;
     }
@@ -484,6 +547,10 @@ bool zones_config_set_name_no_save(uint8_t zone_index, const char *name)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     strncpy(s_zones.cfg.zones[zone_index].name, name ? name : "", ZONE_NAME_MAX_LEN);
     s_zones.cfg.zones[zone_index].name[ZONE_NAME_MAX_LEN] = '\0';
     s_config_generation++;
@@ -493,6 +560,9 @@ bool zones_config_set_name_no_save(uint8_t zone_index, const char *name)
 
 bool zones_config_set_name(uint8_t zone_index, const char *name)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_name_no_save(zone_index, name)) {
         return false;
     }
@@ -514,6 +584,9 @@ bool zones_config_get_relay_name(uint8_t relay_n, char *out, size_t out_cap)
 
 bool zones_config_set_relay_name(uint8_t relay_n, const char *name)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (relay_n < 1 || relay_n > KILN_IO_RELAY_COUNT) {
         return false;
     }
@@ -559,6 +632,9 @@ bool zones_config_get_relay_device_type(uint8_t relay_n, relay_device_type_t *ou
 
 bool zones_config_set_relay_device_type(uint8_t relay_n, relay_device_type_t type)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (relay_n < 1 || relay_n > KILN_IO_RELAY_COUNT) {
         return false;
     }
@@ -628,6 +704,10 @@ zones_set_result_t zones_config_set_pid_no_save_checked(uint8_t zone_index, floa
     const bool gains_changed = zones_config_gain_changed(z->pid_kp, kp) || zones_config_gain_changed(z->pid_ki, ki) ||
                                zones_config_gain_changed(z->pid_kd, kd);
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return ZONES_SET_REJECTED;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return ZONES_SET_BUSY_RUNNING;
@@ -671,6 +751,9 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
 
 zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return ZONES_SET_REJECTED;
+    }
     zones_set_result_t r = zones_config_set_pid_no_save_checked(zone_index, kp, ki, kd);
     if (r != ZONES_SET_OK) {
         return r;
@@ -680,6 +763,9 @@ zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, fl
 
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     return zones_config_set_pid_checked(zone_index, kp, ki, kd) == ZONES_SET_OK;
 }
 
@@ -692,6 +778,9 @@ zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, fl
                                                           float dead_time_s, float kp, float ki, float kd,
                                                           const float *expect_prior_pid)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return ZONES_SET_REJECTED;
+    }
     if (zone_index >= s_zones.cfg.thermo_count) {
         return ZONES_SET_REJECTED;
     }
@@ -706,6 +795,10 @@ zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, fl
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return ZONES_SET_BUSY_RUNNING;
@@ -754,6 +847,10 @@ bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].fuzzy_strength_pct = pct;
     s_config_generation++;
     zones_cfg_unlock();
@@ -762,6 +859,9 @@ bool zones_config_set_fuzzy_strength_pct_no_save(uint8_t zone_index, float pct)
 
 bool zones_config_set_fuzzy_strength_pct(uint8_t zone_index, float pct)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_fuzzy_strength_pct_no_save(zone_index, pct)) {
         return false;
     }
@@ -797,6 +897,10 @@ bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
@@ -809,6 +913,9 @@ bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
 
 bool zones_config_set_coupling_diag_k_dc(uint8_t zone_index, float k_dc)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_coupling_diag_k_dc_no_save(zone_index, k_dc)) {
         return false;
     }
@@ -919,6 +1026,9 @@ bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31
  * ambiguous with a real (if coincidentally equal) cross-gain. */
 bool zones_config_set_coupling(uint8_t zone_index, const float row[MAX31856_CHANNEL_COUNT])
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!row || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
@@ -1001,6 +1111,10 @@ bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->coupling_coeff[neighbor_index] = coeff;
     z->coupling_tau_s[neighbor_index] = tau_s;
@@ -1015,6 +1129,9 @@ bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor
 bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                             float dead_time_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (relay_authority_reset_in_flight()) {
         return false;
     }
@@ -1041,6 +1158,9 @@ bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     /* HTTP audit L37 follow-up (MED-2): the autotune coupling persist job and adaptive_tune_model run
      * on their own tasks and can reach this after a factory reset has set its in-flight mark. Refuse
      * before touching RAM, so nothing is written back over storage the reset is erasing. This narrows
@@ -1077,6 +1197,9 @@ bool zones_config_get_settings_source(uint8_t zone_index, uint8_t group, uint8_t
  * need to check every zone. */
 bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (group >= SRC_GROUP_COUNT) {
         return false;
     }
@@ -1141,6 +1264,9 @@ bool zones_config_set_settings_source(uint8_t zone_index, uint8_t group, uint8_t
  * that check, it does not repeat it. */
 bool zones_config_set_settings_source_unchecked(uint8_t zone_index, uint8_t group, uint8_t settings_source)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (group >= SRC_GROUP_COUNT) {
         return false;
     }
@@ -1179,6 +1305,10 @@ bool zones_config_set_settings_source_unchecked_no_save(uint8_t zone_index, uint
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].settings_source[group] = settings_source;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1238,6 +1368,10 @@ bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].sanity_rate_c_per_min = c_per_min;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1246,6 +1380,9 @@ bool zones_config_set_sanity_rate_no_save(uint8_t zone_index, float c_per_min)
 
 bool zones_config_set_sanity_rate(uint8_t zone_index, float c_per_min)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_sanity_rate_no_save(zone_index, c_per_min)) {
         return false;
     }
@@ -1271,6 +1408,10 @@ bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].control_mode = (uint8_t)mode;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1279,6 +1420,9 @@ bool zones_config_set_control_mode_no_save(uint8_t zone_index, zone_control_mode
 
 bool zones_config_set_control_mode(uint8_t zone_index, zone_control_mode_t mode)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_control_mode_no_save(zone_index, mode)) {
         return false;
     }
@@ -1305,6 +1449,10 @@ bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].zone_type = (uint8_t)type;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1313,6 +1461,9 @@ bool zones_config_set_zone_type_no_save(uint8_t zone_index, zone_type_t type)
 
 bool zones_config_set_zone_type(uint8_t zone_index, zone_type_t type)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_zone_type_no_save(zone_index, type)) {
         return false;
     }
@@ -1393,6 +1544,10 @@ bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].failsafe_state = on_state ? 1u : 0u;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1401,6 +1556,9 @@ bool zones_config_set_failsafe_state_no_save(uint8_t zone_index, bool on_state)
 
 bool zones_config_set_failsafe_state(uint8_t zone_index, bool on_state)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_failsafe_state_no_save(zone_index, on_state)) {
         return false;
     }
@@ -1432,6 +1590,10 @@ bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].hyst_c = hyst_c;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1440,6 +1602,9 @@ bool zones_config_set_hyst_c_no_save(uint8_t zone_index, float hyst_c)
 
 bool zones_config_set_hyst_c(uint8_t zone_index, float hyst_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_hyst_c_no_save(zone_index, hyst_c)) {
         return false;
     }
@@ -1470,6 +1635,10 @@ bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].min_on_s = min_on_s;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1478,6 +1647,9 @@ bool zones_config_set_min_on_s_no_save(uint8_t zone_index, uint16_t min_on_s)
 
 bool zones_config_set_min_on_s(uint8_t zone_index, uint16_t min_on_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_min_on_s_no_save(zone_index, min_on_s)) {
         return false;
     }
@@ -1506,6 +1678,10 @@ bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].min_off_s = min_off_s;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1514,6 +1690,9 @@ bool zones_config_set_min_off_s_no_save(uint8_t zone_index, uint16_t min_off_s)
 
 bool zones_config_set_min_off_s(uint8_t zone_index, uint16_t min_off_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_min_off_s_no_save(zone_index, min_off_s)) {
         return false;
     }
@@ -1549,6 +1728,10 @@ bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, 
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->max_temp_c = max_temp_c;
     z->min_temp_c = min_temp_c;
@@ -1559,6 +1742,9 @@ bool zones_config_set_temp_limits_no_save(uint8_t zone_index, float max_temp_c, 
 
 bool zones_config_set_temp_limits(uint8_t zone_index, float max_temp_c, float min_temp_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_temp_limits_no_save(zone_index, max_temp_c, min_temp_c)) {
         return false;
     }
@@ -1610,6 +1796,10 @@ bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, fl
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->heater_window_ms = window_ms;
     z->heater_min_on_ms = min_on_ms;
@@ -1621,6 +1811,9 @@ bool zones_config_set_heater_cfg_no_save(uint8_t zone_index, float window_ms, fl
 
 bool zones_config_set_heater_cfg(uint8_t zone_index, float window_ms, float min_on_ms, float min_off_ms)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_heater_cfg_no_save(zone_index, window_ms, min_on_ms, min_off_ms)) {
         return false;
     }
@@ -1743,6 +1936,10 @@ bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t i
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].timing_profile = index;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1751,6 +1948,9 @@ bool zones_config_set_timing_profile_index_no_save(uint8_t zone_index, uint8_t i
 
 bool zones_config_set_timing_profile_index(uint8_t zone_index, uint8_t index)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_timing_profile_index_no_save(zone_index, index)) {
         return false;
     }
@@ -1834,6 +2034,10 @@ bool zones_config_set_timing_profile_raw_no_save(uint8_t profile_index, const ch
     }
     zone_timing_profile_t *tp = &s_zones.cfg.timing_profiles[profile_index];
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     strncpy(tp->name, name, TIMING_PROFILE_NAME_MAX_LEN);
     tp->name[TIMING_PROFILE_NAME_MAX_LEN] = '\0';
     tp->guard_progress_duty_min = progress_duty_min;
@@ -1860,6 +2064,9 @@ bool zones_config_set_timing_profile_raw(uint8_t profile_index, const char *name
                                          float cooling_limited_margin_c, float cooling_limited_hold_s,
                                          float ramp_lock_band_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_timing_profile_raw_no_save(profile_index, name, progress_duty_min, progress_window_s, drift_hysteresis_c, frozen_eps_c, cross_zone_period_s, bangbang_hysteresis_c, cooling_limited_margin_c, cooling_limited_hold_s, ramp_lock_band_c)) {
         return false;
     }
@@ -1920,6 +2127,10 @@ bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mul
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].ease_off_window_mult = mult;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1928,6 +2139,9 @@ bool zones_config_set_ease_off_window_mult_no_save(uint8_t zone_index, float mul
 
 bool zones_config_set_ease_off_window_mult(uint8_t zone_index, float mult)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_ease_off_window_mult_no_save(zone_index, mult)) {
         return false;
     }
@@ -1975,6 +2189,10 @@ bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, flo
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].approach_rate_cap_c_per_hr = cap_c_per_hr;
     s_config_generation++;
     zones_cfg_unlock();
@@ -1983,6 +2201,9 @@ bool zones_config_set_approach_rate_cap_c_per_hr_no_save(uint8_t zone_index, flo
 
 bool zones_config_set_approach_rate_cap_c_per_hr(uint8_t zone_index, float cap_c_per_hr)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_approach_rate_cap_c_per_hr_no_save(zone_index, cap_c_per_hr)) {
         return false;
     }
@@ -2024,6 +2245,10 @@ bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].error_band_c = band_c;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2032,6 +2257,9 @@ bool zones_config_set_error_band_c_no_save(uint8_t zone_index, float band_c)
 
 bool zones_config_set_error_band_c(uint8_t zone_index, float band_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_error_band_c_no_save(zone_index, band_c)) {
         return false;
     }
@@ -2063,6 +2291,10 @@ bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].rate_band_c_per_s = band_c_per_s;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2071,6 +2303,9 @@ bool zones_config_set_rate_band_c_per_s_no_save(uint8_t zone_index, float band_c
 
 bool zones_config_set_rate_band_c_per_s(uint8_t zone_index, float band_c_per_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_rate_band_c_per_s_no_save(zone_index, band_c_per_s)) {
         return false;
     }
@@ -2119,6 +2354,10 @@ bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].relay_type = relay_type;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2127,6 +2366,9 @@ bool zones_config_set_relay_type_no_save(uint8_t zone_index, uint8_t relay_type)
 
 bool zones_config_set_relay_type(uint8_t zone_index, uint8_t relay_type)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_relay_type_no_save(zone_index, relay_type)) {
         return false;
     }
@@ -2167,6 +2409,10 @@ bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].progress_band_c = band_c;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2175,6 +2421,9 @@ bool zones_config_set_progress_band_c_no_save(uint8_t zone_index, float band_c)
 
 bool zones_config_set_progress_band_c(uint8_t zone_index, float band_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_progress_band_c_no_save(zone_index, band_c)) {
         return false;
     }
@@ -2223,6 +2472,10 @@ bool zones_config_set_guard_thresholds_no_save(uint8_t zone_index, float wrong_d
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->guard_wrong_dir_window_s = wrong_dir_window_s;
     z->guard_wrong_dir_rate_c_per_min = wrong_dir_rate_c_per_min;
@@ -2243,6 +2496,9 @@ bool zones_config_set_guard_thresholds(uint8_t zone_index, float wrong_dir_windo
                                        float drift_period_s, float sensor_fault_debounce_ticks,
                                        float frozen_window_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_guard_thresholds_no_save(zone_index, wrong_dir_window_s, wrong_dir_rate_c_per_min, off_settle_s, runaway_rate_c_per_min, runaway_margin_c, drift_period_s, sensor_fault_debounce_ticks, frozen_window_s)) {
         return false;
     }
@@ -2269,6 +2525,10 @@ bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_del
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     s_zones.cfg.zones[zone_index].cross_zone_max_delta_c = max_delta_c;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2277,6 +2537,9 @@ bool zones_config_set_cross_zone_delta_no_save(uint8_t zone_index, float max_del
 
 bool zones_config_set_cross_zone_delta(uint8_t zone_index, float max_delta_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_cross_zone_delta_no_save(zone_index, max_delta_c)) {
         return false;
     }
@@ -2319,6 +2582,10 @@ zones_set_result_t zones_config_set_model_no_save_checked(uint8_t zone_index, fl
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return ZONES_SET_REJECTED;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return ZONES_SET_BUSY_RUNNING;
@@ -2343,6 +2610,9 @@ bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s,
 
 zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return ZONES_SET_REJECTED;
+    }
     zones_set_result_t r = zones_config_set_model_no_save_checked(zone_index, k_dc, tau_s, dead_time_s);
     if (r != ZONES_SET_OK) {
         return r;
@@ -2352,6 +2622,9 @@ zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc
 
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     return zones_config_set_model_checked(zone_index, k_dc, tau_s, dead_time_s) == ZONES_SET_OK;
 }
 
@@ -2383,6 +2656,10 @@ bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_te
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
@@ -2397,6 +2674,9 @@ bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_te
 
 bool zones_config_set_model_fit_context(uint8_t zone_index, float fit_temp_c, float fit_ambient_c)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_model_fit_context_no_save(zone_index, fit_temp_c, fit_ambient_c)) {
         return false;
     }
@@ -2426,6 +2706,10 @@ bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
@@ -2438,6 +2722,9 @@ bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k
 
 bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_autotune_baseline_k_dc_no_save(zone_index, k_dc)) {
         return false;
     }
@@ -2493,6 +2780,10 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     zones_cfg_lock();
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: the stored config is undecided -- no RAM change */
+        zones_cfg_unlock();
+        return false;
+    }
     if (zones_config_run_claimed_locked()) {
         zones_cfg_unlock();
         return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
@@ -2532,6 +2823,9 @@ bool zones_config_reinstate_tuning_quality_no_save(uint8_t zone_index)
 
 bool zones_config_set_tuning_quality(uint8_t zone_index, const zone_tuning_quality_t *q)
 {
+    if (zones_config_is_undecided()) { /* persfx3 LOW-5: no RAM change while the stored config is undecided */
+        return false;
+    }
     if (!zones_config_set_tuning_quality_no_save(zone_index, q)) {
         return false;
     }

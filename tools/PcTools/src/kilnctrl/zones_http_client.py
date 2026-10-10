@@ -163,6 +163,25 @@ def is_system_mode_gate_refusal(detail: Optional[str]) -> bool:
     return bool(detail) and _SYSTEM_MODE_GATE_REFUSAL_MARKER in detail
 
 
+def unreadable_store_refusal(status: Optional[int], detail: Optional[str]) -> Optional[str]:
+    """persfx3 LOW-4: a specific operator message for the two firmware 409s that mean "the stored config could not
+    be read at boot, so this write was refused to avoid overwriting it" -- `zones_config_undecided` (the zones
+    config itself) and `store_unreadable_at_boot` (another cfg store). Neither is a mode-gate or ceiling refusal,
+    and a reboot alone only retries the same read. None for any other response."""
+    if status != 409 or not detail:
+        return None
+    if "zones_config_undecided" in detail:
+        which = "the stored zones config"
+    elif "store_unreadable_at_boot" in detail:
+        which = "a stored setting"
+    else:
+        return None
+    return (f"refused: {which} could not be read at boot, so the board refuses this write rather than overwrite "
+            f"it (HTTP 409): {detail} -- nothing was changed. Reboot to retry the read; if it persists, GET "
+            f"/api/cfgfs lists the degraded store, and the recovery routes are a factory reset with scope kiln or "
+            f"a cfgfs format_confirm with force_healthy")
+
+
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 

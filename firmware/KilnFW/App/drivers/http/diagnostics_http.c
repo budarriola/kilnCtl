@@ -1081,7 +1081,7 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
 
     esp_err_t err = ramp_assist_cfg_set_enabled(enabled);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, RAMP_ASSIST_FILE_PATH, err);
     }
     char json[96];
     int n;

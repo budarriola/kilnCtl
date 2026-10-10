@@ -62,6 +62,19 @@ static ZONES_POST_NOINLINE void zones_post_track_ceiling_lower(const float *live
     }
 }
 
+/* MED-2/LOW-2 (review persfx/persfx2 2026-10-10): the single 409 body for "the stored zones config could not be
+ * read this boot". Names the actual recovery routes -- a reboot alone retries the same unreadable file. */
+static ZONES_POST_NOINLINE void zones_post_send_undecided_409(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+                       "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config "
+                       "could not be read at boot, so a save would be lost or overwrite it; a reboot retries the read, "
+                       "and if it stays unreadable use the recovery routes: factory reset with scope kiln, or cfgfs "
+                       "format with force_healthy\"}");
+}
+
 /* The commit-time mode-gate refusal (a firing/autotune started during the ceiling raise): undo the
  * raise to the unchanged live maxima, exactly as the lost-update 409 does, then answer the same 409
  * the entry gate sends. NOINLINE: keeps the reason buffer off zones_post_apply()'s frame. */
@@ -680,6 +693,15 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
      * reports a clear, specific, operator-facing reason via HTTP 409
      * rather than a generic 400/500, and never silently drops the raise or
      * requires an undocumented safety-processor reset. */
+    /* LOW-1 (review persfx2): decide "undecided" BEFORE the Pico ceiling raise -- the commit-point check below
+     * would refuse only after the Pico had already been widened for a submission that can never commit. This is an
+     * unlocked early-out; the locked check at the commit point stays authoritative. */
+    if (zones_config_is_undecided()) {
+        ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones refused before any Pico write: stored zones config unreadable");
+        zones_post_send_undecided_409(req);
+        free(body);
+        return ESP_OK;
+    }
     {
         float new_max_temp_c[MAX31856_CHANNEL_COUNT];
         for (uint8_t i = 0; i < MAX31856_CHANNEL_COUNT; i++) {
@@ -800,9 +822,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
         zones_cfg_unlock();
         zones_post_track_ceiling_lower(live_max_temp_c, "POST /api/zones undecided 409");
         ESP_LOGE(ZONES_HTTP_TAG, "POST /api/zones refused: the stored zones config could not be read this boot");
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config could not be read at boot, so a save would be lost or overwrite it; reboot the controller to retry\"}");
+        zones_post_send_undecided_409(req);
         free(body);
         return ESP_OK;
     }
@@ -872,7 +892,7 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
 
     free(body);
     if (err != ESP_OK || names_err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, "zones.json", err != ESP_OK ? err : names_err);
     }
     return httpd_resp_sendstr(req, "ok");
 }

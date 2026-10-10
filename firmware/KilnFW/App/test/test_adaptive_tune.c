@@ -718,7 +718,7 @@ static void reset_all_cfg_fs_at(void)
 
 static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
 {
-    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- a legacy NVS copy still loads, a save "
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- a frozen legacy NVS copy is not adopted, a save "
                  "fails loud and never falls back to NVS");
     reset_all_cfg_fs_at();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
@@ -729,8 +729,8 @@ static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
     legacy.vals[1] = 3.5f;
     at_stage_legacy_kibase(&legacy, 1);
     adaptive_tune_init();
-    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
-               "a legacy NVS-only board still loads its baseline");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
+               "persfx3 MED-3: a frozen legacy NVS-only baseline is NOT adopted (default: no baseline)");
 
     adaptive_tune_zones[1].ki_baseline = 4.5f;
     kibase_job_t job = {.result = ESP_OK};
@@ -743,8 +743,8 @@ static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
 
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
-    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
-               "the NVS copy was NOT overwritten by the failed save (no fallback)");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
+               "the failed save left no baseline anywhere (no NVS fallback write)");
 }
 
 static void test_kibase_cfg_fs_migrates_then_prefers_file(void)

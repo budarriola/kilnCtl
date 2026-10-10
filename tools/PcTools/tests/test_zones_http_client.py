@@ -1387,3 +1387,22 @@ def test_format_scalar_refuses_empty_string():
     from kilnctrl import zones_http_client as zc
     with pytest.raises(zc.ZonesHttpError):
         zc._format_scalar("z0_xzone", "", set())
+
+
+class UnreadableStoreRefusalTest(unittest.TestCase):
+    """persfx3 LOW-4: the two 'stored config unreadable at boot' 409s get a specific message."""
+
+    def test_zones_undecided(self):
+        msg = zh.unreadable_store_refusal(
+            409, '{"ok":false,"error":"zones_config_undecided","reason":"x"}')
+        self.assertIn("zones config", msg)
+        self.assertIn("force_healthy", msg)
+
+    def test_store_unreadable(self):
+        msg = zh.unreadable_store_refusal(409, '{"error":"store_unreadable_at_boot"}')
+        self.assertIn("stored setting", msg)
+
+    def test_other_409_and_other_status_untouched(self):
+        self.assertIsNone(zh.unreadable_store_refusal(409, "safety_ceiling_raise_failed"))
+        self.assertIsNone(zh.unreadable_store_refusal(500, "zones_config_undecided"))
+        self.assertIsNone(zh.unreadable_store_refusal(409, None))

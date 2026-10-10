@@ -142,6 +142,22 @@ static void test_settings_http(void)
     CHECK(post_settings("repo=alice%2Fproj", 0) == 500, "settings POST: persist failure -> 500");
     CHECK(resp_has("could not be saved to flash") && !resp_has("\"ok\":true"), "persist failure body is a failure");
 
+    // persfx3 MED-2: the 409 store_unreadable_at_boot is per store AND per error.
+    extern void test_stub_cfg_fs_degraded_set(const char *name);
+    g_set_result = ESP_ERR_INVALID_STATE;
+    test_stub_cfg_fs_degraded_set(UPDATE_SETTINGS_FILE_PATH);
+    CHECK(post_settings("repo=alice%2Fproj", 0) == 409 && resp_has("store_unreadable_at_boot") &&
+              resp_has("force_healthy") && resp_has("scope kiln"),
+          "settings POST: this store degraded + refusal error -> 409 naming the recovery routes");
+    g_set_result = ESP_FAIL;
+    CHECK(post_settings("repo=alice%2Fproj", 0) == 500 && !resp_has("store_unreadable_at_boot"),
+          "settings POST: this store degraded but a flash error -> 500, not the unreadable-store 409");
+    test_stub_cfg_fs_degraded_set("zones.json");
+    g_set_result = ESP_ERR_INVALID_STATE;
+    CHECK(post_settings("repo=alice%2Fproj", 0) == 500 && !resp_has("store_unreadable_at_boot"),
+          "settings POST: a DIFFERENT store degraded never renames this store's failure");
+    test_stub_cfg_fs_degraded_set(NULL);
+
     // success echoes the new state
     g_set_result = ESP_OK;
     g_set_calls = 0;

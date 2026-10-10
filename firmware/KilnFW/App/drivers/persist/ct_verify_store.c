@@ -17,6 +17,7 @@
 #include "hal_kv.h"
 #include "hal_status.h"
 #include "nvs_key_check.h"
+#include "legacy_nvs_erase.h"
 #include "pref_cfg_fs.h"
 
 static const char *TAG = "ct_verify_store";
@@ -284,6 +285,11 @@ esp_err_t ct_verify_store_start(void)
         s_blob = resolved;
         s_rev = rev;
         s_have = true;
+        if (used_file) {
+            /* persfx3 MED-3: retire the frozen NVS verdict once the file is the adopted source. */
+            static const char *const k_legacy[] = {NVS_KEY_VERDICT};
+            (void)legacy_nvs_erase_keys(TAG, KILN_NVS_PARTITION, NVS_NAMESPACE, k_legacy, 1);
+        }
         ESP_LOGI(TAG, "CT attribution verdict loaded: %u zones, fingerprint 0x%08lX (source=%s)",
                  (unsigned)s_blob.zone_count, (unsigned long)s_blob.fingerprint, used_file ? "file" : "NVS");
     }

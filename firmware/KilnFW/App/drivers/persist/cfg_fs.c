@@ -366,6 +366,23 @@ bool cfg_fs_degraded_name(int idx, char *out, size_t cap)
     return ok;
 }
 
+bool cfg_fs_degraded_is(const char *name)
+{
+    bool found = false;
+    if (!name || name[0] == '\0') {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_DEGRADED_MAX; i++) {
+        if (s_degraded[i][0] != '\0' && strncmp(s_degraded[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return found;
+}
+
 void cfg_fs_degraded_clear_for_test(void)
 {
     portENTER_CRITICAL(&s_degraded_mux);

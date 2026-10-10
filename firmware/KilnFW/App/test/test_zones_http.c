@@ -2176,9 +2176,16 @@ static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
     zones_cfg_mark_undecided("test: cannot decide", true);
     s_zones_config_valid = false;
     uint32_t gen_before = s_config_generation;
+    s_zones.cfg.zones[0].max_temp_c = 100.0f; /* the body's max is higher, so a raise WOULD be needed */
+    s_zones.cfg.zones[1].max_temp_c = 100.0f;
     zones_cfg_t before = s_zones.cfg;
+    int writes_before = s_ceiling_writer_calls;
     run_zones_post(body);
     zones_cfg_load_fault_t lf;
+    TEST_CHECK(s_ceiling_writer_calls == writes_before,
+               "persfx3 LOW-1: no Pico ceiling write at all for a POST that can never commit");
+    TEST_CHECK(strstr(s_last_resp_body, "force_healthy") != NULL && strstr(s_last_resp_body, "scope kiln") != NULL,
+               "persfx3 LOW-2: the 409 names the recovery routes");
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided POST answered 409");
     TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "refusal names the cause");
     TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault is still latched");
@@ -2187,6 +2194,25 @@ static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
     TEST_CHECK(s_config_generation == gen_before, "generation not bumped");
     TEST_CHECK(safety_cfg_writer_owner() == SAFETY_CFG_WRITER_NONE, "guard released after the refusal");
     zones_config_load_fault_reset_for_test();
+    s_zones_config_valid = true;
+}
+
+/* persfx3 LOW-5: the narrow setters must refuse -- and leave RAM alone -- while the stored config is undecided. */
+static void test_narrow_setters_refuse_while_undecided(void)
+{
+    TEST_SECTION("zones narrow setters -- refuse and change no RAM while the config is undecided (persfx3 LOW-5)");
+    seed_two_zone_pid_baseline();
+    zones_config_load_fault_reset_for_test();
+    float ramp_before = s_zones.cfg.zones[0].max_ramp_c_per_hr;
+    float kp_before = s_zones.cfg.zones[0].pid_kp;
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    TEST_CHECK(!zones_config_set_max_ramp(0, ramp_before + 7.0f), "set_max_ramp refused while undecided");
+    TEST_CHECK(!zones_config_set_pid(0, kp_before + 1.0f, 0.1f, 0.1f), "set_pid refused while undecided");
+    TEST_CHECK(s_zones.cfg.zones[0].max_ramp_c_per_hr == ramp_before, "max_ramp RAM unchanged");
+    TEST_CHECK(s_zones.cfg.zones[0].pid_kp == kp_before, "pid RAM unchanged");
+    zones_config_load_fault_reset_for_test();
+    s_zones_cfg_undecided = false;
+    TEST_CHECK(zones_config_set_max_ramp(0, ramp_before + 7.0f), "and accepted once decided again");
     s_zones_config_valid = true;
 }
 
@@ -12553,9 +12579,8 @@ static void test_ct_store_legacy_nvs_migrates(void)
     TEST_CHECK(ct_verify_store_start() == ESP_OK, "ct mig: start()");
     ct_verify_blob_t out;
     memset(&out, 0, sizeof(out));
-    TEST_CHECK(ct_verify_store_get(&out) && memcmp(&out, &legacy, sizeof(out)) == 0,
-               "ct mig: the legacy NVS verdict is read as the fallback");
-    TEST_CHECK(ct_file_exists(), "ct mig: and was migrated into the cfg file");
+    TEST_CHECK(!ct_verify_store_get(&out), "ct mig: persfx3 MED-3: the frozen legacy NVS verdict is NOT adopted");
+    TEST_CHECK(!ct_file_exists(), "ct mig: and was NOT migrated into a cfg file");
     TEST_CHECK(ct_nvs_has_verdict(), "ct mig: the NVS copy is left in place");
     fake_kv_reset_all();
 }
@@ -17279,6 +17304,7 @@ void run_test_zones_http(void)
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_expected_generation();
     test_zones_post_refused_while_load_undecided_keeps_fault();
+    test_narrow_setters_refuse_while_undecided();
     test_zones_post_failed_save_keeps_load_fault();
     test_zones_post_refuses_run_started_during_ceiling_raise();
     test_zones_post_refused_while_rollback_pending();

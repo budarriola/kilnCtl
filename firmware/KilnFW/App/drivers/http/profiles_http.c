@@ -2199,6 +2199,13 @@ static esp_err_t profiles_boot_load_body(void)
             }
         }
     }
+    /* persfx3 MED-2: publish the rev-unknown marks in the degraded registry ("profiles" in GET /api/cfgfs and
+     * the backup stale marker). The HTTP 409 itself is decided per slot from s_profile_rev_unknown[]. */
+    bool any_unknown = false;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        any_unknown = any_unknown || s_profile_rev_unknown[id];
+    }
+    cfg_fs_degraded_set("profiles", any_unknown);
     return err;
 }
 

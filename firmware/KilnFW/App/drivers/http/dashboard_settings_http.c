@@ -74,12 +74,13 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
     }
 
     bool adopted = false;
-    if (unit_pref_set_ex(pref, &adopted) != ESP_OK) {
+    esp_err_t pref_err = unit_pref_set_ex(pref, &adopted);
+    if (pref_err != ESP_OK) {
         /* Live value is unchanged unless `adopted` (file read back with the new value, RAM
          * matches it). No NVS fallback: an error, never ok. */
         ESP_LOGW(DASH_TAG, "unit preference save not verified -- %s",
                  adopted ? "live value now matches the file" : "live value unchanged");
-        return cfg_fs_http_persist_failed_adopted(req, adopted);
+        return cfg_fs_http_persist_failed_adopted_for(req, adopted, UNIT_PREF_FILE_PATH, pref_err);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }

@@ -220,19 +220,12 @@ static void test_nvs_copy_migrates_into_cfg_at_start(void)
     TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf, sizeof(filebuf), &file_len) != ESP_OK,
                "no cfg file exists before the first boot");
 
-    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start adopts the legacy NVS copy");
+    /* persfx3 MED-3: the frozen legacy copy is NOT adopted and NOT migrated; defaults are served. */
+    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start with only a frozen legacy NVS copy");
     iter_tune_store_zone_t out;
-    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 21.0f, "legacy zone is served");
-    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf, sizeof(filebuf), &file_len) == ESP_OK &&
-                   file_len == sizeof(filebuf) && get_u32_le(filebuf) == 4u,
-               "the NVS copy was migrated into the cfg file at its own rev");
-
-    // Drop the NVS copy entirely: the file alone must now carry the store.
-    fake_kv_reset_all();
-    hal_kv_init_partition(ITER_TUNE_NVS_PARTITION);
-    iter_tune_store_reset_for_test();
-    TEST_CHECK(iter_tune_store_start() == ESP_OK, "start with only the migrated file");
-    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 21.0f, "file alone serves the migrated zone");
+    TEST_CHECK(!(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 21.0f), "legacy zone is NOT served");
+    TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf, sizeof(filebuf), &file_len) != ESP_OK,
+               "the NVS copy was NOT migrated into a cfg file");
 
     cfg_fs_deinit();
     tit_scratch_clean();
@@ -253,8 +246,8 @@ static void test_nvs_fallback_serves_when_unmounted(void)
 
     TEST_CHECK(iter_tune_store_start() == ESP_OK, "start with cfg unmounted and a legacy NVS copy");
     iter_tune_store_zone_t out;
-    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 33.0f,
-               "NVS stays readable as the fallback when cfg is unmounted");
+    TEST_CHECK(!(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 33.0f),
+               "persfx3 MED-3: the frozen NVS copy is NOT served when cfg is unmounted");
 }
 
 static void test_nvs_wrong_version_and_truncated(void)
@@ -305,6 +298,18 @@ static void test_nvs_wrong_version_and_truncated(void)
 // finding 2): a buggy "always re-derive v2 in RAM on every load"
 // implementation would pass any assertion made only through
 // iter_tune_store_get_zone()/s_blob.
+static bool raw_nvs_blob_present(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ITER_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ITER_TUNE_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    bool present = hal_kv_key_exists(&h, ITER_TUNE_NVS_KEY_BLOB) == HAL_OK;
+    hal_kv_close(&h);
+    return present;
+}
+
+#if 0
 static void read_raw_nvs(uint8_t *out_version, uint32_t *out_rev)
 {
     hal_kv_handle_t h;
@@ -319,6 +324,7 @@ static void read_raw_nvs(uint8_t *out_version, uint32_t *out_rev)
     *out_version = raw.version;
     *out_rev = rev;
 }
+#endif
 
 // Step 7 acceptance gap (2), 2026-09-23, REWRITTEN per review finding 1+2:
 // exercises the schema-migration mechanism (v1 -> v2, byte-compatible) AND
@@ -374,12 +380,7 @@ static void test_v1_old_layout_migrates(void)
 
     // The on-disk copies must NOT have been re-tagged by a bare load: still
     // v1, still rev 3, in both NVS and the cfg file.
-    uint8_t raw_version = 0;
-    uint32_t raw_rev = 0;
-    read_raw_nvs(&raw_version, &raw_rev);
-    TEST_CHECK(raw_version == ITER_TUNE_STORE_VERSION_V1,
-               "raw on-disk NVS blob stays tagged v1 after a bare load (no eager re-persist)");
-    TEST_CHECK(raw_rev == 3u, "raw on-disk NVS rev is untouched by a bare load");
+    TEST_CHECK(!raw_nvs_blob_present(), "persfx3 MED-3: the frozen legacy NVS blob was erased once the file was adopted");
 
     uint8_t filebuf_after[ITER_TUNE_FILE_BUF_MAX];
     size_t file_len = 0;
@@ -398,9 +399,7 @@ static void test_v1_old_layout_migrates(void)
 
     // The real write goes to the cfg file ONLY: the legacy NVS copy is left
     // exactly as it was (still v1, still rev 3).
-    read_raw_nvs(&raw_version, &raw_rev);
-    TEST_CHECK(raw_version == ITER_TUNE_STORE_VERSION_V1 && raw_rev == 3u,
-               "a real write no longer touches the legacy NVS copy");
+    TEST_CHECK(!raw_nvs_blob_present(), "a real write does not resurrect the legacy NVS copy");
 
     TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, filebuf_after, sizeof(filebuf_after), &file_len) == ESP_OK,
                "raw cfg file read back after a real write");
@@ -632,13 +631,14 @@ static void test_cfg_fs_dual_write_tie_break(void)
     seed_nvs(&nvs_ahead, 500u);
     iter_tune_store_reset_for_test();
     TEST_CHECK(iter_tune_store_start() == ESP_OK, "start resolves the NVS-ahead case");
-    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 55.0f,
-               "a legacy NVS copy at a higher rev beats a stale file");
+    TEST_CHECK(iter_tune_store_get_zone(0, &out) && out.anchor_kp == 7.0f,
+               "persfx3 MED-3: a frozen NVS copy at a higher rev does NOT beat the file");
     uint8_t chk[ITER_TUNE_FILE_BUF_MAX];
     size_t chk_len = 0;
     TEST_CHECK(cfg_fs_read(ITER_TUNE_CFG_FILE_PATH, chk, sizeof(chk), &chk_len) == ESP_OK &&
-                   get_u32_le(chk) == 500u,
-               "the winning NVS copy was resynced into the file");
+                   get_u32_le(chk) != 500u,
+               "the NVS copy was NOT resynced into the file");
+    TEST_CHECK(!raw_nvs_blob_present(), "and the frozen NVS copy was erased");
 
     // Now make the FILE strictly ahead of NVS by writing a higher-rev file
     // directly, and confirm the file wins per the documented tie-break.

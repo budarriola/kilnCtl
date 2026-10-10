@@ -155,6 +155,8 @@ void cfg_fs_degraded_set(const char *name, bool degraded);
 int cfg_fs_degraded_count(void);
 /* Copies the idx-th degraded name (0-based) into out; false when idx >= count. */
 bool cfg_fs_degraded_name(int idx, char *out, size_t cap);
+/* persfx3 MED-2: true iff `name` itself is registered degraded (per-store decision for the HTTP 409). */
+bool cfg_fs_degraded_is(const char *name);
 void cfg_fs_degraded_clear_for_test(void);
 
 #ifndef ESP_PLATFORM /* host builds only */

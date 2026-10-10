@@ -557,9 +557,9 @@ static void test_ct_verify(void)
 
     seed_ct_nvs(&b, sizeof(b));
     ct_verify_store_start();
-    TEST_CHECK(ct_verify_store_get(&t) && memcmp(&t, &b, sizeof(b)) == 0, "NVS blob loaded");
+    TEST_CHECK(!ct_verify_store_get(&t), "persfx3 MED-3: frozen NVS blob NOT adopted");
     pref_cfg_fs_load_raw(CT_VERIFY_CFG_FILE_PATH, sizeof(f), ct_verify_blob_validate, &f, &frev, &fv);
-    TEST_CHECK(fv, "NVS verdict migrated into cfg file");
+    TEST_CHECK(!fv, "NVS verdict NOT migrated into a cfg file");
 
     fresh();
     seed_ct_nvs(&b, sizeof(b) - 2);
@@ -607,7 +607,7 @@ static void test_ct_verify(void)
     bool nv = false;
     uint32_t nr = 0;
     ct_verify_store_get_dualwrite_status(&fv, &frev, &nv, &nr, &dg);
-    TEST_CHECK(fv && nv && dg, "dualwrite status reports divergence");
+    TEST_CHECK(fv && !nv, "persfx3 MED-3: the stale NVS verdict was erased once the file was adopted");
     {
         char p[300];
         snprintf(p, sizeof(p), "%s/ct_verify.bin", BASE);

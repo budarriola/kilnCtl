@@ -227,6 +227,11 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
                           uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
                           bool *out_used_file);
 
+// persfx3 MED-3: the frozen NVS copy is NEVER a source for these stores. A valid file wins outright (no rev
+// tie-break); an absent, unreadable, wrong-size or invalid file, or an unmounted cfg, returns false with out_bytes
+// zeroed (caller uses its safe defaults) and nothing is migrated into a file. The store erases its legacy NVS keys
+// once used_file is true (legacy_nvs_erase.h). Unreadable files are still marked rev-unknown (persfx MED-3).
+// Older text follows.
 // persfx MED-3: same as pref_cfg_fs_resolve(), except that when the cfg file is present but UNREADABLE the NVS copy
 // is NOT adopted (the path is still marked rev-unknown and out_bytes is zeroed, return false => caller uses its safe
 // defaults). For control/safety-relevant stores whose NVS writer was retired (aux_outputs, ramp_assist, ki_base,

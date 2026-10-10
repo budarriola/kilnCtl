@@ -294,3 +294,30 @@ class BackupImportTransportWordingTest(_Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StaleStoresNoteTest(_Base):
+    """persfx3 LOW-4: stale_or_unknown_stores is surfaced by export and by an import of such a file."""
+
+    def test_export_warns_when_stores_are_stale(self):
+        doc = dict(_GOOD_DOC, stale_or_unknown_stores=["zones.json", "aux_outputs.bin"])
+        out_path = os.path.join(self._tmpdir, "out.json")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                         return_value=(json.dumps(doc), doc)):
+            result = msi.backup_export(out_path=out_path)
+        self.assertIn("WARNING", result)
+        self.assertIn("zones.json", result)
+
+    def test_export_silent_when_key_absent(self):
+        out_path = os.path.join(self._tmpdir, "out.json")
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                         return_value=(json.dumps(_GOOD_DOC), _GOOD_DOC)):
+            result = msi.backup_export(out_path=out_path)
+        self.assertNotIn("stale_or_unknown_stores", result)
+
+    def test_note_helper(self):
+        self.assertEqual(msi._stale_stores_note({"stale_or_unknown_stores": []}, "x"), "")
+        self.assertEqual(msi._stale_stores_note([], "x"), "")
+        self.assertIn("a.bin", msi._stale_stores_note({"stale_or_unknown_stores": ["a.bin"]}, "x"))

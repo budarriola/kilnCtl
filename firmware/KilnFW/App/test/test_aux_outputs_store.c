@@ -422,13 +422,17 @@ static void test_dual_write_and_file_tiebreak(void)
     TEST_CHECK(aux_outputs_cfg_conflict_mask() == 0x04 && aux_outputs_cfg_enabled_mask() == 0,
                "file-sourced entry is reconciled against the zones too");
 
-    /* A legacy/rollback writer left an NVS copy at the SAME rev with different
-     * content: NVS wins the equal-rev tie (the dangerous case stays visible). */
+    /* persfx3 MED-3: a frozen NVS copy at the SAME rev with different content is never re-adopted; the file
+     * wins and the stale NVS keys are erased. */
     aux_outputs_blob_t legacy = make_blob_one_enabled(0);
     stash_blob(&legacy, sizeof(legacy), 5);
     simulate_reboot();
     aux_outputs_cfg_start(0);
-    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x01, "equal rev, differing bytes: NVS wins");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0x04, "equal rev, differing bytes: the file wins, NVS not adopted");
+    hal_kv_handle_t hk;
+    TEST_CHECK(hal_kv_open(&hk, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) != HAL_OK ||
+                   hal_kv_key_exists(&hk, NVS_KEY_AUX_OUT) != HAL_OK,
+               "the frozen NVS aux blob was erased once the file was adopted");
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
@@ -616,7 +620,7 @@ static void test_start_holds_no_lock_during_io(void)
 {
     fresh_board();
     aux_outputs_blob_t blob = make_blob_one_enabled(1);
-    stash_blob(&blob, sizeof(blob), 3);
+    TEST_CHECK(pref_cfg_fs_save(AUX_OUTPUTS_FILE_PATH, &blob, sizeof(blob), 3) == ESP_OK, "cfg file seeded");
     g_probe_crc_max_depth = -1;
     g_test_stub_lock_depth = 0;
     TEST_CHECK(aux_outputs_cfg_start(0) == ESP_OK, "start ok");

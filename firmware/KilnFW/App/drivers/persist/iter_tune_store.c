@@ -9,6 +9,7 @@
 
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
+#include "legacy_nvs_erase.h"
 #include "pref_cfg_fs.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
@@ -202,14 +203,16 @@ esp_err_t iter_tune_store_start(void) {
     if (pref_cfg_fs_probe_newer_wrong_size(ITER_TUNE_CFG_FILE_PATH, sizeof(nvs_blob), 0, ITER_TUNE_STORE_VERSION,
                                            &newer_ver)) {
         note_version_byte(newer_ver);
-        have = nvs_ok;
-        if (nvs_ok) {
-            resolved = nvs_blob;
-            resolved_rev = nvs_rev;
-        }
+        /* persfx3 MED-3: the frozen NVS copy is never adopted, not even beside a newer-firmware file. */
+        have = false;
     } else {
         have = pref_cfg_fs_resolve_nvs_retired(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
                                    validate_and_note, &resolved, &resolved_rev, &used_file);
+    }
+    if (used_file) {
+        /* persfx3 MED-3: retire the frozen NVS copy once the file is the adopted source. */
+        static const char *const k_legacy[] = {ITER_TUNE_NVS_KEY_BLOB, ITER_TUNE_NVS_KEY_REV};
+        (void)legacy_nvs_erase_keys(TAG, ITER_TUNE_NVS_PARTITION, ITER_TUNE_NVS_NAMESPACE, k_legacy, 2);
     }
     if (have) {
         s_blob = resolved;

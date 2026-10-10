@@ -123,7 +123,7 @@ static esp_err_t settings_tz_post_handler(httpd_req_t *req)
          * live value took effect, so this is reported as an error to the
          * client rather than silently swallowed, but is not a 500: the
          * board is in a consistent (if not-yet-persisted) state. */
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, TIME_SYNC_TZ_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");
@@ -245,7 +245,7 @@ static esp_err_t settings_display_power_post_handler(httpd_req_t *req)
          * (see its own comment) -- a non-OK here means the values took
          * effect for the rest of this boot but a save failed, same
          * "consistent but not-yet-persisted" reporting as the tz handler. */
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, DISPLAY_POWER_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");

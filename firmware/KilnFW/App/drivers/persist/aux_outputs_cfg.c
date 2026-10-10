@@ -16,6 +16,7 @@
 #include "hal_kv.h"
 #include "kiln_io.h"
 #include "nvs_key_check.h"
+#include "legacy_nvs_erase.h"
 #include "pref_cfg_fs.h"
 #include "relay_authority.h" /* relay_authority_reset_in_flight() -- aux_outputs_cfg_set() */
 
@@ -195,6 +196,12 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve_nvs_retired(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
                                           aux_outputs_cfg_file_validate, &resolved, &resolved_rev, &used_file);
+    if (used_file && !nvs_newer) {
+        /* persfx3 MED-3: the file is authoritative; retire the frozen NVS copy so no later file loss can
+         * resurrect a rule the operator has since disabled. Retried next boot on failure. */
+        static const char *const k_legacy[] = {NVS_KEY_AUX_OUT, NVS_KEY_AUX_OUT_REV};
+        (void)legacy_nvs_erase_keys(TAG, KILN_NVS_PARTITION, NVS_NAMESPACE, k_legacy, 2);
+    }
     ao_lock(s_lock);
     apply_defaults();
     if (nvs_newer) {

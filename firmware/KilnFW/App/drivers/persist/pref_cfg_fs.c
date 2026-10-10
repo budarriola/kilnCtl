@@ -485,6 +485,28 @@ static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_
     }
     unknown_set(rel_path, false);
 
+    if (!adopt_nvs_if_unreadable) {
+        /* persfx3 MED-3: NVS-retired store. Its NVS copy is frozen at the dual-write close and is never a source
+         * again: a valid file wins outright (no rev tie-break that could pick the frozen copy), and an absent /
+         * corrupt / wrong-size / invalid file, or an unmounted cfg, gives safe defaults and writes nothing
+         * (no NVS -> file migration, so a disabled rule cannot be resurrected). The store erases its legacy NVS
+         * keys once it sees used_file, see legacy_nvs_erase.h. */
+        if (file_valid) {
+            memcpy(out_bytes, file_bytes, item_size);
+            *out_rev = file_rev;
+            *out_used_file = true;
+            return true;
+        }
+        if (nvs_valid) {
+            ESP_LOGW(PREF_FS_TAG, "%s: no usable cfg file -- frozen legacy NVS copy NOT adopted (safe defaults)",
+                     rel_path);
+        }
+        memset(out_bytes, 0, item_size);
+        *out_rev = 0;
+        *out_used_file = false;
+        return false;
+    }
+
     if (!file_valid) {
         // No usable file -- fall back to the NVS candidate, and if it is
         // itself trustworthy, opportunistically write it out (lazy,

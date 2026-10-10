@@ -822,6 +822,9 @@ def control_set_zone_limits(
                     f"a firing or autotune run started after this tool's own precheck; distinct "
                     f"from the safety-ceiling-raise 409 above and from OTA's 428 interlock "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -999,6 +1002,9 @@ def control_set_zone_type(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -1380,6 +1386,9 @@ def control_set_zone_coupling(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"
@@ -1563,6 +1572,9 @@ def control_set_relay_type(
             return (f"refused: system_mode_gate refused this write (HTTP 409): {exc.detail} -- "
                     f"a firing or autotune run started after this tool's own precheck "
                     f"(host={resolved})")
+        unreadable = zones_http_client.unreadable_store_refusal(exc.status, exc.detail)
+        if unreadable:
+            return f"{unreadable} (host={resolved})"
         return f"error: POST /api/zones failed (host={resolved}): {exc}"
     if post_result != "ok":
         return f"refused: POST /api/zones refused: {post_result} (host={resolved})"

@@ -204,7 +204,7 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
     esp_err_t err = setup_wizard_progress_set_step((uint8_t)step_num, state, note);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "setup_wizard_progress_set_step(%ld) failed: %s", step_num, esp_err_to_name(err));
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, SETUP_WIZARD_PROGRESS_FILE_PATH, err);
     }
 
     httpd_resp_set_type(req, "application/json");
