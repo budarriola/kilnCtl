@@ -2866,6 +2866,22 @@ static void test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock
 // into dozens of unrelated suites that run later in this same combined
 // executable. Covered by direct code inspection instead.
 
+static void test_backup_import_job_refused_when_reset_mark_set(void)
+{
+    TEST_SECTION("backup_import_job -- reset mark set after the flag is published refuses before any write, flag cleared");
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    g_total_write_calls = 0;
+    g_test_reset_in_flight = true;
+    run_backup_import_job_with_body(k_job_body);
+    g_test_reset_in_flight = false;
+    TEST_CHECK(g_total_write_calls == 0, "nothing written while a factory reset is in flight");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 0, "refused before the interlock re-check");
+    TEST_CHECK(!backup_import_restore_in_flight(), "restore flag cleared after the refusal");
+    reset_backup_import_post_stubs();
+    reset_stub_state();
+}
+
 static void test_wrong_kind_refused(void)
 {
     TEST_SECTION("backup_import_apply -- wrong \"kind\" is refused");
@@ -7143,6 +7159,7 @@ void run_test_backup_import(void)
     test_backup_import_post_refused_by_sweep_reason_via_interlock();
     test_backup_import_job_rechecks_mode_gate_before_writing();
     test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock();
+    test_backup_import_job_refused_when_reset_mark_set();
     test_backup_import_job_clears_restore_in_flight_flag();
 
     test_malformed_body_writes_nothing();

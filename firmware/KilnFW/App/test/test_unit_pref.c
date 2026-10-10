@@ -31,6 +31,7 @@
 #include "cfg_fs.h"
 
 #include "../drivers/persist/unit_pref.c"
+#include "../drivers/persist/cfg_save_barrier.h"
 #include "save_section_probe.h"
 
 static const char *UP_SCRATCH_BASE = "cfg_fs_test_unit_pref";
@@ -499,6 +500,53 @@ static void test_save_reserves_worker_around_lock(void)
     cfg_fs_deinit();
 }
 
+/* Factory-reset writer fence (pref_cfg_fs.h): refusal under the save lock, and the barrier. */
+static bool g_up_reset_mark = false;
+static bool up_reset_hook(void) { return g_up_reset_mark; }
+
+static void test_reset_mark_refuses_save_and_keeps_ram(void)
+{
+    TEST_SECTION("unit_pref_set: reset mark refuses under the lock, RAM and file untouched");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    int base = g_test_stub_lock_depth;
+    pref_cfg_fs_set_reset_refuse_hook(up_reset_hook);
+    g_up_reset_mark = true;
+    uint32_t r0 = s_unit_pref_rev;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_ERR_INVALID_STATE, "refused while the mark is set");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "RAM unchanged by a refused save");
+    TEST_CHECK(s_unit_pref_rev == r0, "rev unchanged");
+    TEST_CHECK(g_test_stub_lock_depth == base, "save lock released on the refusal path");
+    uint8_t raw = 1;
+    TEST_CHECK(pref_cfg_fs_save("x.bin", &raw, 1, 1) == ESP_ERR_INVALID_STATE, "pref_cfg_fs_save refuses centrally");
+    g_up_reset_mark = false;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "saves again once the mark is clear");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    cfg_fs_deinit();
+}
+
+static void test_reset_barrier_cycles_every_registered_lock(void)
+{
+    TEST_SECTION("persist_reset_barrier: takes and gives each registered save lock");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "a save registers its lock");
+    size_t n = pref_cfg_fs_lock_registry_count();
+    TEST_CHECK(n >= 1, "registry holds at least unit_pref's lock");
+    int base = g_test_stub_lock_depth;
+    ssp_install();
+    persist_reset_barrier();
+    TEST_CHECK(g_ssp.enters == (int)n && g_ssp.exits == (int)n, "one take/give per registered lock");
+    TEST_CHECK(g_test_stub_lock_depth == base, "every lock given back");
+    size_t n_after = pref_cfg_fs_lock_registry_count();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "second save works after the barrier");
+    TEST_CHECK(pref_cfg_fs_lock_registry_count() == n_after, "a lock registers only once");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
@@ -515,6 +563,8 @@ void run_test_unit_pref(void)
     test_mount_failed_falls_through_to_nvs_only();
     test_save_holds_lock_across_rev_read_and_commit();
     test_save_reserves_worker_around_lock();
+    test_reset_mark_refuses_save_and_keeps_ram();
+    test_reset_barrier_cycles_every_registered_lock();
 
     test_start_partition_init_failure_returns_error_and_defaults();
     test_start_open_error_without_file_returns_error();

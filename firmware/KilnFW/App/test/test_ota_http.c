@@ -461,6 +461,19 @@ void relay_authority_reset_in_flight_end(void)
     }
 }
 bool relay_authority_reset_in_flight(void) { return g_reset_in_flight_depth != 0; }
+// Writer fence: the reset job brackets itself, and persist_reset_barrier() must run after the mark is set.
+static int g_reset_job_depth = 0;
+static int g_barrier_calls = 0;
+static int g_barrier_saw_mark = 0;
+void relay_authority_reset_job_enter(void) { g_reset_job_depth++; }
+void relay_authority_reset_job_exit(void) { g_reset_job_depth--; }
+void persist_reset_barrier(void)
+{
+    g_barrier_calls++;
+    if (g_reset_in_flight_depth != 0) {
+        g_barrier_saw_mark++;
+    }
+}
 
 // safety_link.h -- never actually invoked by any test here (ota_http_safety is
 // left NULL for every test -- ota_http_start()'s io_or_null/safety_or_null
@@ -1363,6 +1376,31 @@ static void test_factory_reset_execute_refused_by_mode_gate_during_firing(void)
 // Factory reset in flight, reset side: a firing that starts after the entry mode-gate check (modeled
 // by g_stub_run_starts_at_reset_mark) is seen by the late re-check taken after the reset mark is set.
 // The reset refuses with the mode gate's sentinel, dispatches no erase, and clears its mark.
+// Writer fence: a reset that proceeds runs the writer barrier once, AFTER the mark is set, and brackets
+// its job with relay_authority_reset_job_enter/exit; a refused reset runs no barrier.
+static void test_factory_reset_execute_runs_writer_barrier_after_mark(void)
+{
+    TEST_SECTION("factory_reset_execute() -- writer barrier runs once, after the reset mark is set");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_barrier_calls = 0;
+    g_barrier_saw_mark = 0;
+    g_reset_job_depth = 0;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_WIFI);
+    TEST_CHECK(g_barrier_calls == 1, "barrier ran exactly once");
+    TEST_CHECK(g_barrier_saw_mark == 1, "the mark was already set when the barrier ran");
+    TEST_CHECK(g_reset_job_depth == 0, "job enter/exit balanced");
+    g_reset_in_flight_depth = 0;
+
+    g_barrier_calls = 0;
+    g_stub_run_starts_at_reset_mark = true;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_run_starts_at_reset_mark = false;
+    TEST_CHECK(g_barrier_calls == 0, "a refused reset runs no barrier");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+}
+
 static void test_factory_reset_execute_refused_when_run_starts_during_dispatch(void)
 {
     TEST_SECTION("factory_reset_execute() -- a run started after the entry check is refused at dispatch, "
@@ -2847,6 +2885,7 @@ void run_test_ota_http(void)
     test_recovery_boot_set_failed_restores_boot_target();
     test_factory_reset_execute_refused_by_mode_gate_during_firing();
     test_factory_reset_execute_refused_when_run_starts_during_dispatch();
+    test_factory_reset_execute_runs_writer_barrier_after_mark();
     test_factory_reset_http_refused_when_run_starts_during_dispatch();
     test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase();
     test_factory_reset_execute_refused_by_sweep_or_restore();

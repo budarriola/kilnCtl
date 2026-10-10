@@ -1250,6 +1250,9 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
                                "check the profiles NVS partition, then reboot.", (unsigned)id);
         return ESP_ERR_INVALID_STATE;
     }
+    if (cfg_save_lock_reset_refused()) { /* caller holds the profiles save lock; factory reset in flight */
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_profile_rev[id] + 1;
     esp_err_t ferr = profiles_cfg_fs_save(id, &s_profiles.profiles[id], new_rev);
     if (ferr != ESP_OK) {

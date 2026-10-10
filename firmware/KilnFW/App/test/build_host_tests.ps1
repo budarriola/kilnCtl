@@ -299,6 +299,7 @@ try {
         (Join-Path $driversDir "persist/cfg_fs_format_gate.c"),
         (Join-Path $driversDir "persist/cfg_fs_status.c"),
         (Join-Path $driversDir "persist/pref_cfg_fs.c"),
+        (Join-Path $driversDir "persist/cfg_save_barrier.c"),
         # kiln config slots filesystem move (docs/FILESYSTEM_USER_DATA.md
         # section 5) -- kiln_cfg_store.c (#included directly by
         # test_kiln_cfg_store.c above) now calls into

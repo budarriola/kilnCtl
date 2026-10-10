@@ -4045,6 +4045,18 @@ typedef struct {
  * sent. */
 static BACKUP_IMPORT_NOINLINE bool backup_import_job_recheck_refused(httpd_req_t *async_req, bool ack_no_safety)
 {
+    /* Factory-reset mark, read AFTER backup_import_job() published
+     * s_backup_restore_in_flight (store-then-read, same pairing as the heat
+     * sweep): a reset whose mark landed before this read is refused here
+     * (flag cleared by the wrapper); a reset that sets its mark later sees
+     * the restore's savers refuse under their save locks. Both orders covered. */
+    if (relay_authority_reset_in_flight()) {
+        ESP_LOGW(BACKUP_TAG, "backup import refused: factory reset in flight (job re-check)");
+        httpd_resp_set_status(async_req, "409 Conflict");
+        httpd_resp_set_type(async_req, "text/plain");
+        httpd_resp_sendstr(async_req, "factory reset in progress");
+        return true;
+    }
     sys_mode_snapshot_t mode_snap = { 0 };
     relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
     char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
