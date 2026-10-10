@@ -26,7 +26,7 @@ in the Host rule itself.
 
 ### M1 (MEDIUM): captive 302 sends LAN clients to the SoftAP IP
 
-**FIXED in 9bc8cbfc (SHA before rebase; see git log).**
+**FIXED in 9a99223a.**
 
 `firmware/KilnFW/App/drivers/http/wifi_provision_http.c:884-889`
 
@@ -59,7 +59,7 @@ header values, and the send happens in the same frame).
 
 ### M2 (MEDIUM, test gap): the seqlock tests cannot see the RAM assign, only the persist
 
-**FIXED in 3c4e2dd4 (SHA before rebase; see git log).**
+**FIXED in 2974eacd.**
 
 `firmware/KilnFW/App/test/test_profiles_http.c:3982` (`sg_write_fn`) and the
 header comment above it. The relevant source is `profiles_http.c:2435-2436`,
@@ -95,7 +95,7 @@ edit/delete failure paths (persist error) have no bracket test.
 
 ### L1 (LOW): login and bootstrap 403s bypass the refusal alert and show raw JSON
 
-**FIXED in f0642fdb (SHA before rebase; see git log).**
+**FIXED in 6453f331.**
 
 `firmware/KilnFW/App/drivers/http/app.js:347-357` (`isAuthExemptUrl`) and `:626-649`;
 `login_page.html:90-110`, `:129-151`
@@ -116,7 +116,7 @@ hook at `app.js:1257`, and both login UIs print `resp.text()`.
 
 ### L2 (LOW): the OTA stage upload uses XHR, so it gets no refusal alert
 
-**FIXED in f0642fdb (SHA before rebase; see git log).**
+**FIXED in 6453f331.**
 
 `firmware/KilnFW/App/drivers/net/ota_page.html:766-783`
 
@@ -130,7 +130,7 @@ and is noted only for completeness.
 
 ### L3 (LOW): the netif-read-failure fallback is untested and leaves the captive flow broken
 
-**FIXED in 9bc8cbfc (SHA before rebase; see git log).**
+**FIXED in 9a99223a.**
 
 `wifi_provision_http.c:883-888`
 
@@ -146,7 +146,7 @@ when the request arrived on the AP, and add an `ESP_LOGW`.
 
 ### L4 (LOW): blank-omit resets the 8 guard thresholds and hides typos; the page comment is wrong
 
-**FIXED in f0642fdb (SHA before rebase; see git log).**
+**FIXED in 6453f331.**
 
 `firmware/KilnFW/App/drivers/http/zones_page.html:2654-2661`;
 `zones_http_post_parse.c:578-665`
@@ -178,7 +178,7 @@ and a reload clears it.
 
 ### L5 (LOW): the wizard marks step 11 "done" even when the read-back disagrees or fails
 
-**FIXED in f0642fdb (SHA before rebase; see git log).**
+**FIXED in 6453f331.**
 
 `firmware/KilnFW/App/drivers/http/setup_wizard_page.html:1513-1522`;
 `security_http.c:79-89`
