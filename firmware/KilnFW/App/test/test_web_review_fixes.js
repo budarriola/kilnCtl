@@ -72,7 +72,26 @@ function makeCtx(responses) {
   assert(!/z\d_|wrongdirwindow|driftperiod/.test(out.join(' ')), 'no wire keys in the refusal text');
   const out2 = bgl(['z0_driftperiod=', 'z1_debounce='], (zi, s) => zi === 0);
   assert(out2.join('|') === 'Zone 2 Sensor debounce', 'a blank guard field the operator cannot see (hidden heater-only row) is not named');
-  assert(/blank optional|omitBlankOptionalParams\(params\)/.test(ZONES), 'hidden blanks fall through to omit-blank (stored value kept)');
+  const ob = new Function(ZONES.match(/var ZONE_OPTIONAL_KEY_RE = [^\n]*\n/)[0] +
+    ZONES.match(/function omitBlankOptionalParams\(params\) \{[\s\S]*?\r?\n\}\r?\n/)[0] + '; return omitBlankOptionalParams;')();
+  assert(ob(['z0_kp=1', 'z0_driftperiod=', 'z1_coupling_c2= ', 'z0_name=', 'z0_debounce=5']).join('|') === 'z0_kp=1|z0_name=|z0_debounce=5',
+    'omitBlankOptionalParams drops blank optional keys only (stored value kept), keeps filled and non-optional blanks');
+  assert(/omitBlankOptionalParams\(params\);/.test(ZONES.slice(ZONES.indexOf("msg.textContent = 'Saving"))), 'Save handler runs params through omitBlankOptionalParams');
+
+  // ---- zones save timeout (LOW-5): edits kept, result-unknown text, explicit reload ----
+  const tn = ZONES.match(/function showSaveTimeoutNotice\(msgEl\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
+  let reloads = 0, clickFn = null;
+  const kids = [];
+  const fakeMsg = { textContent: 'x', appendChild: (c) => kids.push(c) };
+  new Function('document', 'loadCurrent', tn + '; showSaveTimeoutNotice(arguments[2]);')(
+    { createElement: () => ({ addEventListener: (ev, fn) => { clickFn = fn; } }) }, () => { reloads++; }, fakeMsg);
+  assert(/unknown/i.test(fakeMsg.textContent) && /edits are still in the form/.test(fakeMsg.textContent), 'timeout notice says result unknown and edits kept');
+  assert(reloads === 0 && kids.length === 1 && /Reload/.test(kids[0].textContent), 'timeout notice does not reload; offers a Reload button');
+  clickFn(); assert(reloads === 1, 'Reload button reloads from the board');
+  const abortBranch = ZONES.slice(ZONES.indexOf("e.name === 'AbortError'"));
+  const abortBody = abortBranch.slice(0, abortBranch.indexOf('return;'));
+  assert(/showSaveTimeoutNotice\(msg\)/.test(abortBody) && !/loadCurrent\(/.test(abortBody),
+    'AbortError branch shows the notice and does NOT auto-reload');
 
   // ---- wizard helpers ----
   const w1 = WIZ.match(/function stepRefusalText\(r\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
@@ -92,6 +111,14 @@ function makeCtx(responses) {
   assert(!/^Saved/.test(f.wizardLoginReadBackText(true, { web_enabled: false })), 'mismatch read-back never says "Saved"');
   assert(!/^Saved/.test(f.wizardLoginReadBackText(true, null)), 'unreadable read-back never says "Saved"');
   assert(/^Saved\. Read back: web login is now ON/.test(f.wizardLoginReadBackText(true, { web_enabled: true })), 'matching read-back still says Saved');
+  // Every step Save handler locks (and releases) on its own button, inside its own click handler.
+  [1, 2, 4, 5, 6, 11].forEach(function (n) {
+    const hAt = WIZ.indexOf("getElementById('step" + n + "Save').addEventListener('click'");
+    const lock = new RegExp("var unlock" + n + " = lockSave\\('step" + n + "Save'\\);\\s*if \\(!unlock" + n + "\\) return;").exec(WIZ.slice(hAt > 0 ? hAt : 0));
+    const nextH = WIZ.indexOf('.addEventListener(\'click\'', hAt + 80);
+    assert(hAt > 0 && lock && (nextH < 0 || hAt + lock.index < nextH), 'wizard step ' + n + ' Save handler takes the double-submit lock');
+    assert(new RegExp('then\\(unlock' + n + '\\)|unlock' + n + '\\(\\)|, unlock' + n + '\\)').test(WIZ), 'wizard step ' + n + ' releases the lock');
+  });
   assert(/return fetch\('\/api\/auth\/config'\)\.then\(function \(rb\)/.test(WIZ), 'step 11 read-back chain is returned');
   assert(/getElementById\('stepStatusLine'\)\.className = 'hint'/.test(WIZ), 'stepStatusLine className reset on render');
 

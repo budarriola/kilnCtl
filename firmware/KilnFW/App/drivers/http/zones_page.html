@@ -2698,6 +2698,17 @@ var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runaway
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
 }
+/* 30 s save timeout (dev web review LOW-5): the result is UNKNOWN. The form is left exactly as
+   the operator typed it; an explicit button reloads from the board (discarding the edits). */
+function showSaveTimeoutNotice(msgEl) {
+  msgEl.textContent = 'Save result unknown: no answer from the board after 30 s, so the save may or ' +
+    'may not have been applied. Your edits are still in the form. ';
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = 'Reload from board (discards your edits)';
+  b.addEventListener('click', function () { loadCurrent(); });
+  msgEl.appendChild(b);
+}
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');
   var saveBtnEl = document.getElementById('saveBtn');
@@ -2987,10 +2998,9 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     saveBtnEl.disabled = false;
     if (e && e.name === 'AbortError') {
       /* The abort may fire after the POST reached the board, so the save may or may not have
-         landed: say so and reload the form from the board instead of implying nothing happened. */
-      msg.textContent = 'No answer from the board after 30 s -- the save may or may not have been applied. ' +
-        'Reloading the current settings; check them before saving again.';
-      loadCurrent();
+         landed. Keep the operator's unsaved edits (dev web review LOW-5): say the result is
+         unknown and offer an explicit reload, never an automatic one. */
+      showSaveTimeoutNotice(msg);
       return;
     }
     /* POST /api/zones's safety-ceiling-raise refusal (owner request

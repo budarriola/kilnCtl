@@ -504,6 +504,22 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    // Validate the new password BEFORE spending the one-time token: a weak
+    // password is a typo the caller can fix, and must not force a fresh
+    // /api/auth/forgot. The backend re-checks at write time (defence in
+    // depth); consume stays immediately before the write so a token is
+    // still spent atomically with the actual password set.
+    if (web_auth_password_check(new_password, username, wifi_prov_get_ap_ssid(), wifi_prov_get_ap_password()) !=
+        WEB_AUTH_PW_OK) {
+        totp_secure_zero(reset_token, sizeof(reset_token));
+        totp_secure_zero(new_password, sizeof(new_password));
+        totp_backoff_record(ip, ip_known, false);
+        ESP_LOGW(TAG, "reset refused (weak password) from %s", ip);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false}");
+    }
+
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());
     totp_secure_zero(reset_token, sizeof(reset_token));
     bool ok = false;

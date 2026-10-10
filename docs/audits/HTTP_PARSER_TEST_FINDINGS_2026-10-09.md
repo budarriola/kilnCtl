@@ -34,8 +34,9 @@ Not covered: there is no `run_queue` body handler and no retarget body handler u
 existing `test_retarget_*`); `bootstrap_password` and `security_http.c` POST (their cores are tested,
 but no recv-stub harness exists; `security_backend_web_auth.c` pulls the full backend and was not
 built this round); `live edit` (`profile_live_edit` field editor) and `zones`-style per-field fuzz.
-Design note, not a defect: `/api/auth/reset` consumes the one-time token before the backend's
-strength check, so a weak `new_password` burns the token and the caller must redo `forgot`.
+Design note [FIXED 2026-10-10 in SHA_X]: `/api/auth/reset` used to consume the one-time token before the
+strength check, so a weak `new_password` burned the token. It now checks strength first (token untouched), with a host test.
+Recv-EOF mutants hanging `test_auth_totp_http_fuzz.c` [FIXED 2026-10-10 in SHA_X]: the fake recv has a per-request call cap, so a spinning loop FAILs.
 
 ## F1 (Low) `http_form_url_decode` writes `out[0]` when `out_cap == 0` and `src_len == 0` [FIXED 2026-10-09 in 20e1263f]
 - `firmware/KilnFW/App/drivers/common/http_form.h:32-60`. The `o + 1 >= out_cap` guard sits

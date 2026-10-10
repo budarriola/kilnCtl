@@ -89,9 +89,19 @@ static const char *s_body;
 static size_t s_body_len, s_off, s_chunk = 999;
 static size_t s_fail_after = (size_t)-1;
 static int s_fail_ret;
+// A handler loop mutated to keep reading on EOF/error would spin forever. Cap
+// the calls per request; past the cap return an error so the loop ends and
+// fuzz_post() reports the spin as a test FAILURE instead of a hang.
+#define FUZZ_RECV_CALL_CAP 1000
+static int s_recv_calls;
+static bool s_recv_spun;
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    if (++s_recv_calls > FUZZ_RECV_CALL_CAP) {
+        s_recv_spun = true;
+        return -1;
+    }
     if (s_off >= s_fail_after) {
         return s_fail_ret;
     }
@@ -127,6 +137,8 @@ esp_err_t web_send_gzip_not_acceptable(httpd_req_t *req, const char *tag, const 
 { (void)req; (void)tag; (void)page_name; return ESP_OK; }
 void web_set_asset_cache_headers(httpd_req_t *r) { (void)r; }
 httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
+const char *wifi_prov_get_ap_ssid(void) { return "KilnTestAP"; }
+const char *wifi_prov_get_ap_password(void) { return "ap-test-secret"; }
 esp_err_t wifi_prov_get_cached_sta_ip_netmask(char *ip_out, size_t ip_cap, char *nm_out, size_t nm_cap)
 {
     snprintf(ip_out, ip_cap, "10.0.0.2");
@@ -228,7 +240,10 @@ static int fuzz_post(esp_err_t (*h)(httpd_req_t *), const char *body, long long 
     httpd_req_t req;
     memset(&req, 0, sizeof(req));
     req.content_len = clen;
+    s_recv_calls = 0;
+    s_recv_spun = false;
     (void)h(&req);
+    TEST_CHECK(!s_recv_spun, "handler recv loop terminates on EOF/error (no spin)");
     s_fail_after = (size_t)-1;
     return s_err_status ? s_err_status : s_status_line;
 }
@@ -419,6 +434,21 @@ static void test_fuzz_reset(void)
     (void)totp_config_clear();
     st = fuzz_post(reset_post_handler, good, (long long)gl, (size_t)-1, 0);
     TEST_CHECK(st == 400 && s_setpw_calls == 0, "reset: token for a since-disenrolled TOTP does not set the password");
+
+    // Weak new password: refused WITHOUT burning the token; the same token then
+    // works with a strong password.
+    {
+        char weak[256];
+        snprintf(weak, sizeof(weak), "username=admin&reset_token=%s&new_password=short1", tok);
+        fuzz_fresh();
+        totp_reset_token_store(reset_tokens(), tok, "admin", now_ms());
+        st = fuzz_post(reset_post_handler, weak, (long long)strlen(weak), (size_t)-1, 0);
+        TEST_CHECK(st >= 400 && s_setpw_calls == 0 && fuzz_state_intact(), "reset: weak password is refused, nothing changed");
+        fake_time_advance_ms(6000); /* clear the 5 s failure backoff */
+        st = fuzz_post(reset_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(s_setpw_calls == 1 && strstr(s_sendstr, "\"ok\":true") != NULL,
+                   "reset: weak password did not burn the token; strong retry succeeds");
+    }
 
     // Control: the shaped body with a stored token reaches the setter once.
     fuzz_fresh();

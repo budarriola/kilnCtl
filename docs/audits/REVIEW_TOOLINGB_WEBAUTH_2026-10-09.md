@@ -90,6 +90,8 @@ let a failed or impossible verification read as success:
 
 ### LOW-4: tests that do not pin the fix
 
+[JS half FIXED 2026-10-10 in SHA_X: zones timeout, per-step wizard lock and omitBlankOptionalParams are now behavioural and negtest-CAUGHT; the Python/guardFieldHidden/kcHostRefusalFromText/source-regex items remain open.]
+
 - `test_gate_flag_strictness_partb.py` unit-tests only `_is_gate_flag_name`. It never checks
   that a real registered tool (e.g. `flash_firmware(skip_backup="yes")`) is refused end to end
   through the registry.
@@ -109,7 +111,7 @@ let a failed or impossible verification read as success:
   "stepStatusLine className reset"), not behavior. They would catch a plain revert but not an
   equivalent break.
 
-### LOW-5: zones Save timeout reload discards the operator's unsaved edits
+### LOW-5: zones Save timeout reload discards the operator's unsaved edits [FIXED 2026-10-10 in SHA_X]
 
 On the 30 s abort, `382c3936` now calls `loadCurrent()`, which repopulates the form from the
 board. If the POST did not land, every edit the operator typed is silently replaced. The new
