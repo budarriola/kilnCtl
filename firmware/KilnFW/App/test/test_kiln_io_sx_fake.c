@@ -14,9 +14,8 @@
 // do not interleave" is checked only at the transfer level: each 16-bit
 // register pair write must be ONE bus transfer.
 //
-// Defects found are NOT asserted here; see
-// docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md (K7-*) and the
-// "K7-" comments below where a case was left out.
+// K7-01..K7-04 (docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md) are
+// asserted below and fixed in kiln_io.c.
 #include <stdint.h>
 #include <string.h>
 
@@ -276,18 +275,70 @@ static void test_partial_write_before_bank_a_never_energises(void)
     TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "relay neither energised nor claimed on");
 }
 
-/* K7-01 (left out): a write that LANDS on the chip but whose transfer then
- * reports an error (land_then_fail) leaves the coil energised while
- * kiln_io_set_relay returns an error AND relay_shadow stays 0. See findings doc. */
+/* K7-01: a write LANDS but the transfer reports a timeout. Error is returned,
+ * and the shadow must follow the chip (relay energised), not claim OFF. */
+static void test_k7_01_landed_write_with_error_resyncs_from_chip(void)
+{
+    setup_ready();
+    F.land_then_fail = 1;
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) != ESP_OK, "K7-01: error still reported");
+    F.land_then_fail = 0;
+    TEST_CHECK(chip_relays_logical() == 0x01, "K7-01: (precondition) the write did land, coil energised");
+    TEST_CHECK(g_io.relay_shadow == chip_relays_logical(), "K7-01: relay_shadow follows the chip, never OFF while energised");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, false) == ESP_OK && chip_relays_logical() == 0 && g_io.relay_shadow == 0,
+               "K7-01: a later OFF recovers");
+}
 
-/* K7-02 (left out): a stuck-high latch bit makes an OFF command fail
- * read-back; kiln_io_resync_relay_shadow adopts the DRIVER's written shadow
- * (0), so relay_shadow reports OFF while the coil is energised. */
+/* K7-02: a stuck-high latch bit makes the OFF fail; the shadow must read the
+ * chip and show ON, and the error stays reported. */
+static void test_k7_02_stuck_high_off_failure_shadow_shows_on(void)
+{
+    setup_ready();
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) == ESP_OK, "relay 1 on");
+    F.stuck_set[SX1509_REG_DATA_A] = (uint8_t)(1u << phys_pin(1)); /* latch bit stuck high */
+    esp_err_t e = kiln_io_set_relay(&g_io, 1, false);
+    TEST_CHECK(e != ESP_OK, "K7-02: failed OFF is reported");
+    TEST_CHECK(chip_relays_logical() == 0x01, "K7-02: (precondition) coil still energised");
+    TEST_CHECK(g_io.relay_shadow == 0x01, "K7-02: relay_shadow reports the true ON state");
+}
 
-/* K7-03 (left out): after SX1509_reset (the owner's CMD_SX_RESET path) all pins
- * are inputs; kiln_io_set_relay(ON) then returns ESP_OK and relay_shadow says
- * ON while nothing is driven. */
+/* Unreadable chip after a failed write: never guess OFF. */
+static void test_k7_unknown_chip_state_does_not_claim_off(void)
+{
+    setup_ready();
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) == ESP_OK, "relay 2 on");
+    F.fail_forever = 1;
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, false) != ESP_OK, "OFF on dead bus fails");
+    TEST_CHECK(g_io.relay_shadow == 0x02, "unreadable chip: shadow keeps the last verified ON, never flips to OFF");
+    F.fail_forever = 0;
+}
 
+/* K7-03: after an expander reset the relay pins are inputs. A relay ON must
+ * never report success with nothing driven, and the owner's re-init
+ * (kiln_io_reinit) must restore outputs, all latched OFF, verified. */
+static void test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven(void)
+{
+    setup_ready();
+    TEST_CHECK(SX1509_reset(&g_exp, false) == ESP_OK, "soft reset");
+    esp_err_t e = kiln_io_set_relay(&g_io, 1, true);
+    if (e == ESP_OK) TEST_CHECK(chip_relays_logical() & 0x01, "K7-03: OK reported => coil really energised");
+    else TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "K7-03: refused, nothing driven, no ON claim");
+
+    TEST_CHECK(kiln_io_reinit(&g_io) == ESP_OK, "K7-03: reinit after reset ok");
+    TEST_CHECK((chip_dir() & 0x000F) == 0 && chip_relays_logical() == 0, "K7-03: relay pins outputs, all latched OFF");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) == ESP_OK, "ON ok after reinit");
+    TEST_CHECK(chip_relays_logical() == 0x01 && g_io.relay_shadow == 0x01, "and the coil is really energised");
+}
+
+static void test_k7_03_reinit_failure_blocks_relay_on(void)
+{
+    setup_ready();
+    (void)SX1509_reset(&g_exp, false);
+    F.stuck_set[SX1509_REG_DIR_A] = 0x01; /* a relay pin can never become an output */
+    TEST_CHECK(kiln_io_reinit(&g_io) != ESP_OK, "reinit fails when the direction read-back is wrong");
+    TEST_CHECK(!g_io.initialized, "board is not initialised");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) != ESP_OK && chip_relays_logical() == 0, "relay ON refused, nothing driven");
+}
 static void test_all_relays_off_failfast_and_failsafe(void)
 {
     setup_ready();
@@ -353,7 +404,29 @@ static void test_por_then_off_commands_are_honest(void)
     TEST_CHECK(chip_relays_logical() == 0, "a POR de-energises the coil (inputs)");
     esp_err_t e = kiln_io_set_relay(&g_io, 2, true);
     if (e == ESP_OK) TEST_CHECK(chip_relays_logical() & 0x02, "if success is reported the coil must really be energised");
-    /* K7-04 (left out): after a POR kiln_io_all_relays_off returns ESP_ERR_INVALID_RESPONSE (read-back vs stale dir shadow) and never re-drives dir. */
+}
+
+/* K7-04: chip POR behind the driver's back; all_relays_off repairs direction. */
+static void test_k7_04_all_relays_off_after_por_repairs_direction(void)
+{
+    setup_ready();
+    (void)kiln_io_set_relay(&g_io, 1, true);
+    chip_por();
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK, "K7-04: all-off reports success after repairing");
+    TEST_CHECK((chip_dir() & 0x000F) == 0, "K7-04: relay pins are outputs again");
+    TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "K7-04: relays OFF");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 3, true) == ESP_OK && chip_relays_logical() == 0x04, "board usable afterward");
+}
+
+static void test_k7_04_unrepairable_por_reports_failure(void)
+{
+    setup_ready();
+    (void)kiln_io_set_relay(&g_io, 1, true);
+    chip_por();
+    F.stuck_set[SX1509_REG_DIR_A] = 0x01; /* repair impossible */
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) != ESP_OK, "K7-04: failure stays honest when repair is impossible");
+    TEST_CHECK(chip_relays_logical() == 0, "no coil energised");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) != ESP_OK && chip_relays_logical() == 0, "ON refused afterward");
 }
 
 static void test_sx_reset_drops_relays_and_resyncs_shadows(void)
@@ -390,6 +463,13 @@ int main(void)
     test_timeout_error_code_propagates();
     test_transient_nack_retried_to_success();
     test_partial_write_before_bank_a_never_energises();
+    test_k7_01_landed_write_with_error_resyncs_from_chip();
+    test_k7_02_stuck_high_off_failure_shadow_shows_on();
+    test_k7_unknown_chip_state_does_not_claim_off();
+    test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven();
+    test_k7_03_reinit_failure_blocks_relay_on();
+    test_k7_04_all_relays_off_after_por_repairs_direction();
+    test_k7_04_unrepairable_por_reports_failure();
     test_all_relays_off_failfast_and_failsafe();
     test_arg_validation();
     test_set_io_dir_never_touches_relay_pins_and_matches_chip();

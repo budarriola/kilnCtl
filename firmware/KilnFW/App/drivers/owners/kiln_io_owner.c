@@ -568,6 +568,12 @@ static void owner_task(void *arg)
                  * relays OFF, never on, so there is nothing for those gates
                  * to protect against. */
                 s_io->relay_shadow = 0;
+                /* K7-03: a POR left the relay pins as inputs. Restore outputs with
+                 * every relay latched OFF, verified by read-back, before any later
+                 * relay command can report success. On failure the board stays
+                 * not-initialised (relay ON refused) and the error is returned. */
+                esp_err_t re = kiln_io_reinit(s_io);
+                if (re != ESP_OK) r.err = re;
                 ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, all relay pins now inputs, "
                               "relay_shadow cleared to match", cmd.args.sx_reset.hard ? "hard" : "soft");
             }

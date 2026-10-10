@@ -139,21 +139,123 @@ static void kiln_io_note_relay_shadow_changed(kiln_io_t *io); /* forward decl --
                                                                   used by both this function and
                                                                   the write paths further down */
 
+/* Reads the chip's real relay state: a relay is energised only if its pin is an
+ * OUTPUT (RegDir bit 0) AND reads high. Both registers are read from the part,
+ * never from the driver's shadows (K7-02: the driver data shadow records what
+ * was last ACKed, not what the pins hold). Returns false if the chip cannot be
+ * read. *out_logical is in logical relay-bit order. */
+static bool kiln_io_read_chip_relays(kiln_io_t *io, uint8_t *out_logical)
+{
+    uint8_t dir_b[2] = { 0xFF, 0xFF };
+    uint16_t port = 0;
+    if (SX1509_read_regs(io->exp, SX1509_REG_DIR_B, dir_b, sizeof(dir_b)) != ESP_OK) return false;
+    if (SX1509_read_port(io->exp, &port) != ESP_OK) return false;
+    uint16_t dir = (uint16_t)(((uint16_t)dir_b[0] << 8) | dir_b[1]);
+    uint16_t driven = (uint16_t)(port & ~dir & (uint16_t)KILN_IO_RELAY_MASK);
+    *out_logical = kiln_io_remap_relay_bits((uint8_t)driven);
+    return true;
+}
+
+/* Re-derives the relay shadow from the CHIP after a failed or uncertain write.
+ * If the chip cannot be read, the state is unknown: first try to drive every
+ * relay OFF (the only safe direction); if that also fails, the shadow
+ * keeps its last verified state (the caller still gets the error) and logs it. */
 static void kiln_io_resync_relay_shadow(kiln_io_t *io)
 {
-    uint8_t accepted_phys = (uint8_t)(SX1509_get_shadow(io->exp) & (uint16_t)KILN_IO_RELAY_MASK);
-    /* SX1509_get_shadow() reads back real hardware pin bits -- remap into
-     * logical-relay-bit order before comparing against/overwriting
-     * relay_shadow, which is logical everywhere else (kiln_relay_logical_to_
-     * pin_bit's own comment above). */
-    uint8_t accepted = kiln_io_remap_relay_bits(accepted_phys);
-    if (accepted != io->relay_shadow) {
-        ESP_LOGE(TAG, "relay shadow mismatch: commanded 0x%X, expander last accepted 0x%X (logical) -- "
-                      "reporting the expander's value",
-                 io->relay_shadow, accepted);
-        io->relay_shadow = accepted;
+    uint8_t actual = 0;
+    if (!kiln_io_read_chip_relays(io, &actual)) {
+        if (SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0) == ESP_OK &&
+            kiln_io_read_chip_relays(io, &actual)) {
+            /* fall through with the verified read-back */
+        } else {
+            actual = io->relay_shadow; /* keep the last verified state; the failure is reported to the caller */
+            ESP_LOGE(TAG, "relay state unknown (chip unreadable, safe-off failed): keeping shadow 0x%X",
+                     actual);
+        }
+    }
+    if (actual != io->relay_shadow) {
+        ESP_LOGE(TAG, "relay shadow mismatch: commanded 0x%X, chip holds 0x%X (logical) -- "
+                      "reporting the chip's value",
+                 io->relay_shadow, actual);
+        io->relay_shadow = actual;
     }
     kiln_io_note_relay_shadow_changed(io);
+}
+
+/* Steps 2-5 of bring-up (after a reset), then a read-back of the relay pins:
+ * they must be outputs, driven low. Only a verified result may mark the board
+ * initialised. */
+static esp_err_t kiln_io_configure_pins(kiln_io_t *io)
+{
+    SX1509Class *exp = io->exp;
+    esp_err_t err = SX1509_write_port(exp, KILN_IO_SAFE_DATA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "loading safe output levels failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = SX1509_set_pullup(exp, KILN_IO_PULLUP_MASK);
+    if (err == ESP_OK) err = SX1509_set_pulldown(exp, 0);
+    if (err == ESP_OK) err = SX1509_set_open_drain(exp, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "input conditioning failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    uint32_t sense = 0;
+    for (uint8_t i = 0; i < KILN_IO_DIGITAL_COUNT; ++i) {
+        uint8_t pin = kiln_io_pins[i];
+        if (KILN_IO_DIR_MASK & KILN_BIT(pin)) {
+            sense |= SX1509_SENSE_FOR_PIN(pin, SX1509_SENSE_BOTH);
+        }
+    }
+    for (uint8_t ch = 0; ch < KILN_IO_DRDY_COUNT; ++ch) {
+        sense |= SX1509_SENSE_FOR_PIN(kiln_io_drdy_pins[ch], SX1509_SENSE_FALLING);
+    }
+    err = SX1509_set_interrupt(exp, (uint16_t)~KILN_IO_DIR_MASK, sense);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "interrupt configuration failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    err = SX1509_set_dir(exp, KILN_IO_DIR_MASK);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "direction configuration failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    (void)SX1509_get_interrupt_source(exp, NULL, true);
+
+    /* Verify from the chip: relay pins are outputs and none reads high. */
+    uint8_t dir_b[2] = { 0xFF, 0xFF };
+    uint16_t port = 0xFFFFu;
+    err = SX1509_read_regs(exp, SX1509_REG_DIR_B, dir_b, sizeof(dir_b));
+    if (err == ESP_OK) err = SX1509_read_port(exp, &port);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "relay pin read-back failed: %s", esp_err_to_name(err));
+        return err;
+    }
+    uint16_t dir = (uint16_t)(((uint16_t)dir_b[0] << 8) | dir_b[1]);
+    if ((dir & (uint16_t)KILN_IO_RELAY_MASK) != 0 || (port & (uint16_t)KILN_IO_RELAY_MASK) != 0) {
+        ESP_LOGE(TAG, "relay pin read-back wrong: dir=0x%04X port=0x%04X", dir, port);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+    return ESP_OK;
+}
+
+esp_err_t kiln_io_reinit(kiln_io_t *io)
+{
+    if (!io || !io->exp) return ESP_ERR_INVALID_ARG;
+    io->initialized = false; /* relay ON is refused until the read-back below passes */
+    esp_err_t err = SX1509_reset(io->exp, false);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "expander reset failed: %s", esp_err_to_name(err));
+        return kiln_io_track(io, err);
+    }
+    /* All pins are inputs now, so no relay can be energised. */
+    io->relay_shadow = 0;
+    kiln_io_note_relay_shadow_changed(io);
+    err = kiln_io_configure_pins(io);
+    if (err != ESP_OK) return kiln_io_track(io, err);
+    io->initialized = true;
+    ESP_LOGI(TAG, "board I/O re-initialised, all relays off");
+    return kiln_io_track(io, ESP_OK);
 }
 
 esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
@@ -179,63 +281,10 @@ esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
         return kiln_io_track(io, err);
     }
 
-    /* Step 2: load the output latches while every pin is still an input. This
-     * moves no pin -- it only decides what they will drive the instant they
-     * become outputs in step 5. Getting this order wrong is what makes relays
-     * click at boot: RegData's power-on value is all ones, so directions-first
-     * would energize all four coils until the next transfer landed. */
-    err = SX1509_write_port(exp, KILN_IO_SAFE_DATA);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "loading safe output levels failed: %s", esp_err_to_name(err));
-        return kiln_io_track(io, err);
-    }
-
-    /* Step 3: input conditioning. Pull-downs and open-drain are explicitly
-     * written to zero rather than assumed: a reset does set them to zero, but
-     * this function is also the recovery path after someone has been poking
-     * registers over the debug subcommands. */
-    err = SX1509_set_pullup(exp, KILN_IO_PULLUP_MASK);
-    if (err == ESP_OK) err = SX1509_set_pulldown(exp, 0);
-    if (err == ESP_OK) err = SX1509_set_open_drain(exp, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "input conditioning failed: %s", esp_err_to_name(err));
-        return kiln_io_track(io, err);
-    }
-
-    /* Step 4: interrupts, still before the pins start driving. Every input gets
-     * an interrupt; the mask register's polarity is inverted (1 = disabled), so
-     * the value written is the complement of the input mask. Sense is both
-     * edges on the opto input and the terminal blocks -- a contact opening
-     * matters as much as one closing -- and falling only on ~DRDY, whose rising
-     * edge is just the part rearming and carries no information. */
-    uint32_t sense = 0;
-    for (uint8_t i = 0; i < KILN_IO_DIGITAL_COUNT; ++i) {
-        uint8_t pin = kiln_io_pins[i];
-        if (KILN_IO_DIR_MASK & KILN_BIT(pin)) {
-            sense |= SX1509_SENSE_FOR_PIN(pin, SX1509_SENSE_BOTH);
-        }
-    }
-    for (uint8_t ch = 0; ch < KILN_IO_DRDY_COUNT; ++ch) {
-        sense |= SX1509_SENSE_FOR_PIN(kiln_io_drdy_pins[ch], SX1509_SENSE_FALLING);
-    }
-    err = SX1509_set_interrupt(exp, (uint16_t)~KILN_IO_DIR_MASK, sense);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "interrupt configuration failed: %s", esp_err_to_name(err));
-        return kiln_io_track(io, err);
-    }
-
-    /* Step 5: and only now do the outputs start driving -- with the values from
-     * step 2. */
-    err = SX1509_set_dir(exp, KILN_IO_DIR_MASK);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "direction configuration failed: %s", esp_err_to_name(err));
-        return kiln_io_track(io, err);
-    }
-
-    /* Clear anything the reconfiguration itself latched (changing a pin's sense
-     * clears its event bit, but the pins that were already settled may have
-     * recorded an edge as the pull-ups came on) so ~INT starts released. */
-    (void)SX1509_get_interrupt_source(exp, NULL, true);
+    /* Steps 2-5: latches first, conditioning, interrupts, then directions; see
+     * kiln_io_configure_pins(). Relay pins are read back before init succeeds. */
+    err = kiln_io_configure_pins(io);
+    if (err != ESP_OK) return kiln_io_track(io, err);
 
     io->initialized = true;
     kiln_io_note_relay_shadow_changed(io); /* relay_shadow is 0 here -- stamps relays_all_off_since_us */
@@ -284,6 +333,14 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
 
     uint8_t phys_mask = kiln_io_remap_relay_bits(mask);
     uint8_t phys_value = kiln_io_remap_relay_bits(value);
+    /* K7-03: never energise on uncertainty. If the driver's own direction
+     * shadow says a relay pin to be driven ON is not an output (an expander
+     * reset/POR left it an input), the latch write would "succeed" with nothing
+     * driven. Refuse; kiln_io_reinit() is the repair. OFF is always allowed. */
+    if ((SX1509_get_dir_shadow(io->exp) & (uint16_t)phys_value) != 0) {
+        ESP_LOGE(TAG, "relay ON refused: relay pin(s) 0x%X are not outputs (expander reset?)", phys_value);
+        return kiln_io_track(io, ESP_ERR_INVALID_STATE);
+    }
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)phys_mask, (uint16_t)phys_value);
     if (err == ESP_OK) {
         io->relay_shadow = (uint8_t)((io->relay_shadow & (uint8_t)~mask) | value);
@@ -323,9 +380,17 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
         kiln_io_note_relay_shadow_changed(io);
         ESP_LOGI(TAG, "all relays off");
     } else {
-        ESP_LOGE(TAG, "ALL RELAYS OFF FAILED: %s -- the expander is not answering",
+        ESP_LOGE(TAG, "ALL RELAYS OFF FAILED: %s -- trying a verified re-init",
                  esp_err_to_name(err));
         kiln_io_resync_relay_shadow(io);
+        /* K7-04: a chip POR behind the driver's back leaves relay pins as
+         * inputs (safe) but the data write cannot verify. Repair direction via
+         * a reset + verified re-configure; if that fails the original error
+         * stands (and the board stays not-initialised, so ON is refused). */
+        if (kiln_io_reinit(io) == ESP_OK) {
+            ESP_LOGI(TAG, "all relays off after re-init");
+            return kiln_io_track(io, ESP_OK);
+        }
     }
     return kiln_io_track(io, err);
 }

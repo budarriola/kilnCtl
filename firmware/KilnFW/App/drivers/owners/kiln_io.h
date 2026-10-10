@@ -172,6 +172,12 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value);
  * half-succeed. */
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io);
 
+/* Re-runs bring-up after the expander was reset/POR'd (CMD_SX_RESET, K7-03):
+ * reset, relays latched OFF, relay pins back to outputs, verified by chip
+ * read-back. Marks the board not-initialised until the read-back passes, so
+ * relay ON is refused meanwhile. Relays are never energised by this call. */
+esp_err_t kiln_io_reinit(kiln_io_t *io);
+
 /* The expander pin bits (IO0..IO3, see this header's top comment) that are
  * relay drives -- SX1509 pin numbering, not the schematic's Relay1..4
  * numbering. Exists so a caller outside this file (uart_bridge.c's raw
