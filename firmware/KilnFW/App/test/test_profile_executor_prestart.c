@@ -12960,6 +12960,20 @@ static void test_zone_off_pending_retry(void)
     TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
                "retry must write OFF to the pending mask");
     TEST_CHECK(s_exec.zone_off_pending_mask == 0, "pending clears after a landed write");
+    /* A retry whose write FAILS must keep the bits pending (fail-safe: the
+     * contacts are not assumed open) and try again on the next call. */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_fail = true;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.zone_off_pending_mask == 0x02,
+               "a failed retry write keeps the mask pending");
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 2 && s_exec.zone_off_pending_mask == 0x02,
+               "a still-failing retry is attempted again every call, never dropped");
+    g_relay_write_fail = false;
+    zone_off_pending_retry();
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "retry clears pending once the write lands");
     g_relay_write_calls = 0;
     zone_off_pending_retry();
     TEST_CHECK(g_relay_write_calls == 0, "nothing pending -> no write");

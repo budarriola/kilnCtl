@@ -36,9 +36,16 @@ void apply_relay(uint8_t zi, bool want_on)
         s_exec.zones[zi].relay_commanded_on = false;
         uint8_t fb = s_exec.claimed_relay_mask;
         if (fb != 0 && s_exec.io) {
-            if (kiln_io_owner_command_set_relay_mask_authorized(fb, 0) == ESP_OK) {
+            esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(fb, 0);
+            if (off_err == ESP_OK) {
                 relay_off_tracker_note_write(fb, 0);
             } else {
+                /* Fail-safe: nothing is assumed open. The mask stays pending
+                 * and zone_off_pending_retry() re-drives OFF every tick. */
+                if ((s_exec.zone_off_pending_mask & fb) != fb) {
+                    ESP_LOGE(PE_TAG, "fallback relay OFF write (mask 0x%02X) failed: %s -- retrying every tick",
+                             (unsigned)fb, esp_err_to_name(off_err));
+                }
                 s_exec.zone_off_pending_mask |= fb;
             }
         }
@@ -483,9 +490,15 @@ void zone_off_pending_retry(void)
     if (mask == 0 || !s_exec.io) {
         return;
     }
-    if (kiln_io_owner_command_set_relay_mask_authorized(mask, 0) == ESP_OK) {
+    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+    if (off_err == ESP_OK) {
         relay_off_tracker_note_write(mask, 0);
         s_exec.zone_off_pending_mask = 0;
+    } else {
+        /* Fail-safe: the bits stay pending (mask NOT cleared) so the next
+         * tick retries; never assume the contacts opened. */
+        ESP_LOGE(PE_TAG, "pending relay OFF retry (mask 0x%02X) failed: %s -- will retry",
+                 (unsigned)mask, esp_err_to_name(off_err));
     }
 }
 

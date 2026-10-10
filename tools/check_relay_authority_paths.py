@@ -134,6 +134,9 @@ SCAN_DIRS = ("tools/PcTools/src", "tools/PcTools/scripts")
 #     exactly backwards. kiln_io_all_relays_off() is unconditional and
 #     only ever turns things off, so a race with owner_task here is benign
 #     (worst case a redundant I2C transaction, never an unsafe state).
+#   - profile_executor.c's guard9_prelock_check() (guard 9's lock-free cut,
+#     called by watchdog_task_entry() before it takes s_exec.lock): same
+#     reasoning, see the allowlist entry below.
 #   - profile_executor.c's watchdog_task_entry() (guard 9 / FAULT /
 #     RETRY_RELAYS_OFF): same reasoning -- must still force relays off when
 #     the main control task has stopped ticking, which is a symptom the
@@ -158,6 +161,16 @@ FW_OWNER_FILES = {"kiln_io_owner.c", "kiln_io_owner.h"}
 FW_ALL_OFF_ALLOWLIST = {
     ("main.c", "main_kiln_enter_safe_state"),
     ("profile_executor.c", "watchdog_task_entry"),
+    # Guard 9's lock-free half (audit 2026-10-09 item 1): the cut-heat step
+    # that used to live in watchdog_task_entry() and moved into this helper so
+    # it runs BEFORE the watchdog takes s_exec.lock. Same reasoning as the
+    # entry above: the control task has stopped ticking, so heat must be cut
+    # without waiting on s_exec.lock or on kiln_io_owner's queue/task, whose
+    # health says nothing about the control task's. kiln_io_all_relays_off()
+    # is unconditional and only ever turns things off, so a race with the
+    # owner task is benign. Delay is the point: routing via the owner queue
+    # would add a post_and_wait() timeout window to a fail-safe cut.
+    ("profile_executor.c", "guard9_prelock_check"),
 }
 
 FW_CALL_RE = re.compile(
