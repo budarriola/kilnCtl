@@ -3,8 +3,6 @@
  * pins: nothing is sent without confirm, the request body carries the right
  * scope, each HTTP refusal shows "Failed: <server text>" (never a success
  * line), a success shows the server text, and the catch arm wording.
- * KNOWN-DEFECT lines document behaviour that is wrong today (see
- * docs/audits/WEB_JS_COVERAGE_GAPS_2026-10-10.md) without failing the suite.
  * Run: node firmware/KilnFW/App/test/test_settings_reset_flows.js */
 'use strict';
 const fs = require('fs');
@@ -14,7 +12,6 @@ const HTML = fs.readFileSync(resolveDriverFile(resolveDriversDir(__dirname), 'se
 
 let failed = 0;
 function ok(c, l) { if (c) console.log('PASS: ' + l); else { failed++; console.log('FAIL: ' + l); } }
-function known(c, l) { console.log((c ? 'KNOWN-DEFECT (present): ' : 'KNOWN-DEFECT FIXED (update audit): ') + l); }
 
 // kind: 'reset' (danger-btn scope), 'sw' (swResetBtn), 'format' (cfgFsFormatConfirmBtn)
 async function scenario(o) {
@@ -33,7 +30,8 @@ async function scenario(o) {
       kcOtaAuthedFetch: (url, init) => {
         calls.push({ url, init: init || {} });
         if (o.reject === 'authcancel') return Promise.reject({ authCancelled: true });
-        if (o.reject === 'net') return Promise.reject(new Error('net'));
+        if (o.reject === 'net') return Promise.reject(Object.assign(new Error('Failed to fetch'), { name: 'TypeError' }));
+        if (o.reject === 'other') return Promise.reject(new Error('boom-real-error'));
         return Promise.resolve(fakeResponse(o.status, o.text));
       },
     },
@@ -59,11 +57,14 @@ async function scenario(o) {
 
     s = await scenario({ kind, reject: 'net' });
     ok(/Request sent|Request failed/.test(s.status), kind + ': transport error ends in a settled message, not the in-progress one');
-    if (kind !== 'format') known(/Request sent -- the board may already be rebooting/.test(s.status),
-      kind + ': any transport error (even before the request left) is reported as "Request sent ... rebooting" (got "' + s.status + '")');
+    if (kind !== 'format') {
+      ok(/Request sent -- the board may already be rebooting/.test(s.status), kind + ': a dropped connection (TypeError) after the send reads as a reboot in progress');
+      s = await scenario({ kind, reject: 'other' });
+      ok(/boom-real-error/.test(s.status) && !/Request sent/.test(s.status), kind + ': any other failure shows its real error, not "Request sent" (got "' + s.status + '")');
+    }
 
     s = await scenario({ kind, reject: 'authcancel' });
-    known(/^(Erasing and rebooting|Rebooting both processors|Formatting)\.\.\.$/.test(s.status), kind + ': sign-in cancel leaves the stale in-progress status "' + s.status + '"');
+    ok(s.status === 'Sign-in cancelled', kind + ': sign-in cancel shows "Sign-in cancelled" and clears the in-progress status (got "' + s.status + '")');
   }
 
   const w = await scenario({ kind: 'reset', scope: 'profiles', status: 200, text: 'ok' });

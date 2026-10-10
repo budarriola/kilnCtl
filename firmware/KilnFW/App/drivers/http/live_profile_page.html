@@ -80,7 +80,7 @@
 <div id="refusalBanner" class="card err" style="display:none;"></div>
 
 <div id="statusCard" class="card">
-  <div id="statusText" class="empty">Loadingâ€¦</div>
+  <div id="statusText" class="empty">Loading...</div>
 </div>
 
 <div id="decisionCard" class="card" style="display:none;">
@@ -249,6 +249,30 @@ function collectSegmentParams(originalSegments) {
   return params;
 }
 
+// readJsonResult: check the status before trusting the body. A refusal that is
+// not JSON (401/403 CSRF or auth page, a 500 page) shows its HTTP status and
+// body text instead of being mistaken for "could not reach the board".
+function readJsonResult(r) {
+  return r.text().then(function (t) {
+    var d;
+    try { d = JSON.parse(t); } catch (e) {
+      return { ok: false, status: r.status, data: { error: 'HTTP ' + r.status + ': ' + String(t).slice(0, 200) } };
+    }
+    return { ok: r.ok, status: r.status, data: d };
+  });
+}
+
+// Unsaved-edit guard: set when a segment input changes, cleared once the
+// working copy is (re)loaded, saved, or decided.
+var dirty = false;
+document.getElementById('segments').addEventListener('input', function () { dirty = true; });
+window.addEventListener('beforeunload', function (e) {
+  if (!dirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 var currentWorking = null; // last-fetched /api/profile?id=working_id response
 
 function loadWorkingCopy(workingId, editableFromSegment) {
@@ -264,6 +288,7 @@ function loadWorkingCopy(workingId, editableFromSegment) {
     document.getElementById('saveBtn').dataset.name = p.name;
     document.getElementById('saveBtn').dataset.id = workingId;
     renderSegments(p.segments, editableFromSegment);
+    dirty = false;
     document.getElementById('editorCard').style.display = '';
   });
 }
@@ -352,9 +377,9 @@ function refreshLive() {
 
 document.getElementById('forkBtn').addEventListener('click', function () {
   var msg = document.getElementById('forkMsg');
-  msg.textContent = 'Forkingâ€¦';
+  msg.textContent = 'Forking...';
   fetch('/api/profile/live/fork', { method: 'POST' })
-    .then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+    .then(readJsonResult)
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
         msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'fork failed') + '</span>';
@@ -364,7 +389,7 @@ document.getElementById('forkBtn').addEventListener('click', function () {
       lastWorkingId = null; // force the next refreshLive() to load the fresh working copy
       refreshLive();
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }
       msg.innerHTML = '<span class="err">Fork failed -- could not reach the board.</span>';
     });
 });
@@ -375,10 +400,10 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var params = ['id=' + btn.dataset.id, 'name=' + encodeURIComponent(btn.dataset.name || ''),
     'zone_mask=' + (btn.dataset.zoneMask || '0')];
   params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));
-  msg.textContent = 'Savingâ€¦';
+  msg.textContent = 'Saving...';
   fetch('/api/profile/live', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
-  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, status: r.status, data: d }; }); })
+  }).then(readJsonResult)
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
         // 400 (bound violation) and 409 (running-segment conflict) both
@@ -389,10 +414,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
         return;
       }
       msg.textContent = 'Saved.';
+      dirty = false;
       lastWorkingId = null;
       refreshLive();
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }
       msg.innerHTML = '<span class="err">Save failed -- could not reach the board.</span>';
     });
 });
@@ -404,20 +430,21 @@ document.getElementById('reloadBtn').addEventListener('click', function () {
 
 function decide(body) {
   var msg = document.getElementById('decideMsg');
-  msg.textContent = 'Workingâ€¦';
+  msg.textContent = 'Working...';
   return fetch('/api/profile/live/decide', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
-  }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
+  }).then(readJsonResult)
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
         msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'that failed') + '</span>';
         return;
       }
       msg.textContent = 'Done.';
+      dirty = false;
       lastWorkingId = null;
       refreshLive();
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }
       msg.innerHTML = '<span class="err">Could not reach the board.</span>';
     });
 }
@@ -441,7 +468,10 @@ document.getElementById('overwriteBtn').addEventListener('click', function () {
 });
 
 document.getElementById('discardBtn').addEventListener('click', function () {
-  decide('action=discard');
+  kcConfirm('Discard the working copy? All edits made during this firing are lost.').then(function (ok) {
+    if (!ok) return;
+    decide('action=discard');
+  });
 });
 
 refreshLive();

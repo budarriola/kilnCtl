@@ -178,6 +178,22 @@ for (const root of page_roots) for (const fullPath of walk_files(root).filter(p 
   let src = fs.readFileSync(fullPath, 'utf8');
   const scripts = [], styles = [];
 
+  /* Mojibake: UTF-8 text that was decoded as a single-byte codepage and
+   * re-encoded. A double-encoded ellipsis (U+2026) becomes U+00E2 U+20AC
+   * U+00A6 and renders as "a-circumflex, euro, broken bar" in the browser
+   * (live_profile_page.html shipped four of them unnoticed, 2026-10-10). The
+   * pair U+00E2 U+20AC is the lead of every double-encoded U+2000 block
+   * punctuation character, and never appears in real text. */
+  {
+    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac), 'g');
+    let mm;
+    while ((mm = mre.exec(src))) {
+      bad++;
+      console.log(`${f} (line ${src.slice(0, mm.index).split(String.fromCharCode(10)).length}): mojibake sequence U+00E2 U+20AC ` +
+        `(double-encoded UTF-8, e.g. a broken ellipsis) -- retype the character or use ASCII.`);
+    }
+  }
+
   if (f.endsWith('.js')) {
     scripts.push({ code: src, line: 1 });
   } else if (f.endsWith('.css')) {

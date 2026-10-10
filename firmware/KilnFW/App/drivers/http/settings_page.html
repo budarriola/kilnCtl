@@ -273,6 +273,20 @@ var SCOPE_LABELS = {
   profiles: 'saved fire profiles only',
   all: 'EVERYTHING (factory default)',
 };
+// Shared catch arm for the reboot-causing actions. A browser reports a
+// dropped connection as a TypeError (fetch network error); only that case is
+// worded as "request sent, board rebooting". Anything else shows its real error.
+function kcResetCatch(status, err) {
+  if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
+    status.textContent = 'Sign-in cancelled';
+    return;
+  }
+  if (err && err.name === 'TypeError') {
+    status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    return;
+  }
+  status.textContent = 'Request failed: ' + ((err && err.message) ? err.message : String(err));
+}
 // cfg_fs auto-format ask-first banner -- see the #cfgFsFormatBanner markup
 // above. Checked once on page load; nothing polls it, so a board that
 // starts refusing mid-session (it can't -- the decision is made once, at
@@ -301,7 +315,7 @@ document.getElementById('cfgFsFormatConfirmBtn').addEventListener('click', funct
         document.getElementById('cfgFsFormatBanner').hidden = true;
       }
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { status.textContent = 'Sign-in cancelled'; return; }
       status.textContent = 'Request failed -- check the board is reachable and try again.';
     });
   });
@@ -326,8 +340,7 @@ document.getElementById('swResetBtn').addEventListener('click', function () {
     }).then(function (res) {
       status.textContent = res.ok ? res.text : ('Failed: ' + res.text);
     }).catch(function (authErr) {
-      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-      status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+      kcResetCatch(status, authErr);
     });
   });
 });
@@ -350,8 +363,7 @@ document.querySelectorAll('.danger-btn').forEach(function (b) {
       }).then(function (res) {
         status.textContent = res.ok ? (res.text + ' -- reconnect once the board comes back up.') : ('Failed: ' + res.text);
       }).catch(function (authErr) {
-        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-        status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+        kcResetCatch(status, authErr);
       });
     });
   });

@@ -238,9 +238,11 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
           headers: headers,
           body: body,
         }).then(function (r) {
-          return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+          return r.text().then(function (t) { return { ok: r.ok, status: r.status, text: t }; });
         }).then(function (res) {
-          status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+          status.textContent = res.ok ? 'Restore complete.' : (res.status === 500
+            ? ('Restore failed partway -- some settings may have changed: ' + res.text)
+            : ('Restore refused: ' + res.text));
         }).catch(function (authErr) {
           // Quiet note, never a stale "Uploading...".
           if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {

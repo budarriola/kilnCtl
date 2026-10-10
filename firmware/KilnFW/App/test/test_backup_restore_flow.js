@@ -68,10 +68,13 @@ async function scenario(o) {
     ok(s.status === 'Restore refused: reason-' + code, 'real POST ' + code + ' shows the server reason, never "complete"');
   }
 
-  // A 500 is a partial write per backup_import. The page labels it "refused" (DEFECT, see
-  // WEB_JS_COVERAGE_GAPS audit); pinned: no success claim and the server text is shown.
+  // A 500 is a partial write per backup_import: it must say so, never "refused" (D3).
   s = await scenario({ responses: [{ status: 200, text: '' }, { status: 500, text: 'partial write: zones committed' }] });
   ok(!/complete/i.test(s.status) && /partial write: zones committed/.test(s.status), '500 partial write: no success claim, server text shown');
+  ok(/Restore failed partway -- some settings may have changed/.test(s.status) && !/refused/i.test(s.status),
+    '500 partial write says it failed partway and settings may have changed, never "refused"');
+  s = await scenario({ responses: [{ status: 200, text: '' }, { status: 409, text: 'busy now' }] });
+  ok(/Restore refused: busy now/.test(s.status), '409 on the real POST is still a plain refusal');
 
   s = await scenario({ responses: ['authcancel'] });
   ok(s.status === 'Sign-in cancelled -- nothing was restored.', 'auth cancel during dry run -> quiet note, not stale "Checking..."');
