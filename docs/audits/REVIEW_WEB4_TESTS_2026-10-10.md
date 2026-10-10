@@ -19,7 +19,7 @@ LOW or informational.
 
 ## A. webfx3
 
-### A1 (LOW) M1 generation guard: the race is web-vs-LCD, not two httpd workers
+### A1 (LOW) M1 generation guard: the race is web-vs-LCD, not two httpd workers [FIXED in @@SHA@@]
 
 The fix notes say check-then-write is not atomic "across httpd workers".
 esp_http_server runs one shared worker task (`http_async_job.h` says so),
@@ -44,7 +44,7 @@ Related, smaller:
   post-reboot saves (reset-one-side class). LOW; the page refetches on
   load, so only a long-open tab or a PcTools caller is exposed.
 
-### A2 (LOW) Page sends no gen while `lastGen` is null
+### A2 (LOW) Page sends no gen while `lastGen` is null [FIXED in @@SHA@@]
 
 `genQuery()` returns `''` when `lastGen` is null and the board treats an
 absent `gen` as accepted. `lastGen` is set to null on Reload, after fork
@@ -53,7 +53,7 @@ ungated. Ordering is status (gen) then content, which fails safe when both
 complete. Fix: disable Save until `lastGen` is known, or have the board
 require `gen` from the page (keep it optional only for PcTools).
 
-### A3 (doc) Comment claims PcTools always sends gen
+### A3 (doc) Comment claims PcTools always sends gen [FIXED in @@SHA@@]
 
 `profiles_live_http.c`'s comment says "the PcTools client and the page
 always send it". The PcTools `generation` parameter is optional and
@@ -69,7 +69,7 @@ post-write failure (kiln_configs, aux, candidates OOM, two-pass). The page's
 three messages (partway, before anything written, connection lost) match.
 Tests cover both 500 variants.
 
-### A5 (LOW) Unsaved-edit guards
+### A5 (LOW) Unsaved-edit guards [FIXED in @@SHA@@]
 
 - Tests are not vacuous: inflight `release()` throws if no POST happened,
   and fail mode uses the identical setup, so the POST is proven reached.
@@ -86,7 +86,7 @@ Tests cover both 500 variants.
 
 ## B. c78b
 
-### B1 (LOW) zone_aux_convert gate action: near-equivalent mutant MISSED
+### B1 (LOW) zone_aux_convert gate action: near-equivalent mutant MISSED [FIXED in @@SHA@@]
 
 `op_mode_blocked()` uses `SYS_ACTION_WRITE_ZONES_CONFIG`. The test asserts
 only the shared prefix "firing or autotune run is active". FACTORY_RESET,
@@ -138,7 +138,7 @@ executables. D adds to the main executable's source list, not a new block.
 - Cosmetic: the three adaptive_tune calls sit inside the "F3 follow-up"
   section of `test_adaptive_tune.c`.
 
-### C3 (LOW, behaviour the test pins) Clean `clear_all_credentials` keeps live sessions
+### C3 (LOW, behaviour the test pins) Clean `clear_all_credentials` keeps live sessions [FIXED in @@SHA@@]
 
 `test_clear_all_credentials` asserts "clean success does not itself
 invalidate". In `security_backend_web_auth.c`, the half-wipe branch
@@ -160,7 +160,7 @@ values as before. The `"Maximum 12 segments reached"` literal ignores the
 new `max_segments` argument (it was a literal before too); harmless while
 `PROFILE_MAX_SEGMENTS` is 12.
 
-### D2 (LOW) R4 test cannot catch the regression it names
+### D2 (LOW) R4 test cannot catch the regression it names [FIXED in @@SHA@@]
 
 The R4 case only proves `ui_pbs_pad_to_celsius()` converts with whatever
 unit was captured. The guarantee R4 needs, that the page's done callbacks
