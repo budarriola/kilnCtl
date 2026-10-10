@@ -26,6 +26,7 @@
 
 #include "link_task.c"
 
+#include "trip_seq.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -557,7 +558,7 @@ static void scenario_trip_seq(void)
     uint8_t seq = 1;
     int bursts = 0;
     for (int step = 0; step < 300; step++) {
-        seq = link_frame_next_trip_seq(seq);
+        seq = trip_seq_next(seq);
         CHECK(seq != 0, "trip_seq never 0 (step %d)", step);
         g_trip_seq = seq;
         g_tick_ms += 1000;
