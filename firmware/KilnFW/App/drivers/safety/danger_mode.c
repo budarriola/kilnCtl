@@ -118,8 +118,12 @@ bool danger_mode_request_start(void)
     if (already_open && was_heat_requested) {
         /* F6-1: re-entry cleared heat_requested above; send the matching release so the Pico's
          * request and the tile agree (display and wire never disagree). */
-        (void)safety_link_request_enable(s_dm.safety, false);
-        ESP_LOGW(TAG, "danger mode re-entered -- heat-enable request released to match the cleared flag");
+        esp_err_t rel_err = safety_link_request_enable(s_dm.safety, false);
+        if (rel_err != ESP_OK) {
+            ESP_LOGE(TAG, "danger mode re-entered -- heat-enable release request failed (%s); Pico request may still be set", esp_err_to_name(rel_err));
+        } else {
+            ESP_LOGW(TAG, "danger mode re-entered -- heat-enable request released to match the cleared flag");
+        }
     }
 
     /* Does NOT request heat-enable on its own any more (owner request

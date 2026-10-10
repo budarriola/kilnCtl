@@ -137,6 +137,8 @@ SCAN_DIRS = ("tools/PcTools/src", "tools/PcTools/scripts")
 #   - profile_executor.c's guard9_prelock_check() (guard 9's lock-free cut,
 #     called by watchdog_task_entry() before it takes s_exec.lock): same
 #     reasoning, see the allowlist entry below.
+#   - profile_executor.c's relay_unknown_prelock_check() (K7 MED-1): same reasoning,
+#     see the allowlist entry below.
 #   - profile_executor.c's watchdog_task_entry() (guard 9 / FAULT /
 #     RETRY_RELAYS_OFF): same reasoning -- must still force relays off when
 #     the main control task has stopped ticking, which is a symptom the
@@ -171,6 +173,13 @@ FW_ALL_OFF_ALLOWLIST = {
     # owner task is benign. Delay is the point: routing via the owner queue
     # would add a post_and_wait() timeout window to a fail-safe cut.
     ("profile_executor.c", "guard9_prelock_check"),
+    # K7 MED-1: relay_unknown_prelock_check(), the lock-free retry of the fail-safe all-off
+    # when kiln_io_relay_state_unknown() says a coil may be energised against the shadow. Same
+    # reasoning as guard9_prelock_check: it runs on the watchdog task before s_exec.lock, must
+    # work when kiln_io_owner's task or queue is the thing that is wedged, and
+    # kiln_io_all_relays_off() only ever turns things off, so a race with the owner task is benign.
+    # It is retried every watchdog period, so a failed attempt is re-issued, not lost.
+    ("profile_executor.c", "relay_unknown_prelock_check"),
 }
 
 FW_CALL_RE = re.compile(
