@@ -1904,6 +1904,22 @@ try {
 
     Invoke-HostTestExe -Name "uart_bridge_thermo_gate" -ExePath $exeUartBridgeThermoGate -BuildCmd $cmdUartBridgeThermoGate
 
+    # ---- test_persist_campaign10.c: backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store ----
+    $exeC10 = Join-Path $outDir "kilnctl_host_tests_persist_campaign10.exe"
+    $c10ObjDir = Join-Path $outDir "persistcampaign10"
+    New-Item -ItemType Directory -Force -Path $c10ObjDir | Out-Null
+    $cmdC10 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+            "/Fo:`"$c10ObjDir\\`" /Fe:`"$exeC10`" " +
+            "`"$(Join-Path $testDir 'test_persist_campaign10.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/backup_json.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/touch_cal_store.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/ct_verify_store.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "persist_campaign10" -ExePath $exeC10 -BuildCmd $cmdC10
+
     # ---- test_uart_bridge_ext_worker.c: its own separate executable ----------
     # #includes uart_bridge_ext.c directly (static bx_worker_iteration() and
     # the save-section hooks have no other seam) with fake FreeRTOS primitives
@@ -3280,10 +3296,15 @@ try {
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
     # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
+<<<<<<< HEAD
     # 75 -> 77: test_danger_mode.c (campaign 6) plus one exe an earlier landing did not count (origin/dev built 76 vs expected 75)
     # 77 -> 78: test_diagnostics_http.c (campaign 9)
     # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
     $totalExpected = 80
+=======
+    # 75 -> 76: added test_persist_campaign10.c (campaign 10)
+    $totalExpected = 76
+>>>>>>> 3c9a3b1da (tests: campaign 10 persist host test (backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store))
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

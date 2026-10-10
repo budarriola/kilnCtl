@@ -96,3 +96,84 @@ Observations (design notes, not filed as defects):
 - K8-01 (INFO): `POST /api/profile_exec/start` has no `confirm` field and its only mode gate is the recovery-mode check plus the readiness interlock and `danger_mode_active()`; a second start while a run is active is refused only by `profile_executor_run()` (faked here), so that refusal is not covered at the handler level.
 - K8-02 (INFO): stop/pause/resume/ack are deliberately ungated (stop works in recovery mode and with danger mode on); pinned by test.
 - K8-03 (INFO): the raw `relay_post_handler` route no longer exists; the raw write path is aux manual via `dashboard_set_relay()`, covered here with the board faked. `zone_aux_convert_http.c` `move_handler` (hook on POST /api/zones, not a route) is not covered at handler level; its core has its own test.
+
+## Campaign 10: persist parsers and stores (backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store)
+
+Test: `firmware/KilnFW/App/test/test_persist_campaign10.c` (129 checks, one
+executable, wired into `build_host_tests.ps1`, expected count 75 -> 76). Real
+modules over `fake_kv` and a real `cfg_fs` scratch directory, with the
+`persist_scratch` OOM hook. Each defect below is pinned by a
+"CHARACTERIZATION K10-xx" check that asserts today's behavior; when a fix
+lands, invert that check. `backup_import.c` was out of scope (another agent).
+
+### K10-10 (HIGH) pref_cfg_fs_resolve: transient OOM reading the file overwrites a NEWER file with older NVS
+
+- File: `firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c`, `load_raw_impl` and `pref_cfg_fs_resolve`
+- Input: a file above `PREF_CFG_FS_MAX_ITEM` (128 B) at rev 9 and an NVS copy at rev 3; the scratch allocation for the file read fails once.
+- Observed: the read reports "no valid file", resolve adopts the NVS value, returns success and rewrites the file at rev 3. The rev-9 user data is gone.
+- Expected: an allocation failure is an error; resolve must not touch the file.
+- Test: `resolve returned success` then file reads rev 3.
+
+### K10-09 (MEDIUM) pref_cfg_fs_load_raw / load_var report alloc failure as "absent"
+
+- Same file. The functions have no error channel: `valid=false, rev=0` is identical for "no file" and "could not allocate". K10-09b is the same for `load_var`. Every caller that treats "absent" as "adopt defaults / NVS" inherits K10-10.
+
+### K10-11 (MEDIUM) pref_cfg_fs_probe_newer_wrong_size answers "not newer" on alloc failure
+
+- A newer-firmware file of the wrong size is detected normally; on OOM the probe returns false, so the caller treats the file as ordinary garbage and may overwrite it.
+
+### K10-13 (MEDIUM) ct_verify_store_save serves an unpersisted verdict after a failed write
+
+- File: `drivers/persist/ct_verify_store.c`. After `pref_cfg_fs_commit` fails the call returns an error but RAM already serves the new verdict (and rev is correctly not advanced). A reboot silently reverts to the old verdict. Callers that ignore the return value show a verification result that does not survive.
+
+### K10-14 (MEDIUM) ct_verify_store_start: corrupt newer file silently replaced by older NVS
+
+- A bad file (valid-looking size, failed validate) loses to the older NVS blob, and the file is overwritten. Nothing is reported beyond a log line. Same shape as K10-10 without needing OOM.
+
+### K10-01 (MEDIUM) backup_json_field_str silently truncates an over-long string
+
+- A 8-char value into a 4-byte buffer returns true with "abc". A backup carrying a long name/SSID is restored shortened with no error.
+
+### K10-02 (MEDIUM) backup_json_field_str accepts an unterminated string
+
+- `{"s":"abc` (truncated backup) returns true. Same silent-data-loss class as K10-01.
+
+### K10-07 (LOW-MEDIUM) touch_cal_store_save has no read-back
+
+- A write that reports OK but persists nothing returns `ESP_OK`; the board loses calibration at reboot with no indication. Failed `set_blob` and failed commit are reported correctly.
+
+### K10-08 (LOW) touch_cal_store accepts NaN / all-zero coefficients (no CRC, no value validation)
+
+- A NaN coefficient or an all-zero v1 record loads as "calibrated" and yields a degenerate touch map (K10-08b).
+
+### K10-06 (LOW) touch_cal_store_load maps a corrupt NVS record to ESP_OK uncalibrated
+
+- A `HAL_IO` read is indistinguishable from a first boot; the caller cannot tell data loss from a fresh board.
+
+### K10-12 (LOW) ct_verify_blob_validate does not check the verdict floats
+
+- NaN `measured_a` / `threshold_a` pass validation.
+
+### K10-03 (LOW) backup_json \u escapes are mangled
+
+- `"AB"` decodes to `Au0042` with no error. Only matters if a backup string can contain non-ASCII.
+
+### K10-04 (LOW) backup_json_field_num accepts hex floats (strtod syntax)
+
+- `0x1F` parses as 31. Not valid JSON; harmless for self-produced backups.
+
+### K10-05 (LOW) backup_json_field_num ignores trailing garbage
+
+- `12abc` parses as 12.
+
+### Verified clean
+
+- backup_json: nesting (10000 deep, iterative), commas inside strings, truncated objects/arrays terminate, nan/inf/null/string rejected, absent vs malformed optional distinguished.
+- touch_cal_store: wrong version, version 0, truncated and oversized records all give uncalibrated; failed set_blob and failed commit are reported; fit rejects collinear and n<3.
+- pref_cfg_fs: size mismatch both directions, validator rejection, truncated and oversized file on disk, write failure leaves the previous file, resolve tie-breaks (file higher, equal rev NVS wins and resyncs, NVS invalid uses file), save-side alloc failure reports `ESP_ERR_NO_MEM`, resolve scratch OOM reports failure and leaves the file.
+- ct_verify_store: every validate field (size, version, zone_count, reserved, fingerprint, verdict, responded_ch), NVS truncated/newer/corrupt gives no verdict, never a pass; file beats stale NVS; invalid blob refused without touching RAM; rev not advanced by a failed save.
+
+### Negative tests
+
+Three mutations, all CAUGHT with a passing baseline (`tools
+egtest.ps1 -Command` over `build_host_tests.ps1 -Only persist_campaign10`): touch_cal version check disabled (2 failures), ct_verify zone_count bound loosened (1), backup_json isfinite check dropped (2).
