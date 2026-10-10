@@ -351,24 +351,42 @@ uint32_t esp_partition_get_main_flash_sector_size(void) { return 4096u; }
 esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset, void *dst, size_t size)
 { (void)partition; (void)src_offset; if (dst) memset(dst, 0, size); return ESP_OK; }
 
+// Settable so test_ota_http_refusals.c can drive the ESP push handler (defaults keep this file's behaviour).
+static const esp_partition_t *s_fake_next_part = NULL;
+static const esp_partition_t *s_fake_running_part = NULL;
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *start_from)
-{ (void)start_from; return NULL; }
-const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
+{ (void)start_from; return s_fake_next_part; }
+const esp_partition_t *esp_ota_get_running_partition(void) { return s_fake_running_part; }
 
 // recovery_switch.c is target-only (esp_image_verify); ota_http_recovery.c's
 // recovery_boot handler only calls these two seams. Never reached by a test
 // in this file except test_recovery_boot_set_failed_restores_boot_target().
 static recovery_switch_result_t s_fake_select_result = RECOVERY_SWITCH_NOT_PRESENT;
 static int s_fake_restore_calls = 0;
+static int s_fake_select_calls = 0;
 recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
-{ if (msg && cap) msg[0] = '\0'; return s_fake_select_result; }
+{ s_fake_select_calls++; if (msg && cap) msg[0] = '\0'; return s_fake_select_result; }
 bool recovery_switch_restore_running(void) { s_fake_restore_calls++; return true; }
+static esp_err_t s_fake_ota_begin_rc = ESP_OK;
+static esp_err_t s_fake_ota_write_rc = ESP_OK;
+static int s_fake_ota_write_ok_budget = -1; // >=0: that many writes succeed, then s_fake_ota_write_rc applies
+static esp_err_t s_fake_ota_end_rc = ESP_OK;
+static int s_fake_ota_begin_calls = 0, s_fake_ota_write_calls = 0, s_fake_ota_end_calls = 0, s_fake_ota_abort_calls = 0;
+static size_t s_fake_ota_written = 0;
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out_handle)
-{ (void)partition; (void)image_size; if (out_handle) *out_handle = 1; return ESP_OK; }
+{ (void)partition; (void)image_size; s_fake_ota_begin_calls++; if (out_handle) *out_handle = 1; return s_fake_ota_begin_rc; }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
-{ (void)handle; (void)data; (void)size; return ESP_OK; }
-esp_err_t esp_ota_end(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
-esp_err_t esp_ota_abort(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
+{
+    (void)handle; (void)data;
+    s_fake_ota_write_calls++;
+    if (s_fake_ota_write_ok_budget == 0) return s_fake_ota_write_rc;
+    if (s_fake_ota_write_ok_budget > 0) s_fake_ota_write_ok_budget--;
+    else if (s_fake_ota_write_rc != ESP_OK) return s_fake_ota_write_rc;
+    s_fake_ota_written += size;
+    return ESP_OK;
+}
+esp_err_t esp_ota_end(esp_ota_handle_t handle) { (void)handle; s_fake_ota_end_calls++; return s_fake_ota_end_rc; }
+esp_err_t esp_ota_abort(esp_ota_handle_t handle) { (void)handle; s_fake_ota_abort_calls++; return ESP_OK; }
 // Fakes for boot_partition_verify.c: s_fake_boot_part is what the "otadata"
 // reads back as; esp_ota_set_boot_partition() copies the request into it
 // unless a test sets s_fake_set_ignored (a write that reports OK but does not
@@ -385,7 +403,8 @@ esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
 }
 esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition, esp_app_desc_t *out)
 { (void)partition; (void)out; return ESP_FAIL; }
-bool esp_ota_check_rollback_is_possible(void) { return false; }
+static bool s_fake_rollback_possible = false;
+bool esp_ota_check_rollback_is_possible(void) { return s_fake_rollback_possible; }
 esp_err_t esp_ota_mark_app_invalid_rollback_and_reboot(void) { return ESP_FAIL; }
 
 // ---------------------------------------------------------------------------
@@ -565,8 +584,9 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c) { (void)zone_index
 esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings, size_t *out_count)
 { (void)out; (void)max_readings; if (out_count) *out_count = 0; return ESP_FAIL; }
 static esp_err_t s_fake_io_read_result = ESP_FAIL;
+static uint8_t s_fake_io_relay_shadow = 0; // settable: bits 0..3 are K1..K4 energized
 esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out)
-{ if (out) memset(out, 0, sizeof(*out)); return s_fake_io_read_result; }
+{ if (out) { memset(out, 0, sizeof(*out)); out->relay_shadow = s_fake_io_relay_shadow; } return s_fake_io_read_result; }
 
 // ota_pico_relay.h -- never called by ota_http.c's own tests, but review
 // finding D6 adds a direct test of pico_img_stage.c (linked in for real,
@@ -578,11 +598,14 @@ static esp_partition_t s_fake_pico_img_partition = {
 };
 const esp_partition_t *ota_pico_img_partition(void) { return &s_fake_pico_img_partition; }
 const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase) { (void)phase; return "idle"; }
+static bool s_fake_relay_start_rc = false;
+static int s_fake_relay_start_calls = 0;
 bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t image_crc32,
                           const char *version16_or_null, const uint8_t image_sha256_or_null[32])
 {
     (void)link; (void)image_length; (void)image_crc32; (void)version16_or_null; (void)image_sha256_or_null;
-    return false;
+    s_fake_relay_start_calls++;
+    return s_fake_relay_start_rc;
 }
 void ota_pico_relay_get_status(ota_pico_relay_status_t *out) { if (out) memset(out, 0, sizeof(*out)); }
 
@@ -591,11 +614,15 @@ void ota_pico_relay_get_status(ota_pico_relay_status_t *out) { if (out) memset(o
 // doing whatever RAM-only setup they needed (ota_http_start()'s mutex/state
 // init already ran by the time it checks this -- see that function's own
 // body), before touching an httpd handle this stub cannot provide.
-httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
+static httpd_handle_t s_fake_http_server = NULL;
+httpd_handle_t wifi_provision_http_get_server(void) { return s_fake_http_server; }
 
 // boot_guard.h
-bool boot_guard_is_recovery_mode(void) { return false; }
-void boot_guard_mark_healthy(void) {}
+static bool s_stub_recovery_mode = false;
+static bool s_stub_mark_healthy_result = true;
+static int s_stub_mark_healthy_calls = 0;
+bool boot_guard_is_recovery_mode(void) { return s_stub_recovery_mode; }
+bool boot_guard_mark_healthy(void) { s_stub_mark_healthy_calls++; return s_stub_mark_healthy_result; }
 // Test-controllable so ota_boot_guard_reset_post_handler()'s success/failure
 // reporting can be exercised without pulling in the real boot_guard.c (its
 // own NVS-backed clear-and-verify sequence is covered directly by
@@ -699,8 +726,21 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *v
 
 int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 
+// Registration capture (test_ota_http_refusals.c): every (uri, method, handler) the code under test registers.
+#define STUB_REG_MAX 64
+static struct { char uri[96]; int method; void *handler; } s_reg[STUB_REG_MAX];
+static int s_reg_count = 0;
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
-{ (void)handle; (void)uri_handler; return ESP_OK; }
+{
+    (void)handle;
+    if (s_reg_count < STUB_REG_MAX && uri_handler) {
+        strncpy(s_reg[s_reg_count].uri, uri_handler->uri, sizeof(s_reg[0].uri) - 1);
+        s_reg[s_reg_count].method = (int)uri_handler->method;
+        s_reg[s_reg_count].handler = (void *)uri_handler->handler;
+        s_reg_count++;
+    }
+    return ESP_OK;
+}
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 { (void)r; (void)field; (void)value; return ESP_OK; }
@@ -774,9 +814,31 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 // Body source for the factory-reset late-check test; NULL (default) keeps the old "no body" behavior.
 static const char *s_fake_recv_body = NULL;
 static size_t s_fake_recv_off = 0;
+// Binary body source (NULL = off): serves s_fake_recv_bin_len bytes from s_fake_recv_bin (or zeros when
+// s_fake_recv_bin is NULL), at most s_fake_recv_max_chunk per call, and returns -1 once
+// s_fake_recv_fail_after bytes were served (>=0). Takes precedence over s_fake_recv_body.
+static const unsigned char *s_fake_recv_bin = NULL;
+static size_t s_fake_recv_bin_len = 0;
+static size_t s_fake_recv_bin_off = 0;
+static size_t s_fake_recv_max_chunk = 4096;
+static long s_fake_recv_fail_after = -1;
+static int s_fake_recv_calls = 0;
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    s_fake_recv_calls++;
+    if (s_fake_recv_bin_len > 0) {
+        if (s_fake_recv_fail_after >= 0 && (long)s_fake_recv_bin_off >= s_fake_recv_fail_after) return -1;
+        size_t left = s_fake_recv_bin_len - s_fake_recv_bin_off;
+        size_t n = left < buf_len ? left : buf_len;
+        if (n > s_fake_recv_max_chunk) n = s_fake_recv_max_chunk;
+        if (s_fake_recv_fail_after >= 0 && s_fake_recv_bin_off + n > (size_t)s_fake_recv_fail_after) {
+            n = (size_t)s_fake_recv_fail_after - s_fake_recv_bin_off;
+        }
+        if (s_fake_recv_bin) memcpy(buf, s_fake_recv_bin + s_fake_recv_bin_off, n); else memset(buf, 0, n);
+        s_fake_recv_bin_off += n;
+        return (int)n;
+    }
     if (!s_fake_recv_body) {
         return 0;
     }

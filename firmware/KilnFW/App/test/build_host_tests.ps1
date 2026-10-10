@@ -1293,6 +1293,62 @@ try {
 
     Invoke-HostTestExe -Name "ota_http" -ExePath $exe8 -BuildCmd $cmd8
 
+    # ---- test_ota_http_refusals.c: campaign 9b. #includes test_ota_http.c (and so every OTA handler .c and its
+    # fakes) and adds refusal/failure-mapping tests, so it links exactly the same objects as the ota_http exe. ----
+    $exe8b = Join-Path $outDir "kilnctl_host_tests_ota_http_refusals.exe"
+    $otaObjDirB = Join-Path $outDir "ota_refusals"
+    New-Item -ItemType Directory -Force -Path $otaObjDirB | Out-Null
+    $cmd8b = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$otaObjDirB\\`" /Fe:`"$exe8b`" " +
+            "`"$(Join-Path $testDir 'test_ota_http_refusals.c')`" " +
+            "`"$(Join-Path $driversDir 'net/ota_auth.c')`" `"$(Join-Path $driversDir 'net/ota_interlock.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/ota_record.c')`" `"$(Join-Path $driversDir 'http/ota_http_util.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/legacy_default_nvs.c')`" " +
+            # PICO_AUTO_UPDATE.md G1: ota_http_pico.c (#included into
+            # test_ota_http.c above) now records what it staged, so a later
+            # boot can re-use the image. Linked in for REAL rather than faked,
+            # same rationale as ota_record.c beside it -- it is a plain
+            # hal_kv_* record store and fake_kv.c below already supplies its
+            # backing store.
+            "`"$(Join-Path $driversDir 'persist/pico_image_manifest.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
+            "`"$(Join-Path $driversDir 'http/ota_esp_image_header.c')`" " +
+            # Owner decision 2026-09-20: ota_http_pico.c's ota_pico_do_stage()
+            # now calls pico_img_stage_begin/write_chunk/finish() (shared with
+            # net/pico_auto_update_boot.c's embedded-image writer) instead of
+            # its own inline erase/write/manifest logic -- linked in for real,
+            # same rationale as pico_image_manifest.c/ota_image_crc.c beside it.
+            "`"$(Join-Path $driversDir 'net/pico_img_stage.c')`" " +
+            # KilnFW TODO.md 9.4: ota_pico_do_stage() now re-scans the image it
+            # just staged via pico_image_source_describe(), to learn the image's
+            # OWN declared link protocol version. Linked in for real, same
+            # rationale as pico_img_stage.c/ota_image_crc.c above: it is a pure
+            # scanner over the fake pico_img partition test_ota_http.c already
+            # supplies, and a stub would hide the real symbol this executable
+            # has to keep linkable.
+            "`"$(Join-Path $driversDir 'net/pico_image_source.c')`" " +
+            "`"$(Join-Path $testDir '..\..\..\CommonFW\src\saftyfw_image_identity.c')`" " +
+            "`"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_http.c')`" `"$(Join-Path $driversDir 'http/http_auth_enforce.c')`" " +
+            "`"$(Join-Path $driversDir 'http/http_auth_policy_iface.c')`" `"$(Join-Path $driversDir 'http/http_session_iface.c')`" " +
+            "`"$(Join-Path $testDir 'stubs/wifi_prov_unprovisioned_stub.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
+            # system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md,
+            # gate-slices-2/4/5, 2026-09-25): factory_reset.c (#included
+            # above) now calls system_mode_gate_check()/
+            # system_mode_gate_http_send_refusal() -- link both real, pure,
+            # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
+            # itself is faked in test_ota_http.c, same convention as its other
+            # profile_executor/autotune_engine fakes.
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
+    Invoke-HostTestExe -Name "ota_http_refusals" -ExePath $exe8b -BuildCmd $cmd8b
+
+
     # ---- test_dashboard_status_http.c: its own NINTH, separate executable ----
     # 2026-09-17 audit finding 7 follow-up: GET /api/status (ROUTE_TIER_OPEN,
     # no credentials) leaked the same build-identity fields (fw_build,
@@ -3301,7 +3357,8 @@ try {
     # 77 -> 78: test_diagnostics_http.c (campaign 9)
     # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
     # 80 -> 81: test_persist_campaign10.c (campaign 10)
-    $totalExpected = 81
+    # 81 -> 82: test_ota_http_refusals.c (campaign 9b)
+    $totalExpected = 82
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
