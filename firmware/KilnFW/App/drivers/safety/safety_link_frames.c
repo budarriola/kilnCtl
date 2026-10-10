@@ -279,6 +279,9 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
      * wrongly accepted). */
     link->cached.diag_trip_seq_known = false;
     link->cached.diag_trip_seq = 0u;
+    /* The new boot's peer-version knowledge is a fresh question: fresh re-announce budget. */
+    link->diag_reannounce_count = 0u;
+    link->diag_reannounce_last_ms = 0u;
     /* RELAY_LIFE_BUDGET.md: the Pico rebooting may have left K4 in either
      * state before it ever comes up -- this ESP's last-observed
      * safety_relay_state predates that reboot and must not be compared
@@ -291,6 +294,34 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
      * own doc comment (safety_link.h) for why this moved off the calling
      * task's stack 2026-09-10. */
     link->reannounce_pending = true;
+}
+
+#define SAFETY_DIAG_REANNOUNCE_MAX 3u
+#define SAFETY_DIAG_REANNOUNCE_GAP_MS 2000u
+
+/* Bounded re-announce when the Pico has not learned our version: a Pico >= 17 sends the 31-byte DIAG
+ * (trip_seq) only once it knows our version is >= 17, so a 30-byte DIAG from one means our ANNOUNCE
+ * burst was lost. Owe it an ANNOUNCE (sent by safety_poll_task) at most MAX times, GAP apart. A 31-byte
+ * DIAG proves it learned the version and returns the budget. Caller holds state_lock. */
+static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32_t now_ms)
+{
+    if (link->cached.diag_trip_seq_known) {
+        link->diag_reannounce_count = 0u;
+        return;
+    }
+    if (!link->peer_version_known || link->peer_protocol_version < 17u) {
+        return;
+    }
+    if (link->diag_reannounce_count >= SAFETY_DIAG_REANNOUNCE_MAX) {
+        return;
+    }
+    if (link->diag_reannounce_count != 0u &&
+        (uint32_t)(now_ms - link->diag_reannounce_last_ms) < SAFETY_DIAG_REANNOUNCE_GAP_MS) {
+        return;
+    }
+    link->reannounce_pending = true;
+    link->diag_reannounce_count++;
+    link->diag_reannounce_last_ms = now_ms;
 }
 
 void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg)
@@ -1050,6 +1081,8 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_trip_seq_known = (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V2);
     link->cached.diag_trip_seq = link->cached.diag_trip_seq_known ? p[30] : 0u;
     link->cached.diag_ever_received = true;
+    safety_diag_reannounce_consider_locked(
+        link, (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS));
     link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     bool want_boot_clear = false;
     if (s_boot_clean) {

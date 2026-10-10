@@ -1213,6 +1213,8 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(&link, &fw_msg);
     link.reannounce_pending = false;
+    // These 30-byte DIAGs would otherwise owe the bounded DIAG-driven re-announce; isolate the uptime path.
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
 
     apply_diag_uptime(&link, 600000u);
     apply_diag_uptime(&link, 601000u);
@@ -1236,6 +1238,7 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     TEST_CHECK(link.reannounce_pending == true, "ANNOUNCE_VERSION re-burst owed to the new boot");
 
     link.reannounce_pending = false;
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
     apply_diag_uptime(&link, 2500u);
     TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.reannounce_pending == false,
                "the new boot's rising uptime is not a second reboot");
@@ -2963,6 +2966,61 @@ static void test_low1_pico_reboot_forgets_cached_diag_trip_seq(void)
                "the clear is the unbound form, never the stale seq-1 bound form");
 }
 
+static void test_diag_reannounce_is_bounded(void)
+{
+    TEST_SECTION("residual -- 30-byte DIAGs from a >= 17 Pico owe at most MAX re-announces, GAP apart");
+    SafetyLinkClass link = boot_clear_test_setup();
+    s_boot_clean = false; // isolate from the boot-clear branch's own (separate) re-announce request
+    low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = 0u;
+
+    unsigned owed = 0;
+    for (unsigned i = 0; i < 20u; i++) {
+        s_fake_tick_count = 1000u + i * 2100u; // each DIAG a full gap after the last
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false; // safety_poll_task consumed it
+        }
+    }
+    TEST_CHECK(owed == SAFETY_DIAG_REANNOUNCE_MAX, "re-announce owed exactly MAX times, then stops");
+
+    // Rate limit: a fresh budget, DIAGs 100 ms apart owe only the first.
+    low_fw_version(&link, 43u, 17u); // Pico boot_id change resets the budget
+    link.reannounce_pending = false;
+    TEST_CHECK(link.diag_reannounce_count == 0u, "Pico boot_id change resets the counter");
+    owed = 0;
+    for (unsigned i = 0; i < 10u; i++) {
+        s_fake_tick_count = 100000u + i * 100u;
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false;
+        }
+    }
+    TEST_CHECK(owed == 1u, "DIAGs inside the gap owe a single re-announce");
+
+    // A 31-byte DIAG proves the Pico learned our version: budget returns, nothing owed.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(link.diag_reannounce_count == 0u && !link.reannounce_pending,
+               "31-byte DIAG resets the budget and owes nothing");
+
+    // A pre-17 Pico never sends byte 30: nothing owed.
+    low_fw_version(&link, 44u, 16u);
+    link.reannounce_pending = false;
+    s_fake_tick_count = 900000u;
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+    TEST_CHECK(!link.reannounce_pending, "protocol 16 peer: no re-announce");
+
+    // Link-down reset.
+    link.diag_reannounce_count = 2u;
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.diag_reannounce_count == 0u,
+               "link-down clears the counter");
+    s_fake_tick_count = 0;
+}
+
 static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
 {
     TEST_SECTION("LOW-2 -- boot clear on a >= 17 peer does not spend an attempt on a 30-byte DIAG");
@@ -3216,6 +3274,7 @@ int main(void)
     test_boot_clear_stops_after_own_fault_source_rises();
     test_low1_pico_reboot_forgets_cached_diag_trip_seq();
     test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
+    test_diag_reannounce_is_bounded();
     test_low4_link_down_invalidates_uptime_baseline();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();

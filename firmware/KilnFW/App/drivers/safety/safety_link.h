@@ -1653,6 +1653,14 @@ typedef struct {
      * under state_lock by safety_poll_task once per iteration; never read or
      * cleared anywhere else. */
     bool    reannounce_pending;
+    /* Bounded DIAG-driven re-announce (SAFTYFW_8838DEA7_REVIEW residual): a Pico >= protocol 17
+     * that has not learned OUR version (lost ANNOUNCE burst) keeps sending 30-byte DIAGs.
+     * safety_apply_diag() owes it an ANNOUNCE at most SAFETY_DIAG_REANNOUNCE_MAX times,
+     * SAFETY_DIAG_REANNOUNCE_GAP_MS apart. Counter is the ESP half of a pair with the Pico's
+     * peer version: reset on a 31-byte DIAG (Pico learned it), on a Pico boot_id change
+     * (safety_note_pico_reboot_locked) and on link-down (safety_reset_stale_peer_info_if_link_down). */
+    uint8_t  diag_reannounce_count;
+    uint32_t diag_reannounce_last_ms;
     /* Same deferral, same reason, for safety_apply_diag()'s stale-S6a
      * boot-clear send (safety_link_frames.c) -- another synchronous
      * uart_protocol_send_broadcast()-reaching call previously made straight

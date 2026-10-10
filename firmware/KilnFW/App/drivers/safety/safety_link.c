@@ -313,6 +313,8 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
          * 49.7-day wrap would read as a reboot). Kept on the SAME condition as pico_boot_id_known so the
          * two reboot signals reset together. */
         link->pico_uptime_baseline_known = false;
+        link->diag_reannounce_count = 0u;
+        link->diag_reannounce_last_ms = 0u;
     }
     safety_unlock(link);
 }
