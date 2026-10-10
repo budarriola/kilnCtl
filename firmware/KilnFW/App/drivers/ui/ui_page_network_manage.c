@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR: s_scan_results is LVGL-task + copy only, no ISR/DMA */
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -95,7 +96,7 @@ static bool s_list_showing_saved = true; /* which of Scan/Saved is visible -- de
  * index), overwritten only by the next Scan tap, which also rebuilds the
  * list itself. Only ever touched from lvgl_port_task, same single-task-owned
  * discipline as ui_page_network.c's original. */
-static wifi_prov_scan_result_t s_scan_results[UI_PAGE_NETWORK_MANAGE_SCAN_MAX];
+EXT_RAM_BSS_ATTR static wifi_prov_scan_result_t s_scan_results[UI_PAGE_NETWORK_MANAGE_SCAN_MAX];
 
 /* ---- Async scan job -- see ui_page_network.c's original header comment for
  * the freeze bug this fixes (unchanged by the move: wifi_prov_scan() is a

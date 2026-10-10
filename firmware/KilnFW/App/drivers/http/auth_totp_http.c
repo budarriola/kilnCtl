@@ -363,7 +363,9 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     char code[8];
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int code_len = http_form_find_field(body, "code", code, sizeof(code));
+    totp_secure_zero(body, sizeof(body)); /* body holds the TOTP code; fields are copied out */
     if (username_len < 0 || code_len < 0) {
+        totp_secure_zero(code, sizeof(code));
         totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username and code are required");
         return ESP_OK;
@@ -495,6 +497,8 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     free(body);
     body = NULL;
     if (username_len < 0 || token_len < 0 || password_len < 0) {
+        totp_secure_zero(reset_token, sizeof(reset_token));
+        totp_secure_zero(new_password, sizeof(new_password));
         totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username, reset_token and new_password are required");
         return ESP_OK;
