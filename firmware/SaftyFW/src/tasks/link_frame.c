@@ -245,12 +245,6 @@ bool link_frame_versions_compatible(uint16_t self_protocol, uint16_t self_min_co
     return (peer_protocol >= self_min_compatible) && (self_protocol >= peer_min_compatible);
 }
 
-uint8_t link_frame_next_trip_seq(uint8_t current)
-{
-    uint8_t next = (uint8_t)(current + 1u);
-    return next == 0u ? 1u : next;
-}
-
 uint16_t link_frame_trip_mask_for_reason(safety_trip_t reason)
 {
     if (reason == SAFETY_TRIP_NONE) {

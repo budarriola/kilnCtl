@@ -11,6 +11,7 @@
 
 #include "test_common.h"
 #include "../src/tasks/link_frame.h"
+#include "../src/tasks/trip_seq.h"
 #include "../src/snapshots.h"
 
 static void pack_u32_le(uint8_t *out, uint32_t v)
@@ -346,15 +347,15 @@ static void test_versions_compatible(void)
 // exact same mapping DIAG frames report. TODO.md Phase 7's CLEAR_TRIP item.
 static void test_next_trip_seq(void)
 {
-    TEST_SECTION("F4: link_frame_next_trip_seq -- wraps 255 -> 1, never back to 0 (0 = no trip yet)");
-    TEST_CHECK(link_frame_next_trip_seq(0u) == 1u, "first trip -> 1");
-    TEST_CHECK(link_frame_next_trip_seq(1u) == 2u, "1 -> 2");
-    TEST_CHECK(link_frame_next_trip_seq(254u) == 255u, "254 -> 255");
-    TEST_CHECK(link_frame_next_trip_seq(255u) == 1u, "255 wraps to 1, not 0");
+    TEST_SECTION("F4: trip_seq_next -- wraps 255 -> 1, never back to 0 (0 = no trip yet)");
+    TEST_CHECK(trip_seq_next(0u) == 1u, "first trip -> 1");
+    TEST_CHECK(trip_seq_next(1u) == 2u, "1 -> 2");
+    TEST_CHECK(trip_seq_next(254u) == 255u, "254 -> 255");
+    TEST_CHECK(trip_seq_next(255u) == 1u, "255 wraps to 1, not 0");
     uint8_t s = 0u;
     bool hit_zero = false;
     for (int i = 0; i < 1000; i++) {
-        s = link_frame_next_trip_seq(s);
+        s = trip_seq_next(s);
         if (s == 0u) hit_zero = true;
     }
     TEST_CHECK(!hit_zero, "1000 trips never produce seq 0");
@@ -369,7 +370,7 @@ static void test_trip_event_publish_barrier(void)
     TEST_CHECK(text != NULL, "safety_core.c readable");
     if (text) {
         /* CRLF-tolerant: distance checks, not exact whitespace. */
-        const char *w = strstr(text, "s_trip_seq = link_frame_next_trip_seq(s_trip_seq)");
+        const char *w = strstr(text, "s_trip_seq = trip_seq_next(s_trip_seq)");
         const char *dw = NULL;
         for (const char *q = text; w && (q = strstr(q, "HAL_DMB();")) != NULL && q < w; q++) {
             dw = q;

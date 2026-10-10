@@ -21,7 +21,7 @@
 // doc comment on that section, and reboot_announce.h's comment two lines up
 // for the precedent this follows.
 #include "safety_core.h"
-#include "link_frame.h" // link_frame_next_trip_seq(), F4
+#include "trip_seq.h" // trip_seq_next(), F4 (link-free header; link_frame.h is off limits here)
 #include "hal_barrier.h" // HAL_DMB(): publish/acquire of the trip-event fields across cores, F5
 
 #include <math.h>
@@ -568,7 +568,7 @@ static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP
 // s_trip_seq == 0 means "no trip yet this boot" (matches
 // safety_core_get_trip_event()'s documented return-false contract); the
 // first real trip makes it 1, wrapping uint8_t 255 -> 1 thereafter (never back
-// to 0: link_frame_next_trip_seq(), safety link review 2026-10-09 F4 -- a wrap
+// to 0: trip_seq_next(), safety link review 2026-10-09 F4 -- a wrap
 // to 0 made the 256th trip read as "never tripped" and go unreported).
 // 2026-08-27 audit: relay_owner_command_trip() posts to a 4-deep queue and
 // never blocks (relay_owner must never block -- ARCHITECTURE.md section 1),
@@ -1467,7 +1467,7 @@ static void safety_core_task(void *arg)
                                                                             &s_guard_cfg);
             // F5: release -- every field above must be visible to the other core before the seq is.
             HAL_DMB();
-            s_trip_seq = link_frame_next_trip_seq(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
+            s_trip_seq = trip_seq_next(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
             HAL_DMB();
             s_trip_gen++; // even again: capture complete
 
