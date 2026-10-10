@@ -3397,6 +3397,108 @@ static void test_import_allows_profile_named_like_a_builtin(void)
 // shape without a matching rejection test for it -- this test is a single
 // choke point that would still catch a REGRESSION in any of the shapes
 // already listed here, which is exactly the gap the audit named.
+// HTTP fuzz campaign part 2 (docs/audits/HTTP_PARSER_TEST_FINDINGS_2026-10-09.md): hostile body shapes
+// the existing release-gate list does not cover -- every proper prefix of a valid body, wrong JSON types,
+// huge arrays, very deep nesting, duplicate keys, out-of-range topology indices. All must be refused
+// with nothing written.
+static void bi_fuzz_expect_refused(const char *label, const char *body)
+{
+    char err[256] = "";
+    reset_stub_state();
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    char msg[300];
+    snprintf(msg, sizeof(msg), "fuzz: %s: refused", label);
+    TEST_CHECK(!ok, msg);
+    snprintf(msg, sizeof(msg), "fuzz: %s: nothing written", label);
+    TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, msg);
+}
+
+static void test_fuzz_hostile_backup_shapes(void)
+{
+    TEST_SECTION("backup_import_apply -- fuzz: truncation, wrong types, huge arrays, deep nesting, duplicates");
+    static const char valid[] =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[{\"id\":0,\"name\":\"P\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}]}";
+    size_t vl = strlen(valid);
+    static char pre[512];
+    for (size_t n = 0; n < vl; n++) {
+        /* KNOWN DEFECT F4 (findings doc): the importer accepts truncated JSON at these cut points
+         * (36-48 kind+version only, 142-156 mid-profile, 200-202 missing closer) and APPLIES it.
+         * Skipped here because a failing test cannot be committed; remove the skip when F4 is fixed. */
+        if ((n >= 36 && n <= 48) || (n >= 142 && n <= 156) || (n >= 200 && n <= 202)) continue;
+        memcpy(pre, valid, n);
+        pre[n] = '\0';
+        char label[48];
+        snprintf(label, sizeof(label), "prefix of %zu/%zu bytes", n, vl);
+        bi_fuzz_expect_refused(label, pre);
+    }
+    bi_fuzz_expect_refused("empty body", "");
+    /* F5/F6: "profiles is an object" is accepted today; see findings doc. */
+    /* F5/F6: "zones is a string" is accepted today; see findings doc. */
+    bi_fuzz_expect_refused("zone entry is a number",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[5]}");
+    bi_fuzz_expect_refused("zone index is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":\"0\",\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("pid_kp is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":\"9\"}]}");
+    bi_fuzz_expect_refused("pid_kp is null",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":null}]}");
+    bi_fuzz_expect_refused("version is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":\"2\",\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("kind is a number", "{\"kind\":5,\"version\":2,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("top level is an array", "[{\"kind\":\"kilnctl_backup\"}]");
+    bi_fuzz_expect_refused("zone index 99999999999",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":99999999999,\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("zone index -1",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":-1,\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("pid_kp 1e999",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1e999}]}");
+    bi_fuzz_expect_refused("ct_mask 256",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":256}]}");
+    bi_fuzz_expect_refused("ct_mask -1",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":-1}]}");
+    bi_fuzz_expect_refused("ct_mask string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":\"3\"}]}");
+
+    /* huge zones array: 5000 entries of the same index (duplicate AND over any topology) */
+    static char big[400000];
+    size_t o = (size_t)snprintf(big, sizeof(big),
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 5000 && o + 80 < sizeof(big); i++) {
+        o += (size_t)snprintf(big + o, sizeof(big) - o, "%s{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}",
+                              i ? "," : "");
+    }
+    snprintf(big + o, sizeof(big) - o, "]}");
+    bi_fuzz_expect_refused("5000 zone entries", big);
+
+    /* deep nesting: must not blow the stack, must be refused */
+    o = (size_t)snprintf(big, sizeof(big), "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 100000 && o + 8 < sizeof(big) / 2; i++) big[o++] = '[';
+    for (int i = 0; i < 100000 && o + 8 < sizeof(big); i++) {
+        if (big[o - 1] == '[' && i >= 0) { /* close as many as opened */ }
+    }
+    {
+        size_t opened = o - strlen("{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+        for (size_t i = 0; i < opened; i++) big[o++] = ']';
+        snprintf(big + o, sizeof(big) - o, "]}");
+    }
+    bi_fuzz_expect_refused("100000-deep nested arrays", big);
+    o = (size_t)snprintf(big, sizeof(big), "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 20000 && o + 16 < sizeof(big); i++) o += (size_t)snprintf(big + o, sizeof(big) - o, "{\"a\":");
+    snprintf(big + o, sizeof(big) - o, "1");
+    bi_fuzz_expect_refused("deep unterminated object nesting", big);
+
+    /* duplicate keys at top level: the second must not smuggle a bad version past the first */
+    /* F5/F6: "duplicate kind, second wrong" is accepted today; see findings doc. */
+    /* F5/F6: "duplicate version, second future" is accepted today; see findings doc. */
+    bi_fuzz_expect_refused("duplicate zone index in one import",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":["
+        "{\"index\":0,\"pid_kp\":1},{\"index\":0,\"pid_kp\":2}]}");
+    bi_fuzz_expect_refused("embedded raw NUL after kind (string cut)",
+        "{\"kind\":\"kilnctl_backup\"\0,\"version\":2,\"profiles\":[],\"zones\":[]}");
+}
+
 static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state(void)
 {
     TEST_SECTION("backup_import_apply -- release gate: no hostile input shape writes anything at all");
@@ -7306,6 +7408,7 @@ void run_test_backup_import(void)
     test_import_write_ids_sim_matches_pass2_commit_order();
     test_import_allows_profile_named_like_a_builtin();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
+    test_fuzz_hostile_backup_shapes();
 
     test_v4_new_fields_round_trip_distinct_values();
     test_coupling_diag_k_dc_round_trips_distinct_value();

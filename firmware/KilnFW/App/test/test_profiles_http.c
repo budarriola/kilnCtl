@@ -5072,8 +5072,76 @@ static void test_profiles_refused_until_boot_load_done(void)
     TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save works again after boot load");
 }
 
+// HTTP fuzz campaign part 2: hostile POST /api/profile bodies and a body shorter than Content-Length.
+static void test_fuzz_profile_post_hostile(void)
+{
+    TEST_SECTION("profile_post_handler() fuzz -- hostile bodies store nothing; short body is a 400");
+    const char *seg = "&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    static const char *const heads[] = {
+        "id=-1", "id=-1&name=",
+        "id=-1&name=ThisNameIsFarTooLongForAProfileSlotxxxxxxxxxxxxxxxxxxxx",
+        "id=-1&name=A&zone_mask=0", "id=-1&name=A&zone_mask=-1", "id=-1&name=A&zone_mask=99999999999",
+        "id=-1&name=A&zone_mask=1&seg_count=0", "id=-1&name=A&zone_mask=1&seg_count=-1",
+        "id=-1&name=A&zone_mask=1&seg_count=99999",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=nan&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=1e999&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=inf&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=-1",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=99999999999",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=99999&seg0_ramp=50&seg0_dwell=5",
+        "id=-1&name=A&zone_mask=1&seg_count=1&seg0_target=-500&seg0_ramp=50&seg0_dwell=5",
+    };
+    for (size_t k = 0; k < sizeof(heads) / sizeof(heads[0]); k++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        pcfg_reset_all();
+        char body[512];
+        /* bodies that already carry segment fields get no extra suffix */
+        snprintf(body, sizeof(body), "%s%s", heads[k], strstr(heads[k], "seg0_") ? "" : seg);
+        run_profile_post(body);
+        char msg[200];
+        snprintf(msg, sizeof(msg), "hostile profile body #%zu stores nothing (%s)", k, heads[k]);
+        TEST_CHECK(!profiles_slot_used(0), msg);
+    }
+    /* seg_count bigger than the fields supplied */
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    run_profile_post("id=-1&name=A&zone_mask=1&seg_count=3&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    TEST_CHECK(!profiles_slot_used(0), "seg_count=3 with only seg0 present stores nothing");
+
+    /* Content-Length longer than the body actually received: recv returns 0 early */
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    pcfg_reset_all();
+    const char *good = "id=-1&name=Short&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = (long long)strlen(good) + 40;
+    s_post_body = good;
+    s_post_body_left = strlen(good);
+    s_last_err_code = 0;
+    (void)profile_post_handler(&req);
+    s_post_body = NULL;
+    s_post_body_left = 0;
+    TEST_CHECK(s_last_err_code == 400, "body shorter than Content-Length answers 400");
+    TEST_CHECK(!profiles_slot_used(0), "short body stores nothing");
+
+    /* Content-Length 0 and a negative one */
+    for (int i = 0; i < 2; i++) {
+        memset(&req, 0, sizeof(req));
+        req.content_len = i ? -5 : 0;
+        s_last_err_code = 0;
+        (void)profile_post_handler(&req);
+        TEST_CHECK(s_last_err_code == 400 && !profiles_slot_used(0), "empty/negative Content-Length is a 400, nothing stored");
+    }
+    /* oversized Content-Length never allocates/reads */
+    memset(&req, 0, sizeof(req));
+    req.content_len = 100 * 1024 * 1024;
+    s_last_err_code = 0;
+    (void)profile_post_handler(&req);
+    TEST_CHECK(s_last_err_code == 400 || s_last_err_code == 413, "100 MB Content-Length refused up front");
+}
+
 void run_test_profiles_http(void)
 {
+    test_fuzz_profile_post_hostile();
     profiles_http_test_set_loaded(true); /* tests below exercise runnable checks without a boot sequence */
     test_v1_blob_loads_and_preserves_all_fields();
     test_profiles_refused_until_boot_load_done();

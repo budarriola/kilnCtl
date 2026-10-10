@@ -486,8 +486,42 @@ static void test_apply_idle_and_clear_reaches_swap_worker(void)
     TEST_CHECK(s_last_status == 202, "an accepted apply reports 202 Accepted");
 }
 
+// HTTP fuzz campaign part 2: hostile apply bodies never reach the interlock or the swap worker.
+static void test_apply_hostile_bodies_never_reach_swap(void)
+{
+    TEST_SECTION("apply_post_handler fuzz -- malformed id bodies are 4xx and never reach the swap worker");
+    static const char *const bodies[] = {
+        "", "id", "id=", "id=abc", "id=1x", "id=-1", "id=%00", "id=1%002", "id=%zz",
+        "id=0x1", "id=1.5", "id=+", "foo=1", "&&&", "id=1e2", "id=--1",
+    };
+    for (size_t i = 0; i < sizeof(bodies) / sizeof(bodies[0]); i++) {
+        test_reset();
+        s_test_id_exists = true;
+        snprintf(s_test_post_body, sizeof(s_test_post_body), "%s", bodies[i]);
+        httpd_req_t req;
+        memset(&req, 0, sizeof(req));
+        req.content_len = (long long)strlen(bodies[i]);
+        (void)apply_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "body '%s' refused", bodies[i]);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, msg);
+        snprintf(msg, sizeof(msg), "body '%s': swap worker never reached", bodies[i]);
+        TEST_CHECK(g_stub_swap_submit_calls == 0 && g_probe_interlock_called == 0, msg);
+    }
+    /* oversized Content-Length (past the 256 B scratch) refused without a read */
+    test_reset();
+    s_test_id_exists = true;
+    snprintf(s_test_post_body, sizeof(s_test_post_body), "id=1");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 100000;
+    (void)apply_post_handler(&req);
+    TEST_CHECK(s_test_err_called && g_stub_swap_submit_calls == 0, "100000-byte Content-Length refused");
+}
+
 int main(void)
 {
+    test_apply_hostile_bodies_never_reach_swap();
     test_apply_nonexistent_id_refused_before_mode_gate();
     test_apply_refused_by_mode_gate_before_interlock();
     test_apply_refused_by_mode_gate_autotune_running();

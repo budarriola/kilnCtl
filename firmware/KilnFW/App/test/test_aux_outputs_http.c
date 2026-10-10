@@ -347,8 +347,55 @@ static void test_format(void)
     TEST_CHECK(aux_http_core_format_head(&OPS, tiny, 0) == 0, "zero cap formats nothing");
 }
 
+static void test_fuzz_hostile_bodies(void)
+{
+    TEST_SECTION("aux POST fuzz: hostile bodies refused 4xx, store and relay never touched");
+    reset_fakes();
+    f_enabled_mask = 0x0F;
+    static const char *const bad_set[] = {
+        "", "&", "relay", "relay=", "relay=%", "relay=%zz&enabled=1", "relay=1%00&enabled=1",
+        "relay=1x&enabled=1", "relay=0x1&enabled=1", "relay=1.0&enabled=1",
+        "relay=99999999999999999999&enabled=1", "relay=-1&enabled=1", "relay=1&enabled=",
+        "relay=1&enabled=true", "relay=1&enabled=1&hyst_c=inf", "relay=1&enabled=1&hyst_c=-nan",
+        "relay=1&enabled=1&hyst_c=1e999", "relay=1&enabled=1&hyst_c=",
+        "relay=1&enabled=1&min_on_s=1e3", "relay=1&enabled=1&min_on_s=99999999999",
+        "relay=1&enabled=1&min_off_s=-5", "relay=1&enabled=1&tc_zone=99999999999",
+        "relay=1&enabled=1&tc_zone=abc", "relay=1&enabled=1&tc_zone=",
+    };
+    for (size_t i = 0; i < sizeof(bad_set) / sizeof(bad_set[0]); i++) {
+        int st = do_set(bad_set[i]);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "set body #%zu '%s' -> 4xx (got %d)", i, bad_set[i], st);
+        TEST_CHECK(st >= 400 && st < 500, msg);
+    }
+    TEST_CHECK(f_set_calls == 0, "no hostile set body reached the store");
+    static const char *const bad_manual[] = {
+        "", "relay=4&on=", "relay=4&on=true", "relay=4%00&on=1", "relay=4&on=1x", "relay=4&on=-1",
+        "relay=4x&on=1", "relay=99999999999&on=1", "relay=%&on=1", "relay=4&on=%zz",
+    };
+    for (size_t i = 0; i < sizeof(bad_manual) / sizeof(bad_manual[0]); i++) {
+        int st = do_manual(bad_manual[i]);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "manual body #%zu '%s' -> 4xx (got %d)", i, bad_manual[i], st);
+        TEST_CHECK(st >= 400 && st < 500, msg);
+    }
+    TEST_CHECK(f_relay_calls == 0, "no hostile manual body switched a relay");
+
+    /* duplicate keys: first occurrence wins, never a mix; a later bad duplicate cannot flip the relay */
+    TEST_CHECK(do_manual("relay=4&on=0&on=1") == 200 && !f_relay_on, "duplicate on=: first value used");
+    /* very long value is bounded, not overrun */
+    static char longb[8192];
+    memset(longb, '9', sizeof(longb));
+    memcpy(longb, "relay=", 6);
+    longb[sizeof(longb) - 1] = '\0';
+    int calls_before = f_set_calls;
+    TEST_CHECK(do_set(longb) >= 400, "8 KB relay value refused");
+    TEST_CHECK(f_set_calls == calls_before, "8 KB value never reached the store");
+}
+
 void run_test_aux_outputs_http(void)
 {
+    test_fuzz_hostile_bodies();
     test_set_mode_gate();
     test_set_field_validation();
     test_set_zone_conflict();
