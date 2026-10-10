@@ -29,7 +29,9 @@ async function scenario(o) {
         const r = queue.shift();
         if (r === 'authcancel') return Promise.reject({ authCancelled: true });
         if (r === 'netfail') return Promise.reject(new Error('net'));
-        return Promise.resolve(fakeResponse(r.status, r.text));
+        const resp = fakeResponse(r.status, r.text);
+        resp.headers = { get: (k) => (r.partial && k === 'X-Kiln-Partial-Write' ? '1' : null) };
+        return Promise.resolve(resp);
       },
     },
   });
@@ -69,10 +71,14 @@ async function scenario(o) {
   }
 
   // A 500 is a partial write per backup_import: it must say so, never "refused" (D3).
-  s = await scenario({ responses: [{ status: 200, text: '' }, { status: 500, text: 'partial write: zones committed' }] });
+  s = await scenario({ responses: [{ status: 200, text: '' }, { status: 500, text: 'partial write: zones committed', partial: true }] });
   ok(!/complete/i.test(s.status) && /partial write: zones committed/.test(s.status), '500 partial write: no success claim, server text shown');
   ok(/Restore failed partway -- some settings may have changed/.test(s.status) && !/refused/i.test(s.status),
     '500 partial write says it failed partway and settings may have changed, never "refused"');
+  // L2: a 500 without the partial-write header (OOM before any write) must not claim a partial write.
+  s = await scenario({ responses: [{ status: 200, text: '' }, { status: 500, text: 'out of memory' }] });
+  ok(/before anything was written/.test(s.status) && /out of memory/.test(s.status) && !/partway/.test(s.status),
+    '500 without X-Kiln-Partial-Write says nothing was written, not "failed partway"');
   s = await scenario({ responses: [{ status: 200, text: '' }, { status: 409, text: 'busy now' }] });
   ok(/Restore refused: busy now/.test(s.status), '409 on the real POST is still a plain refusal');
 
@@ -83,7 +89,7 @@ async function scenario(o) {
   s = await scenario({ responses: ['netfail'] });
   ok(/Could not check the restore plan/.test(s.status), 'network failure on dry run says the plan could not be checked');
   s = await scenario({ responses: [{ status: 200, text: '' }, 'netfail'] });
-  ok(/Upload failed/.test(s.status), 'network failure on real POST says upload failed');
+  ok(/Connection lost -- the restore result is unknown/.test(s.status), 'network failure on real POST says the result is unknown');
 
   console.log(failed ? failed + ' FAILED' : 'all passed');
   process.exit(failed ? 1 : 0);

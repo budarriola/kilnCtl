@@ -4334,6 +4334,9 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 
     if (!ok) {
         httpd_resp_set_status(async_req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
+        /* Webfix review L2: the page tells a real partial write from an earlier 500 (OOM before
+         * any write, httpd's own) by this header, set only where backup_import_apply reports it. */
+        if (partial_write) httpd_resp_set_hdr(async_req, "X-Kiln-Partial-Write", "1");
         httpd_resp_set_type(async_req, "text/plain");
         httpd_resp_send(async_req, err_msg, strlen(err_msg));
         free(plan);

@@ -305,6 +305,7 @@ function loadCurrent() {
 // Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real user edit,
 // cleared once a save succeeds or the form is re-rendered from the board.
 var kcDirty = false;
+var kcEditSeq = 0; // a save clears the guard / re-renders only if nothing was typed after it was sent
 window.addEventListener('beforeunload', function (e) {
   if (!kcDirty) return undefined;
   e.preventDefault();
@@ -313,8 +314,8 @@ window.addEventListener('beforeunload', function (e) {
 });
 ['profiles', 'zones', 'pcLink'].forEach(function (id) {
   var el = document.getElementById(id);
-  el.addEventListener('input', function () { kcDirty = true; });
-  el.addEventListener('change', function () { kcDirty = true; });
+  el.addEventListener('input', function () { kcDirty = true; kcEditSeq++; });
+  el.addEventListener('change', function () { kcDirty = true; kcEditSeq++; });
 });
 
 document.getElementById('save').addEventListener('click', function () {
@@ -374,12 +375,18 @@ document.getElementById('save').addEventListener('click', function () {
   if (!ok) { msg.textContent = 'Every timing box must be a number of 0 or more.'; return; }
 
   msg.textContent = 'Saving…';
+  var savedEditSeq = kcEditSeq;
   fetch('/api/zones', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.join('&'),
   }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    if (kcEditSeq !== savedEditSeq) {
+      /* Typed while the save was in flight: a re-render would overwrite it. Keep it, keep the guard. */
+      msg.textContent = 'Saved. You made further edits while saving -- they are not saved yet.';
+      return;
+    }
     kcDirty = false;
     msg.textContent = 'Saved.';
     loadCurrent();

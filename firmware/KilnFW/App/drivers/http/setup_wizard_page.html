@@ -1721,6 +1721,8 @@ function gRenderTarget(target) {
   if (target === 'overview' || target === null || target === undefined) {
     overview.hidden = false;
     stepScreen.hidden = true;
+    /* Leaving a step for the overview (e.g. after a progress-save failure) is not unsaved work. */
+    kcDirty = false;
     gRenderStepper();
     return;
   }

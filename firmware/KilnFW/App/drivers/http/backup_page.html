@@ -238,10 +238,13 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
           headers: headers,
           body: body,
         }).then(function (r) {
-          return r.text().then(function (t) { return { ok: r.ok, status: r.status, text: t }; });
+          var partial = !!(r.headers && r.headers.get && r.headers.get('X-Kiln-Partial-Write') === '1');
+          return r.text().then(function (t) { return { ok: r.ok, status: r.status, text: t, partial: partial }; });
         }).then(function (res) {
           status.textContent = res.ok ? 'Restore complete.' : (res.status === 500
-            ? ('Restore failed partway -- some settings may have changed: ' + res.text)
+            ? (res.partial
+              ? ('Restore failed partway -- some settings may have changed: ' + res.text)
+              : ('Restore failed before anything was written (board error): ' + res.text))
             : ('Restore refused: ' + res.text));
         }).catch(function (authErr) {
           // Quiet note, never a stale "Uploading...".
@@ -249,7 +252,7 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
             status.textContent = 'Sign-in cancelled -- nothing was restored.';
             return;
           }
-          status.textContent = 'Upload failed -- check the connection and try again.';
+          status.textContent = 'Connection lost -- the restore result is unknown (it may have been applied in full or in part). Check the settings, then re-run the same file if unsure.';
         });
       });
     }).catch(function (authErr) {

@@ -6,7 +6,7 @@
 'use strict';
 const fs = require('fs');
 const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
-const { runPageScript, flush, fakeResponse } = require('./_page_vm.js');
+const { runPageScript, flush, fakeResponse, makeEl } = require('./_page_vm.js');
 
 let failed = 0;
 function ok(c, l) { if (c) console.log('PASS: ' + l); else { failed++; console.log('FAIL: ' + l); } }
@@ -129,9 +129,10 @@ function boot(file, marker, routes, extraOpts) {
   {
     const r = boot('profiles_page.html', 'function resetEditor', {
       '/api/profile': (init) => jsonResp({ ok: true, id: 3 }),
-    }, { groups: { '.pzone-cb': [{ checked: true, value: '0' }] } });
+    }, { groups: { '.pzone-cb': [{ checked: true, value: '0' }] }, selectors: { details: makeEl('details') } });
     await flush();
-    const rowEl = r.getEl('row');
+    const v = (x) => ({ value: x, checked: false });
+    const rowEl = makeEl('row', { '.seg-kind': v('0'), '.s-target': v('100'), '.s-ramp': v('50'), '.s-dwell': v('10') });
     r.els.segments.querySelectorAll = (sel) => (sel === '.seg' ? [rowEl] : []);
     ok(r.hasGuard(), 'profiles: exactly one beforeunload guard registered');
     ok(!r.prompts(), 'profiles: no edit -> no prompt');
@@ -156,6 +157,79 @@ function boot(file, marker, routes, extraOpts) {
     ok(!r.prompts(), 'setup_wizard: successful step save clears the guard');
     r.els.stepBody1.fire('change');
     await r.sandbox.postStepState(1, 'done').catch(() => {});
+  }
+
+  /* ---- M4-M7 / L2-L3: a FAILED save keeps the guard; an edit typed during an in-flight save keeps it too ---- */
+  const zonesGet = { thermo_count: 0, relay_count: 0, max_simultaneous_relays: 0, zones: [], timing_profiles: [], relay_names: [], pc_link_abort_silence_ms: 0 };
+  const variants = [
+    { name: 'safety_config', file: 'safety_config_page.html', marker: "getElementById('save')", edit: 'pcLink', ev: 'input', btn: 'save',
+      route: '/api/zones', get: zonesGet },
+    { name: 'settings_display', file: 'settings_display_page.html', marker: 'kcDpBrightness', edit: 'kcDpTimeout', ev: 'change', btn: 'kcDpSave',
+      route: '/api/settings/display_power', get: { brightness_percent: 50, timeout_setting: 0, keep_on_while_firing: false, display_on_error: false } },
+    { name: 'zones', file: 'zones_page.html', marker: 'zonesFormDirty', edit: 'thermoCount', ev: 'change', btn: 'saveBtn',
+      route: '/api/zones', get: zonesGet },
+  ];
+  for (const v of variants) {
+    for (const mode of ['fail', 'inflight']) {
+      let release = null;
+      const routes = {};
+      routes[v.route] = (init) => {
+        if (init.method !== 'POST') return jsonResp(v.get);
+        if (mode === 'fail') return { ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('boom') };
+        return new Promise((res) => { release = () => res(jsonResp({ ok: true })); });
+      };
+      const r = boot(v.file, v.marker, routes);
+      await flush();
+      r.els[v.edit].fire(v.ev);
+      r.els[v.btn].fire('click');
+      if (mode === 'inflight') {
+        await flush();
+        r.els[v.edit].fire(v.ev);
+        release();
+      }
+      await flush();
+      ok(r.prompts(), v.name + ': ' + (mode === 'fail' ? 'failed save keeps the guard armed' : 'edit typed during an in-flight save keeps the guard armed'));
+    }
+  }
+
+  /* profiles: failed save + in-flight edit + resetEditor */
+  {
+    for (const mode of ['fail', 'inflight']) {
+      let release = null;
+      const v = (x) => ({ value: x, checked: false });
+      const r = boot('profiles_page.html', 'function resetEditor', {
+        '/api/profile': () => (mode === 'fail'
+          ? { ok: false, status: 500, json: () => Promise.resolve({}), text: () => Promise.resolve('boom') }
+          : new Promise((res) => { release = () => res(jsonResp({ ok: true, id: 3 })); })),
+      }, { groups: { '.pzone-cb': [{ checked: true, value: '0' }] }, selectors: { details: makeEl('details') } });
+      await flush();
+      const rowEl = makeEl('row', { '.seg-kind': v('0'), '.s-target': v('100'), '.s-ramp': v('50'), '.s-dwell': v('10') });
+      r.els.segments.querySelectorAll = (sel) => (sel === '.seg' ? [rowEl] : []);
+      r.els.pname.fire('input');
+      r.els.saveBtn.fire('click');
+      if (mode === 'inflight') { await flush(); r.els.pname.fire('input'); release(); }
+      await flush();
+      ok(r.prompts(), 'profiles: ' + (mode === 'fail' ? 'failed save keeps the guard armed' : 'edit typed during an in-flight save keeps the guard armed'));
+    }
+    const r = boot('profiles_page.html', 'function resetEditor', {
+      '/api/profile': () => jsonResp({ ok: true, id: 3 }),
+    }, { groups: { '.pzone-cb': [{ checked: true, value: '0' }] }, selectors: { details: makeEl('details') } });
+    await flush();
+    r.els.pname.fire('input');
+    ok(r.prompts(), 'profiles: edit arms the guard before resetEditor');
+    r.sandbox.resetEditor();
+    ok(!r.prompts(), 'profiles: resetEditor clears the guard');
+  }
+
+  /* setup_wizard: a refused/failed progress save leaves the guard armed (M4) */
+  {
+    const r = boot('setup_wizard_page.html', 'function postStepState(', {
+      '/api/setup/progress': () => ({ ok: false, status: 500, json: () => Promise.resolve({ error: 'x' }), text: () => Promise.resolve('x') }),
+    });
+    await flush();
+    r.els.stepBody1.fire('input');
+    await r.sandbox.postStepState(1, 'done');
+    ok(r.prompts(), 'setup_wizard: failed progress save keeps the guard armed');
   }
 
   process.exit(failed ? 1 : 0);

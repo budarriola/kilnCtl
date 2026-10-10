@@ -14,12 +14,19 @@ function lastInlineScript(html) {
   return last;
 }
 
-function makeEl(id) {
+/* L6: an unregistered selector throws (a typo'd selector must not silently get a fake
+ * element). Register with opts.selectors: {selector: el}; a null value means "absent". */
+function qs(sel, q, who) {
+  if (sel && Object.prototype.hasOwnProperty.call(sel, q)) return sel[q];
+  throw new Error('_page_vm: unregistered querySelector(' + JSON.stringify(q) + ') on ' + who + ' -- add it to opts.selectors');
+}
+
+function makeEl(id, sel) {
   const handlers = {};
   const attrs = {};
   return {
     id, textContent: '', hidden: false, checked: false, files: null, value: '',
-    disabled: false, style: {}, dataset: {}, innerHTML: '', querySelectorAll() { return []; }, querySelector() { return makeEl('q'); }, appendChild() {}, remove() {}, click() {}, classList: { add() {}, remove() {}, toggle() {} },
+    disabled: false, style: {}, dataset: {}, innerHTML: '', querySelectorAll() { return []; }, querySelector(q) { return qs(sel, q, 'element ' + id); }, appendChild() {}, remove() {}, click() {}, classList: { add() {}, remove() {}, toggle() {} },
     addEventListener(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
     setAttribute(k, v) { attrs[k] = String(v); },
@@ -30,11 +37,11 @@ function makeEl(id) {
 }
 
 /* opts.elements: ids to pre-create; opts.groups: {selector: [el,...]};
- * opts.extra: extra globals (window.* stubs go here too, they are mirrored). */
+ * opts.selectors: {selector: el|null} for querySelector; opts.extra: extra globals (window.* stubs go here too, they are mirrored). */
 function runPageScript(html, opts) {
   opts = opts || {};
   const els = {};
-  const getEl = (id) => (els[id] = els[id] || makeEl(id));
+  const getEl = (id) => (els[id] = els[id] || makeEl(id, opts.selectors));
   (opts.elements || []).forEach(getEl);
   const sandbox = {
     console: { log() {}, warn() {}, error() {} },
@@ -42,7 +49,7 @@ function runPageScript(html, opts) {
     document: {
       getElementById: getEl,
       querySelectorAll: (sel) => (opts.groups && opts.groups[sel]) || [],
-      querySelector: () => null,
+      querySelector: (q) => qs(opts.selectors, q, 'document'),
       addEventListener() {},
       documentElement: makeEl('html'),
     },

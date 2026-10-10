@@ -56,11 +56,11 @@ async function scenario(o) {
     ok(s.status.indexOf('did-it') === 0 && !/Failed/.test(s.status), kind + ': 200 shows the server text, no failure wording');
 
     s = await scenario({ kind, reject: 'net' });
-    ok(/Request sent|Request failed/.test(s.status), kind + ': transport error ends in a settled message, not the in-progress one');
+    ok(/No reply|Request failed/.test(s.status), kind + ': transport error ends in a settled message, not the in-progress one');
     if (kind !== 'format') {
-      ok(/Request sent -- the board may already be rebooting/.test(s.status), kind + ': a dropped connection (TypeError) after the send reads as a reboot in progress');
+      ok(/No reply -- the board may be rebooting, or the request may not have reached it/.test(s.status), kind + ': a dropped connection (TypeError) after the send reads as a reboot in progress');
       s = await scenario({ kind, reject: 'other' });
-      ok(/boom-real-error/.test(s.status) && !/Request sent/.test(s.status), kind + ': any other failure shows its real error, not "Request sent" (got "' + s.status + '")');
+      ok(/boom-real-error/.test(s.status) && !/No reply/.test(s.status), kind + ': any other failure shows its real error, not "No reply" (got "' + s.status + '")');
     }
 
     s = await scenario({ kind, reject: 'authcancel' });

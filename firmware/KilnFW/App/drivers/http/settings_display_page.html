@@ -148,6 +148,7 @@ browser only.</p>
 
   // Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7).
   var kcDirty = false;
+  var kcEditSeq = 0; // a save clears the guard only for edits made before it was sent
   window.addEventListener('beforeunload', function (e) {
     if (!kcDirty) return undefined;
     e.preventDefault();
@@ -155,8 +156,8 @@ browser only.</p>
     return '';
   });
   [brightness, timeout, keepOnFiring, onError].forEach(function (el) {
-    el.addEventListener('input', function () { kcDirty = true; });
-    el.addEventListener('change', function () { kcDirty = true; });
+    el.addEventListener('input', function () { kcDirty = true; kcEditSeq++; });
+    el.addEventListener('change', function () { kcDirty = true; kcEditSeq++; });
   });
 
   brightness.addEventListener('input', function () {
@@ -195,6 +196,7 @@ browser only.</p>
 
   saveBtn.addEventListener('click', function () {
     status.textContent = 'Saving...';
+    var savedEditSeq = kcEditSeq;
     var body = 'brightness=' + encodeURIComponent(brightness.value) +
                '&timeout=' + encodeURIComponent(timeout.value) +
                '&keep_on_while_firing=' + (keepOnFiring.checked ? '1' : '0') +
@@ -208,7 +210,10 @@ browser only.</p>
         if (!r.ok) throw new Error('save failed');
         return r.json();
       })
-      .then(function () { kcDirty = false; status.textContent = 'Saved.'; })
+      .then(function () {
+        if (kcEditSeq === savedEditSeq) { kcDirty = false; status.textContent = 'Saved.'; }
+        else status.textContent = 'Saved. You made further edits while saving -- they are not saved yet.';
+      })
       .catch(function (authErr) {
         // Quiet note, never a stale "Saving...".
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {

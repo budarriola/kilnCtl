@@ -2596,7 +2596,8 @@ pollSweepStatus(); /* pick up a sweep already in progress from a previous page l
    * form from the board, which silently discarded whatever the operator had typed. Any
    * input/change inside the form sets the flag; a successful render of board data clears it. */
 var zonesFormDirty = false;
-function markZonesFormDirty() { zonesFormDirty = true; }
+var zonesEditSeq = 0; // a save clears the guard / re-renders only if nothing was typed after it was sent
+function markZonesFormDirty() { zonesFormDirty = true; zonesEditSeq++; }
 function reloadUnlessDirty(what) {
   if (!zonesFormDirty) { loadCurrent(); return true; }
   showDirtyReloadNotice(document.getElementById('msg'), what);
@@ -3004,6 +3005,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     return;
   }
   msg.textContent = 'Saving…';
+  var savedZonesEditSeq = zonesEditSeq;
   saveBtnEl.disabled = true;
   params = omitBlankOptionalParams(params);
   /* A stalled connection must not leave Save disabled until the browser gives up. */
@@ -3036,6 +3038,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       ? ' Also updated zone' + (dependents.length > 1 ? 's' : '') + ' ' + dependents.join(', ') +
         ' from ' + (dependents.length > 1 ? 'their' : 'its') + ' settings source.'
       : '');
+    if (zonesEditSeq !== savedZonesEditSeq) {
+      /* Typed while the save was in flight: a re-render would overwrite it. Keep it, keep the guard. */
+      msg.textContent += ' You made further edits while saving -- they are not saved yet.';
+      return;
+    }
     zonesFormDirty = false;
     loadCurrent();
   }).catch(function (e) {

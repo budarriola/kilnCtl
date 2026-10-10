@@ -1357,20 +1357,22 @@ function onOffRulesSummaryHtml(rules) {
  * editor (typing, zone tick, segment/rule edit, add/remove row); programmatic loads
  * (resetEditor, editProfile, loadIntoEditor) and a successful save clear it. */
 var kcDirty = false;
-function kcMarkDirty() { kcDirty = true; }
+var kcEditSeq = 0; /* bumped by every real edit: a save clears the guard only for edits made before it was sent */
+var kcSuppressUnload = false; /* set around a download navigation, which must not raise the leave-page prompt */
+function kcMarkDirty() { kcDirty = true; kcEditSeq++; }
 ['pname', 'pzone', 'segments', 'oorules'].forEach(function (id) {
   var el = document.getElementById(id);
   el.addEventListener('input', kcMarkDirty);
   el.addEventListener('change', kcMarkDirty);
   el.addEventListener('click', function (e) {
-    if (e.target && e.target.classList && e.target.classList.contains('remove')) kcDirty = true;
+    if (e.target && e.target.classList && e.target.classList.contains('remove')) kcMarkDirty();
   });
 });
 ['addSegBtn', 'addOoBtn'].forEach(function (id) {
   document.getElementById(id).addEventListener('click', kcMarkDirty);
 });
 window.addEventListener('beforeunload', function (e) {
-  if (!kcDirty) return undefined;
+  if (!kcDirty || kcSuppressUnload) return undefined;
   e.preventDefault();
   e.returnValue = '';
   return '';
@@ -1783,7 +1785,9 @@ function profileActionsGroup(p) {
        * button makes all three controls siblings of the same shape; the
        * server's own Content-Disposition header (profiles_export_http.c) is
        * what names the saved file, exactly as it did for the <a download>. */
+      kcSuppressUnload = true; /* a download is not a page leave; do not prompt for unsaved edits */
       window.location.href = profileExportUrl(p.id);
+      setTimeout(function () { kcSuppressUnload = false; }, 1500);
     });
 
     var editBtn = iconBtn('kgIconEdit', 'Edit "' + p.name + '"');
@@ -2288,6 +2292,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }
   params = params.concat(ooRulesToParams());
   msg.textContent = 'Saving…';
+  var savedEditSeq = kcEditSeq;
   fetch('/api/profile', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
@@ -2302,7 +2307,9 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       }
       msg.innerHTML = html;
       editingId = result.data.id;
-      kcDirty = false;
+      /* Edits typed while the save was in flight are not in what was saved: keep the guard armed for them. */
+      if (kcEditSeq === savedEditSeq) kcDirty = false;
+      else msg.innerHTML += '<br><span class="warn">You made further edits while saving -- they are not saved yet.</span>';
       refreshAll();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;

@@ -282,7 +282,7 @@ function kcResetCatch(status, err) {
     return;
   }
   if (err && err.name === 'TypeError') {
-    status.textContent = 'Request sent -- the board may already be rebooting, so this connection dropped.';
+    status.textContent = 'No reply -- the board may be rebooting, or the request may not have reached it.';
     return;
   }
   status.textContent = 'Request failed: ' + ((err && err.message) ? err.message : String(err));
