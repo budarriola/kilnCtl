@@ -60,7 +60,16 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t h, TickType_t t) { (void)h; (void)t;
 BaseType_t xSemaphoreGive(SemaphoreHandle_t h) { (void)h; return pdTRUE; }
 void watchdog_task_checkin(watchdog_checkin_id_t id) { (void)id; }
 
-bool uart_owner_send(const uint8_t *d, size_t n) { (void)d; (void)n; g_sends++; return true; }
+// Last frame handed to the UART (stuffed bytes), for scenarios that decode the reply.
+static uint8_t g_last_tx[KILNLINK_FRAME_STUFFED_MAX];
+static size_t g_last_tx_len;
+bool uart_owner_send(const uint8_t *d, size_t n)
+{
+    g_sends++;
+    g_last_tx_len = (n <= sizeof(g_last_tx)) ? n : 0;
+    if (g_last_tx_len) { memcpy(g_last_tx, d, n); }
+    return true;
+}
 size_t uart_owner_rx_read(uint8_t *o, size_t m) { (void)o; (void)m; return 0; }
 size_t uart_owner_get_last_send_remainder(void) { return 0; }
 uint32_t uart_owner_get_tx_bytes_from_isr(void) { return 0; }
@@ -106,9 +115,10 @@ void config_store_get_ct_cal(config_store_ct_channel_cal_t out[CONFIG_STORE_CT_C
     memset(out, 0, sizeof(config_store_ct_channel_cal_t) * CONFIG_STORE_CT_CAL_NUM_CHANNELS);
 }
 bool config_store_get_full_record(config_store_record_t *out) { config_store_default(out); return true; }
-uint8_t config_store_get_persisted_tc_type(void) { return 0; }
+static uint8_t g_pers_tc, g_cur_tc;
+uint8_t config_store_get_persisted_tc_type(void) { return g_pers_tc; }
 uint32_t config_store_get_ram_integrity_fail_count(void) { return 0; }
-uint8_t config_store_get_tc_type(void) { return 0; }
+uint8_t config_store_get_tc_type(void) { return g_cur_tc; }
 bool config_store_is_abs_max_temp_disabled(void) { return false; }
 bool config_store_is_calibration_missing(void) { return false; }
 bool config_store_is_rate_guard_disabled(void) { return false; }
@@ -118,14 +128,23 @@ bool config_store_write(const config_store_record_t *r, const char **why)
 {
     (void)r; g_cfg_writes++; if (why) { *why = "fake"; } return false;
 }
+// Controllable write fakes: the commit scenarios choose the outcome and read
+// back the exact candidate record the handler built.
+static bool g_wex_ret, g_wvol_ret;
+static config_store_write_decision_t g_wex_decision;
+static int g_wex_calls, g_wvol_calls, g_wex_heat_safe;
+static config_store_record_t g_last_cand;
 bool config_store_write_ex(const config_store_record_t *r, bool heat_safe, const char **why,
                             config_store_write_decision_t *d)
 {
-    (void)r; (void)heat_safe; g_cfg_writes++; if (why) { *why = "fake"; } if (d) { memset(d, 0, sizeof(*d)); } return false;
+    g_cfg_writes++; g_wex_calls++; g_wex_heat_safe = heat_safe ? 1 : 0; g_last_cand = *r;
+    if (why) { *why = "fake"; }
+    if (d) { *d = g_wex_decision; }
+    return g_wex_ret;
 }
 bool config_store_write_volatile(const config_store_record_t *r, const char **why)
 {
-    (void)r; g_cfg_writes++; if (why) { *why = "fake"; } return false;
+    g_cfg_writes++; g_wvol_calls++; g_last_cand = *r; if (why) { *why = "fake"; } return g_wvol_ret;
 }
 
 static bool g_any_current_present;
@@ -134,7 +153,8 @@ bool current_task_ct_auto_zero_begin(uint8_t ch) { (void)ch; return false; }
 void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *o) { memset(o, 0, sizeof(*o)); }
 void current_task_get_power(current_sense_power_t *o) { memset(o, 0, sizeof(*o)); }
 void current_task_get_snapshot(current_snapshot_t *o) { memset(o, 0, sizeof(*o)); }
-void current_task_reload_cal(void) {}
+static int g_reload_cal;
+void current_task_reload_cal(void) { g_reload_cal++; }
 void current_task_reload_ct_cal(void) {}
 bool discrete_task_estop_pressed(void) { return false; }
 
@@ -154,7 +174,8 @@ bool thermo_task_inject_reading(bool v, float tc, float cj, uint8_t f) { (void)v
 bool thermo_task_injection_active(void) { return false; }
 uint32_t thermo_task_live_config_mismatch_count(void) { return 0; }
 bool thermo_task_reconfig_gave_up(void) { return false; }
-void thermo_task_request_tc_type_reapply(void) {}
+static int g_tc_reapply;
+void thermo_task_request_tc_type_reapply(void) { g_tc_reapply++; }
 
 bool update_task_get_active_slot(bool *b) { *b = false; return false; }
 static int g_upd_calls[4];
@@ -870,6 +891,215 @@ static void scenario_heat_probe_current_floor(void)
     g_any_current_present = false;
 }
 
+// --- R2-B: COMMIT_CONFIG / APPLY_CONFIG_VOLATILE handlers ------------------------
+
+// Decodes the last UART frame into a COMMIT_CONFIG_REJECTED (0x20) payload.
+static bool last_tx_rejected(uint16_t *param_id, uint8_t *reason)
+{
+    uint8_t raw[KILNLINK_FRAME_RAW_MAX];
+    kilnlink_frame_status_t st;
+    size_t rl = kilnlink_unstuff(g_last_tx, g_last_tx_len, raw, sizeof(raw), &st);
+    if (rl == 0) { return false; }
+    kilnlink_frame_t f;
+    if (kilnlink_frame_decode(raw, rl, &f) != KILNLINK_FRAME_OK) { return false; }
+    kilnlink_commit_config_rejected_t m;
+    kilnlink_commit_config_rejected_status_t ds = kilnlink_commit_config_rejected_decode(f.payload, f.length, &m);
+    if (ds != KILNLINK_COMMIT_CONFIG_REJECTED_OK) { return false; }
+    *param_id = m.param_id;
+    *reason = m.reason;
+    return true;
+}
+
+static void commit_reset(void)
+{
+    reset_link_state();
+    link_staging_reset(&s_staging);
+    g_wex_ret = g_wvol_ret = false;
+    g_wex_decision = CONFIG_STORE_WRITE_OK;
+    g_wex_calls = g_wvol_calls = g_reload_cal = g_tc_reapply = 0;
+    g_pers_tc = g_cur_tc = 0;
+    g_last_tx_len = 0;
+    s_tc_type_reapply_pending = false;
+    memset(&g_last_cand, 0, sizeof(g_last_cand));
+}
+
+static void stage_u8(uint16_t id, uint8_t v) { send_set_param(id, KILNLINK_PARAM_TYPE_U8, &v, 1); }
+static void send_cmd1(uint8_t cmd) { send_esp(&cmd, 1); }
+
+static void scenario_commit_config(void)
+{
+    uint16_t pid = 0;
+    uint8_t reason = 0xEE;
+
+    // 1. Contradictory pair (BORROWED_ZONE + EXTERNAL_OVERHEAT): refused before
+    //    any write, names tc_placement_mode (0x0103), CONTRADICTION, staging kept.
+    commit_reset();
+    stage_u8(0x0101u, CONFIG_STORE_TC_SOURCE_BORROWED_ZONE);
+    stage_u8(0x0103u, CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT);
+    CHECK(link_staging_count(&s_staging) == 2, "contradiction setup staged %u", (unsigned)link_staging_count(&s_staging));
+    g_sends = 0;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(g_wex_calls == 0, "contradiction must not reach config_store_write_ex, calls=%d", g_wex_calls);
+    CHECK(g_sends == 1, "one rejection frame sent, sends=%d", g_sends);
+    CHECK(last_tx_rejected(&pid, &reason), "rejection frame decodes");
+    CHECK(pid == 0x0103u, "contradiction names tc_placement_mode 0x0103, got 0x%04X", (unsigned)pid);
+    CHECK(reason == KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION, "reason CONTRADICTION, got %u", (unsigned)reason);
+    CHECK(link_staging_count(&s_staging) == 2, "staging kept after validation refusal, count=%u", (unsigned)link_staging_count(&s_staging));
+    CHECK(g_reload_cal == 0 && g_tc_reapply == 0, "no reload/reapply on refusal");
+
+    // 1b. abs_max_temp_c above the Type T ceiling: names abs_max_temp_c (0x0104).
+    commit_reset();
+    stage_u8(0x0105u, 7);
+    {
+        float f = 1500.0f;
+        uint8_t b[4];
+        memcpy(b, &f, 4);
+        send_set_param(0x0104u, KILNLINK_PARAM_TYPE_F32, b, 4);
+    }
+    g_sends = 0;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(g_wex_calls == 0, "abs_max vs tc_type contradiction must not write");
+    CHECK(last_tx_rejected(&pid, &reason), "abs_max rejection decodes");
+    CHECK(pid == 0x0104u && reason == KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION,
+          "abs_max contradiction pid=0x%04X reason=%u", (unsigned)pid, (unsigned)reason);
+
+    // 2. Refusal decisions from the write map onto the wire reason and keep staging.
+    struct { config_store_write_decision_t d; uint8_t want; const char *name; } cases[] = {
+        { CONFIG_STORE_WRITE_REFUSED_ARMED, KILNLINK_COMMIT_CONFIG_REJECT_ARMED, "ARMED" },
+        { CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_ON, KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_ON, "HEAT_ON" },
+        { CONFIG_STORE_WRITE_REFUSED_ARMED_HEAT_UNKNOWN, KILNLINK_COMMIT_CONFIG_REJECT_ARMED_HEAT_UNKNOWN, "HEAT_UNKNOWN" },
+        { CONFIG_STORE_WRITE_FLASH_FAILURE, KILNLINK_COMMIT_CONFIG_REJECT_STORAGE, "STORAGE" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        commit_reset();
+        stage_u8(0x0105u, 3);
+        g_wex_ret = false;
+        g_wex_decision = cases[i].d;
+        g_pers_tc = 3; // persisted == candidate, so ARMED is not promoted to MIXED
+        g_sends = 0;
+        send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+        CHECK(g_wex_calls == 1, "%s: one write attempt, calls=%d", cases[i].name, g_wex_calls);
+        CHECK(g_sends == 1 && last_tx_rejected(&pid, &reason), "%s: rejection frame", cases[i].name);
+        CHECK(pid == KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID, "%s: no-param sentinel, got 0x%04X", cases[i].name, (unsigned)pid);
+        CHECK(reason == cases[i].want, "%s: reason want %u got %u", cases[i].name, (unsigned)cases[i].want, (unsigned)reason);
+        CHECK(link_staging_count(&s_staging) == 1, "%s: staging kept for retry, count=%u", cases[i].name, (unsigned)link_staging_count(&s_staging));
+        CHECK(g_reload_cal == 0 && g_tc_reapply == 0, "%s: no reload/reapply on refusal", cases[i].name);
+    }
+
+    // 2b. ARMED with a tc_type that differs from the PERSISTED one is MIXED.
+    commit_reset();
+    stage_u8(0x0105u, 3);
+    g_wex_decision = CONFIG_STORE_WRITE_REFUSED_ARMED;
+    g_pers_tc = 5;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(last_tx_rejected(&pid, &reason) && reason == KILNLINK_COMMIT_CONFIG_REJECT_ARMED_MIXED,
+          "ARMED with tc_type differing from persisted maps to MIXED, got %u", (unsigned)reason);
+
+    // 3. Accepted, tc_type unchanged: staging reset, cal reloaded, no reapply, no frame.
+    commit_reset();
+    stage_u8(0x0105u, 0); // candidate tc_type 0 == current 0
+    g_wex_ret = true;
+    g_sends = 0;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(g_wex_calls == 1, "accepted: one write, calls=%d", g_wex_calls);
+    CHECK(g_sends == 0, "accepted commit sends no rejection frame, sends=%d", g_sends);
+    CHECK(link_staging_count(&s_staging) == 0, "accepted commit resets staging, count=%u", (unsigned)link_staging_count(&s_staging));
+    CHECK(g_reload_cal == 1, "accepted commit reloads CT cal exactly once, got %d", g_reload_cal);
+    CHECK(g_tc_reapply == 0 && !s_tc_type_reapply_pending, "unchanged tc_type: no reapply, no pending");
+    CHECK(g_last_cand.tc_type == 0, "candidate carries staged tc_type");
+    CHECK(g_last_cand.calibration_missing, "required no-safe-default fields unset: calibration_missing stays true");
+
+    // 4. Accepted with tc_type change while heat is NOT provably safe (no context
+    //    ever received): reapply is deferred and the pending retry is armed.
+    commit_reset();
+    stage_u8(0x0105u, 4);
+    g_cur_tc = 0;
+    g_wex_ret = true;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(g_wex_heat_safe == 0, "no context: heat not provably safe");
+    CHECK(g_tc_reapply == 0, "heat unsafe: immediate reapply skipped, got %d", g_tc_reapply);
+    CHECK(s_tc_type_reapply_pending && s_tc_type_reapply_pending_value == 4,
+          "heat unsafe: retry armed for tc_type 4 (pending=%d value=%u)", (int)s_tc_type_reapply_pending,
+          (unsigned)s_tc_type_reapply_pending_value);
+    CHECK(g_reload_cal == 1, "still reloads cal, got %d", g_reload_cal);
+    CHECK(link_staging_count(&s_staging) == 0, "staging reset after accepted write");
+
+    // 5. Malformed COMMIT_CONFIG (extra byte) is dropped silently: no write, no frame.
+    commit_reset();
+    stage_u8(0x0105u, 3);
+    g_sends = 0;
+    {
+        uint8_t bad[2] = { KILNLINK_COMMIT_CONFIG_CMD, 0 };
+        send_esp(bad, 2);
+    }
+    CHECK(g_wex_calls == 0 && g_sends == 0, "malformed commit ignored: writes=%d sends=%d", g_wex_calls, g_sends);
+    CHECK(link_staging_count(&s_staging) == 1, "malformed commit leaves staging");
+}
+
+static void scenario_apply_config_volatile(void)
+{
+    uint16_t pid = 0;
+    uint8_t reason = 0xEE;
+
+    // 1. Validation refusal: same wire mapping, no volatile write, staging kept.
+    commit_reset();
+    stage_u8(0x0101u, CONFIG_STORE_TC_SOURCE_BORROWED_ZONE);
+    stage_u8(0x0103u, CONFIG_STORE_TC_PLACEMENT_EXTERNAL_OVERHEAT);
+    g_sends = 0;
+    send_cmd1(KILNLINK_APPLY_CONFIG_VOLATILE_CMD);
+    CHECK(g_wvol_calls == 0 && g_wex_calls == 0, "volatile contradiction writes nothing");
+    CHECK(last_tx_rejected(&pid, &reason), "volatile rejection decodes");
+    CHECK(pid == 0x0103u && reason == KILNLINK_COMMIT_CONFIG_REJECT_CONTRADICTION,
+          "volatile contradiction pid=0x%04X reason=%u", (unsigned)pid, (unsigned)reason);
+    CHECK(link_staging_count(&s_staging) == 2, "volatile refusal keeps staging");
+
+    // 2. Heat-possible refusal from config_store_write_volatile: reported as ARMED.
+    commit_reset();
+    stage_u8(0x0105u, 3);
+    g_wvol_ret = false;
+    g_sends = 0;
+    send_cmd1(KILNLINK_APPLY_CONFIG_VOLATILE_CMD);
+    CHECK(g_wvol_calls == 1 && g_wex_calls == 0, "volatile path calls only write_volatile (vol=%d ex=%d)", g_wvol_calls, g_wex_calls);
+    CHECK(last_tx_rejected(&pid, &reason), "volatile heat refusal frame");
+    CHECK(pid == KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID && reason == KILNLINK_COMMIT_CONFIG_REJECT_ARMED,
+          "volatile refusal pid=0x%04X reason=%u", (unsigned)pid, (unsigned)reason);
+    CHECK(link_staging_count(&s_staging) == 1, "volatile refusal keeps staging");
+    CHECK(g_reload_cal == 0 && g_tc_reapply == 0, "volatile refusal: no reload/reapply");
+
+    // 3. Accepted, tc_type unchanged: staging reset, cal reloaded, no frame.
+    commit_reset();
+    stage_u8(0x0105u, 0);
+    g_wvol_ret = true;
+    g_sends = 0;
+    send_cmd1(KILNLINK_APPLY_CONFIG_VOLATILE_CMD);
+    CHECK(g_wvol_calls == 1, "volatile accepted: one write");
+    CHECK(g_sends == 0, "volatile accept sends no frame, sends=%d", g_sends);
+    CHECK(link_staging_count(&s_staging) == 0, "volatile accept resets staging");
+    CHECK(g_reload_cal == 1, "volatile accept reloads cal once, got %d", g_reload_cal);
+    CHECK(g_tc_reapply == 0, "volatile accept, same tc_type: no reapply");
+    CHECK(g_last_cand.calibration_missing, "volatile candidate keeps calibration_missing when required fields unset");
+
+    // 4. Accepted with a tc_type change (no context => heat not provably safe).
+    commit_reset();
+    stage_u8(0x0105u, 6);
+    g_wvol_ret = true;
+    send_cmd1(KILNLINK_APPLY_CONFIG_VOLATILE_CMD);
+    CHECK(g_reload_cal == 1, "volatile tc change reloads cal");
+    CHECK(link_staging_count(&s_staging) == 0, "volatile tc change resets staging");
+    CHECK((g_tc_reapply == 1) != (s_tc_type_reapply_pending && s_tc_type_reapply_pending_value == 6),
+          "tc change: exactly one of immediate reapply (%d) or armed retry (%d)", g_tc_reapply, (int)s_tc_type_reapply_pending);
+
+    // 5. Malformed frame ignored.
+    commit_reset();
+    stage_u8(0x0105u, 3);
+    g_sends = 0;
+    {
+        uint8_t bad[3] = { KILNLINK_APPLY_CONFIG_VOLATILE_CMD, 1, 2 };
+        send_esp(bad, 3);
+    }
+    CHECK(g_wvol_calls == 0 && g_sends == 0, "malformed volatile ignored");
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -891,6 +1121,8 @@ int main(void)
     scenario_set_param_refusals();
     printf("-> update_routing\n");
     scenario_update_routing();
+    scenario_commit_config();
+    scenario_apply_config_volatile();
     printf("-> fuzz\n");
     scenario_fuzz();
     printf("test_link_task_fuzz: %d checks, %d failures\n", g_checks, g_fail);
