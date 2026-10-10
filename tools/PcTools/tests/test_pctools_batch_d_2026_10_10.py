@@ -204,7 +204,7 @@ class ReadBackTests(unittest.TestCase):
         self.assertTrue(out.startswith("ok"))
 
     def _sweep(self, status):
-        board = um.MagicMock(reachable=True, crash_unacknowledged=False, readiness_blocked=[], heat_blocked=[])
+        board = um.MagicMock(reachable=True, crash_unacknowledged=False, readiness_blocked=[], heat_blocked=[], undetermined=())
         with um.patch.object(m_sw, "_zone_sweep_resolve_host", return_value="h"), \
              um.patch.object(m_sw.capability_preflight, "get_board_info", return_value=board), \
              um.patch.object(sw_http, "start", return_value={"ok": True}), \
@@ -228,6 +228,7 @@ class BackupImportRelayCyclesKeptTests(unittest.TestCase):
         try:
             with um.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="h"), \
                  um.patch.object(readiness_http_client, "get_readiness", return_value={"items": []}), \
+                 um.patch("kilnctrl.backup_export_http_client.get_export", return_value=("", {})), \
                  um.patch.object(backup_import_http_client, "post_import",
                                  return_value=(200, '{"ok":true,"relay_cycles_kept":[1,3]}')):
                 out = m_info.backup_import(path, confirm=True)

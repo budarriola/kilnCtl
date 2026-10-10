@@ -586,6 +586,13 @@ def profile_save_bench_aux_rule(
     mine = next((p["id"] for p in user if p.get("name") == BENCH_AUX_PROFILE_NAME), None)
     slot = -1 if mine is None else mine
     others_before = {p["id"]: p for p in user if p["id"] != mine}
+    # Full content of every other profile, read BEFORE the write, so "others
+    # unchanged" compares segments and rules, not just name/zone_mask/segment_count.
+    try:
+        others_full_before = {oid: ahc._get_json(resolved, f"/api/profile?id={oid}", ahc.AUX_HTTP_TIMEOUT_S)
+                              for oid in others_before}
+    except ahc.AuxHttpError as exc:
+        return f"error: precheck read of the other profiles failed (host={resolved}): {exc}"
 
     rule = pehc.OnOffRule(
         zone_index=8 + relay - 1, segment_index=0, enable=True,
@@ -651,6 +658,14 @@ def profile_save_bench_aux_rule(
         if (a is None or a.get("name") != p.get("name") or a.get("zone_mask") != p.get("zone_mask")
                 or a.get("segment_count") != p.get("segment_count")):
             bad.append(f"other profile {oid} ('{p.get('name')}') changed or vanished")
+    for oid, before_full in others_full_before.items():
+        try:
+            after_full = ahc._get_json(resolved, f"/api/profile?id={oid}", ahc.AUX_HTTP_TIMEOUT_S)
+        except ahc.AuxHttpError as exc:
+            bad.append(f"other profile {oid} could not be re-read ({exc})")
+            continue
+        if after_full != before_full:
+            bad.append(f"other profile {oid} ('{others_before[oid].get('name')}') content changed")
     if set(after_user) - set(others_before) - {pid}:
         bad.append("an unexpected extra profile appeared")
     if bad:

@@ -146,6 +146,8 @@ class BackupImportSuccessTest(_Base):
 
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", side_effect=fake_readiness), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        return_value=("", dict(_GOOD_DOC))), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')) as post_mock:
             result = msi.backup_import(path, confirm=True)
         post_mock.assert_called_once()
@@ -154,6 +156,39 @@ class BackupImportSuccessTest(_Base):
         self.assertIn("readiness after", result)
         self.assertIn("1 not_done", result)  # before
         self.assertIn("2 ok", result)  # after
+
+    def _import_with(self, readiness, export):
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(_GOOD_DOC))
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(readiness_http_client, "get_readiness", side_effect=readiness), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export", side_effect=export), \
+             unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
+            return msi.backup_import(path, confirm=True)
+
+    def test_unreadable_readiness_after_is_unverified(self):
+        def rd(host):
+            if not hasattr(rd, "n"):
+                rd.n = 1
+                return _READINESS_OK
+            raise readiness_http_client.ReadinessHttpError("down")
+        out = self._import_with(rd, lambda h: ("", dict(_GOOD_DOC)))
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertNotIn("ok - restored", out)
+
+    def test_zone_count_mismatch_is_unverified(self):
+        bad = dict(_GOOD_DOC)
+        bad["zones"] = []
+        out = self._import_with(lambda h: _READINESS_OK, lambda h: ("", bad))
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn("zones", out)
+
+    def test_reexport_failure_is_unverified(self):
+        def boom(h):
+            raise backup_export_http_client.BackupExportHttpError("boom")
+        out = self._import_with(lambda h: _READINESS_OK, boom)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
 
     def test_dry_run_reports_plan_and_does_not_claim_restored(self):
         path = os.path.join(self._tmpdir, "backup.json")
@@ -179,6 +214,8 @@ class BackupImportSuccessTest(_Base):
             f.write(json.dumps(_GOOD_DOC))
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+             unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        return_value=("", dict(_GOOD_DOC))), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
             result = msi.backup_import(path, confirm=True)
         self.assertIn("synchronous", result)

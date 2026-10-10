@@ -91,6 +91,10 @@ def _wifi_write_refusal(confirm: object, what: str, allow_running: object = Fals
     return None
 
 
+WIFI_PASSWORD_ENV = "KILNCTL_WIFI_PASSWORD"
+WIFI_AP_PASSWORD_ENV = "KILNCTL_WIFI_AP_PASSWORD"
+
+
 def _wifi_readback_networks(ssid: str) -> "Optional[bool]":
     """True/False if ssid is in the saved list, None if unreadable."""
     try:
@@ -202,9 +206,11 @@ def wifi_add_network(
 
     Requires confirm=True (exactly) and refuses while a profile is running or
     paused (allow_running=True overrides): joining can drop the link. After a
-    success the saved list is read back. Passwords are never echoed (note: the
-    password travels as a tool parameter, which MCP clients may log -- prefer
-    the settings page or an env-var-fed path for a real credential).
+    success the saved list is read back; an unreadable read-back is FAILED, not
+    ok. Passwords are never echoed. PREFERRED: leave `password` unset and put
+    it in the KILNCTL_WIFI_PASSWORD environment variable (a `password`
+    argument still works for compatibility but travels in the MCP client
+    transcript; the argument wins when both are given).
     """
     refusal = _wifi_write_refusal(confirm, "wifi_add_network", allow_running)
     if refusal is not None:
@@ -214,6 +220,8 @@ def wifi_add_network(
         if saved is None:
             return "error: no ssid given and no saved credentials found (set Wi-Fi up once via the GUI first)"
         ssid, password = saved["ssid"], saved["password"]
+    if password is None:
+        password = os.environ.get(WIFI_PASSWORD_ENV) or None
     try:
         result = _srv._wifi.add_network(ssid, password or "")
     except WifiUartQueryError as exc:
@@ -222,8 +230,10 @@ def wifi_add_network(
         present = _wifi_readback_networks(ssid)
         if present is False:
             return f"FAILED - board reported ok for {ssid!r} but it is not in the saved list on read-back"
-        note = "" if present else " (read-back unavailable; unverified)"
-        return f"ok - saved {ssid!r}{note}"
+        if present is None:
+            return (f"FAILED - board reported ok for {ssid!r} but the saved list could not be read back; "
+                    "state UNVERIFIED")
+        return f"ok - saved {ssid!r}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not save {ssid!r}{detail}"
 
@@ -248,7 +258,8 @@ def wifi_set_mode(mode: str, confirm: bool = False, allow_running: bool = False)
         try:
             got = _srv._wifi.get_status().mode_name
         except Exception:  # noqa: BLE001
-            return f"ok - mode set to {mode} (read-back unavailable; unverified)"
+            return (f"FAILED - board reported ok for mode {mode!r} but the mode could not be read back; "
+                    "state UNVERIFIED")
         if got != mode.strip().lower():
             return f"FAILED - board reported ok but mode reads back as {got!r}, wanted {mode!r}"
         return f"ok - mode set to {mode}"
@@ -257,18 +268,42 @@ def wifi_set_mode(mode: str, confirm: bool = False, allow_running: bool = False)
 
 
 @_core._tool()
-def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[str] = None) -> str:
+def wifi_set_ap_identity(
+    ap_ssid: Optional[str] = None, ap_password: Optional[str] = None, confirm: bool = False,
+    allow_running: bool = False,
+) -> str:
     """Rename the board's own provisioning AP and/or change its password.
     Leave either argument unset (None) to keep it unchanged.
 
-    Not confirm-gated by design: the AP identity is re-settable; the AP password is never echoed (note: it travels as a tool parameter, which MCP clients may log).
+    Requires confirm=True (exactly) and refuses while a profile or autotune is
+    running/unreadable (allow_running=True overrides). The new identity is read
+    back over the link (SSID compared; password compared without being
+    printed); a mismatch or unreadable read-back is FAILED. The AP password is
+    never echoed. PREFERRED: leave `ap_password` unset and put it in the
+    KILNCTL_WIFI_AP_PASSWORD environment variable (the argument still works
+    for compatibility but travels in the MCP client transcript; the argument
+    wins when both are given).
     """
+    refusal = _wifi_write_refusal(confirm, "wifi_set_ap_identity", allow_running)
+    if refusal is not None:
+        return refusal
+    if ap_password is None:
+        ap_password = os.environ.get(WIFI_AP_PASSWORD_ENV) or None
     try:
         result = _srv._wifi.set_ap_identity(ap_ssid, ap_password)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
-        return "ok - AP identity updated"
+        try:
+            st = _srv._wifi.get_status()
+            got_ssid, got_pw = st.ap_ssid, st.ap_password
+        except Exception:  # noqa: BLE001
+            return "FAILED - board reported ok but the AP identity could not be read back; state UNVERIFIED"
+        if ap_ssid is not None and got_ssid != ap_ssid:
+            return f"FAILED - board reported ok but AP SSID reads back as {got_ssid!r}, wanted {ap_ssid!r}"
+        if ap_password is not None and got_pw != ap_password:
+            return "FAILED - board reported ok but the AP password does not read back as the requested value"
+        return "ok - AP identity updated (read back)"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not update AP identity{detail}"
 

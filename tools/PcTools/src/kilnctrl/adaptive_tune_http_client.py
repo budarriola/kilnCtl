@@ -78,7 +78,9 @@ class AdaptiveTuneZoneStatus:
     serialized by ``status_get_handler()`` (adaptive_tune_http.c)."""
 
     zone: int
-    enabled: bool
+    #: None when the GET omitted the key or sent a non-bool -- a caller verifying
+    #: a write must treat None as UNVERIFIED, never as False.
+    enabled: "Optional[bool]"
     observation_count: int
     observations_lifetime: int
     has_applied: bool
@@ -103,7 +105,7 @@ class AdaptiveTuneZoneStatus:
     # module docstring). Defaults False for a firmware build that predates
     # this field, same "older peer, tolerant default" convention every other
     # field here already follows.
-    revert_available: bool = False
+    revert_available: "Optional[bool]" = None
 
     #: adaptive_tune_ki_verdict_t (adaptive_tune.h), mirrored here as a name
     #: table so a caller doesn't have to import the firmware header to make
@@ -134,6 +136,13 @@ def _http_error_detail(exc: Exception) -> "tuple[Optional[int], str]":
     return None, str(exc)
 
 
+def _opt_bool(entry: dict, key: str) -> "Optional[bool]":
+    """A real JSON bool, else None. Never defaults: a write-verifying caller
+    must not read an absent key as a confirmation."""
+    v = entry.get(key)
+    return v if isinstance(v, bool) else None
+
+
 def _zone_status_from_json(entry: dict) -> AdaptiveTuneZoneStatus:
     """Tolerant decode of one element of the GET's ``zones`` array -- a
     missing key defaults rather than raising (see module docstring on why:
@@ -141,7 +150,7 @@ def _zone_status_from_json(entry: dict) -> AdaptiveTuneZoneStatus:
     work in flight). An unexpected key is simply ignored."""
     return AdaptiveTuneZoneStatus(
         zone=int(entry.get("zone", 0)),
-        enabled=bool(entry.get("enabled", False)),
+        enabled=_opt_bool(entry, "enabled"),
         observation_count=int(entry.get("observation_count", 0)),
         observations_lifetime=int(entry.get("observations_lifetime", 0)),
         has_applied=bool(entry.get("has_applied", False)),
@@ -160,7 +169,7 @@ def _zone_status_from_json(entry: dict) -> AdaptiveTuneZoneStatus:
         ki_correction_pct=float(entry.get("ki_correction_pct", 0.0)),
         ki_applied=bool(entry.get("ki_applied", False)),
         ki_refusal=str(entry.get("ki_refusal", "")),
-        revert_available=bool(entry.get("revert_available", False)),
+        revert_available=_opt_bool(entry, "revert_available"),
     )
 
 

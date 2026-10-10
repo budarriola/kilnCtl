@@ -139,6 +139,11 @@ def _urlopen_router(responses: dict):
                 if isinstance(value, Exception):
                     raise value
                 return _fake_response(value)
+        # Healthy safety reads: a failed read now refuses (fail closed).
+        if "/api/crash_report" in url:
+            return _fake_response(json.dumps({"present": False}).encode())
+        if "/api/readiness" in url:
+            return _fake_response(json.dumps({"items": []}).encode())
         raise AssertionError(f"unexpected URL in test: {url}")
 
     return _fake_urlopen

@@ -106,7 +106,7 @@ class GetStatusTest(unittest.TestCase):
             zones = at.get_status("192.168.4.1")
         self.assertEqual(len(zones), 1)
         self.assertEqual(zones[0].zone, 4)
-        self.assertFalse(zones[0].enabled)
+        self.assertIsNone(zones[0].enabled)  # absent key must not read as False
         self.assertEqual(zones[0].ki_verdict_name, "insufficient")
 
     def test_rejects_non_json_body(self):
@@ -214,12 +214,12 @@ class RevertTest(unittest.TestCase):
 
 
 class RevertAvailableFieldTest(unittest.TestCase):
-    def test_defaults_false_when_absent(self):
+    def test_none_when_absent(self):
         body = json.dumps({"zones": [{"zone": 0}]}).encode()
         with unittest.mock.patch.object(at.urllib.request, "urlopen",
                                          return_value=_fake_response(body)):
             zones = at.get_status("192.168.4.1")
-        self.assertFalse(zones[0].revert_available)
+        self.assertIsNone(zones[0].revert_available)  # absent is not a confirmation
 
     def test_true_when_present(self):
         body = json.dumps({"zones": [{"zone": 0, "revert_available": True}]}).encode()

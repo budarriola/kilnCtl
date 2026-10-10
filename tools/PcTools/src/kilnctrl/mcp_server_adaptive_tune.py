@@ -177,7 +177,10 @@ def adaptive_tune_set_enabled(zone: int, enabled: bool, confirm: bool = False,
     if row is None:
         return (f"UNVERIFIED - zone {zone} adaptive tuning POST accepted but GET /api/adaptive_tune "
                 f"has no row for the zone; state UNKNOWN (host={resolved}){wtxt}")
-    if bool(row.enabled) != bool(enabled):
+    if row.enabled is None:
+        return (f"UNVERIFIED - zone {zone} adaptive tuning POST accepted but the status row has no boolean "
+                f"`enabled` field; state UNKNOWN (host={resolved}){wtxt}")
+    if row.enabled is not bool(enabled):
         return (f"FAILED - zone {zone} adaptive tuning POST accepted but status reads enabled={row.enabled}, "
                 f"wanted {enabled} (host={resolved}){wtxt}")
     return f"ok - zone {zone} adaptive tuning {state}, read back verified (host={resolved}){wtxt}"
@@ -228,7 +231,10 @@ def adaptive_tune_revert(zone: int, confirm: bool = False, host: Optional[str] =
     if row is None:
         return (f"UNVERIFIED - zone {zone} adaptive-tune revert POST accepted but GET /api/adaptive_tune "
                 f"has no row for the zone; gains UNKNOWN (host={resolved})")
-    if bool(row.revert_available):
+    if row.revert_available is None:
+        return (f"UNVERIFIED - zone {zone} adaptive-tune revert POST accepted but the status row has no "
+                f"boolean `revert_available` field; gains UNKNOWN (host={resolved})")
+    if row.revert_available:
         return (f"FAILED - zone {zone} adaptive-tune revert POST accepted but status still reads "
                 f"revert_available=True, so the gains were not restored (host={resolved})")
     return f"ok - zone {zone} adaptive-tune refinement reverted, read back verified (host={resolved})"

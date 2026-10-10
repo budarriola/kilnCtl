@@ -1048,6 +1048,37 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     return "\n".join(lines)
 
 
+def _backup_import_readback_problem(host: str, body_text: str, after_readiness: str) -> Optional[str]:
+    """None when the post-import read-back agrees with the backup, else why not.
+    Checks: readiness readable, and a fresh GET /api/backup/export holds at least
+    the backup's profiles and exactly its zones count (spot check, not a diff)."""
+    from . import backup_export_http_client
+
+    if "could not read GET /api/readiness" in after_readiness:
+        return "readiness could not be read after the import"
+    try:
+        want = json.loads(body_text)
+    except ValueError:
+        return None  # the board parsed it; an unparseable local copy has nothing to compare
+    if not isinstance(want, dict):
+        return None
+    try:
+        _raw, got = backup_export_http_client.get_export(host)
+    except Exception as exc:  # noqa: BLE001
+        return f"could not re-export to verify ({exc})"
+    if not isinstance(got, dict):
+        return "re-export was not a JSON object"
+    for key, exact in (("zones", True), ("profiles", False)):
+        w, g = want.get(key), got.get(key)
+        if not isinstance(w, list):
+            continue
+        if not isinstance(g, list):
+            return f"re-export has no {key} list"
+        if (len(g) != len(w)) if exact else (len(g) < len(w)):
+            return f"{key}: backup has {len(w)} entries, board now has {len(g)}"
+    return None
+
+
 @_core._tool()
 def backup_import(
     path: str,
@@ -1195,8 +1226,17 @@ def backup_import(
         if isinstance(kept, list) and kept:
             kept_note = (f"\nNOTE: relay_cycles counters {kept} were NOT lowered: the backup value was below the "
                          "live wear count, so the live (higher) count was kept (raise-only).")
+        # Read back before claiming ok: a 2xx alone is the board's word, not proof.
+        problem = _backup_import_readback_problem(resolved, body_text, after_readiness)
+        if problem:
+            return (
+                f"UNVERIFIED - POST returned HTTP {status} but the read-back could not confirm the "
+                f"restore: {problem}.{kept_note} Check get_readiness()/control_get_zones() before "
+                f"relying on it; do NOT re-POST blindly. (host={resolved})"
+                f"\n{before_readiness}\n{after_readiness}"
+            )
         return (
-            f"ok - restored.{kept_note} (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
+            f"ok - restored (read-back: readiness readable, zones/profiles counts match).{kept_note} (POST elapsed {elapsed_s:.2f}s; this route is synchronous, so the "
             f"full job took the same {elapsed_s:.2f}s) (host={resolved})\n{before_readiness}\n"
             f"{after_readiness}"
         )

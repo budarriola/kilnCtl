@@ -69,6 +69,8 @@ Missing test: ARMED (and unreadable ARMED) refuses with no probe I/O.
 
 ### M1. Wi-Fi writers report "ok" when the read-back is unavailable
 
+**FIXED (mcpfx2): unreadable read-back returns FAILED/UNVERIFIED; tests catch N5/N6.**
+
 - `mcp_server_wifi.py:225` `wifi_add_network`: `note = "" if present else " (read-back unavailable; unverified)"` then `return f"ok - saved ..."`.
 - `mcp_server_wifi.py:251` `wifi_set_mode`: `return f"ok - mode set to {mode} (read-back unavailable; unverified)"`.
 
@@ -77,11 +79,15 @@ branches into FAILED) were MISSED: no test pins them.
 
 ### M2. `thermo_write_reg` reports "ok" on a read-back exception
 
+**FIXED (mcpfx2): read-back exception or empty read-back returns FAILED.**
+
 `mcp_server_thermo.py:288`:
 `return f"ok - channel {channel} reg 0x{reg:02X} written (read-back failed: {exc})"`.
 A value mismatch returns only "warning -". No test covers the exception path.
 
 ### M3. `capability_preflight` fails open on unreadable crash report / readiness / liveness
+
+**FIXED (mcpfx2): crash_report/readiness/liveness read failures are `undetermined` and refuse unless `allow_undetermined=True`; missing `acknowledged` is unacknowledged; sweep start refuses.**
 
 `capability_preflight.py:454-463`: `except PreflightTransportError: crash = None`,
 so a 401 (crash_report is ROUTE_TIER_ADMIN), 5xx or timeout reads as "no
@@ -100,6 +106,8 @@ Missing test: crash_report 401 must not read as "no crash".
 
 ### M4. `profile_live_*` results start with "ok -" even when the read-back failed
 
+**FIXED (mcpfx2): prefix is ok only when the read-back is OK; edit also compares zone_mask and segment count.**
+
 `mcp_server_profile_live.py:109/164/212`:
 `return f"ok - {obj} (host={resolved}){_live_readback(...)}"`, so a
 "FAILED read-back" or "UNVERIFIED" suffix still follows "ok -". The edit
@@ -109,6 +117,8 @@ CAUGHT, but the prefix problem is unpinned.
 
 ### M5. Adaptive-tune client decodes tolerantly, so a missing key verifies a write
 
+**FIXED (mcpfx2): absent `enabled`/`revert_available` is None and reports UNVERIFIED.**
+
 `adaptive_tune_http_client.py:144/163`: `enabled=bool(entry.get("enabled", False))`
 and `revert_available=...get(..., False)`, so an absent key "verifies" a
 disable or a revert. `enabled` is not type-checked. N10 was CAUGHT by
@@ -117,12 +127,16 @@ tolerant default; a fix needs that test changed.
 
 ### M6. `update_check` is documented read-only but POSTs
 
+**FIXED (mcpfx2): reclassified as a board-job-starting POST (module doc, tool doc, CLAUDE.md, MCP_SERVERS.md), method pinned by test. No confirm gate added.**
+
 `mcp_server_update.py` module docstring (line 6) lists it under read-only, but
 it calls `uhc.start_check`, i.e. `_empty_post(... "/api/update/check")`, which
 starts a TLS job on the board. No confirm gate. Either reclassify it in the
 docs and CLAUDE.md, or gate it.
 
 ### M7. Waits that default at or above the client's 300 s abort, with no background twin
+
+**FIXED (mcpfx2): `recovery_pico_upload` default 240 s and clamped to 240; `_wait_job` clamped to 200 s, `update_stage_release` default 200. No `*_start` twins, so tool count is unchanged.**
 
 - `recovery_pico_upload` defaults `wait_s=600.0` (`mcp_server_recovery.py:541`).
 - `update_stage_release` defaults `wait_s=300.0` plus its prechecks.
@@ -133,6 +147,8 @@ never sees the verified result. Clamp below 300 s or add a `*_start` twin on
 
 ### M8. Safety-config writers' mid-run gate is a deny-list
 
+**FIXED (mcpfx2): safety writers and coordinated_gpio_test use an allow-list.**
+
 `mcp_server_safety.py:1208/1216`: `if prof.state in (1, 2)` and
 `at.state in (1, 2, 3, 4)`, so an unknown or newly added state counts as idle.
 `control.py:544` uses an allow-list instead. Same pattern in
@@ -141,6 +157,8 @@ never sees the verified result. Clamp below 300 s or add a `*_start` twin on
 
 ### M9. `backup_import` and `wifi_set_ap_identity`
 
+**FIXED (mcpfx2): `backup_import` re-reads readiness and re-exports (zones count, profiles count) and returns UNVERIFIED otherwise; `wifi_set_ap_identity` has confirm gate, mid-run refusal and read-back.**
+
 `backup_import` (`mcp_server_info.py:1199`) reports `ok - restored` on any
 2xx with no data read-back; a failed readiness re-read becomes a string inside
 an "ok" result. `wifi_set_ap_identity` has no confirm gate, no mid-run refusal
@@ -148,12 +166,16 @@ and no read-back.
 
 ### M10. Secrets passed as tool arguments
 
+**FIXED (mcpfx2): `KILNCTL_WIFI_PASSWORD` / `KILNCTL_WIFI_AP_PASSWORD` env fallback, arg kept, never echoed.**
+
 `wifi_add_network(password=...)` and `wifi_set_ap_identity(ap_password=...)`
 put the secret in the client transcript (the call log records keys only, so
 the server side is clean). TOTP and web-auth already read secrets from the
 environment; do the same here.
 
 ### M11. `profile_save_bench_aux_rule` "every OTHER profile unchanged" is shallow
+
+**FIXED (mcpfx2): full content of every other profile is compared before/after.**
 
 It compares only `name`, `zone_mask` and `segment_count`; segment contents and
 rules of other profiles could change unnoticed.

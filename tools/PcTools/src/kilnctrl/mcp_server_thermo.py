@@ -285,8 +285,12 @@ def thermo_write_reg(channel: int, reg: int, value: int, confirm: bool = False) 
             back = _srv._thermo.read_reg(channel, reg, 1)
             got = list(getattr(back, "values", None) or getattr(back, "data", None) or [])
         except ThermoQueryError as exc:
-            return f"ok - channel {channel} reg 0x{reg:02X} written (read-back failed: {exc})"
-        if got and got[0] != value:
+            return (f"FAILED - channel {channel} reg 0x{reg:02X}: write acknowledged but the read-back "
+                    f"failed ({exc}); state UNVERIFIED")
+        if not got:
+            return (f"FAILED - channel {channel} reg 0x{reg:02X}: write acknowledged but the read-back "
+                    "returned no value; state UNVERIFIED")
+        if got[0] != value:
             return (f"warning - channel {channel} reg 0x{reg:02X} written but read back "
                     f"0x{got[0]:02X}, wanted 0x{value:02X}")
         return f"ok - channel {channel} reg 0x{reg:02X} written"

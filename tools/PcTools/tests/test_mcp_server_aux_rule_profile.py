@@ -50,7 +50,7 @@ class FakeBoard:
         if path == "/api/profiles":
             return self.listing()
         pid = int(path.split("id=")[1])
-        return self.profiles[pid]
+        return copy.deepcopy(self.profiles[pid])
 
     def post_profile(self, host, profile_id, name, zone_mask, segments, on_off_rules=None, timeout=8.0):
         self.posts.append((profile_id, name, zone_mask, segments, on_off_rules))
@@ -101,6 +101,21 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         self.assertEqual(rules[0].temp_cmp, pehc.ON_OFF_TEMP_CMP_BELOW)
         self.assertEqual(rules[0].temp_source, 1)
         self.assertEqual(board.profiles[0]["name"], "MY_BISQUE")
+
+    def test_other_profile_segment_content_change_fails(self):
+        # name, zone_mask and segment_count unchanged, but a segment value moved:
+        # the old name/mask/count comparison missed this (review 2026-10-10 MED).
+        board = FakeBoard({0: _user_profile("MY_BISQUE")})
+        orig = board.post_profile
+
+        def post(*a, **k):
+            r = orig(*a, **k)
+            board.profiles[0]["segments"][0]["target_c"] = 999.0
+            return r
+        board.post_profile = post
+        r = self._run(board)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("content changed", r)
 
     def test_reuses_only_its_own_named_slot(self):
         board = FakeBoard({0: _user_profile("MY_BISQUE"), 1: _user_profile(NAME)})

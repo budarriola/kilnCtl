@@ -1205,7 +1205,9 @@ def _profile_or_autotune_running() -> Optional[str]:
     the wire."""
     try:
         prof = _srv._profiles.get_exec_status()
-        if prof.state in (1, 2):  # running, paused (still armed/heating-capable)
+        # Allow-list, fail closed: only idle/done/faulted are safe; running,
+        # paused or an unknown(N) state from newer firmware refuses.
+        if prof.state_name not in ("idle", "done", "faulted"):
             return f"a profile is currently {prof.state_name} (#{prof.profile_id} {prof.name!r})"
     except ProfilesQueryError as exc:
         # Fail closed (audit F4), like mcp_server_control's twin: a down/slow
@@ -1213,7 +1215,9 @@ def _profile_or_autotune_running() -> Optional[str]:
         return f"could not read profile exec status ({exc}) -- refusing to guess"
     try:
         at = _srv._autotune.get_status()
-        if at.state in (1, 2, 3, 4):  # settling, stepping, relay_approach, relay_cycling
+        # Only idle(0)/done(5)/aborted(6) are non-running; anything else,
+        # including an unknown state, refuses.
+        if at.state not in (0, 5, 6):
             return f"an autotune run is currently {at.state_name} (zone {at.zone})"
     except AutotuneQueryError as exc:
         return f"could not read autotune status ({exc}) -- refusing to guess"

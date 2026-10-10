@@ -33,7 +33,17 @@ def _profile_live_resolve_host(host: Optional[str]) -> str:
     return "192.168.4.1"
 
 
-def _live_readback(resolved: str, expect: str, name: Optional[str] = None) -> str:
+def _live_result(obj: object, resolved: str, expect: str, name: Optional[str] = None,
+                zone_mask: Optional[int] = None, nsegs: Optional[int] = None) -> str:
+    """Result line for a live write: "ok -" only when the read-back verified,
+    else "FAILED -" (the write already happened, so say state is unverified)."""
+    suffix = _live_readback(resolved, expect, name, zone_mask, nsegs)
+    prefix = "ok" if suffix.endswith("read-back OK") else "FAILED"
+    return f"{prefix} - {obj} (host={resolved}){suffix}"
+
+
+def _live_readback(resolved: str, expect: str, name: Optional[str] = None,
+                   zone_mask: Optional[int] = None, nsegs: Optional[int] = None) -> str:
     """GET the live status (and content for edit) after a write and compare.
     Returns a suffix: "; read-back OK", or a FAILED / UNVERIFIED note."""
     try:
@@ -48,6 +58,11 @@ def _live_readback(resolved: str, expect: str, name: Optional[str] = None) -> st
         ok = bool(st.get("active")) and st.get("working_id", -1) not in (-1, None)
     elif expect == "edit":
         ok = isinstance(body, dict) and body.get("name") == name
+        if ok and zone_mask is not None:
+            ok = body.get("zone_mask") == zone_mask
+        if ok and nsegs is not None:
+            segs = body.get("segments")
+            ok = isinstance(segs, list) and len(segs) == nsegs
     else:  # decide: the pending working copy is resolved
         ok = not st.get("pending_decision") and st.get("working_id") == -1
     return "; read-back OK" if ok else f"; FAILED read-back: live status {st!r} does not show the {expect} took effect"
@@ -106,7 +121,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'fork')}"
+    return _live_result(obj, resolved, 'fork')
 
 
 @_core._tool()
@@ -161,7 +176,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'edit', name)}"
+    return _live_result(obj, resolved, 'edit', name, zone_mask, len(segments))
 
 
 @_core._tool()
@@ -209,7 +224,7 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"
-    return f"ok - {obj} (host={resolved}){_live_readback(resolved, 'decide')}"
+    return _live_result(obj, resolved, 'decide')
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

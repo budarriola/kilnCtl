@@ -556,6 +556,27 @@ class GhCheckTest(GhBase):
         self.assertTrue(out.startswith("UNKNOWN"), out)
 
 
+class UpdateCheckClassificationTest(unittest.TestCase):
+    def test_update_check_documented_as_not_read_only(self):
+        # update_check POSTs /api/update/check and starts a board job; the module
+        # header and tool doc must not call it read-only (review 2026-10-10 MED).
+        head = msu.__doc__.split("Mutating:")[0]
+        read_only_line = [l for l in head.splitlines() if l.startswith("Read-only:")][0]
+        self.assertNotIn("update_check", read_only_line)
+        self.assertIn("NOT read-only", msu.update_check.__doc__)
+        import inspect
+        self.assertIn("start_check", inspect.getsource(msu.update_check))
+
+
+class WaitClampTest(unittest.TestCase):
+    def test_wait_job_clamped(self):
+        clock = [0.0]
+        with unittest.mock.patch.object(msu.time, "monotonic", lambda: clock[0]),                 unittest.mock.patch.object(msu.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + 30.0)),                 unittest.mock.patch.object(msu.uhc, "get_fetch_status", lambda h: {"busy": True}):
+            st, err = msu._wait_job("h", 10 ** 6)
+        self.assertIsNotNone(err)
+        self.assertLessEqual(clock[0], 270.0)
+
+
 class GhStageReleaseTest(GhBase):
     def test_dry_run_posts_nothing(self):
         for val in (False, 1, "yes", None):

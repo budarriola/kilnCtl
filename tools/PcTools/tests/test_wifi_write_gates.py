@@ -42,8 +42,18 @@ class _Fake:
     def get_networks(self):
         return [types.SimpleNamespace(ssid=s) for s in self.nets], False
 
+    def set_ap_identity(self, ssid, pw):
+        self.calls.append(("ap", ssid))
+        if self.ok:
+            self.ap_ssid = ssid if ssid is not None else self.ap_ssid
+            self.ap_pw = pw if pw is not None else self.ap_pw
+        return _res(self.ok)
+
+    ap_ssid = "old"
+    ap_pw = "oldpassword"
+
     def get_status(self):
-        return types.SimpleNamespace(mode_name=self.mode)
+        return types.SimpleNamespace(mode_name=self.mode, ap_ssid=self.ap_ssid, ap_password=self.ap_pw)
 
 
 class WifiGateTests(unittest.TestCase):
@@ -110,6 +120,58 @@ class WifiGateTests(unittest.TestCase):
         f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))
         with self._srv(f):
             self.assertIn("FAILED", w.wifi_forget("a", confirm=True))
+
+    def test_add_unreadable_readback_fails(self):
+        f = _Fake()
+        f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            out = w.wifi_add_network("a", "p", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_mode_unreadable_readback_fails(self):
+        f = _Fake(mode="ap")
+        f.get_status = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            out = w.wifi_set_mode("ap", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_ap_identity_gates_and_readback(self):
+        f = _Fake()
+        with self._srv(f):
+            self.assertIn("confirm=True", w.wifi_set_ap_identity("n"))
+            self.assertIn("confirm=True", w.wifi_set_ap_identity("n", confirm="yes"))
+        self.assertEqual(f.calls, [])
+        with self._srv(f, state=1):
+            self.assertIn("while a profile", w.wifi_set_ap_identity("n", confirm=True))
+        self.assertEqual(f.calls, [])
+        with self._srv(f):
+            out = w.wifi_set_ap_identity("newssid", "secretpass1", confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertNotIn("secretpass1", out)
+
+    def test_ap_identity_mismatch_and_unreadable_fail(self):
+        f = _Fake()
+        f.set_ap_identity = lambda s, p: _res(True)  # board lies
+        with self._srv(f):
+            out = w.wifi_set_ap_identity("newssid", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        f2 = _Fake()
+        f2.get_status = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f2):
+            self.assertTrue(w.wifi_set_ap_identity("n", confirm=True).startswith("FAILED"))
+
+    def test_env_passwords_used_when_arg_unset(self):
+        seen = []
+        f = _Fake()
+        f.add_network = lambda s, p: (seen.append(p), f.nets.append(s), _res(True))[2]
+        with self._srv(f), um.patch.dict(os.environ, {"KILNCTL_WIFI_PASSWORD": "envpw123"}):
+            out = w.wifi_add_network("a", confirm=True)
+        self.assertEqual(seen, ["envpw123"])
+        self.assertNotIn("envpw123", out)
+        f2 = _Fake()
+        with self._srv(f2), um.patch.dict(os.environ, {"KILNCTL_WIFI_AP_PASSWORD": "apenv1234"}):
+            self.assertTrue(w.wifi_set_ap_identity(confirm=True).startswith("ok"))
+        self.assertEqual(f2.ap_pw, "apenv1234")
 
     def test_status_explicit_host_untrusted(self):
         st = types.SimpleNamespace(ap_password="", mode_name="home", state_name="x", sta_connected=False,

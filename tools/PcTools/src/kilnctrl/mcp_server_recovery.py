@@ -538,7 +538,7 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
 
 @_core._tool()
 def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[str] = None,
-                         host: Optional[str] = None, wait_s: float = 600.0) -> str:
+                         host: Optional[str] = None, wait_s: float = 240.0) -> str:
     """Flash a SaftyFW slot image (.bin) onto the RP2040 through the recovery
     image's UART relay (POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B],
     -- the CRC32 is computed
@@ -608,6 +608,10 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
 
     lost = 0
     last: dict = {}
+    # The MCP client aborts a call after 300 s of silence while the relay keeps
+    # running: clamp the poll under that, and report UNKNOWN (never ok) if the
+    # relay is still going; read recovery_status / the pico status to continue.
+    wait_s = min(max(0.0, float(wait_s)), 240.0)
     deadline = _monotonic() + wait_s
     while True:
         _sleep(1.0)

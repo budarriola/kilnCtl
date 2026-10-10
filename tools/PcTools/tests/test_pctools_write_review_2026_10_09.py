@@ -251,6 +251,19 @@ class Low10MiscTests(unittest.TestCase):
             out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
         self.assertTrue(out.startswith("ok"), out)
 
+    def test_thermo_write_reg_readback_exception_fails(self):
+        from kilnctrl.thermo import ThermoQueryError
+        with um.patch(RUN_GATE, return_value=None),              um.patch.object(mcp_server._thermo, "write_reg", return_value=um.Mock(ok=True, reason="")),              um.patch.object(mcp_server._thermo, "read_reg", side_effect=ThermoQueryError("boom")):
+            out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertNotIn("ok -", out)
+
+    def test_thermo_write_reg_empty_readback_fails(self):
+        back = um.Mock(values=[], data=[])
+        with um.patch(RUN_GATE, return_value=None),              um.patch.object(mcp_server._thermo, "write_reg", return_value=um.Mock(ok=True, reason="")),              um.patch.object(mcp_server._thermo, "read_reg", return_value=back):
+            out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
     def test_relay_io_hits_fail_closed_without_segments(self):
         def gj(host, path, timeout):
             if path == "/api/profiles":
@@ -294,3 +307,33 @@ class Low10MiscTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SafetyRunningGateAllowListTest(unittest.TestCase):
+    """_profile_or_autotune_running treats only idle/done/faulted (profile) and
+    0/5/6 (autotune) as not running; unknown states refuse (review 2026-10-10 MED)."""
+
+    def _gate(self, prof_name, at_state):
+        import types
+        from kilnctrl import mcp_server_safety as ms
+        prof = types.SimpleNamespace(state_name=prof_name, state=99, profile_id=1, name="p")
+        at = types.SimpleNamespace(state=at_state, state_name="x", zone=0)
+        srv = types.SimpleNamespace(
+            _profiles=types.SimpleNamespace(get_exec_status=lambda: prof),
+            _autotune=types.SimpleNamespace(get_status=lambda: at))
+        with unittest.mock.patch.object(ms, "_srv", srv):
+            return ms._profile_or_autotune_running()
+
+    def test_idle_states_pass(self):
+        for n in ("idle", "done", "faulted"):
+            self.assertIsNone(self._gate(n, 0))
+        self.assertIsNone(self._gate("idle", 5))
+        self.assertIsNone(self._gate("idle", 6))
+
+    def test_unknown_profile_state_refuses(self):
+        self.assertIsNotNone(self._gate("unknown(7)", 0))
+        self.assertIsNotNone(self._gate("running", 0))
+
+    def test_unknown_autotune_state_refuses(self):
+        self.assertIsNotNone(self._gate("idle", 9))
+        self.assertIsNotNone(self._gate("idle", 2))

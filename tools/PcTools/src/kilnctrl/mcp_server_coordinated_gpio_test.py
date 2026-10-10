@@ -63,7 +63,8 @@ def _gpio_test_preflight(host: Optional[str]) -> GpioTestPreflight:
         link_up = None
     try:
         exec_status = _srv._profiles.get_exec_status()
-        running_or_paused = exec_status.state in (1, 2)
+        # Allow-list: only idle/done/faulted are not running; an unknown state counts as running.
+        running_or_paused = exec_status.state_name not in ("idle", "done", "faulted")
         state_name = exec_status.state_name
     except Exception:  # noqa: BLE001
         running_or_paused = None

@@ -459,6 +459,16 @@ class PicoUploadTest(_Base):
             self.assertTrue(out.startswith("REFUSED"), out)
             self.assertEqual(board.posts, [])
 
+    def test_wait_clamped_under_client_abort(self):
+        # wait_s=600 must not poll past ~240 s: the client aborts at 300 s.
+        clock = [0.0]
+        board = self._board(_pico(phase="sending", busy=True, bytes_sent=1, total_bytes=len(self.IMAGE)))
+        with unittest.mock.patch.object(mr, "_monotonic", lambda: clock[0]),                 unittest.mock.patch.object(mr, "_sleep", lambda s: clock.__setitem__(0, clock[0] + 50.0)):
+            out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=600)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertLessEqual(clock[0], 300.0)
+        self.assertIn("240", out)
+
     def test_outcome_unknown_is_never_success(self):
         board = self._board(_pico(phase="outcome_unknown", busy=False, bytes_sent=len(self.IMAGE),
                                    total_bytes=len(self.IMAGE),

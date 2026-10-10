@@ -23,6 +23,19 @@ from kilnctrl import mcp_server_profile_live as mpl  # noqa: E402
 from kilnctrl.wifi_uart import WifiUartQueryError  # noqa: E402
 
 
+
+def _rb(kind):
+    """Patch the live read-back GETs to show the write took effect."""
+    import contextlib
+    h = mpl.profile_live_http
+    st = {"fork": {"active": True, "working_id": 250}}.get(kind, {"pending_decision": False, "working_id": -1})
+    stack = contextlib.ExitStack()
+    stack.enter_context(unittest.mock.patch.object(h, "get_live_status", return_value=st))
+    stack.enter_context(unittest.mock.patch.object(
+        h, "get_live_content", return_value={"name": "x", "zone_mask": 1, "segments": [{}]}))
+    return stack
+
+
 class ProfileLiveGetTests(unittest.TestCase):
     def test_status_reports_ok(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "get_live_status",
@@ -62,7 +75,8 @@ class ProfileLiveForkConfirmGateTests(unittest.TestCase):
     def test_confirm_true_sends_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "fork_live",
                                          return_value={"ok": True, "working_id": 250}) as m:
-            result = mpl.profile_live_fork(confirm=True, host="10.0.0.5")
+            with _rb("fork"):
+                result = mpl.profile_live_fork(confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5")
 
@@ -90,7 +104,8 @@ class ProfileLiveEditConfirmGateTests(unittest.TestCase):
         segments = [{"kind": 0, "target": 100, "ramp": 1, "dwell": 1}]
         with unittest.mock.patch.object(mpl.profile_live_http, "edit_live",
                                          return_value={"ok": True, "warnings": []}) as m:
-            result = mpl.profile_live_edit("x", 1, segments, confirm=True, host="10.0.0.5")
+            with _rb("edit"):
+                result = mpl.profile_live_edit("x", 1, segments, confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", "x", 1, segments, generation=None)
 
@@ -126,7 +141,8 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
     def test_confirm_true_discard_sends_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_discard",
                                          return_value={"ok": True}) as m:
-            result = mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5")
+            with _rb("decide"):
+                result = mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", generation=None)
 
@@ -140,7 +156,8 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
     def test_save_as_with_name_sends_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_save_as",
                                          return_value={"ok": True, "id": 3}) as m:
-            result = mpl.profile_live_decide("save_as", name="new one", confirm=True, host="10.0.0.5")
+            with _rb("decide"):
+                result = mpl.profile_live_decide("save_as", name="new one", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", "new one", generation=None)
 
@@ -153,7 +170,8 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
     def test_overwrite_sends_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_overwrite",
                                          return_value={"ok": True}) as m:
-            result = mpl.profile_live_decide("overwrite", confirm=True, host="10.0.0.5")
+            with _rb("decide"):
+                result = mpl.profile_live_decide("overwrite", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", generation=None)
 
@@ -191,6 +209,32 @@ class ProfileLiveHostResolutionTests(unittest.TestCase):
                                        return_value={"active": False}) as m:
             mpl.profile_live_get()
         m.assert_called_once_with("192.168.4.1")
+
+
+class LiveWriteResultPrefixTests(unittest.TestCase):
+    """A failed or unverified read-back must not read as "ok -" (review M4)."""
+
+    def _run(self, status):
+        h = mpl.profile_live_http
+        with unittest.mock.patch.object(h, "fork_live", return_value={"ok": True}),                 unittest.mock.patch.object(h, "get_live_status", **status):
+            return mpl.profile_live_fork(confirm=True, host="h")
+
+    def test_failed_readback_is_not_ok(self):
+        out = self._run({"return_value": {"active": False, "working_id": -1}})
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_unverified_readback_is_not_ok(self):
+        out = self._run({"side_effect": OSError("x")})
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("UNVERIFIED", out)
+
+    def test_edit_compares_zone_mask_and_segment_count(self):
+        h = mpl.profile_live_http
+        for body in ({"name": "x", "zone_mask": 2, "segments": [{}]},
+                     {"name": "x", "zone_mask": 1, "segments": []}):
+            with unittest.mock.patch.object(h, "edit_live", return_value={"ok": True}),                     unittest.mock.patch.object(h, "get_live_status", return_value={}),                     unittest.mock.patch.object(h, "get_live_content", return_value=body):
+                out = mpl.profile_live_edit("x", 1, [{"kind": 0}], confirm=True, host="h")
+            self.assertTrue(out.startswith("FAILED"), out)
 
 
 if __name__ == "__main__":

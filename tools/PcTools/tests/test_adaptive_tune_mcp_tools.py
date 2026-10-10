@@ -124,6 +124,20 @@ class RevertConfirmGateTest(unittest.TestCase):
             result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("UNVERIFIED"), result)
 
+    def test_absent_revert_available_is_unverified(self):
+        row = unittest.mock.MagicMock(zone=2, revert_available=None)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]), \
+                unittest.mock.patch.object(at_http, "revert", return_value={"ok": True}):
+            result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("UNVERIFIED"), result)
+
+    def test_absent_enabled_is_unverified(self):
+        row = unittest.mock.MagicMock(zone=2, enabled=None)
+        with unittest.mock.patch.object(at_http, "get_status", return_value=[row]), \
+                unittest.mock.patch.object(at_http, "set_enabled", return_value={"ok": True}):
+            result = m.adaptive_tune_set_enabled(2, False, confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("UNVERIFIED"), result)
+
     def test_missing_row_reports_unverified(self):
         with unittest.mock.patch.object(at_http, "get_status", return_value=[]),                 unittest.mock.patch.object(at_http, "revert", return_value={"ok": True}):
             result = m.adaptive_tune_revert(2, confirm=True, host="10.0.0.5")

@@ -35,7 +35,7 @@ def _preflight_resolve_host(host: Optional[str]) -> str:
     return capability_preflight.PREFLIGHT_AP_DEFAULT_HOST
 
 
-def _preflight_task_liveness():
+def _preflight_task_liveness(reason_out: Optional[list] = None):
     """Compute a task_liveness.TaskLivenessReport off the LINK (not HTTP --
     capability_preflight.py itself has no link access), same
     get_stack_margin() path as the standalone check_task_liveness tool.
@@ -43,7 +43,11 @@ def _preflight_task_liveness():
     connected on this host, rather than treating "could not check" as
     "confirmed absent" -- an operator running preflight for a board
     reachable only over Wi-Fi HTTP without a live serial link should not be
-    refused over a check this preflight cannot perform."""
+    refused over a check this preflight cannot perform.
+
+    If `reason_out` (a list) is given, the reason a None return was "could not
+    read" is appended to it, so the caller can refuse on it (a read failure is
+    not a clean bill) unless explicitly overridden."""
     import os
 
     from . import task_liveness
@@ -52,7 +56,9 @@ def _preflight_task_liveness():
 
     try:
         entries = _srv._info.get_stack_margin()
-    except (InfoQueryError, InfoResponseError):
+    except (InfoQueryError, InfoResponseError) as exc:
+        if reason_out is not None:
+            reason_out.append(f"stack-margin read failed: {exc}")
         # InfoResponseError (devices_info.py) is a ValueError raised when
         # the reply parses but its shape is malformed -- not a subclass of
         # InfoQueryError, so it must be caught separately. Either way this
@@ -65,7 +71,9 @@ def _preflight_task_liveness():
     script_path = task_liveness.default_check_script_path(repo_root)
     try:
         specs = task_liveness.load_required_task_specs(script_path)
-    except (task_liveness.TaskLivenessParseError, OSError):
+    except (task_liveness.TaskLivenessParseError, OSError) as exc:
+        if reason_out is not None:
+            reason_out.append(f"required-task list not loadable: {exc}")
         return None
     expected = tuple(spec.name for spec in specs)
     tags = {spec.name: spec.tag for spec in specs}
@@ -76,7 +84,8 @@ def _preflight_task_liveness():
 def capability_preflight_check(name: str, host: Optional[str] = None,
                                 zones_host: Optional[str] = None,
                                 safety_host: Optional[str] = None,
-                                allow_missing_tasks: bool = False) -> str:
+                                allow_missing_tasks: bool = False,
+                                allow_undetermined: bool = False) -> str:
     """Preflight a config preset against the LIVE board's actual firmware
     capabilities, BEFORE applying it -- read-only, safe to call at any time,
     never writes anything.
@@ -112,16 +121,23 @@ def capability_preflight_check(name: str, host: Optional[str] = None,
     task being dead or absent by design (see `$requiredNames` in
     `tools/check_stack_margin_registration.ps1`) is reported but never
     blocks. That check runs over the direct UART link, not `host`; if no
-    link/board answers it, task liveness is simply not checked (never
-    treated as a failure), so a preflight against a board reachable only by
-    Wi-Fi HTTP still works.
+    link/board answers it, task liveness could not be read.
+
+    FAIL CLOSED (2026-10-10 review M3): a failed read is "could not
+    determine", never "clean". An unreadable /api/crash_report or
+    /api/readiness (401 -- both are admin tier -- 5xx, timeout, non-JSON), a
+    crash record with no `acknowledged` field, or an unreadable task-liveness
+    check all refuse, listed as [UNDETERMINED]. `allow_undetermined=True`
+    (exactly True) is the explicit override, for a board reachable only by
+    Wi-Fi HTTP with no serial link or a deliberately logged-out session.
     """
     try:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
     resolved = _preflight_resolve_host(host)
-    task_liveness_report = _preflight_task_liveness()
+    liveness_reasons: list = []
+    task_liveness_report = _preflight_task_liveness(liveness_reasons)
     # Mirrors load_config_preset()'s own default: zones_host/safety_host
     # omitted means that write path is not attempted, so a capability
     # gated on it (like ramp_assist) is correctly reported as not required
@@ -134,6 +150,8 @@ def capability_preflight_check(name: str, host: Optional[str] = None,
         preset_name=name,
         task_liveness=task_liveness_report,
         allow_missing_tasks=allow_missing_tasks,
+        task_liveness_unavailable="; ".join(liveness_reasons),
+        allow_undetermined=allow_undetermined,
     )
     return report.describe()
 

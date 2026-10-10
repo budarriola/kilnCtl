@@ -150,6 +150,11 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
             "refusing to start a sweep. Review and acknowledge via GET/POST /api/crash_report "
             f"before energizing relays (host={resolved})."
         )
+    if board.undetermined:
+        return (
+            f"error: could not read the board's safety state ({'; '.join(board.undetermined)}) -- a failed "
+            f"read is not a clean board; refusing to start a sweep (host={resolved})"
+        )
     if board.readiness_blocked or board.heat_blocked:
         names = ", ".join(f"{label} ({key}): {detail}"
                           for key, label, detail in (*board.readiness_blocked, *board.heat_blocked))
