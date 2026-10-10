@@ -29,7 +29,7 @@ Caveats (each LOW):
 - An autotune run is neither paused nor surfaced while the reboot is undecided. It runs cold until DIAG arrives.
 - `granted` is not cleared by `note_pico_boot()`, so `heat_enable_is_granted()` can read true while undecided. Its only caller is the LCD auth-reset gesture (`ui_page_home_actions.c:604`), so there is no heat consequence.
 
-### A1 (LOW-MED): post-commit DIAG freshness can be satisfied by a pre-commit DIAG (FIXED 2f985aa7b)
+### A1 (LOW-MED): post-commit DIAG freshness can be satisfied by a pre-commit DIAG (FIXED a3c6475c1)
 
 `safety_cfg_write.c:330`:
 
@@ -48,7 +48,7 @@ bool fresh = nonblocking_refetch || (int32_t)(diag_count - diag_applied_before_c
 
 The `test_safety_cfg_http.c` stub does not model the drain inside `send_commit`, so the test cannot see this. Its expected `diag_calls` changed from 1 to 2 in this batch.
 
-### A2 (MED/LOW): `autotune_engine_abort()` from the watchdog waits on `s_at.lock` with `portMAX_DELAY`, every tick the hold persists (FIXED 2f985aa7b)
+### A2 (MED/LOW): `autotune_engine_abort()` from the watchdog waits on `s_at.lock` with `portMAX_DELAY`, every tick the hold persists (FIXED a3c6475c1)
 
 `profile_executor.c:2516/2519` calls `autotune_engine_abort("pico_fatal_reboot")` or `autotune_engine_abort("heat_grant_unconfirmed")`. It does so on every guard-9 watchdog tick while `reboot_hold` or `k4_unconfirmed` stands.
 
@@ -63,13 +63,13 @@ Mitigations seen:
 
 So this is a liveness stall, not a deadlock. **Fix:** a bounded variant of `autotune_engine_abort()` for the watchdog, or a `state_is_running()` precheck before the take.
 
-### A3 (LOW): `send_enable()`'s in-flight check covers `reboot_hold` but not `reboot_classify_pending` (FIXED 2f985aa7b)
+### A3 (LOW): `send_enable()`'s in-flight check covers `reboot_hold` but not `reboot_classify_pending` (FIXED a3c6475c1)
 
 `heat_enable.c:307`: firefx3 added "enable landed under a reboot hold, so record nothing and queue a release". If `note_pico_boot()` sets `reboot_classify_pending` (not the hold) while an enable is on the wire, the `else if (err == ESP_OK)` branch records `granted = true`. The Pico then holds an enable granted to a board that has not yet classified the reboot.
 
 A fatal classification still clears it afterwards, so the exposure is one DIAG period. The window is narrow. `note_pico_boot()` runs on the watchdog task, and `reconcile()`'s retry from that task is already gated. The race needs a `heat_enable_acquire_since()` send from another task in flight at that moment: the profile start path (`profile_executor_run.c:1543`) or the autotune task (`autotune_engine.c:1594/1705`). `heat_enable_acquire_since()` itself checks only the release epoch, not either reboot flag, before it sends. **Fix:** extend the line 307 condition to `s_he.reboot_hold || s_he.reboot_classify_pending`.
 
-### A4 (LOW): slow re-announce comment says "one frame"; it is a 4-frame burst (FIXED 2f985aa7b)
+### A4 (LOW): slow re-announce comment says "one frame"; it is a 4-frame burst (FIXED a3c6475c1)
 
 `safety_link_frames.c:334-336` says "at most one frame per SLOW_GAP_MS". The slow branch sets `reannounce_pending`, and `safety_link_poll.c:573` services that with `safety_link_send_announce_version_burst()`: 4 frames, 250 ms apart, about 750 ms of poll-task block.
 
