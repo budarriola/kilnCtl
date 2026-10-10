@@ -359,8 +359,14 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * caller-supplied buffer per field, and two more 19 B buffers on this
      * handler's stack buy nothing since the values are already quote-safe
      * dotted quads (validated before storage). */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8];
-    int n = snprintf(json, sizeof(json),
+    /* HEAP, not stack (httpd 8 KB stack): ~680 B; freed on every return path. */
+    const size_t json_cap = 352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8;
+    char *json = persist_scratch_alloc(json_cap);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    int n = snprintf(json, json_cap,
                      "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
                      "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
                      "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
@@ -383,11 +389,13 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     if (n < 0) {
         n = 0;
     }
-    if ((size_t)n >= sizeof(json)) {
-        n = (int)sizeof(json) - 1; /* truncated is fine for a status readout; never overrun */
+    if ((size_t)n >= json_cap) {
+        n = (int)json_cap - 1; /* truncated is fine for a status readout; never overrun */
     }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n);
+    esp_err_t sent = httpd_resp_send(req, json, n);
+    free(json);
+    return sent;
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req)
