@@ -307,6 +307,10 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;
+        /* kilnlink review LOW-4: the DIAG uptime baseline must not survive an outage (one spanning the
+         * 49.7-day wrap would read as a reboot). Kept on the SAME condition as pico_boot_id_known so the
+         * two reboot signals reset together. */
+        link->pico_uptime_baseline_known = false;
     }
     safety_unlock(link);
 }

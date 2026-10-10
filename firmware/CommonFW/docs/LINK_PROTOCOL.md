@@ -530,7 +530,10 @@ Recovery: reboot the Pico (`debug_reset(peer="pico")` or a power cycle) so it
 forgets the peer version and re-learns it from the next ANNOUNCE. Also see
 UPDATE_PROTOCOL.md's `ota_rollback(processor)` bullet. On a protocol 17 ESP the
 boot-time clear now waits for a DIAG carrying `trip_seq` rather than spending a
-retry on an unbound clear a >= 17 Pico would refuse.
+retry on an unbound clear. Whether the Pico refuses depends on the Pico knowing
+the ESP is >= 17 (learned from the ESP's ANNOUNCE), not on the ESP knowing the
+Pico is; while the gate blocks, the ESP re-sends its ANNOUNCE
+(`reannounce_pending`) so the Pico moves to the 31-byte DIAG.
 
 Both lengths decode on both sides, so `KILNLINK_MIN_COMPATIBLE` stays 7. The
 PC wire is unchanged: `safety_clear_trip` still sends no mask or seq, and the

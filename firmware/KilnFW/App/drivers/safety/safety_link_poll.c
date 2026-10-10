@@ -210,9 +210,6 @@ static void safety_update_health(SafetyLinkClass *link)
         up = false;
     }
 
-    if (!up) {
-        safety_link_note_link_down(link);
-    }
     if (up) {
         if (link->down_logged) {
             ESP_LOGI(TAG, "safety processor link is up again");

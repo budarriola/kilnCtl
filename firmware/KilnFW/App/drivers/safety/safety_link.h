@@ -1629,7 +1629,7 @@ typedef struct {
      * rebooted even when its 8-bit boot_id happened to repeat, and runs the
      * same safety_note_pico_reboot_locked() bookkeeping a boot_id change
      * does. Cleared on link-down (review LOW-4: an outage may span the
-     * 49.7-day wrap; safety_link_note_link_down()) and on a boot_id change,
+     * 49.7-day wrap; safety_reset_stale_peer_info_if_link_down()) and on a boot_id change,
      * since the new boot's baseline is not yet known. Under state_lock. */
     uint32_t pico_uptime_baseline_ms;
     bool     pico_uptime_baseline_known;

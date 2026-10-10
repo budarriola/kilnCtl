@@ -293,20 +293,6 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
     link->reannounce_pending = true;
 }
 
-/* kilnlink review LOW-4: called when the link is declared down. The DIAG
- * uptime baseline must not survive an outage: one spanning the 49.7-day
- * uptime wrap (or any long gap) would otherwise read as a reboot. The first
- * DIAG after recovery re-seeds it. A reboot during the outage is still caught
- * by the FW_VERSION boot_id path. */
-void safety_link_note_link_down(SafetyLinkClass *link)
-{
-    if (!safety_lock(link)) {
-        return;
-    }
-    link->pico_uptime_baseline_known = false;
-    safety_unlock(link);
-}
-
 void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
     uint16_t peer_protocol = 0;
@@ -1096,11 +1082,15 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
                    (s_boot_clear_attempts == 0u ||
                     (now - s_boot_clear_last_attempt_tick_ms) >= SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS) &&
                    link->fault_sources == 0u &&
-                   /* kilnlink review LOW-2: a Pico known to be >= 17 refuses an
-                    * unbound 3-byte clear (SEQ_REQUIRED, no reply reaches us), so
-                    * do not offer one from a 30-byte DIAG cached before it learned
-                    * our version -- wait for a DIAG that carries trip_seq, without
-                    * spending an attempt. Never weakens the Pico's refusal. */
+                   /* kilnlink review LOW-2: a Pico known to be >= 17 CAN refuse an
+                    * unbound 3-byte clear (SEQ_REQUIRED, no reply reaches us), but
+                    * whether it does depends on the Pico knowing OUR version is
+                    * >= 17 (learned from our ANNOUNCE), not on us knowing its. So
+                    * do not offer one from a 30-byte DIAG cached before the Pico
+                    * learned our version -- wait for a DIAG that carries trip_seq,
+                    * without spending an attempt (the branch below re-announces so
+                    * the Pico moves to 31-byte DIAGs). Never weakens the Pico's
+                    * refusal. */
                    !(link->peer_version_known && link->peer_protocol_version >= 17u &&
                      !link->cached.diag_trip_seq_known) &&
                    link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
@@ -1117,6 +1107,14 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
              * would already have flipped diag_state away from TRIPPED by
              * the time a later DIAG frame gets here, so this branch simply
              * would not re-fire. */
+        } else if (s_boot_clear_attempts < SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS && link->fault_sources == 0u &&
+                   link->peer_version_known && link->peer_protocol_version >= 17u &&
+                   !link->cached.diag_trip_seq_known && link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                   link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
+            /* The gate above blocked: the Pico is still sending 30-byte DIAGs, i.e. it has not learned our
+             * version. Owe it an ANNOUNCE (sent by safety_poll_task, see reannounce_pending) so it moves
+             * to 31-byte DIAGs carrying trip_seq. */
+            link->reannounce_pending = true;
         }
     }
     if (want_boot_clear) {

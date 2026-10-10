@@ -2972,6 +2972,9 @@ static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
     TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
                "30-byte DIAG from a v17 peer: no clear sent");
     TEST_CHECK(s_boot_clear_attempts == 0, "no attempt consumed");
+    TEST_CHECK(link.reannounce_pending == true,
+               "blocked gate re-announces so the Pico learns our version and sends the 31-byte DIAG");
+    link.reannounce_pending = false;
     m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 5u, true);
     safety_link_service_boot_clear_if_pending(&link);
     TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
@@ -2991,10 +2994,15 @@ static void test_low4_link_down_invalidates_uptime_baseline(void)
     TEST_SECTION("LOW-4 -- link-down clears the DIAG uptime baseline; the first DIAG after "
                  "recovery re-seeds it instead of reading as a reboot");
     SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.cached_tick = 0; // reads as link UP (see stale-reset tests above)
     apply_diag_uptime(&link, UINT32_MAX - 1000u);
     TEST_CHECK(link.pico_uptime_baseline_known, "setup: baseline known");
-    safety_link_note_link_down(&link);
-    TEST_CHECK(link.pico_uptime_baseline_known == false, "link-down invalidates the baseline");
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "up tick leaves the baseline alone");
+    link.cached_tick = 1; // wraps to a huge elapsed -> link down
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_uptime_baseline_known == false, "down tick invalidates the baseline");
     apply_diag_uptime(&link, 300000u); // would regress against the old baseline
     TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "post-outage DIAG seeds, not a reboot");
     TEST_CHECK(link.pico_uptime_baseline_known == true, "baseline re-seeded");
