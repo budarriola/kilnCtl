@@ -25,7 +25,7 @@ matching CLAUDE.md and `docs/MCP_SERVERS.md`.
 
 ## HIGH
 
-### H1. `control_set_aux_manual` verifies against a relay shadow it does not validate
+### H1. `control_set_aux_manual` verifies against a relay shadow it does not validate -- FIXED (mcpfx1, see git log)
 
 `mcp_server_aux.py:226`: the read-back is `if state.relay(relay) != on:`. It
 never consults `IoState.relay_state_unknown` (FLAG_RELAY_UNKNOWN 0x04) or
@@ -39,7 +39,7 @@ Missing tests: unknown flag set with `on=False` must FAIL; `i2c_failed` must
 FAIL. The existing `_io()` mock is a bare `Mock`, so the flags must be set
 False explicitly in the happy-path mock for a fix to stay green.
 
-### H2. `pico_gpio_set_mode` / `pico_gpio_write` leave the RP2040 core halted
+### H2. `pico_gpio_set_mode` / `pico_gpio_write` leave the RP2040 core halted -- FIXED (mcpfx1, see git log)
 
 `debug_probe.write_memory` (`debug_probe.py:857`) issues
 `init; halt; <cmd>; exit` with no `resume`. `pico_gpio_probe.set_mode` ends on
@@ -54,7 +54,7 @@ Missing test: a fake OpenOCD command recorder asserting every write sequence
 ends with `resume` (or a following read that resumes), including when the
 read-back raises. Existing tests mock `pico_gpio_probe` out entirely.
 
-### H3. `pico_gpio_*` writers have no ARMED gate
+### H3. `pico_gpio_*` writers have no ARMED gate -- FIXED (mcpfx1, see git log)
 
 `debug_write_memory` (`mcp_server_debug.py` near 726) calls
 `debug_probe.pico_armed_state()` and fails closed. The `pico_gpio_set_mode` /
