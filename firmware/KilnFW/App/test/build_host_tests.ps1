@@ -2617,6 +2617,31 @@ try {
 
     Invoke-HostTestExe -Name "dashboard_autotune_http_handlers" -ExePath $exeDa -BuildCmd $cmdDa
 
+    # ---- test_dashboard_autotune_http_get_handlers.c (c78b): GET /api/autotune{,/matrix,/trace.csv} ----
+    $exeDg = Join-Path $outDir "kilnctl_host_tests_dashboard_autotune_http_get_handlers.exe"
+    $dgObjDir = Join-Path $outDir "dg"
+    New-Item -ItemType Directory -Force -Path $dgObjDir | Out-Null
+    $cmdDg = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dgObjDir\\`" /Fe:`"$exeDg`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_get_handlers.c')`" `"$(Join-Path $testDir 'test_dashboard_autotune_http_get_link_stubs.c')`" " +
+            "`"$(Join-Path $driversDir 'http/dashboard_json.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "dashboard_autotune_http_get_handlers" -ExePath $exeDg -BuildCmd $cmdDg
+
+    # ---- test_zone_aux_convert_http.c (c78b): move_zone_to_aux adapter + real core ----
+    $exeZc = Join-Path $outDir "kilnctl_host_tests_zone_aux_convert_http.exe"
+    $zcObjDir = Join-Path $outDir "zc"
+    New-Item -ItemType Directory -Force -Path $zcObjDir | Out-Null
+    $cmdZc = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$zcObjDir\\`" /Fe:`"$exeZc`" `"$(Join-Path $testDir 'test_zone_aux_convert_http.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+
+    Invoke-HostTestExe -Name "zone_aux_convert_http" -ExePath $exeZc -BuildCmd $cmdZc
+
     # ---- test_readiness_crash_disclosure.c: its own 46th, separate
     # executable -- 2026-09-17 ROUTE_TIER_OPEN disclosure audit finding 2:
     # GET /api/readiness's crash-report checklist item leaked
@@ -3415,7 +3440,8 @@ try {
     # 83 -> 84: test_uart_bridge_core.c (campaign 10)
     # 84 -> 85: test_ct_leak_alarm_service.c (round 2, R2-1)
     # 85 -> 86: test_dashboard_autotune_http_handlers.c (campaign 8 autotune)
-    $totalExpected = 86
+    # 86 -> 88: test_dashboard_autotune_http_get_handlers.c, test_zone_aux_convert_http.c (c78b)
+    $totalExpected = 88
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
