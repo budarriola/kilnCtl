@@ -9,6 +9,7 @@
 #include "ui_num_pad.h"
 #include "ui_page_profile_builder_review.h"
 #include "ui_page_profile_builder_zones.h"
+#include "ui_profile_builder_segment_logic.h"
 #include "ui_theme.h"
 #include "ui_unit_entry.h"
 #include "ui_topbar.h"
@@ -96,9 +97,9 @@ static void refresh(void)
              unit_pref_suffix(pref));
     if (s_target_cap_label && s_ramp_cap_label) {
         char cap[24];
-        snprintf(cap, sizeof(cap), "Target %s", unit_pref_suffix(pref));
+        ui_pbs_target_caption(pref, cap, sizeof(cap));
         lv_label_set_text(s_target_cap_label, cap);
-        snprintf(cap, sizeof(cap), "Ramp %s/hr", unit_pref_suffix(pref));
+        ui_pbs_ramp_caption(pref, cap, sizeof(cap));
         lv_label_set_text(s_ramp_cap_label, cap);
     }
     lv_label_set_text(s_target_val_label, buf);
@@ -136,15 +137,11 @@ static void refresh(void)
     if (d->segment_count >= PROFILE_MAX_SEGMENTS) {
         lv_obj_remove_flag(s_add_btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_opa(s_add_btn, LV_OPA_50, 0);
-        lv_label_set_text(s_caption, "Maximum 12 segments reached");
+        lv_label_set_text(s_caption, ui_pbs_limit_caption(d->segment_count, PROFILE_MAX_SEGMENTS));
     } else {
         lv_obj_add_flag(s_add_btn, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_style_bg_opa(s_add_btn, LV_OPA_COVER, 0);
-        if (d->segment_count <= 1) {
-            lv_label_set_text(s_caption, "At least one segment is required");
-        } else {
-            lv_label_set_text(s_caption, "");
-        }
+        lv_label_set_text(s_caption, ui_pbs_limit_caption(d->segment_count, PROFILE_MAX_SEGMENTS));
     }
 
     if (d->segment_count <= 1) {
@@ -223,7 +220,7 @@ static void del_cb(lv_event_t *e)
 /* Unit the open pad was rendered in (R4): the done callbacks convert back with
  * THIS, never a fresh unit_pref_get(), so a unit change while the pad is open
  * cannot reinterpret the typed number. */
-static unit_pref_t s_pad_pref = UNIT_PREF_CELSIUS;
+static ui_pbs_pad_t s_pad = { UNIT_PREF_CELSIUS };
 
 static void target_done_cb(bool accepted, const char *text, float value, void *user_data)
 {
@@ -232,7 +229,7 @@ static void target_done_cb(bool accepted, const char *text, float value, void *u
     if (!accepted) return;
     float min_c, max_c;
     profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
-    draft()->segments[s_cur_seg].target_c = ui_unit_entry_to_celsius(value, s_pad_pref, UNIT_PREF_KIND_ABSOLUTE, min_c, max_c);
+    draft()->segments[s_cur_seg].target_c = ui_pbs_pad_to_celsius(&s_pad, value, UNIT_PREF_KIND_ABSOLUTE, min_c, max_c);
     refresh();
 }
 
@@ -243,7 +240,7 @@ static void ramp_done_cb(bool accepted, const char *text, float value, void *use
     if (!accepted) return;
     float min_r, max_r;
     profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
-    draft()->segments[s_cur_seg].ramp_c_per_hr = ui_unit_entry_to_celsius(value, s_pad_pref, UNIT_PREF_KIND_RATE, min_r, max_r);
+    draft()->segments[s_cur_seg].ramp_c_per_hr = ui_pbs_pad_to_celsius(&s_pad, value, UNIT_PREF_KIND_RATE, min_r, max_r);
     refresh();
 }
 
@@ -265,9 +262,9 @@ static void target_card_cb(lv_event_t *e)
     profiles_http_get_bounds(&min_c, &max_c, NULL, NULL, NULL);
     /* LCD review N8: the pad is in the display unit; target_done_cb() converts back to Celsius. */
     const unit_pref_t pref = unit_pref_get();
-    s_pad_pref = pref;
+    ui_pbs_pad_capture(&s_pad, pref);
     static char s_target_caption[16];
-    snprintf(s_target_caption, sizeof(s_target_caption), "Target %s", unit_pref_suffix(pref));
+    ui_pbs_target_caption(pref, s_target_caption, sizeof(s_target_caption));
     ui_num_pad_params_t params = {
         .caption = s_target_caption,
         .mode = UI_NUM_PAD_MODE_NUMBER,
@@ -287,9 +284,9 @@ static void ramp_card_cb(lv_event_t *e)
     float min_r, max_r;
     profiles_http_get_bounds(NULL, NULL, &min_r, &max_r, NULL);
     const unit_pref_t pref = unit_pref_get();
-    s_pad_pref = pref;
+    ui_pbs_pad_capture(&s_pad, pref);
     static char s_ramp_caption[20];
-    snprintf(s_ramp_caption, sizeof(s_ramp_caption), "Ramp %s/hr", unit_pref_suffix(pref));
+    ui_pbs_ramp_caption(pref, s_ramp_caption, sizeof(s_ramp_caption));
     ui_num_pad_params_t params = {
         .caption = s_ramp_caption,
         .mode = UI_NUM_PAD_MODE_NUMBER,
