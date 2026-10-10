@@ -88,7 +88,7 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 | L20 | fix in progress (D2) | `http/profiles_edit_http.c:288-291` | `rule%u_temp_c` goes through `strtof` with no `isfinite` check or end check. `profiles_validate.c` ~265 range-checks it only when `temp_cmp != NONE`, so NaN or inf can persist. | `rule0_temp_cmp=0&rule0_temp_c=nan` | Not for NaN |
 | L21 | fix in progress (D3) | `http/profiles_edit_http.c` profile_post | `name=%00` gives an embedded NUL, so the stored name is empty. | `name=%00abc` | No |
 | L22 | fix in progress (D4) | `http/profiles_edit_http.c` profile_post | An over-long `id` (`-2`) is treated as "create new". `id=abc` parses as 0 and overwrites slot 0. `1abc` is accepted. | `POST /api/profiles` with `id=abc&name=x&...` | No |
-| L23 | open (skipped 2026-10-09: file/area owned by another in-flight change) | `http/profiles_edit_http.c` profile_delete_post_handler | The "is it running" check is unlocked, so a TOCTOU window remains against a profile start. Re-check the ordering against the dev reorder. | Delete slot N while `POST /api/profile_exec/start id=N` races it | No |
+| L23 | fixed-by fffa1504 | `http/profiles_edit_http.c` profile_delete_post_handler | The "is it running" check is unlocked, so a TOCTOU window remains against a profile start. Re-check the ordering against the dev reorder. | Delete slot N while `POST /api/profile_exec/start id=N` races it | No |
 | L24 | fix in progress (D6) | `http/profiles_edit_http.c` profile_favorite_post_handler | An empty slot can be favorited. | `POST /api/profiles/favorite` with `id=<empty slot>` | No |
 | L25 | fix in progress (D7) | `http/ota_http_esp.c` (`ota_esp_do_transfer`), `http/ota_http_pico.c` (`ota_pico_do_stage`) | Each recv has a 30 s timeout, but there is no overall deadline. A slow drip holds the update claim and the httpd task. | OTA upload that sends 1 KB every 25 s | No |
 | L26 | fixed-by 595bd701 | `http/ota_http_pico.c`, `net/pico_img_stage.c` | Begin erases `pico_img` before the body is validated, which destroys the previously staged image. The manifest is not cleared on a failed upload: `pico_image_manifest_clear` (`persist/pico_image_manifest.c:176`) has no HTTP caller. Mitigated by the CRC recheck in `pico_image_source.c`. | A truncated `POST /api/ota/pico` | No |
@@ -119,7 +119,12 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 - **L7:** refuse a leading `-` and an empty value before `strtoul`.
 - **L12:** persist first, then publish to RAM.
 - **L15:** refuse `strlen(v) != len`, as `update_settings_http.c` ~97 already does.
-- **L23:** take the executor lock across the running check and the erase.
+- **L23:** fixed-by fffa1504, not as suggested here. Holding the executor lock across
+  the erase deadlocks (lock order is flash worker -> profiles save lock -> executor
+  lock). Instead both delete paths share `profiles_delete_slot()`, which sets a
+  lock-free delete-in-flight bit before its running check, and `profile_executor_run()`
+  re-checks `profiles_http_slot_runnable()` under the executor lock before committing
+  RUNNING. A second concurrent delete of the slot is 409 busy.
 - **L26:** erase on the first validated chunk, and call `pico_image_manifest_clear` on a failed upload.
 - **L35:** treat a present-but-empty Origin as a refusal.
 - **L43:** return `ESP_OK` after `send_err`.
