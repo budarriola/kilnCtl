@@ -2299,6 +2299,7 @@ static void test_guard9_fault_source_cleared_on_halt(void)
 
 static void test_guard9_watchdog_source_order(void);
 static void test_heat_acquire_result_not_discarded(void);
+static void test_zone_off_pending_retry(void);
 
 // Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
 // not wait on s_exec.lock. The host stub is single-threaded, so "another task
@@ -11967,6 +11968,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fires_while_another_task_holds_exec_lock();
     test_guard9_watchdog_source_order();
     test_heat_acquire_result_not_discarded();
+    test_zone_off_pending_retry();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -12838,4 +12840,40 @@ bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor
         return false;
     }
     return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
+}
+
+static void test_zone_off_pending_retry(void)
+{
+    TEST_SECTION("firing review item 4: failed zone OFF write is retried in a non-RUNNING state; unreadable mask still drives OFF");
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[0] = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    g_relay_write_fail = true;
+    apply_relay(0, false);
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed OFF write must be recorded as pending");
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "retry must write OFF to the pending mask");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "pending clears after a landed write");
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 0, "nothing pending -> no write");
+
+    /* mask getter failure: claimed mask driven OFF anyway */
+    g_stub_relay_mask[0] = 0;
+    s_exec.claimed_relay_mask = 0x02;
+    g_relay_write_calls = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "unreadable mask must still drive the claimed relays OFF");
+    g_relay_write_fail = true;
+    apply_relay(0, true);
+    g_relay_write_fail = false;
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed fallback OFF must be pending too");
+    s_exec.io = NULL;
+    memset(&s_exec, 0, sizeof(s_exec));
 }

@@ -970,6 +970,10 @@ typedef struct {
      * why start forces every claimed aux OFF before the first decision. */
     uint8_t aux_claim_mask;
     bool aux_off_pending;
+    /* Firing review item 4: zone relay bits whose OFF write failed (or whose
+     * mask could not be read). Retried every non-RUNNING tick until a write
+     * lands. */
+    uint8_t zone_off_pending_mask;
     struct {
         on_off_trigger_state_t trigger;
         bool actuated_on;
@@ -1286,6 +1290,7 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
                                                           float dt_s, bool *bypass_hold_out);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
+void zone_off_pending_retry(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
  * claim-before-gate, same authorized kiln_io_owner write, but gated by the
  * global relay_authority_on_blocked() (an aux has no zone). force_aux_relays_off()

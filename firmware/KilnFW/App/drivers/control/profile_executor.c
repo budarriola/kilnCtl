@@ -764,6 +764,7 @@ void executor_task_entry(void *arg)
              * Never while PAUSED (a pause holds aux at its last state while no fault is asserted -- see profile_executor_aux_fault_drop()) and a
              * no-op once the write has landed, so it cannot fight a later
              * manual toggle. */
+            zone_off_pending_retry();
             if (s_exec.aux_off_pending && s_exec.state != PROFILE_EXEC_PAUSED) {
                 force_aux_relays_off();
             }

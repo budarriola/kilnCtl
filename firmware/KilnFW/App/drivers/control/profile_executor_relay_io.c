@@ -29,7 +29,22 @@
 void apply_relay(uint8_t zi, bool want_on)
 {
     uint8_t mask = 0;
-    if (!zones_config_get_relay_mask(zi, &mask) || mask == 0) {
+    bool mask_ok = zones_config_get_relay_mask(zi, &mask);
+    if (!mask_ok) {
+        /* Firing review item 4: an unreadable mask must still drive OFF --
+         * fall back to every mask this run has claimed, and keep retrying. */
+        s_exec.zones[zi].relay_commanded_on = false;
+        uint8_t fb = s_exec.claimed_relay_mask;
+        if (fb != 0 && s_exec.io) {
+            if (kiln_io_owner_command_set_relay_mask_authorized(fb, 0) == ESP_OK) {
+                relay_off_tracker_note_write(fb, 0);
+            } else {
+                s_exec.zone_off_pending_mask |= fb;
+            }
+        }
+        return;
+    }
+    if (mask == 0) {
         s_exec.zones[zi].relay_commanded_on = false;
         return;
     }
@@ -104,6 +119,10 @@ void apply_relay(uint8_t zi, bool want_on)
                      esp_err_to_name(err), zi);
         } else {
             relay_off_tracker_note_write(mask, want_on ? mask : 0);
+            s_exec.zone_off_pending_mask &= (uint8_t)~mask;
+        }
+        if (err != ESP_OK && !want_on) {
+            s_exec.zone_off_pending_mask |= mask;
         }
     }
     /* No-op unless CONFIG_KILNCTL_SIM_PLANT. Fed the POST-gate decision, not
@@ -454,6 +473,20 @@ void force_zone_relay_off(uint8_t zi)
     heater_output_force_off(&s_exec.zones[zi].heater_state);
     apply_relay(zi, false);
     s_exec.zones[zi].duty = 0.0f;
+}
+
+/* Retry zone relay OFF writes that failed. Safe in every state: only writes
+ * OFF, only to bits recorded as failed. Must be called with s_exec.lock held. */
+void zone_off_pending_retry(void)
+{
+    uint8_t mask = s_exec.zone_off_pending_mask;
+    if (mask == 0 || !s_exec.io) {
+        return;
+    }
+    if (kiln_io_owner_command_set_relay_mask_authorized(mask, 0) == ESP_OK) {
+        relay_off_tracker_note_write(mask, 0);
+        s_exec.zone_off_pending_mask = 0;
+    }
 }
 
 /* Must be called with s_exec.lock held. */
