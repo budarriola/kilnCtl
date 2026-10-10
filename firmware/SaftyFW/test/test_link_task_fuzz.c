@@ -124,9 +124,12 @@ bool config_store_is_calibration_missing(void) { return false; }
 bool config_store_is_rate_guard_disabled(void) { return false; }
 bool config_store_is_volatile_dirty(void) { return false; }
 void config_store_set_heat_possible_probe(config_store_heat_possible_probe_t p) { (void)p; }
+static bool g_cw_ret;
+static int g_cw_calls;
+static config_store_record_t g_cw_rec;
 bool config_store_write(const config_store_record_t *r, const char **why)
 {
-    (void)r; g_cfg_writes++; if (why) { *why = "fake"; } return false;
+    g_cfg_writes++; g_cw_calls++; g_cw_rec = *r; if (why) { *why = "fake"; } return g_cw_ret;
 }
 // Controllable write fakes: the commit scenarios choose the outcome and read
 // back the exact candidate record the handler built.
@@ -155,7 +158,8 @@ void current_task_get_power(current_sense_power_t *o) { memset(o, 0, sizeof(*o))
 void current_task_get_snapshot(current_snapshot_t *o) { memset(o, 0, sizeof(*o)); }
 static int g_reload_cal;
 void current_task_reload_cal(void) { g_reload_cal++; }
-void current_task_reload_ct_cal(void) {}
+static int g_reload_ct;
+void current_task_reload_ct_cal(void) { g_reload_ct++; }
 bool discrete_task_estop_pressed(void) { return false; }
 
 uint32_t log_task_get_dropped(void) { return 0; }
@@ -191,9 +195,12 @@ void update_task_handle_abort(const uint8_t *p, uint8_t n) { upd_rec(3, p, n); }
 void update_task_handle_begin(const uint8_t *p, uint8_t n) { upd_rec(0, p, n); }
 void update_task_handle_data(const uint8_t *p, uint8_t n) { upd_rec(1, p, n); }
 void update_task_handle_end(const uint8_t *p, uint8_t n) { upd_rec(2, p, n); }
-bool update_task_reboot_allowed(const char **why, uint8_t *code) { *why = "fake"; *code = 0; return false; }
+static bool g_reboot_allowed;
+static uint8_t g_reboot_code;
+bool update_task_reboot_allowed(const char **why, uint8_t *code) { *why = "fake"; *code = g_reboot_code; return g_reboot_allowed; }
 void update_task_reboot_now(void) { g_reboots++; }
-bool update_task_request_rollback(const char **why, uint8_t *code) { *why = "fake"; *code = 0; return false; }
+static uint8_t g_rb_code;
+bool update_task_request_rollback(const char **why, uint8_t *code) { *why = "fake"; *code = g_rb_code; return false; }
 
 // --- harness ---------------------------------------------------------------------
 
@@ -1100,6 +1107,190 @@ static void scenario_apply_config_volatile(void)
     CHECK(g_wvol_calls == 0 && g_sends == 0, "malformed volatile ignored");
 }
 
+// --- round 3: SET_CT_CAL, SET_FIRING_CEILING/SET_CLOCK, REBOOT/ROLLBACK ------------
+
+static void send_ct_cal(uint8_t ch, uint8_t calibrated, float gain, float offset)
+{
+    kilnlink_set_ct_cal_t m = { ch, calibrated, gain, offset };
+    uint8_t p[KILNLINK_SET_CT_CAL_LEN];
+    kilnlink_set_ct_cal_status_t st;
+    size_t n = kilnlink_set_ct_cal_encode(&m, p, sizeof(p), &st);
+    send_esp(p, (uint8_t)n);
+}
+
+static void scenario_set_ct_cal(void)
+{
+    commit_reset();
+    g_cw_ret = true; g_cw_calls = 0; g_reload_ct = 0;
+
+    // Out-of-range channel: refused before any write.
+    send_ct_cal(3, 1, 1.0f, 0.0f);
+    send_ct_cal(255, 1, 1.0f, 0.0f);
+    CHECK(g_cw_calls == 0 && g_reload_ct == 0, "ct_cal bad channel wrote (%d) reloaded (%d)", g_cw_calls, g_reload_ct);
+
+    // Calibrated with gain 0 would blind S14; NaN/Inf/negative/huge gain; NaN offset.
+    send_ct_cal(0, 1, 0.0f, 0.0f);
+    send_ct_cal(0, 1, NAN, 0.0f);
+    send_ct_cal(0, 1, INFINITY, 0.0f);
+    send_ct_cal(0, 1, -1.0f, 0.0f);
+    send_ct_cal(0, 1, 1.0e9f, 0.0f);
+    send_ct_cal(0, 1, 1.0f, NAN);
+    send_ct_cal(0, 1, 1.0f, 1.0e9f);
+    CHECK(g_cw_calls == 0 && g_reload_ct == 0, "ct_cal bad values wrote (%d) reloaded (%d)", g_cw_calls, g_reload_ct);
+
+    // Malformed length ignored.
+    {
+        uint8_t bad[5] = { KILNLINK_SET_CT_CAL_CMD, 0, 1, 0, 0 };
+        send_esp(bad, 5);
+    }
+    CHECK(g_cw_calls == 0, "malformed SET_CT_CAL wrote");
+
+    // Write refused by config_store: no reload.
+    g_cw_ret = false;
+    send_ct_cal(1, 1, 2.0f, 0.5f);
+    CHECK(g_cw_calls == 1, "valid SET_CT_CAL must reach config_store_write once, got %d", g_cw_calls);
+    CHECK(g_reload_ct == 0, "refused write must not reload ct cal");
+
+    // Accepted: candidate carries the channel values, reload happens, superseded staged gain dropped.
+    link_staging_reset(&s_staging);
+    {
+        float g = 9.0f;
+        uint8_t gb[4];
+        memcpy(gb, &g, 4);
+        send_set_param(0x0311u, KILNLINK_PARAM_TYPE_F32, gb, 4); // gain ch1 staged
+    }
+    unsigned before = (unsigned)link_staging_count(&s_staging);
+    CHECK(before == 1u, "precondition: gain ch1 staged, count=%u", before);
+    g_cw_ret = true; g_cw_calls = 0;
+    send_ct_cal(1, 1, 2.0f, 0.5f);
+    CHECK(g_cw_calls == 1 && g_reload_ct == 1, "accepted SET_CT_CAL write=%d reload=%d", g_cw_calls, g_reload_ct);
+    CHECK(g_cw_rec.ct_cal[1].calibrated && g_cw_rec.ct_cal[1].gain == 2.0f && g_cw_rec.ct_cal[1].offset == 0.5f,
+          "candidate ch1 gain=%f off=%f", (double)g_cw_rec.ct_cal[1].gain, (double)g_cw_rec.ct_cal[1].offset);
+    CHECK(!g_cw_rec.ct_cal[0].calibrated, "other channel must stay uncalibrated");
+    CHECK(link_staging_count(&s_staging) == 0u, "accepted SET_CT_CAL must drop the superseded staged gain, count=%u",
+          (unsigned)link_staging_count(&s_staging));
+}
+
+static void send_ceiling(float v)
+{
+    kilnlink_ceiling_t m = { v };
+    uint8_t p[KILNLINK_CEILING_LEN];
+    kilnlink_ceiling_status_t st;
+    size_t n = kilnlink_ceiling_encode(&m, p, sizeof(p), &st);
+    send_esp(p, (uint8_t)n);
+}
+
+static void send_clock(uint64_t ms)
+{
+    kilnlink_set_clock_t m = { ms };
+    uint8_t p[KILNLINK_SET_CLOCK_LEN];
+    kilnlink_set_clock_status_t st;
+    size_t n = kilnlink_set_clock_encode(&m, p, sizeof(p), &st);
+    send_esp(p, (uint8_t)n);
+}
+
+static void scenario_ceiling_and_clock(void)
+{
+    commit_reset();
+    s_firing_ceiling_have = false; s_firing_ceiling_c = 0.0f;
+    s_wall_clock_have = false; s_wall_clock_epoch_ms = 0;
+
+    send_ceiling(1200.0f);
+    CHECK(s_firing_ceiling_have && s_firing_ceiling_c == 1200.0f, "valid ceiling not stored");
+    // Each non-active value must CLEAR a previously stored ceiling, never half-accept it.
+    float bad[4] = { 0.0f, -50.0f, NAN, INFINITY };
+    for (int i = 0; i < 4; i++) {
+        send_ceiling(1200.0f);
+        send_ceiling(bad[i]);
+        CHECK(!s_firing_ceiling_have && s_firing_ceiling_c == 0.0f, "ceiling bad[%d] left have=%d c=%f", i,
+              (int)s_firing_ceiling_have, (double)s_firing_ceiling_c);
+    }
+    send_ceiling(1200.0f);
+    send_ceiling(-INFINITY);
+    CHECK(!s_firing_ceiling_have, "-inf ceiling accepted");
+    send_ceiling(1200.0f);
+    {
+        uint8_t m[3] = { KILNLINK_CEILING_CMD, 0, 0 };
+        send_esp(m, 3);
+    }
+    CHECK(s_firing_ceiling_have && s_firing_ceiling_c == 1200.0f, "malformed ceiling must be ignored, not clear");
+
+    send_clock(1790000000000ULL);
+    CHECK(s_wall_clock_have && s_wall_clock_epoch_ms == 1790000000000ULL, "plausible clock not stored");
+    send_clock(0ULL);
+    send_clock(1577836799999ULL);
+    send_clock(4102444800001ULL);
+    send_clock(0xFFFFFFFFFFFFFFFFULL);
+    CHECK(s_wall_clock_epoch_ms == 1790000000000ULL, "implausible epoch overwrote the clock: %llu",
+          (unsigned long long)s_wall_clock_epoch_ms);
+    send_clock(1577836800000ULL);
+    CHECK(s_wall_clock_epoch_ms == 1577836800000ULL, "lower bound inclusive");
+    send_clock(4102444800000ULL);
+    CHECK(s_wall_clock_epoch_ms == 4102444800000ULL, "upper bound inclusive");
+}
+
+static bool last_tx_result(uint8_t cmd, uint8_t *accepted, uint8_t *reason)
+{
+    uint8_t raw[KILNLINK_FRAME_RAW_MAX];
+    kilnlink_frame_status_t st;
+    size_t rl = kilnlink_unstuff(g_last_tx, g_last_tx_len, raw, sizeof(raw), &st);
+    if (rl == 0) { return false; }
+    kilnlink_frame_t f;
+    if (kilnlink_frame_decode(raw, rl, &f) != KILNLINK_FRAME_OK) { return false; }
+    if (f.length != 3 || f.payload[0] != cmd) { return false; }
+    *accepted = f.payload[1];
+    *reason = f.payload[2];
+    return true;
+}
+
+static void scenario_reboot_rollback(void)
+{
+    uint8_t acc = 0xEE, rsn = 0xEE;
+
+    // REBOOT refused (e.g. armed): reply says refused + reason, chip is NOT reset.
+    commit_reset();
+    g_reboots = 0;
+    g_reboot_allowed = false;
+    g_reboot_code = KILNLINK_REBOOT_RESULT_REASON_ARMED;
+    g_sends = 0;
+    send_cmd1(KILNLINK_REBOOT_CMD);
+    CHECK(g_reboots == 0, "refused REBOOT must not reset the chip");
+    CHECK(g_sends == 1 && last_tx_result(KILNLINK_REBOOT_RESULT_CMD, &acc, &rsn), "refused REBOOT must reply");
+    CHECK(acc == 0 && rsn == KILNLINK_REBOOT_RESULT_REASON_ARMED, "refused reply acc=%u rsn=%u", acc, rsn);
+
+    // REBOOT accepted: accepted=1/reason NONE, then exactly one reset.
+    g_reboot_allowed = true;
+    g_reboot_code = KILNLINK_REBOOT_RESULT_REASON_ARMED; // must be ignored on accept
+    g_sends = 0;
+    send_cmd1(KILNLINK_REBOOT_CMD);
+    CHECK(g_reboots == 1, "accepted REBOOT must reset exactly once, got %d", g_reboots);
+    CHECK(last_tx_result(KILNLINK_REBOOT_RESULT_CMD, &acc, &rsn), "accepted REBOOT must reply");
+    CHECK(acc == 1 && rsn == KILNLINK_REBOOT_RESULT_REASON_NONE, "accepted reply acc=%u rsn=%u", acc, rsn);
+
+    // Malformed REBOOT (extra byte): ignored entirely.
+    g_reboots = 0; g_sends = 0;
+    {
+        uint8_t m[2] = { KILNLINK_REBOOT_CMD, 0 };
+        send_esp(m, 2);
+    }
+    CHECK(g_reboots == 0 && g_sends == 0, "malformed REBOOT acted on");
+
+    // ROLLBACK refused: result frame only to a peer that announced protocol >= 9.
+    g_rb_code = KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID;
+    s_peer_announce.version = 0;
+    g_sends = 0;
+    send_cmd1(KILNLINK_ROLLBACK_CMD);
+    CHECK(g_sends == 0, "rollback result sent to an unannounced peer (skew safety)");
+    s_peer_announce.version = (uint16_t)(KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL - 1u);
+    send_cmd1(KILNLINK_ROLLBACK_CMD);
+    CHECK(g_sends == 0, "rollback result sent to a protocol-%u peer", (unsigned)s_peer_announce.version);
+    s_peer_announce.version = (uint16_t)KILNLINK_ROLLBACK_RESULT_MIN_PROTOCOL;
+    send_cmd1(KILNLINK_ROLLBACK_CMD);
+    CHECK(g_sends == 1 && last_tx_result(KILNLINK_ROLLBACK_RESULT_CMD, &acc, &rsn), "supported peer must get result");
+    CHECK(acc == 0 && rsn == KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID, "rollback reply acc=%u rsn=%u", acc, rsn);
+    s_peer_announce.version = 0;
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1123,6 +1314,9 @@ int main(void)
     scenario_update_routing();
     scenario_commit_config();
     scenario_apply_config_volatile();
+    scenario_set_ct_cal();
+    scenario_ceiling_and_clock();
+    scenario_reboot_rollback();
     printf("-> fuzz\n");
     scenario_fuzz();
     printf("test_link_task_fuzz: %d checks, %d failures\n", g_checks, g_fail);
