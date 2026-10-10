@@ -41,6 +41,7 @@ int g_test_failures = 0;
 int g_test_count = 0;
 
 #include "../drivers/safety/crash_report.c"
+const esp_app_desc_t *g_stub_esp_app_desc = NULL; // crash_report.c reads the running ELF sha via esp_app_get_description()
 
 #include "fake_sysinfo.h"
 
@@ -496,6 +497,49 @@ static void test_init_reaches_summary_fetch_when_coredump_present(void)
     fake_sysinfo_reset_all();
 }
 
+static void test_image_match_and_stale_stamping(void)
+{
+    TEST_SECTION("crash_report_image_match / apply_image_match / reset gate -- a foreign dump is not "
+                 "attributed to the running image");
+
+    uint8_t run[32];
+    for (int i = 0; i < 32; i++) {
+        run[i] = (uint8_t)(0x10 + i); /* hex "101112131415161718..." */
+    }
+    TEST_CHECK(crash_report_image_match("101112131", run) == CRASH_REPORT_IMAGE_MATCH, "same prefix matches");
+    TEST_CHECK(crash_report_image_match("10111213F", run) == CRASH_REPORT_IMAGE_MISMATCH, "differing last nibble mismatches");
+    TEST_CHECK(crash_report_image_match("ffffffff1", run) == CRASH_REPORT_IMAGE_MISMATCH, "other image mismatches");
+    TEST_CHECK(crash_report_image_match("", run) == CRASH_REPORT_IMAGE_UNKNOWN, "empty dump sha is unknown");
+    uint8_t zero[32];
+    memset(zero, 0, sizeof(zero));
+    TEST_CHECK(crash_report_image_match("101112131", zero) == CRASH_REPORT_IMAGE_UNKNOWN, "all-zero running sha is unknown");
+    TEST_CHECK(crash_report_image_match("101112131", NULL) == CRASH_REPORT_IMAGE_UNKNOWN, "NULL running sha is unknown");
+
+    crash_report_record_t rec = make_sample_record();
+    strcpy(rec.fw_build, "Oct 09 2026 10:00:00");
+    rec.crash_uptime_s = 77u;
+    rec.crash_uptime_known = 1u;
+    apply_image_match(&rec, CRASH_REPORT_IMAGE_MISMATCH, "ffffffff1");
+    TEST_CHECK(rec.image_match == CRASH_REPORT_IMAGE_MISMATCH, "mismatch recorded");
+    TEST_CHECK(strcmp(rec.fw_build, "unknown (dump from other image)") == 0, "fw_build not the running build");
+    TEST_CHECK(strcmp(rec.reset_reason, "UNKNOWN") == 0, "this boot's reset reason not attributed");
+    TEST_CHECK(rec.crash_uptime_known == 0u && rec.crash_uptime_s == 0u, "previous-boot uptime not attributed");
+    TEST_CHECK(strcmp(rec.dump_elf_sha, "ffffffff1") == 0, "dump elf sha kept");
+    TEST_CHECK(strlen("unknown (dump from other image)") < sizeof(rec.fw_build), "string fits fw_build");
+
+    crash_report_record_t ok = make_sample_record();
+    apply_image_match(&ok, CRASH_REPORT_IMAGE_MATCH, "101112131");
+    TEST_CHECK(strcmp(ok.reset_reason, "PANIC") == 0, "matching dump keeps reset reason");
+
+    TEST_CHECK(reset_reason_can_produce_coredump(HAL_RESET_PANIC), "panic can");
+    TEST_CHECK(reset_reason_can_produce_coredump(HAL_RESET_TASK_WDT), "task wdt can");
+    TEST_CHECK(!reset_reason_can_produce_coredump(HAL_RESET_POWERON), "poweron cannot");
+    TEST_CHECK(!reset_reason_can_produce_coredump(HAL_RESET_SW), "sw reset cannot");
+
+    seal_crc(&rec);
+    TEST_CHECK(record_valid(&rec), "v4 record seals and validates");
+}
+
 static void test_clear_reflag_survives_ack_write_failure(void)
 {
     TEST_SECTION("crash_report_clear -- LOW fix (review_crash_report_relay_gate_61765de7_2026-09-15): "
@@ -863,6 +907,7 @@ void run_test_crash_report(void)
     test_fill_v3_fields_bad_magic_reads_as_unknown();
     test_crash_report_note_alive_writes_a_valid_beacon();
     test_init_invalidates_a_stale_beacon();
+    test_image_match_and_stale_stamping();
 
     fake_kv_reset_all(); // leave shared fake state as every other test file in this binary expects
 }

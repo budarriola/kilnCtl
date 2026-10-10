@@ -6,6 +6,7 @@
 #include "esp_attr.h" /* RTC_NOINIT_ATTR -- s_uptime_beacon below, same storage class as
                          * boot_guard.c's s_bg_rtc (see that file's header comment) */
 #include "esp_crc.h"
+#include "esp_app_desc.h" /* esp_app_get_description() -- running image ELF sha256 */
 #include "esp_core_dump.h" /* esp_core_dump_summary_t/esp_core_dump_get_summary() -- full-summary parsing stays above hal_sysinfo, see that header's top comment */
 #include "esp_log.h"
 
@@ -87,7 +88,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * C11 alike and checks exactly the same thing. Update this literal whenever
  * crash_report_record_t's layout changes, alongside bumping
  * CRASH_REPORT_RECORD_VERSION. */
-typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 208) ? 1 : -1];
+typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 228) ? 1 : -1];
 
 /* ---------------------------------------------------------------------------
  * Uptime beacon (v3, ROADMAP.md follow-up) -- RTC memory, NOT NVS. Same
@@ -204,6 +205,61 @@ static void copy_str(char *dst, size_t cap, const char *src)
     }
     strncpy(dst, src, cap - 1);
     dst[cap - 1] = '\0';
+}
+
+uint8_t crash_report_image_match(const char *dump_sha_hex, const uint8_t run_sha[32])
+{
+    if (!dump_sha_hex || !run_sha || dump_sha_hex[0] == '\0') {
+        return CRASH_REPORT_IMAGE_UNKNOWN;
+    }
+    bool run_nonzero = false;
+    for (int i = 0; i < 32; i++) {
+        if (run_sha[i] != 0) {
+            run_nonzero = true;
+            break;
+        }
+    }
+    if (!run_nonzero) {
+        return CRASH_REPORT_IMAGE_UNKNOWN;
+    }
+    static const char hex[] = "0123456789abcdef";
+    size_t n = strnlen(dump_sha_hex, 64);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t b = run_sha[i / 2];
+        char c = hex[(i & 1) ? (b & 0xFu) : (b >> 4)];
+        char d = dump_sha_hex[i];
+        if (d >= 'A' && d <= 'F') {
+            d = (char)(d - 'A' + 'a');
+        }
+        if (c != d) {
+            return CRASH_REPORT_IMAGE_MISMATCH;
+        }
+    }
+    return CRASH_REPORT_IMAGE_MATCH;
+}
+
+/* True only for a reset reason that can have JUST produced a coredump. A
+ * coredump found on any other boot (POWERON/EXT/SW/...) is an old one -- the
+ * NVS record having gone missing (kiln_nvs erased) must not resurrect it as a
+ * new crash event. Pure, host-tested. */
+static bool reset_reason_can_produce_coredump(hal_reset_reason_t rr)
+{
+    return rr == HAL_RESET_PANIC || rr == HAL_RESET_INT_WDT || rr == HAL_RESET_TASK_WDT ||
+           rr == HAL_RESET_WDT;
+}
+
+/* Applies the image-match verdict to a freshly filled record: a foreign dump
+ * keeps NONE of this boot's facts. Pure, host-tested. */
+static void apply_image_match(crash_report_record_t *out, uint8_t match, const char *dump_sha_hex)
+{
+    out->image_match = match;
+    copy_str(out->dump_elf_sha, sizeof(out->dump_elf_sha), dump_sha_hex);
+    if (match == CRASH_REPORT_IMAGE_MISMATCH) {
+        copy_str(out->fw_build, sizeof(out->fw_build), "unknown (dump from other image)");
+        copy_str(out->reset_reason, sizeof(out->reset_reason), "UNKNOWN");
+        out->crash_uptime_s = 0u;
+        out->crash_uptime_known = 0u;
+    }
 }
 
 /* Xtensa EXCCAUSE mnemonics this board can actually hit (Xtensa ISA table
@@ -394,6 +450,7 @@ static bool load(crash_report_record_t *out)
     rec.exc_cause_str[sizeof(rec.exc_cause_str) - 1] = '\0';
     rec.reset_reason[sizeof(rec.reset_reason) - 1] = '\0';
     rec.fw_build[sizeof(rec.fw_build) - 1] = '\0';
+    rec.dump_elf_sha[sizeof(rec.dump_elf_sha) - 1] = '\0';
 
     if (!record_valid(&rec)) {
         ESP_LOGW(TAG, "stored crash record failed version/CRC check -- treating as no record");
@@ -486,6 +543,16 @@ void crash_report_init(void)
     }
 
     hal_reset_reason_t rr = hal_sysinfo_reset_reason();
+    if (!reset_reason_can_produce_coredump(rr)) {
+        /* A coredump is present but THIS boot was not a panic/watchdog reset,
+         * and no record for it exists (NVS lost, or first boot after a
+         * reflash). It is an old dump: do not mint a new crash event from it
+         * (it would be attributed to the running image). It stays in the
+         * partition for espcoredump.py until the next crash overwrites it. */
+        ESP_LOGW(TAG, "coredump present but this boot's reset reason is not panic/watchdog -- "
+                      "old dump, no crash record captured");
+        return;
+    }
     const char *rr_name;
     switch (rr) {
     case HAL_RESET_UNKNOWN:    rr_name = "UNKNOWN"; break;
@@ -510,6 +577,11 @@ void crash_report_init(void)
     hal_sysinfo_build_info_t build_info;
     hal_sysinfo_get_build_info(&build_info);
     fill_v3_fields(&rec, &boot_beacon, &build_info);
+    {
+        const esp_app_desc_t *desc = esp_app_get_description();
+        const char *dump_sha = (const char *)summary.app_elf_sha256;
+        apply_image_match(&rec, crash_report_image_match(dump_sha, desc ? desc->app_elf_sha256 : NULL), dump_sha);
+    }
 
     seal_crc(&rec);
 

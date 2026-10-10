@@ -61,7 +61,14 @@ extern "C" {
 // (used internally to dedupe recapture of the same coredump) but was never
 // surfaced in the JSON response -- diagnostics_http.c now reports it too, no
 // record-layout change needed for that part.
-#define CRASH_REPORT_RECORD_VERSION 3u
+//
+// v3 -> v4 (2026-10-09): a coredump from an OLDER image (kiln_nvs erased, or
+// the app reflashed/rolled back after the crash) used to be recaptured and
+// stamped with the RUNNING app's fw_build and this boot's reset reason, so it
+// read as a crash of the current firmware. v4 adds image_match and
+// dump_elf_sha (the coredump's own app ELF sha256 prefix, compared with the
+// running image's) -- see crash_report_record_t and crash_report_image_match().
+#define CRASH_REPORT_RECORD_VERSION 4u
 
 // esp_core_dump_bt_info_t.bt[] (port/xtensa/esp_core_dump_summary_port.h) is
 // itself capped at 16 entries -- this just mirrors that cap, not an
@@ -71,6 +78,12 @@ extern "C" {
 #define CRASH_REPORT_TASK_NAME_MAX   16  // matches esp_core_dump_summary_t.exc_task's own size
 #define CRASH_REPORT_CAUSE_STR_MAX   32  // holds every xtensa exception-cause mnemonic with room to spare
 #define CRASH_REPORT_RESET_STR_MAX   16  // matches main.c's own reset-reason name strings ("BROWNOUT", etc.)
+#define CRASH_REPORT_ELF_SHA_MAX     19  // hex chars of the dump's app ELF sha256 kept + NUL (IDF default keeps 9)
+
+// record.image_match values
+#define CRASH_REPORT_IMAGE_UNKNOWN   0u  // dump or running image carries no ELF sha: cannot tell
+#define CRASH_REPORT_IMAGE_MATCH     1u  // dump's app ELF sha256 == running image's
+#define CRASH_REPORT_IMAGE_MISMATCH  2u  // dump is from ANOTHER image (stale/foreign)
 #define CRASH_REPORT_FW_BUILD_MAX    40  // matches dashboard_http.h's own fw_build[40] ("Aug 20 2026 14:03:11")
 
 // The record persisted to NVS. Explicit reserved padding, same discipline
@@ -132,7 +145,20 @@ typedef struct {
                                   // ota_rollback_esp()'s hazard note (CLAUDE.md) already warns
                                   // about elsewhere, and is called out again here rather than
                                   // silently assumed.
+
+    // v4 additions ----------------------------------------------------------
+    uint8_t  image_match;        // CRASH_REPORT_IMAGE_*. MISMATCH => fw_build is "unknown (dump from
+                                  // other image)", reset_reason is "UNKNOWN" and crash_uptime_known
+                                  // is 0: none of this boot's facts describe that crash.
+    char     dump_elf_sha[CRASH_REPORT_ELF_SHA_MAX]; // coredump's own app ELF sha256 hex prefix
+                                  // ("" if the dump carried none) -- find_crash_elf() prefers it.
 } crash_report_record_t;
+
+// Pure: compares the coredump's app ELF sha256 hex string (as in
+// esp_core_dump_summary_t.app_elf_sha256, possibly truncated) with the running
+// image's 32-byte esp_app_desc_t.app_elf_sha256. UNKNOWN if either is
+// empty/all-zero, else MATCH/MISMATCH over the dump string's length.
+uint8_t crash_report_image_match(const char *dump_sha_hex, const uint8_t run_sha[32]);
 
 // Records "the scheduler was alive at approximately this many seconds since
 // boot" into RTC memory (survives a software reset/panic/watchdog reset,

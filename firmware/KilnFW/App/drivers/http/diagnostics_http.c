@@ -393,10 +393,10 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
 
     /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
      * every return path below. */
-    const size_t json_cap = 768;
+    const size_t json_cap = 1024;
     char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (json == NULL) {
-        ESP_LOGE(TAG, "GET /api/crash_report: malloc(768) failed for the response buffer");
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(1024) failed for the response buffer");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
@@ -422,6 +422,8 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     json_escape(rec.exc_cause_str, cause_str_esc, sizeof(cause_str_esc));
     json_escape(rec.reset_reason, reset_reason_esc, sizeof(reset_reason_esc));
     json_escape(rec.fw_build, fw_build_esc, sizeof(fw_build_esc));
+    char elf_sha_esc[sizeof(rec.dump_elf_sha) * 2 + 1];
+    json_escape(rec.dump_elf_sha, elf_sha_esc, sizeof(elf_sha_esc));
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
@@ -441,13 +443,17 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
           "\"fw_build\":\"%s\","
           "\"crash_uptime_s\":%lu,"
           "\"crash_uptime_known\":%s,"
+          "\"image_match\":\"%s\",\"stale_image\":%s,\"dump_elf_sha\":\"%s\","
           "\"backtrace\":[",
           rec.acknowledged ? "true" : "false", (unsigned long)rec.exc_cause, cause_str_esc,
           (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned long)rec.exc_a0,
           (unsigned long)rec.exc_a1, task_esc, reset_reason_esc,
           crash_report_frame_trustworthy(&rec) ? "true" : "false",
           (unsigned long)rec.dump_id, fw_build_esc,
-          (unsigned long)rec.crash_uptime_s, rec.crash_uptime_known ? "true" : "false");
+          (unsigned long)rec.crash_uptime_s, rec.crash_uptime_known ? "true" : "false",
+          rec.image_match == CRASH_REPORT_IMAGE_MATCH ? "match"
+          : rec.image_match == CRASH_REPORT_IMAGE_MISMATCH ? "mismatch" : "unknown",
+          rec.image_match == CRASH_REPORT_IMAGE_MISMATCH ? "true" : "false", elf_sha_esc);
     for (uint8_t i = 0; i < rec.bt_count && i < CRASH_REPORT_BT_MAX; i++) {
         /* Hex strings, not JSON numbers: these are code addresses, and the
          * only thing anyone does with them is paste them into addr2line.
@@ -468,7 +474,7 @@ overflow:
     /* Buffer overflow while building the crash-report JSON: never send the
      * truncated, malformed partial body as a 200 -- that reads as success to
      * a caller that only checks the status code. Log once and fail loud with
-     * a 500 instead. json[] is 768 B and the margin after the v3 fields is
+     * a 500 instead. json[] is 1024 B and the margin after the v3 fields is
      * only ~61 B, so this is meant to be reachable if the record grows again
      * -- do not enlarge json[] to "fix" it (house rule: never enlarge httpd
      * stack buffers). */
