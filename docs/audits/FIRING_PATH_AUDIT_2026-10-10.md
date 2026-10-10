@@ -84,7 +84,7 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Severity:** fails safe for heat, so not higher than MED. Combined with MED-2 it can also hit zones the refused run never owned.
 - **Fix:** in DONE/FAULTED, skip a zone's relays when they are owned by someone other than NONE/PROFILE (the F4 filter), or stop forcing once the terminal-state OFF has landed (it is already tracked through `zone_off_pending_mask`).
 
-### MED-4. A safety-link blip of about 1.5 s is classified as a Pico reboot, and can pause a firing with `pico_fatal_reboot` (FIXED 6451b5160)
+### MED-4. A safety-link blip of about 1.5 s is classified as a Pico reboot, and can pause a firing with `pico_fatal_reboot` (FIXED 33ed07a7a)
 
 - **How a blip becomes a "reboot":**
   - `safety/safety_link.c:310-319` clears `pico_boot_id_known` whenever `!safety_link_up_locked()`, which is about 3 missed polls.
@@ -101,7 +101,7 @@ All paths below are relative to `firmware/KilnFW/App/drivers/`. Line numbers are
 - **Severity:** fails safe, but spurious. No test covers a same-boot-id relink. Only `test_heat_enable.c` mentions `pico_reboot_seq`.
 - **Fix:** do not count "unknown because the link dropped" as a change. Keep the last known boot id across the outage and compare against it, relying on the uptime-regression signal for a repeat-id reboot.
 
-### MED-5. Pause/resume during an undecided reboot drops the pending verdict, so a late fatal DIAG never holds heat (FIXED 6451b5160)
+### MED-5. Pause/resume during an undecided reboot drops the pending verdict, so a late fatal DIAG never holds heat (FIXED 33ed07a7a)
 
 - **The stated rule:** `control/heat_enable.c:71-73` and 746-747 say there is no timeout fallback and a late fatal DIAG must still hold.
 - **How the verdict is lost:**
