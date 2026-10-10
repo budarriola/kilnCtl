@@ -8,6 +8,18 @@
 
 typedef struct {
     int _unused;
+    void *task_handle;
 } i2c_owner_t;
+
+/* Campaign 7: prototypes so SX1509.c compiles; bodies live in
+ * test_kiln_io_sx_fake.c (never called: the fake leaves owner_initialized false). */
+#include <stddef.h>
+#include <stdint.h>
+#include "driver/i2c_master.h"
+#include "esp_err.h"
+esp_err_t i2c_owner_transfer(i2c_owner_t *o, i2c_master_dev_handle_t dev, const uint8_t *tx, size_t tx_len,
+                             uint8_t *rx, size_t rx_len, int timeout_ms);
+esp_err_t i2c_owner_init(i2c_owner_t *o, i2c_master_bus_handle_t bus, int a, int b, int c, int d);
+esp_err_t i2c_owner_deinit(i2c_owner_t *o);
 
 #endif // TEST_STUB_I2C_OWNER_H

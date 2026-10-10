@@ -1441,6 +1441,17 @@ try {
 
     Invoke-HostTestExe -Name "kiln_io_owner" -ExePath $exe11 -BuildCmd $cmd11
 
+    # ---- test_kiln_io_sx_fake.c: real kiln_io.c + real SX1509.c over a fake I2C chip
+    # (host-test coverage campaign 7). Own executable: it defines the i2c_master_* fakes.
+    $exeKsx = Join-Path $outDir "kilnctl_host_tests_kiln_io_sx_fake.exe"
+    $ksxObjDir = Join-Path $outDir "ksx"
+    New-Item -ItemType Directory -Force -Path $ksxObjDir | Out-Null
+    $cmdKsx = "cl @`"$hostTestsRsp`" /std:c11 /DCONFIG_KILNCTL_SX1509_I2C_ADDR=0x3E " +
+            "/Fo:`"$ksxObjDir\\`" /Fe:`"$exeKsx`" " +
+            "`"$(Join-Path $testDir 'test_kiln_io_sx_fake.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
+            "`"$(Join-Path $driversDir 'hw/SX1509.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`""
+    Invoke-HostTestExe -Name "kiln_io_sx_fake" -ExePath $exeKsx -BuildCmd $cmdKsx
+
     # ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
     # Header-only (safety_trip_words.h is static inline, no .c) -- see the test
     # file's own header comment. No shared-symbol collision risk, but every
