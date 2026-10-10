@@ -1441,9 +1441,9 @@ def cfgfs_format(confirm: bool = False, host: Optional[str] = None, force_health
     DESTRUCTIVE: on success this ERASES EVERY FILE cfg_fs holds (zones,
     prefs, profiles, ramp_assist, tz, relay_cycles, adaptive_tune,
     firing_stats -- whatever get_cfgfs_status() currently lists) and remounts
-    an empty filesystem. NVS stays authoritative and unaffected by this call
-    on its own (see CLAUDE.md's cfg-partition dual-write section) -- this is
-    strictly a `cfg`-partition-only action, not a factory_reset(scope=KILN).
+    an empty filesystem. Since the NVS dual-write close the `cfg` partition is the ONLY
+    copy of zones/prefs/profiles, so erasing it loses them for good (export a backup first).
+    This is a `cfg`-partition-only action, not a factory_reset(scope=KILN).
 
     HEALTHY-CFG GUARD: since the NVS dual-write close, a mounted cfg partition is
     the ONLY copy of zones/profiles/preferences, so the firmware answers 409

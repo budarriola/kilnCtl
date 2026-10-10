@@ -251,6 +251,36 @@ def _validate_safety_sections(name: str, data: dict) -> None:
                 f"{safety_cfg_http_client.SAFETY_CT_MAP_BACKUP_SECTION!r} instead")
 
 
+def _verify_pid_readback(control, preset, results):
+    """Replace each ZoneApplyResult whose PID did not read back over GET_ZONES
+    with a pid_ok=False copy naming what the board reports."""
+    from .control import ControlQueryError  # deferred: control.py imports a lot
+    try:
+        _, _, zones = control.get_zones()
+    except (ControlQueryError, AttributeError) as exc:
+        return [ZoneApplyResult(r.zone, False, f"UNVERIFIED: PID read-back failed ({exc})", r.model_ok, r.model_detail)
+                for r in results]
+    by_index = {z.index: z for z in zones}
+    wanted = {z["index"]: z for z in preset["zones"]}
+    out = []
+    for r in results:
+        got = by_index.get(r.zone)
+        w = wanted[r.zone]
+        if not r.pid_ok:
+            out.append(r)
+        elif got is None:
+            out.append(ZoneApplyResult(r.zone, False, "UNVERIFIED: zone missing from GET_ZONES read-back", r.model_ok, r.model_detail))
+        elif not (_pid_matches(w["pid_kp"], got.pid_kp) and _pid_matches(w["pid_ki"], got.pid_ki)
+                  and _pid_matches(w["pid_kd"], got.pid_kd)):
+            out.append(ZoneApplyResult(
+                r.zone, False,
+                f"read-back mismatch: wanted Kp/Ki/Kd={w['pid_kp']}/{w['pid_ki']}/{w['pid_kd']}, "
+                f"board reports {got.pid_kp}/{got.pid_ki}/{got.pid_kd}", r.model_ok, r.model_detail))
+        else:
+            out.append(r)
+    return out
+
+
 @dataclass(frozen=True)
 class ZoneApplyResult:
     zone: int
@@ -350,7 +380,8 @@ def apply_preset(control: "ControlClient", preset: dict,
                   safety_host: "Optional[str]" = None,
                   safety_timeout: float = safety_cfg_http_client.SAFETY_CFG_HTTP_TIMEOUT_S,
                   verify_safety: bool = True,
-                  use_ct_map_backup: bool = False) -> PresetApplyResult:
+                  use_ct_map_backup: bool = False,
+                  verify_pid: bool = True) -> PresetApplyResult:
     """Write everything this preset can be written through over the UART
     CONTROL task (PID gains, and the thermal model when the preset carries
     one).
@@ -401,7 +432,38 @@ def apply_preset(control: "ControlClient", preset: dict,
     reported in ``not_written`` instead, same as the rest of the
     zones-http-only fields.
 
+    PARTIAL FAILURE (2026-10-09): a stage that raises (ControlQueryError,
+    ZonesHttpError, SafetyCfgHttpError, RampAssistHttpError) is re-raised
+    unchanged, but with ``exc.preset_partial`` set to a text summary of the
+    stages that had ALREADY landed, so a caller never reports a failure as if
+    nothing was written. PID gains are read back over GET_ZONES
+    (``verify_pid``, default True): an ACK is not proof on this link, and a
+    gain that does not read back (or cannot be read) is ``pid_ok=False``.
+    The zones POST strips the firmware's omit-preserved fields
+    (zones_http_client.strip_omit_preserved) so they stay bit-exact.
+
     Never touches relays, never resets, never enables anything."""
+    done: "list[str]" = []
+    try:
+        return _apply_preset_stages(control, preset, zones_host, zones_timeout, verify_zones,
+                                     safety_host, safety_timeout, verify_safety, use_ct_map_backup,
+                                     verify_pid, done)
+    except (Exception,) as exc:
+        if getattr(exc, "preset_partial", None) is None:
+            try:
+                exc.preset_partial = "\n".join(done) if done else "(nothing had landed yet)"
+            except Exception:  # noqa: BLE001 -- exotic exception without __dict__
+                pass
+        raise
+
+
+def _pid_matches(want: float, got: float) -> bool:
+    return abs(want - got) <= 1e-4 + 1e-3 * abs(want)
+
+
+def _apply_preset_stages(control, preset, zones_host, zones_timeout, verify_zones,
+                         safety_host, safety_timeout, verify_safety, use_ct_map_backup,
+                         verify_pid, done) -> PresetApplyResult:
     results = []
     for zone in preset["zones"]:
         pid: "OkReason" = control.set_zone_pid(
@@ -425,13 +487,20 @@ def apply_preset(control: "ControlClient", preset: dict,
             )
         )
 
+    if verify_pid and results:
+        results = _verify_pid_readback(control, preset, results)
+    done.append("PID/model written over UART: " + ", ".join(
+        f"zone {r.zone} pid={'ok' if r.pid_ok else 'FAILED'}" for r in results))
+
     zones_result = None
     ramp_assist_result = None
     if zones_host:
         zones_result = zones_http_client.apply_zone_preset(
             zones_host, preset, timeout=zones_timeout, verify=verify_zones)
+        done.append(f"zones config POSTed over HTTP ({'read back ok' if zones_result.ok else 'READ-BACK MISMATCH'})")
         ramp_assist_result = ramp_assist_http_client.set_enabled(
             zones_host, bool(preset["ramp_assist_enabled"]))
+        done.append(f"ramp_assist pinned: {ramp_assist_result}")
         not_written = []
     else:
         not_written = sorted(

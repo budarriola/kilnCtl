@@ -103,6 +103,23 @@ def thermo_read_faults(channel: int = THERMO_CHANNEL_ALL) -> str:
     return "\n".join(f.describe() for f in faults)
 
 
+def _write_gate(what: str, confirm: object) -> Optional[str]:
+    """Shared gate for thermo writers: confirm must be exactly True and no firing/autotune may be live.
+
+    Fail closed: an unreadable run state refuses. Changing MAX31856 config mid-firing alters the
+    very reading the control loop and safety guards act on (the firmware-side mode gate is a
+    separate task; this is the tool-side half).
+    """
+    if confirm is not True:
+        return (f"refused: {what} rewrites MAX31856 configuration; pass confirm=True "
+                f"(exactly True) to proceed")
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {what} not allowed while a run is live: {running}"
+    return None
+
+
 @_core._tool()
 def thermo_config_channel(
     channel: int,
@@ -110,6 +127,7 @@ def thermo_config_channel(
     avg_mode: int = 0,
     filter_50hz: bool = False,
     auto_convert: bool = True,
+    confirm: bool = False,
 ) -> str:
     """Configure one thermocouple channel.
 
@@ -117,8 +135,12 @@ def thermo_config_channel(
     K is what this kiln ships with. `avg_mode`: 0=1, 1=2, 2=4, 3=8, 4=16
     samples averaged. `filter_50hz` picks 50 Hz mains rejection instead of
     60 Hz. `auto_convert` false selects one-shot mode, where nothing converts
-    until thermo_one_shot().
+    until thermo_one_shot(). Writes MAX31856 config: needs `confirm=True` and refuses
+    while a profile or autotune is live.
     """
+    gate = _write_gate("thermo_config_channel", confirm)
+    if gate:
+        return gate
     try:
         result = _srv._thermo.config_channel(channel, tc_type, avg_mode, filter_50hz, auto_convert)
     except ThermoQueryError as exc:
@@ -131,9 +153,14 @@ def thermo_config_channel(
 
 @_core._tool()
 def thermo_set_thresholds(
-    channel: int, tc_high: float, tc_low: float, cj_high: int, cj_low: int
+    channel: int, tc_high: float, tc_low: float, cj_high: int, cj_low: int, confirm: bool = False
 ) -> str:
-    """Set one channel's TC high/low trip temperatures and CJ high/low limits (degC)."""
+    """Set one channel's TC high/low trip temperatures and CJ high/low limits (degC).
+
+    Needs `confirm=True`; refuses while a profile or autotune is live."""
+    gate = _write_gate("thermo_set_thresholds", confirm)
+    if gate:
+        return gate
     try:
         result = _srv._thermo.set_thresholds(channel, tc_high, tc_low, cj_high, cj_low)
     except ThermoQueryError as exc:
@@ -145,8 +172,13 @@ def thermo_set_thresholds(
 
 
 @_core._tool()
-def thermo_set_cj_offset(channel: int, offset_c: float) -> str:
-    """Set one channel's cold-junction offset in degC (-8..+8)."""
+def thermo_set_cj_offset(channel: int, offset_c: float, confirm: bool = False) -> str:
+    """Set one channel's cold-junction offset in degC (-8..+8).
+
+    Needs `confirm=True`; refuses while a profile or autotune is live."""
+    gate = _write_gate("thermo_set_cj_offset", confirm)
+    if gate:
+        return gate
     try:
         result = _srv._thermo.set_cj_offset(channel, offset_c)
     except ThermoQueryError as exc:
@@ -171,12 +203,16 @@ def thermo_one_shot(channel: int) -> str:
 
 
 @_core._tool()
-def thermo_clear_faults(channel: int) -> str:
+def thermo_clear_faults(channel: int, confirm: bool = False) -> str:
     """Pulse CR0.FAULTCLR on one channel.
 
     Only meaningful in the part's interrupt fault mode; in the comparator mode
     this driver uses, fault bits clear themselves when the condition clears.
+    Needs `confirm=True`; refuses while a profile or autotune is live.
     """
+    gate = _write_gate("thermo_clear_faults", confirm)
+    if gate:
+        return gate
     try:
         result = _srv._thermo.clear_faults(channel)
     except ThermoQueryError as exc:
@@ -232,13 +268,27 @@ def thermo_read_reg(channel: int, reg: int, length: int = 1) -> str:
 
 
 @_core._tool()
-def thermo_write_reg(channel: int, reg: int, value: int) -> str:
-    """Raw MAX31856 register write on one channel (debug)."""
+def thermo_write_reg(channel: int, reg: int, value: int, confirm: bool = False) -> str:
+    """Raw MAX31856 register write on one channel (debug).
+
+    Needs `confirm=True`; refuses while a profile or autotune is live. Reads the register back
+    and reports a mismatch (volatile/status registers may legitimately differ)."""
+    gate = _write_gate("thermo_write_reg", confirm)
+    if gate:
+        return gate
     try:
         result = _srv._thermo.write_reg(channel, reg, value)
     except ThermoQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        try:
+            back = _srv._thermo.read_reg(channel, reg, 1)
+            got = list(getattr(back, "values", None) or getattr(back, "data", None) or [])
+        except ThermoQueryError as exc:
+            return f"ok - channel {channel} reg 0x{reg:02X} written (read-back failed: {exc})"
+        if got and got[0] != value:
+            return (f"warning - channel {channel} reg 0x{reg:02X} written but read back "
+                    f"0x{got[0]:02X}, wanted 0x{value:02X}")
         return f"ok - channel {channel} reg 0x{reg:02X} written"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not write channel {channel} reg 0x{reg:02X}{detail}"

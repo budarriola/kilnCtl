@@ -248,7 +248,7 @@ def _run_web_step(client, action: str, step: dict) -> dict:
 
 
 def run_ui_script(name: str, ui_test_client=None, web_client=None,
-                   zones_host: "Optional[str]" = None, apply_preset: bool = True) -> dict:
+                   zones_host: "Optional[str]" = None, apply_preset: bool = False) -> dict:
     """Load and run one script, dispatching each step to the backend client
     for ``script["backend"]``.
 
@@ -269,7 +269,11 @@ def run_ui_script(name: str, ui_test_client=None, web_client=None,
         control = ControlClient(ui_test_client.link)
         try:
             preset = config_presets.load_preset_data(script["preset"])
-            config_presets.apply_preset(control, preset, zones_host=zones_host)
+            applied = config_presets.apply_preset(control, preset, zones_host=zones_host)
+            if not applied.all_ok:
+                raise UiScriptError(
+                    f"script {name!r}: preset {script['preset']!r} was only PARTIALLY applied, "
+                    f"no steps run:\n{applied.describe()}")
         finally:
             control.close()
 

@@ -81,13 +81,18 @@ def ui_list_scripts() -> str:
 
 
 @_core._tool()
-def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = True) -> str:
+def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: bool = False,
+                  confirm: bool = False) -> str:
     """Run one UI regression-test script end to end and report a compact
     pass/fail per step.
 
     ``zones_host``/``apply_preset``: same meaning as load_config_preset()'s
     -- forwarded to config_presets.apply_preset() when the script names a
-    ``preset``. The web backend resolves its base_url the same way OTA does
+    ``preset``. ``apply_preset`` defaults to False: applying a preset
+    OVERWRITES every zone's PID gains and thermal model (and zones/ramp_assist
+    with ``zones_host``). It therefore needs ``confirm=True`` exactly, refuses
+    while a profile or autotune run is live or cannot be ruled out, and FAILS
+    the call (no steps run) if any preset stage did not land. The web backend resolves its base_url the same way OTA does
     (see ``_ota_resolve_host``); the lcd backend drives the already-connected
     board over task 14.
     """
@@ -97,6 +102,14 @@ def ui_run_script(name: str, zones_host: Optional[str] = None, apply_preset: boo
         script = ui_test_runner.load_ui_script(name)
     except ui_test_runner.UiScriptError as exc:
         return f"error: {exc}"
+    if apply_preset and "preset" in script:
+        if confirm is not True:
+            return (f"refused: ui_run_script({name!r}, apply_preset=True) overwrites PID gains and the thermal "
+                    "model for every zone in the script's preset; pass confirm=True, exactly, to apply.")
+        from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+        running = _profile_or_autotune_running_reason()
+        if running is not None:
+            return f"refused: {running} -- will not apply a script preset mid-run"
     web_client = None
     if script["backend"] == "web":
         web_client = WebUiClient(f"http://{_ota_resolve_host(zones_host)}")
@@ -218,7 +231,11 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             "confirm=True once you have reviewed exactly what this will destroy."
         )
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
 
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not factory-default the board mid-run (nothing erased)"
     try:
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
@@ -260,13 +277,25 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             _srv._control, preset, zones_host=resolved, safety_host=resolved_safety,
             use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
-        return _wiped_message(scope, backup, f"preset apply failed: {exc}")
+        return _wiped_message(scope, backup, f"preset apply failed: {exc}{_partial_note(exc)}")
     except zones_http_client.ZonesHttpError as exc:
-        return _wiped_message(scope, backup, f"PID/model applied, but zones config write failed (host={resolved}): {exc}")
+        return _wiped_message(scope, backup, f"PID/model applied, but zones config write failed (host={resolved}): {exc}{_partial_note(exc)}")
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
         return _wiped_message(scope, backup, "PID/model applied, but safety config write failed "
-                              f"(host={resolved_safety}): {exc}")
+                              f"(host={resolved_safety}): {exc}{_partial_note(exc)}")
+    except Exception as exc:  # noqa: BLE001 -- after a wipe EVERY failure must still name the backup
+        return _wiped_message(scope, backup, f"preset apply raised {type(exc).__name__}: {exc}{_partial_note(exc)}")
+    if not result.all_ok:
+        return _wiped_message(scope, backup, "preset only PARTIALLY applied:\n" + result.describe())
     return f"factory reset ok (scope={scope})\nbackup: {backup}\n" + result.describe()
+
+
+def _partial_note(exc: BaseException) -> str:
+    """Stages that landed before ``exc`` (config_presets.apply_preset attaches
+    ``preset_partial``), or empty."""
+    partial = getattr(exc, "preset_partial", None)
+    return f"\nstages completed before the failure:\n{partial}" if partial else ""
+
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

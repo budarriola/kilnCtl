@@ -330,7 +330,13 @@ def post_zones(host: str, body: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> s
                               status_code, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise ZonesHttpError(f"POST /api/zones timed out after {timeout:g}s: the board may have "
+                                 f"APPLIED it -- state UNKNOWN, read GET /api/zones back before retrying") from exc
         raise ZonesHttpError(f"POST /api/zones unreachable: {detail}") from exc
+    except OSError as exc:  # TimeoutError / ConnectionResetError mid-response: the POST may have landed
+        raise ZonesHttpError(f"POST /api/zones got no complete reply ({type(exc).__name__}: {exc}): the board "
+                             f"may have APPLIED it -- state UNKNOWN, read GET /api/zones back before retrying") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -1247,6 +1253,50 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
     return mismatches
 
 
+#: POST keys parse_zone_fields() (zones_http_post_parse.c) treats as
+#: omit-PRESERVES-current (`field_present ? parse : current_z->...`): the
+#: measured plant model, the coupling cells and diagonal gain, the fuzzy/
+#: easeoff/approach/band floats, hystc and coilpower. Re-posting them at
+#: GET's coarser print (%.1f/%.2f/%.3f/%.4f) would round them; leaving them
+#: out of the body makes the firmware keep them bit-exact. Nothing else is
+#: strippable: a required field left out would 400 or zero.
+ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
+    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
+    r"|approachratecap|errorband|rateband|progressband|hystc|coilpower)$")
+
+
+def strip_omit_preserved(body: str, keep_keys: "frozenset[str] | set[str]" = frozenset()) -> str:
+    """Drop every ZONE_OMIT_PRESERVED_KEY_RE key from a build_post_body()
+    form body except those in `keep_keys` (fields the caller deliberately
+    writes)."""
+    pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
+    kept = [(k, v) for k, v in pairs if k in keep_keys or not ZONE_OMIT_PRESERVED_KEY_RE.match(k)]
+    return urllib.parse.urlencode(kept)
+
+
+def _preset_named_omit_preserved_keys(preset: dict) -> "set[str]":
+    """Omit-preserved POST keys a preset explicitly names (any scalar field
+    in _ZONE_FIELD_FORM_KEY, coupling rows/cells), so apply_zone_preset()'s
+    strip keeps what the caller asked to change and drops only what it
+    merely echoed from GET."""
+    keep = set()
+    for z in preset.get("zones", []):
+        i = z.get("index")
+        if i is None:
+            continue
+        for key in z:
+            suffix = _ZONE_FIELD_FORM_KEY.get(key)
+            if suffix is not None:
+                keep.add(f"z{i}_{suffix}")
+            m = _ZONE_COUPLING_CELL_RE.match(key)
+            if m:
+                keep.add(f"z{i}_coupling_c{m.group(1)}")
+        if _PRESET_ZONE_COUPLING_FIELD in z:
+            for j in range(len(z[_PRESET_ZONE_COUPLING_FIELD])):
+                keep.add(f"z{i}_coupling_c{j}")
+    return keep
+
+
 def apply_zone_preset(host: str, preset: dict, timeout: float = ZONES_HTTP_TIMEOUT_S,
                        verify: bool = True) -> ZonesApplyResult:
     """The whole GET-merge-POST-(verify) cycle for one preset, over
@@ -1275,7 +1325,7 @@ def apply_zone_preset(host: str, preset: dict, timeout: float = ZONES_HTTP_TIMEO
     # _TOP_FIELD_FORM_KEY any more) and silently report ok=True regardless
     # of whether the value actually landed.
     preset = _apply_legacy_top_level_ease_off_mult(current, preset)
-    body = build_post_body(current, preset)
+    body = strip_omit_preserved(build_post_body(current, preset), _preset_named_omit_preserved_keys(preset))
     response_text = post_zones(host, body, timeout)
     if response_text.strip() != "ok":
         raise ZonesHttpError(f"POST /api/zones returned 200 but body was {response_text!r}, not 'ok'")

@@ -689,8 +689,10 @@ def control_set_zone_limits(
     (floor), touching ONLY those two fields over the GET-merge-POST
     /api/zones path (zones_http_client.build_post_body()) -- every other
     field the board reports (PID gains, control_mode, relay_mask, ramp rate,
-    coupling matrix, timing profiles, ...) is echoed back exactly as read,
-    never overwritten. This is the narrow tool the facade was missing: the
+    coupling matrix, timing profiles, ...) is echoed back as GET printed
+    it (the firmware's omit-preserved float fields -- plant model, coupling,
+    easeoff/approach/bands/fuzzy, hystc, coilpower -- are NOT re-posted at
+    all, so they stay bit-exact), never overwritten. This is the narrow tool the facade was missing: the
     only pre-existing zones writer, load_config_preset() (config_presets.py),
     overwrites PID gains and control_mode for every zone along with whatever
     limit a preset also carries.
@@ -802,7 +804,8 @@ def control_set_zone_limits(
         )
 
     try:
-        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [zone_override]}), None)
     except zones_http_client.ZonesHttpError as exc:
         return f"error: could not build POST body from the GET snapshot: {exc}"
 
@@ -912,7 +915,8 @@ def control_set_zone_type(
     over the GET-merge-POST /api/zones path (zones_http_client.
     build_post_body()) -- every other field the board reports (PID gains,
     control_mode, relay_mask, limits, ramp rate, coupling matrix, timing
-    profiles, ...) is echoed back exactly as read, never overwritten. Modeled
+    profiles, ...) is echoed back as GET printed it (omit-preserved float fields
+    are not re-posted, so they stay bit-exact), never overwritten. Modeled
     directly on control_set_zone_limits(); see that tool's docstring for the
     shared GET-merge-POST/collateral-diff discipline.
 
@@ -983,7 +987,8 @@ def control_set_zone_type(
         )
 
     try:
-        body = zones_http_client.build_post_body(before, {"zones": [zone_override]})
+        body = _strip_omit_preserved_zone_fields(
+            zones_http_client.build_post_body(before, {"zones": [zone_override]}), None)
     except zones_http_client.ZonesHttpError as exc:
         return f"error: could not build POST body from the GET snapshot: {exc}"
 
@@ -1119,11 +1124,12 @@ def control_set_zone_type(
 #: %.2f/%.3f/%.4f print -- z%u_fuzzy_strength, z%u_easeoffmult,
 #: z%u_approachratecap, z%u_errorband, z%u_rateband, z%u_progressband
 #: (zones_http_post_parse.c) -- so they are stripped too and stay bit-exact.
+#: 2026-10-09: z%u_hystc and z%u_coilpower use the same branch
+#: (zones_http_post_parse.c, `field_present ? parse : current_z->...`) and
+#: are stripped as well.
 #: Nothing else is stripped: a required field left out of the body would 400
 #: or zero.
-_ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
-    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
-    r"|approachratecap|errorband|rateband|progressband)$")
+_ZONE_OMIT_PRESERVED_KEY_RE = zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE  # single source: zones_http_client.py
 
 
 def _strip_omit_preserved_zone_fields(body: str, keep_key: "Optional[str]") -> str:

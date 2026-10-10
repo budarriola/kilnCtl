@@ -84,6 +84,7 @@ class PresetToolTests(unittest.TestCase):
              mock.patch("kilnctrl.backup_export_http_client.get_export", exporter), \
              mock.patch.object(config_presets, "load_preset_data", return_value={}), \
              mock.patch.object(config_presets, "apply_preset", side_effect=apply_exc), \
+             mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason", return_value=None), \
              mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"), \
              mock.patch.object(mcp_server._srv._link if hasattr(mcp_server, "_srv") else mcp_server._link, "send", link.send), \
              mock.patch.object(mcp_server._info, "arm_boot_push"), \

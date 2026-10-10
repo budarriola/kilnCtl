@@ -95,6 +95,7 @@ class ConvertTest(unittest.TestCase):
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=zs), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", side_effect=ax), \
              unittest.mock.patch.object(ahc, "get_stored_profile_rules", side_effect=pr), \
+             unittest.mock.patch.object(ma.readiness_http_client, "get_readiness", return_value={"items": []}), \
              unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value=io_hits or {}), \
              unittest.mock.patch.object(ahc, "post_move_zone_to_aux",
                                         side_effect=ack if isinstance(ack, Exception) else None,

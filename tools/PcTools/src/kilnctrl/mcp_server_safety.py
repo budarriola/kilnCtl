@@ -274,7 +274,7 @@ def safety_set_poll_period(period_ms: int) -> str:
 
 
 @_core._tool()
-def safety_set_fault_out(assert_fault: bool) -> str:
+def safety_set_fault_out(assert_fault: bool, confirm: bool = False) -> str:
     """Drive the isolated Fault line to the safety processor.
 
     This is an ESP **output** (GPIO6 -> optocoupler U1 -> the Pico's mainFault
@@ -284,7 +284,14 @@ def safety_set_fault_out(assert_fault: bool) -> str:
 
     The firmware asserts this by itself on PC-link loss, a thermocouple fault
     or a watchdog trip; this tool is a manual override of that.
+
+    Asserting (True) only makes the safety processor trip, so it is ungated. DE-asserting
+    (False) removes a fault indication the firmware may have raised for a real reason, so it
+    needs `confirm=True` (exactly True).
     """
+    if assert_fault is not True and confirm is not True:
+        return ("refused: de-asserting the fault line can hide a fault the firmware raised for a real "
+                "reason; pass confirm=True (exactly True) to proceed")
     try:
         result = _srv._safety.set_fault_out(assert_fault)
     except SafetyQueryError as exc:
@@ -296,7 +303,7 @@ def safety_set_fault_out(assert_fault: bool) -> str:
 
 
 @_core._tool()
-def safety_clear_trip() -> str:
+def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
     """Clear a latched safety trip on the safety processor.
 
     A trip LATCHES on the Pico: once `safety_guards_tick()` sets `is_tripped`
@@ -315,8 +322,33 @@ def safety_clear_trip() -> str:
     afterwards to see whether it actually cleared.
 
     Not confirm-gated by design: clearing a trip is a routine operator step; the Pico refuses it while the cause persists and the post-trip dwell applies.
+
+    Precheck (2026-10-09): reads GET_DIAG first. Refuses when the link is down or the reported
+    `trip_mask` is not `1 << (trip_reason - 1)` (the mask rule in
+    `link_frame_trip_mask_for_reason()`), i.e. more than the one expected guard is latched or the
+    reading is inconsistent, unless `allow_unexpected_mask=True` after a human has reviewed it.
+    Afterwards the tool re-reads GET_DIAG and reports whether the trip is still latched.
     """
-    return _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+    try:
+        before = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"refused: could not read GET_DIAG before clearing ({exc}) -- state UNKNOWN"
+    if before.ever_received:
+        expected = devices.safety_trip_mask_for_reason(before.trip_reason)
+        if before.trip_mask != expected and allow_unexpected_mask is not True:
+            return (f"refused: trip_mask 0x{before.trip_mask:04X} != expected 0x{expected:04X} "
+                    f"(1 << (trip_reason {before.trip_reason} - 1)); review safety_get_diag() and pass "
+                    f"allow_unexpected_mask=True only if the extra guards are understood")
+    sent = _srv._send(UART_TASK_ID_SAFETY, devices.safety_clear_trip())
+    if not sent.startswith("ok"):
+        return sent
+    try:
+        after = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"{sent}\nread-back failed ({exc}); check safety_get_status()"
+    left = devices.safety_trip_mask_for_reason(after.trip_reason) if after.trip_reason else 0
+    return (f"{sent}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
+            f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if left or after.trip_mask else 'cleared'})")
 
 
 @_core._tool()

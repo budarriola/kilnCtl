@@ -175,7 +175,7 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         with unittest.mock.patch.object(ahc, "_get_json", side_effect=board.get_json), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()), \
              unittest.mock.patch.object(pehc, "post_profile",
-                                        side_effect=pehc.ProfileEditHttpError("HTTP 400: rule 0: bad")):
+                                        side_effect=pehc.ProfileEditHttpError("HTTP 400: rule 0: bad", 400, {})):
             r = ma.profile_save_bench_aux_rule(target_c=30.0, threshold_c=28.0, confirm=True)
         self.assertTrue(r.startswith("refused"), r)
 

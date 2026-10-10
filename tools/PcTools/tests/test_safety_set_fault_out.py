@@ -43,7 +43,7 @@ class SafetySetFaultOutHappyPathTests(unittest.TestCase):
             mcp_server._safety, "set_fault_out",
             return_value=OkReason(ok=False, reason="link down"),
         ):
-            result = mcp_server.safety_set_fault_out(False)
+            result = mcp_server.safety_set_fault_out(False, confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("link down", result)
 

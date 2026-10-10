@@ -239,7 +239,13 @@ def post_commissioning(host: str, body: str, timeout: float = SAFETY_CFG_HTTP_TI
                                   status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise SafetyCfgHttpError(f"POST {_API_PATH} timed out -- the Pico may have APPLIED it; state UNKNOWN, "
+                                      f"read GET {_API_PATH} back before retrying") from exc
         raise SafetyCfgHttpError(f"POST {_API_PATH} unreachable: {detail}") from exc
+    except TimeoutError as exc:
+        raise SafetyCfgHttpError(f"POST {_API_PATH} timed out -- the Pico may have APPLIED it; state UNKNOWN, "
+                                  f"read GET {_API_PATH} back before retrying") from exc
     try:
         return json.loads(text)
     except Exception as exc:

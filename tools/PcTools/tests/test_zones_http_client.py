@@ -1024,12 +1024,10 @@ class ApplyZonePresetTest(unittest.TestCase):
         posted = urllib.parse.parse_qs(captured["body"].decode())
         self.assertEqual(posted["z0_approachratecap"], ["30.0"],
                           "zone 0: the POST body must carry the preset's own cap value")
-        self.assertEqual(posted["z1_approachratecap"], ["0.0"],
-                          "zone 1 was not named by the preset -- it must echo its CURRENT "
-                          "(board-reported) value, uncapped, not silently drop the field or "
-                          "inherit zone 0's cap")
-        self.assertEqual(posted["z2_approachratecap"], ["0.0"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+        self.assertNotIn("z1_approachratecap", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_approachratecap", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
 
     def test_approach_rate_cap_NOT_landing_is_caught(self):
         """NEGATIVE TEST proving the write path is real: if the board's
@@ -1089,16 +1087,14 @@ class ApplyZonePresetTest(unittest.TestCase):
                           "zone 0: the POST body must carry the preset's own rescaled error band")
         self.assertEqual(posted["z0_rateband"], ["0.22"],
                           "zone 0: the POST body must carry the preset's own rescaled rate band")
-        self.assertEqual(posted["z1_errorband"], ["20.0"],
-                          "zone 1 was not named by the preset -- it must echo its CURRENT "
-                          "(board-reported, firmware-default) value, not silently drop the "
-                          "field or inherit zone 0's rescale")
-        self.assertEqual(posted["z1_rateband"], ["0.5"],
-                          "zone 1 was not named by the preset -- same reasoning as z1_errorband above")
-        self.assertEqual(posted["z2_errorband"], ["20.0"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
-        self.assertEqual(posted["z2_rateband"], ["0.5"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+        self.assertNotIn("z1_errorband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z1_rateband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_errorband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_rateband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
 
     def test_fuzzy_bands_NOT_landing_is_caught(self):
         """NEGATIVE TEST proving the write path is real: if the board's

@@ -87,7 +87,13 @@ def _post(host: str, path: str, fields: "list[tuple[str, str]]", timeout: float)
         raise AuxHttpError(f"POST {path} refused: HTTP {status}: {detail}", status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise AuxHttpError(f"POST {path} timed out after {timeout:g}s: the board may have APPLIED it "
+                               f"-- state UNKNOWN, read it back before retrying") from exc
         raise AuxHttpError(f"POST {path} unreachable: {detail}") from exc
+    except OSError as exc:  # TimeoutError / reset mid-response: the POST may have landed
+        raise AuxHttpError(f"POST {path} got no complete reply ({type(exc).__name__}: {exc}): the board may "
+                           f"have APPLIED it -- state UNKNOWN, read it back before retrying") from exc
 
 
 def _is_ok(text: str) -> bool:
@@ -167,7 +173,9 @@ def get_stored_relay_io_hits(host: str, relay: int, timeout: float = AUX_HTTP_TI
         detail = _get_json(host, f"/api/profile?id={item['id']}", timeout)
         segs = detail.get("segments") if isinstance(detail, dict) else None
         if not isinstance(segs, list):
-            continue
+            # Fail closed: a profile whose segments cannot be read might hold a RELAY_IO segment.
+            raise AuxHttpError(f"GET /api/profile?id={item['id']} has no segments array -- cannot rule out a "
+                               f"RELAY_IO segment targeting relay {relay}")
         hit = [i + 1 for i, sg in enumerate(segs)
                if isinstance(sg, dict) and sg.get("seg_kind") == 1 and sg.get("io_target") == relay]
         if hit:

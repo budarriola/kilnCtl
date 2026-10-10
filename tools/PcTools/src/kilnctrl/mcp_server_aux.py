@@ -240,6 +240,23 @@ def _count_rules(rules_by_profile: dict, target: int) -> int:
     return sum(1 for rules in rules_by_profile.values() for r in rules if r.get("zone") == target)
 
 
+#: Zone fields compared before/after a conversion for every zone OTHER than the converted one.
+_CONVERT_COLLATERAL_KEYS = ("zone_type", "relay_mask", "thermo_mask", "control_mode", "max_temp_c",
+                            "min_temp_c", "pid_kp", "pid_ki", "pid_kd", "failsafe_state")
+
+
+def _conversion_state_after_failure(resolved: str, zone: int, relay: int) -> str:
+    """Best-effort read of what a failed/timed-out conversion POST left behind."""
+    try:
+        z = _zone_entry(zones_http_client.get_zones(resolved), zone)
+        e = ahc.aux_entry(ahc.get_aux_outputs(resolved), relay)
+    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+        return f"read-back after the failure ALSO failed ({exc}); state UNKNOWN -- do not retry blind"
+    return (f"read-back after the failure: zone {zone} zone_type={z and z.get('zone_type')!r} "
+            f"relay_mask={z and z.get('relay_mask')!r}; aux relay {relay} enabled={e and e.get('enabled')!r} "
+            f"(zone_type 0 + relay_mask 0 + aux enabled means the conversion COMMITTED)")
+
+
 @_core._tool()
 def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Optional[str] = None,
                                       resume_relay: int = 0) -> str:
@@ -399,13 +416,20 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
     try:
         ack = ahc.post_move_zone_to_aux(resolved, zone)
     except ahc.AuxHttpError as exc:
-        return _gate_or_error(exc, "POST /api/zones move_zone_to_aux", resolved)
+        msg = _gate_or_error(exc, "POST /api/zones move_zone_to_aux", resolved)
+        if not msg.startswith("refused:"):
+            # 5xx/timeout: the firmware is all-or-nothing but may have committed or be mid-rollback.
+            msg += ("\n" + _conversion_state_after_failure(resolved, zone, relay)
+                    + "\nGET /api/readiness 'zone_aux_conversion' lists an interrupted conversion; "
+                      "resume with resume_relay=<relay> once the cause is understood.")
+        return msg
 
     try:
         zones_after = zones_http_client.get_zones(resolved)
         aux_after = ahc.get_aux_outputs(resolved)
         profiles_after = ahc.get_stored_profile_rules(resolved)
-    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+        readiness_after = readiness_http_client.get_readiness(resolved)
+    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError, readiness_http_client.ReadinessHttpError) as exc:
         return (f"error: POST answered ok, but the confirming re-read failed (host={resolved}): {exc} "
                 f"-- state UNKNOWN, re-check zones, aux outputs and profiles before trusting this")
 
@@ -417,9 +441,12 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
     for i in range(3):
         zb, zn = _zone_entry(zones_before, i), _zone_entry(zones_after, i)
         if i != zone and zb is not None:
-            for k in ("zone_type", "relay_mask", "thermo_mask"):
+            for k in _CONVERT_COLLATERAL_KEYS:
                 if (zb or {}).get(k) != (zn or {}).get(k):
                     bad.append(f"zone {i} {k} changed")
+    marker = next((it for it in readiness_after.get("items", []) if it.get("key") == "zone_aux_conversion"), None)
+    if marker is not None:
+        bad.append(f"readiness still lists zone_aux_conversion ({marker.get('detail')!r})")
     ea = ahc.aux_entry(aux_after, relay)
     if ea is None or not ea.get("enabled") or ea.get("conflicted") or ea.get("tc_zone") != want_tc:
         bad.append(f"aux relay {relay} does not read enabled/unconflicted with tc_zone={want_tc}: {ea!r}")
@@ -549,7 +576,11 @@ def profile_save_bench_aux_rule(
     try:
         ack = pehc.post_profile(resolved, slot, BENCH_AUX_PROFILE_NAME, 1 << zone, [seg], [rule])
     except pehc.ProfileEditHttpError as exc:
-        return f"refused: POST /api/profile refused (host={resolved}): {exc}"
+        if exc.status in (400, 403, 409, 422, 503):
+            return f"refused: POST /api/profile refused (HTTP {exc.status}) (host={resolved}): {exc}"
+        return (f"error: POST /api/profile failed (host={resolved}): {exc} -- a 5xx/timeout/transport failure "
+                f"is NOT a refusal: the profile may have been saved, state UNKNOWN; read GET /api/profiles "
+                f"back for '{BENCH_AUX_PROFILE_NAME}' before retrying")
     pid = ack.get("id")
     if not _is_int(pid):
         return f"FAILED: POST answered ok but gave no profile id: {ack!r} (host={resolved}). Do not trust this."
