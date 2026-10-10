@@ -354,7 +354,11 @@ ZERO new routes:
   the mechanical enforcement in its sec 5 (version symbol
   `AUX_OUTPUTS_CFG_VERSION`). Reader refuses newer-than-known (quarantine
   semantics, not defaults). Rollback to older firmware: the key is unknown to
-  it and is ignored; aux relays then simply do nothing, with no zone impact.
+  it and is ignored; aux relays then simply do nothing. A zone already
+  converted to aux is NOT unaffected: the old firmware runs it as an ordinary
+  HEATER with an empty relay mask (PID and guards 1-4, nothing to heat it, so
+  likely a heat-rise trip). Fails safe; retype the zone back before rolling
+  back (aux review F6, hazard text in `firmware/CommonFW/docs/UPDATE_PROTOCOL.md`).
   An aux relay left energised by a rollback is impossible: no run, no owner,
   relays drop on boot.
 - Kiln packages (`kiln_cfg_store`): NOT included in v1 (would force a

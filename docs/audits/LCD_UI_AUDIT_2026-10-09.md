@@ -31,28 +31,28 @@ Context that shapes the findings:
 | L4 | MED | scroll | Network Manage scan and saved lists are 70 px `lv_list`s holding up to 20 / 8 rows of 72 px touch targets, so they scroll. **FIXED in ef99c327.** |
 | L5 | LOW | scroll | Temperature page relay row is a deliberately scrollable 40 px box; 4 buttons of 144 px wrap to 2 rows, so it always scrolls. **FIXED in ef99c327.** |
 | L6 | LOW | info | The AP password is displayed in clear on the Network page behind a USER PIN. **FIXED in ef99c327.** |
-| L7 | LOW | auth | With the LCD policy off, every gate collapses to full access, including Clear Trip. Matches the web auth-off rule; recorded so the owner can confirm it is intended for the trip clear. |
+| L7 | LOW | auth | With the LCD policy off, every gate collapses to full access, including Clear Trip. Matches the web auth-off rule; recorded so the owner can confirm it is intended for the trip clear. **OWNER DECISION 2026-10-09: keep as is** (policy off = open, matching web auth-off; no admin-PIN-required refusal). |
 | L8 | INFO | timers | Page refresh timers are created once at build and never deleted; they keep running while the page is hidden. |
 | L9 | HIGH | auth | First boot with no stored touch calibration returns from `kiln_ui_init()` before the LCD lock is initialised, so every gate (Clear Trip included) is open until reboot. **FIXED in ef99c327.** |
 | L10 | MED | auth | The Network Manage Forget dialog is a raw `lv_msgbox`, not `ui_confirm`, so it survives an LCD relock and stays tappable. **FIXED in ef99c327.** |
 | L11 | MED | auth | More USER-gated writes whose web equivalents are ADMIN: unit preference, touch calibration save, profile delete, live-edit apply, AP QR code, crash-report acknowledge. **FIXED in ef99c327.** Follow-up LOW (crash-ack and profile Delete PIN success callbacks were no-ops, forcing a second tap): FIXED, the callbacks now run the arm step (74bf36ec). |
-| L12 | MED | touch | Topbar touch-group registry holds 4 groups and drops the rest silently; 21 topbar call sites, so pages visited after the 4th lose nearest-center arbitration. |
-| L13 | MED | layout | Builder slot grid creates 100 slot cells in a 2-row box with scrolling removed; only 8 are reachable, and each build makes 100 profile reads. |
+| L12 | MED | touch | Topbar touch-group registry holds 4 groups and drops the rest silently; 21 topbar call sites, so pages visited after the 4th lose nearest-center arbitration. **FIXED in 60c02217.** |
+| L13 | MED | layout | Builder slot grid creates 100 slot cells in a 2-row box with scrolling removed; only 8 are reachable, and each build makes 100 profile reads. **FIXED in 60c02217.** |
 | L14 | MED | churn | Network Manage saved list is cleaned and rebuilt every second, even when hidden. **FIXED in ef99c327.** |
-| L15 | MED | fit | Home right-hand rail height assert ignores the trip strip, lag notice and progress bar; with all visible, zone 3 and watts are clipped. |
+| L15 | MED | fit | Home right-hand rail height assert ignores the trip strip, lag notice and progress bar; with all visible, zone 3 and watts are clipped. **FIXED in 60c02217.** |
 | L16 | LOW | strings | AP QR payload buffer can truncate a max-length SSID + password; no escaping; always `T:WPA`. **FIXED in ef99c327.** |
 | L17 | LOW | race | A second AP Save overwrites the job strings before the busy check. **FIXED in ef99c327.** |
-| L18 | LOW | dialogs | `ui_confirm` does not NULL-check its `lv_malloc`'d context and frees it only in the button callbacks, so a dialog closed by relock leaks it. |
-| L19 | LOW | keypad | `ui_lcd_keypad_show()` overwrites the pending callback if called while open; single global gate context. Reachability unconfirmed. |
-| L20 | LOW | fit | Long-text labels with no fixed height wrap instead of truncating (home strips, topbar status, rail zone names); Diagnostics Trip detail rows have no budget assert. |
-| L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. |
+| L18 | LOW | dialogs | `ui_confirm` does not NULL-check its `lv_malloc`'d context and frees it only in the button callbacks, so a dialog closed by relock leaks it. **FIXED in 60c02217.** |
+| L19 | LOW | keypad | `ui_lcd_keypad_show()` overwrites the pending callback if called while open; single global gate context. Reachability unconfirmed. **FIXED in 60c02217.** |
+| L20 | LOW | fit | Long-text labels with no fixed height wrap instead of truncating (home strips, topbar status, rail zone names); Diagnostics Trip detail rows have no budget assert. **FIXED in 60c02217.** |
+| L21 | LOW | cost | Home and Diagnostics refresh callbacks keep calling `dashboard_get_status()` (and a thermocouple read-all) while hidden. **FIXED in 60c02217.** |
 | L22 | LOW | misc | Start confirm re-resolves the profile at Confirm time, not the one shown; picker id cache can go stale (mislabel only); live-decide Save As has no confirm. **FIXED in ef99c327.** |
 | L23 | INFO | threads | Debug flags and 64-bit flush stats shared across tasks without atomics; startup `lv_*` calls on app_main are an undocumented exception. |
-| L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. **Fixed** (LCD chart commit, see Third pass fix note). |
-| L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). **Fixed** (LCD chart commit, see Third pass fix note). |
-| L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. **Fixed** (LCD chart commit, see Third pass fix note). |
-| L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. **Fixed** (LCD chart commit, see Third pass fix note). |
-| L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. **Fixed** (LCD chart commit, see Third pass fix note). |
+| L24 | MED | chart | Home chart looks up history by `t / 30 s` as a ring index; once the 640-sample ring wraps (5 h 20 min) the actual trace is time-shifted and then flat. **FIXED in 0968a699** (see Third pass fix note). |
+| L25 | LOW | chart | The dashed planned-line hook never runs: `LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS` is never set, so the plan draws solid (home and profile detail). **FIXED in 0968a699** (see Third pass fix note). |
+| L26 | LOW | chart | The time axis ends at the plan's nominal horizon; a run that outlasts its plan stops drawing the actual trace and pins the now-dot to the last bucket. **FIXED in 0968a699** (see Third pass fix note). |
+| L27 | LOW | cost | Each home tick makes up to 31 `s_exec.lock` acquisitions (`portMAX_DELAY`) plus a plan-curve rebuild on the LVGL task, also while hidden. **FIXED in 0968a699** (see Third pass fix note). |
+| L28 | LOW | overflow | A valid but tiny ramp rate gives a horizon above 2^31 s; `lroundf()` into a 32-bit `long` then overflows in the tick labels and history index. **FIXED in 0968a699** (see Third pass fix note). |
 | L29 | INFO | geometry | **FIXED in 8b65ea9a.** Tick and legend positions add the chart's content offset twice (2 px); the top Y label sits 3 px above the content box. |
 | L30 | INFO | rail | **FIXED in 8b65ea9a** (write-on-change, name copy under the zones lock, aux caption static assert). Rail zone name/temp labels are rewritten every tick; zone names are read without the zones lock; aux caption table hard-codes 4 relays. |
 
@@ -159,7 +159,9 @@ ADMIN page.
 Fix: mask the password unless the session has ADMIN, or move the page behind
 ADMIN with L1.
 
-### L7 (LOW) LCD policy off collapses Clear Trip to no login
+### L7 (LOW) **CLOSED 2026-10-09, owner decision: keep as is** LCD policy off collapses Clear Trip to no login
+
+Owner decision 2026-10-09: keep the behavior. With the LCD policy off, every gate is open (matches web auth-off); no "set an admin PIN" refusal is added. Original analysis follows.
 
 `ui/ui_page_safety.c:210` passes `ui_lcd_lock_has_role(LCD_PIN_ROLE_ADMIN)`,
 which returns true whenever the LCD policy is disabled (`ui/ui_lcd_lock.h`,

@@ -13,15 +13,15 @@ Owner decisions taken as given:
 
 ## Summary
 
-| ID | Rating | Question | Finding |
-|----|--------|----------|---------|
-| F1 | MED | a, b | While PAUSED, an aux left ON stays energised through every relay-authority fault source that does not escalate to a run FAULT. |
-| F2 | LOW | a | A manual aux ON made while idle survives a later Pico trip. Plan section 5 says a Pico trip drops aux. |
-| F3 | LOW | d | `aux_outputs_cfg_set()` updates RAM before the commit and never rolls it back, so a failed save leaves RAM enabled while flash says disabled. |
-| F4 | LOW | a | The aux store globals are read by the executor task and written by HTTP with no lock. |
-| F5 | LOW | c | A monitor-only zone is dropped as a cross-zone (guard 8) peer. On a 2-zone kiln with one zone converted, guard 8 has no peer left. |
-| F6 | LOW | d | After a rollback to pre-aux firmware, stored aux rules (targets 8..11) are silently inert. The freed zone runs as an ordinary HEATER with an empty relay mask. |
-| F7 | LOW | b | The run-start handoff comment overstates when the failed-OFF retry runs. |
+| ID | Rating | Question | Finding | Status |
+|----|--------|----------|---------|---|
+| F1 | MED | a, b | While PAUSED, an aux left ON stays energised through every relay-authority fault source that does not escalate to a run FAULT. | FIXED 1a516706 |
+| F2 | LOW | a | A manual aux ON made while idle survives a later Pico trip. Plan section 5 says a Pico trip drops aux. | FIXED 1a516706 |
+| F3 | LOW | d | `aux_outputs_cfg_set()` updates RAM before the commit and never rolls it back, so a failed save leaves RAM enabled while flash says disabled. | FIXED 2ae8d1e6 |
+| F4 | LOW | a | The aux store globals are read by the executor task and written by HTTP with no lock. | FIXED 2ae8d1e6 |
+| F5 | LOW | c | A monitor-only zone is dropped as a cross-zone (guard 8) peer. On a 2-zone kiln with one zone converted, guard 8 has no peer left. | FIXED 8073e66f (documented coverage loss, no code change) |
+| F6 | LOW | d | After a rollback to pre-aux firmware, stored aux rules (targets 8..11) are silently inert. The freed zone runs as an ordinary HEATER with an empty relay mask. | FIXED 8073e66f (rollback hazard documented in UPDATE_PROTOCOL.md and SPARE_RELAY_ONOFF_PLAN.md) |
+| F7 | LOW | b | The run-start handoff comment overstates when the failed-OFF retry runs. | FIXED 8073e66f |
 
 There are no HIGH findings. Questions (c) and (e) came out clean apart from F5.
 
