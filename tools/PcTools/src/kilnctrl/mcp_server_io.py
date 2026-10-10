@@ -238,6 +238,18 @@ def io_scan() -> str:
     return ", ".join(f"0x{a:02X}" for a in found)
 
 
+def _expander_gate(what: str, confirm: object) -> "Optional[str]":
+    """Raw SX1509 writes can move relay-driver pins directly: confirm must be exactly True and no
+    firing/autotune may be live (fail closed on an unreadable run state)."""
+    if confirm is not True:
+        return f"refused: {what} writes the I/O expander directly; pass confirm=True (exactly True) to proceed"
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {what} not allowed while a run is live: {running}"
+    return None
+
+
 @_core._tool()
 def expander_read_reg(reg: int, length: int = 1) -> str:
     """Raw SX1509 register read (debug), 1-16 bytes."""
@@ -249,32 +261,47 @@ def expander_read_reg(reg: int, length: int = 1) -> str:
 
 
 @_core._tool()
-def expander_write_reg(reg: int, value: int) -> str:
+def expander_write_reg(reg: int, value: int, confirm: bool = False) -> str:
     """Raw SX1509 register write (debug)."""
+    gate = _expander_gate("expander_write_reg", confirm)
+    if gate:
+        return gate
     return _io_mutating(f"reg 0x{reg:02X} <- 0x{value:02X}", lambda: _srv._io.sx_write_reg(reg, value))
 
 
 @_core._tool()
-def expander_set_dir(mask: int) -> str:
+def expander_set_dir(mask: int, confirm: bool = False) -> str:
     """Write RegDir: u16, bit N = 1 makes expander pin N an input."""
+    gate = _expander_gate("expander_set_dir", confirm)
+    if gate:
+        return gate
     return _io_mutating(f"RegDir <- 0x{mask:04X}", lambda: _srv._io.sx_set_dir(mask))
 
 
 @_core._tool()
-def expander_set_pullup(mask: int) -> str:
+def expander_set_pullup(mask: int, confirm: bool = False) -> str:
     """Write RegPullUp: u16, bit N = 1 enables pin N's pull-up."""
+    gate = _expander_gate("expander_set_pullup", confirm)
+    if gate:
+        return gate
     return _io_mutating(f"RegPullUp <- 0x{mask:04X}", lambda: _srv._io.sx_set_pullup(mask))
 
 
 @_core._tool()
-def expander_set_opendrain(mask: int) -> str:
+def expander_set_opendrain(mask: int, confirm: bool = False) -> str:
     """Write RegOpenDrain: u16, bit N = 1 makes pin N open-drain."""
+    gate = _expander_gate("expander_set_opendrain", confirm)
+    if gate:
+        return gate
     return _io_mutating(f"RegOpenDrain <- 0x{mask:04X}", lambda: _srv._io.sx_set_opendrain(mask))
 
 
 @_core._tool()
-def expander_set_debounce(enable_mask: int, config: int = 0) -> str:
+def expander_set_debounce(enable_mask: int, config: int = 0, confirm: bool = False) -> str:
     """Enable debounce on the masked pins; `config` 0-7 selects 0.5ms << config."""
+    gate = _expander_gate("expander_set_debounce", confirm)
+    if gate:
+        return gate
     return _io_mutating(
         f"debounce mask 0x{enable_mask:04X} config {config}",
         lambda: _srv._io.sx_set_debounce(enable_mask, config),
@@ -282,11 +309,14 @@ def expander_set_debounce(enable_mask: int, config: int = 0) -> str:
 
 
 @_core._tool()
-def expander_set_int_mask(mask: int, sense: int = 0) -> str:
+def expander_set_int_mask(mask: int, sense: int = 0, confirm: bool = False) -> str:
     """Write RegInterruptMask (bit N = 1 DISABLES pin N's interrupt) and RegSense.
 
     `sense` is 2 bits per pin *pair*, exactly as the part encodes them.
     """
+    gate = _expander_gate("expander_set_int_mask", confirm)
+    if gate:
+        return gate
     return _io_mutating(
         f"RegInterruptMask <- 0x{mask:04X}, sense 0x{sense:04X}",
         lambda: _srv._io.sx_set_int_mask(mask, sense),
@@ -294,11 +324,14 @@ def expander_set_int_mask(mask: int, sense: int = 0) -> str:
 
 
 @_core._tool()
-def expander_led_driver(pin: int, enable: bool, intensity: int = 0) -> str:
+def expander_led_driver(pin: int, enable: bool, intensity: int = 0, confirm: bool = False) -> str:
     """Enable the SX1509's LED driver on one pin (0-15).
 
     `intensity` 0-255, where 0 is *full on* for this part's sink driver.
     """
+    gate = _expander_gate("expander_led_driver", confirm)
+    if gate:
+        return gate
     return _io_mutating(
         f"pin {pin} LED driver {'on' if enable else 'off'} @ {intensity}",
         lambda: _srv._io.sx_led_driver(pin, enable, intensity),
@@ -306,8 +339,11 @@ def expander_led_driver(pin: int, enable: bool, intensity: int = 0) -> str:
 
 
 @_core._tool()
-def expander_reset(hard: bool = False) -> str:
+def expander_reset(hard: bool = False, confirm: bool = False) -> str:
     """Reset the SX1509: software reset via RegReset, or pulse ~RESET (GPIO10)."""
+    gate = _expander_gate("expander_reset", confirm)
+    if gate:
+        return gate
     return _io_mutating(f"SX1509 {'hard' if hard else 'soft'} reset", lambda: _srv._io.sx_reset(hard))
 
 

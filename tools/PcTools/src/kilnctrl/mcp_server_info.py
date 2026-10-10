@@ -892,6 +892,13 @@ def kiln_config_apply(id: int, confirm: bool = False, ack_hardware_differs: bool
     state = final.get("state")
     diverged = final.get("diverged")
     reason = final.get("reason")
+    reported_id = final.get("id")
+    if isinstance(reported_id, int) and not isinstance(reported_id, bool) and reported_id != id:
+        # apply_status is a single global slot: a different id means another apply (or a stale
+        # result) is being reported, so this call's outcome was never actually read.
+        return (f"UNKNOWN: apply_status reports id={reported_id!r} (state={state!r}, reason={reason!r}), "
+                f"not the id={id} this call applied -- another apply may have run; outcome of id={id} "
+                f"unconfirmed, re-check by hand (host={resolved})")
     if state == "done_ok" and not diverged:
         return f"ok - applied id={id}, confirmed by apply_status (host={resolved})"
     if diverged:

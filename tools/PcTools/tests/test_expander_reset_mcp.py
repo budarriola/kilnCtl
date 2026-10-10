@@ -34,12 +34,50 @@ from kilnctrl.io_expander import IoQueryError  # noqa: E402
 from kilnctrl.protocol import IO_CMD_SX_RESET  # noqa: E402
 
 
+_RUN_GATE = "kilnctrl.mcp_server_control._profile_or_autotune_running_reason"
+_gate_patch = unittest.mock.patch(_RUN_GATE, return_value=None)
+
+
+def setUpModule():
+    _gate_patch.start()
+
+
+def tearDownModule():
+    _gate_patch.stop()
+
+
+class ExpanderWriteGateTests(unittest.TestCase):
+    CALLS = [
+        lambda **k: mcp_server.expander_write_reg(1, 2, **k),
+        lambda **k: mcp_server.expander_set_dir(1, **k),
+        lambda **k: mcp_server.expander_set_pullup(1, **k),
+        lambda **k: mcp_server.expander_set_opendrain(1, **k),
+        lambda **k: mcp_server.expander_set_debounce(1, **k),
+        lambda **k: mcp_server.expander_set_int_mask(1, **k),
+        lambda **k: mcp_server.expander_led_driver(1, True, **k),
+        lambda **k: mcp_server.expander_reset(**k),
+    ]
+
+    def test_refused_without_exact_confirm(self):
+        with unittest.mock.patch.object(mcp_server._io, "_write_style") as w:
+            for c in self.CALLS:
+                self.assertTrue(c().startswith("refused"))
+                self.assertTrue(c(confirm="yes").startswith("refused"))
+            w.assert_not_called()
+
+    def test_refused_mid_run(self):
+        with unittest.mock.patch(_RUN_GATE, return_value="a profile is running"):
+            for c in self.CALLS:
+                out = c(confirm=True)
+                self.assertTrue(out.startswith("refused") and "live" in out, out)
+
+
 class ExpanderResetHappyPathTests(unittest.TestCase):
     def test_silent_success_soft_reset_reports_ok(self):
         with unittest.mock.patch.object(
             mcp_server._io, "sx_reset", return_value=OkReason(ok=True)
         ) as mock_reset:
-            result = mcp_server.expander_reset(hard=False)
+            result = mcp_server.expander_reset(hard=False, confirm=True)
         self.assertTrue(result.startswith("ok"))
         self.assertIn("soft reset", result)
         mock_reset.assert_called_once_with(False)
@@ -48,7 +86,7 @@ class ExpanderResetHappyPathTests(unittest.TestCase):
         with unittest.mock.patch.object(
             mcp_server._io, "sx_reset", return_value=OkReason(ok=True)
         ):
-            result = mcp_server.expander_reset(hard=True)
+            result = mcp_server.expander_reset(hard=True, confirm=True)
         self.assertIn("hard reset", result)
 
 
@@ -57,7 +95,7 @@ class ExpanderResetRefusalTests(unittest.TestCase):
         with unittest.mock.patch.object(
             mcp_server._io, "sx_reset", return_value=OkReason(ok=False, reason="safety"),
         ):
-            result = mcp_server.expander_reset(hard=False)
+            result = mcp_server.expander_reset(hard=False, confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("safety", result)
 
@@ -87,7 +125,7 @@ class ExpanderResetErrorPathTests(unittest.TestCase):
         with unittest.mock.patch.object(
             mcp_server._io, "sx_reset", side_effect=IoQueryError("not delivered"),
         ):
-            result = mcp_server.expander_reset(hard=False)
+            result = mcp_server.expander_reset(hard=False, confirm=True)
         self.assertTrue(result.startswith("error"))
         self.assertIn("not delivered", result)
 
