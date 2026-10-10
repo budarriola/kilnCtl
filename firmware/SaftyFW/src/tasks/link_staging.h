@@ -84,6 +84,22 @@ bool link_staging_drop_id(link_staging_t *st, uint16_t param_id);
 bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
                                   bool context_gap);
 
+// What link_task.c's push_context does on every PUSH_CONTEXT (pure, so the
+// trigger is host-tested rather than only read in the FreeRTOS file): on a
+// new ESP session, discard the staged edits; on a boot_id CHANGE additionally
+// forget the peer's protocol version (set it to 0 = unknown). A rebooted ESP
+// may be a different firmware (e.g. rolled back to a v16 image) whose
+// ANNOUNCE_VERSION burst this Pico missed, so the previous boot's version must
+// not keep selecting 31-byte DIAG / bound-clear behaviour for it. Unknown (0)
+// makes every link_frame_*_supported() gate false: legacy-length frames and
+// accepting an unbound (3-byte) CLEAR_TRIP -- the same state as a fresh Pico
+// boot before any announce, and the ESP's next ANNOUNCE_VERSION restores it.
+// A plain context gap with the same boot_id does NOT clear the version: the
+// same ESP image is still talking, only silent. Returns true on a new session.
+bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
+                                        bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
+                                        bool context_gap);
+
 #ifdef __cplusplus
 }
 #endif

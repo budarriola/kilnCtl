@@ -38,6 +38,9 @@ typedef struct {
     void *ctx;
 } update_metadata_write_io_t;
 
+// Size of the local verify buffer; records longer than this are refused.
+#define UPDATE_METADATA_MAX_RECORD 256u
+
 update_metadata_write_result_t update_task_metadata_write_verified(
     const update_metadata_write_io_t *io, bool needs_erase, uint32_t slot_offset,
     const uint8_t *record, size_t record_len);

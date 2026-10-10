@@ -515,6 +515,9 @@ static size_t update_task_read_latest_metadata_or_default(bootloader_metadata_t 
     return latest;
 }
 
+_Static_assert(BOOTLOADER_METADATA_RECORD_LEN <= UPDATE_METADATA_MAX_RECORD,
+               "metadata record must fit update_task_metadata_write_verified()'s verify buffer");
+
 typedef struct {
     size_t next_write_slot;
     bool needs_erase;

@@ -288,7 +288,8 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
             } else {
                 snprintf(reason_out, reason_cap,
                          "the safety processor ACKed the commit, but %s (id %u) does not read back "
-                         "as the submitted value -- treating the write as FAILED, not successful",
+                         "as the submitted value -- treating the write as FAILED, not successful (staged edits "
+                         "are discarded after 5 s of link silence or an ESP reboot before the commit)",
                          name, (unsigned)pairs[i].param_id);
             }
             return false;

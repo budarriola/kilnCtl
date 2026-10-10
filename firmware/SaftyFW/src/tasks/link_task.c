@@ -1379,14 +1379,20 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
     bool context_gap =
         s_context_boot_id_known &&
         (xTaskGetTickCount() - s_last_context_rx_tick) >= pdMS_TO_TICKS(LINK_TASK_CONTEXT_MAX_AGE_MS);
-    if (link_staging_new_esp_session(s_context_boot_id_known, s_last_context_boot_id, snap.boot_id,
-                                     context_gap) &&
-        link_staging_count(&s_staging) > 0u) {
-        char discard_msg[64];
-        snprintf(discard_msg, sizeof(discard_msg), "new ESP session: discarded %u staged edit(s)",
-                 (unsigned)link_staging_count(&s_staging));
-        log_task_log(LOG_LEVEL_WARN, "push_context", discard_msg);
-        link_staging_reset(&s_staging);
+    uint16_t staged_before = (uint16_t)link_staging_count(&s_staging);
+    uint16_t peer_version = s_peer_protocol_version;
+    // A boot_id change also forgets the peer protocol version (see
+    // link_staging_apply_context_session()): a rolled-back ESP that lost its
+    // announce burst must not be sent the previous boot's frame formats.
+    if (link_staging_apply_context_session(&s_staging, &peer_version, s_context_boot_id_known,
+                                           s_last_context_boot_id, snap.boot_id, context_gap)) {
+        s_peer_protocol_version = peer_version;
+        if (staged_before > 0u) {
+            char discard_msg[64];
+            snprintf(discard_msg, sizeof(discard_msg),
+                     "new ESP session: discarded %u staged edit(s)", (unsigned)staged_before);
+            log_task_log(LOG_LEVEL_WARN, "push_context", discard_msg);
+        }
     }
     s_last_context_boot_id = snap.boot_id;
     s_context_boot_id_known = true;

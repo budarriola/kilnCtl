@@ -135,3 +135,17 @@ bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t
     }
     return (boot_id != prev_boot_id) || context_gap;
 }
+
+bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
+                                        bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
+                                        bool context_gap)
+{
+    if (!link_staging_new_esp_session(prev_known, prev_boot_id, boot_id, context_gap)) {
+        return false;
+    }
+    link_staging_reset(st);
+    if (boot_id != prev_boot_id && peer_protocol_version != NULL) {
+        *peer_protocol_version = 0u;
+    }
+    return true;
+}
