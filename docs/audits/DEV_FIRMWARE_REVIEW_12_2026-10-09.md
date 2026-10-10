@@ -184,3 +184,10 @@ The Python mutations used `-Preset pytest` on `tests/test_run_queue_inplace_rewr
 - The blank-field handling in `zones_http_post_parse.c` copies `current_z` values, not firmware defaults, for every guard field and xzone.
 - The `65ac0650` retire condition requires `used_file`, which implies a mounted cfg and a validated file, and the rev array (floor) is left untouched. An equal rev adopts NVS and does not retire. The unmounted case is tested.
 - `nvs_load_all_from()` has a single caller (`profiles_boot_load_body`, boot only), so the retire erase never runs concurrently with a save.
+
+## Fix status
+
+- LOW-1, LOW-2, LOW-4, INFO-4, INFO-5: fixed in `422d7d35`. `nvs_save()` is the shared gate (refuses while the rollback journal is kept), the journal-clear-failed path sets the at-risk flag, the 409 text is shared, and `retire_legacy_slot_blob` clears the used bit first and erases the key second.
+- LOW-5: fixed in `df990cb3` (persisted used-bitmap and equal-rev identical-bytes tests; both former MISSED mutations are now CAUGHT).
+- LOW-3: fixed upstream in `fa4a62ef`.
+- Follow-up (thermo writers): the THERMO UART writers (config_channel, set_thresholds, set_cj_offset, clear_faults, write_reg) are refused with "refused: run active" while a profile or autotune is active (`f1567116`, `uart_bridge_thermo_gate.h`). Reads stay allowed.
