@@ -2105,6 +2105,28 @@ static void test_zones_post_refuses_lost_update_on_concurrent_generation_bump(vo
     test_cfg_rows_reset();
 }
 
+static esp_err_t zh_failing_cfg_write_fn(const char *rel_path, const void *data, size_t len);
+
+/* persfx MED-2 (second half): a fault latched WITHOUT the undecided flag must survive a POST whose save fails;
+ * the fault is cleared only by a save that persisted. */
+static void test_zones_post_failed_save_keeps_load_fault(void)
+{
+    TEST_SECTION("POST /api/zones -- a failed save does not clear the latched load fault (persfx MED-2)");
+    seed_two_zone_pid_baseline();
+    const char *body = TWO_ZONE_MINIMAL_BODY("255", "255");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: fault only", true);
+    s_zones_cfg_undecided = false; /* fault latched, boot otherwise decided */
+    zones_config_cfg_fs_set_write_fn(zh_failing_cfg_write_fn);
+    run_zones_post(body);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(strncmp(s_test_last_status, "200", 3) != 0, "the POST reported the failed save");
+    TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault stays latched after a failed save");
+    zones_config_load_fault_reset_for_test();
+    s_zones_config_valid = true;
+}
+
 /* persfx MED-2: on an undecided boot (stored config unreadable) a POST must NOT commit to RAM, mark the config
  * valid or clear the load fault -- that would lift the firing refusal while every save stays refused. */
 static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
@@ -17219,6 +17241,7 @@ void run_test_zones_http(void)
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refused_while_load_undecided_keeps_fault();
+    test_zones_post_failed_save_keeps_load_fault();
     test_zones_post_refuses_run_started_during_ceiling_raise();
     test_zones_post_refused_while_rollback_pending();
     test_zones_post_refused_while_restore_in_flight();
