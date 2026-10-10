@@ -196,3 +196,232 @@ bool backup_json_field_str(const char *obj, const char *key, char *out, size_t c
     out[o] = '\0';
     return true;
 }
+
+#define BACKUP_JSON_MAX_DEPTH 32
+
+static const char *bj_fail(char *err, size_t cap, const char *msg)
+{
+    if (err && cap) {
+        snprintf(err, cap, "%s", msg);
+    }
+    return NULL;
+}
+
+/* Validates one JSON string starting at the opening quote; returns the byte after the closing quote or NULL. */
+static const char *bj_check_string(const char *p)
+{
+    p++;
+    while (*p && *p != '"') {
+        unsigned char ch = (unsigned char)*p;
+        if (ch < 0x20) {
+            return NULL;
+        }
+        if (ch == '\\') {
+            p++;
+            /* Lenient on the escape letter: the field scanners define its meaning and some callers refuse
+             * backslashes outright with their own message. Only a NUL or control byte here is malformed. */
+            if ((unsigned char)*p < 0x20) {
+                return NULL;
+            }
+        }
+        p++;
+    }
+    return (*p == '"') ? p + 1 : NULL;
+}
+
+static const char *bj_check_number(const char *p)
+{
+    if (*p == '-') {
+        p++;
+    }
+    if (*p == '0') {
+        p++;
+    } else if (*p >= '1' && *p <= '9') {
+        while (*p >= '0' && *p <= '9') {
+            p++;
+        }
+    } else {
+        return NULL;
+    }
+    if (*p == '.') {
+        p++;
+        if (!(*p >= '0' && *p <= '9')) {
+            return NULL;
+        }
+        while (*p >= '0' && *p <= '9') {
+            p++;
+        }
+    }
+    if (*p == 'e' || *p == 'E') {
+        p++;
+        if (*p == '+' || *p == '-') {
+            p++;
+        }
+        if (!(*p >= '0' && *p <= '9')) {
+            return NULL;
+        }
+        while (*p >= '0' && *p <= '9') {
+            p++;
+        }
+    }
+    return p;
+}
+
+
+/* F6: refuse a top-level key that appears twice (the field scanners would silently take the first). The
+ * document is already known to be well-formed here. */
+static bool bj_no_dup_top_level_key(const char *doc, char *err, size_t err_cap)
+{
+    const char *p = backup_json_skip_ws(doc) + 1;
+    for (;;) {
+        p = backup_json_skip_ws(p);
+        if (*p != '"') {
+            return true; /* '}' -- end of object */
+        }
+        const char *ks = p + 1;
+        const char *ke = ks;
+        while (*ke != '"') {
+            ke += (*ke == '\\') ? 2 : 1;
+        }
+        size_t kl = (size_t)(ke - ks);
+        /* compare against every later key */
+        const char *q = backup_json_skip_ws(ke + 1);
+        q = backup_json_skip_value(q + 1); /* past ':' and the value */
+        for (;;) {
+            q = backup_json_skip_ws(q);
+            if (*q != ',') {
+                break;
+            }
+            q = backup_json_skip_ws(q + 1);
+            const char *ks2 = q + 1;
+            const char *ke2 = ks2;
+            while (*ke2 != '"') {
+                ke2 += (*ke2 == '\\') ? 2 : 1;
+            }
+            if ((size_t)(ke2 - ks2) == kl && strncmp(ks, ks2, kl) == 0) {
+                bj_fail(err, err_cap, "duplicate top-level key in backup");
+                return false;
+            }
+            q = backup_json_skip_ws(ke2 + 1);
+            q = backup_json_skip_value(q + 1);
+        }
+        p = backup_json_skip_value(backup_json_skip_ws(ke + 1) + 1);
+        p = backup_json_skip_ws(p);
+        if (*p != ',') {
+            return true;
+        }
+        p++;
+    }
+}
+
+bool backup_json_key_present_not_array(const char *obj, const char *key)
+{
+    const char *v = backup_json_obj_find(obj, key);
+    return v && *backup_json_skip_ws(v) != '[';
+}
+
+bool backup_json_validate_document(const char *doc, char *err, size_t err_cap)
+{
+    if (!doc) {
+        bj_fail(err, err_cap, "empty body");
+        return false;
+    }
+    /* stack[i]: '{' or '['. expect: 0 = value, 1 = after value (',' or close), 2 = key (or '}' if first),
+     * 3 = value required (after ',' or ':'), 4 = value-or-']' (just after '['). */
+    char stack[BACKUP_JSON_MAX_DEPTH];
+    int depth = 0;
+    int expect = 3;
+    const char *p = backup_json_skip_ws(doc);
+    if (*p != '{') {
+        bj_fail(err, err_cap, "backup is not a JSON object");
+        return false;
+    }
+    for (;;) {
+        p = backup_json_skip_ws(p);
+        if (expect == 1) {
+            if (depth == 0) {
+                if (*p != '\0') {
+                    bj_fail(err, err_cap, "trailing data after the JSON document");
+                    return false;
+                }
+                return bj_no_dup_top_level_key(doc, err, err_cap);
+            }
+            if (*p == ',') {
+                p++;
+                expect = (stack[depth - 1] == '{') ? 5 : 3;
+            } else if ((*p == '}' && stack[depth - 1] == '{') || (*p == ']' && stack[depth - 1] == '[')) {
+                p++;
+                depth--;
+                expect = 1;
+            } else {
+                bj_fail(err, err_cap, "malformed or truncated JSON document");
+                return false;
+            }
+            continue;
+        }
+        if (expect == 2 || expect == 5) { /* object: key (or '}' when first) */
+            if (expect == 2 && *p == '}') {
+                p++;
+                depth--;
+                expect = 1;
+                continue;
+            }
+            if (*p != '"') {
+                bj_fail(err, err_cap, "malformed or truncated JSON document");
+                return false;
+            }
+            p = bj_check_string(p);
+            if (!p) {
+                bj_fail(err, err_cap, "malformed or truncated JSON string");
+                return false;
+            }
+            p = backup_json_skip_ws(p);
+            if (*p != ':') {
+                bj_fail(err, err_cap, "malformed or truncated JSON document");
+                return false;
+            }
+            p++;
+            expect = 3;
+            continue;
+        }
+        /* expect a value (3), or a value-or-']' (4) */
+        if (expect == 4 && *p == ']') {
+            p++;
+            depth--;
+            expect = 1;
+            continue;
+        }
+        if (*p == '{' || *p == '[') {
+            if (depth >= BACKUP_JSON_MAX_DEPTH) {
+                bj_fail(err, err_cap, "JSON nested too deeply");
+                return false;
+            }
+            stack[depth++] = *p;
+            expect = (*p == '{') ? 2 : 4;
+            p++;
+        } else if (*p == '"') {
+            p = bj_check_string(p);
+            if (!p) {
+                bj_fail(err, err_cap, "malformed or truncated JSON string");
+                return false;
+            }
+            expect = 1;
+        } else if (strncmp(p, "true", 4) == 0) {
+            p += 4;
+            expect = 1;
+        } else if (strncmp(p, "false", 5) == 0) {
+            p += 5;
+            expect = 1;
+        } else if (strncmp(p, "null", 4) == 0) {
+            p += 4;
+            expect = 1;
+        } else {
+            p = bj_check_number(p);
+            if (!p) {
+                bj_fail(err, err_cap, "malformed or truncated JSON document");
+                return false;
+            }
+            expect = 1;
+        }
+    }
+}

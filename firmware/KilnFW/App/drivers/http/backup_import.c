@@ -1017,7 +1017,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_resolve_topology(const char *bo
 static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates,
-                                        bool *zones_landed_out, bool *aux_wrote_out)
+                                        bool *zones_landed_out, bool *aux_wrote_out, bool parse_only)
 {
     *zones_landed_out = false;
     double dver;
@@ -2294,6 +2294,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
     if (has_safety_tc && (dsafety < 0 || dsafety > 7)) {
         snprintf(err_msg, err_cap, "safety_tc_type out of range (0-7)");
         return false;
+    }
+    if (parse_only) {
+        return true; /* DEV_REVIEW_13 F8: every parse/validate refusal above happens before any write */
     }
 
     /* opus review finding (LOW-MEDIUM), originally closed with a narrow
@@ -3918,6 +3921,35 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
     s_aux_undo.written = 0;
 }
 
+/* DEV_REVIEW_13 F8: run the whole pass-1 parse (profiles, zones, timing profiles) into scratch candidate arrays
+ * BEFORE anything is committed, so a parse/validate refusal is a 4xx with nothing written. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, char *err_msg, size_t err_cap)
+{
+    profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
+                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!zone_candidates) {
+        zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
+    }
+    timing_profile_candidate_t *tp = heap_caps_malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT,
+                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!tp) {
+        tp = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
+    }
+    bool ok = false;
+    if (!candidates || !zone_candidates || !tp) {
+        snprintf(err_msg, err_cap, "out of memory validating the backup -- nothing was changed");
+    } else {
+        bool zl = false, aw = false;
+        ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates, tp, &zl, &aw, true);
+    }
+    free(tp);
+    free(zone_candidates);
+    free(candidates);
+    return ok;
+}
+
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
  * this file's header comment above profile_candidate_t) and hands them to
  * backup_import_apply_two_pass(), which is otherwise byte-for-byte the
@@ -3972,6 +4004,9 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
     }
     if (!backup_import_zone_topology_precheck(body, err_msg, err_cap)) {
         return false; // pass 1: zone entry for a zone this board lacks; nothing written (400, not a partial write)
+    }
+    if (!backup_import_parse_only(body, err_msg, err_cap)) {
+        return false; // pass 1: profile/zone/timing-profile parse refusal; nothing written (400, not a partial write)
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
@@ -4054,7 +4089,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
 
     bool zones_landed = false;
     bool ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates,
-                                         timing_profile_candidates, &zones_landed, &aux_wrote);
+                                         timing_profile_candidates, &zones_landed, &aux_wrote, false);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
      * exit from backup_import_apply_two_pass(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
@@ -4103,6 +4138,18 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
                                  bool *partial_write_out, char *err_msg, size_t err_cap)
 {
     *partial_write_out = false;
+    /* HTTP fuzz F4/F5/F6: one complete, well-formed JSON object with no repeated top-level key, and array-typed
+     * collections, before any scanner runs. */
+    if (!backup_json_validate_document(body, err_msg, err_cap)) {
+        return false;
+    }
+    static const char *const k_array_keys[] = {"profiles", "zones", "kiln_configs", "timing_profiles"};
+    for (size_t ki = 0; ki < sizeof(k_array_keys) / sizeof(k_array_keys[0]); ki++) {
+        if (backup_json_key_present_not_array(body, k_array_keys[ki])) {
+            snprintf(err_msg, err_cap, "\"%s\" must be an array", k_array_keys[ki]);
+            return false;
+        }
+    }
     backup_topology_t topo;
     if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
         return false;

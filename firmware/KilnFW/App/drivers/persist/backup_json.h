@@ -70,4 +70,14 @@ bool backup_json_field_opt_num(const char *obj, const char *key, double min, dou
 
 bool backup_json_field_str(const char *obj, const char *key, char *out, size_t cap);
 
+// Strict whole-document check, run BEFORE any field scanner touches a body (HTTP fuzz F4/F5/F6): `doc` must
+// be exactly one complete, well-formed JSON object (RFC 8259 grammar, nesting depth <= 32, no trailing
+// bytes other than whitespace) and must not repeat any key at its top level. Iterative, constant stack.
+// Returns true when valid; otherwise false with a short reason in err (may be NULL).
+bool backup_json_validate_document(const char *doc, char *err, size_t err_cap);
+
+// True when the top-level object `obj` has `key` and its value is not a JSON array (F5). False when the key
+// is absent or the value is an array.
+bool backup_json_key_present_not_array(const char *obj, const char *key);
+
 #endif // BACKUP_JSON_H

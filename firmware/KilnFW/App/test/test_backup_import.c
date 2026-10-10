@@ -3423,10 +3423,6 @@ static void test_fuzz_hostile_backup_shapes(void)
     size_t vl = strlen(valid);
     static char pre[512];
     for (size_t n = 0; n < vl; n++) {
-        /* KNOWN DEFECT F4 (findings doc): the importer accepts truncated JSON at these cut points
-         * (36-48 kind+version only, 142-156 mid-profile, 200-202 missing closer) and APPLIES it.
-         * Skipped here because a failing test cannot be committed; remove the skip when F4 is fixed. */
-        if ((n >= 36 && n <= 48) || (n >= 142 && n <= 156) || (n >= 200 && n <= 202)) continue;
         memcpy(pre, valid, n);
         pre[n] = '\0';
         char label[48];
@@ -3434,8 +3430,16 @@ static void test_fuzz_hostile_backup_shapes(void)
         bi_fuzz_expect_refused(label, pre);
     }
     bi_fuzz_expect_refused("empty body", "");
-    /* F5/F6: "profiles is an object" is accepted today; see findings doc. */
-    /* F5/F6: "zones is a string" is accepted today; see findings doc. */
+    bi_fuzz_expect_refused("F5 profiles is an object",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":{},\"zones\":[]}");
+    bi_fuzz_expect_refused("F5 zones is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":\"x\"}");
+    bi_fuzz_expect_refused("F6 duplicate kind",
+        "{\"kind\":\"kilnctl_backup\",\"kind\":\"x\",\"version\":2,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("F6 duplicate version",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"version\":9999,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("trailing garbage after the document",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[]} x");
     bi_fuzz_expect_refused("zone entry is a number",
         "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[5]}");
     bi_fuzz_expect_refused("zone index is a string",
@@ -5246,7 +5250,7 @@ static void test_import_onto_empty_zones_config_refused_before_any_write(void)
     TEST_CHECK(tk != NULL && rk != NULL && vk != NULL, "export carries topology and v7");
     if (tk) { tk[1] = 'x'; }
     if (rk) { rk[1] = 'x'; }
-    if (vk) { vk[11] = '6'; }
+    if (vk) { vk[10] = '6'; }
     char import_err[256] = "";
     bool partial = true;
     float kp_before = s_writes[1].kp;
@@ -5256,6 +5260,34 @@ static void test_import_onto_empty_zones_config_refused_before_any_write(void)
     TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
     TEST_CHECK(strstr(import_err, "not a configured zone") != NULL, "the error names the missing zone configuration");
     TEST_CHECK(s_writes[1].kp == kp_before, "no zone setter ran");
+    reset_stub_state();
+}
+
+static void test_import_pass1b_parse_failure_is_not_a_partial_write(void)
+{
+    TEST_SECTION("backup_import_apply -- DEV_REVIEW_13 F8: a pass-1b zone parse refusal happens before any commit "
+                 "(400-class, nothing written, not a partial write)");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (!s_export_body) {
+        return;
+    }
+    char *k = strstr(s_export_body, "\"pid_kp\":");
+    TEST_CHECK(k != NULL, "export carries pid_kp");
+    if (!k) {
+        return;
+    }
+    k[5] = 'q'; /* "pid_kq": the required gain is now missing -> pass-1b refusal */
+    char import_err[256] = "";
+    bool partial = true;
+    int writes_before = g_total_write_calls;
+    bool ok = backup_import_apply(s_export_body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan,
+                                  &partial, import_err, sizeof(import_err));
+    TEST_CHECK(!ok, "missing pid_kp is refused");
+    TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
+    TEST_CHECK(g_total_write_calls == writes_before, "nothing was written before the refusal");
     reset_stub_state();
 }
 
@@ -7284,9 +7316,9 @@ static void test_gap7_candidate_oom_truncation_thermo_count(void)
         heap_caps_malloc_test_set_fail(true);
         bool ok = wp9_apply_full("", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial, err, sizeof(err));
         heap_caps_malloc_test_set_fail(false);
-        TEST_CHECK(!ok, "import refused when the profile candidate array cannot be allocated");
-        TEST_CHECK(partial, "reported as a partial write (past the kiln_configs commit pass)");
-        TEST_CHECK(strstr(err, "out of memory (profile candidates)") != NULL, "error names the candidate array");
+        TEST_CHECK(!ok, "import refused when the candidate arrays cannot be allocated");
+        TEST_CHECK(!partial, "refused in the pre-commit parse: not a partial write");
+        TEST_CHECK(strstr(err, "out of memory validating the backup") != NULL, "error names the validation OOM");
         TEST_CHECK(g_profile_save_calls == 0, "no profile written");
     }
 
@@ -7409,6 +7441,7 @@ void run_test_backup_import(void)
     test_import_allows_profile_named_like_a_builtin();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
     test_fuzz_hostile_backup_shapes();
+    test_import_pass1b_parse_failure_is_not_a_partial_write();
 
     test_v4_new_fields_round_trip_distinct_values();
     test_coupling_diag_k_dc_round_trips_distinct_value();
