@@ -112,6 +112,17 @@ static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], flo
     return lagging;
 }
 
+/* Mirrors profile_executor.c's static exec_elapsed_accumulate() verbatim
+ * (bound by ramp_stepping_gate_mirror_drift_check.py): whole seconds with the
+ * sub-second remainder carried in *rem_ms, no per-tick rounding loss. */
+static void exec_elapsed_accumulate(uint32_t *seconds, uint16_t *rem_ms, float dt_s)
+{
+    if (!(dt_s > 0.0f) || dt_s > 3600.0f) return;
+    uint32_t ms = (uint32_t)(dt_s * 1000.0f + 0.5f) + (uint32_t)*rem_ms;
+    *seconds += ms / 1000u;
+    *rem_ms = (uint16_t)(ms % 1000u);
+}
+
 /* Mirrors profile_executor.c's ramp-stepping gate, ZONE_RAMP ramp sub-case
  * only (`} else if (lock_ok || stretched_this_tick) { s_exec.segment_
  * elapsed_s += ...; if (!s_exec.dwelling) { <ramp math> } }` --
@@ -123,14 +134,14 @@ static uint8_t lock_lagging_mask(const mirror_zone_t zones[TEST_ZONE_COUNT], flo
  * stretch_rate_c_per_s (converted to C/hr) while stretched_this_tick,
  * ramp_c_per_hr otherwise -- bit-identical to before sec 7.2 whenever
  * stretched_this_tick is false. */
-static void step_schedule(float *target_c, uint32_t *segment_elapsed_s, float seg_target_c,
+static void step_schedule(float *target_c, uint32_t *segment_elapsed_s, uint16_t *segment_elapsed_rem_ms, float seg_target_c,
                           float ramp_c_per_hr, float dt_s, bool lock_ok,
                           bool stretched_this_tick, float stretch_rate_c_per_s)
 {
     if (!lock_ok && !stretched_this_tick) {
         return; /* the lock -- schedule frozen exactly as profile_executor.c freezes it */
     }
-    *segment_elapsed_s += (uint32_t)(dt_s + 0.5f);
+    exec_elapsed_accumulate(segment_elapsed_s, segment_elapsed_rem_ms, dt_s);
     float rate_c_per_hr = stretched_this_tick ? (stretch_rate_c_per_s * 3600.0f) : ramp_c_per_hr;
     float direction = (seg_target_c >= *target_c) ? 1.0f : -1.0f;
     float new_target = *target_c + direction * rate_c_per_hr * (dt_s / 3600.0f);
@@ -158,6 +169,7 @@ void run_test_ramp_lock_onesided(void)
         };
         float target_c = 45.0f;
         uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
         const float seg_target_c = 200.0f;
         const float ramp_c_per_hr = 600.0f; /* 10C/min -- fast on purpose so a real advance would be obvious quickly */
         const float dt_s = 10.0f;
@@ -165,7 +177,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 500; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/true);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c -= 0.02f; /* passive cooling only, ~50 min to close 50C at this rate */
         }
 
@@ -185,6 +197,7 @@ void run_test_ramp_lock_onesided(void)
         };
         float target_c = 45.0f;
         uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
         const float seg_target_c = 200.0f;
         const float ramp_c_per_hr = 600.0f;
         const float dt_s = 10.0f;
@@ -202,7 +215,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 20; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c -= 0.02f;
             zones[0].actual_c = target_c; /* z0 tracks the setpoint perfectly -- keeps it a non-issue zone
                                            * throughout, isolating the assertion to z1's hot-start behavior
@@ -231,6 +244,7 @@ void run_test_ramp_lock_onesided(void)
         };
         float target_c = 45.0f;
         uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
         const float seg_target_c = 200.0f;
         const float ramp_c_per_hr = 600.0f;
         const float dt_s = 10.0f;
@@ -238,7 +252,7 @@ void run_test_ramp_lock_onesided(void)
         for (int i = 0; i < 500; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, seg_target_c, ramp_c_per_hr, dt_s, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             zones[1].actual_c += 0.02f; /* slow but real heating -- still can't keep up with a 10C/min commanded ramp */
         }
 
@@ -263,10 +277,11 @@ void run_test_ramp_lock_onesided(void)
         };
         float target_c = 45.0f;
         uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
         for (int i = 0; i < 10; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
         }
         TEST_CHECK(segment_elapsed_s == 0, "an invalid sensor holds the lock under the fix, same as before -- "
                                             "the !sensor_ok clause was left exactly as-is");
@@ -286,10 +301,11 @@ void run_test_ramp_lock_onesided(void)
         s_mirror_on_off[1] = true;
         float target_c = 45.0f;
         uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
         for (int i = 0; i < 10; i++) {
             uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
             bool lock_ok = (lagging == 0);
-            step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
         }
         TEST_CHECK(segment_elapsed_s > 0, "an on/off zone (even with sensor_ok=false / no TC) never holds the "
                                           "ramp lock -- only the real heater zone's own state matters");
@@ -308,10 +324,11 @@ void run_test_ramp_lock_onesided(void)
             };
             float target_c = 45.0f;
             uint32_t segment_elapsed_s = 0;
+            uint16_t segment_elapsed_rem_ms = 0;
             for (int i = 0; i < 10; i++) {
                 uint8_t lagging = lock_lagging_mask(zones, target_c, /*old_fabsf=*/false);
                 bool lock_ok = (lagging == 0);
-                step_schedule(&target_c, &segment_elapsed_s, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+                step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, 200.0f, 600.0f, 10.0f, lock_ok, /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
             }
             if (monitor_only) {
                 TEST_CHECK(segment_elapsed_s > 0, "a cold monitor-only zone must NOT hold the ramp lock");
@@ -319,5 +336,19 @@ void run_test_ramp_lock_onesided(void)
                 TEST_CHECK(segment_elapsed_s == 0, "the same cold zone as a HEATER holds the lock (control case)");
             }
         }
+    }
+    /* --- sub-second dt carries instead of rounding away ------------------
+     * Five 0.4 s ticks must add exactly 2 s (the old per-tick (dt+0.5f)
+     * rounding added 0 each time and froze segment_elapsed_s forever). */
+    {
+        float target_c = 45.0f;
+        uint32_t segment_elapsed_s = 0;
+        uint16_t segment_elapsed_rem_ms = 0;
+        for (int i = 0; i < 5; i++) {
+            step_schedule(&target_c, &segment_elapsed_s, &segment_elapsed_rem_ms, 200.0f, 600.0f, 0.4f, /*lock_ok=*/true,
+                          /*stretched_this_tick=*/false, /*stretch_rate_c_per_s=*/-1.0f);
+        }
+        TEST_CHECK(segment_elapsed_s == 2, "five 0.4 s ticks accumulate exactly 2 s (remainder carries)");
+        TEST_CHECK(segment_elapsed_rem_ms == 0, "no residual after a whole number of seconds");
     }
 }

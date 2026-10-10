@@ -100,6 +100,14 @@ def strip_comments(text: str) -> str:
     return text
 
 
+# The mirror passes its pointer parameters straight through where production
+# takes the address of the s_exec fields; fold the mirror's call to
+# production's spelling.
+MIRROR_CALL_FOLD = (
+    re.compile(r"exec_elapsed_accumulate\(segment_elapsed_s, segment_elapsed_rem_ms,"),
+    "exec_elapsed_accumulate(&s_exec.segment_elapsed_s, &s_exec.segment_elapsed_rem_ms,",
+)
+
 FOLDS = [
     (re.compile(r"\bs_exec\.segment_elapsed_s\b"), "SEG_ELAPSED"),
     (re.compile(r"\*segment_elapsed_s\b"), "SEG_ELAPSED"),
@@ -178,6 +186,7 @@ def normalize_mirror(func_body: str) -> list:
         elif line == "}" and lines and lines[-1] == "GATE_NOT_OK {":
             lines.pop()
             continue
+        line = MIRROR_CALL_FOLD[0].sub(MIRROR_CALL_FOLD[1], line)
         for pattern, repl in FOLDS:
             line = pattern.sub(repl, line)
         line = re.sub(r"\s+", " ", line)
@@ -195,6 +204,27 @@ def normalize_mirror(func_body: str) -> list:
             lines[i] = line[len("float "):]
             break
     return lines
+
+
+ACCUM_RE = re.compile(
+    r"static void exec_elapsed_accumulate\([^)]*\)\s*\{(.*?)\n\}\n",
+    re.DOTALL,
+)
+
+
+def check_accumulate_helper(prod_text: str, mirror_text: str):
+    """exec_elapsed_accumulate() is static in production, so the mirror carries
+    a copy; its body must match production's (comments/whitespace aside)."""
+    bodies = []
+    for label, text in (("production", prod_text), ("mirror", mirror_text)):
+        matches = ACCUM_RE.findall(text)
+        if len(matches) != 1:
+            return f"{label}: exec_elapsed_accumulate() not found exactly once ({len(matches)})"
+        bodies.append(re.sub(r"\s+", " ", strip_comments(matches[0])).strip())
+    if bodies[0] != bodies[1]:
+        return ("exec_elapsed_accumulate() body differs.\n    production: "
+                f"{bodies[0]}\n    mirror:     {bodies[1]}")
+    return None
 
 
 def main() -> int:
@@ -231,6 +261,12 @@ def main() -> int:
         print("RAMP-STEPPING GATE MIRROR DRIFT CHECK: FAILED (extraction)")
         print(f"  Could not locate step_schedule() in {MIRROR_REL} -- update this check's")
         print("  MIRROR_SIG_RE rather than letting it pass vacuously.")
+        return 1
+
+    helper_err = check_accumulate_helper(prod_text, mirror_text)
+    if helper_err:
+        print("RAMP-STEPPING GATE MIRROR DRIFT CHECK: FAILED (exec_elapsed_accumulate)")
+        print(f"  {helper_err}")
         return 1
 
     prod_lines = normalize_prod(prod_fragment)
