@@ -36,6 +36,8 @@ A2b/A3b.)
 
 ### A-LOW-1: the new scenario leaks link_task state into every later scenario
 
+**Fixed in 2695eac4a (fwlow16).** State restored and checked.
+
 `scenario_heat_probe_current_floor` sets `s_context_lock = (SemaphoreHandle_t)1` and publishes a
 fresh idle context. It restores only `g_any_current_present`. `reset_link_state()` resets neither
 `s_context_lock` nor `s_context_published`/`s_context_snapshot`.
@@ -56,6 +58,8 @@ the lock once in shared setup, which also fixes A-LOW-2.
 
 ### A-LOW-2 (existing, found while checking the leak): the push_context "malformed never overwrites" check proves nothing
 
+**Fixed in 2695eac4a (fwlow16).** Lock set; mutation A2b now CAUGHT.
+
 In `scenario_push_context`, `s_context_lock` is still NULL (task init is not run). So
 `link_task_publish_context()` returns early and `link_task_get_context_snapshot()` always returns
 false. `had == have == false`, and the check `had == have && (!had || ...)` passes for any code.
@@ -64,6 +68,8 @@ the scenario) was CAUGHT. The new scenario's own comment names the cause ("task 
 here; the gate needs a lock"), but the fix was applied only to the new scenario.
 
 ### A-INFO-1: LINK_PROTOCOL.md CT-order paragraph overstates one point and understates another
+
+**Fixed in 2695eac4a (fwlow16).** Wording corrected.
 
 - Overstated: "on a CT chain marked fitted but not yet calibrated the op-amp offset floor reads
   as current present". With `k_ct_v_per_a <= 0`, `current_presence_is_flowing()` uses
@@ -85,6 +91,8 @@ here; the gate needs a lock"), but the fix was applied only to the new scenario.
 
 ### B-LOW-1: "(did not run)" also labels a test that timed out
 
+**Fixed in 2695eac4a (fwlow16).** Timeout labelled distinctly (exit 124).
+
 `build_host_tests.ps1` now uses `-1` to mean "missing from `$exitCodes`" and prints
 `(did not run)`. But `Invoke-HostTestProcess` (`tools/host_test_exec.ps1:37`) also returns `-1` on
 a per-executable timeout. A hung executable, which did run, is therefore summarised as
@@ -102,6 +110,8 @@ a static expected count. Not harmful. The message reads as if the inequality wer
 check.
 
 ### B-INFO-2: the nested-run guard is correct but untested
+
+**Fixed in 2695eac4a (fwlow16).** Nested-run test added in test_discrete_task_loop.c.
 
 The guard sits after the no-task check and before `setjmp`. `s_running` is cleared on both the
 normal return and the longjmp return. B2 confirms it fires and B3 shows what it prevents, a stack
