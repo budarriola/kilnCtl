@@ -58,7 +58,7 @@
 #                 and is therefore MISSED with a note, not CAUGHT)
 # -RequireAssertion: for -Command runs (e.g. a node/JS test script) only; combining it with -ExpectPattern or a preset is refused.
 # CAUGHT requires a case-sensitive assertion-failure line (AssertionError / ERR_ASSERTION / assertion failed /
-# "FAIL:"), not merely a nonzero exit -- a mutation that makes the script crash (syntax error, ReferenceError)
+# "FAIL:", or the KilnFW host-test form "  FAIL file:line: msg"), not merely a nonzero exit -- a mutation that makes the script crash (syntax error, ReferenceError)
 # exits nonzero but proves nothing about the assertions.
 #
 # COMMAND: exactly one of -Preset or -Command. -Command is PowerShell text run
@@ -373,13 +373,15 @@ public static class NegJob {
 "@
 }
 
+$script:SpareNames = @('mspdbsrv.exe', 'vctip.exe', 'conhost.exe', 'ccache.exe')
 function Stop-CopyProcesses([string]$copy) {
     # Belt and braces after the job kill: anything whose command line names the copy.
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
                 $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($copy, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
-        foreach ($l in $left) { & taskkill.exe /T /F /PID $l.ProcessId 2>&1 | Out-Null }
+        foreach ($l in $left) { if ($script:SpareNames -contains "$($l.Name)".ToLowerInvariant()) { continue }; & taskkill.exe /F /PID $l.ProcessId 2>&1 | Out-Null }
+        $left = @($left | Where-Object { $script:SpareNames -notcontains "$($_.Name)".ToLowerInvariant() })
         if ($left.Count -gt 0) { Start-Sleep -Milliseconds 500 }
     } while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
 }
@@ -387,17 +389,27 @@ function Stop-CopyProcesses([string]$copy) {
 # Orphan tracking: host_build_worker.ps1 / kilnctl_host_tests_*.exe detach from the cmd tree and keep the
 # copy's directories busy. While the command runs we remember every descendant (pid + creation time); after
 # the run (any exit path) the ones still alive are killed. Shared per-user daemons are spared.
-$script:SpareNames = @('mspdbsrv.exe', 'vctip.exe', 'conhost.exe', 'ccache.exe')
+# A real child is never older than its parent. Win32_Process.ParentProcessId is not updated when the parent
+# exits and PIDs get reused, so a stale parent PID can make an unrelated long-lived process look like a child.
+function Test-ChildAdoptable($child, $parentCreated) {
+    if ($null -eq $child.CreationDate -or $null -eq $parentCreated) { return $false }
+    return ([datetime]$child.CreationDate -ge [datetime]$parentCreated)
+}
 function Add-Descendants([int]$rootId, $tracked) {
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $kids = @{}
     foreach ($q in $all) { if (-not $kids.ContainsKey([int]$q.ParentProcessId)) { $kids[[int]$q.ParentProcessId] = @() }; $kids[[int]$q.ParentProcessId] += $q }
     $stack = New-Object System.Collections.Stack
+    $byId = @{}
+    foreach ($q in $all) { $byId[[int]$q.ProcessId] = $q }
+    if (-not $byId.ContainsKey($rootId)) { return }
     $stack.Push($rootId)
     while ($stack.Count -gt 0) {
         $id = [int]$stack.Pop()
+        $parentCreated = $byId[$id].CreationDate
         foreach ($c in @($kids[$id])) {
             if (-not $c -or $c.ProcessId -eq $PID) { continue }
+            if (-not (Test-ChildAdoptable $c $parentCreated)) { continue }
             if (-not $tracked.ContainsKey([int]$c.ProcessId)) { $tracked[[int]$c.ProcessId] = "$($c.CreationDate)|$($c.Name)" }
             $stack.Push([int]$c.ProcessId)
         }
@@ -408,7 +420,7 @@ function Stop-Tracked($tracked) {
         $cp, $nm = "$($tracked[$k])".Split('|', 2)
         if ($script:SpareNames -contains $nm.ToLowerInvariant()) { continue }
         $cur = Get-CimInstance Win32_Process -Filter "ProcessId = $k" -ErrorAction SilentlyContinue
-        if ($cur -and "$($cur.CreationDate)" -eq $cp) { & taskkill.exe /T /F /PID $k 2>&1 | Out-Null }
+        if ($cur -and "$($cur.CreationDate)" -eq $cp) { & taskkill.exe /F /PID $k 2>&1 | Out-Null }
     }
 }
 
@@ -675,7 +687,7 @@ switch ($Preset) {
 if ($RequireAssertion -and ($ExpectPattern -or $presetExpect)) { Finish 2 "-RequireAssertion cannot be combined with -ExpectPattern or a -Preset (it would be silently ignored); drop one" }
 if (-not $ExpectPattern) {
     if ($presetExpect) { $ExpectPattern = $presetExpect }
-    elseif ($RequireAssertion) { $ExpectPattern = '(?-i)(AssertionError|ERR_ASSERTION|assertion failed|\bFAIL:)' }
+    elseif ($RequireAssertion) { $ExpectPattern = '(?-i)(AssertionError|ERR_ASSERTION|assertion failed|\bFAIL:|(?m)^\s+FAIL \S+:\d+:)' }
 }
 if ($Command -and $Command -notmatch '\{OUT\}') {
     Write-Line "negtest: note: -Command has no {OUT}; every run still starts from a pristine copy (reset + clean -fdx), so no build output is reused" DarkGray

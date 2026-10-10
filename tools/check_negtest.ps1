@@ -255,6 +255,23 @@ exit 0
     $mutNotOk = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'not ok 1 - x'; Write-Host 'fail: x'; throw 'boom'")
     $r = Run-Neg "reqassert_notok" (@('-Command', $testCmd, '-RequireAssertion') + $mutNotOk)
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_notok: 'not ok' and lowercase 'fail:' must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    # B-MEDIUM-1: a process created BEFORE its reported parent (stale PPID / PID reuse) is never adopted.
+    $srcN = Get-Content -LiteralPath $script:ScriptUnderTest -Raw
+    $mA = [regex]::Match($srcN, '(?s)function Test-ChildAdoptable.*?\r?\n\}')
+    Assert-True $mA.Success "Test-ChildAdoptable not found in negtest.ps1"
+    . ([scriptblock]::Create($mA.Value))
+    $tParent = [datetime]'2026-01-01T10:00:00'
+    Assert-True (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(5) }) $tParent) "adopt: a child created after its parent must be adopted"
+    Assert-True (-not (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(-3600) }) $tParent)) "adopt: a process older than its reported parent must NOT be adopted"
+    Assert-True ($srcN -match 'Test-ChildAdoptable \$c \$parentCreated') "adopt: Add-Descendants must call Test-ChildAdoptable"
+    Assert-True ($srcN -notmatch 'taskkill\.exe /T /F /PID \$k') "Stop-Tracked must not use taskkill /T"
+    # INFO: KilnFW host-test failure format is an assertion under -RequireAssertion; a build failure is not.
+    $mutKiln = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host '  FAIL calc.c:42: expected 3'; exit 1")
+    $r = Run-Neg "reqassert_kilnfw" (@('-Command', $testCmd, '-RequireAssertion') + $mutKiln)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "reqassert_kilnfw: '  FAIL file:line:' must count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $mutBuild = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'BUILD FAILURES (1)'; Write-Host 'calc.c:42: error: expected'; exit 1")
+    $r = Run-Neg "reqassert_buildfail" (@('-Command', $testCmd, '-RequireAssertion') + $mutBuild)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_buildfail: a build failure must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
     # Extra: a detached grandchild (not in the copy's command line, outliving its parent) must be killed
     # when the run ends, on the normal-exit path (the job object is disarmed there on purpose).
     $tok = 'negorph' + [guid]::NewGuid().ToString('N').Substring(0, 10)

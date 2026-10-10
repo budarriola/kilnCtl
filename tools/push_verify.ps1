@@ -111,7 +111,10 @@ try {
         $fetchMsg = "failed (exit $($fetchProc.ExitCode))"
     } else { $fetchOk = $true }
 } finally {
-    foreach ($tf in @($outTmp, $errTmp)) { try { [IO.File]::Delete($tf) } catch {} }
+    foreach ($tf in @($outTmp, $errTmp)) {
+        # a killed fetch child can still hold the file for a moment: best-effort retry
+        for ($i = 0; $i -lt 5; $i++) { try { [IO.File]::Delete($tf); break } catch { Start-Sleep -Milliseconds 300 } }
+    }
 }
 if (-not $fetchOk) {
     Write-Host "VERDICT: UNKNOWN -- git fetch $remote $fetchMsg; cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
