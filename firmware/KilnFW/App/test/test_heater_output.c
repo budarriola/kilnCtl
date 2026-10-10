@@ -471,4 +471,17 @@ void run_test_heater_output(void)
         r = heater_output_duty(&s, &cfg, INFINITY, 0);
         TEST_CHECK(r == true && s.on_ms_this_window == 60000, "+inf duty clamps to a full window");
     }
+    /* (float)NaN * window cast to an integer is undefined; host and target may disagree, so also pin the
+     * positive-form clamp in the source. */
+    {
+        static const char *const cands[] = {"../drivers/control/heater_output.c", "App/drivers/control/heater_output.c",
+                                            "firmware/KilnFW/App/drivers/control/heater_output.c"};
+        char *text = test_read_source_anchored(__FILE__, "../drivers/control/heater_output.c", cands, 3);
+        TEST_CHECK(text != NULL, "could locate heater_output.c");
+        if (text) {
+            TEST_CHECK(strstr(text, "if (!(duty > 0.0f)) {") != NULL,
+                       "MUST GO RED if the NaN-safe positive-form duty clamp is reverted");
+            free(text);
+        }
+    }
 }

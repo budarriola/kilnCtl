@@ -12876,4 +12876,17 @@ static void test_zone_off_pending_retry(void)
     TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed fallback OFF must be pending too");
     s_exec.io = NULL;
     memset(&s_exec, 0, sizeof(s_exec));
+
+    /* The tick loop must actually call the retry, in the not-RUNNING branch. */
+    char *src = profile_executor_c_read_source();
+    TEST_CHECK(src != NULL, "could locate profile_executor.c");
+    if (src) {
+        char *code = pe_strip_c_comments(src);
+        free(src);
+        const char *retry = code ? strstr(code, "zone_off_pending_retry();") : NULL;
+        const char *fd = code ? strstr(code, "profile_executor_aux_fault_drop(pre_lock_pico_tripped);") : NULL;
+        TEST_CHECK(retry != NULL && fd != NULL && retry < fd,
+                   "MUST GO RED if the tick loop stops retrying failed zone OFF writes in non-RUNNING states");
+        free(code);
+    }
 }
