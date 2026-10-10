@@ -20,7 +20,7 @@ One MED finding is a gap that predates this refactor and that the refactor keeps
 
 ## Findings
 
-### MED-1 (FIXED in 9dfc5167): a stale ESP version survives the Pico's first PUSH_CONTEXT (pre-existing, kept by e6a0ff34)
+### MED-1 (FIXED in 6f4fa7d0): a stale ESP version survives the Pico's first PUSH_CONTEXT (pre-existing, kept by e6a0ff34)
 
 `firmware/SaftyFW/src/tasks/link_staging.c:130-136,166`. `link_staging_new_esp_session()` returns false when
 `prev_known` is false (the first PUSH_CONTEXT after a Pico boot). `link_staging_apply_context_session()` then
@@ -47,7 +47,7 @@ not cover this case.
 Suggested fix: on the first context (`!prev_known`), also zero `peer->version` when
 `peer->known && peer->boot_id != boot_id`. This is independent of the staging reset.
 
-### LOW-1 (FIXED in 9dfc5167, branch removed): the boot-clear branch re-announces without a bound and bypasses the new budget
+### LOW-1 (FIXED in 6f4fa7d0, branch removed): the boot-clear branch re-announces without a bound and bypasses the new budget
 
 `firmware/KilnFW/App/drivers/safety/safety_link_frames.c:1143-1150`. During the 30 s boot-clean window
 (`SAFETY_LINK_BOOT_CLEAN_WINDOW_MS`, `:1002`), if a stale S6a is latched, `fault_sources == 0`, the peer is
@@ -66,7 +66,7 @@ It could be dropped in favour of the bounded helper. Alternatively, keep it as a
 override for the boot-clear case and say so in a comment, because today the two mechanisms do not reference
 each other.
 
-### LOW-2 (FIXED in 9dfc5167, one ESP_LOGW): once the budget is spent, nothing recovers until a reboot or link-down (accepted degradation, undocumented)
+### LOW-2 (FIXED in 6f4fa7d0, one ESP_LOGW): once the budget is spent, nothing recovers until a reboot or link-down (accepted degradation, undocumented)
 
 `safety_link_frames.c:315-317`. The three re-announces fire about 0 s, 2-4 s and 4-8 s after the first
 30-byte DIAG. The GAP equals the DIAG period, so with jitter a DIAG at 1999 ms is skipped and the next one at
@@ -88,7 +88,7 @@ If that happens, the Pico stays at version 0 for the rest of its boot. Degradati
 This is acceptable, but no log line says "re-announce budget exhausted, Pico still on 30-byte DIAG", so the
 degraded state is invisible. Suggestion: one `ESP_LOGW` when the count reaches MAX, and/or a stats counter.
 
-### LOW-3 (FIXED in 9dfc5167, documented): the uptime-regression reboot path spends one slot at the instant of the reboot
+### LOW-3 (FIXED in 6f4fa7d0, documented): the uptime-regression reboot path spends one slot at the instant of the reboot
 
 `safety_link_frames.c:1064` calls `safety_note_pico_reboot_locked()`, which sets count to 0 and
 `reannounce_pending`. Then `:1084` sees the new boot's 30-byte DIAG and takes slot 1 at the same moment, so
