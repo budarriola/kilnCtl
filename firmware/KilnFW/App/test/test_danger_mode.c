@@ -77,6 +77,17 @@ bool profile_executor_get_active_id(uint8_t *out_id)
     }
     return s_firing_active;
 }
+static bool s_heat_profile_claim;
+static bool s_heat_autotune_claim;
+void relay_authority_heat_run_active(bool *profile, bool *autotune)
+{
+    if (profile) {
+        *profile = s_heat_profile_claim;
+    }
+    if (autotune) {
+        *autotune = s_heat_autotune_claim;
+    }
+}
 bool stack_margin_register(const char *name, void *slot, uint32_t bytes)
 {
     (void)name;
@@ -97,6 +108,8 @@ static void reset_counters(void)
     s_relays_off_result = ESP_OK;
     s_enable_result = ESP_OK;
     s_firing_active = false;
+    s_heat_profile_claim = false;
+    s_heat_autotune_claim = false;
 }
 
 /* Run exactly one expiry-check iteration of the real task body. */
@@ -165,10 +178,18 @@ static void test_lifecycle(void)
     CHK(danger_mode_set_heat_enable_request(false));
     CHK(!danger_mode_get_heat_requested());
 
-    /* re-entry while open: stays open, full window. heat_requested after re-entry is NOT asserted: see HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md F6-1 */
+    /* re-entry while open: stays open, full window. F6-1: the re-entry clears heat_requested, so it
+     * must also send the matching release (display and wire agree). */
     CHK(danger_mode_set_heat_enable_request(true));
+    reset_counters();
     CHK(danger_mode_request_start());
     CHK(danger_mode_active());
+    CHK(!danger_mode_get_heat_requested());
+    CHK(s_enable_calls == 1 && s_enable_last == false);
+    /* re-entry with no outstanding request sends nothing */
+    reset_counters();
+    CHK(danger_mode_request_start());
+    CHK(s_enable_calls == 0);
 
     /* active() reads false at the deadline but does NOT self-close */
     s_tick += DANGER_MODE_WINDOW_MS;
@@ -261,12 +282,57 @@ static void test_lock_timeout(void)
     danger_mode_stop("cleanup");
 }
 
+/* LCD review R1/R2/R3 */
+static void test_heat_claim_exclusion(void)
+{
+    TEST_SECTION("danger_mode_request_start() claim-first recheck against profile/autotune heat claims; fail-closed gate");
+    reset_counters();
+    s_tick = 500000;
+    danger_mode_stop("test"); /* window closed */
+    CHK(!danger_mode_blocks_start());
+
+    /* R1: an autotune (or profile) heat claim refuses a fresh open and leaves the window CLOSED */
+    s_heat_autotune_claim = true;
+    CHK(!danger_mode_request_start());
+    CHK(!s_dm.window_open);
+    CHK(!danger_mode_blocks_start());
+    CHK(s_enable_calls == 0 && s_relays_off_calls == 0); /* must not cut the claimant's run */
+    s_heat_autotune_claim = false;
+    s_heat_profile_claim = true; /* R2: PAUSED/RUNNING profile claim, executor peek reads idle */
+    CHK(!danger_mode_request_start());
+    CHK(!s_dm.window_open);
+    CHK(s_enable_calls == 0 && s_relays_off_calls == 0);
+    s_heat_profile_claim = false;
+
+    /* with no claim it opens, and blocks_start reports it */
+    CHK(danger_mode_request_start());
+    CHK(danger_mode_blocks_start());
+    /* a claim appearing while already open refuses the re-entry but keeps the open window and flag */
+    CHK(danger_mode_set_heat_enable_request(true));
+    reset_counters();
+    s_heat_autotune_claim = true;
+    CHK(!danger_mode_request_start());
+    CHK(s_dm.window_open && danger_mode_get_heat_requested());
+    s_heat_autotune_claim = false;
+
+    /* R3: expired reads clear; lock timeout reads BLOCKED while danger_mode_active() still reads inactive */
+    s_tick += DANGER_MODE_WINDOW_MS;
+    CHK(!danger_mode_blocks_start());
+    danger_mode_stop("test");
+    g_test_stub_semaphore_take_default = 0;
+    CHK(danger_mode_blocks_start());
+    CHK(!danger_mode_active());
+    g_test_stub_semaphore_take_default = 1;
+    CHK(!danger_mode_blocks_start());
+}
+
 int main(void)
 {
     test_before_init();
     test_lifecycle();
     test_clock_wrap();
     test_lock_timeout();
+    test_heat_claim_exclusion();
     if (g_test_failures) {
         printf("test_danger_mode: %d FAILED\n", g_test_failures);
         return 1;

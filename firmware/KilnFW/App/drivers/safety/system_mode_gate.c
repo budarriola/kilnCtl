@@ -188,9 +188,8 @@ bool system_mode_gate_check(sys_action_t action, const sys_mode_snapshot_t *snap
             }
             return true;
         }
-        /* LCD review N2: danger mode open -> no firing starts, from ANY transport (was a
-         * web-handler-only check). Profile start only; autotune's web route never refused. */
-        if (action == SYS_ACTION_START_PROFILE && snap->danger_mode_active) {
+        /* LCD review N2/R1: danger mode open -> no firing OR autotune starts, from ANY transport. */
+        if (snap->danger_mode_active) {
             if (reason != NULL && reason_cap > 0) {
                 snprintf(reason, reason_cap,
                          "refused -- danger mode is active (diagnostics page); stop it first");

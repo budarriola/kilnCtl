@@ -255,9 +255,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * while backup_import.c has one in flight, same choke point as the
          * recovery-mode check just above. */
         mode_snap.restore_in_flight = backup_import_restore_in_flight();
-        mode_snap.danger_mode_active = danger_mode_active(); /* LCD review N2 */
+        mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review N2; R3: fail closed */
         if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, err_msg, err_cap)) {
-            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode or restore)",
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode, restore or danger mode)",
                      (unsigned)profile_id);
             return false;
         }
@@ -1393,6 +1393,23 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         late_snap.restore_in_flight = true;
         (void)system_mode_gate_check(SYS_ACTION_START_PROFILE, &late_snap, err_msg, err_cap);
         ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    /* Danger mode, second look (LCD review R2): the early gate read precedes the baseline reads.
+     * danger_mode_request_start() opens its window and THEN reads the heat claim published above;
+     * this side publishes the claim and THEN reads the window (fail closed) -- at least one refuses,
+     * so a firing never commits inside a danger window. */
+    if (danger_mode_blocks_start()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        xSemaphoreGive(s_exec.lock);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.danger_mode_active = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_PROFILE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: danger mode opened meanwhile",
                  (unsigned)profile_id);
         return false;
     }

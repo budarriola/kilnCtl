@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "danger_mode.h"
 #include "dashboard_json.h"
 #include "http_form.h"
 #include "profile_executor.h"
@@ -242,8 +243,9 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     sys_mode_snapshot_t mode_snap;
     memset(&mode_snap, 0, sizeof(mode_snap));
     mode_snap.recovery_mode = facts.recovery_mode;
+    mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review R1/R3 */
     if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, recovery_err, sizeof(recovery_err))) {
-        ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode)");
+        ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode or danger mode)");
         return autotune_send_gate_refusal(req, READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
     }
 

@@ -2,6 +2,7 @@
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
                                     * A4 review follow-up A */
 #include "heat_enable.h"
+#include "danger_mode.h" /* danger_mode_blocks_start(): LCD review R1/R2 */
 
 #include "esp_attr.h" /* EXT_RAM_BSS_ATTR -- see s_at's definition below */
 
@@ -1030,6 +1031,7 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
          * profile_executor_run()'s identical check -- a backup restore's
          * commit pass writes the same zone state an autotune start reads. */
         mode_snap.restore_in_flight = backup_import_restore_in_flight();
+        mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review R1/R3 */
         if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, err_msg, err_cap)) {
             ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused by the system mode gate (recovery mode or restore)",
                      (unsigned)zone_index);
@@ -1311,6 +1313,21 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
         late_snap.restore_in_flight = true;
         (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
         ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: a backup restore started meanwhile",
+                 (unsigned)zone_index);
+        return false;
+    }
+    /* Danger mode, second look (LCD review R1/R2) -- same pairing as profile_executor_run()'s identical
+     * check: danger_mode_request_start() opens its window and then reads the heat claim published
+     * above; this side publishes the claim and then reads the window (fail closed). */
+    if (danger_mode_blocks_start()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, zone_bit);
+        xSemaphoreGive(s_at.lock);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.danger_mode_active = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(AT_TAG, "autotune begin_run(zone %u) refused at commit: danger mode opened meanwhile",
                  (unsigned)zone_index);
         return false;
     }

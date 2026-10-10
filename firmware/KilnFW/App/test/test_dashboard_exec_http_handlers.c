@@ -58,6 +58,7 @@ bool run_state_acknowledge(void) { f_ack_calls++; return f_ack_result; }
 
 static bool f_danger;
 bool danger_mode_active(void) { return f_danger; }
+bool danger_mode_blocks_start(void) { return f_danger; }
 bool watchdog_cfg_panic_disabled(void) { return false; }
 
 /* ---- transport ---- */

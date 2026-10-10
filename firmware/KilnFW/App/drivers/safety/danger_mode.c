@@ -11,6 +11,7 @@
 #include "kiln_io_owner.h"
 #include "profile_executor_state.h"
 #include "profile_executor.h"
+#include "relay_authority.h" /* relay_authority_heat_run_active(): R1/R2 claim-first recheck */
 #include "stack_margin.h"
 #include "startup_faults.h"
 #include "uart_task_ids.h" /* SAFETY_FLAG_RELAY/SAFETY_FLAG_ENABLED */
@@ -85,10 +86,41 @@ bool danger_mode_request_start(void)
         return false;
     }
     bool already_open = s_dm.window_open;
+    bool was_heat_requested = s_dm.heat_requested;
     s_dm.window_open = true;
     s_dm.deadline_ms = now_ms() + DANGER_MODE_WINDOW_MS;
     s_dm.heat_requested = false;
     xSemaphoreGive(s_dm.lock);
+
+    /* Claim-first, then recheck (LCD review R1/R2): the window is published ABOVE, and only now is
+     * the heat claim (profile OR autotune, any state incl. PAUSED) read. profile_executor_run()/
+     * autotune_begin_run_locked() publish their heat claim and THEN read danger_mode_blocks_start()
+     * -- so at least one side sees the other: either this refuses, or the run's commit does. The
+     * executor-state peek at the top of this function stays as the cheap early refusal. */
+    bool heat_profile = false, heat_autotune = false;
+    relay_authority_heat_run_active(&heat_profile, &heat_autotune);
+    if (heat_profile || heat_autotune) {
+        if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (already_open) {
+                s_dm.heat_requested = was_heat_requested; /* nothing changed */
+            } else {
+                /* Deliberately NOT danger_mode_stop(): its enable=false release / all-relays-off
+                 * would cut the run that just claimed heat. The window was open for microseconds
+                 * and never had a request outstanding. */
+                s_dm.window_open = false;
+            }
+            xSemaphoreGive(s_dm.lock);
+        }
+        ESP_LOGW(TAG, "danger mode refused -- a %s run holds the heat claim",
+                 heat_autotune ? "autotune" : "firing");
+        return false;
+    }
+    if (already_open && was_heat_requested) {
+        /* F6-1: re-entry cleared heat_requested above; send the matching release so the Pico's
+         * request and the tile agree (display and wire never disagree). */
+        (void)safety_link_request_enable(s_dm.safety, false);
+        ESP_LOGW(TAG, "danger mode re-entered -- heat-enable request released to match the cleared flag");
+    }
 
     /* Does NOT request heat-enable on its own any more (owner request
      * 2026-08-27) -- entering this section only unlocks the ESP's own
@@ -215,6 +247,21 @@ bool danger_mode_active(void)
         ESP_LOGW(TAG, "danger_mode_active: internal lock timeout, reporting inactive");
     }
     return active;
+}
+
+bool danger_mode_blocks_start(void)
+{
+    if (!s_dm.initialized || !s_dm.lock) {
+        return false; /* no window can exist */
+    }
+    bool blocks = true; /* unknown (lock timeout) reads as blocked */
+    if (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        blocks = s_dm.window_open && (int32_t)(s_dm.deadline_ms - now_ms()) > 0;
+        xSemaphoreGive(s_dm.lock);
+    } else {
+        ESP_LOGW(TAG, "danger_mode_blocks_start: internal lock timeout, refusing the start");
+    }
+    return blocks;
 }
 
 uint32_t danger_mode_remaining_ms(void)

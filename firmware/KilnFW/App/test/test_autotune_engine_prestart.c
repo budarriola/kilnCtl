@@ -1111,6 +1111,15 @@ bool zones_config_changed_since(uint32_t gen_snapshot)
     return s_test_zones_gen_bump_after_heat_claim && s_heat_zone_claim_begin_calls > 0;
 }
 
+// LCD review R1/R2: danger_mode_blocks_start() fake -- closed, open from the start (early gate), or
+// opening only after the heat claim is published (commit recheck).
+static bool s_test_danger_mode_active = false;
+static bool s_test_danger_opens_after_heat_claim = false;
+bool danger_mode_blocks_start(void)
+{
+    return s_test_danger_mode_active || (s_test_danger_opens_after_heat_claim && s_heat_zone_claim_begin_calls > 0);
+}
+
 // Factory reset in flight: see test_profile_executor_prestart.c's identical fake.
 static bool s_test_reset_in_flight = false;
 bool relay_authority_reset_in_flight(void)
@@ -1163,6 +1172,15 @@ static void test_begin_run_refused_by_restore_in_flight(void)
     begin_run_and_expect_gate_refusal("a backup restore in flight refuses an autotune start",
                                        "backup restore is in progress");
     s_test_restore_in_flight = false;
+}
+
+static void test_begin_run_refused_by_danger_mode(void)
+{
+    TEST_SECTION("autotune_begin_run_locked() is refused by the system mode gate -- danger mode active (LCD review R1)");
+    reset_readiness_facts_to_ready();
+    s_test_danger_mode_active = true;
+    begin_run_and_expect_gate_refusal("an open danger window refuses an autotune start", "danger mode is active");
+    s_test_danger_mode_active = false;
 }
 
 static void test_begin_run_refused_by_readiness_safety_trip(void)
@@ -3559,6 +3577,39 @@ static void test_run_refuses_when_factory_reset_in_flight(void)
     TEST_CHECK(strstr(errbuf, "factory reset in progress") != NULL, "the refusal names the factory reset");
     TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
     TEST_CHECK(s_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
+    TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
+}
+// LCD review R2: danger mode opening after the early gate refuses at commit and releases claims.
+static void test_run_refuses_when_danger_mode_opens_at_commit(void)
+{
+    TEST_SECTION("autotune_engine_run() -- danger mode opening after the early gate refuses at commit and releases claims");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 500.0f;
+    s_stub_ch0_ok = true;
+    s_test_sweep_active = false;
+    reset_owner_recorder();
+    s_heat_zone_claim_begin_calls = 0;
+    s_heat_zone_claim_end_calls = 0;
+    s_zone_claim_begin_calls = 0;
+    s_zone_claim_end_calls = 0;
+
+    s_test_danger_opens_after_heat_claim = true;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 0.5f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_test_danger_opens_after_heat_claim = false;
+    TEST_CHECK(!ok, "danger mode opening after the early gate must refuse the autotune start");
+    TEST_CHECK(strstr(errbuf, "danger mode is active") != NULL, "the refusal names danger mode");
+    TEST_CHECK(s_claim_calls == 0, "relay ownership is never grabbed");
+    TEST_CHECK(s_heat_zone_claim_begin_calls >= 1, "the heat claim was published before danger mode was re-read");
     TEST_CHECK(s_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
     TEST_CHECK(s_zone_claim_end_calls == 1, "the per-zone claim is released");
 }
@@ -7159,6 +7210,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_relay_refuses_before_start();
     test_begin_run_refused_by_readiness_recovery_mode();
     test_begin_run_refused_by_restore_in_flight();
+    test_begin_run_refused_by_danger_mode();
     test_begin_run_refused_by_readiness_safety_trip();
     test_begin_run_refused_by_readiness_crash_report();
     test_begin_run_refused_by_readiness_estop_unverified();
@@ -7273,6 +7325,7 @@ void run_test_autotune_engine_prestart(void)
     test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_when_zones_config_changes_during_start();
     test_run_refuses_when_factory_reset_in_flight();
+    test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_at_atomic_zone_claim_gate();
 
     // Heat-enable (K4) wiring -- each starts from its own

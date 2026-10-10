@@ -1547,9 +1547,15 @@ bool backup_import_restore_in_flight(void)
 }
 
 static bool s_test_danger_mode_active = false;
+/* LCD review R2: danger mode that opens AFTER the heat claim is published (the late recheck). */
+static bool s_test_danger_opens_after_heat_claim = false;
 bool danger_mode_active(void)
 {
     return s_test_danger_mode_active;
+}
+bool danger_mode_blocks_start(void)
+{
+    return s_test_danger_mode_active || (s_test_danger_opens_after_heat_claim && g_heat_zone_claim_begin_calls > 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -2969,6 +2975,42 @@ static void test_run_refuses_when_factory_reset_in_flight(void)
     TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
     TEST_CHECK(g_relay_claim_calls == 0, "relay ownership is never grabbed");
     TEST_CHECK(g_heat_zone_claim_begin_calls >= 1, "the heat claim was published before the mark was read");
+    TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
+    TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
+
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// LCD review R2: the early gate saw danger mode closed, danger_mode_request_start() then opened its window
+// before the RUNNING commit. The commit-side recheck (after the heat claim is published) must refuse and
+// release every claim.
+static void test_run_refuses_when_danger_mode_opens_at_commit(void)
+{
+    TEST_SECTION("profile_executor_run() -- danger mode opening after the early gate refuses at commit and releases claims");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+    s_test_profiles_http_get_out.zone_mask = 0x01;
+    s_test_profiles_http_get_out.segment_count = 1;
+    s_test_profiles_http_get_out.segments[0].seg_kind = PROFILE_SEG_KIND_ZONE_RAMP;
+    s_test_profiles_http_get_out.segments[0].target_c = 100.0f;
+    s_test_profiles_http_get_ok = true;
+    s_test_zones_config_valid = true;
+    s_test_sweep_active = false;
+    memset(g_stub_max_temp_c, 0, sizeof(g_stub_max_temp_c));
+    memset(g_stub_control_mode, 0, sizeof(g_stub_control_mode));
+    g_stub_max_temp_c[0] = 1300.0f;
+    g_stub_control_mode[0] = ZONE_CONTROL_MODE_PID;
+
+    s_test_danger_opens_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_danger_opens_after_heat_claim = false;
+    TEST_CHECK(!ok, "danger mode opening after the early gate must refuse the start at commit");
+    TEST_CHECK(strstr(err, "danger mode is active") != NULL, "the refusal names danger mode");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a refused start leaves the executor idle");
+    TEST_CHECK(g_heat_zone_claim_begin_calls >= 1, "the heat claim was published before danger mode was re-read");
     TEST_CHECK(g_heat_zone_claim_end_calls >= 1, "the published heat claim is released");
     TEST_CHECK(g_zone_claim_end_calls == 1, "the per-zone claim is released");
 
@@ -11985,6 +12027,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_when_update_claims_after_early_check();
     test_run_refuses_when_zones_config_changes_during_start();
     test_run_refuses_when_factory_reset_in_flight();
+    test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();
     test_guard_trip_releases_heat_enable();

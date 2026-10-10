@@ -120,6 +120,13 @@ bool danger_mode_touch(void);
 // be correct at read time.
 bool danger_mode_active(void);
 
+// Fail-CLOSED twin of danger_mode_active() for START gates (LCD review R3): true when the window is
+// open OR when that cannot be determined (internal lock timeout), so a start is refused rather than
+// let through while danger mode may be open. Reads false only when the module is not initialized
+// (no window can exist) or the lock was taken and the window is closed/expired. Display callers keep
+// using danger_mode_active().
+bool danger_mode_blocks_start(void);
+
 // 0 when the window is not open (or has already expired); otherwise the
 // real number of milliseconds left before it auto-closes-and-reboots, for
 // the diagnostics page's countdown. Computed from the same on-target

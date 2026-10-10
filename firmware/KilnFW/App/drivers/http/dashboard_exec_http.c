@@ -801,7 +801,7 @@ esp_err_t profile_exec_start_post_handler(httpd_req_t *req)
      * firing must never start into that state; see danger_mode_request_
      * start()'s own PROFILE_EXEC_RUNNING/PAUSED refusal for the symmetric
      * check in the other direction. */
-    if (danger_mode_active()) {
+    if (danger_mode_blocks_start()) {
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "refused -- danger mode is active (diagnostics page); stop it first");
         return ESP_OK;
