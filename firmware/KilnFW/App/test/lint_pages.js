@@ -188,7 +188,7 @@ for (const root of page_roots) for (const fullPath of walk_files(root).filter(p 
     /* Lead pairs: U+00E2 U+20AC (punctuation), U+00C2 + U+00A0..U+00BF
      * (degree sign, plus-minus, micro, nbsp...), U+00C3 + a Latin-1 or
      * cp1252-mapped continuation (accented letters). */
-    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac) + '|\\u00c2[\\u00a0-\\u00bf]|\\u00c3[\\u0080-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u2122]', 'g');
+    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac) + '|\\u00c2[\\u00a0-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u20ac\\u2122]|\\u00c3[\\u0080-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u20ac\\u2122]', 'g');
     let mm;
     while ((mm = mre.exec(src))) {
       bad++;

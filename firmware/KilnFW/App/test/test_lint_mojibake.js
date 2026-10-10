@@ -35,5 +35,12 @@ ok(r.code === 1 && /mojibake/.test(r.out), 'double-encoded e-acute (U+00C3 U+00A
 r = lint(page('Temp 20' + String.fromCharCode(0xb0) + 'C, caf' + String.fromCharCode(0xe9)));
 ok(r.code === 0 && !/mojibake/.test(r.out), 'a legitimate degree sign and e-acute pass clean');
 
+r = lint(page('A-grave ' + String.fromCharCode(0xc3, 0x20ac)));
+ok(r.code === 1 && /mojibake/.test(r.out), 'double-encoded A-grave (U+00C3 U+20AC) is flagged');
+r = lint(page('x ' + String.fromCharCode(0xc2, 0x20ac)));
+ok(r.code === 1 && /mojibake/.test(r.out), 'U+00C2 followed by a cp1252-mapped char (U+20AC) is flagged');
+r = lint(page('x ' + String.fromCharCode(0xc2, 0x2122)));
+ok(r.code === 1 && /mojibake/.test(r.out), 'U+00C2 followed by U+2122 is flagged');
+
 console.log(failed ? failed + ' FAILED' : 'all passed');
 process.exit(failed ? 1 : 0);
