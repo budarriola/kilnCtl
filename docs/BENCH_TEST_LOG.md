@@ -3210,3 +3210,24 @@ Task: restore zones config after the suspected untraced factory reset. Pre-wipe 
 - Meaning: S14 per-channel over-current baseline (measured normal CT current per channel, `config_params.c`); until set, S14 reports ch0..2 DORMANT. Accepts any value >= 0.
 - Settable from a measurement on the bench: yes in principle (zones-page "record normal current" button, M12), but the 4 W fixture draws far below the CT's useful range, so a value would not represent a real kiln. Recommendation: leave unset on the bench; record on the real kiln with CT calibrated. Not an owner decision, not "not applicable" (ct_installed applies). No param written.
 - Also still not_done: `estop_verified` (human-only, never automated).
+
+## 2026-10-09 bench campaign of origin/dev 0dd056c6 (benchdev worktree) -- BLOCKED by estop_verified
+
+Firmware under test: origin/dev `0dd056c6` plus TWO bench-local, uncommitted build workarounds (findings 1 and 2 in `docs/audits/BENCH_FINDINGS_2026-10-09.md`; dev tip does not build as committed). KilnFW ELF archive key `1a0ec1e32f2f`; SaftyFW identity `e6a0ff34_2026-10-10_04:59:54Z`. Backup taken first: `logs/backup_export/kilnctl_backup_20261010T050050Z.json`. Flash: Pico via `debug_program`, ESP via `flash_firmware(kiln_fw_root=worktree)`, verified running `app`, boot_guard cleared. No trip latched after the dual reflash (S6a did not appear).
+
+| Item | Result |
+|---|---|
+| build_saftyfw (worktree) | OK |
+| build_kilnfw dev tip as committed | FAIL x2 (findings 1, 2) |
+| flash both + verify | OK |
+| get_heap_status after boot | no crash report; internal min_free 22607 B (>= 8192 B floor) |
+| get_readiness | 19 ok, 2 not_done (safety_commissioned, estop_verified), 3 other |
+| check_task_liveness | RESULT ok, 31/41 alive, the rest by design |
+| get_stack_margin | 5 ok / 0 failed; lowest headroom wifi_prov_owner 1536/4096 B free, backlight_pwm 1152/3072 B, info_uart_bridge 1496/4096 B, safety_uart_bridge 1692/4096 B |
+| update_check (WP8 gate b) | state=failed http 404 "no release published"; internal min_free 22607 B before and after (no new low-water), free 37903 -> 37667 B; the 29556 B figure was NOT exercised (no release found) |
+| latency_soak 120 s | 250 samples, 0 errors, 0 clustered stalls; p95 <= 392 ms, max 600 ms (status) |
+| autotune_start zone 0 step 0.2 | refused by the E-stop interlock (correct); message truncated, finding 4 |
+| bench_test smoke / aux / web / lcd / static / ota / safety | NOT_RUN: run 20261010T053127Z_smoke_benchdev, "PREFLIGHT FAILED: readiness gate blocks: estop_verified", all 36 cases NOT_RUN; the same gate blocks every suite (runner.py preflight) |
+| ota_matrix, autotune, heat | not attempted: same gate (autotune and firing refused firmware-side) |
+
+Board left running dev firmware, safety link up and ARMED, no trip. The campaign is gated on a human running the E-stop verification (`estop_verify` was deliberately not called).
