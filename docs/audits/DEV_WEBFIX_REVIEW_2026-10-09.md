@@ -11,7 +11,7 @@ Line numbers refer to origin/dev at `e6a0ff34`. The CRITICAL and HIGH findings w
 
 ## Findings
 
-### CRITICAL-1: forgot handler uses `RESET_BODY_MAX` before it is defined and calls free() on a stack buffer
+### CRITICAL-1: forgot handler uses `RESET_BODY_MAX` before it is defined and calls free() on a stack buffer **FIXED in f8860c92**
 
 `firmware/KilnFW/App/drivers/http/auth_totp_http.c:351-352`, inside `forgot_post_handler()`. In this handler, `body` is `char body[FORGOT_BODY_MAX]` on the stack (line 346, 128 B). The read-failure path now does:
 
@@ -30,7 +30,7 @@ The hunk was clearly meant for the read loop in `reset_post_handler()` (CRITICAL
 
 Fix: delete these two lines from the forgot handler and add them to the reset handler's read-failure path.
 
-### HIGH-1: reset handler read-failure path leaks the 512 B buffer and leaves it unzeroed
+### HIGH-1: reset handler read-failure path leaks the 512 B buffer and leaves it unzeroed **FIXED in f8860c92**
 
 `auth_totp_http.c:471-475`. When `httpd_req_recv()` returns <=0 in `reset_post_handler()`, the handler records backoff, sends a 400 and returns. It never calls `totp_secure_zero(body, RESET_BODY_MAX)` and never calls `free(body)`.
 
@@ -86,7 +86,7 @@ Fix: either refuse a blank xzone (keep it required-when-present), or make blank 
 
 `tools/PcTools/src/kilnctrl/zones_http_client.py:~705`. A preset or call that carries `""` for a guard or xzone field used to get a 400. Now it is silently accepted as 0, meaning default or disabled. Same root cause as LOW-1, on the PC side.
 
-### LOW-3: reset body uses plain malloc, which is served from internal RAM
+### LOW-3: reset body uses plain malloc, which is served from internal RAM **FIXED in f8860c92**
 
 `auth_totp_http.c:465`. With `CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192`, `malloc(512)` comes from internal RAM.
 - The draw is transient, the route is rare, and `RESERVE_INTERNAL` is 32 KB, so the risk to the 8 KB floor is small on its own.
