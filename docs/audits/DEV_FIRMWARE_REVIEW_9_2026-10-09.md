@@ -95,3 +95,60 @@ Fix: move the heat-claim re-check into `zones_config_set_pid_no_save()` and its 
 - **Starter pairing.** Each starter takes its generation snapshot, then publishes its claim, then calls `changed_since`. Against POST's re-check under the lock, either the POST sees the claim or the starter sees the bump.
 - **Stack.** No commit in range adds a large stack local. The two arrays that used to be on the stack (coupled-plan observations and the login body) moved to the heap.
 - **Tests.** Most fixes come with targeted host tests. L1 and L2 now have interleaving host tests (negtest: all CAUGHT).
+
+## Fix review (`4e3282fb`, `b813b027`)
+
+Read-only review of the L1/L2 fixes at origin/dev `8a8cb663`. Paths are relative to `firmware/KilnFW/App/drivers/`. Line numbers are approximate (`~`) where the function is long.
+
+### Findings
+
+- **F1 (LOW) Accept can still race the run-end apply.** In `control/autotune_engine_guard.c` the `adaptive_tune_any_write_in_flight()` check (~:471) and Accept's own `zones_config_set_pid_checked()` (~:483) are separate steps. Nothing marks Accept as an in-flight writer that the adaptive plan honours.
+  - Scenario: Accept passes the check, then the executor task preempts it. `adaptive_tune_run_end()` plans (`control/adaptive_tune_model.c:50`) and captures the pre-Accept gains as the prior. The apply-time stale check (`:254-266`) still sees those same gains and passes. Accept's set_pid lands. Then the adaptive `set_model` (`:268`) and `set_pid` (`:270`) overwrite it. The commit (`:280-345`) compares live against what the adaptive apply wrote, finds a match, and records `has_applied` plus a revert snapshot of the pre-Accept gains. Accept's later `set_model` (`:569`) then overwrites the adaptive model. The zone ends up with adaptive gains and the Accept model, while Accept reports success.
+  - The window is a few instructions wide, but it is the L1 outcome.
+  - Fix: Accept sets an `external_write_in_flight` flag under `adaptive_tune_lock` before its check. The plan skips the zone while that flag is set, symmetric with `write_in_flight`.
+- **F2 (LOW) The revert snapshot outlives later writers.** `revert_available` is set only in `control/adaptive_tune.c:1195` (capture_revert). It is cleared only by a successful revert (`:1294`) and by the commit refusals (`adaptive_tune_model.c:294`). No external `zones_config_set_pid*` caller invalidates it, and neither does `adaptive_tune_clear_ki_baseline()` (`adaptive_tune.c:1069`).
+  - Scenario: a refinement commits. Later the operator accepts an autotune result, or POSTs gains, writes over UART SET_ZONE_PID, restores an iter_tune record, or imports a backup. `revert_available` is still true. The operator then presses the adaptive "revert". `adaptive_tune.c:1277-1278` writes the pre-refinement snapshot over the newer gains with no warning. `has_applied` keeps describing gains that are no longer live.
+  - This is the L1 outcome, still reachable outside the narrow in-flight window the fix closed.
+  - Fix, either of:
+    - Record the applied gains at commit, and make the revert refuse unless live gains still equal them.
+    - Have the checked setters clear the adaptive snapshot for that zone.
+- **F3 (LOW) A BUSY refusal between the paired model/PID writes leaves a half-applied zone, with misleading results.** Each pair is two checked calls, and the heat claim can be published between them. The three pairs are:
+  - The adaptive apply (`adaptive_tune_model.c:268/270`).
+  - The adaptive revert (`adaptive_tune.c:1277-1278`).
+  - Accept (set_pid ~:483, then `set_model` `autotune_engine_guard.c:569`). Accept's window is widened by the `clear_ki_baseline` NVS save in between.
+  - Scenario: a profile starts between the two writes. The first write lands, the second returns BUSY, and the firing runs on new gains with the old model (or the reverse).
+  - How each call site misreports this:
+    - The revert returns HTTP 200 `ok:false` with a "rejected/write failed" reason, not the 409 refusal (`http/adaptive_tune_http.c:266-273`). `revert_available` stays true, but the snapshot now no longer matches the half-applied live state.
+    - The adaptive commit's reason says `zones_config_set_pid() rejected`, which reads as a validation failure.
+    - Accept's `set_model` failure is only logged, and Accept still returns true.
+  - Fix, either of:
+    - A combined `zones_config_set_model_and_pid_checked()` that checks the claim once and writes both under one `zones_cfg_lock` section.
+    - Roll back the first write when the second returns BUSY.
+  - Either way, map `ZONES_SET_BUSY_RUNNING` to the 409 refusal in the revert handler.
+- **F4 (LOW) The run-end apply is refused while an autotune runs on another zone.** The fix note says the adaptive run-end write runs after the claim is released, but it does not hold here. `relay_authority_heat_run_active()` is true while either claim is held, and `control/autotune_engine.c` ~:1253-1345 allows an autotune to start on zones disjoint from a running profile.
+  - Scenario: a profile reaches DONE while an autotune is still running on another zone. The run end calls `adaptive_tune_run_end()` after `release_profile_relay_claim` (`control/profile_executor_relay_io.c:897`), but the autotune claim is still held. Every planned zone's `set_model` returns BUSY, and the commit records the reason `zones_config_set_model() rejected` (`adaptive_tune_model.c:298-300`). That firing's refinement data is discarded.
+  - The same thing happens when a new profile is started quickly over DONE, before the run-end work finishes.
+  - Fix: a distinct `busy` reason, so the loss is visible. Either defer the apply until both claims are clear, or correct the fix note and this doc's L2 status line.
+- **F5 (LOW) L2 is only partly closed: several mid-run-capable writers still bump the generation with no claim re-check.**
+  - Accept's follow-on setters after `set_model`: `fit_context`, `baseline_k_dc`, `set_max_ramp`, `coupling_diag_k_dc`, `tuning_quality` (`autotune_engine_guard.c` after `:569`). These are plain unchecked setters and their results are ignored.
+  - The adaptive coupling-cell write (`adaptive_tune_model.c:756`) and the bootstrap baseline write (`:257`).
+  - kiln_cfg apply through `zones_config_import_blob()` (`persist/zones_config_accessors.c` ~:2506-2509). `http/kiln_cfg_http.c:387` checks only at entry.
+  - Scenario: Accept's checked `set_model` succeeds, then a profile starter takes its generation snapshot, publishes its claim and passes `changed_since`. Accept's `set_max_ramp` then lands mid-run, changing the ramp cap of a running firing. This is the outcome L2 describes.
+  - Fix: give these setters (and `import_blob`) the same in-lock claim re-check, or run Accept's whole write sequence under one checked section.
+- **F6 (INFO) Backup import BUSY is transient and safe, but the message misleads.** `http/backup_import.c:2437/2443`: when a starter publishes its claim and then withdraws it on seeing `restore_in_flight`, the import's setter can still see the claim and return false. Both sides then refuse. The snapshot restore runs, so nothing is half-written. The reported reason reads as a validation failure, not "a run was starting, retry".
+- **F7 (INFO) The plan-time gain comparison is exact, and the reads are unlocked.**
+  - Exact compare: the prior is a raw float copy of the live gains, compared with `==`. NaN gains are rejected by the setters, so a NaN prior cannot occur. `+0` and `-0` compare equal, which is harmless.
+  - `zones_config_get_pid()` (`persist/zones_config_accessors.c` ~:548) reads the triple without `zones_cfg_lock`. A torn read is possible only during a real concurrent write, and that write then makes the compare correctly fail as stale.
+  - `adaptive_tune_model.c:232` and `:235` read the prior twice. This is redundant, not wrong.
+
+### Checked, no defect
+
+- **Lock order.** `zones_cfg_lock` is taken before the leaf `s_heat_claim_mux` spinlock. The adaptive lock only covers the unlocked `get_pid` read. `s_exec.lock` is taken before `zones_cfg_lock`, never the reverse. The checked setters run outside `adaptive_tune_lock`. No inversion was found.
+- **Claim re-check pairing.** The claim is read inside the same `zones_cfg_lock` section that bumps `s_config_generation`. A starter's `changed_since()` takes that lock after it publishes its claim, so either the setter sees the claim or the starter sees the bump.
+- **Wrapper blast radius.** These callers were checked and either handle the bool/result or need no change:
+  - `http/zones_http_pid.c:174` (BUSY maps to the 409 `system_mode_gate_http_send_refusal`).
+  - UART SET_ZONE_PID/MODEL (`bridge/uart_bridge_ext_control.c`, BUSY maps to a "run active" error through `uart_bridge_ext_reply_ok_err`).
+  - iter_tune restore (`http/iter_tune_http.c:221`, false maps to 500 and the record is untouched).
+  - backup import and the adaptive revert (see F3, F6).
+  - No LCD or profile-executor caller of these setters exists. `control/adaptive_tune_ki.c` only reads gains.
+- **UART BUSY reply.** The reply frame carries the error string. Neither writer is called on a refusal.
