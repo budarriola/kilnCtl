@@ -15,7 +15,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### MED-1 (pre-existing; ab210508 limits the damage): a rejected zones.json is still overwritten at boot by an older legacy candidate
 
-**FIXED in 730ceeff: a newer zones.json is never rewritten from NVS or the legacy copy and no stale copy is adopted (latch stays, firing refused); a rejected file with no .bad copy is not overwritten.**
+**FIXED in fa4a62ef: a newer zones.json is never rewritten from NVS or the legacy copy and no stale copy is adopted (latch stays, firing refused); a rejected file with no .bad copy is not overwritten.**
 
 **Where**
 - `persist/zones_config_cfg_fs.c:356-371`. This is the `!file_valid` branch of `resolve_with_file_buf`. When the NVS candidate is valid, it calls `zones_config_cfg_fs_save(nvs_cfg, nvs_rev)` without checking why the file was rejected, including when the file was rejected as a NEWER schema version.
@@ -37,7 +37,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### MED-2 (ab210508): the load-fault latch fires even when a valid candidate was adopted, so banners claim firing is refused when it is not
 
-**FIXED in 730ceeff: latch only when no trustworthy copy was adopted; web and LCD banners worded by rejection reason; boot log no longer claims a zeroed config when a copy was adopted.**
+**FIXED in fa4a62ef: latch only when no trustworthy copy was adopted; web and LCD banners worded by rejection reason; boot log no longer claims a zeroed config when a copy was adopted.**
 
 **Where**
 - `persist/zones_config_store.c:613-618`. The latch is set whenever a file rejection is recorded, regardless of what happened next. The NVS or legacy candidate may have been adopted and `zones_config_is_valid()` may be true.
@@ -57,7 +57,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### MED-3 (pre-existing, adjacent to 0aec8e7c): a blank xzone on the zones page silently disables guard 8
 
-**FIXED in 730ceeff: page refuses a blank xzone; firmware keeps the stored value for a blank or missing guard/xzone field.**
+**FIXED in fa4a62ef: page refuses a blank xzone; firmware keeps the stored value for a blank or missing guard/xzone field.**
 
 **Where**
 - `http/zones_page.html:2665`. `ZONE_OPTIONAL_KEY_RE` includes `xzone`, so `omitBlankOptionalParams` drops a blank `z<N>_xzone` from the POST.
@@ -74,7 +74,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### LOW-1 (ab210508): read-only paths now write `.bad` outside any save lock, with a factory-reset fence race
 
-**PARTLY FIXED in 730ceeff: a failed .bad write is reported (file_rejected/bad_copy_failed) and blocks overwrite; the .bad write is still not moved under the save lock.**
+**PARTLY FIXED in fa4a62ef: a failed .bad write is reported (file_rejected/bad_copy_failed) and blocks overwrite; the .bad write is still not moved under the save lock.**
 
 - `load_raw` callers that now reach `preserve_rejected_file` (`persist/zones_config_cfg_fs.c:63-88`) at runtime:
   - GET /api/cfgfs (`diagnostics_http.c:1569`)
@@ -87,7 +87,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### LOW-2 (ab210508): partition-full behaviour and visibility of `.bad`
 
-**FIXED in 730ceeff: bad_copy_failed is in the fault record and the web banner.**
+**FIXED in fa4a62ef: bad_copy_failed is in the fault record and the web banner.**
 
 - On a full `cfg` partition the roughly 1 KB `.bad` write fails and is only logged.
 - If the write succeeds, the file persists until factory reset and is not listed anywhere a user would look. Its space can later make a zones.json atomic write fail.
@@ -95,7 +95,7 @@ The reviewed tree is origin/dev `05d4ea58`. Paths are relative to `firmware/Kiln
 
 ### LOW-3 (ab210508, by design): the latch persists until reboot after a heal
 
-**FIXED in 730ceeff: a successful POST /api/zones (and a legacy-copy adoption) clears the latch.**
+**FIXED in fa4a62ef: a successful POST /api/zones (and a legacy-copy adoption) clears the latch.**
 
 - After a successful POST /api/zones, `s_zones_config_valid` is set (`http/zones_http_post.c:759`) and firing is allowed. The banner stays up until the next boot, which then finds a valid file and does not latch.
 - Recovery without a factory reset therefore works. Only the banner is stale for the rest of that boot.
