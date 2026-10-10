@@ -17,10 +17,10 @@ This was a read-only review. No code was changed and no board was touched. Line 
 
 | ID | Severity | Area | One line |
 |----|----------|------|----------|
-| N1 | MED | F2 fix, app Wi-Fi load | The empty-namespace probe reads every key with `hal_kv_get_str`. On real ESP-IDF a string read of a u8 or blob key returns NOT_FOUND, so a namespace holding only u8/blob keys reads as "not found". The probe also runs on the normal `wifi_nvs` boot load, so a board saved in AP mode loses that setting on every boot. The host fake returns INVALID_ARG for a wrong-type read, which is why the host tests pass. |
-| N2 | LOW | F6 test vacuity | The F6 "legacy copy not checked" reply is pinned only by text. Removing `*skipped = true;`, or disabling the ternary, passes the check (negtest C1, C2). |
-| N3 | NIT | F3 test source | The CRLF strip in `test_recovery_wifi_policy.c` writes a raw CR byte inside a char literal instead of `'\r'`. |
-| N4 | NIT | F1 wire contract | The PC tool spots the "not applicable" reply by matching a substring of free text. There is no machine-readable field. |
+| N1 (FIXED 110650ae0) | MED | F2 fix, app Wi-Fi load | The empty-namespace probe reads every key with `hal_kv_get_str`. On real ESP-IDF a string read of a u8 or blob key returns NOT_FOUND, so a namespace holding only u8/blob keys reads as "not found". The probe also runs on the normal `wifi_nvs` boot load, so a board saved in AP mode loses that setting on every boot. The host fake returns INVALID_ARG for a wrong-type read, which is why the host tests pass. |
+| N2 (FIXED 110650ae0) | LOW | F6 test vacuity | The F6 "legacy copy not checked" reply is pinned only by text. Removing `*skipped = true;`, or disabling the ternary, passes the check (negtest C1, C2). |
+| N3 (FIXED 110650ae0) | NIT | F3 test source | The CRLF strip in `test_recovery_wifi_policy.c` writes a raw CR byte inside a char literal instead of `'\r'`. |
+| N4 (FIXED 110650ae0) | NIT | F1 wire contract | The PC tool spots the "not applicable" reply by matching a substring of free text. There is no machine-readable field. |
 
 Per-finding verdicts on `e788b153e`:
 
