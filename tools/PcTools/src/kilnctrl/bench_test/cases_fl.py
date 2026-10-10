@@ -348,7 +348,7 @@ def _case_fl10(ctx: dict) -> CaseResult:
     itself is always a FAIL, never a lesser verdict (plan §6 rule 3) --
     `judgments.judge_flash_round_trip` treats any `error:`-prefixed reply
     that way."""
-    if not ctx.get("allow_flash"):
+    if ctx.get("allow_flash") is not True:
         return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-10")
 
     srv = _srv(ctx)
@@ -383,7 +383,7 @@ def _case_fl11(ctx: dict) -> CaseResult:
     failing outright is a FAIL via the same `judge_flash_round_trip` path
     FL-10 uses; the S6a check itself reuses `judge_operator_trip` (it is
     generic trip-then-clear reasoning, not actually operator-specific)."""
-    if not ctx.get("allow_flash"):
+    if ctx.get("allow_flash") is not True:
         return CaseResult(Verdict.SKIP, reason="opt-in: pass allow_flash=True to run FL-11")
 
     srv = _srv(ctx)
