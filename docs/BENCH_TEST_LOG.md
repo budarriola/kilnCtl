@@ -3203,3 +3203,10 @@ Task: restore zones config after the suspected untraced factory reset. Pre-wipe 
 - Therefore no topology write and no `backup_import` was performed; the board was not modified.
 - Readback: z0 `tuning_valid=no` (the backup carries no tuning_* block for z0 either), z1/z2 yes. Aux outputs: all four disabled (matches backup). `get_readiness`: 19 ok, 2 not_done (`safety_commissioned`: 3 of 68 params unset; `estop_verified`), 3 other (`guard_cross_zone` and `calibration` deliberately off, `ct_attribution` cannot_yet). Safety link up, armed, no trip.
 - Open: whoever restored the zones before this run is unrecorded; the 3 unset safety params were not compared to a pre-wipe state (`safety_get_unset_commissioning_params` would name them).
+
+## 2026-10-09 commissioning gap (read-only)
+
+- `get_readiness`: `safety_commissioned` not_done, "3 of 68 applicable safety parameters still have no value". `safety_get_unset_commissioning_params` names exactly `i_normal_a[0..2]` (ids 0x031A/B/C, f32). `safety_get_commissioning` was unreachable (ECONNREFUSED) during this check.
+- Meaning: S14 per-channel over-current baseline (measured normal CT current per channel, `config_params.c`); until set, S14 reports ch0..2 DORMANT. Accepts any value >= 0.
+- Settable from a measurement on the bench: yes in principle (zones-page "record normal current" button, M12), but the 4 W fixture draws far below the CT's useful range, so a value would not represent a real kiln. Recommendation: leave unset on the bench; record on the real kiln with CT calibrated. Not an owner decision, not "not applicable" (ct_installed applies). No param written.
+- Also still not_done: `estop_verified` (human-only, never automated).
