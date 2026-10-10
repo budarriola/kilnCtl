@@ -915,8 +915,86 @@ static void test_bad_claimant(void)
     TEST_CHECK(enable_sends() == 0 && release_sends() == 0, "and neither touched the wire");
 }
 
+static void test_k4_mismatch_rerequests_with_backoff_then_gives_up(void)
+{
+    TEST_SECTION("heat_enable -- F1: grant held but Pico ARMED with K4 open is re-requested, bounded");
+
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    uint32_t t = 1000;
+    // GRACE (Pico rebooted): K4 cannot be expected closed, nothing timed.
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t);
+    t += 10000;
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "no re-request during GRACE");
+    // ARMED, K4 open: clock starts, no resend before 3 s.
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    t += 2900;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1 && heat_enable_is_granted(), "still granted inside the 3 s window");
+    // 3 s: first re-request; granted reads false until it lands.
+    t += 200;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    TEST_CHECK(!heat_enable_is_granted(), "not claimed granted while re-requesting");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "first re-request sent");
+    TEST_CHECK(heat_enable_is_granted(), "granted again once the re-request is accepted");
+    // Backoff: next one only after 6 s more.
+    t += 5000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "backoff holds the second re-request");
+    t += 1100;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 3, "second re-request after 6 s");
+    for (int i = 0; i < 40 && !heat_enable_grant_unconfirmed(); i++) {
+        t += 30000;
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(enable_sends() == 5, "exactly 4 re-requests (5 sends total), then no more");
+    TEST_CHECK(heat_enable_grant_unconfirmed(), "gave up: unconfirmed flag set");
+    TEST_CHECK(!heat_enable_is_granted(), "never claims heat enabled while K4 is open");
+    TEST_CHECK(heat_enable_retry_pending(), "surfaced as retry-pending");
+    t += 60000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 5, "bounded: no further sends");
+    // K4 finally closes: everything clears.
+    heat_enable_note_pico_state(true, ARMED, true, t + 100);
+    TEST_CHECK(!heat_enable_grant_unconfirmed() && heat_enable_is_granted(), "K4 closed clears the fault");
+}
+
+static void test_k4_closed_or_released_never_resends(void)
+{
+    TEST_SECTION("heat_enable -- F1: K4 closed, stale status, or no claim never triggers a re-request");
+
+    reset_all(true);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 100);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 100000);
+    TEST_CHECK(enable_sends() == 0, "no claim held: nothing re-requested");
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    for (uint32_t t = 1000; t < 60000; t += 1000) {
+        heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, true, t);
+        heat_enable_note_pico_state(false, SAFETY_LINK_DIAG_STATE_ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(enable_sends() == 1, "K4 closed / stale status: still exactly one send");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 70000);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 90000);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "after release nothing is re-requested");
+}
+
 void run_test_heat_enable(void)
 {
+    test_k4_mismatch_rerequests_with_backoff_then_gives_up();
+    test_k4_closed_or_released_never_resends();
     test_start_requests_exactly_once();
     test_release_on_stop();
     test_two_claimants_refcount();

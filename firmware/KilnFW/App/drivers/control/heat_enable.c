@@ -65,6 +65,9 @@ static const char *TAG = "heat_enable";
  * remainder. */
 #define HE_FLUSH_MAX_ATTEMPTS 20
 #define HE_FLUSH_RETRY_MS     10
+/* F1: K4 must read closed within this long of an ARMED, fresh status, else re-request. */
+#define HE_K4_CONFIRM_MS      3000u
+#define HE_K4_MAX_RESENDS     4
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -74,6 +77,13 @@ typedef struct {
     bool              pending;     /* someone holds a claim but the request did not land */
     uint32_t          enable_sends;
     uint32_t          release_sends;
+    /* F1 (safety link review 2026-10-09): K4 reconcile. REQUEST_ENABLE is a
+     * fire-and-forget broadcast, so `granted` only means the local UART took
+     * the bytes. These fields compare it with the Pico's reported K4 state. */
+    uint32_t          k4_open_since_ms;   /* 0 = no mismatch being timed */
+    uint32_t          k4_next_resend_ms;
+    uint8_t           k4_resends;         /* re-requests spent on this episode */
+    bool              k4_unconfirmed;     /* retries exhausted, Pico still reports K4 open */
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -146,6 +156,14 @@ static void he_unlock(bool taken)
     }
 }
 
+static void he_k4_reset_locked(void)
+{
+    s_he.k4_open_since_ms = 0u;
+    s_he.k4_next_resend_ms = 0u;
+    s_he.k4_resends = 0u;
+    s_he.k4_unconfirmed = false;
+}
+
 void heat_enable_init(SafetyLinkClass *safety_or_null)
 {
     if (!s_he.lock) {
@@ -165,6 +183,7 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.warned_pending = false;
     s_he.release_pending = false;
     s_he.release_inflight = false;
+    he_k4_reset_locked();
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -489,6 +508,7 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         s_he.granted = false;
         s_he.pending = false;
         s_he.warned_pending = false;
+        he_k4_reset_locked();
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -630,7 +650,9 @@ bool heat_enable_is_held(heat_enable_claimant_t who)
 bool heat_enable_is_granted(void)
 {
     bool taken = he_lock();
-    bool granted = s_he.granted && s_he.held_mask != 0u;
+    /* Never claim heat is enabled while the Pico reports K4 open past the
+     * bounded re-request budget (F1). */
+    bool granted = s_he.granted && s_he.held_mask != 0u && !s_he.k4_unconfirmed;
     he_unlock(taken);
     return granted;
 }
@@ -638,9 +660,62 @@ bool heat_enable_is_granted(void)
 bool heat_enable_retry_pending(void)
 {
     bool taken = he_lock();
-    bool pending = s_he.pending && s_he.held_mask != 0u;
+    bool pending = (s_he.pending || s_he.k4_unconfirmed) && s_he.held_mask != 0u;
     he_unlock(taken);
     return pending;
+}
+
+bool heat_enable_grant_unconfirmed(void)
+{
+    bool taken = he_lock();
+    bool u = s_he.k4_unconfirmed && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return u;
+}
+
+void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed, uint32_t now_ms)
+{
+    bool taken = he_lock();
+    bool log_giveup = false;
+    bool log_resend = false;
+    if (s_he.held_mask == 0u) {
+        he_k4_reset_locked();
+    } else if (!s_he.granted) {
+        /* Nothing to compare (a send or a re-request is outstanding). */
+    } else if (!fresh || diag_state != SAFETY_LINK_DIAG_STATE_ARMED) {
+        /* GRACE/INIT/TRIPPED/unknown: K4 cannot be expected closed, so do not
+         * time it. A GRACE->ARMED transition restarts the clock below. */
+        s_he.k4_open_since_ms = 0u;
+    } else if (k4_closed) {
+        he_k4_reset_locked();
+    } else if (s_he.k4_open_since_ms == 0u) {
+        s_he.k4_open_since_ms = now_ms ? now_ms : 1u;
+        s_he.k4_next_resend_ms = s_he.k4_open_since_ms + HE_K4_CONFIRM_MS;
+    } else if ((int32_t)(now_ms - s_he.k4_next_resend_ms) >= 0 && !s_he.k4_unconfirmed) {
+        if (s_he.k4_resends >= HE_K4_MAX_RESENDS) {
+            s_he.k4_unconfirmed = true;
+            log_giveup = true;
+        } else {
+            /* Exponential backoff: first re-request 3 s after K4 first read
+             * open, then 6, 12, 24 and 48 s between the following checks. */
+            s_he.k4_resends++;
+            s_he.k4_next_resend_ms = now_ms + (HE_K4_CONFIRM_MS << s_he.k4_resends);
+            s_he.granted = false;  /* not claimed until the re-request lands */
+            s_he.pending = true;
+            s_he.warned_pending = false;
+            log_resend = true;
+        }
+    }
+    uint8_t n = s_he.k4_resends;
+    he_unlock(taken);
+    if (log_resend) {
+        ESP_LOGW(TAG, "Pico is ARMED but reports K4 open while a heat grant is held -- "
+                      "re-requesting (attempt %u of %d)", (unsigned)n, HE_K4_MAX_RESENDS);
+    }
+    if (log_giveup) {
+        ESP_LOGE(TAG, "heat grant could not be obtained: Pico ARMED, K4 still open after %d "
+                      "re-requests -- heat is NOT enabled (reported as not granted)", HE_K4_MAX_RESENDS);
+    }
 }
 
 void heat_enable_reconcile(void)

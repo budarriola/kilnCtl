@@ -2122,6 +2122,7 @@ void watchdog_task_entry(void *arg)
         bool safety_diag_valid = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
+        bool safety_k4_closed = false;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
@@ -2139,6 +2140,7 @@ void watchdog_task_entry(void *arg)
                                      !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
                 safety_diag_state = safety_status.diag_state;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;
             }
         }
         bool safety_link_silent_30s = s_exec.safety != NULL &&
@@ -2337,6 +2339,9 @@ void watchdog_task_entry(void *arg)
          * from safety_link/s_exec under their own locks. Keep it last: a new
          * blocking call must not be put ahead of the staleness checks either.
          */
+        /* F1: tell heat_enable what the Pico reports so a lost grant is re-requested. */
+        heat_enable_note_pico_state(safety_diag_valid, safety_diag_state, safety_k4_closed,
+                                    (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
         heat_enable_reconcile();
     }
 }
