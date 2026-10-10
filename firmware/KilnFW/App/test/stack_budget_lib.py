@@ -104,9 +104,9 @@ CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
 # The walk used to follow only call4/8/12, silently dropping all of these
 # (control_handle_message measured 944 B while really reaching
 # zones_config_set_pid and everything below it). LongCallTracker pairs the two
-# instructions: it remembers which literal each register holds, forgets a
-# register when anything else writes it, and reports the target when a
-# callx4/8/12 uses a register that still holds one. A register left stale
+# instructions: it keeps the UNION of literals each register was loaded with since the
+# last callx and flags the site tainted if any other instruction wrote the
+# register (2026-10-09 review: a last-literal-wins tracker dropped edges). A register left stale
 # across a branch target can only ADD an edge, never hide one (the safe
 # direction for this checker).
 # ---------------------------------------------------------------------------
@@ -119,11 +119,16 @@ _NON_WRITING = ("s32", "s16", "s8", "ssi", "ssx", "b", "j", "call", "ret", "nop"
 
 class LongCallTracker:
     """Feed every disassembly line of one function in order via feed(); it
-    returns (target_addr, symbol_name) for a resolved l32r+callx pair, else
-    None. Call reset() at each function boundary."""
+    returns None, or (targets, tainted) when a callx4/8/12 uses a register
+    that an l32r loaded since the last callx. `targets` is the UNION of every
+    literal l32r put in the register (a branch can pick either), `tainted` is
+    True when a non-l32r instruction also wrote the register, so some path
+    to the call may hold an unknown value: the caller must add the edges AND
+    still mark the function indirect. Call reset() at each function
+    boundary."""
 
     def __init__(self):
-        self.regs = {}
+        self.regs = {}   # reg -> [set of (addr, name), tainted]
 
     def reset(self):
         self.regs = {}
@@ -131,14 +136,20 @@ class LongCallTracker:
     def feed(self, line):
         m = L32R_RE.search(line)
         if m:
-            self.regs[m.group(1)] = (int(m.group(2), 16), m.group(3))
+            ent = self.regs.setdefault(m.group(1), [set(), False])
+            ent[0].add((int(m.group(2), 16), m.group(3)))
             return None
         m = CALLX_REG_RE.search(line)
         if m:
-            return self.regs.get(m.group(1))
+            ent = self.regs.pop(m.group(1), None)
+            if ent is None:
+                return None
+            return sorted(ent[0]), ent[1]
         m = _INSN_RE.match(line)
         if m and self.regs and not m.group(1).startswith(_NON_WRITING):
-            self.regs.pop(m.group(2), None)
+            ent = self.regs.get(m.group(2))
+            if ent is not None:
+                ent[1] = True
         return None
 
 
@@ -346,7 +357,10 @@ def parse(objdump, elf):
             calls[cur].add(int(c.group(1), 16))
         lc = lct.feed(line)
         if lc is not None:
-            calls[cur].add(lc[0])   # resolved long call: an edge, not a dead end
+            for t in lc[0]:
+                calls[cur].add(t[0])   # resolved long call: an edge, not a dead end
+            if lc[1]:
+                indirect[cur] = True   # a non-l32r write also reached the call
         elif CALLX_RE.search(line):
             indirect[cur] = True
     return ParsedElf(frames, calls, names, name_addrs, indirect)

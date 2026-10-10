@@ -168,19 +168,43 @@ class LongCallTrackerTest(unittest.TestCase):
     def test_pairs_l32r_with_callx(self):
         t = addr_keyed.LongCallTracker()
         self.assertIsNone(t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <far_fn>)"))
-        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), (0x200, "far_fn"))
+        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), ([(0x200, "far_fn")], False))
 
     def test_redefinition_drops_the_literal(self):
         t = addr_keyed.LongCallTracker()
         t.feed("13:\tc90c81        \tl32r\ta9, 00000004 <x> (00000300 <other_fn>)")
         t.feed("1c:\t001982        \tmovi\ta9, 1")
-        self.assertIsNone(t.feed("1f:\t0009e0        \tcallx8\ta9"))
+        # Edge is KEPT (never hide one); the clobber only taints -> indirect.
+        self.assertEqual(t.feed("1f:\t0009e0        \tcallx8\ta9"), ([(0x300, "other_fn")], True))
+
+    def test_merge_keeps_both_literals(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <f>)")
+        t.feed("16:\t000000        \tbnez\ta2, 20")
+        t.feed("19:\tc90c81        \tl32r\ta8, 00000008 <x> (00000300 <g>)")
+        self.assertEqual(t.feed("1c:\t0008e0        \tcallx8\ta8"),
+                         ([(0x200, "f"), (0x300, "g")], False))
+
+    def test_non_l32r_overwrite_between_loads_is_tainted(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <f>)")
+        t.feed("16:\t001982        \tmovi\ta8, 1")
+        t.feed("19:\tc90c81        \tl32r\ta8, 00000008 <x> (00000300 <g>)")
+        self.assertEqual(t.feed("1c:\t0008e0        \tcallx8\ta8"),
+                         ([(0x200, "f"), (0x300, "g")], True))
+
+    def test_legacy_sym_plus_off_resolves_to_base(self):
+        import check_main_task_stack_budget as legacy
+        t = legacy.stack_budget_common.lib.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000204 <far_fn+0x4>)")
+        r = t.feed("16:\t0008e0        \tcallx8\ta8")
+        self.assertEqual({n.split("+", 1)[0] for _a, n in r[0]}, {"far_fn"})
 
     def test_store_does_not_drop_the_literal(self):
         t = addr_keyed.LongCallTracker()
         t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <far_fn>)")
         t.feed("14:\t0008e0        \ts32i\ta8, a1, 4")
-        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), (0x200, "far_fn"))
+        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), ([(0x200, "far_fn")], False))
 
     def test_reset_clears_state(self):
         t = addr_keyed.LongCallTracker()
@@ -194,18 +218,18 @@ class LongCallParseTest(unittest.TestCase):
         with mock.patch.object(addr_keyed.subprocess, "run", side_effect=_longcall_run), \
                 mock.patch("os.path.getsize", return_value=len(LONGCALL_D)):
             parsed = addr_keyed.parse("objdump", "fake.elf")
-        self.assertEqual(parsed.calls[0x10], {0x200}, "l32r+callx8 edge to far_fn must exist; the "
-                         "movi-clobbered a9 and the unpaired callx8 a11 must not add edges")
+        self.assertEqual(parsed.calls[0x10], {0x200, 0x300}, "l32r+callx8 edge to far_fn must exist; the "
+                         "movi-clobbered a9 keeps its other_fn edge (never hide one); the unpaired a11 adds none")
         total, _ = addr_keyed.deepest(0x10, parsed)
-        self.assertEqual(total, 32 + 48)
+        self.assertEqual(total, 32 + 64)
         self.assertTrue(parsed.indirect[0x10], "the unresolved callx8 a11 is still indirect")
 
     def test_legacy_parser_resolves_long_call(self):
         with mock.patch.object(legacy.subprocess, "run", side_effect=_longcall_run), \
                 mock.patch("os.path.getsize", return_value=len(LONGCALL_D)):
             frames, calls = legacy.parse("objdump", "fake.elf")
-        self.assertEqual(calls["caller_fn"], {"far_fn"})
-        self.assertEqual(legacy.deepest("caller_fn", frames, calls)[0], 32 + 48)
+        self.assertEqual(calls["caller_fn"], {"far_fn", "other_fn"})
+        self.assertEqual(legacy.deepest("caller_fn", frames, calls)[0], 32 + 64)
 
 
 class DeclaredEdgesTest(unittest.TestCase):

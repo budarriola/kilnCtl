@@ -275,8 +275,12 @@ def parse(objdump, elf):
         if c:
             calls[cur].add(c.group(1))
         lc = lct.feed(line)
-        if lc is not None and "+" not in lc[1]:
-            calls[cur].add(lc[1])   # resolved l32r+callx long call
+        if lc is not None:
+            # Resolved l32r+callx long call(s): union of every literal. A
+            # "sym+0xNN" caption means the target lies INSIDE sym, so credit
+            # sym itself (never skip it: that added 0 B silently).
+            for _addr, tname in lc[0]:
+                calls[cur].add(tname.split("+", 1)[0])
     return frames, calls
 
 

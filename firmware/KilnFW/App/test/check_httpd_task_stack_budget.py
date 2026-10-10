@@ -145,7 +145,10 @@ HANDLER_DIRS = [HTTP_DIR, UPDATE_DIR]
 # not a percentage-of-stack budget: it exists to catch the deepest
 # reachable handler path getting WORSE, not to relitigate this depth.
 # 2026-10-09: long calls (l32r+callx) now followed: profile_exec_start_post_handler 4848 B (was 4832 B), 8192 - 4848 - 1800 = 1544 B honest free.
-CEILING_BYTES = 4848
+# 2026-10-09 (LongCallTracker union-merge fix): a register loaded with several literals now yields every edge,
+# not just the last, so the walk reaches the __assert_func/panic_abort tail it used to miss: measured 5248 B (was 4848 B).
+# Honest free still above 10% of the declared stack; re-baselined for this stated cause only.
+CEILING_BYTES = 5248
 
 # 2026-09-08 honesty fix (docs/audits/2026-09-08-httpd-stack-gap.md, `022bde0a`):
 # the static walk's "N B free" framing was misleading. It measures only each

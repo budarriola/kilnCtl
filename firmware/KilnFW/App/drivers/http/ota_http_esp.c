@@ -826,7 +826,7 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     // is nothing left to release.
     dram_watch_log_task("ota_rollback_reboot", "before-create");
     if (dram_watch_task_after("ota_rollback_reboot",
-                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 3072, NULL,
+                              xTaskCreate(ota_rollback_reboot_task, "ota_rollback_reboot", 4096, NULL,
                                           tskIDLE_PRIORITY + 1, &s_ota_rollback_reboot_task)) != pdPASS) {
         ESP_LOGE(OTA_HTTP_TAG, "OTA esp rollback from %s: failed to start the reboot task -- "
                       "board will NOT reboot, still running the current image", ip);
@@ -835,8 +835,8 @@ esp_err_t ota_esp_rollback_post_handler(httpd_req_t *req)
     /* Registered unconditionally, success or not -- stack_margin_register()
      * reads *task_handle_slot fresh at report time, so a creation failure
      * just reads back alive=false rather than needing a second branch here.
-     * 3072 must match the xTaskCreate() literal above. */
-    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 3072);
+     * 4096 must match the xTaskCreate() literal above. */
+    stack_margin_register("ota_rollback_reboot", &s_ota_rollback_reboot_task, 4096);
 
     return ESP_OK;
 }

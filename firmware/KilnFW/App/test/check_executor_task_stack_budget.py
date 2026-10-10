@@ -147,9 +147,13 @@ STACK_BYTES = 6144
 # 2784 B. Lowered deliberately, with the cause stated, per "do not raise a
 # ceiling quietly" -- the same rule applies to lowering one.
 # 2026-10-09: long calls (l32r+callx) now followed: measured 3360 B (was 1936 B). With the nvs_save -> zones_autosave_job
-# edge (a volatile function pointer the static walk cannot follow; see check_all_task_stack_budgets.py DECLARED_EDGES) the
-# prototype resolver gives 3936 B; 3936 + 1220 overhead = 5156 B of 6144 B, so no stack bump is needed.
-CEILING_BYTES = 3360
+# edge (a volatile function pointer the static walk cannot follow; see check_all_task_stack_budgets.py DECLARED_EDGES -- that
+# declared edge applies only to the bx_flash_worker task, NOT to this executor measurement) the
+# bx_flash_worker prototype resolver gives 3936 B; 3936 + 1220 overhead = 5156 B of 6144 B, so no stack bump is needed.
+# 2026-10-09 (LongCallTracker union-merge fix): a register loaded with several literals now yields every edge,
+# not just the last, so the walk reaches the __assert_func/panic_abort tail it used to miss: measured 3920 B (was 3360 B).
+# Honest free still above 10% of the declared stack; re-baselined for this stated cause only.
+CEILING_BYTES = 3920
 
 # See "UNMODELED_OVERHEAD_BYTES" above -- this task's own live-measured figure,
 # not the httpd checker's 1800 B placeholder.

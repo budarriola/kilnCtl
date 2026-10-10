@@ -70,7 +70,8 @@ $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/zones_http_post_parse.c",
     "firmware/KilnFW/App/drivers/http/wifi_provision_http.c",
     "firmware/KilnFW/App/drivers/http/kiln_cfg_http.c",
-    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
+    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c",
+    "firmware/KilnFW/App/drivers/control/adaptive_tune_model.c"
 )
 $persistRoot = Join-Path $RepoRoot $persistDir
 if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }
