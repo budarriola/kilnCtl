@@ -915,6 +915,29 @@ static void test_newer_version_blob_refused_by_store(void)
                "active id is unchanged -- the refused apply changed nothing");
 }
 
+// Review 15 LOW-1: a boot-time restore refused ONLY because a run holds the claim must not clear the active id.
+static void test_boot_restore_claim_refusal_keeps_active_id(void)
+{
+    TEST_SECTION("kiln_cfg_store_init -- a boot restore refused on the run claim keeps the active id; a real "
+                 "validation failure still clears it (review 15 LOW-1)");
+    reset_state();
+    int32_t id = -1;
+    char reason[96];
+    TEST_CHECK(kiln_cfg_store_save_current("Boot Cfg", -1, &id, reason, sizeof(reason)), "setup: saved");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id, "setup: it is the active config");
+
+    s_stub_import_result = false;
+    strncpy(s_stub_import_reason, ZONES_IMPORT_REASON_RUN_CLAIMED, sizeof(s_stub_import_reason) - 1);
+    TEST_CHECK(kiln_cfg_store_init() == ESP_OK, "init succeeds");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == id,
+               "a claim refusal at boot is not a validation failure: the active id survives");
+
+    strncpy(s_stub_import_reason, "zone max_temp_c out of range", sizeof(s_stub_import_reason) - 1);
+    TEST_CHECK(kiln_cfg_store_init() == ESP_OK, "init succeeds (validation failure)");
+    TEST_CHECK(kiln_cfg_store_get_active_id() == KILN_CFG_NO_ACTIVE_ID,
+               "a genuine validation failure at boot still clears the active id");
+}
+
 static void test_out_of_range_value_rejected_nothing_written(void)
 {
     TEST_SECTION("kiln_cfg_store_apply -- an out-of-range stored value is rejected, nothing applied");
@@ -4196,6 +4219,7 @@ void run_test_kiln_cfg_store(void)
     test_delete_refuses_the_active_config();
     test_delete_refused_by_interlock_while_firing_even_when_not_active();
     test_newer_version_blob_refused_by_store();
+    test_boot_restore_claim_refusal_keeps_active_id();
     test_out_of_range_value_rejected_nothing_written();
     test_save_as_new_rejects_duplicate_name();
     test_clone_rejects_duplicate_name();

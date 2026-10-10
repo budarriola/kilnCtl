@@ -961,6 +961,13 @@ esp_err_t kiln_cfg_store_init(void)
             reason[0] = '\0';
             if (!zones_config_import_blob(s_store.entries[idx].blob, s_store.entries[idx].blob_len,
                                           reason, sizeof(reason))) {
+                if (strcmp(reason, ZONES_IMPORT_REASON_RUN_CLAIMED) == 0) {
+                    /* Review 15 LOW-1: refused only because a run holds the claim (HTTP/LCD are up before this
+                     * init); the config is valid. Keep the active id and the loaded zones config. */
+                    ESP_LOGW(TAG, "active kiln config id=%ld not applied at boot: %s -- kept as active",
+                             (long)s_store.active_id, reason);
+                    return ESP_OK;
+                }
                 ESP_LOGW(TAG, "active kiln config id=%ld failed validation at boot (%s) -- clearing "
                               "it, keeping whatever zones config already loaded",
                          (long)s_store.active_id, reason);

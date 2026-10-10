@@ -2628,7 +2628,7 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
         /* F5: the claim is re-read inside the generation-bumping section, like the PID/model setters. */
         zones_cfg_unlock();
         if (reason_out && reason_cap) {
-            snprintf(reason_out, reason_cap, "a profile or autotune run is active -- retry when it ends");
+            snprintf(reason_out, reason_cap, "%s", ZONES_IMPORT_REASON_RUN_CLAIMED);
         }
         return false;
     }
