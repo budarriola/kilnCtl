@@ -2082,6 +2082,45 @@ void executor_task_entry(void *arg)
 
 /* ---- watchdog task (guard 9) ------------------------------------------------ */
 
+#define WATCHDOG_LOCK_TIMEOUT_MS 1000u
+
+/* Set by guard9_prelock_check() when it cut heat, cleared once the locked
+ * bookkeeping (global_fault_source OR) has run. */
+static volatile bool s_guard9_bookkeeping_pending = false;
+
+/* Guard 9, lock-free half (audit 2026-10-09 item 1). Reads the control task's
+ * liveness tick without s_exec.lock (single 32-bit writer, volatile field;
+ * nothing else is derived from it so no ordering is needed). On stale it
+ * forces relays off through kiln_io (own owner-task serialisation) and
+ * asserts SAFETY_FAULT_SRC_APP on the safety link (own lock), all without
+ * s_exec.lock. Returns true when stale; *since_ms_out gets the age. */
+static bool guard9_prelock_check(uint32_t *since_ms_out)
+{
+    TickType_t now = xTaskGetTickCount();
+    uint32_t since_ms = ticks_to_ms(now - s_exec.last_tick_tick);
+    if (since_ms_out) *since_ms_out = since_ms;
+    if (since_ms <= WATCHDOG_TICK_DEAD_MS) {
+        return false;
+    }
+    ESP_LOGE(PE_TAG, "guard 9: control tick stale for %lums -- cutting heat before taking s_exec.lock",
+             (unsigned long)since_ms);
+    if (s_exec.io) {
+        kiln_io_all_relays_off(s_exec.io);
+    }
+    /* io_segs_force_all_off() mutates s_exec and needs the lock; it runs in
+     * the locked half. */
+    if (s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+    }
+    s_guard9_bookkeeping_pending = true;
+    return true;
+}
+
+static bool guard9_take_lock_bounded(void)
+{
+    return xSemaphoreTake(s_exec.lock, pdMS_TO_TICKS(WATCHDOG_LOCK_TIMEOUT_MS)) == pdTRUE;
+}
+
 void watchdog_task_entry(void *arg)
 {
     (void)arg;
@@ -2174,39 +2213,42 @@ void watchdog_task_entry(void *arg)
         bool pc_link_down_sustained = pc_link_now_down &&
             ticks_to_ms(pc_link_check_now - pc_link_down_since_tick) >= pc_link_abort_silence_ms();
 
+        bool continue_after_lock_timeout = false;
         bool wdt_faulted = false;
-        xSemaphoreTake(s_exec.lock, portMAX_DELAY);
-        TickType_t now = xTaskGetTickCount();
-        uint32_t since_ms = ticks_to_ms(now - s_exec.last_tick_tick);
-        bool tick_stale = since_ms > WATCHDOG_TICK_DEAD_MS;
+        /* Guard 9 audit 2026-10-09 item 1: staleness is tested and the relays
+         * are cut BEFORE s_exec.lock is touched. A control task that stalls
+         * while holding the lock must not also blind its own watchdog. */
+        uint32_t since_ms = 0;
+        bool tick_stale = guard9_prelock_check(&since_ms);
+        if (!guard9_take_lock_bounded()) {
+            /* Lock still held by someone else. Relays are already off and the
+             * APP fault source is asserted (above); bookkeeping (state to
+             * FAULTED, fault_reason) happens on a later pass once the lock is
+             * obtainable. Nothing below may touch s_exec without the lock. */
+            ESP_LOGE(PE_TAG, "guard 9: s_exec.lock not obtainable within %ums (tick_stale=%d, %lums)",
+                     (unsigned)WATCHDOG_LOCK_TIMEOUT_MS, (int)tick_stale, (unsigned long)since_ms);
+            continue_after_lock_timeout = true;
+        }
+        if (continue_after_lock_timeout) {
+            heat_enable_reconcile();
+            continue;
+        }
 
-        if (tick_stale) {
-            /* Guard 9 proper forces relays off unconditionally the instant the
-             * control task's own liveness tick goes stale, regardless of what
-             * profile_executor_wd_decide() below says to do about the STATE --
-             * this part is not delegated to that pure function (it always
-             * needs to happen, not just "when RUNNING/PAUSED"). */
-            ESP_LOGE(PE_TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
-                     (unsigned long)since_ms);
+        if (tick_stale || s_guard9_bookkeeping_pending) {
+            /* The relay cut itself already happened in guard9_prelock_check();
+             * repeated here under the lock as a cheap idempotent retry (the
+             * profile_executor_wd_decide() below classifies the STATE, this
+             * part is unconditional). */
+            if (tick_stale) {
+                ESP_LOGE(PE_TAG, "control task tick stale for %lums -- forcing relays off (guard 9)",
+                         (unsigned long)since_ms);
+            }
             if (s_exec.io) {
                 kiln_io_all_relays_off(s_exec.io);
             }
-            /* kiln_io_all_relays_off() only touches relay bits 1-4; a
-             * relay/IO segment's general-purpose IO_1..7 line needs its own
-             * explicit force-off, and this replaces rules_watchdog_entry's
-             * force-release-and-off for the segment machinery (rules_task.c
-             * is untouched by this pass and is deleted later -- see
-             * profiles_http.h's profile_seg_kind_t comment -- so THIS is now
-             * the one place a stalled control task still gets a relay/IO
-             * segment's contacts open). Unconditional off, same as the relay
-             * call just above: a control task that has stopped ticking gets
-             * no leave_on_at_end exception. */
             io_segs_force_all_off(false);
-            /* See guard9_assert_stale_tick_fault()'s own doc comment for why
-             * this is now a helper rather than the bare safety_link_set_
-             * fault_source() call this used to be, and what defect that
-             * fixes (audit 2026-08-27 item 2). */
             guard9_assert_stale_tick_fault();
+            s_guard9_bookkeeping_pending = false;
         }
 
         /* profile_executor_wd_decide() (profile_executor.h) is the pure

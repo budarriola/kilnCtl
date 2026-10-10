@@ -749,7 +749,7 @@ typedef struct {
     SemaphoreHandle_t lock;
     TaskHandle_t task;
     TaskHandle_t watchdog_task;
-    TickType_t   last_tick_tick; /* updated every control-task iteration, regardless of run state -- guard 9 reads this */
+    volatile TickType_t last_tick_tick; /* updated every control-task iteration, regardless of run state -- guard 9 reads this */
 
     profile_exec_state_t state;
     profile_t profile; /* copy taken at profile_executor_run(); the saved

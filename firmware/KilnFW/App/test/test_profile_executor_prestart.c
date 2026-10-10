@@ -122,9 +122,11 @@ static void test_task_delay_hook(TickType_t ticks)
 // translation unit must still link.
 // ---------------------------------------------------------------------------
 
+static int g_kiln_io_all_relays_off_calls = 0;
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
 {
     (void)io;
+    g_kiln_io_all_relays_off_calls++;
     return ESP_OK;
 }
 
@@ -2293,6 +2295,53 @@ static void test_guard9_fault_source_cleared_on_halt(void)
     TEST_CHECK(g_last_fault_source_mask == SAFETY_FAULT_SRC_APP, "must clear exactly the mask that was asserted");
     TEST_CHECK(g_last_fault_source_assert == false, "must clear (false), not assert again");
     TEST_CHECK(s_exec.global_fault_source == 0, "global_fault_source must be back to 0 after halt()");
+}
+
+static void test_guard9_watchdog_source_order(void);
+
+// Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
+// not wait on s_exec.lock. The host stub is single-threaded, so "another task
+// holds the lock" is modelled by a stub depth/take-failure: the prelock check
+// must make ZERO xSemaphoreTake calls (so a held lock cannot block it) and
+// the bounded take must give up (fail_nth) without hanging the watchdog.
+static void test_guard9_fires_while_another_task_holds_exec_lock(void)
+{
+    TEST_SECTION("guard 9 -- stale tick cuts relays and asserts the APP fault source with s_exec.lock "
+                 "held by another task (no lock taken before the cut)");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    /* Another task "holds" s_exec.lock: depth 1, and every Take would time out. */
+    g_test_stub_lock_depth = 1;
+    g_test_stub_semaphore_fail_nth = 1;
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+
+    uint32_t since_ms = 0;
+    bool stale = guard9_prelock_check(&since_ms);
+
+    TEST_CHECK(stale, "stale tick must be detected lock-free");
+    TEST_CHECK(since_ms > WATCHDOG_TICK_DEAD_MS, "age reported");
+    TEST_CHECK(g_test_stub_semaphore_fail_nth == 1, "prelock check must not call xSemaphoreTake at all");
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 1, "relays forced off through kiln_io before any lock take");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   g_last_fault_source_assert,
+               "SAFETY_FAULT_SRC_APP asserted without s_exec.lock");
+    TEST_CHECK(s_guard9_bookkeeping_pending, "locked bookkeeping is left pending for the next obtainable lock");
+    /* The bounded take gives up instead of blocking forever. */
+    TEST_CHECK(!guard9_take_lock_bounded(), "bounded take must time out while the lock is held elsewhere");
+    g_test_stub_lock_depth = 0;
+    g_test_stub_semaphore_fail_nth = 0;
+    s_guard9_bookkeeping_pending = false;
+
+    /* Fresh tick: no cut. */
+    s_exec.last_tick_tick = 0;
+    g_kiln_io_all_relays_off_calls = 0;
+    TEST_CHECK(!guard9_prelock_check(NULL) && g_kiln_io_all_relays_off_calls == 0,
+               "a fresh tick must not trip guard 9");
 }
 
 // profile_zones_have_ceiling() tests (audit 2026-08-27 items 1/2: "Guard 5's
@@ -11860,6 +11909,8 @@ void run_test_profile_executor_prestart(void)
     test_guard9_asserts_and_ors_global_fault_source();
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
+    test_guard9_fires_while_another_task_holds_exec_lock();
+    test_guard9_watchdog_source_order();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -12621,6 +12672,27 @@ static void test_thermo_channels_read_fault_filter(void)
     thermo_channels_read(&bus, &snap);
     TEST_CHECK(!snap.ok[0] && isnan(snap.cj_c[0]), "spi_failed -> ok=false and cj_c NAN");
     reset_test_thermo_readings();
+}
+
+static void test_guard9_watchdog_source_order(void)
+{
+    TEST_SECTION("watchdog_task_entry() -- guard9_prelock_check precedes the lock and the lock take is bounded");
+    char *text = profile_executor_c_read_source();
+    if (!text) { TEST_CHECK(false, "could not read profile_executor.c"); return; }
+    char *code = pe_strip_c_comments(text);
+    free(text);
+    if (!code) { TEST_CHECK(false, "malloc failed"); return; }
+    const char *b = strstr(code, "void watchdog_task_entry(void *arg)");
+    TEST_CHECK(b != NULL, "watchdog body found");
+    if (b) {
+        const char *pre = strstr(b, "guard9_prelock_check(&since_ms)");
+        const char *take = strstr(b, "guard9_take_lock_bounded()");
+        TEST_CHECK(pre && take && pre < take, "MUST GO RED if the lock is taken before the lock-free stale check");
+        TEST_CHECK(strstr(b, "xSemaphoreTake(s_exec.lock, portMAX_DELAY)") == NULL ||
+                       strstr(b, "xSemaphoreTake(s_exec.lock, portMAX_DELAY)") > strstr(b, "heat_enable_reconcile();"),
+                   "the watchdog must not block forever on s_exec.lock before the stale check");
+    }
+    free(code);
 }
 
 int main(void)
