@@ -3445,9 +3445,9 @@ static void test_fuzz_hostile_backup_shapes(void)
     bi_fuzz_expect_refused("zone index is a string",
         "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":\"0\",\"pid_kp\":1}]}");
     bi_fuzz_expect_refused("pid_kp is a string",
-        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":\"9\"}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":\"9\",\"pid_ki\":0,\"pid_kd\":0}]}");
     bi_fuzz_expect_refused("pid_kp is null",
-        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":null}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":null,\"pid_ki\":0,\"pid_kd\":0}]}");
     bi_fuzz_expect_refused("version is a string",
         "{\"kind\":\"kilnctl_backup\",\"version\":\"2\",\"profiles\":[],\"zones\":[]}");
     bi_fuzz_expect_refused("kind is a number", "{\"kind\":5,\"version\":2,\"profiles\":[],\"zones\":[]}");
@@ -3457,13 +3457,33 @@ static void test_fuzz_hostile_backup_shapes(void)
     bi_fuzz_expect_refused("zone index -1",
         "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":-1,\"pid_kp\":1}]}");
     bi_fuzz_expect_refused("pid_kp 1e999",
-        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1e999}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1e999,\"pid_ki\":0,\"pid_kd\":0}]}");
     bi_fuzz_expect_refused("ct_mask 256",
-        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":256}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":256}]}");
     bi_fuzz_expect_refused("ct_mask -1",
-        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":-1}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":-1}]}");
     bi_fuzz_expect_refused("ct_mask string",
-        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"ct_mask\":\"3\"}]}");
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":\"3\"}]}");
+
+    /* Review 15 LOW-4: positive controls. Each hostile shape above now carries all three gains, so it is refused
+     * by the check its label names; these prove the same shapes with a GOOD value are accepted, i.e. the refusal is
+     * about the one field, not a missing gain. */
+    {
+        char err[256] = "";
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply(valid, err, sizeof(err)), "fuzz control: the full valid body is accepted");
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+                                            "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0}]}",
+                                            err, sizeof(err)),
+                   "fuzz control: a numeric pid_kp with all three gains is accepted");
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],"
+                                            "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+                                            "\"ct_mask\":3}]}",
+                                            err, sizeof(err)),
+                   "fuzz control: an in-range ct_mask with all three gains is accepted");
+    }
 
     /* huge zones array: 5000 entries of the same index (duplicate AND over any topology) */
     static char big[400000];
@@ -3498,7 +3518,7 @@ static void test_fuzz_hostile_backup_shapes(void)
     /* F5/F6: "duplicate version, second future" is accepted today; see findings doc. */
     bi_fuzz_expect_refused("duplicate zone index in one import",
         "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":["
-        "{\"index\":0,\"pid_kp\":1},{\"index\":0,\"pid_kp\":2}]}");
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0},{\"index\":0,\"pid_kp\":2,\"pid_ki\":0,\"pid_kd\":0}]}");
     bi_fuzz_expect_refused("embedded raw NUL after kind (string cut)",
         "{\"kind\":\"kilnctl_backup\"\0,\"version\":2,\"profiles\":[],\"zones\":[]}");
 }
