@@ -195,8 +195,7 @@ Negative test: 4 mutations (target==running check, `esp_ota_abort` cleanup,
 recovery_boot claim release on set failure, Pico relay-start handling), all
 CAUGHT.
 
-Not covered: the `update_*_http*.c` gate-refusal handlers. That part of item 9
-stays open.
+Not covered here: the `update_*_http*.c` gate-refusal handlers (done in campaign 9c below).
 
 Findings (handler behaviour left as is, per campaign rules; the tests do not
 pin either behaviour):
@@ -213,3 +212,40 @@ pin either behaviour):
   refusal is shadowed by the mode gate (`relay_authority_heat_run_active` and
   `relays_energized` refuse first), so the post-claim authoritative re-read is
   not reachable through the fakes. Not a defect, a coverage limit.
+
+## Campaign 9c: update_*_http gate refusals
+
+New `test_update_http_refusals.c` (392 checks, 0 failed, including the
+`test_update_fetch.c` cases it hooks into). It #includes `test_update_fetch.c`
+(`main` renamed, `UF_EXTRA_TESTS` hook before the writer-wedge case), compiles
+the real `update_fetch.c`, `update_http.c`, `update_stage.c` and, new, the real
+`update_settings_http.c`, over the existing update_fetch fakes. One new fake
+knob, `g_fr_alloc_fail_all`.
+
+Covered: settings handler (GET; cfg unmounted and recovery-skipped 503; empty,
+oversize and short body 400; firing/autotune 409 shadowing a malformed field;
+missing field, over-long repo, embedded NUL, validator reject 400; persist
+failure 500, never ok; success), fetch status OOM 500, bad_confirm 400, gate
+order (mode gate before interlock before claim), claim_deny body text, check
+never takes the claim, stage upload (claim busy body, interlock reason,
+autotune, a parked download holding the claim, zero-length and 100 MB
+content_len 413, malformed X-Stage-Zones-Cfg/Kilnlink/Uart headers 400
+bad_schema_header, downgrade policy 409), stage GET, stage clear and its flash
+failure.
+
+Negative test (`tools/negtest.ps1`, run with `-Command` on
+`build_host_tests.ps1 -Only update_http_refusals` for speed; baseline passed):
+10 mutations, all CAUGHT after one replacement: settings_mode_gate,
+settings_cfg_unmounted, settings_persist_fail_as_ok, settings_body_bound,
+stage_oversize_status, stage_kilnlink_hdr, stage_claim_busy_body,
+stage_clear_mode_gate, download_bad_confirm, fetch_status_oom. The first
+attempt, removing the `strlen(repo) != len` embedded-NUL guard in
+`update_settings_http.c`, was MISSED because it is shadowed: `http_form_url_decode`
+already returns -2 for `%00`, so the guard is unreachable defence in depth.
+Replaced by settings_body_bound.
+
+Findings: no defects. Coverage limits, not defects: the mode-gate re-check
+after the claim is taken (stage upload) cannot be driven through the fakes;
+auth tier is a route-table property, not a handler one, and there is no
+recovery-mode gate in the update handlers; there is no apply route among the
+`update_*` handlers (apply lives in the recovery image's own handler set).
