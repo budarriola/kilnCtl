@@ -1117,5 +1117,20 @@ class ApplyStagedTest(_ApplyBase):
 
 
 
+class FirmwareWordingPin(unittest.TestCase):
+    """REVIEW_RECOVERY_FIX3 N4: the tool detects the board's not-applicable reply by
+    text, so the firmware's wording and the tool's needle must stay in step."""
+
+    def test_firmware_message_contains_tool_needle(self):
+        src = os.path.join(os.path.dirname(__file__), "..", "..", "..", "firmware",
+                           "KilnFW_recovery", "main", "recovery_http.c")
+        with open(src, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        self.assertIn("boot_guard not applicable (", text)
+        tool = os.path.join(os.path.dirname(mr.__file__), "mcp_server_recovery.py")
+        with open(tool, encoding="utf-8") as f:
+            self.assertIn('"not applicable" in str(reply.get("text", "")).lower()', f.read())
+
+
 if __name__ == "__main__":
     unittest.main()

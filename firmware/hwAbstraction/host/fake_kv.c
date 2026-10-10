@@ -482,7 +482,10 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
         len = k->committed_len;
     }
 
-    if (want_str && !is_str) return HAL_INVALID_ARG; /* wrong-type injection case */
+    /* Matches ESP-IDF 6.0.2: Storage::findItem keeps scanning past a page
+     * TYPE_MISMATCH and ends in NOT_FOUND, so a typed read of a key stored
+     * with another type is NOT_FOUND on target, not a type error. */
+    if (want_str && !is_str) return HAL_NOT_FOUND;
 
     if (buf == NULL) { /* size probe */
         *out_len = len;
@@ -571,7 +574,7 @@ hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out)
      * than 4 bytes, which do_get() would otherwise report as a successful
      * short read. */
     hal_status_t err = do_get(get_handle(h), key, false, out, &len);
-    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_NOT_FOUND; /* wrong type: NOT_FOUND on target */
     return err;
 }
 
@@ -585,13 +588,24 @@ hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out)
     if (out == NULL) return HAL_INVALID_ARG;
     size_t len = sizeof(*out);
     hal_status_t err = do_get(get_handle(h), key, false, out, &len);
-    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_NOT_FOUND; /* wrong type: NOT_FOUND on target */
     return err;
 }
 
 hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value)
 {
     return do_set(get_handle(h), key, false, &value, sizeof(value));
+}
+
+hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key)
+{
+    fake_kv_handle_slot_t *hs = get_handle(h);
+    if (!hs) return HAL_NOT_READY;
+    if (key == NULL) return HAL_INVALID_ARG;
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO;
+    fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];
+    fake_kv_key_slot_t *k = find_key(ns, key, false);
+    return (k && key_logically_present(k)) ? HAL_OK : HAL_NOT_FOUND;
 }
 
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)

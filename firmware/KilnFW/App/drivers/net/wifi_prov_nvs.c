@@ -138,11 +138,10 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     static const char *const probe_keys[] = WIFI_PROV_NVS_ALL_KEYS_INIT;
     bool any_key = false;
     for (size_t i = 0; i < sizeof(probe_keys) / sizeof(probe_keys[0]) && !any_key; i++) {
-        char probe[8];
-        size_t plen = sizeof(probe);
-        /* Any status but NOT_FOUND (OK, wrong type, too long for the probe buffer)
-         * proves the key exists. */
-        any_key = hal_kv_get_str(&h, probe_keys[i], probe, &plen) != HAL_NOT_FOUND;
+        /* Type-agnostic: a typed getter returns NOT_FOUND for a key of another
+         * type on target (ESP-IDF 6.0.2), so mode, the has_ flags and ip_mode (u8) and
+         * saved_nets (blob) would read as absent. */
+        any_key = hal_kv_key_exists(&h, probe_keys[i]) == HAL_OK;
     }
     if (!any_key) {
         hal_kv_close(&h);

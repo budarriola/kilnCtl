@@ -170,12 +170,10 @@ static hal_status_t hal_kv_esp_err_to_status(esp_err_t err) {
         case ESP_ERR_NVS_NOT_ENOUGH_SPACE:  return HAL_NO_MEM;
         case ESP_ERR_NVS_INVALID_HANDLE:    return HAL_INVALID_ARG;
         case ESP_ERR_NVS_READ_ONLY:         return HAL_INVALID_ARG;
-        /* get_str() on a key written via set_blob() (or vice versa) -- NVS's
-         * own type tag mismatch. Mapped to HAL_INVALID_ARG (a caller-error
-         * shape, not a transport failure) to match fake_kv.c's identical
-         * "wrong-type injection case" return for the same scenario
-         * (fake_kv.c:412/436's do_get()/hal_kv_get_u32() HAL_INVALID_ARG
-         * returns) -- target and host now agree on this case. */
+        /* TYPE_MISMATCH only surfaces from calls that do not scan pages (e.g. the
+         * set path). The typed getters never return it: Storage::findItem keeps
+         * scanning past a page mismatch and ends in NOT_FOUND (checked against
+         * ESP-IDF 6.0.2), and fake_kv.c matches that. */
         case ESP_ERR_NVS_TYPE_MISMATCH:     return HAL_INVALID_ARG;
         default:                            return hal_esp_err_to_status(err);
     }
@@ -353,6 +351,19 @@ hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value) {
         return HAL_NOT_READY; /* factory-reset writer fence, see hal_kv.h */
     }
     esp_err_t err = nvs_set_u8(impl->handle, key, value);
+    return hal_kv_esp_err_to_status(err);
+}
+
+hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key) {
+    if (!h || !key) {
+        return HAL_INVALID_ARG;
+    }
+    struct hal_kv_esp_impl *impl = hal_kv_esp_impl(h);
+    if (!impl->is_open) {
+        return HAL_NOT_READY;
+    }
+    nvs_type_t type;
+    esp_err_t err = nvs_find_key(impl->handle, key, &type);
     return hal_kv_esp_err_to_status(err);
 }
 

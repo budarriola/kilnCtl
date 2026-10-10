@@ -49,7 +49,7 @@ static char *slurp(const char *path)
         // CRLF checkouts: the scans below use LF needles.
         size_t w = 0;
         for (size_t r = 0; r < got; r++) {
-            if (buf[r] != '') {
+            if (buf[r] != '\r') {
                 buf[w++] = buf[r];
             }
         }
@@ -244,6 +244,21 @@ static void test_http(const char *path)
         }
         CHECK(strstr(w, "legacy copy not checked") != NULL && strstr(w, "httpd_resp_sendstr(req, legacy_skipped") != NULL,
               "reply says when the legacy erase was skipped");
+        // N2 (REVIEW_RECOVERY_FIX3): pin the exact selection, whitespace squeezed, so a
+        // ternary forced false (or reordered) is caught, not just the note's text.
+        const char *rep = strstr(w, "httpd_resp_sendstr(req, legacy_skipped");
+        char sq[512];
+        size_t sn = 0;
+        for (const char *c = rep; rep && *c && *c != ';' && sn + 1 < sizeof(sq); c++) {
+            if (*c != ' ' && *c != '\n' && *c != '\t') {
+                sq[sn++] = *c;
+            }
+        }
+        sq[sn] = 0;
+        CHECK(rep != NULL &&
+                  strcmp(sq, "httpd_resp_sendstr(req,legacy_skipped?\"ok,Wi-Fisettingscleared,restarting"
+                             "(legacycopynotchecked:defaultNVSunavailable)\":\"ok,Wi-Fisettingscleared,restarting\")") == 0,
+              "reply picks the skip note exactly when legacy_skipped is set, else the plain ok");
         free(w);
     }
     char *l = fn_body(src, "static int erase_legacy_default_wifi(");
@@ -258,6 +273,12 @@ static void test_http(const char *path)
                   strstr(er, "if (err == ESP_OK) {") < cm,
               "legacy erase: commit only when erase_all succeeded");
         CHECK(cl != NULL && cm != NULL && cm < cl, "legacy erase returns the erase/commit result");
+        // N2: the skip path must report itself: *skipped = true inside the
+        // RECOVERY_NVS_FAIL_DEFAULT branch, before that branch's return 0.
+        const char *gt = strstr(l, "RECOVERY_NVS_FAIL_DEFAULT");
+        const char *sk = gt ? strstr(gt, "*skipped = true;") : NULL;
+        const char *r0 = gt ? strstr(gt, "return 0;") : NULL;
+        CHECK(sk != NULL && r0 != NULL && sk < r0, "legacy erase skip path sets *skipped before returning 0");
         free(l);
     }
     free(src);

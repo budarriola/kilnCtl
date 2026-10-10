@@ -130,6 +130,12 @@ hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
 hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out);
 hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value);
 
+/* Type-agnostic existence probe (nvs_find_key on target). HAL_OK = a key of ANY
+ * type exists; HAL_NOT_FOUND = none. Use this, never a typed getter, to ask
+ * "is there data here": on real NVS a typed getter on a key of another type
+ * returns NOT_FOUND, not a type error. */
+hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key);
+
 /* crash_report.c and profiles_http.c's scoped-key erase. */
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key);
 

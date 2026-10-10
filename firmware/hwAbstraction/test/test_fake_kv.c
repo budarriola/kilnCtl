@@ -133,7 +133,9 @@ int main(void)
     CHECK(len == strlen("kiln1") + 1);
 
     /* --- wrong-type error injection: get_str on a blob key, and vice versa --- */
-    CHECK(hal_kv_get_str(&h, "cal", strbuf, &len) == HAL_INVALID_ARG);
+    CHECK(hal_kv_get_str(&h, "cal", strbuf, &len) == HAL_NOT_FOUND); /* as on target (IDF 6.0.2) */
+    CHECK(hal_kv_key_exists(&h, "cal") == HAL_OK);
+    CHECK(hal_kv_key_exists(&h, "no_such_key") == HAL_NOT_FOUND);
     len = sizeof(strbuf);
     CHECK(hal_kv_get_blob(&h, "name", strbuf, &len) == HAL_OK); /* blob accepts either */
     CHECK(len == strlen("kiln1") + 1 && memcmp(strbuf, "kiln1", len) == 0);

@@ -627,9 +627,7 @@ static bool legacy_wifi_key_present(const char *key)
     if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, NULL) != HAL_OK) {
         return false;
     }
-    char b[8];
-    size_t l = sizeof(b);
-    bool present = hal_kv_get_blob(&h, key, b, &l) != HAL_NOT_FOUND;
+    bool present = hal_kv_key_exists(&h, key) == HAL_OK;
     hal_kv_close(&h);
     return present;
 }
@@ -639,6 +637,34 @@ static void simulate_reboot_state(void)
 {
     reset_state();
     memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+}
+
+// N1 (REVIEW_RECOVERY_FIX3): on target a typed getter returns NOT_FOUND for a key of
+// another type, so a namespace holding only u8/blob keys must still count as saved
+// data on the MAIN wifi_nvs load. fake_kv now models that NOT_FOUND.
+static void test_main_load_keeps_ap_mode_saved_as_u8_only(void)
+{
+    TEST_SECTION("wifi_nvs holding only mode=AP (u8, no string keys) survives a reload "
+                 "(REVIEW_RECOVERY_FIX3 N1)");
+    seed_legacy_default_wifi();
+    TEST_CHECK(legacy_default_nvs_erase_wifi() == ESP_OK, "legacy namespace emptied");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION) == HAL_OK, "open wifi_nvs");
+    TEST_CHECK(hal_kv_set_u8(&h, NVS_KEY_MODE, 1) == HAL_OK, "seed mode=AP as a u8 only");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "commit");
+    char b[4];
+    size_t l = sizeof(b);
+    TEST_CHECK(hal_kv_get_str(&h, NVS_KEY_MODE, b, &l) == HAL_NOT_FOUND,
+               "model check: a string read of a u8 key is NOT_FOUND, as on target");
+    hal_kv_close(&h);
+    simulate_reboot_state();
+    bool found = false;
+    TEST_CHECK(wifi_prov_nvs_load_from(WIFI_NVS_PARTITION, &found) == ESP_OK, "reload succeeds");
+    TEST_CHECK(found, "a u8-only namespace counts as found");
+    TEST_CHECK(s_wifi.mode == WIFI_PROV_MODE_AP, "AP mode survives the reload");
+    simulate_reboot_state();
+    boot_wifi_migration();
+    TEST_CHECK(s_wifi.mode == WIFI_PROV_MODE_AP, "AP mode survives the full boot sequence");
 }
 
 static void test_legacy_wifi_migration_is_one_shot(void)
@@ -1736,6 +1762,7 @@ void run_test_wifi_prov(void)
     test_dns_nvs_round_trip();
     test_legacy_default_wifi_erase_keeps_board_unprovisioned();
     test_empty_legacy_namespace_is_not_found();
+    test_main_load_keeps_ap_mode_saved_as_u8_only();
     test_legacy_wifi_migration_is_one_shot();
     test_interrupted_first_migration_retries_next_boot();
     test_legacy_migration_failures_never_lose_credential();

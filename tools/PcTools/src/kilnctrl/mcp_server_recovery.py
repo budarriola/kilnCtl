@@ -514,6 +514,7 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
             return _post_error("/api/ota/esp/boot_guard_reset", exc)
         return (f"UNVERIFIED: POST /api/ota/esp/boot_guard_reset was sent but the reply was lost ({exc}); "
                 f"the board may or may not have cleared it -- read recovery_status (host={resolved})")
+    # Wording is owned by recovery_http.c (boot_guard_clear_or_na); test_mcp_server_recovery pins it.
     if "not applicable" in str(reply.get("text", "")).lower():
         return (f"NOT APPLICABLE: board replied {reply['text']!r} -- its kiln_nvs is unavailable in the "
                 f"recovery image, so NOTHING was cleared (host={resolved}); the application will read "

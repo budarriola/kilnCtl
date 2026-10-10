@@ -693,6 +693,7 @@ static bool clear_boot_guard(char *msg, size_t cap)
 // treats an unusable kiln_nvs as count 0 too), so it must not block the apply.
 static bool boot_guard_clear_or_na(char *msg, size_t cap)
 {
+    /* mcp_server_recovery.py matches "not applicable" in the text below (a test pins it). */
     if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
         snprintf(msg, cap, "boot_guard not applicable (kiln_nvs unavailable)");
         ESP_LOGW(TAG, "%s", msg);

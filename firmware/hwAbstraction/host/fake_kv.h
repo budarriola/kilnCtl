@@ -42,8 +42,9 @@
  *    "blob size-probe" path kiln_cfg_store.c and touch_cal_store.c use on
  *    values that may have been written either way.
  *  - get_str requires the key was last written via set_str; calling it on
- *    a set_blob key returns HAL_INVALID_ARG (the plan's "wrong-type" error
- *    injection case) rather than silently reinterpreting the bytes.
+ *    a set_blob key returns HAL_NOT_FOUND, matching ESP-IDF 6.0.2 (a typed
+ *    read of a key of another type ends in NOT_FOUND, never a type error)
+ *    rather than silently reinterpreting the bytes.
  *  - fake_kv_script_corrupt_key() marks a COMMITTED value corrupted; any
  *    get_* on it (once no newer pending write shadows it) returns HAL_IO
  *    until overwritten by a fresh set_*+commit, modeling flash bit-rot
