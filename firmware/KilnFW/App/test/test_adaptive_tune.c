@@ -754,7 +754,7 @@ static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
     adaptive_tune_kibase_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), adaptive_tune_kibase_file_validate, &raw, &rev, &valid);
     TEST_CHECK(valid && rev == 1, "the file holds a rev-1 copy after one save");
 }
 
@@ -790,7 +790,7 @@ static void test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_u
     adaptive_tune_kibase_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), adaptive_tune_kibase_file_validate, &raw, &rev, &valid);
     TEST_CHECK(!valid, "with the file write skipped there is no file, and no NVS copy was written either");
 }
 

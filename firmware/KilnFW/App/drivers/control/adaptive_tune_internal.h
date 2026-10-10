@@ -275,7 +275,7 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 // to the WHOLE adaptive_tune_kibase_blob_t as one document. Losing this file
 // (partition wipe, corrupt file) costs at most one firing's worth of
 // baseline re-latching, not a safety-relevant fact -- see adaptive_tune.c's
-// kibase_file_validate() for the one structural check applied (the mask
+// adaptive_tune_kibase_file_validate() for the one structural check applied (the mask
 // cannot reference a zone index that does not exist), everything else is
 // trusted the same way the NVS blob always was.
 /* ADAPTIVE_TUNE_KIBASE_FILE_PATH now lives in adaptive_tune.h (kiln-scope reset names it). */

@@ -40,6 +40,7 @@
 // boot-time reads (adaptive_tune_init()) run once from app_main's task,
 // which is not PSRAM-stacked.
 #include "adaptive_tune_internal.h"
+#include "cfgfs_file_validators.h"
 
 #include <assert.h>
 #include <math.h>
@@ -604,7 +605,7 @@ static uint32_t s_kibase_rev = 0;
 // not have -- everything else (a garbage baseline value for a zone whose
 // bit IS set) is exactly as trusted as the NVS blob always was, since this
 // item's whole point is that losing/re-deriving it is cheap.
-static bool kibase_file_validate(const void *bytes, size_t len)
+bool adaptive_tune_kibase_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(adaptive_tune_kibase_blob_t)) {
         return false;
@@ -1414,7 +1415,7 @@ void adaptive_tune_init(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
-                                           kibase_file_validate, &resolved, &resolved_rev, &used_file);
+                                           adaptive_tune_kibase_file_validate, &resolved, &resolved_rev, &used_file);
     if (have_value) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (resolved.mask & (1u << zi)) {
@@ -1501,7 +1502,7 @@ void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(f_blob), kibase_file_validate, &f_blob, &f_rev,
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(f_blob), adaptive_tune_kibase_file_validate, &f_blob, &f_rev,
                           &f_valid);
 
     adaptive_tune_kibase_blob_t n_blob;

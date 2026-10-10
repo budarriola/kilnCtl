@@ -10,6 +10,7 @@
 // outright to write anything whose name does not end in .inc, so pointing it
 // at this file by mistake fails loudly instead of silently.)
 #include "profiles_builtin.h"
+#include "cfgfs_file_validators.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -67,7 +68,7 @@ static uint32_t s_hidden_rev;
 /* Any 32-bit mask is accepted -- the NVS path never range-checked it either
  * (bits past g_builtin_profile_count are inert), so the file is validated
  * exactly as NVS is: by size alone. */
-static bool hidden_mask_validate(const void *bytes, size_t len)
+bool profiles_builtin_hidden_file_validate(const void *bytes, size_t len)
 {
     (void)bytes;
     return len == sizeof(uint32_t);
@@ -176,7 +177,7 @@ esp_err_t profiles_builtin_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(PROFILES_HIDDEN_FILE_PATH, &nvs_mask, sizeof(nvs_mask), nvs_valid, nvs_rev,
-                                           hidden_mask_validate, &resolved, &resolved_rev, &used_file);
+                                           profiles_builtin_hidden_file_validate, &resolved, &resolved_rev, &used_file);
     if (have_value) {
         s_hidden_mask = resolved;
         s_hidden_rev = resolved_rev;
@@ -197,7 +198,7 @@ void profiles_builtin_get_dualwrite_status(bool *file_valid, uint32_t *file_rev,
     uint32_t f_mask = 0;
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
 
     bool n_valid = false;
     uint32_t n_mask = 0;

@@ -259,7 +259,7 @@ static void test_dual_write_lands_on_both_file_and_nvs(void)
     memset(&file_blob, 0, sizeof(file_blob));
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(file_blob), display_power_validate, &file_blob, &file_rev,
+    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(file_blob), display_power_cfg_file_validate, &file_blob, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_blob.brightness_percent == 55 && file_blob.timeout_setting == DISPLAY_TIMEOUT_5_MIN,
                "the file was written and decodes to the values just set");
@@ -330,7 +330,7 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     memset(&file_blob, 0, sizeof(file_blob));
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(file_blob), display_power_validate, &file_blob, &file_rev,
+    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(file_blob), display_power_cfg_file_validate, &file_blob, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_blob.brightness_percent == 99 && file_rev == 9,
                "the file was resynced from the winning NVS side");

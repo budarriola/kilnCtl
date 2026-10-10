@@ -1,4 +1,5 @@
 #include "setup_wizard_progress.h"
+#include "cfgfs_file_validators.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -467,7 +468,7 @@ static void steps_to_blob(setup_wizard_progress_blob_t *blob)
     }
 }
 
-static bool cfg_blob_validate(const void *bytes, size_t len)
+bool setup_wizard_progress_file_validate(const void *bytes, size_t len)
 {
     if (!bytes || len != sizeof(setup_wizard_progress_blob_t)) {
         return false;
@@ -498,7 +499,7 @@ esp_err_t setup_wizard_progress_start(void)
     uint32_t rev = 0;
     bool used_file = false;
     if (pref_cfg_fs_resolve(SETUP_WIZARD_PROGRESS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
-                            cfg_blob_validate, &resolved, &rev, &used_file)) {
+                            setup_wizard_progress_file_validate, &resolved, &rev, &used_file)) {
         if (used_file) {
             adopt_v5(&resolved);
         }
@@ -526,7 +527,7 @@ void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file
     bool n_valid = false;
     bool content_equal = false;
     if (w != NULL) {
-        pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(w->f), cfg_blob_validate, &w->f, &f_rev,
+        pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(w->f), setup_wizard_progress_file_validate, &w->f, &f_rev,
                                    &f_valid);
         memset(&w->n, 0, sizeof(w->n));
         n_valid = nvs_v5_read_quiet(&w->n, &w->raw);

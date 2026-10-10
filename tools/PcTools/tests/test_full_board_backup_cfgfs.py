@@ -197,3 +197,24 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_validated_files_are_posted_without_raw_and_others_with_raw():
+    """Files the firmware validates (cfgfs_file_validate.c) must not carry raw=1;
+    files with no validator still need it."""
+    urls: list = []
+
+    def fake_urlopen(req, timeout=None):
+        urls.append(req.full_url)
+        return _FakeResponse(b"{\"ok\":true}")
+
+    files = {n: {"size_bytes": 1, "data_base64": base64.b64encode(b"x").decode()}
+             for n in ("zones.json", "aux_out.dat", "profiles/hidden.json", "unit_pref.dat", "relay_names.dat")}
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok, message, _ = fbb.restore_cfgfs_files("10.0.0.5", files, 5.0)
+    assert ok, message
+    by_name = {u.split("name=")[1].split("&")[0]: u for u in urls}
+    for n in ("zones.json", "aux_out.dat", "profiles/hidden.json"):
+        assert "raw=1" not in by_name[n], n
+    for n in ("unit_pref.dat", "relay_names.dat"):
+        assert by_name[n].endswith("&raw=1"), n

@@ -211,7 +211,7 @@ static void test_save_lands_in_cfg_file_only(void)
     uint8_t file_raw = 0;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_validate, &file_raw, &file_rev,
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_raw == 1, "the file was actually written and decodes to enabled=true");
 
@@ -301,7 +301,7 @@ static void test_divergence_tie_break_higher_rev_wins(void)
     uint8_t file_raw = 1;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_validate, &file_raw, &file_rev,
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_raw == 0 && file_rev == 5, "the file was resynced from the winning NVS side");
 
@@ -364,7 +364,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
     uint8_t file_raw = 1;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_validate, &file_raw, &file_rev,
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_raw == 0 && file_rev == 1, "the file was resynced from the winning NVS side");
 
@@ -440,7 +440,7 @@ static void test_interrupted_write_leaves_old_file_intact(void)
     uint8_t file_raw = 0xFF;
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_validate, &file_raw, &file_rev,
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(file_raw), ramp_assist_cfg_file_validate, &file_raw, &file_rev,
                           &file_valid);
     TEST_CHECK(file_valid && file_raw == 1 && file_rev == 1,
                "the interrupted write left the OLD file (rev 1, enabled=true) completely intact");

@@ -1,4 +1,5 @@
 #include "ramp_assist_cfg.h"
+#include "cfgfs_file_validators.h"
 
 #include "cfg_fs_status.h"
 #include "esp_log.h"
@@ -50,7 +51,7 @@ static hal_status_t nvs_partition_init(const char *partition)
 // stored NVS byte -- reused verbatim as the pref_cfg_fs_validate_fn_t for
 // the file, so the moved item is validated exactly as its NVS path
 // validates today.
-static bool ramp_assist_validate(const void *bytes, size_t len)
+bool ramp_assist_cfg_file_validate(const void *bytes, size_t len)
 {
     if (len != 1) {
         return false;
@@ -89,7 +90,7 @@ esp_err_t ramp_assist_cfg_start(void)
         uint8_t raw = 0;
         hal_status_t rerr = hal_kv_get_u8(&h, NVS_KEY_RAMP_ASSIST, &raw);
         if (rerr == HAL_OK) {
-            if (ramp_assist_validate(&raw, 1)) {
+            if (ramp_assist_cfg_file_validate(&raw, 1)) {
                 nvs_valid = true;
                 nvs_raw = raw;
             } else {
@@ -121,7 +122,7 @@ esp_err_t ramp_assist_cfg_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(RAMP_ASSIST_FILE_PATH, &nvs_raw, sizeof(nvs_raw), nvs_valid, nvs_rev,
-                                           ramp_assist_validate, &resolved_raw, &resolved_rev, &used_file);
+                                           ramp_assist_cfg_file_validate, &resolved_raw, &resolved_rev, &used_file);
     if (!have_value) {
         return load_err ? ESP_FAIL : ESP_OK; // neither side had anything trustworthy -- disabled default stands
     }
@@ -190,7 +191,7 @@ void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
     uint8_t f_raw = 0;
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(f_raw), ramp_assist_validate, &f_raw, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(RAMP_ASSIST_FILE_PATH, sizeof(f_raw), ramp_assist_cfg_file_validate, &f_raw, &f_rev, &f_valid);
 
     bool n_valid = false;
     uint8_t n_raw = 0;
@@ -199,7 +200,7 @@ void ramp_assist_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
         hal_kv_handle_t h;
         if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK) {
             uint8_t raw = 0;
-            if (hal_kv_get_u8(&h, NVS_KEY_RAMP_ASSIST, &raw) == HAL_OK && ramp_assist_validate(&raw, 1)) {
+            if (hal_kv_get_u8(&h, NVS_KEY_RAMP_ASSIST, &raw) == HAL_OK && ramp_assist_cfg_file_validate(&raw, 1)) {
                 n_valid = true;
                 n_raw = raw;
                 uint32_t rev = 0;

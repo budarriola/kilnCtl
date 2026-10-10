@@ -2,7 +2,20 @@
 
 #include <string.h>
 
+#include "adaptive_tune.h"
+#include "aux_outputs_cfg.h"
+#include "cfgfs_file_validators.h"
+#include "ct_verify_store.h"
+#include "display_power_cfg.h"
+#include "iter_tune_store.h"
 #include "persist_scratch.h"
+#include "profiles_builtin.h"
+#include "profiles_favorites.h"
+#include "ramp_assist_cfg.h"
+#include "relay_cycles.h"
+#include "setup_wizard_progress.h"
+#include "time_sync.h"
+#include "update_settings.h"
 #include "zones_config_cfg_fs.h" /* ZONES_CFG_FILE_PATH */
 #include "zones_config_json.h"
 
@@ -34,6 +47,29 @@ static cfgfs_file_check_t check_zones(const uint8_t *body, size_t len, const cha
     return CFGFS_FILE_CHECK_INVALID;
 }
 
+/* Flat pref files: 4-byte LE rev + item, judged by the validator the owning
+ * module hands pref_cfg_fs_load_raw() (which itself rejects a wrong size). */
+typedef struct {
+    const char *name;
+    bool (*validate)(const void *bytes, size_t len);
+    const char *reason;
+} pref_file_rule_t;
+
+static const pref_file_rule_t PREF_FILE_RULES[] = {
+    { ADAPTIVE_TUNE_KIBASE_FILE_PATH, adaptive_tune_kibase_file_validate, "ki_base.dat fails validation" },
+    { RAMP_ASSIST_FILE_PATH, ramp_assist_cfg_file_validate, "ramp_assist.dat fails validation" },
+    { TIME_SYNC_TZ_FILE_PATH, time_sync_tz_file_validate, "tz.dat fails validation" },
+    { AUX_OUTPUTS_FILE_PATH, aux_outputs_cfg_file_validate, "aux_out.dat fails validation" },
+    { DISPLAY_POWER_FILE_PATH, display_power_cfg_file_validate, "display_power.dat fails validation" },
+    { "profiles/hidden.json", profiles_builtin_hidden_file_validate, "profiles/hidden.json fails validation" },
+    { PROFILES_FAVORITES_FILE_PATH, profiles_favorites_file_validate, "prof_fav.bin fails validation" },
+    { RELAY_CYCLES_FILE_PATH, relay_cycles_file_validate, "relay_cycles.dat fails validation" },
+    { SETUP_WIZARD_PROGRESS_FILE_PATH, setup_wizard_progress_file_validate, "setup_wiz.bin fails validation" },
+    { UPDATE_SETTINGS_FILE_PATH, update_settings_file_validate, "update_repo.dat fails validation" },
+    { CT_VERIFY_CFG_FILE_PATH, ct_verify_blob_validate, "ct_verify.bin fails validation" },
+    { ITER_TUNE_CFG_FILE_PATH, iter_tune_store_blob_validate, "iter_tune.bin fails validation" },
+};
+
 cfgfs_file_check_t cfgfs_file_check_write(const char *name, bool raw, const void *body, size_t len,
                                           const char **reason)
 {
@@ -44,6 +80,16 @@ cfgfs_file_check_t cfgfs_file_check_write(const char *name, bool raw, const void
     if (strcmp(name, ZONES_CFG_FILE_PATH) == 0) {
         /* Validated even with raw=1: raw only waives the missing-validator refusal. */
         return check_zones((const uint8_t *)body, len, reason);
+    }
+    for (size_t i = 0; i < sizeof(PREF_FILE_RULES) / sizeof(PREF_FILE_RULES[0]); i++) {
+        if (strcmp(name, PREF_FILE_RULES[i].name) == 0) {
+            /* raw=1 never waives a file that has a validator. */
+            if (len < 4 || !PREF_FILE_RULES[i].validate((const uint8_t *)body + 4, len - 4)) {
+                *reason = PREF_FILE_RULES[i].reason;
+                return CFGFS_FILE_CHECK_INVALID;
+            }
+            return CFGFS_FILE_CHECK_OK;
+        }
     }
     if (raw) {
         return CFGFS_FILE_CHECK_OK;

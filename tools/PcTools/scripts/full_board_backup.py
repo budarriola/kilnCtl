@@ -207,6 +207,14 @@ def _capture_cfgfs_files(host: str, timeout: float, cfgfs_status) -> tuple[dict,
     return files, errors
 
 
+# Mirrors cfgfs_file_validate.c (zones.json + PREF_FILE_RULES): files the firmware validates.
+CFGFS_VALIDATED_FILES = frozenset({
+    "zones.json", "ki_base.dat", "ramp_assist.dat", "tz.dat", "aux_out.dat", "display_power.dat",
+    "profiles/hidden.json", "prof_fav.bin", "relay_cycles.dat", "setup_wiz.bin", "update_repo.dat",
+    "ct_verify.bin", "iter_tune.bin",
+})
+
+
 def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry_run: bool = False):
     """Restores every captured cfg-filesystem file back onto a board via
     POST /api/cfgfs/file?name=<name>.
@@ -238,9 +246,9 @@ def restore_cfgfs_files(host: str, cfgfs_files: dict, timeout: float = 10.0, dry
 
     for name, raw in decoded.items():
         url = f"http://{host}/api/cfgfs/file?name={urllib.parse.quote(name)}"
-        if name != "zones.json":
-            # Audit M7: firmware validates zones.json content; every other file has no
-            # validator and needs the explicit raw=1 opt-in.
+        if name not in CFGFS_VALIDATED_FILES:
+            # Audit M7: firmware validates the content of these files (raw=1 never
+            # waives that); every other file has no validator and needs raw=1.
             url += "&raw=1"
         req = urllib.request.Request(url, data=raw, method="POST")
         try:

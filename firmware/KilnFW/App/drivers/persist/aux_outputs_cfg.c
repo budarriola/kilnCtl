@@ -1,4 +1,5 @@
 #include "aux_outputs_cfg.h"
+#include "cfgfs_file_validators.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -105,7 +106,7 @@ static bool entry_valid(const aux_output_entry_t *e)
 /* pref_cfg_fs validator: exact size + CRC; a CURRENT-version blob also needs
  * every entry in range. A NEWER version passes (its entries are not ours to
  * judge) so start() can quarantine it instead of silently defaulting. */
-static bool aux_validate(const void *bytes, size_t len)
+bool aux_outputs_cfg_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(aux_outputs_blob_t)) {
         return false;
@@ -169,7 +170,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
             } else if (len > 0 && len <= sizeof(raw)) {
                 size_t rl = len;
                 if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, raw, &rl) == HAL_OK && rl > 0) {
-                    if (rl == sizeof(nvs_blob) && aux_validate(raw, rl)) {
+                    if (rl == sizeof(nvs_blob) && aux_outputs_cfg_file_validate(raw, rl)) {
                         memcpy(&nvs_blob, raw, sizeof(nvs_blob));
                         nvs_valid = true;
                     } else if (raw[0] > AUX_OUTPUTS_CFG_VERSION) {
@@ -193,7 +194,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
-                                          aux_validate, &resolved, &resolved_rev, &used_file);
+                                          aux_outputs_cfg_file_validate, &resolved, &resolved_rev, &used_file);
     ao_lock(s_lock);
     apply_defaults();
     if (nvs_newer) {
@@ -267,7 +268,7 @@ bool aux_outputs_cfg_verify_persisted(void)
     uint32_t rev = 0;
     bool valid = false;
     cfg_save_lock_take(&s_set_lock); /* no set() in flight: RAM and file are consistent */
-    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_validate, &blob, &rev, &valid);
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_outputs_cfg_file_validate, &blob, &rev, &valid);
     ao_lock(s_lock);
     bool same = valid && rev == s_rev && blob.version == AUX_OUTPUTS_CFG_VERSION &&
                 memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
@@ -445,7 +446,7 @@ void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(f_blob), aux_validate, &f_blob, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(f_blob), aux_outputs_cfg_file_validate, &f_blob, &f_rev, &f_valid);
 
     bool n_valid = false;
     aux_outputs_blob_t n_blob;
@@ -457,7 +458,7 @@ void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
             aux_outputs_blob_t blob;
             memset(&blob, 0, sizeof(blob));
             size_t len = sizeof(blob);
-            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_validate(&blob, len)) {
+            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_outputs_cfg_file_validate(&blob, len)) {
                 n_valid = true;
                 n_blob = blob;
                 uint32_t rev = 0;

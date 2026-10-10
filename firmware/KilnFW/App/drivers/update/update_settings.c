@@ -1,4 +1,5 @@
 #include "update_settings.h"
+#include "cfgfs_file_validators.h"
 
 #include <stdatomic.h>
 #include <string.h>
@@ -77,7 +78,7 @@ bool update_settings_repo_is_valid(const char *repo)
 
 // Blob validator, also the pref_cfg_fs_validate_fn_t for the file. Accepts the
 // all-zero string (unset) and any valid repo, NUL-terminated and zero-padded.
-static bool update_settings_validate_blob(const void *bytes, size_t len)
+bool update_settings_file_validate(const void *bytes, size_t len)
 {
     if (bytes == NULL || len != sizeof(update_settings_blob_t)) {
         return false;
@@ -144,7 +145,7 @@ esp_err_t update_settings_start(void)
         size_t len = sizeof(blob);
         hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_UPDATE_REPO, &blob, &len);
         if (rerr == HAL_OK) {
-            if (update_settings_validate_blob(&blob, len)) {
+            if (update_settings_file_validate(&blob, len)) {
                 nvs_valid = true;
                 nvs_blob = blob;
             } else {
@@ -168,7 +169,7 @@ esp_err_t update_settings_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(UPDATE_SETTINGS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
-                                           update_settings_validate_blob, &resolved, &resolved_rev, &used_file);
+                                           update_settings_file_validate, &resolved, &resolved_rev, &used_file);
     if (!have_value) {
         return ESP_OK; // neither side had anything trustworthy -- default stands
     }
@@ -294,7 +295,7 @@ void update_settings_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw_quiet(UPDATE_SETTINGS_FILE_PATH, sizeof(f_blob), update_settings_validate_blob, &f_blob,
+    pref_cfg_fs_load_raw_quiet(UPDATE_SETTINGS_FILE_PATH, sizeof(f_blob), update_settings_file_validate, &f_blob,
                                &f_rev, &f_valid);
 
     bool n_valid = false;
@@ -308,7 +309,7 @@ void update_settings_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
             memset(&blob, 0, sizeof(blob));
             size_t len = sizeof(blob);
             if (hal_kv_get_blob(&h, NVS_KEY_UPDATE_REPO, &blob, &len) == HAL_OK &&
-                update_settings_validate_blob(&blob, len)) {
+                update_settings_file_validate(&blob, len)) {
                 n_valid = true;
                 n_blob = blob;
                 uint32_t rev = 0;

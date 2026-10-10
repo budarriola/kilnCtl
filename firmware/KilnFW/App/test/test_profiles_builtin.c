@@ -234,7 +234,7 @@ static void test_hidden_save_writes_file_only(void)
 
     uint32_t f_mask = 0, f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
     TEST_CHECK(f_valid && f_mask == (1u << 3), "the file decodes to the new mask");
     uint32_t n_mask = 0, n_rev = 0;
     TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "NVS holds no mask -- the dual-write window is closed");
@@ -298,7 +298,7 @@ static void test_hidden_higher_rev_wins_over_file(void)
     TEST_CHECK(s_hidden_mask == (1u << 9) && s_hidden_rev == 5, "NVS (rev 5) beat the file (rev 1)");
     uint32_t f_mask = 0, f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
     TEST_CHECK(f_valid && f_mask == (1u << 9) && f_rev == 5, "the file was resynced from NVS");
 
     /* Reverse: file ahead of NVS. */

@@ -16751,6 +16751,7 @@ void run_test_zones_http(void)
  * file's header comment and build_host_tests.ps1's $cmd2). Declared here
  * rather than in a shared header since nothing else needs it. */
 extern void run_test_zones_config_cfg_fs(void);
+extern void run_test_cfgfs_pref_validate(void);
 
 /* test_relay_names_cfg_fs.c -- same convention, item 3's cfg_fs dual-write
  * bridge tests. */
@@ -16769,6 +16770,7 @@ int main(void)
 {
     run_test_zones_http();
     run_test_zones_config_cfg_fs();
+    run_test_cfgfs_pref_validate();
     run_test_relay_names_cfg_fs();
     run_test_zone_normals_cfg_fs();
     run_test_zones_blob_golden();

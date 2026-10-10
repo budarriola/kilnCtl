@@ -5,7 +5,7 @@
 // header comment used to document ("no host stub written for it in this
 // pass"). #includes time_sync.c directly, same convention as
 // test_unit_pref.c/test_ramp_assist_cfg.c/test_display_power_cfg.c, to reach
-// its file-scope statics (s_tz_rev, TIME_SYNC_TZ_FILE_PATH, tz_file_validate)
+// its file-scope statics (s_tz_rev, TIME_SYNC_TZ_FILE_PATH, time_sync_tz_file_validate)
 // for the dual-write tests below.
 //
 // OWN, SEPARATE executable (build_host_tests.ps1's own build step), not part
@@ -159,7 +159,7 @@ static void test_ts_save_lands_in_cfg_file_only(void)
     uint8_t file_item[TZ_ITEM_SIZE];
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, file_item, &file_rev, &file_valid);
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, time_sync_tz_file_validate, file_item, &file_rev, &file_valid);
     TEST_CHECK(file_valid && strcmp((char *)file_item, "EST5EDT,M3.2.0,M11.1.0") == 0,
                "the file decodes to the just-set TZ string");
 
@@ -220,7 +220,7 @@ static void test_ts_divergence_tie_break_higher_rev_wins(void)
     uint8_t file_item[TZ_ITEM_SIZE];
     uint32_t file_rev = 0;
     bool file_valid = false;
-    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, file_item, &file_rev, &file_valid);
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, time_sync_tz_file_validate, file_item, &file_rev, &file_valid);
     TEST_CHECK(file_valid && strcmp((char *)file_item, "PST8PDT,M3.2.0,M11.1.0") == 0 && file_rev == 5,
                "the file was resynced from the winning NVS side");
 

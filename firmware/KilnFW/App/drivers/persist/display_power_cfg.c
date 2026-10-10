@@ -1,4 +1,5 @@
 #include "display_power_cfg.h"
+#include "cfgfs_file_validators.h"
 
 #include <string.h>
 
@@ -78,7 +79,7 @@ static void apply_defaults(void)
 // applied to a stored NVS blob -- reused verbatim as the
 // pref_cfg_fs_validate_fn_t for the file, so the moved item is validated
 // exactly as its NVS path validates today.
-static bool display_power_validate(const void *bytes, size_t len)
+bool display_power_cfg_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(display_power_cfg_blob_t)) {
         return false;
@@ -125,7 +126,7 @@ esp_err_t display_power_cfg_start(void)
         size_t len = sizeof(blob);
         hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len);
         if (rerr == HAL_OK) {
-            if (display_power_validate(&blob, len)) {
+            if (display_power_cfg_file_validate(&blob, len)) {
                 nvs_valid = true;
                 nvs_blob = blob;
             } else {
@@ -156,7 +157,7 @@ esp_err_t display_power_cfg_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(DISPLAY_POWER_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
-                                           display_power_validate, &resolved, &resolved_rev, &used_file);
+                                           display_power_cfg_file_validate, &resolved, &resolved_rev, &used_file);
     if (!have_value) {
         return ESP_OK; // neither side had anything trustworthy -- defaults stand
     }
@@ -252,7 +253,7 @@ void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(f_blob), display_power_validate, &f_blob, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(f_blob), display_power_cfg_file_validate, &f_blob, &f_rev, &f_valid);
 
     bool n_valid = false;
     display_power_cfg_blob_t n_blob;
@@ -265,7 +266,7 @@ void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev
             memset(&blob, 0, sizeof(blob));
             size_t len = sizeof(blob);
             if (hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len) == HAL_OK &&
-                display_power_validate(&blob, len)) {
+                display_power_cfg_file_validate(&blob, len)) {
                 n_valid = true;
                 n_blob = blob;
                 uint32_t rev = 0;

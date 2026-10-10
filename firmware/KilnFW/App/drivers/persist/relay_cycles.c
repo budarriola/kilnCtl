@@ -1,4 +1,5 @@
 #include "relay_cycles.h"
+#include "cfgfs_file_validators.h"
 #include "legacy_default_nvs.h"
 
 #include <string.h>
@@ -134,7 +135,7 @@ static relay_cycles_t s_rc;
  * valid" here, exactly like relay_cycles_init() treats such an NVS blob,
  * falling back to whichever side (NVS in practice, since a cfg-file can only
  * ever have been written by firmware at or after this pass) is trustworthy. */
-static bool relay_cycles_file_validate(const void *bytes, size_t len)
+bool relay_cycles_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(relay_cycles_blob_t)) {
         return false;

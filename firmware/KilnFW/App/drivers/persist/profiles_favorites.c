@@ -3,6 +3,7 @@
 // shortcut and not a move, why two masks rather than one, and what happens
 // to a favorite when the profile it points at is deleted or overwritten).
 #include "profiles_favorites.h"
+#include "cfgfs_file_validators.h"
 
 #include <string.h>
 
@@ -62,7 +63,7 @@ _Static_assert(sizeof(fav_item_t) <= PREF_CFG_FS_MAX_ITEM, "favorites item must 
 /* Any mask is acceptable content (an empty mask is the shipped default), so
  * validation is the exact-size check pref_cfg_fs already does before calling
  * this; it exists to satisfy the helper's contract. */
-static bool fav_item_validate(const void *bytes, size_t len)
+bool profiles_favorites_file_validate(const void *bytes, size_t len)
 {
     return bytes != NULL && len == sizeof(fav_item_t);
 }
@@ -207,7 +208,7 @@ esp_err_t profiles_favorites_start(void)
     uint32_t rev = 0;
     bool used_file = false;
     bool have = pref_cfg_fs_resolve(PROFILES_FAVORITES_FILE_PATH, &nvs_item, sizeof(nvs_item),
-                                    nerr == HAL_OK && nvs_found, 0, fav_item_validate, &resolved, &rev, &used_file);
+                                    nerr == HAL_OK && nvs_found, 0, profiles_favorites_file_validate, &resolved, &rev, &used_file);
     if (!have) {
         if (nerr == HAL_OK) {
             ESP_LOGI(TAG, "no favorites saved yet");
@@ -292,7 +293,7 @@ void profiles_favorites_get_dualwrite_status(bool *file_valid, uint32_t *file_re
     fav_item_t f;
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw_quiet(PROFILES_FAVORITES_FILE_PATH, sizeof(f), fav_item_validate, &f, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw_quiet(PROFILES_FAVORITES_FILE_PATH, sizeof(f), profiles_favorites_file_validate, &f, &f_rev, &f_valid);
 
     fav_item_t n;
     bool n_found = false;

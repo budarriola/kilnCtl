@@ -380,7 +380,7 @@ below for both.
   "reset one side of a pair" bug class this codebase already tracks).
 - **Validation**: each item's file bytes are validated by the SAME function
   its NVS load has always used (`unit_pref_validate()`/
-  `ramp_assist_validate()`/`display_power_validate()`, extracted from each
+  `ramp_assist_cfg_file_validate()`/`display_power_cfg_file_validate()`, extracted from each
   module's existing range checks, not new logic) — no bounds relaxed by the
   move. None of the three has a "0 means use default" sentinel to protect
   (unlike `progress_band_c`, the trap this task's brief calls out) — checked
@@ -484,7 +484,7 @@ here rather than left pending.
   the SAME generic `pref_cfg_fs.h` bridge too: the string is written into a
   fixed `TZ_ITEM_SIZE` (`TIME_SYNC_TZ_MAX_LEN + 1` = 64 bytes) buffer,
   NUL-padded, so the bridge's fixed-item_size contract needs no
-  variable-length special case. Validator (`tz_file_validate()`) requires a
+  variable-length special case. Validator (`time_sync_tz_file_validate()`) requires a
   NUL terminator within the buffer and re-runs `time_sync_tz_is_valid()` —
   the identical POSIX-TZ-grammar check `time_sync_start()`'s NVS path has
   always applied (Finding 2's "America/Chicago" rejection included). File:
@@ -959,7 +959,7 @@ taken here.
   `adaptive_tune_clear_ki_baseline()`, `adaptive_tune_revert()`) funnel
   through that one function to reach storage — a single counter there cannot
   desync between them the way one counter per call site could.
-- **Validator**: `kibase_file_validate()` checks only that `mask` names no
+- **Validator**: `adaptive_tune_kibase_file_validate()` checks only that `mask` names no
   zone index past `MAX31856_CHANNEL_COUNT` — everything else (a garbage
   baseline float for a zone whose bit IS set) is exactly as trusted as the
   NVS blob always was. This is the "simpler treatment" made concrete: no

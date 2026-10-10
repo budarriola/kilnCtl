@@ -1,4 +1,5 @@
 #include "time_sync.h"
+#include "cfgfs_file_validators.h"
 
 #include <string.h>
 #include <time.h>
@@ -16,7 +17,7 @@
                             * (<=TIME_SYNC_TZ_MAX_LEN bytes) with no migration chain of
                             * its own -- reuses the SAME generic bridge unit_pref.c/
                             * relay names (zones_config_store.c) share, not a bespoke
-                            * module. See tz_file_validate() below for how a
+                            * module. See time_sync_tz_file_validate() below for how a
                             * NUL-padded fixed buffer maps onto pref_cfg_fs's
                             * fixed-item_size contract. */
 
@@ -74,7 +75,7 @@ static uint32_t s_tz_rev = 0;
  * time_sync_start()'s NVS path already applies to a stored string, per this
  * task's "validated on load exactly as its NVS path validates today"
  * requirement. */
-static bool tz_file_validate(const void *bytes, size_t len)
+bool time_sync_tz_file_validate(const void *bytes, size_t len)
 {
     if (len != TZ_ITEM_SIZE) {
         return false;
@@ -184,7 +185,7 @@ esp_err_t time_sync_start(void)
     uint32_t resolved_rev = 0;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(TIME_SYNC_TZ_FILE_PATH, nvs_item, TZ_ITEM_SIZE, nvs_valid, nvs_rev,
-                                           tz_file_validate, resolved_item, &resolved_rev, &used_file);
+                                           time_sync_tz_file_validate, resolved_item, &resolved_rev, &used_file);
 
     char effective[TIME_SYNC_TZ_MAX_LEN + 1];
     time_sync_tz_effective(have_value ? (const char *)resolved_item : NULL, effective, sizeof(effective));
@@ -303,7 +304,7 @@ void time_sync_get_tz_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
     memset(f_item, 0, sizeof(f_item));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, tz_file_validate, f_item, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(TIME_SYNC_TZ_FILE_PATH, TZ_ITEM_SIZE, time_sync_tz_file_validate, f_item, &f_rev, &f_valid);
 
     bool n_valid = false;
     uint8_t n_item[TZ_ITEM_SIZE];

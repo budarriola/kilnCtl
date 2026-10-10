@@ -1945,10 +1945,12 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
     }
     free(body);
 
-    char json[128];
+    char json[2 * CFGFS_FILE_NAME_MAX + 96];
+    char name_esc[CFGFS_FILE_NAME_MAX * 2 + 1]; /* L6: name is client-supplied */
+    kiln_json_escape_ctl(name, name_esc, sizeof(name_esc));
     int n;
     if (job.result == ESP_OK) {
-        n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\",\"size_bytes\":%u}", name, (unsigned)received);
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\",\"size_bytes\":%u}", name_esc, (unsigned)received);
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(job.result));
         httpd_resp_set_status(req, "500 Internal Server Error");
