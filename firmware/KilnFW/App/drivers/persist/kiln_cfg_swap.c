@@ -656,10 +656,11 @@ static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_sa
     if (have_target_ceiling) {
         char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
         ceiling_reason[0] = '\0';
-        if (!safety_cfg_write_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
+        if (!safety_cfg_write_set_and_confirm_f32_blocking(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
                                                  ceiling_reason, sizeof(ceiling_reason), NULL)) {
-            ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land (%s) -- expected "
-                          "while ARMED, swap already succeeded via the volatile install, not a failure",
+            ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land or is not yet "
+                          "confirmed (%s) -- may be an ARMED refusal or a DIAG older than the commit; the swap "
+                          "already succeeded via the volatile install, not a failure",
                      ceiling_reason);
         }
     }

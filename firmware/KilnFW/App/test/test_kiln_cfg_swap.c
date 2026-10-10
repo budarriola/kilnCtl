@@ -329,6 +329,13 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
     return true;
 }
 
+/* LOW-5: the swap's flash fallback now uses the blocking sibling; same fake behaviour. */
+bool safety_cfg_write_set_and_confirm_f32_blocking(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                   char *reason_out, size_t reason_cap, void *out_class)
+{
+    return safety_cfg_write_set_and_confirm_f32(link, param_id, value, reason_out, reason_cap, out_class);
+}
+
 bool safety_cfg_write_set_and_confirm_f32_volatile(SafetyLinkClass *link, uint16_t param_id, float value,
                                                    char *reason_out, size_t reason_cap, void *out_class)
 {

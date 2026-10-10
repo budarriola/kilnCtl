@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -179,13 +180,20 @@ static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, con
  * this, same as safety_cfg_store_maybe_refetch()'s existing non-blocking
  * use. */
 /* F3: how long a blocking caller waits for a post-commit DIAG to clear VOLATILE_DIRTY. */
-#define SAFETY_CFG_PERSIST_WAIT_MS 3000
+/* LOW-4 (safety-link fix batch 2): DIAG is sent every 2 s, so 3 s let ONE dropped
+ * frame turn a persisted commit into a false UNCONFIRMED. 5 s covers two periods
+ * plus margin and is still bounded (httpd/worker callers only). */
+#define SAFETY_CFG_PERSIST_WAIT_MS 5000
 #define SAFETY_CFG_PERSIST_POLL_MS 100
 
 static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
                                    char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class,
-                                   bool nonblocking_refetch, bool require_persisted)
+                                   bool nonblocking_refetch, bool require_persisted,
+                                   bool *out_readback_matched)
 {
+    if (out_readback_matched) {
+        *out_readback_matched = false;
+    }
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
     }
@@ -302,6 +310,11 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
             return false;
         }
     }
+    /* The Pico's RAM record now equals the submitted values: whatever happens
+     * to the persisted check below, the new values are LIVE (MED-3). */
+    if (out_readback_matched) {
+        *out_readback_matched = true;
+    }
     if (require_persisted) {
         /* F3 (safety link review 2026-10-09): the read-back above serves the
          * Pico's RAM record, which matches a prior volatile install even when
@@ -322,6 +335,16 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
                 break;
             }
             vTaskDelay(pdMS_TO_TICKS(SAFETY_CFG_PERSIST_POLL_MS));
+        }
+        if (v != SAFETY_CFG_PERSIST_VERDICT_PERSISTED && nonblocking_refetch) {
+            /* LOW-5 (safety-link fix batch 2): this caller cannot wait, so the
+             * DIAG it judged may predate the commit. Say that, rather than
+             * claiming the Pico refused the persist (an unarmed board that did
+             * persist read as "expected while ARMED"). The next pass re-judges. */
+            snprintf(reason_out, reason_cap,
+                     "persist not yet confirmed: the latest DIAG may predate this commit (non-blocking "
+                     "caller cannot wait for the next one); re-judged on the next pass");
+            return false;
         }
         if (v != SAFETY_CFG_PERSIST_VERDICT_PERSISTED) {
             snprintf(reason_out, reason_cap,
@@ -550,8 +573,28 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
          * write landed (see confirm_commit_landed()'s header comment for the
          * full audit trail) -- force a live read-back before this function
          * is allowed to report success. */
+        bool readback_matched = false;
         if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch,
-                                   /*require_persisted=*/!volatile_install)) {
+                                   /*require_persisted=*/!volatile_install, &readback_matched)) {
+            /* MED-3 (safety-link fix batch 2): a polarity value that read back
+             * from the Pico is LIVE even when the persisted/DIAG check could not
+             * be confirmed (timeout, no DIAG ever). The standing E-stop
+             * verification no longer describes it, so fail toward
+             * re-verification here too, before returning the failure. */
+            if (readback_matched) {
+                for (int i = 0; i < n_pairs; i++) {
+                    if (pairs[i].param_id == SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL) {
+                        esp_err_t early_clear_err = estop_verification_clear();
+                        if (early_clear_err != ESP_OK) {
+                            ESP_LOGE("safety_cfg_write",
+                                     "estop_active_level is live on the Pico but the E-stop verification "
+                                     "record could NOT be cleared (%s) -- re-run the bench procedure",
+                                     esp_err_to_name(early_clear_err));
+                        }
+                        break;
+                    }
+                }
+            }
             return false;
         }
         /* Landed for real -- now invalidate a standing E-stop verification if
@@ -644,6 +687,29 @@ bool safety_cfg_write_set_and_confirm_f32(SafetyLinkClass *link, uint16_t param_
      * s_store_lock behind an httpd commissioning POST. */
     return apply_pairs_ex(link, &pair, 1, /*commit=*/true, /*volatile_install=*/false, reason_out, reason_cap,
                            out_class, /*nonblocking_refetch=*/true);
+}
+
+/* LOW-5 (safety-link fix batch 2): blocking, persisting sibling of
+ * safety_cfg_write_set_and_confirm_f32() for kiln_cfg_swap.c's step-13 flash
+ * fallback. That runs on the swap's own worker, so it CAN wait for the next
+ * DIAG (SAFETY_CFG_PERSIST_WAIT_MS) and judge CONFIG_VOLATILE_DIRTY fresh;
+ * the nonblocking variant cannot and reports "unconfirmed" for a DIAG that
+ * predates the commit. Never call from safety_poll_task. */
+bool safety_cfg_write_set_and_confirm_f32_blocking(SafetyLinkClass *link, uint16_t param_id, float value,
+                                                   char *reason_out, size_t reason_cap,
+                                                   safety_ceiling_refusal_class_t *out_class)
+{
+    if (out_class) {
+        *out_class = SAFETY_CEILING_REFUSAL_OTHER;
+    }
+    if (!reason_out || reason_cap == 0) {
+        return false;
+    }
+    safety_cfg_post_pair_t pair;
+    pair.param_id = param_id;
+    snprintf(pair.value_text, sizeof(pair.value_text), "%.9g", (double)value);
+    return apply_pairs_ex(link, &pair, 1, /*commit=*/true, /*volatile_install=*/false, reason_out, reason_cap,
+                           out_class, /*nonblocking_refetch=*/false);
 }
 
 /* See this function's own doc comment in safety_cfg_http.h -- kiln_cfg_

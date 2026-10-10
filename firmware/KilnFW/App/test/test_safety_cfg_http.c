@@ -663,11 +663,15 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
 }
 
 /* F3: a persistent commit needs a DIAG with VOLATILE_DIRTY clear; report one. */
+static uint8_t s_stub_diag_flags = 0u;
+static bool s_stub_diag_ever = true;
+static int s_stub_diag_calls = 0;
 esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags)
 {
     (void)link;
-    if (out_ever_received) *out_ever_received = true;
-    if (out_flags) *out_flags = 0u;
+    s_stub_diag_calls++;
+    if (out_ever_received) *out_ever_received = s_stub_diag_ever;
+    if (out_flags) *out_flags = s_stub_diag_flags;
     return ESP_OK;
 }
 
@@ -832,6 +836,9 @@ static void reset_all(void)
     s_stub_refetch_calls = 0;
     s_stub_refetch_nonblocking_result = true;
     s_stub_refetch_nonblocking_calls = 0;
+    s_stub_diag_flags = 0u;
+    s_stub_diag_ever = true;
+    s_stub_diag_calls = 0;
     s_stub_late_rejected = false;
     s_stub_late_reject_param_id = KILNLINK_COMMIT_CONFIG_REJECTED_NO_PARAM_ID;
     s_stub_late_reject_reason = KILNLINK_COMMIT_CONFIG_REJECT_RANGE;
@@ -1450,6 +1457,78 @@ static void test_set_and_confirm_f32_uses_nonblocking_refetch(void)
                "the BLOCKING refetch (portMAX_DELAY) must NEVER be reached from this call path -- "
                "safety_poll_task, the only caller of this function, may not block behind an httpd "
                "commissioning POST holding s_store_lock");
+}
+
+// Safety-link fix batch 2, MED-3 / LOW-8-3.
+//
+// MED-3: a polarity (0x0212) value that read back from the Pico is LIVE even when the
+// persisted/DIAG check could not be confirmed, so the standing E-stop verification must
+// be cleared on that failure path too (it used to return before the clear).
+static void test_estop_polarity_unconfirmed_persist_still_clears_verification(void)
+{
+    TEST_SECTION("safety_cfg_write_apply_pairs -- 0x0212 read back but persist UNCONFIRMED still clears "
+                 "estop_verification (MED-3)");
+    reset_all();
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    safety_cfg_post_pair_t pairs[1] = { { .param_id = 0x0212u, .value_text = "1" } };
+    s_stub_params[0].param_id = 0x0212u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u8_val = 1;
+    s_stub_diag_ever = false; /* no DIAG ever: persisted check is UNKNOWN */
+    char reason[200];
+    bool ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false, "unconfirmed persist is a failure");
+    TEST_CHECK(s_stub_estop_verif_clear_calls == 1,
+               "but the polarity is live, so the E-stop verification is cleared exactly once");
+
+    /* A read-back MISMATCH means the value is not live: nothing to clear. */
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].param_id = 0x0212u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u8_val = 0; /* Pico still reports the OLD polarity */
+    ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false && s_stub_estop_verif_clear_calls == 0,
+               "read-back mismatch: the value is not live, verification untouched");
+}
+
+// LOW-8-3: the non-blocking (safety_poll_task) writer must never wait for a DIAG -- it IS
+// what delivers DIAG. A blocking caller polls up to SAFETY_CFG_PERSIST_WAIT_MS; the
+// non-blocking one judges once. Counted via the diag-flags stub: ~50 polls vs exactly 1.
+static void test_nonblocking_persist_check_never_sleeps(void)
+{
+    TEST_SECTION("safety_cfg_write -- a non-blocking caller judges the persist verdict once and never "
+                 "waits (LOW-8-3); a blocking caller waits");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "abs_max_temp_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f;
+    s_stub_diag_flags = SAFETY_LINK_DIAG_FLAG_CONFIG_VOLATILE_DIRTY; /* never clears */
+    char reason[200];
+    bool ok = safety_cfg_write_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false, "dirty DIAG: not confirmed persisted");
+    TEST_CHECK(s_stub_diag_calls == 1, "non-blocking caller read the DIAG exactly once, no wait loop");
+    TEST_CHECK(strstr(reason, "may predate") != NULL,
+               "and says the DIAG may predate the commit rather than claiming an ARMED refusal (LOW-5)");
+
+    s_stub_diag_calls = 0;
+    ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false && s_stub_diag_calls > 10, "blocking caller polls for the next DIAG before giving up");
+    TEST_CHECK(strstr(reason, "UNSAVED") != NULL, "and then reports the real STILL_DIRTY verdict");
+
+    s_stub_diag_calls = 0;
+    s_stub_diag_flags = 0u;
+    ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == true && s_stub_diag_calls == 1, "blocking caller with a clean DIAG returns at once");
 }
 
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
@@ -3043,6 +3122,8 @@ int main(void)
     test_apply_pairs_readback_mismatch_fails_even_when_acked_and_not_rejected();
     test_apply_pairs_tc_offset_c_readback_mismatch_fails();
     test_set_and_confirm_f32_uses_nonblocking_refetch();
+    test_estop_polarity_unconfirmed_persist_still_clears_verification();
+    test_nonblocking_persist_check_never_sleeps();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
     test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();
