@@ -32,7 +32,7 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F1 (MED): the heat grant is sent once; a Pico reboot, a lost frame or a Pico refusal loses it silently
 
-**FIXED in d6f107682 (2026-10-09):** heat_enable.c now compares the grant with the Pico-reported K4 each watchdog tick, re-requests with 3/6/12/24 s backoff (max 4), and reads not-granted plus retry-pending when K4 stays open.
+**FIXED in 02c650a1c (2026-10-09):** heat_enable.c now compares the grant with the Pico-reported K4 each watchdog tick, re-requests with 3/6/12/24 s backoff (max 4), and reads not-granted plus retry-pending when K4 stays open.
 
 **ESP side**
 
@@ -72,7 +72,7 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F2 (LOW-MED): an ESP reboot mid-firing leaves K4 energized with no owner
 
-**FIXED in 3a1f6b6be (2026-10-09):** a new ESP session whose first context lacks HEAT_OWNER_ACTIVE drops the inherited grant (de-energise, never a trip).
+**FIXED in 9184bd810 (2026-10-09):** a new ESP session whose first context lacks HEAT_OWNER_ACTIVE drops the inherited grant (de-energise, never a trip).
 
 **Pico side**
 
@@ -98,7 +98,7 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F3 (LOW-MED): a refused persistent commit can be read back as landed
 
-**FIXED in b69575892 (2026-10-09):** persistent commit read-back also requires DIAG volatile-dirty clear (waits up to 3 s; non-blocking caller reports unconfirmed).
+**FIXED in 8d7931470 + 5858b3b04 (2026-10-09):** persistent commit read-back also requires DIAG volatile-dirty clear (waits up to 3 s; non-blocking caller reports unconfirmed).
 
 **ESP side**
 
@@ -126,7 +126,7 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F4 (LOW): the 256th trip in one Pico boot is never announced
 
-**FIXED in 3f3008447 (2026-10-09):** trip seq wraps 255 -> 1 via link_frame_next_trip_seq().
+**FIXED in 0c5f3edf6 (2026-10-09):** trip seq wraps 255 -> 1 via link_frame_next_trip_seq().
 
 - `s_trip_seq` is a `uint8_t` that wraps (`safety_core.c:566-573`; the comment calls this an "acceptable, undocumented edge").
 - At the 256th trip it reads 0, `safety_core_get_trip_event()` returns false, and `link_task_poll_trip_event()` (`link_task.c:3297`) sends no `TRIP_EVENT` burst at all.
@@ -136,7 +136,7 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F5 (LOW, informational): trip-event fields are published without a barrier
 
-**FIXED in 12ead6672 (2026-10-09):** HAL_DMB() release before the seq bump and acquire after the seq read.
+**FIXED in 0efee36fa (2026-10-09):** HAL_DMB() release before the seq bump and acquire after the seq read.
 
 - `safety_core.c` latches the trip fields (reason, uptime, tc, threshold) and then `s_trip_seq++` as plain non-volatile statics, with no `__dmb()`.
 - `link_task` reads them lock-free, and on the RP2040 it can run on the other core (`SAFTYFW_CORE_LINK_PATH`).
