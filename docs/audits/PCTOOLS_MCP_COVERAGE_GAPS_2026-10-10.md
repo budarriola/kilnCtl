@@ -43,7 +43,7 @@ Columns: gate = exact `True` test (after the sweep, all pass); read-back = tool 
 
 ## Findings (tool code not changed)
 
-- **F1 MED: `adaptive_tune_revert` reports "reverted" on the POST ack alone.**
+- **F1 MED (FIXED in f2e9f35a1: re-reads status, FAILED if revert_available still true, UNVERIFIED if re-read fails; F2 left as documented): `adaptive_tune_revert` reports "reverted" on the POST ack alone.**
   `mcp_server_adaptive_tune.py` ends with `return f"ok - zone {zone} adaptive-tune refinement reverted"`
   after only `result.get("ok")`. It rewrites a zone's PID gains, and its sibling
   `adaptive_tune_set_enabled` already re-reads and reports FAILED/UNVERIFIED. Fix: re-read
