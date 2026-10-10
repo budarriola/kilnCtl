@@ -965,6 +965,8 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // Same out_reject capture as the v2 branch above, and for the same
         // reason -- a v1 record that migrates cleanly but then fails this
         // re-check is just as much a "found and refused" case as a v2 one.
+        // Clamp is a documented no-op backstop here: v1 has no tc_offset_c and
+        // this branch builds from defaults (offset 0), so no test can observe it.
         const char *field = NULL;
         const char *rule = NULL;
         config_store_clamp_stored_tc_offset(&scratch, out_reject);
