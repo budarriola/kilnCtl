@@ -92,6 +92,8 @@ stays LOW. The wording should still say the result is unknown.
 
 ### L3 (LOW): edge cases in the beforeunload guard
 
+FIXED in 392da5b7f: guard clears when the editor disappears; a changed working copy no longer overwrites dirty edits (warns, Reload discards); edits typed during an in-flight save stay dirty (test_live_profile_guard.js).
+
 `live_profile_page.html:267-291, 355-368, 417`.
 - When the firing ends without a pending decision, or the working copy disappears (another client
   discards it, which hits the `live.active && !hasWorking` branch), the editor card is hidden but
@@ -118,6 +120,8 @@ French text that legitimately contains "Ã" followed by a symbol would collide, 
 English-only.
 
 ### L5 (LOW): no test that the guard clears on success
+
+FIXED in 392da5b7f: test_live_profile_guard.js covers clear-on-save and clear-on-decision (negative-tested).
 
 `test_live_profile_action_errors.js:103-113` checks that the guard is registered, is quiet before
 an edit, and prompts after one. No case checks that `dirty` is cleared after a successful save or

@@ -33,7 +33,7 @@ and four executing tests (items 1-4 below).
 - D4 FIXED 8711ebf7d. live_profile_page.html: save/fork/decide read the body as text and parse defensively; a non-JSON refusal shows "HTTP <status>: <body>".
 - D5 FIXED 8711ebf7d. Sign-in cancel clears Saving/Forking/Working; "Discard working copy" goes through kcConfirm.
 - D6 FIXED 8711ebf7d. Four double-encoded ellipses replaced with "..."; lint_pages.js now flags U+00E2 U+20AC in any page (test_lint_mojibake.js).
-- D7 PARTLY FIXED 8711ebf7d. live_profile_page.html has a beforeunload guard (dirty after a segment edit, cleared on load/save/decide). settings_page.html has no editable form fields, so there is nothing to guard. FOLLOW-UP: the same guard for profiles_page, setup_wizard_page, safety_config_page, kiln_configs_page, settings_display_page and zones_page (zones_page was left alone because another fixer owns it).
+- D7 FIXED (8711ebf7d live_profile; follow-up 392da5b7f: beforeunload guards on profiles, setup_wizard, safety_config, kiln_configs, settings_display, zones; tests test_unsaved_guard_pages.js, test_live_profile_guard.js). settings_page.html has no editable form fields, so there is nothing to guard.
 
 All tests now hard-assert these; the KNOWN-DEFECT markers are gone.
 
