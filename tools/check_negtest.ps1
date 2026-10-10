@@ -246,7 +246,7 @@ exit 0
     # N2: -RequireAssertion refuses to combine with -ExpectPattern, and rejects 'not ok' / lowercase 'fail:'
     $r = Run-Neg "reqassert_expect" (@('-Command', $testCmd, '-RequireAssertion', '-ExpectPattern', 'FAIL') + $mutA)
     Assert-True ($r.Exit -eq 2 -and -not (Ran)) "reqassert_expect: -RequireAssertion with -ExpectPattern must be refused before running (exit $($r.Exit))"
-    $mutNotOk = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Output 'not ok 1 - x'; Write-Output 'fail: x'; throw 'boom'")
+    $mutNotOk = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'not ok 1 - x'; Write-Host 'fail: x'; throw 'boom'")
     $r = Run-Neg "reqassert_notok" (@('-Command', $testCmd, '-RequireAssertion') + $mutNotOk)
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_notok: 'not ok' and lowercase 'fail:' must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
     # Extra: a detached grandchild (not in the copy's command line, outliving its parent) must be killed
