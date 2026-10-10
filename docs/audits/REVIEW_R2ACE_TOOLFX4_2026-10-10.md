@@ -150,3 +150,7 @@ Both runs reported `real_tree_unchanged: false`. The cause was this audit
 document, which was created as an untracked file in the reviewer worktree
 while the runs were going. No source file changed. negtest reported no change in any mutated file's hash,
 in either tree.
+
+## Fix status (testfx5, 2026-10-10)
+
+Fixed in 0598cd290 and f006d22d9 (SHAs as rebased onto origin/dev; the push may rebase them again): L1 (reason buffer 160 B, full text asserted; DASHBOARD_JSON_STATUS_BUF_SIZE 5760 -> 5888 to keep headroom), L2 (`g_tc_reapply==1 && !pending`), L3 (commit-path heat-safe immediate-reapply step 4b), L4 (relay passthrough pointer and owner-written values asserted), L5 (UPDATING/CRASH_UNACK/RUNNING refusal branches), L7 (f006d22d9, U+00C3/U+00C2 + U+20AC and cp1252 set, fixture cases), I2, I3, I4, I5 (logs/ excluded, check count unchanged), I7 (ceiling 2752 -> 2816). L6 belongs to negfx. Negtests CAUGHT: reason buffer back to 96, relay passthrough NULL, CRASH_UNACK gate disabled, link_task gate decide short-circuited (SaftyFW).

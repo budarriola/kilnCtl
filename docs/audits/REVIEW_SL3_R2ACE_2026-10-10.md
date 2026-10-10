@@ -141,3 +141,7 @@ All runs happened in throwaway copies at `6b3534e55`, and each unmutated baselin
 | M6 | SaftyFW `link_task.c` volatile apply defers the tc_type reapply (sets `s_tc_type_reapply_pending`) instead of reapplying now | **MISSED** (expected) | `test_link_task_fuzz` ran, with 32295 checks and 0 failures. This confirms B4. |
 
 M1 being caught shows the test pins "a pre-commit DIAG alone is not enough". It does not cover A1, because the stub's `send_commit` does not drain or apply DIAGs inside the send. M3 is caught only by a source-text check. No behavioural test proves that the watchdog aborts a running autotune.
+
+## Fix status (testfx5, 2026-10-10)
+
+B1, B2, B4 fixed with R2ACE I4, L1, L2 (0598cd290). B3 fixed: test claim narrowed (record has no CRC; only guarded bytes are rejected) and the stub now defines SAFTYFW_GIT_DIRTY 7 so normalisation to 1 is exercised; negtest removing the normalisation is CAUGHT.
