@@ -159,6 +159,14 @@ bool link_staging_apply_context_session(link_staging_t *st, link_peer_announce_t
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
                                         bool context_gap)
 {
+    if (!prev_known) {
+        /* First context after this Pico boot: nothing to reset in staging, but a version announced under
+         * a different ESP boot_id (ESP rebooted before this context, new ANNOUNCE burst lost) is stale. */
+        if (peer != NULL && peer->known && peer->boot_id != boot_id) {
+            peer->version = 0u;
+        }
+        return false;
+    }
     if (!link_staging_new_esp_session(prev_known, prev_boot_id, boot_id, context_gap)) {
         return false;
     }

@@ -302,7 +302,11 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 /* Bounded re-announce when the Pico has not learned our version: a Pico >= 17 sends the 31-byte DIAG
  * (trip_seq) only once it knows our version is >= 17, so a 30-byte DIAG from one means our ANNOUNCE
  * burst was lost. Owe it an ANNOUNCE (sent by safety_poll_task) at most MAX times, GAP apart. A 31-byte
- * DIAG proves it learned the version and returns the budget. Caller holds state_lock. */
+ * DIAG proves it learned the version and returns the budget. Caller holds state_lock.
+ * Effective retries: the first DIAG after a Pico reboot or ESP boot often coincides with the
+ * reboot-time announce (safety_note_pico_reboot_locked) or predates the Pico processing our boot burst,
+ * so about two of the MAX=3 slots are useful retries; spacing is >= GAP but quantised to the 2 s DIAG
+ * period, so 2-4 s apart in practice. */
 static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32_t now_ms)
 {
     if (link->cached.diag_trip_seq_known) {
@@ -313,6 +317,11 @@ static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32
         return;
     }
     if (link->diag_reannounce_count >= SAFETY_DIAG_REANNOUNCE_MAX) {
+        if (link->diag_reannounce_count == SAFETY_DIAG_REANNOUNCE_MAX) {
+            link->diag_reannounce_count++; /* saturate: log once per budget */
+            ESP_LOGW(TAG, "re-announce budget exhausted but safety processor still sends 30-byte DIAGs "
+                          "(no trip_seq binding until reboot or link-down)");
+        }
         return;
     }
     if (link->diag_reannounce_count != 0u &&
@@ -1154,15 +1163,10 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
              * would already have flipped diag_state away from TRIPPED by
              * the time a later DIAG frame gets here, so this branch simply
              * would not re-fire. */
-        } else if (s_boot_clear_attempts < SAFETY_LINK_BOOT_CLEAR_MAX_ATTEMPTS && link->fault_sources == 0u &&
-                   link->peer_version_known && link->peer_protocol_version >= 17u &&
-                   !link->cached.diag_trip_seq_known && link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
-                   link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
-            /* The gate above blocked: the Pico is still sending 30-byte DIAGs, i.e. it has not learned our
-             * version. Owe it an ANNOUNCE (sent by safety_poll_task, see reannounce_pending) so it moves
-             * to 31-byte DIAGs carrying trip_seq. */
-            link->reannounce_pending = true;
         }
+        /* No separate re-announce here: the blocked gate above only holds while the Pico sends 30-byte
+         * DIAGs from protocol >= 17, which safety_diag_reannounce_consider_locked() already answers (a
+         * superset condition) within its bounded budget. */
     }
     if (want_boot_clear) {
         /* Flagged, not sent from here -- see boot_clear_pending's doc

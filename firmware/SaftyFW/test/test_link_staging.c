@@ -292,6 +292,15 @@ static void test_apply_context_session(void)
     TEST_CHECK(!link_staging_apply_context_session(&s_st, &pa, false, 0u, 0x33u, true),
                "first context after Pico boot: nothing reset");
     TEST_CHECK(pa.version == 17u, "first context keeps the version");
+
+    // MED-1: announce recorded under boot X, first context arrives with boot Y: version forgotten.
+    pa = mk_peer(true, 0x44u, 17u);
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pa, false, 0u, 0x55u, false),
+               "first context, announce for another boot_id: no new session");
+    TEST_CHECK(pa.version == 0u, "first context under a different boot_id zeroes the stale version");
+    pa = mk_peer(true, 0x44u, 17u);
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pa, false, 0u, 0x44u, false) && pa.version == 17u,
+               "first context under the announced boot_id keeps the version");
 }
 
 static void test_apply_context_session_announce_order(void)

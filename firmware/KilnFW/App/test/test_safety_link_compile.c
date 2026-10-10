@@ -3052,6 +3052,14 @@ static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
     TEST_CHECK(link.reannounce_pending == true,
                "blocked gate re-announces so the Pico learns our version and sends the 31-byte DIAG");
     link.reannounce_pending = false;
+    // Review LOW-1: inside the boot-clear window the re-announce is bounded too. With the budget spent,
+    // a blocked-gate 30-byte DIAG owes nothing (the old unbounded branch would set it every DIAG).
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TEST_CHECK(drive_one_diag_and_service(&link, SAFETY_LINK_TRIP_REASON_MAIN_FAULT) == base,
+               "spent budget: still no clear sent");
+    TEST_CHECK(link.reannounce_pending == false, "spent budget: boot-clear window owes no unbounded re-announce");
+    TEST_CHECK(link.diag_reannounce_count > SAFETY_DIAG_REANNOUNCE_MAX, "exhaustion saturates (logged once)");
+    link.diag_reannounce_count = 0u;
     m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 5u, true);
     safety_link_service_boot_clear_if_pending(&link);
     TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
