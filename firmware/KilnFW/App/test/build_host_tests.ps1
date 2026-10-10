@@ -1,4 +1,4 @@
-# Builds and runs the host-side unit tests for pid.c / thermal_guard.c /
+﻿# Builds and runs the host-side unit tests for pid.c / thermal_guard.c /
 # heater_output.c / thermo_combine.c / ota_auth.c / ota_interlock.c /
 # pid_autotune.c / profile_feasibility.c (+ the sim_plant.c closed-loop
 # check) with MSVC, entirely off-target -- no ESP-IDF, no hardware.
@@ -2934,6 +2934,16 @@ try {
 
     Invoke-HostTestExe -Name "http_body_recv" -ExePath $exeHbr -BuildCmd $cmdHbr
 
+    # ---- test_http_form.c: its own SEPARATE executable -----------------------
+    # e7c98209 strict form parsing helpers (http_form.h only, header-only, no stubs).
+    $exeHfm = Join-Path $outDir "kilnctl_host_tests_http_form.exe"
+    $hfmObjDir = Join-Path $outDir "hfm"
+    New-Item -ItemType Directory -Force -Path $hfmObjDir | Out-Null
+    $cmdHfm = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$hfmObjDir\\`" /Fe:`"$exeHfm`" `"$(Join-Path $testDir 'test_http_form.c')`""
+
+    Invoke-HostTestExe -Name "http_form" -ExePath $exeHfm -BuildCmd $cmdHfm
+
     # ---- test_update_fetch.c: its own SEPARATE executable --------------------
     # Compiles the REAL update_fetch.c, update_http.c and update_stage.c (plus
     # policy/release/url/heap helpers) against fakes for the HTTP client, psa
@@ -3151,8 +3161,9 @@ try {
     # (recovery_switch_at_boot_threshold() restores the boot target on SET_FAILED).
     # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
     # 70 -> 71: added test_update_fetch.c (real update_fetch.c/update_http.c over fakes).
+    # 71 -> 72: added test_http_form.c (strict form parse helpers).
     Complete-HostTestQueue
-    $totalExpected = 71
+    $totalExpected = 72
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

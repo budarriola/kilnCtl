@@ -620,6 +620,25 @@ static void test_never_commissioned_zone_refuses_409(void)
     TEST_CHECK(s_reserve_calls == 0, "the zone is never reserved for a never-commissioned zone -- refused before that point");
 }
 
+// e7c98209: ?zone= is parsed strictly (whole string, 0..255) -- malformed values are a 400,
+// never "zone 0" (the old strtol read "abc" as 0 and "1abc" as 1).
+static void test_malformed_zone_query_refuses_400(void)
+{
+    static const char *const bad[] = { "zone=abc", "zone=1abc", "zone=", "zone=-1", "zone=256",
+                                       "zone=9999999", "zone=%201", "zone=0x1", "zone=2.5" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_capture();
+        s_fake_present[0] = true;
+        s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+        s_fake_query = bad[i];
+        httpd_req_t req = {0};
+        esp_err_t err = iter_tune_restore_post_handler(&req);
+        TEST_CHECK(err == ESP_OK, "handler returns ESP_OK on a malformed zone param");
+        TEST_CHECK(s_resp_status == 400, bad[i]);
+        TEST_CHECK(s_set_pid_calls == 0 && s_reserve_calls == 0, "nothing written or reserved for a malformed zone");
+    }
+}
+
 // Advisory finding 10 (step 7 review, 2026-09-23): GET /api/iter_tune/status
 // must surface a refused newer-than-known schema version as
 // "schema_refused_version" in its JSON preamble, not silently.
@@ -716,6 +735,7 @@ int main(void)
     test_reservation_brackets_entire_write_and_pairs_exactly();
     test_missing_zone_query_refuses_400();
     test_never_commissioned_zone_refuses_409();
+    test_malformed_zone_query_refuses_400();
     test_status_reports_schema_refused_version();
     test_status_reports_shadow_summary();
 

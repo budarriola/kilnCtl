@@ -1762,6 +1762,64 @@ static void test_zones_post_accepts_clean_minimal_body(void)
               "must survive, since the ESP no longer writes this field");
 }
 
+// e7c98209 strict form parsing: a PRESENT-but-empty or over-long optional key is a 400, never
+// "treated as omitted". Omitted keys stay accepted. The sentinels below prove a rejected POST
+// touched nothing (s_zones.cfg and relay types).
+#define STRICT_BASE "thermo_count=0&relay_count=0&" MINIMAL_TIMING_PROFILE_BODY
+
+static void strict_zones_seed(void)
+{
+    s_zones.cfg.max_simultaneous_relays = 3;
+    s_zones.cfg.continue_on_zone_trip = 1;
+    s_zones.cfg.pc_link_abort_silence_ms = 1234.0f;
+    s_relay_names.cfg.types[0] = 2;
+}
+
+static void strict_zones_expect_400_untouched(const char *body, const char *what)
+{
+    strict_zones_seed();
+    run_zones_post(body);
+    TEST_CHECK(s_test_err_called, what);
+    TEST_CHECK(!s_test_ok_called, "a rejected strict-parse POST must not report success");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 3 && s_zones.cfg.continue_on_zone_trip == 1 &&
+                   s_zones.cfg.pc_link_abort_silence_ms == 1234.0f && s_relay_names.cfg.types[0] == 2,
+               "a rejected strict-parse POST must leave the stored config untouched");
+}
+
+static void test_zones_post_strict_optional_keys(void)
+{
+    TEST_SECTION("zones_post_handler -- present-but-empty optional keys are 400 and change nothing");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=", "empty max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=", "empty continue_on_zone_trip -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=", "empty pc_link_abort_silence_ms -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=", "empty relay1_type -> 400");
+
+    TEST_SECTION("zones_post_handler -- over-long optional keys are 400 and change nothing");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=123456789", "over-long max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=1111", "over-long continue_on_zone_trip -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=1234567890123456", "over-long pc_link_abort_silence_ms -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=12345678", "over-long relay1_type -> 400");
+
+    TEST_SECTION("zones_post_handler -- valid optional keys are accepted and applied");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE "&max_simultaneous_relays=2&continue_on_zone_trip=0&pc_link_abort_silence_ms=500&relay1_type=3");
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "all-valid optional keys must be accepted");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 2, "max_simultaneous_relays applied");
+    TEST_CHECK(s_zones.cfg.continue_on_zone_trip == 0, "continue_on_zone_trip applied");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 500.0f, "pc_link_abort_silence_ms applied");
+    TEST_CHECK(s_relay_names.cfg.types[0] == 3, "relay1_type applied");
+
+    TEST_SECTION("zones_post_handler -- omitted optional keys are accepted; pc_link and relay type preserve, "
+                 "max_simultaneous_relays/continue_on_zone_trip fall to their documented 0 default");
+    strict_zones_seed();
+    run_zones_post(STRICT_BASE);
+    TEST_CHECK(!s_test_err_called && s_test_ok_called, "omitting every optional key must be accepted");
+    TEST_CHECK(s_zones.cfg.pc_link_abort_silence_ms == 1234.0f, "omitted pc_link_abort_silence_ms preserves the stored value");
+    TEST_CHECK(s_relay_names.cfg.types[0] == 2, "omitted relay1_type preserves the stored type");
+    TEST_CHECK(s_zones.cfg.max_simultaneous_relays == 0 && s_zones.cfg.continue_on_zone_trip == 0,
+               "omitted max_simultaneous_relays/continue_on_zone_trip take the documented 0 default");
+}
+
 // A single per-zone body block, shared by the whole-page cross-zone cycle
 // test below -- every field zones_http_parse_zone_fields() requires for an in-range
 // zone (thermo_count covers both zone 0 and zone 1 in that test).
@@ -16363,6 +16421,7 @@ void run_test_zones_http(void)
     test_zones_post_max_simultaneous_relays_rejects_trailing_garbage();
     test_zones_post_safety_tc_type_is_ignored_even_when_garbage();
     test_zones_post_accepts_clean_minimal_body();
+    test_zones_post_strict_optional_keys();
     test_post_whole_page_cross_zone_cycle_refused();
     test_post_whole_page_cross_zone_legal_chain_accepted();
     test_post_zone0_follows_zone1_accepted();
