@@ -2145,6 +2145,7 @@ static bool guard9_prelock_check(uint32_t *since_ms_out)
      * directly from this task (chip access is locked inside
      * sx1509_write_port_locked); it is not serialised through the owner task. */
     if (s_exec.safety) {
+        pe_app_note_foreign_before_assert();
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
     }
     if (s_exec.io) {
@@ -2186,6 +2187,32 @@ static bool guard9_merge_pending(bool tick_stale, uint32_t since_ms, uint32_t *s
  * (relay_unknown_release_locked). */
 static bool s_relay_unknown_fault_asserted = false;
 
+/* K7 review F5: SAFETY_FAULT_SRC_APP is one link bit with several holders. The executor-side
+ * holders are tracked here so the bit drops only when NO owner holds it:
+ *   - guard 9 / global fault: the APP bit in s_exec.global_fault_source (plus
+ *     s_guard9_bookkeeping_pending while the locked half has not run yet);
+ *   - relay-unknown hold: pe_app_owner_relay_unknown() (== s_relay_unknown_fault_asserted);
+ *   - foreign: APP was already asserted on the link by something this module does not track
+ *     (the boot safe-state latch in main*.c); never released here.
+ * clear_this_runs_faults() and relay_unknown_release_locked() both consult these. */
+bool pe_app_owner_foreign = false;
+
+bool pe_app_owner_relay_unknown(void)
+{
+    return s_relay_unknown_fault_asserted;
+}
+
+/* Call BEFORE this module asserts APP: if the link already shows APP and no tracked executor owner
+ * accounts for it, someone else holds it -- remember that so we never release it. */
+void pe_app_note_foreign_before_assert(void)
+{
+    if (!s_exec.safety) return;
+    if ((safety_link_get_fault_sources(s_exec.safety) & SAFETY_FAULT_SRC_APP) == 0u) return;
+    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) != 0u) return;
+    if (s_relay_unknown_fault_asserted || s_guard9_bookkeeping_pending) return;
+    pe_app_owner_foreign = true;
+}
+
 static void relay_unknown_prelock_check(void)
 {
     if (!s_exec.io) return;
@@ -2196,6 +2223,7 @@ static void relay_unknown_prelock_check(void)
     }
     if (kiln_io_relay_state_unknown(s_exec.io) && !s_relay_unknown_fault_asserted) {
         if (s_exec.safety) {
+            pe_app_note_foreign_before_assert();
             safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
         }
         s_relay_unknown_fault_asserted = true;
@@ -2209,7 +2237,8 @@ static void relay_unknown_release_locked(void)
     if (!s_relay_unknown_fault_asserted) return;
     if (s_exec.io && kiln_io_relay_state_unknown(s_exec.io)) return;
     s_relay_unknown_fault_asserted = false;
-    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && s_exec.safety) {
+    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && !s_guard9_bookkeeping_pending &&
+        !pe_app_owner_foreign && s_exec.safety) {
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, false);
     }
 }

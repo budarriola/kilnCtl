@@ -326,6 +326,36 @@ static void test_heat_claim_exclusion(void)
     CHECK(!danger_mode_blocks_start());
 }
 
+/* K7 review F1: the refusal rollback must not be able to fail. A failed 50 ms re-take used to
+ * leave the window open (and a deadline extension in place) under a running firing. */
+static void test_refusal_rollback_survives_lock_timeout(void)
+{
+    TEST_SECTION("danger_mode_request_start() refusal rollback retries its lock take (K7 F1)");
+    reset_counters();
+    s_tick = 700000;
+    danger_mode_stop("test");
+    s_heat_profile_claim = true;
+    g_test_stub_semaphore_fail_nth = 2; /* take #1 (publish) ok, take #2 (first rollback try) times out */
+    CHECK(!danger_mode_request_start());
+    g_test_stub_semaphore_fail_nth = 0;
+    CHECK(!s_dm.window_open); /* window must not stay open under the firing */
+    CHECK(!danger_mode_active());
+    s_heat_profile_claim = false;
+
+    /* already-open: the refused re-entry must neither lose the flag nor extend the deadline */
+    CHECK(danger_mode_request_start());
+    uint32_t deadline_before = s_dm.deadline_ms;
+    s_tick += 1000;
+    s_heat_profile_claim = true;
+    g_test_stub_semaphore_fail_nth = 2;
+    CHECK(!danger_mode_request_start());
+    g_test_stub_semaphore_fail_nth = 0;
+    CHECK(s_dm.window_open);
+    CHECK(s_dm.deadline_ms == deadline_before); /* extension undone */
+    s_heat_profile_claim = false;
+    danger_mode_stop("cleanup");
+}
+
 int main(void)
 {
     test_before_init();
@@ -333,6 +363,7 @@ int main(void)
     test_clock_wrap();
     test_lock_timeout();
     test_heat_claim_exclusion();
+    test_refusal_rollback_survives_lock_timeout();
     if (g_test_failures) {
         printf("test_danger_mode: %d FAILED\n", g_test_failures);
         return 1;

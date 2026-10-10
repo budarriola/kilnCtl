@@ -600,9 +600,14 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
              (unsigned)KILN_IO_FAILSAFE_LOCK_WAIT_MS);
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0);
     io->relay_state_unknown = true;
+    /* K7 review F3: this write was not serialised against the lock holder, whose own ON write may
+     * land AFTER it. So never report ESP_OK and never touch relay_shadow here: the shadow belongs
+     * to the lock holder, and a caller that records a verified OFF on ESP_OK (kiln_io_owner's
+     * off-tracker) would be wrong. A successful unserialised write returns
+     * KILN_IO_ERR_UNSERIALISED_OFF; callers treat any non-OK as "not verified, retry" and the
+     * watchdog's next locked all-off clears relay_state_unknown. */
     if (err == ESP_OK) {
-        io->relay_shadow = 0;
-        kiln_io_note_relay_shadow_changed(io);
+        err = KILN_IO_ERR_UNSERIALISED_OFF;
     }
     return kiln_io_track(io, err);
 }

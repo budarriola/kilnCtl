@@ -197,6 +197,12 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io);
  * fail-safe all-off and must not close a relay afterward. */
 uint32_t kiln_io_relay_off_epoch(void);
 
+/* K7 review F3: returned by kiln_io_all_relays_off() when the kiln_io lock could not be taken and
+ * the bare, unserialised OFF write succeeded. NOT a verified OFF (the lock holder's own ON write may
+ * land after it): relay_shadow is untouched and relay_state_unknown stays raised. Any non-ESP_OK
+ * result means "retry the locked all-off"; callers must not record an OFF on it. */
+#define KILN_IO_ERR_UNSERIALISED_OFF 0x10C /* == ESP_ERR_NOT_FINISHED */
+
 /* Re-runs bring-up after the expander was reset/POR'd (K7-03): reset (the hard
  * ~RESET pulse when the GPIO is wired, else soft -- K7 NIT-1), relays latched
  * OFF, relay pins back to outputs, verified by chip read-back. Marks the board

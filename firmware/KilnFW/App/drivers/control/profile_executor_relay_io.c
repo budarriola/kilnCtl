@@ -1488,6 +1488,7 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
 void guard9_assert_stale_tick_fault(void)
 {
     if (s_exec.safety) {
+        pe_app_note_foreign_before_assert();
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
     }
     s_exec.global_fault_source |= SAFETY_FAULT_SRC_APP;
@@ -1496,10 +1497,16 @@ void guard9_assert_stale_tick_fault(void)
 /* Must be called with s_exec.lock held. */
 void clear_this_runs_faults(void)
 {
-    if (s_exec.global_fault_source != 0 && s_exec.safety) {
-        esp_err_t err = safety_link_set_fault_source(s_exec.safety, s_exec.global_fault_source, false);
+    /* K7 review F5: APP is shared. A live relay-unknown hold or a foreign (boot safe-state) holder
+     * keeps the link bit; only this run's own claim on it is forgotten (global_fault_source below). */
+    uint32_t release_mask = s_exec.global_fault_source;
+    if (pe_app_owner_relay_unknown() || pe_app_owner_foreign) {
+        release_mask &= ~(uint32_t)SAFETY_FAULT_SRC_APP;
+    }
+    if (release_mask != 0 && s_exec.safety) {
+        esp_err_t err = safety_link_set_fault_source(s_exec.safety, release_mask, false);
         if (err != ESP_OK) {
-            ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)s_exec.global_fault_source,
+            ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)release_mask,
                      esp_err_to_name(err));
         }
     }

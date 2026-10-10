@@ -734,6 +734,25 @@ static void test_authorized_on_queued_before_all_off_is_dropped(void)
     g_sx_dir_shadow = 0xFFFFu;
 }
 
+// K7 N8: a successful SX_RESET is a POR (every relay de-energised), so the owner must record
+// "all relays off" in the off-tracker. Without it the on/off min_off_s hold would count from the
+// stale ON note.
+static void test_owner_task_sx_reset_notes_off_tracker(void)
+{
+    TEST_SECTION("owner_task() dispatch -- successful SX_RESET notes all-relays-off in the off-tracker");
+    s_stub_danger_mode = false; s_stub_safety_blocked = false; s_stub_updating = false;
+    s_stub_crash_unacked = false; s_stub_profile_running = false;
+    relay_off_tracker_reset_all();
+    relay_off_tracker_note_write(0x0Fu, 0x0Fu); /* all four ON */
+    TEST_CHECK(relay_off_tracker_held_s(0x0Fu) == 0.0f, "precondition: relays recorded ON");
+    owner_cmd_t c;
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_RESET; c.args.sx_reset.hard = false;
+    owner_result_t r = dispatch(c);
+    TEST_CHECK(r.err == ESP_OK, "soft reset + re-init succeeded");
+    fake_time_advance_ms(5000);
+    TEST_CHECK(relay_off_tracker_held_s(0x0Fu) > 0.0f, "N8: off-tracker records all relays OFF after a successful SX_RESET");
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
@@ -757,6 +776,7 @@ int main(void)
     test_owner_task_dispatch_refuses_relay_pin_reconfig();
     test_owner_task_dispatch_write_reg_relay_on_gate();
     test_authorized_on_queued_before_all_off_is_dropped();
+    test_owner_task_sx_reset_notes_off_tracker();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

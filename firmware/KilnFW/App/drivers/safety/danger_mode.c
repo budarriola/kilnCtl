@@ -87,6 +87,7 @@ bool danger_mode_request_start(void)
     }
     bool already_open = s_dm.window_open;
     bool was_heat_requested = s_dm.heat_requested;
+    uint32_t was_deadline_ms = s_dm.deadline_ms;
     s_dm.window_open = true;
     s_dm.deadline_ms = now_ms() + DANGER_MODE_WINDOW_MS;
     s_dm.heat_requested = false;
@@ -100,9 +101,18 @@ bool danger_mode_request_start(void)
     bool heat_profile = false, heat_autotune = false;
     relay_authority_heat_run_active(&heat_profile, &heat_autotune);
     if (heat_profile || heat_autotune) {
-        if (s_dm.lock && xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) == pdTRUE) {
+        /* K7 review F1: the rollback must not be able to fail -- a failed 50 ms take left the
+         * window open under a running firing (relay-route gates bypassed, link-loss drop
+         * suppressed, the 5-minute expiry then cut the firing's heat). Holders of s_dm.lock are
+         * short, so retry (with a log) until it is taken. s_dm.lock is non-NULL here (initialized
+         * was checked and the first take succeeded). */
+        while (xSemaphoreTake(s_dm.lock, pdMS_TO_TICKS(50)) != pdTRUE) {
+            ESP_LOGE(TAG, "danger mode refusal rollback waiting for the internal lock");
+        }
+        {
             if (already_open) {
                 s_dm.heat_requested = was_heat_requested; /* nothing changed */
+                s_dm.deadline_ms = was_deadline_ms;       /* undo the extension too */
             } else {
                 /* Deliberately NOT danger_mode_stop(): its enable=false release / all-relays-off
                  * would cut the run that just claimed heat. The window was open for microseconds

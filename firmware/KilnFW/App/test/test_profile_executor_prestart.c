@@ -697,6 +697,7 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
 /* Spy state for the guard9_assert_stale_tick_fault() tests below (audit
  * 2026-08-27 item 2) -- every other test in this file leaves these unread. */
 static int      g_set_fault_source_calls = 0;
+static int      g_fault_source_deassert_count = 0;
 static uint32_t g_last_fault_source_mask = 0;
 static bool     g_last_fault_source_assert = false;
 
@@ -707,13 +708,15 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
     g_seq_set_fault_source = ++g_pe_seq;
     g_last_fault_source_mask = source_mask;
     g_last_fault_source_assert = assert_fault;
+    if (!assert_fault) g_fault_source_deassert_count++;
     return ESP_OK;
 }
 
+static uint32_t g_stub_link_fault_sources = 0;
 uint32_t safety_link_get_fault_sources(SafetyLinkClass *link)
 {
     (void)link;
-    return 0;
+    return g_stub_link_fault_sources;
 }
 
 /* Spy for the heat-enable (K4) wiring tests below -- profile_executor.c now
@@ -2050,6 +2053,10 @@ static void reset_relay_claim_test_state(void)
     g_zone_claim_end_calls = 0;
     g_last_zone_claimant = RELAY_HEAT_ZONE_CLAIM_PROFILE;
     g_last_zone_claim_mask = 0;
+    g_stub_link_fault_sources = 0;
+    pe_app_owner_foreign = false;
+    s_relay_unknown_fault_asserted = false;
+    s_guard9_bookkeeping_pending = false;
 }
 
 static void test_escalate_guard_trip_global_releases_relay_claim(void)
@@ -2468,6 +2475,93 @@ static void test_relay_state_unknown_is_a_fault(void)
     g_set_fault_source_calls = 0;
     relay_unknown_release_locked();
     TEST_CHECK(g_set_fault_source_calls == 0, "guard-9 held APP bit is not released by the relay-unknown path");
+    s_exec.global_fault_source = 0;
+    s_exec.io = NULL;
+}
+
+// K7 review F5: SAFETY_FAULT_SRC_APP is shared; it drops only when no owner holds it.
+static void test_app_fault_source_is_owner_tracked(void)
+{
+    TEST_SECTION("K7 F5 -- APP fault bit: halt cannot drop a live relay-unknown hold; release cannot clear a foreign latch");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+
+    /* (a) guard 9 + relay-unknown both hold APP; a halt (clear_this_runs_faults) must keep the bit */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    guard9_assert_stale_tick_fault();
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "halt does not deassert APP while the relay-unknown hold is live");
+    TEST_CHECK(s_exec.global_fault_source == 0, "the run's own claim is still forgotten");
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 1 && !g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "once the relay-unknown hold is the last owner its release drops APP");
+
+    /* (b) a boot safe-state latch already on the link is foreign: neither path may release it */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP; /* asserted by main_kiln_enter_safe_state() */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(pe_app_owner_foreign, "pre-existing APP on the link is recorded as a foreign holder");
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 0, "relay-unknown release never clears the boot safe-state latch");
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "halt never clears the boot safe-state latch either");
+    pe_app_owner_foreign = false;
+    s_exec.io = NULL;
+}
+
+// K7 review F4 / N1: one real watchdog_task_entry() pass (vTaskDelay hook: one delay through, the
+// second longjmps out). With relay_state_unknown raised the pass must retry the all-off and hold
+// APP (N1: the prelock call is wired in); and when guard 9 fires in the same pass the APP bit must
+// never be released in between (F4: the release runs after the guard-9 bookkeeping).
+static void test_watchdog_pass_wires_relay_unknown_and_orders_release(void)
+{
+    TEST_SECTION("K7 N1/F4 -- one watchdog pass: relay-unknown wired in; release after guard 9 never drops APP");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    g_kiln_io_relay_unknown = true;
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    TEST_CHECK(g_kiln_io_all_relays_off_calls >= 1, "N1: the watchdog pass retried the fail-safe all-off");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "N1: the watchdog pass asserted APP for the unknown relay state");
+
+    /* F4: relay state recovered AND guard 9 stale in the same pass -> APP is never deasserted */
+    s_guard9_bookkeeping_pending = false;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = false;
+    s_exec.last_tick_tick = xTaskGetTickCount() - pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u);
+    g_set_fault_source_calls = 0;
+    g_last_fault_source_assert = true;
+    int deasserts = 0;
+    g_fault_source_deassert_count = 0;
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    deasserts = g_fault_source_deassert_count;
+    TEST_CHECK(deasserts == 0, "F4: guard 9 firing in the same pass as a relay-unknown release never drops APP");
     s_exec.global_fault_source = 0;
     s_exec.io = NULL;
 }
@@ -12285,6 +12379,8 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fault_source_cleared_on_halt();
     test_guard9_fires_while_another_task_holds_exec_lock();
     test_relay_state_unknown_is_a_fault();
+    test_app_fault_source_is_owner_tracked();
+    test_watchdog_pass_wires_relay_unknown_and_orders_release();
     test_guard9_watchdog_source_order();
     test_guard9_pending_verdict_survives_lock_timeout();
     test_heat_acquire_result_not_discarded();

@@ -35,6 +35,7 @@ static struct {
     int fail_writes;          /* next N write transfers return fail_err, no effect */
     esp_err_t fail_err;
     int fail_forever;         /* every transfer fails */
+    int fail_dir_reads;       /* reads of RegDirB fail (the chip-relay resync read), data reads still work */
     int die_after;            /* >=0: every transfer after this many writes fails */
     int land_then_fail;       /* write lands, then returns ESP_ERR_TIMEOUT */
     int partial_bytes;        /* >=0: apply only that many data bytes then fail */
@@ -128,6 +129,7 @@ esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t d, const uint8_t *
     (void)d; (void)t; (void)tl;
     F.attempts++;
     if (F.fail_forever) return F.fail_err;
+    if (F.fail_dir_reads && tx[0] == SX1509_REG_DIR_B) return F.fail_err;
     if (F.die_after >= 0 && F.write_transfers >= F.die_after) return F.fail_err;
     for (size_t i = 0; i < rl; i++) {
         unsigned r = (unsigned)tx[0] + (unsigned)i;
@@ -431,13 +433,29 @@ static void test_k7_med2_lock_serialises_and_is_bounded(void)
     /* The fail-safe all-off still does the safest thing when the lock holder is stuck. */
     TEST_CHECK(kiln_io_set_relay_mask(&g_io, 0x0F, 0x0F) == ESP_OK && chip_relays_logical() == 0x0F, "all on");
     g_test_stub_semaphore_fail_nth = 1;
-    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK, "all-off with the lock busy still writes OFF");
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == KILN_IO_ERR_UNSERIALISED_OFF,
+               "K7 F3: unserialised OFF never reports ESP_OK (the lock holder's ON could land after it)");
+    TEST_CHECK(g_io.relay_shadow == 0x0F, "K7 F3: and the shadow, owned by the lock holder, is left alone");
     TEST_CHECK(chip_relays_logical() == 0, "K7 MED-2: coils dropped without the lock");
     TEST_CHECK(kiln_io_relay_state_unknown(&g_io), "but the state stays flagged unknown (could not serialise)");
     g_test_stub_semaphore_fail_nth = 0;
     TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK && !kiln_io_relay_state_unknown(&g_io),
                "a later locked, verified all-off clears it");
     TEST_CHECK(g_test_stub_lock_depth == 0, "no lock leaked on any path");
+}
+
+/* K7 MED-3 exception: a write that fails with a verify mismatch (ESP_ERR_INVALID_RESPONSE) followed by
+ * an unreadable chip is NOT a dead bus (the transport works), so the reset + re-init repair must run. */
+static void test_k7_med3_verify_mismatch_with_unreadable_chip_still_resets(void)
+{
+    setup_ready();
+    (void)kiln_io_set_relay(&g_io, 1, true);
+    F.stuck_set[SX1509_REG_DATA_A] = (uint8_t)(1u << phys_pin(1)); /* OFF write reads back ON: INVALID_RESPONSE */
+    F.fail_dir_reads = 1;                                          /* ...and the resync read of the chip fails */
+    F.reset_attempts = 0;
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) != ESP_OK, "mismatch + unreadable chip: failure reported");
+    TEST_CHECK(F.reset_attempts > 0, "K7 MED-3: INVALID_RESPONSE is not a dead bus, so the reset/re-init repair is tried");
+    F.fail_dir_reads = 0;
 }
 
 /* K7 MED-3: a dead bus must not trigger the reset + re-init (another ~30 s). */
@@ -639,6 +657,7 @@ int main(void)
     test_k7_med1_unknown_state_flag();
     test_k7_med2_lock_serialises_and_is_bounded();
     test_k7_med3_dead_bus_all_off_skips_reset();
+    test_k7_med3_verify_mismatch_with_unreadable_chip_still_resets();
     test_k7_low1_reset_restores_user_io();
     test_k7_low5_nit1_reset_and_reinit();
     test_k7_04_all_relays_off_after_por_repairs_direction();
