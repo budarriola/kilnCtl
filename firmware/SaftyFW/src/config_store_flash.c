@@ -1284,6 +1284,31 @@ static bool config_store_flash_slot_is_erased(hal_flash_region_t *region, size_t
     return true;
 }
 
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: true iff `to_write`, with the
+// persisted record's seq in place of its own, packs to exactly the bytes in
+// the slot the persisted record was loaded from or last written to. False
+// when there is no valid persisted record, or the slot cannot be read --
+// both fall through to a real write. Static buffers: 2 x 512 bytes would
+// otherwise sit on link_task's stack, and only link_task writes this store.
+static uint8_t s_noop_packed[CONFIG_STORE_RECORD_LEN];
+static uint8_t s_noop_flash[CONFIG_STORE_RECORD_LEN];
+
+static bool config_store_write_is_noop(const config_store_record_t *to_write)
+{
+    if (s_cached_slot == CONFIG_STORE_NO_SLOT || s_persisted_record.seq == 0u ||
+        s_cached_sector >= SAFTYFW_CONFIG_STORE_NUM_SECTORS) {
+        return false;
+    }
+    config_store_record_t probe = *to_write;
+    probe.seq = s_persisted_record.seq;
+    config_store_pack(&probe, s_noop_packed);
+    if (hal_flash_read(s_regions[s_cached_sector], (uint32_t)s_cached_slot * CONFIG_STORE_RECORD_LEN,
+                       s_noop_flash, sizeof(s_noop_flash)) != HAL_OK) {
+        return false;
+    }
+    return memcmp(s_noop_packed, s_noop_flash, sizeof(s_noop_flash)) == 0;
+}
+
 static void config_store_write_cb(void *param)
 {
     config_store_write_args_t *a = (config_store_write_args_t *)param;
@@ -1382,11 +1407,15 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     // zero_counts/k_ct_v_per_a-only change is the second (and, today, only
     // other) narrow-change shape this decision accepts -- see
     // config_store_only_ct_cal_differs()'s header comment (config_store.h)
-    // for the safety argument. The two comparators are mutually exclusive
-    // by construction (they compare disjoint field sets), so ORing them is
-    // safe: a record can satisfy both only if NEITHER actually changed
-    // anything, which config_store_write_ex()'s caller never does (a
-    // no-op write is not on any call path here).
+    // for the safety argument. The two comparators compare disjoint field
+    // sets, so at most one of them can be true for a real change, and ORing
+    // them is safe. A record identical to the persisted one makes BOTH false
+    // (each requires its own field to differ), so an identical write is
+    // treated like any other full-record write by the decision below: allowed
+    // while idle, refused while ARMED. Identical writes do happen (a
+    // COMMIT_CONFIG with nothing staged, a repeated SET_CONFIG or SET_CT_CAL,
+    // KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3); an allowed one is answered
+    // without a flash write further down.
     bool ct_cal_only_change = config_store_only_ct_cal_differs(&s_persisted_record, rec);
     bool narrow_change_only = tc_type_only_change || ct_cal_only_change;
     config_store_write_decision_t decision =
@@ -1442,6 +1471,36 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     // the caller's record, and after the write decision above so it can
     // never turn a refusal into a write.
     config_store_backfill_legacy_ct_topology(&to_write);
+
+    // KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: a record whose bytes are
+    // exactly what the current slot already holds is not written again.
+    // Without this, every replayed COMMIT_CONFIG / SET_CONFIG / SET_CT_CAL
+    // programmed a fresh slot (and erased a sector every eighth time, under
+    // hal_flash_safe_execute(), which stalls both cores). Placed after the
+    // write decision above, so it can never turn a refusal into a success.
+    // The comparison is against the slot's real flash bytes, packed with the
+    // persisted seq -- not against the RAM mirror -- so it only ever skips a
+    // write whose result is provably already on flash; anything else
+    // (different content, a migrated older-format record, an unreadable slot)
+    // takes the full write path below, erased-slot check and read-back
+    // included.
+    if (config_store_write_is_noop(&to_write)) {
+        // Same RAM effect a real write of this content would have: the
+        // cached record becomes flash truth again, which also drops a prior
+        // volatile install (config_store_is_volatile_dirty() goes false).
+        config_store_record_t same = to_write;
+        same.seq = s_persisted_record.seq;
+        config_store_seqlock_write(&same);
+        s_persisted_record = same;
+        s_persisted_record_crc = config_store_record_crc(&s_persisted_record);
+        if (out_reason != NULL) {
+            *out_reason = "ok (unchanged, no flash write)";
+        }
+        if (out_decision != NULL) {
+            *out_decision = CONFIG_STORE_WRITE_OK;
+        }
+        return true;
+    }
 
     // config_store.h's "A/B sector arbitration" -- this plan names which
     // sector this write actually targets, and whether that sector needs an

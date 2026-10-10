@@ -1717,6 +1717,110 @@ static void test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a
                "as a repair source must not itself change anything");
 }
 
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: a write whose record is
+// byte-identical to the stored slot is answered without touching flash. The
+// fake is scripted to fail the next safe_execute AND the next program, so a
+// write that reaches either one returns false; the identical write must still
+// succeed, and the stored seq (config_version) must not move.
+static void test_identical_write_skips_flash(void)
+{
+    TEST_SECTION("config_store_flash: byte-identical write is not written again (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: first write lands");
+    uint8_t version_after_first = config_store_get_config_version();
+    uint32_t erases_a = fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET / HAL_FLASH_ERASE_SIZE);
+    uint32_t erases_b = fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B / HAL_FLASH_ERASE_SIZE);
+
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_IO);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_PROGRAM, HAL_IO);
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_REFUSED_ARMED;
+    reason = NULL;
+    bool ok = config_store_write_ex(&rec, false, &reason, &decision);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_OK);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_PROGRAM, HAL_OK);
+
+    TEST_CHECK(ok == true, "identical write succeeds without reaching safe_execute or program");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_OK, "identical write reports WRITE_OK");
+    TEST_CHECK(reason != NULL && strncmp(reason, "ok", 2) == 0, "identical write reason starts with 'ok'");
+    TEST_CHECK(config_store_get_config_version() == version_after_first,
+               "identical write does not bump the stored seq / config_version");
+    TEST_CHECK(fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET / HAL_FLASH_ERASE_SIZE) == erases_a &&
+                   fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B / HAL_FLASH_ERASE_SIZE) == erases_b,
+               "identical write erases nothing");
+
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_tc_type() == 0x07u && config_store_get_config_version() == version_after_first,
+               "a reload still finds the original slot, unchanged");
+
+    // Control: a CHANGED record under the same scripted failure must fail,
+    // proving the scripting above would have caught a real write.
+    rec.tc_type = 0x03u;
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_IO);
+    ok = config_store_write(&rec, NULL);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_OK);
+    TEST_CHECK(ok == false, "control: a changed record does reach safe_execute and fails there");
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "a changed record still writes normally");
+    TEST_CHECK(config_store_get_config_version() != version_after_first, "a real write bumps the seq");
+}
+
+// L3: an identical durable commit after a volatile install must still drop
+// the volatile install (the cache becomes flash truth again), exactly as a
+// real write of the same content would.
+static void test_identical_write_after_volatile_clears_dirty(void)
+{
+    TEST_SECTION("config_store_flash: identical commit after a volatile install clears dirty (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "fixture: committed");
+    uint8_t persisted = config_store_get_persisted_config_version();
+
+    config_store_record_t vol = rec;
+    vol.tc_type = 0x03u;
+    TEST_CHECK(config_store_write_volatile(&vol, NULL) == true, "fixture: volatile install accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == true, "fixture: cache is ahead of flash");
+    TEST_CHECK(config_store_get_tc_type() == 0x03u, "fixture: volatile value is live");
+
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "identical durable commit accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == false, "identical commit clears volatile-dirty");
+    TEST_CHECK(config_store_get_tc_type() == 0x07u, "the committed value is live again");
+    TEST_CHECK(config_store_get_persisted_config_version() == persisted,
+               "no flash write: the persisted version did not move");
+    TEST_CHECK(config_store_get_config_version() == persisted, "cache and flash versions agree");
+}
+
+// L3 never turns a refusal into a success: an identical record is still a
+// full-record write and is refused while ARMED, before the skip is reached.
+static void test_identical_write_still_refused_while_armed(void)
+{
+    TEST_SECTION("config_store_flash: identical write is still refused while ARMED (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "fixture: committed while idle");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    bool ok = config_store_write_ex(&rec, false, NULL, &decision);
+    TEST_CHECK(ok == false, "identical write refused while ARMED");
+    TEST_CHECK(decision != CONFIG_STORE_WRITE_OK, "decision is a refusal, not WRITE_OK");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -1750,6 +1854,9 @@ int main(void)
     test_ram_integrity_repair_discards_live_volatile_install();
     test_ram_integrity_both_copies_corrupted_requests_trip_no_repair();
     test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a_no_op();
+    test_identical_write_skips_flash();
+    test_identical_write_after_volatile_clears_dirty();
+    test_identical_write_still_refused_while_armed();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {
