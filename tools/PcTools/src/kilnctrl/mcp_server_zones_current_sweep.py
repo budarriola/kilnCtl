@@ -150,8 +150,9 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
             "refusing to start a sweep. Review and acknowledge via GET/POST /api/crash_report "
             f"before energizing relays (host={resolved})."
         )
-    if board.readiness_blocked:
-        names = ", ".join(f"{label} ({key}): {detail}" for key, label, detail in board.readiness_blocked)
+    if board.readiness_blocked or board.heat_blocked:
+        names = ", ".join(f"{label} ({key}): {detail}"
+                          for key, label, detail in (*board.readiness_blocked, *board.heat_blocked))
         return f"error: readiness firing interlock blocks on {names} -- refusing to start a sweep (host={resolved})"
     try:
         result = sweep_http.start(resolved)

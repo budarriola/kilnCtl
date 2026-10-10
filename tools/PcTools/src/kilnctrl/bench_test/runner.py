@@ -328,6 +328,14 @@ class BenchTestRunner:
             pico_fw.describe() if ok_pico and hasattr(pico_fw, "describe") else
             (str(pico_fw) if ok_pico else f"error: {pico_fw}")
         )
+        # E-stop unverified blocks HEAT cases only (capability_preflight.
+        # HEAT_ONLY_BLOCKING_KEYS); fail-closed: if the report could not be
+        # read at all, heat is treated as blocked too.
+        self.ctx["estop_unverified"] = bool(
+            (not ok) or getattr(cp_report.board, "heat_blocked", ()))
+        if self.ctx["estop_unverified"]:
+            from ..capability_preflight import ESTOP_UNVERIFIED_LINE  # noqa: PLC0415
+            board_before["estop_unverified"] = ESTOP_UNVERIFIED_LINE
         if ok and not cp_report.ok:
             if cp_report.board.crash_unacknowledged:
                 reasons.append(f"unacknowledged crash report present: {cp_report.board.crash_summary}")
@@ -544,12 +552,23 @@ class BenchTestRunner:
         if preflight_ok:
             self._run_start_probes(requested)
 
+        estop_unverified = bool(self.ctx.get("estop_unverified", False)) if preflight_ok else False
+        if estop_unverified:
+            from ..capability_preflight import ESTOP_UNVERIFIED_LINE  # noqa: PLC0415
+            self._log(f"WARNING: {ESTOP_UNVERIFIED_LINE}")
+            # Defence in depth: the per-case opt-ins that let a non-heat-flagged
+            # case start its own firing (LCD-19 and friends) are forced off.
+            for k in ("allow_heat", "lcd19_allow_heat", "lcd22_allow_heat", "ota_allow_heat"):
+                self.ctx[k] = False
         if not preflight_ok:
             for cid in requested:
                 results[cid] = CaseResult(Verdict.NOT_RUN, reason=f"preflight failed: {preflight_reason}")
         else:
             for cid in requested:
                 spec = get_case(cid)
+                if spec.heat and estop_unverified:
+                    results[cid] = CaseResult(Verdict.SKIP, reason="estop_unverified")
+                    continue
                 if spec.heat and not allow_heat:
                     results[cid] = CaseResult(Verdict.SKIP, reason=spec.heat_skip_reason or "allow_heat=False")
                     continue

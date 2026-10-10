@@ -217,6 +217,15 @@ READINESS_BLOCKING_KEYS = frozenset(
     {"recovery_mode", "safety_trip", "crash_report", "estop_verified"}
 )
 
+# Subset of READINESS_BLOCKING_KEYS that only matters to a run that STARTS a
+# firing or autotune (heat). The firmware still refuses heat starts on it
+# (readiness_gate.h, unchanged); PC-side, a non-heat run proceeds past it and
+# heat cases SKIP (reason ``estop_unverified``) instead. Owner decision
+# 2026-10-10: bench testing must not wait on the physical E-stop check, which
+# is NEVER marked verified from tooling.
+HEAT_ONLY_BLOCKING_KEYS = frozenset({"estop_verified"})
+ESTOP_UNVERIFIED_LINE = "E-stop not physically verified: heat cases skipped"
+
 
 @dataclass(frozen=True)
 class BoardInfo:
@@ -255,6 +264,9 @@ class BoardInfo:
     # this build predates) leaves this empty and changes nothing -- same
     # tolerance get_board_info() already applies to /api/crash_report.
     readiness_blocked: "tuple[tuple[str, str, str], ...]" = ()
+    # Same shape, but only the HEAT_ONLY_BLOCKING_KEYS items (estop_verified):
+    # these do NOT make PreflightReport.ok False; they make ok_for_heat False.
+    heat_blocked: "tuple[tuple[str, str, str], ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -303,6 +315,12 @@ class PreflightReport:
         return not any(c.fatal for c in self.checks)
 
     @property
+    def ok_for_heat(self) -> bool:
+        """``ok`` AND no heat-only readiness item (estop_verified) is red.
+        Anything that starts a firing/autotune must use this, not ``ok``."""
+        return self.ok and not self.board.heat_blocked
+
+    @property
     def fatal_checks(self) -> "list[CapabilityCheck]":
         return [c for c in self.checks if c.fatal]
 
@@ -334,6 +352,9 @@ class PreflightReport:
                 "this run would repeat. REMEDY: investigate, then "
                 "POST /api/crash_report/ack once reviewed."
             )
+        if self.board.heat_blocked:
+            lines.append(f"  [WARN]   {ESTOP_UNVERIFIED_LINE} "
+                         "(firmware still refuses firing/autotune starts; non-heat runs proceed).")
         for key, label, detail in self.board.readiness_blocked:
             lines.append(
                 f"  [FATAL]  READINESS ITEM BLOCKS FIRING: {label} ({key}) -- {detail} "
@@ -488,6 +509,7 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
     # pins those key strings on the firmware side, and a rename has to go
     # through it.
     readiness_blocked = []
+    heat_blocked = []
     try:
         readiness, _raw3 = _get_json(host, "/api/readiness", timeout)
     except PreflightTransportError:
@@ -500,7 +522,8 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
                 continue
             if item.get("status") != "not_done":
                 continue
-            readiness_blocked.append(
+            (heat_blocked if item.get("key") in HEAT_ONLY_BLOCKING_KEYS
+             else readiness_blocked).append(
                 (
                     str(item.get("key")),
                     str(item.get("label") or item.get("key")),
@@ -511,6 +534,7 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
     return BoardInfo(
         reachable=True,
         readiness_blocked=tuple(readiness_blocked),
+        heat_blocked=tuple(heat_blocked),
         fw_version=data.get("fw_version") or None,
         fw_build=data.get("fw_build") or None,
         self_protocol_version=data.get("self_protocol_version"),
