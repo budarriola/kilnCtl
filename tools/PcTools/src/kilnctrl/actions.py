@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from . import devices
+from . import devices, factory_reset_guard
 from .display import BlitError, DisplayClient, DisplayQueryError
 from .info import InfoClient, InfoQueryError
 from .io_expander import IoClient, IoQueryError
@@ -782,6 +782,20 @@ _register(
     {},
     lambda ctx: _send(ctx, UART_TASK_ID_SYSTEM, devices.system_restart_uart()),
 )
+def _factory_reset(ctx: ActionContext, scope: int, confirm: bool, skip_backup: bool,
+                   host: "str | None") -> str:
+    if confirm is not True:
+        return ("error: factory reset refused without confirm=True -- this erases NVS-backed "
+                "configuration and reboots the device")
+    # Backup first (docs/audits/KILN_NVS_LOSS_2026-10-09.md); refuse if it fails.
+    ok, backup = factory_reset_guard.backup_before_reset(host, skip_backup)
+    if not ok:
+        return backup
+    result = _send(ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope))
+    return (f"{result}\nbackup: {backup}\n"
+            "Log this reset (time, reason) in docs/BENCH_TEST_LOG.md.")
+
+
 _register(
     "System: Factory Reset",
     "Erase NVS-backed configuration and reboot the device (SYSTEM_CMD_FACTORY_RESET). "
@@ -789,17 +803,15 @@ _register(
     "identity), 1=kiln (zones, PID), 2=profiles (fire profiles), 3=all. The GUI's "
     "Danger Zone button gates this behind an askyesno dialog plus typing RESET; "
     "confirm=True is this path's equivalent -- confirm=False (the default) is refused "
-    "so a bare call can never erase anything. No reply frame; the device reboots "
+    "so a bare call can never erase anything. A backup export is saved under "
+    "logs/backup_export/ FIRST and the reset is refused if it fails, unless "
+    "skip_backup=True (host optional). No reply frame; the device reboots "
     "~500ms after the ACK, so poll \"INFO: Get FW Version\" (or get_fw_version) to "
     "confirm it came back up. Unlike load_config_preset()'s factory-reset path, this "
     "does NOT apply any preset afterward -- it only erases.",
-    {"scope": int, "confirm": bool},
-    lambda ctx, scope, confirm=False: (
-        "error: factory reset refused without confirm=True -- this erases NVS-backed "
-        "configuration and reboots the device"
-        if confirm is not True
-        else _send(ctx, UART_TASK_ID_SYSTEM, devices.system_factory_reset(scope))
-    ),
+    {"scope": int, "confirm": bool, "skip_backup": bool, "host": str},
+    lambda ctx, scope, confirm=False, skip_backup=False, host=None: _factory_reset(
+        ctx, scope, confirm, skip_backup, host),
     required=frozenset({"scope", "confirm"}),
 )
 _register(

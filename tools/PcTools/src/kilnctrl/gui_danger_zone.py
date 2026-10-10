@@ -25,7 +25,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 from typing import Callable, Optional
 
-from . import devices, host_resolve, pin_overlay, pinout_reference, settings, wifi_credentials
+from . import devices, factory_reset_guard, host_resolve, pin_overlay, pinout_reference, settings, wifi_credentials
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -224,6 +224,16 @@ class DangerZoneMixin:
             self.danger_status_var.set("Factory reset cancelled (confirmation text did not match).")
             return
 
+        # Backup first (docs/audits/KILN_NVS_LOSS_2026-10-09.md): refuse if it fails.
+        self.danger_status_var.set("Exporting pre-reset backup...")
+        self.root.update_idletasks()
+        ok, backup = factory_reset_guard.backup_before_reset()
+        if not ok:
+            self.danger_status_var.set(backup)
+            self.session_log.error("factory reset refused: %s", backup)
+            return
+        self.session_log.info("pre-reset backup saved: %s", backup)
+
         self.danger_status_var.set(f"Sending factory reset ({scope_name})...")
 
         self.send_async(
@@ -234,6 +244,7 @@ class DangerZoneMixin:
         self.session_log.info("factory reset requested: scope=%s", scope_name)
         self.danger_status_var.set(
             f"Factory reset ({scope_name}) sent. Device will erase and reboot "
-            "~500ms after the ACK -- watch the Device Console / FW version line."
+            "~500ms after the ACK -- watch the Device Console / FW version line. "
+            f"Backup: {backup}. Log this reset in docs/BENCH_TEST_LOG.md."
         )
 

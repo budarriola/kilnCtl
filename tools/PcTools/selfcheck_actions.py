@@ -196,7 +196,7 @@ def actions_checks() -> None:
         )
         check("System: Factory Reset did not send without confirm", len(system_seen), 0)
 
-        result = actions.ACTIONS["System: Factory Reset"].run(ctx, scope=0, confirm=True)
+        result = actions.ACTIONS["System: Factory Reset"].run(ctx, scope=0, confirm=True, skip_backup=True)
         check("System: Factory Reset succeeds with confirm=True", result.startswith("ok"), True)
         deadline = time.time() + 2.0
         while not system_seen and time.time() < deadline:

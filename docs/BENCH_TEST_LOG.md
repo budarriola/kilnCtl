@@ -7,6 +7,8 @@ here). Never edit a past line by hand -- append only. A line never carries a
 credential; anything that looks like one is `***` before it is written, same
 as `transcript.md`/`summary.json` (`_redact()`).
 
+**Factory resets.** Log every board factory reset (any scope, any path: `System: Factory Reset`, `factory_default_then_load_preset`, GUI Danger Zone, HTTP/LCD) here with its UTC time and reason, and take a backup first. PcTools paths now export one to `logs/backup_export/` automatically and refuse to reset if that fails (`skip_backup=True` overrides); cite the backup file in the entry. (docs/audits/KILN_NVS_LOSS_2026-10-09.md)
+
 - `20260921T004103Z_smoke` suite=`smoke` exit_code=2 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=36 SKIP=0 esp_fw=unknown pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T004103Z_smoke/`
 - `20260921T004457Z_smoke` suite=`smoke` exit_code=1 PASS=6 FAIL=27 INCONCLUSIVE=2 NOT_RUN=1 SKIP=0 esp_fw=Sep 20 2026 17:38:28 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T004457Z_smoke/`
 - `20260921T010207Z_smoke` suite=`smoke` exit_code=1 PASS=8 FAIL=24 INCONCLUSIVE=3 NOT_RUN=1 SKIP=0 esp_fw=Sep 20 2026 17:38:28 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T010207Z_smoke/`

@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, debug_probe, devices, factory_reset_guard, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -137,12 +137,20 @@ def ui_step(backend: str, action: str, target: str, timeout_ms: int = 3000,
 FACTORY_RESET_REBOOT_TIMEOUT_S = 20.0
 
 
+def _wiped_message(scope: int, backup: str, why: str) -> str:
+    return (f"BOARD WIPED: factory reset (scope={scope}) HAPPENED and the follow-up failed -- {why}. "
+            f"The board is at firmware defaults, NOT configured. Restore from the pre-reset "
+            f"backup: {backup} (backup_import(path=..., confirm=True)), then verify "
+            f"control_get_zones before any firing.")
+
+
 @_core._tool()
 def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE_KILN,
                                       host: Optional[str] = None,
                                       safety_host: Optional[str] = None,
                                       use_ct_map_backup: bool = False,
-                                      confirm: bool = False) -> str:
+                                      confirm: bool = False,
+                                      skip_backup: bool = False) -> str:
     """Factory-default the board, then apply a known-good preset -- one
     callable step so a test always starts from the same place.
 
@@ -195,6 +203,13 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     invoke it against a bench with a firing in progress or with the safety
     processor ARMED. Refuses unless ``confirm is True`` exactly (it erases
     NVS partitions).
+
+    BACKUP FIRST (docs/audits/KILN_NVS_LOSS_2026-10-09.md): before sending the
+    reset this exports GET /api/backup/export to logs/backup_export/ and
+    REFUSES to reset if the export fails, unless ``skip_backup=True``. The
+    saved path is reported in every result. If the preset apply fails after the
+    reset the result says the board is WIPED and names the file to restore with
+    ``backup_import``. Log every reset (time, reason) in docs/BENCH_TEST_LOG.md.
     """
     if confirm is not True:
         return (
@@ -208,6 +223,9 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
         preset = config_presets.load_preset_data(name)
     except config_presets.ConfigPresetError as exc:
         return f"error: {exc}"
+    ok, backup = factory_reset_guard.backup_before_reset(_ota_resolve_host(host), skip_backup)
+    if not ok:
+        return backup
     # Arm BEFORE sending, so a reboot fast enough to push before the wait
     # below starts is still counted rather than cleared away.
     _srv._info.arm_boot_push()
@@ -232,7 +250,8 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             f"refused: factory reset request was ACKed, but no reboot was observed "
             f"within {FACTORY_RESET_REBOOT_TIMEOUT_S}s (no unsolicited FW-version "
             f"boot push) -- most likely refused by the board's system mode gate "
-            f"(e.g. a firing or autotune run in progress); preset NOT applied"
+            f"(e.g. a firing or autotune run in progress); preset NOT applied. "
+            f"backup: {backup}"
         )
     resolved = _ota_resolve_host(host) if host else None
     resolved_safety = _ota_resolve_host(safety_host) if safety_host else None
@@ -241,13 +260,13 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
             _srv._control, preset, zones_host=resolved, safety_host=resolved_safety,
             use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
-        return f"factory reset ok, but preset apply failed: {exc}"
+        return _wiped_message(scope, backup, f"preset apply failed: {exc}")
     except zones_http_client.ZonesHttpError as exc:
-        return f"factory reset ok, PID/model applied, but zones config write failed (host={resolved}): {exc}"
+        return _wiped_message(scope, backup, f"PID/model applied, but zones config write failed (host={resolved}): {exc}")
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
-        return ("factory reset ok, PID/model applied, but safety config write failed "
-                f"(host={resolved_safety}): {exc}")
-    return f"factory reset ok (scope={scope})\n" + result.describe()
+        return _wiped_message(scope, backup, "PID/model applied, but safety config write failed "
+                              f"(host={resolved_safety}): {exc}")
+    return f"factory reset ok (scope={scope})\nbackup: {backup}\n" + result.describe()
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised
