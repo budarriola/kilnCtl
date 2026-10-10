@@ -577,6 +577,12 @@ typedef struct {
     bool     revert_available;
     float    revert_kp, revert_ki, revert_kd;
     float    revert_k_dc, revert_tau_s, revert_dead_time_s;
+    // Fix-review F2: the values THIS adaptive commit left live. adaptive_tune_revert() refuses (and
+    // clears revert_available) unless the live gains and model still equal these, so ANY other
+    // writer (Accept, PID POST, UART, iter_tune restore, backup import, kiln_cfg apply) that
+    // changed the zone since invalidates the snapshot without each writer needing a hook.
+    float    revert_expect_kp, revert_expect_ki, revert_expect_kd;
+    float    revert_expect_k_dc, revert_expect_tau_s, revert_expect_dead_time_s;
     bool     revert_ki_baseline_valid;
     float    revert_ki_baseline;
 
@@ -678,6 +684,8 @@ typedef struct {
     bool have_prior;
     float prior_kp, prior_ki, prior_kd;
     bool stale; // apply found the gains changed since plan; nothing was written
+    bool busy;  // fix-review F3/F4: a profile/autotune claim was held at apply; nothing was written
+    bool save_failed; // RAM updated and live, persist failed
 } adaptive_tune_zone_plan_t;
 
 typedef struct {

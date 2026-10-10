@@ -268,6 +268,10 @@ static esp_err_t revert_post_handler(httpd_req_t *req)
     if (r == ADAPTIVE_TUNE_REVERT_OK) {
         return httpd_resp_sendstr(req, "{\"ok\":true}");
     }
+    if (r == ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE) {
+        // F3: a run claimed heat after the entry gate; same 409 refusal as the gate above.
+        return system_mode_gate_http_send_refusal(req, reason);
+    }
     char resp[192];
     snprintf(resp, sizeof(resp), "{\"ok\":false,\"reason\":\"%s\"}", reason);
     return httpd_resp_sendstr(req, resp);

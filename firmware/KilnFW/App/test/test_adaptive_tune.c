@@ -545,6 +545,7 @@ static profile_firing_run_record_t make_clean_record(uint8_t profile_id, uint8_t
 // no production code touched. See each file's own header comment for what
 // it covers and why that's the seam.
 // ---------------------------------------------------------------------
+static bool s_stub_claim_busy; // defined at the end of this file (models the setter's in-lock claim check)
 #include "test_adaptive_tune_dwell.c"
 #include "test_adaptive_tune_model.c"
 #include "test_adaptive_tune_coupled.c"
@@ -675,6 +676,9 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: F3 follow-up -- revert vs run_end's unlocked apply window");
     test_revert_during_run_end_apply_is_refused_busy();
+    test_fix_review9_busy_defers_without_mixed_state();
+    test_fix_review9_revert_cleared_by_external_writer();
+    test_fix_review9_revert_busy_reports_firing_active();
     test_run_end_during_revert_write_skips_the_zone();
     test_ki_clear_gen_is_per_zone();
     test_any_write_in_flight_covers_the_apply_window();
@@ -863,4 +867,36 @@ int main(void)
     }
     printf("all passed\n");
     return 0;
+}
+
+/* Dev review 9 fix review (F1/F3/F5): stand-ins for the atomic model+PID setter and the idle-only
+ * coupling-cell setter. Composed from this file's existing fakes so their hooks/probes still fire. */
+static bool s_stub_claim_busy = false; /* models the real setter's in-lock heat-claim re-check */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (s_stub_claim_busy) {
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    float a, b, c;
+    if (expect_prior_pid != NULL && zones_config_get_pid(zone_index, &a, &b, &c) &&
+        (a != expect_prior_pid[0] || b != expect_prior_pid[1] || c != expect_prior_pid[2])) {
+        return ZONES_SET_STALE_PRIOR;
+    }
+    if (!zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s)) {
+        return ZONES_SET_REJECTED;
+    }
+    if (!zones_config_set_pid(zone_index, kp, ki, kd)) {
+        return ZONES_SET_REJECTED;
+    }
+    return ZONES_SET_OK;
+}
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (s_stub_claim_busy) {
+        return false;
+    }
+    return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
 }

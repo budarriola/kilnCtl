@@ -2291,6 +2291,51 @@ static void test_zones_setters_refuse_busy_running_inside_the_lock(void)
                "positive control: idle write succeeds");
 }
 
+// Dev review 9 fix review F1/F3/F5. Real setters. MUST GO RED if the combined setter stops writing
+// model+gains in one section / consulting the claim, or if the F5 writers stop consulting it.
+static void test_zones_fix_review9_atomic_pair_and_claim_gated_writers(void)
+{
+    TEST_SECTION("zones_config_set_model_and_pid_checked -- atomic pair, stale-prior detection; F5 writers refuse mid-run");
+    seed_two_zone_pid_baseline();
+    TEST_CHECK(zones_config_set_model_and_pid_checked(0, 11.0f, 111.0f, 6.0f, 0.4f, 0.002f, 0.7f, NULL) == ZONES_SET_OK,
+               "idle combined write succeeds");
+    float k = 0, t = 0, d = 0, kp = 0, ki = 0, kd = 0;
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d) && zones_config_get_pid(0, &kp, &ki, &kd), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "model landed");
+    TEST_CHECK_NEAR(kp, 0.4, 1e-6, "gains landed with the model");
+    // mid-pair BUSY: a claim held at the call -> NEITHER model nor gains change (no mixed state).
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) s_test_profile_status.state = PROFILE_EXEC_RUNNING; else s_test_autotune_active = true;
+        TEST_CHECK(zones_config_set_model_and_pid_checked(0, 22.0f, 222.0f, 9.0f, 0.9f, 0.009f, 0.9f, NULL) ==
+                       ZONES_SET_BUSY_RUNNING, "combined write BUSY while a run holds the claim");
+        TEST_CHECK(!zones_config_set_coupling_cell_if_idle(0, 1, 0.3f, 50.0f, 5.0f), "F5: cell write refuses mid-run");
+        TEST_CHECK(!zones_config_set_autotune_baseline_k_dc_no_save(0, 5.0f), "F5: baseline write refuses mid-run");
+        TEST_CHECK(!zones_config_set_coupling_diag_k_dc_no_save(0, 5.0f), "F5: coupling_diag write refuses mid-run");
+        TEST_CHECK(!zones_config_set_model_fit_context_no_save(0, 500.0f, 20.0f), "F5: fit context refuses mid-run");
+        zones_cfg_t blob;
+        memcpy(&blob, &s_zones.cfg, sizeof(blob));
+        blob.crc32 = zones_config_json_compute_crc(&blob);
+        char reason[128] = "";
+        TEST_CHECK(!zones_config_import_blob(&blob, sizeof(blob), reason, sizeof(reason)) &&
+                       strstr(reason, "run is active") != NULL,
+                   "F5: kiln_cfg import_blob refuses mid-run with the run-active reason");
+        s_test_profile_status.state = PROFILE_EXEC_IDLE;
+        s_test_autotune_active = false;
+    }
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d) && zones_config_get_pid(0, &kp, &ki, &kd), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "BUSY left the model untouched (no mixed pair)");
+    TEST_CHECK_NEAR(kp, 0.4, 1e-6, "BUSY left the gains untouched (no mixed pair)");
+    // stale prior: another writer changed the gains after the planner's snapshot.
+    const float expect[3] = {0.4f, 0.002f, 0.7f};
+    TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.003f, 0.8f) == ZONES_SET_OK, "external writer");
+    TEST_CHECK(zones_config_set_model_and_pid_checked(0, 33.0f, 333.0f, 7.0f, 0.6f, 0.004f, 0.9f, expect) ==
+                   ZONES_SET_STALE_PRIOR, "gains changed since plan -> STALE_PRIOR");
+    TEST_CHECK(zones_config_get_model(0, &k, &t, &d), "readable");
+    TEST_CHECK_NEAR(k, 11.0, 1e-6, "STALE_PRIOR wrote nothing (model unchanged)");
+    // idle positive controls for the F5 writers.
+    TEST_CHECK(zones_config_set_coupling_cell_if_idle(0, 1, 0.3f, 50.0f, 5.0f), "idle cell write succeeds");
+}
+
 static void test_zones_pid_post_accepts_while_idle(void)
 {
     TEST_SECTION("POST /api/zones/pid -- positive control: still accepted while nothing is running");
@@ -16762,6 +16807,7 @@ void run_test_zones_http(void)
     test_zones_pid_post_refused_while_profile_running();
     test_zones_pid_post_refused_while_autotune_running();
     test_zones_setters_refuse_busy_running_inside_the_lock();
+    test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
     test_zones_pid_post_refuses_embedded_nul();

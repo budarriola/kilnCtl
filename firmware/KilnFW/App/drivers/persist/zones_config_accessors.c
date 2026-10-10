@@ -12,6 +12,8 @@
 #include "zone_settings_source_chain.h" /* zones_config_settings_source_import_has_cycle() shares the
                                           * chain-walk algorithm with this file's setters. */
 
+static bool zones_config_run_claimed_locked(void); /* defined below, used by the earlier _no_save setters */
+
 /* ---- Public getters (profiles_http.c) ------------------------------------ */
 
 bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr)
@@ -34,6 +36,10 @@ bool zones_config_set_max_ramp_no_save(uint8_t zone_index, float c_per_hr)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
+    }
     s_zones.cfg.zones[zone_index].max_ramp_c_per_hr = c_per_hr;
     s_config_generation++;
     zones_cfg_unlock();
@@ -675,6 +681,54 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return zones_config_set_pid_checked(zone_index, kp, ki, kd) == ZONES_SET_OK;
 }
 
+/* F1/F3 (dev review 9 fix review): model + gains as ONE all-or-nothing section. Validates every
+ * value first, then takes zones_cfg_lock once, re-reads the heat claim once, optionally verifies
+ * the live gains still equal expect_prior_pid (the adaptive plan-time snapshot; this makes the
+ * stale check atomic with the write, so an Accept landing between plan and apply is detected
+ * rather than overwritten), and writes model and gains together. */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (zone_index >= s_zones.cfg.thermo_count) {
+        return ZONES_SET_REJECTED;
+    }
+    if (!isfinite(k_dc) || !isfinite(tau_s) || !isfinite(dead_time_s) || k_dc < 0.0f || tau_s < 0.0f ||
+        dead_time_s < 0.0f || k_dc > ZONE_MODEL_K_MAX || tau_s > ZONE_MODEL_TIME_MAX_S ||
+        dead_time_s > ZONE_MODEL_TIME_MAX_S) {
+        return ZONES_SET_REJECTED;
+    }
+    if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || kp < 0.0f || ki < 0.0f || kd < 0.0f ||
+        kp > ZONE_PID_GAIN_MAX || ki > ZONE_PID_GAIN_MAX || kd > ZONE_PID_GAIN_MAX) {
+        return ZONES_SET_REJECTED;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    if (expect_prior_pid != NULL &&
+        (z->pid_kp != expect_prior_pid[0] || z->pid_ki != expect_prior_pid[1] || z->pid_kd != expect_prior_pid[2])) {
+        zones_cfg_unlock();
+        return ZONES_SET_STALE_PRIOR;
+    }
+    const bool gains_changed = zones_config_gain_changed(z->pid_kp, kp) || zones_config_gain_changed(z->pid_ki, ki) ||
+                               zones_config_gain_changed(z->pid_kd, kd);
+    z->model_k_dc = k_dc;
+    z->model_tau_s = tau_s;
+    z->model_dead_time_s = dead_time_s;
+    z->pid_kp = kp;
+    z->pid_ki = ki;
+    z->pid_kd = kd;
+    if (gains_changed) {
+        z->tuning_valid = 0;
+    }
+    s_config_generation++;
+    zones_cfg_unlock();
+    return nvs_save() == ESP_OK ? ZONES_SET_OK : ZONES_SET_SAVE_FAILED;
+}
+
 /* See zones_http.h -- Phase 3 control-loop wiring's read of the fuzzy
  * adjustment-strength knob. */
 bool zones_config_get_fuzzy_strength_pct(uint8_t zone_index, float *out_pct)
@@ -741,6 +795,10 @@ bool zones_config_set_coupling_diag_k_dc_no_save(uint8_t zone_index, float k_dc)
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
+    }
     s_zones.cfg.zones[zone_index].coupling_diag_k_dc = k_dc;
     s_config_generation++;
     zones_cfg_unlock();
@@ -948,6 +1006,34 @@ bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor
     s_config_generation++;
     zones_cfg_unlock();
     return true;
+}
+
+/* F5: the adaptive tuner's cell write. Unlike autotune's own persist job (which runs under its
+ * own claim by design), this one must not land mid-run: refuse while any run claim is held. */
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (relay_authority_reset_in_flight()) {
+        return false;
+    }
+    if (neighbor_index == zone_index || zone_index >= s_zones.cfg.thermo_count ||
+        neighbor_index >= MAX31856_CHANNEL_COUNT || !isfinite(coeff) || !isfinite(tau_s) || !isfinite(dead_time_s) ||
+        coeff < 0.0f || coeff > ZONE_COUPLING_COEFF_MAX || tau_s < 0.0f || tau_s > ZONE_MODEL_TIME_MAX_S ||
+        dead_time_s < 0.0f || dead_time_s > ZONE_MODEL_TIME_MAX_S) {
+        return false;
+    }
+    zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false;
+    }
+    zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
+    z->coupling_coeff[neighbor_index] = coeff;
+    z->coupling_tau_s[neighbor_index] = tau_s;
+    z->coupling_dead_time_s[neighbor_index] = dead_time_s;
+    s_config_generation++;
+    zones_cfg_unlock();
+    return nvs_save() == ESP_OK;
 }
 
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
@@ -2295,6 +2381,10 @@ bool zones_config_set_model_fit_context_no_save(uint8_t zone_index, float fit_te
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
+    }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     z->model_fit_temp_c = fit_temp_c;
     z->model_fit_ambient_c = fit_ambient_c;
@@ -2334,6 +2424,10 @@ bool zones_config_set_autotune_baseline_k_dc_no_save(uint8_t zone_index, float k
         return false;
     }
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
+    }
     s_zones.cfg.zones[zone_index].autotune_baseline_k_dc = k_dc;
     s_config_generation++;
     zones_cfg_unlock();
@@ -2397,6 +2491,10 @@ bool zones_config_set_tuning_quality_no_save(uint8_t zone_index, const zone_tuni
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return false; /* dev review 9 fix-review F5: refuse while a run holds the heat claim */
+    }
     z->tuning_valid = 1;
     z->tuning_method = q->method;
     z->tuning_rule = q->rule;
@@ -2526,6 +2624,14 @@ bool zones_config_import_blob(const void *blob, size_t len, char *reason_out, si
      * all-or-nothing discipline as zones_post_handler()'s own commit
      * point. */
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        /* F5: the claim is re-read inside the generation-bumping section, like the PID/model setters. */
+        zones_cfg_unlock();
+        if (reason_out && reason_cap) {
+            snprintf(reason_out, reason_cap, "a profile or autotune run is active -- retry when it ends");
+        }
+        return false;
+    }
     s_zones.cfg = cand;
     s_zones_config_valid = true;
     s_config_generation++;

@@ -802,9 +802,18 @@ typedef enum {
     ZONES_SET_OK = 0,
     ZONES_SET_REJECTED,     /* bad zone or out-of-range value, nothing written */
     ZONES_SET_BUSY_RUNNING, /* run claim held, nothing written */
-    ZONES_SET_SAVE_FAILED   /* RAM updated, persist failed */
+    ZONES_SET_SAVE_FAILED,  /* RAM updated, persist failed */
+    ZONES_SET_STALE_PRIOR   /* expected prior gains no longer live, nothing written */
 } zones_set_result_t;
 zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd);
+/* Model + gains in one lock section, one claim check (all-or-nothing). expect_prior_pid (nullable,
+ * {kp,ki,kd}) makes the live-gains-unchanged check atomic with the write -> ZONES_SET_STALE_PRIOR. */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid);
+/* Adaptive tuner's coupling-cell write: refuses (false) while a profile/autotune claim is held. */
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s);
 zones_set_result_t zones_config_set_pid_no_save_checked(uint8_t zone_index, float kp, float ki, float kd);
 zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
 zones_set_result_t zones_config_set_model_no_save_checked(uint8_t zone_index, float k_dc, float tau_s,

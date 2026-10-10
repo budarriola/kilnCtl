@@ -699,6 +699,65 @@ static void test_revert_during_run_end_apply_is_refused_busy(void)
     TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "a finished revert must clear write_in_flight");
 }
 
+
+// Dev review 9 fix review F1/F3/F4: a heat claim held at the atomic write refuses BOTH the model and
+// the gains (no mixed pair), reports the distinct "deferred_autotune_active" reason (not a rejection),
+// and leaves no revert snapshot offered. MUST GO RED if the model/gains writes split again or the
+// busy result is folded into a generic rejection.
+static void test_fix_review9_busy_defers_without_mixed_state(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    s_stub_claim_busy = true;
+    profile_firing_run_record_t rec = make_clean_record(40, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    s_stub_claim_busy = false;
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-6, "BUSY: model untouched");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kp, 2.0f, 1e-6, "BUSY: gains untouched (no mixed model/gains)");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 0.03f, 1e-6, "BUSY: Ki untouched");
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied, "BUSY: nothing recorded as applied");
+    TEST_CHECK(!adaptive_tune_zones[1].revert_available, "BUSY: no revert offered for a write that never landed");
+    TEST_CHECK(strstr(adaptive_tune_zones[1].last_refusal_reason, "deferred_autotune_active") != NULL,
+               "F4: distinct deferred reason, not a validation rejection");
+}
+
+// F2: any writer that changes the zone after the adaptive commit invalidates the revert snapshot.
+static void test_fix_review9_revert_cleared_by_external_writer(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    profile_firing_run_record_t rec = make_clean_record(41, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(adaptive_tune_zones[1].revert_available, "setup: adaptive change applied, revert offered");
+    s_fake_zone_cfg[1].kp = 7.77f; // e.g. an autotune Accept / PID POST after the adaptive commit
+    char reason[96];
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT,
+               "F2: revert refuses once another writer changed the gains");
+    TEST_CHECK(!adaptive_tune_zones[1].revert_available, "F2: snapshot cleared");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kp, 7.77f, 1e-6, "F2: the other writer's gains are NOT overwritten");
+}
+
+// F3: a claim landing between the revert's entry gate and its write -> FIRING_ACTIVE, nothing written.
+static void test_fix_review9_revert_busy_reports_firing_active(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    profile_firing_run_record_t rec = make_clean_record(42, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    float k = s_fake_zone_cfg[1].k_dc, kp = s_fake_zone_cfg[1].kp;
+    s_stub_claim_busy = true;
+    char reason[96];
+    TEST_CHECK(adaptive_tune_revert(1, reason, sizeof(reason)) == ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE,
+               "F3: revert BUSY at the write maps to FIRING_ACTIVE (HTTP 409), not a generic failure");
+    s_stub_claim_busy = false;
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, k, 1e-6, "F3: model untouched");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].kp, kp, 1e-6, "F3: gains untouched (no mixed pair)");
+    TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "F3: write_in_flight released");
+}
+
 static void hook_run_end_zone1(void)
 {
     profile_firing_run_record_t rec2 = make_clean_record(32, 1, 900);

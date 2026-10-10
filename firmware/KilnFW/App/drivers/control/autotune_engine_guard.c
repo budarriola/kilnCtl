@@ -479,7 +479,15 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         return false;
     }
 
-    zones_set_result_t pid_result = zones_config_set_pid_checked(zone, g.kp, g.ki, g.kd);
+    /* Fix-review F1/F3: a step-method Accept writes model + gains as ONE atomic zones_config
+     * section (single claim check; the adaptive run-end apply uses the same setter and its
+     * plan-time stale check lives inside that section, so neither can interleave with the other).
+     * A relay Accept has no model to write and stays gains-only. */
+    zones_set_result_t pid_result =
+        (method == AUTOTUNE_METHOD_RELAY)
+            ? zones_config_set_pid_checked(zone, g.kp, g.ki, g.kd)
+            : zones_config_set_model_and_pid_checked(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s, g.kp, g.ki,
+                                                     g.kd, NULL);
     if (pid_result != ZONES_SET_OK) {
         autotune_engine_release_zone_for_external_write(zone);
         if (pid_result == ZONES_SET_BUSY_RUNNING && out != NULL) {
@@ -566,7 +574,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * feedback alone -- exactly how every zone ran before this existed --
      * and it is recoverable by re-running the test. Losing the accepted
      * gains to a false return would not be. */
-    bool model_persisted = zones_config_set_model(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s);
+    bool model_persisted = true; /* written atomically with the gains above */
     if (!model_persisted) {
         ESP_LOGW(AT_TAG,
                  "autotune zone %u: gains accepted but plant model (K=%.2f tau=%.1f L=%.1f) was rejected or "

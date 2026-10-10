@@ -14,7 +14,7 @@
 // every other public function now test s_at.lock == NULL as their first
 // statement and return a clean "not running" answer instead.
 //
-// #includes autotune_engine.c and its four split siblings directly (same
+// This test #includes autotune_engine.c and its four split siblings directly (same
 // convention as test_profile_executor_prestart.c's #include of ITS split --
 // see that file's header comment) -- ROADMAP.md M15 A3 broke autotune_engine.c
 // (4120 lines) into autotune_engine.c/_guard.c/_step_identify.c/_relay.c/
@@ -807,6 +807,7 @@ bool zones_current_sweep_is_active(void)
  * tuning-quality write can flip it to true -- same convention as
  * s_stub_set_pid_result below. */
 static bool s_stub_set_model_result = false;
+static bool s_stub_atomic_reject = false; /* F1: combined model+gains setter refuses */
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     s_zones_write_total++;
@@ -4448,13 +4449,14 @@ static void test_autotune_engine_accept_skips_tuning_quality_when_model_persist_
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_tuning_quality_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live, per this "
-                         "function's own comment on why a model-persist failure is logged, not propagated");
+    TEST_CHECK(!accepted, "F1: model and gains are one atomic write, so a refused write fails the accept "
+                          "(no gains-without-model state to report success for)");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_tuning_quality_call_count == 0,
               "zones_config_set_tuning_quality() must NOT be called when the model failed to persist");
 
@@ -4571,12 +4573,13 @@ static void test_autotune_engine_accept_skips_coupling_diag_k_dc_when_model_pers
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_set_coupling_diag_k_dc_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(!accepted, "F1: atomic write refused -> accept fails, nothing follow-on written");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_set_coupling_diag_k_dc_call_count == 0,
               "zones_config_set_coupling_diag_k_dc() must NOT be called when the model failed to persist");
 
@@ -4693,12 +4696,13 @@ static void test_autotune_engine_accept_skips_adaptive_tune_baseline_reset_when_
     s_at.model.dead_time_s = 5.0f;
 
     s_stub_set_pid_result = true;
-    s_stub_set_model_result = false; /* the case under test -- model persist refuses/fails */
+    s_stub_atomic_reject = true; /* the case under test -- the atomic model+gains write refuses */
     s_stub_set_autotune_baseline_k_dc_call_count = 0;
 
     bool accepted = autotune_engine_accept(NULL, NULL);
 
-    TEST_CHECK(accepted, "acceptance itself still succeeds -- the gains are already live");
+    TEST_CHECK(!accepted, "F1: atomic write refused -> accept fails, nothing follow-on written");
+    s_stub_atomic_reject = false;
     TEST_CHECK(s_stub_set_autotune_baseline_k_dc_call_count == 0,
               "zones_config_set_autotune_baseline_k_dc() must NOT be called when the model failed to persist");
 
@@ -7514,4 +7518,30 @@ int main(void)
     }
     printf("all passed\n");
     return 0;
+}
+
+/* Dev review 9 fix review (F1/F3/F5): stand-ins for the atomic model+PID setter and the idle-only
+ * coupling-cell setter. Composed from this file's existing fakes so their hooks/probes still fire. */
+static bool s_stub_claim_busy = false; /* models the real setter's in-lock heat-claim re-check */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (s_stub_claim_busy || s_stub_set_pid_busy) {
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    if (s_stub_atomic_reject) {
+        return ZONES_SET_REJECTED;
+    }
+    (void)expect_prior_pid; /* Accept passes NULL */
+    (void)zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s); /* records the call/args */
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (s_stub_claim_busy) {
+        return false;
+    }
+    return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
 }

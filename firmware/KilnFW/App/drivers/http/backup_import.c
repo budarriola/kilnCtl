@@ -2500,7 +2500,7 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
         if (!zones_config_set_pid_no_save(zc->index, zc->kp, zc->ki, zc->kd)) {
-            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting PID gains",
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting PID gains (invalid value, or a profile/autotune run was starting -- retry in a moment)",
                     (unsigned)i, zc->index);
             zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;

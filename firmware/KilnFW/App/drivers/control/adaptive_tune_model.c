@@ -254,20 +254,34 @@ bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tun
 void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan)
 {
     if (plan->bootstrap_baseline) {
-        plan->bootstrap_ok = zones_config_set_autotune_baseline_k_dc(zi, plan->baseline_k_dc);
+        plan->bootstrap_ok = zones_config_set_autotune_baseline_k_dc(zi, plan->baseline_k_dc); // F5: refuses mid-run
     }
     if (!plan->have_model) {
         return;
     }
-    float live_kp, live_ki, live_kd;
-    if (plan->have_prior && zones_config_get_pid(zi, &live_kp, &live_ki, &live_kd) &&
-        (live_kp != plan->prior_kp || live_ki != plan->prior_ki || live_kd != plan->prior_kd)) {
+    // Fix-review F1/F3: model + gains in ONE zones_cfg_lock section with ONE claim check, and the
+    // "gains still equal the plan-time snapshot" test inside that same section, so an Accept (or any
+    // other writer) can neither slip between the two writes nor between the stale check and them.
+    const float expect[3] = {plan->prior_kp, plan->prior_ki, plan->prior_kd};
+    zones_set_result_t r = zones_config_set_model_and_pid_checked(
+        zi, plan->k_blended, plan->tau_s, plan->dead_time_s, plan->kp, plan->ki, plan->kd,
+        plan->have_prior ? expect : NULL);
+    switch (r) {
+    case ZONES_SET_OK:
+        plan->model_ok = plan->pid_ok = true;
+        break;
+    case ZONES_SET_SAVE_FAILED:
+        plan->model_ok = plan->pid_ok = true; // live in RAM; only persistence failed
+        plan->save_failed = true;
+        break;
+    case ZONES_SET_STALE_PRIOR:
         plan->stale = true; // another writer (autotune Accept) changed the gains after the plan
-        return;
-    }
-    plan->model_ok = zones_config_set_model(zi, plan->k_blended, plan->tau_s, plan->dead_time_s);
-    if (plan->model_ok) {
-        plan->pid_ok = zones_config_set_pid(zi, plan->kp, plan->ki, plan->kd);
+        break;
+    case ZONES_SET_BUSY_RUNNING:
+        plan->busy = true;
+        break;
+    default:
+        break; // REJECTED: model_ok/pid_ok stay false
     }
 }
 
@@ -288,6 +302,15 @@ bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_
     }
     if (!plan->have_model) {
         return false; // plan refused; its refusal reason is already set
+    }
+    if (plan->busy) {
+        // F3/F4: not a validation failure. A profile or autotune run held the heat claim when the
+        // run-end apply reached the setter (e.g. a profile ended while an autotune runs on another
+        // zone), so nothing was written. The next qualifying run re-plans from fresh observations.
+        adaptive_tune_set_refusal(z, "deferred_autotune_active: a profile or autotune run held the heat claim at "
+                                     "apply time -- nothing written, next run will re-plan");
+        z->revert_available = false;
+        return false;
     }
     if (plan->stale) {
         adaptive_tune_set_refusal(z, "zone gains were changed by another writer during the run-end apply -- skipped");
@@ -324,6 +347,16 @@ bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_
         }
     }
 
+    if (plan->save_failed) {
+        ESP_LOGW(ADAPTIVE_TUNE_TAG, "zone %u: refined model/gains are live in RAM but the NVS save failed", (unsigned)zi);
+    }
+    // F2: remember exactly what we left live so a later revert can tell whether it still applies.
+    z->revert_expect_kp = gains.kp;
+    z->revert_expect_ki = gains.ki;
+    z->revert_expect_kd = gains.kd;
+    z->revert_expect_k_dc = k_blended;
+    z->revert_expect_tau_s = tau_s;
+    z->revert_expect_dead_time_s = dead_time_s;
     z->last_refusal_reason[0] = '\0';
     z->has_applied = true;
     z->prior_k_dc = k_dc;
@@ -753,7 +786,7 @@ void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t 
 void adaptive_tune_apply_coupled_plan(uint8_t zi, adaptive_tune_coupled_plan_t *plan)
 {
     for (uint8_t c = 0; c < plan->count; c++) {
-        plan->cells[c].ok = zones_config_set_coupling_cell(zi, plan->cells[c].j, plan->cells[c].blended,
+        plan->cells[c].ok = zones_config_set_coupling_cell_if_idle(zi, plan->cells[c].j, plan->cells[c].blended,
                                                            plan->cells[c].tau, plan->cells[c].dead);
     }
 }

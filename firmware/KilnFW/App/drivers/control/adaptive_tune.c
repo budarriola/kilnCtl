@@ -1261,11 +1261,32 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
         }
         return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
     }
+    {
+        // F2: the snapshot only applies while the live zone still holds exactly what the adaptive
+        // commit left. Any other writer since (Accept, PID POST, UART, iter_tune restore, backup
+        // import, kiln_cfg apply) makes it stale; reverting would overwrite their newer values.
+        float lkp, lki, lkd, lk, lt, ld;
+        const bool have = zones_config_get_pid(zone_index, &lkp, &lki, &lkd) &&
+                          zones_config_get_model(zone_index, &lk, &lt, &ld);
+        if (!have || lkp != z->revert_expect_kp || lki != z->revert_expect_ki || lkd != z->revert_expect_kd ||
+            lk != z->revert_expect_k_dc || lt != z->revert_expect_tau_s || ld != z->revert_expect_dead_time_s) {
+            z->revert_available = false; // F2 precheck
+            z->has_applied = false;
+            xSemaphoreGive(adaptive_tune_lock);
+            if (reason) {
+                snprintf(reason, reason_cap,
+                         "zone gains or model were changed by another writer since the adaptive change -- "
+                         "nothing to revert");
+            }
+            return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
+        }
+    }
     z->write_in_flight = true;
     float kp = z->revert_kp, ki = z->revert_ki, kd = z->revert_kd;
     float k_dc = z->revert_k_dc, tau_s = z->revert_tau_s, dead_time_s = z->revert_dead_time_s;
     bool base_valid = z->revert_ki_baseline_valid;
     float base_val = z->revert_ki_baseline;
+    const float expect[3] = {z->revert_expect_kp, z->revert_expect_ki, z->revert_expect_kd};
     xSemaphoreGive(adaptive_tune_lock); // never hold this lock across the zone-config write below
 
     // Direct, unwrapped zones_config_set_*() calls -- this function's only
@@ -1274,12 +1295,31 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // handler()/adaptive_tune_set_enabled() above already write zones_
     // config from directly, unwrapped -- see either's own comment for the
     // evidence this rests on.
-    bool ok = zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) &&
-              zones_config_set_pid(zone_index, kp, ki, kd);
+    // F1/F3: one atomic model + gains write (single claim check, single lock section). The expected
+    // prior is the adaptive-applied pair, so a writer landing since the check above is detected.
+    zones_set_result_t wr = zones_config_set_model_and_pid_checked(zone_index, k_dc, tau_s, dead_time_s, kp, ki, kd,
+                                                                   expect);
+    bool ok = (wr == ZONES_SET_OK || wr == ZONES_SET_SAVE_FAILED);
     if (!ok) {
         xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
         z->write_in_flight = false;
+        if (wr == ZONES_SET_STALE_PRIOR) {
+            z->revert_available = false; // F2 stale
+            z->has_applied = false;
+        }
         xSemaphoreGive(adaptive_tune_lock);
+        if (wr == ZONES_SET_BUSY_RUNNING) {
+            if (reason) {
+                snprintf(reason, reason_cap, "a profile or autotune run is active -- zone writes refused");
+            }
+            return ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE;
+        }
+        if (wr == ZONES_SET_STALE_PRIOR) {
+            if (reason) {
+                snprintf(reason, reason_cap, "zone gains were changed by another writer -- nothing to revert");
+            }
+            return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
+        }
         if (reason) {
             snprintf(reason, reason_cap, "zone config write rejected the reverted gains");
         }
