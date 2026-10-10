@@ -848,6 +848,9 @@ void executor_task_entry(void *arg)
          * current below -- see io_segs_tick()'s doc comment. */
         io_segs_tick(dt_s);
 
+        /* Review-2 MEDIUM-1: retry pending OFF bits for relays this run does not own. */
+        zone_off_pending_retry_running(now);
+
         /* --- Read every physical channel (raw), then combine per zone
          * (TODO.md 10.8) into that zone's control temperature ------------
          * Two index spaces below on purpose: ch_raw_c/ch_sensor_ok are
@@ -2339,7 +2342,8 @@ void watchdog_task_entry(void *arg)
             continue;
         }
 
-        relay_unknown_release_locked();
+        /* LOW-2 (review 2): merge and assert guard 9 BEFORE relay_unknown_release_locked(), which
+         * recomputes the link fault source from global_fault_source; otherwise APP drops briefly. */
         /* F1: carry a verdict latched on an earlier lock-timeout pass. */
         tick_stale = guard9_merge_pending(tick_stale, since_ms, &since_ms);
         if (tick_stale) {
@@ -2357,6 +2361,7 @@ void watchdog_task_entry(void *arg)
             io_segs_force_all_off(false);
             guard9_assert_stale_tick_fault();
         }
+        relay_unknown_release_locked();
 
         /* profile_executor_wd_decide() (profile_executor.h) is the pure
          * classifier this pass extracted so it could be host-tested without

@@ -544,6 +544,59 @@ void zone_off_pending_retry(void)
     }
 }
 
+/* Review-2 MEDIUM-1: pending OFF bits for relays the RUNNING run does not own must
+ * still be retried while the run is in progress (zone_off_pending_retry() only runs
+ * outside RUNNING). Bounded cadence (1 s); never writes to a relay owned by an
+ * active zone, an active autotune zone or a live aux claim. Must be called with
+ * s_exec.lock held. */
+#define ZONE_OFF_PENDING_RUNNING_RETRY_MS 1000u
+void zone_off_pending_retry_running(TickType_t now)
+{
+    uint8_t mask = s_exec.zone_off_pending_mask;
+    if (mask == 0 || !s_exec.io) {
+        return;
+    }
+    if (s_exec.zone_off_pending_retry_seen &&
+        (uint32_t)(now - s_exec.zone_off_pending_retry_tick) < pdMS_TO_TICKS(ZONE_OFF_PENDING_RUNNING_RETRY_MS)) {
+        return;
+    }
+    s_exec.zone_off_pending_retry_seen = true;
+    s_exec.zone_off_pending_retry_tick = now;
+
+    uint8_t owned = 0;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!s_exec.zones[zi].active && !autotune_engine_is_active_on_zone(zi)) {
+            continue;
+        }
+        uint8_t zm = 0;
+        if (!zones_config_get_relay_mask(zi, &zm)) {
+            return; /* cannot attribute ownership: write nothing this cycle */
+        }
+        owned |= zm;
+    }
+    owned |= s_exec.aux_claim_mask;
+    mask &= (uint8_t)~owned;
+    for (uint8_t b = 0; b < 8; b++) {
+        if (!(mask & (1u << b))) continue;
+        relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+        if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+            mask &= (uint8_t)~(1u << b);
+            s_exec.zone_off_pending_mask &= (uint8_t)~(1u << b);
+        }
+    }
+    if (mask == 0) {
+        return;
+    }
+    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+    if (off_err == ESP_OK) {
+        relay_off_tracker_note_write(mask, 0);
+        s_exec.zone_off_pending_mask &= (uint8_t)~mask;
+    } else {
+        ESP_LOGE(PE_TAG, "pending relay OFF retry during run (mask 0x%02X) failed: %s -- will retry",
+                 (unsigned)mask, esp_err_to_name(off_err));
+    }
+}
+
 /* Must be called with s_exec.lock held. */
 void force_all_relays_off(void)
 {

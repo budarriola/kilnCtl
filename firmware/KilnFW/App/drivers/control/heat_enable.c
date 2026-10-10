@@ -304,7 +304,16 @@ static bool send_enable(const char *why)
 
     bool taken = he_lock();
     bool warn_failure = false;
-    if (err == ESP_OK) {
+    if (err == ESP_OK && s_he.reboot_hold) {
+        /* Review-2 LOW-1: a fatal-reboot hold was set while this send was in flight; the Pico now holds
+         * an enable we must not keep. Record nothing as granted and owe the wire a release. */
+        s_he.granted = false;
+        s_he.pending = false;
+        s_he.warned_pending = false;
+        s_he.release_pending = true;
+        s_he.enable_sends++;
+        ESP_LOGW(TAG, "heat-enable request (%s) landed under a reboot hold -- release queued", why);
+    } else if (err == ESP_OK) {
         s_he.granted = true;
         s_he.pending = false;
         s_he.warned_pending = false;

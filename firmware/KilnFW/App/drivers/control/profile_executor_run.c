@@ -701,7 +701,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * operator has since taken over manually. Each run starts owing nothing
      * and claims what it touches (see s_exec_state_t.claimed_relay_mask). */
     s_exec.claimed_relay_mask = 0;
-    s_exec.zone_off_pending_mask = 0; /* review F4: a stale bit from the last run is not this run's */
+    /* zone_off_pending_mask is deliberately NOT zeroed here (review-2 MEDIUM-1): a bit still set is an OFF write that
+     * has not landed, and forgetting it would strand a closed relay. Ownership is checked at retry time. */
     /* Spare-relay WP-3: per-run aux decision/actuation state starts owing
      * nothing too. aux_claim_mask is NOT zeroed here: a bit still set is a
      * run-end OFF write that failed and has not landed yet, and forgetting it

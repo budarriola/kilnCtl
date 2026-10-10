@@ -2338,6 +2338,7 @@ static void test_guard9_watchdog_source_order(void);
 static void test_guard9_pending_verdict_survives_lock_timeout(void);
 static void test_heat_acquire_result_not_discarded(void);
 static void test_zone_off_pending_retry(void);
+static void test_zone_off_pending_retry_while_running(void);
 
 // Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
 // not wait on s_exec.lock. The host stub is single-threaded, so "another task
@@ -12123,6 +12124,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_pending_verdict_survives_lock_timeout();
     test_heat_acquire_result_not_discarded();
     test_zone_off_pending_retry();
+    test_zone_off_pending_retry_while_running();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -13026,6 +13028,72 @@ bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor
         return false;
     }
     return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
+}
+
+static char *profile_executor_run_c_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor_run.c",
+        "App/drivers/control/profile_executor_run.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor_run.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor_run.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static void test_zone_off_pending_retry_while_running(void)
+{
+    TEST_SECTION("review-2 MEDIUM-1: pending OFF bits survive run start; relays the run does not own are "
+                 "retried OFF while RUNNING (bounded cadence); owned relays never driven");
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[0] = 0x01; /* zone 0 (active) owns relay 1 */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true;
+    s_exec.zone_off_pending_mask = 0x07; /* 0x01 owned by the run, 0x04 an enabled-aux claim, 0x02 free */
+    s_exec.aux_claim_mask = 0x04;
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02 && g_last_relay_write_value == 0,
+               "only the relay the run does not own is driven OFF (never zone 0's 0x01 nor the aux claim 0x04)");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0x05, "landed bit cleared, owned bits stay pending");
+    /* Bounded cadence: a failing retry is not repeated every tick. */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_fail = true;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100 + 100); /* 100 ticks later is under the 1 s bound */
+    TEST_CHECK(g_relay_write_calls == 0, "retry is rate limited, not every tick");
+    zone_off_pending_retry_running(100 + 100 + pdMS_TO_TICKS(1500));
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.zone_off_pending_mask == 0x02,
+               "after the bound a failing retry is attempted again and stays pending");
+    g_relay_write_fail = false;
+    zone_off_pending_retry_running(100 + 100 + 2 * pdMS_TO_TICKS(1500));
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "retry lands and clears");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Run start must not forget a pending OFF (the F4 run-start clear stranded closed relays). */
+    char *rs = profile_executor_run_c_read_source();
+    TEST_CHECK(rs != NULL, "could locate profile_executor_run.c");
+    if (rs) {
+        char *code = pe_strip_c_comments(rs);
+        free(rs);
+        TEST_CHECK(code && strstr(code, "zone_off_pending_mask = 0") == NULL,
+                   "MUST GO RED if run start clears zone_off_pending_mask again (review-2 MEDIUM-1)");
+        free(code);
+    }
+    /* The executor tick must call the RUNNING retry. */
+    char *src = profile_executor_c_read_source();
+    if (src) {
+        char *code = pe_strip_c_comments(src);
+        free(src);
+        const char *skip = code ? strstr(code, "if (!peek_running)") : NULL;
+        const char *call = code ? strstr(code, "zone_off_pending_retry_running(now);") : NULL;
+        TEST_CHECK(skip && call && skip < call,
+                   "MUST GO RED if the RUNNING tick stops retrying pending OFF bits of unowned relays");
+        free(code);
+    }
 }
 
 static void test_zone_off_pending_retry(void)

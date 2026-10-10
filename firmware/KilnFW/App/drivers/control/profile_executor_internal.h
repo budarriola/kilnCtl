@@ -974,6 +974,9 @@ typedef struct {
      * mask could not be read). Retried every non-RUNNING tick until a write
      * lands. */
     uint8_t zone_off_pending_mask;
+    /* Review-2 MEDIUM-1: cadence latch for the RUNNING-state retry of pending OFF bits. */
+    bool zone_off_pending_retry_seen;
+    TickType_t zone_off_pending_retry_tick;
     struct {
         on_off_trigger_state_t trigger;
         bool actuated_on;
@@ -1295,6 +1298,7 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void zone_off_pending_retry(void);
+void zone_off_pending_retry_running(TickType_t now);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
  * claim-before-gate, same authorized kiln_io_owner write, but gated by the
  * global relay_authority_on_blocked() (an aux has no zone). force_aux_relays_off()

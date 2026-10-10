@@ -62,6 +62,9 @@ static bool g_release_should_fail = false;
 static bool g_reenter_acquire_during_release = false;
 static bool g_reentrant_acquire_result;
 static bool g_reentrant_acquire_ran = false;
+// Review-2 LOW-1: a fatal Pico reboot is classified while an enable send is in flight.
+static bool g_hold_during_enable = false;
+static bool g_hold_during_enable_ran = false;
 
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 {
@@ -69,6 +72,10 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     g_last_enable_value = enable;
     if (enable) {
         g_enable_true_calls++;
+        if (g_hold_during_enable && !g_hold_during_enable_ran) {
+            g_hold_during_enable_ran = true;
+            heat_enable_note_pico_boot(6u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+        }
         // safety_link.c: refuses and sends NOTHING when the link is down.
         return g_link_up ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
@@ -96,6 +103,8 @@ static void reset_all(bool link_up)
     g_reenter_acquire_during_release = false;
     g_reentrant_acquire_result = false;
     g_reentrant_acquire_ran = false;
+    g_hold_during_enable = false;
+    g_hold_during_enable_ran = false;
     heat_enable_init((SafetyLinkClass *)0x1);
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
@@ -622,6 +631,61 @@ static char *profile_executor_read_source(void)
                                       sizeof(candidates) / sizeof(candidates[0]));
 }
 
+static char *profile_executor_status_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor_status.c",
+        "App/drivers/control/profile_executor_status.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor_status.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor_status.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+// Review-2 LOW-3: pin the watchdog-loop wiring (M1, M3, LOW-2 order) and the bounded pause (M4b).
+static void test_watchdog_loop_and_bounded_pause_wiring(void)
+{
+    TEST_SECTION("profile_executor -- review-2 LOW-3: guard 9 merge wired into the loop before the unknown-relay "
+                 "release, status-read gate, bounded pause really bounded");
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c");
+        return;
+    }
+    const char *wd = strstr(text, "void watchdog_task_entry(void *arg)");
+    TEST_CHECK(wd != NULL, "watchdog_task_entry found");
+    const char *merge = wd ? strstr(wd, "tick_stale = guard9_merge_pending(tick_stale") : NULL;
+    const char *assert_fn = wd ? strstr(wd, "guard9_assert_stale_tick_fault();") : NULL;
+    const char *rel = wd ? strstr(wd, "\n        relay_unknown_release_locked();") : NULL;
+    TEST_CHECK(merge != NULL, "MUST GO RED if the watchdog loop stops calling guard9_merge_pending");
+    TEST_CHECK(merge && assert_fn && rel && merge < assert_fn && assert_fn < rel,
+               "guard 9 merge+assert precede relay_unknown_release_locked() so APP never drops (LOW-2)");
+    const char *gate = strstr(text, "if (safety_status_ok)");
+    const char *note = gate ? strstr(gate, "heat_enable_note_pico_boot(") : NULL;
+    TEST_CHECK(gate && note && (note - gate) < 80,
+               "MUST GO RED if note_pico_boot is no longer gated on a successful status read");
+    TEST_CHECK(strstr(text, "if (true)") == NULL, "no if (true) stand-in for the status gate");
+    free(text);
+
+    char *st = profile_executor_status_read_source();
+    if (!st) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor_status.c");
+        return;
+    }
+    const char *bf = strstr(st, "bool profile_executor_pause_with_reason_bounded(const char *reason)");
+    const char *end = bf ? strstr(bf, "bool profile_executor_resume(void)") : NULL;
+    bool bounded = false, unbounded = false;
+    if (bf && end) {
+        for (const char *q = bf; q < end; q++) {
+            if (strncmp(q, "pdMS_TO_TICKS(", 14) == 0) bounded = true;
+            if (strncmp(q, "portMAX_DELAY", 13) == 0) unbounded = true;
+        }
+    }
+    TEST_CHECK(bf && end && bounded && !unbounded,
+               "MUST GO RED if the bounded pause waits portMAX_DELAY instead of a finite pdMS_TO_TICKS bound");
+    free(st);
+}
+
 static void test_stale_claim_is_not_resurrected(void)
 {
     TEST_SECTION("heat_enable -- an acquire whose claim was released after the caller committed to "
@@ -1135,8 +1199,28 @@ static void test_pico_reboot_cause_holds_or_retries(void)
                "while the cause is undecided the pending request is not re-sent");
 }
 
-static void test_executor_wires_k4_and_reboot_state(void)
+static void test_enable_in_flight_under_reboot_hold_queues_release(void)
 {
+    TEST_SECTION("heat_enable -- review-2 LOW-1: a fatal-reboot hold set while an enable send is IN FLIGHT "
+                 "must not leave granted=true; the standing enable is released");
+    reset_all(true);
+    heat_enable_note_pico_boot(5u, true, 0u, 1000u); /* baseline */
+    g_hold_during_enable = true;
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(g_hold_during_enable_ran, "sanity: the reboot hold was set mid-send");
+    TEST_CHECK(heat_enable_reboot_hold(), "sanity: hold is set");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "MUST GO RED if send_enable leaves granted=true under a reboot hold set while in flight");
+    uint32_t rel0 = release_sends();
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == rel0 + 1 && g_last_enable_value == false,
+               "the standing enable is released on the wire (release queued)");
+    uint32_t en0 = enable_sends();
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == en0, "no re-request while the hold stands");
+}
+
+static void test_executor_wires_k4_and_reboot_state(void){
     TEST_SECTION("profile_executor -- the watchdog feeds heat_enable the real K4 / reboot facts and "
                  "pauses (LOW-8-1, MED-1, MED-2)");
     char *text = profile_executor_read_source();
@@ -1167,6 +1251,8 @@ void run_test_heat_enable(void)
 {
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
+    test_enable_in_flight_under_reboot_hold_queues_release();
+    test_watchdog_loop_and_bounded_pause_wiring();
     test_executor_wires_k4_and_reboot_state();
     test_k4_mismatch_rerequests_with_backoff_then_gives_up();
     test_k4_closed_or_released_never_resends();
