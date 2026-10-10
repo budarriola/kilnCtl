@@ -1017,6 +1017,70 @@ static void test_pcfg_file_wins_when_it_has_the_higher_rev(void)
     assert_profiles_equal(&out.profiles[0], &file_side, "FILE content wins (higher rev)");
 }
 
+static void test_pcfg_adopted_file_retires_legacy_nvs_blob(void)
+{
+    TEST_SECTION("profiles cfg_fs -- adopted higher-rev file retires the legacy NVS blob; floor and file intact");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t nvs_side = make_stored_profile();
+    strncpy(nvs_side.name, "NvsSide", PROFILE_NAME_MAX_LEN);
+    profile_t file_side = make_stored_profile();
+    strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
+    stage_legacy_slot(0, &nvs_side, 40);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at rev 41");
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "legacy blob present before load");
+
+    for (int boot = 0; boot < 2; boot++) {
+        memset(&s_profiles, 0, sizeof(s_profiles));
+        profiles_state_t out;
+        bool any_found = false;
+        TEST_CHECK(nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found) == ESP_OK, "load succeeds");
+        assert_profiles_equal(&out.profiles[0], &file_side, "file content adopted");
+        TEST_CHECK(profiles_slot_bitmap_test(&out.used_bitmap, 0), "slot still used");
+        TEST_CHECK(!pcfg_nvs_slot_blob_present(0), "legacy NVS blob retired");
+        TEST_CHECK(s_profile_rev[0] == 41, "rev floor is the file rev, unchanged by the erase");
+        TEST_CHECK(!s_profile_rev_unknown[0], "floor known");
+    }
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint32_t back[PROFILES_MAX_COUNT];
+    size_t blen = sizeof(back);
+    nvs_get_blob(h, NVS_KEY_PROFILE_REV, back, &blen);
+    nvs_close(h);
+    TEST_CHECK(blen == sizeof(back) && back[0] == 40, "persisted prof_rev array untouched");
+    profile_t fp;
+    TEST_CHECK(pcfg_file_profile(0, &fp), "file still present");
+}
+
+static void test_pcfg_retire_keeps_blob_when_file_not_adopted(void)
+{
+    TEST_SECTION("profiles cfg_fs -- cfg unmounted or file not adopted keeps the NVS blob");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t nvs_side = make_stored_profile();
+    strncpy(nvs_side.name, "NvsSide", PROFILE_NAME_MAX_LEN);
+    profile_t file_side = make_stored_profile();
+    strncpy(file_side.name, "FileSide", PROFILE_NAME_MAX_LEN);
+    stage_legacy_slot(0, &nvs_side, 40);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at rev 41");
+    cfg_fs_deinit();
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "cfg unmounted: NVS blob kept");
+
+    pcfg_reset_all();
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    stage_legacy_slot(0, &nvs_side, 41);
+    TEST_CHECK(profiles_cfg_fs_save(0, &file_side, 41) == ESP_OK, "file at EQUAL rev 41");
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(pcfg_nvs_slot_blob_present(0), "equal rev (NVS adopted): NVS blob kept");
+}
+
 static void test_pcfg_unused_slot_keeps_nvs_rev_floor(void)
 {
     TEST_SECTION("profiles cfg_fs -- an unused slot keeps its persisted NVS rev as the next-save floor");
@@ -5083,6 +5147,8 @@ void run_test_profiles_http(void)
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
     test_pcfg_file_wins_when_it_has_the_higher_rev();
+    test_pcfg_adopted_file_retires_legacy_nvs_blob();
+    test_pcfg_retire_keeps_blob_when_file_not_adopted();
     test_pcfg_nvs_wins_when_it_has_the_higher_rev_and_resyncs_file();
     test_pcfg_unused_slot_keeps_nvs_rev_floor();
     test_pcfg_boot_load_failure_still_resolves_files();

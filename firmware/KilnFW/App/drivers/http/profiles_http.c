@@ -1065,6 +1065,8 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     return any_resolve_err ? ESP_ERR_NO_MEM : ESP_OK;
 }
 
+static esp_err_t retire_legacy_slot_blob(uint8_t id);
+
 static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out, bool *out_any_found)
 {
     memset(out, 0, sizeof(*out));
@@ -1201,6 +1203,23 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
                 any_resolve_err = true;
                 slot_res_err[id] = true; /* review 7 L3 */
             }
+            /* Retire the superseded legacy blob (bench finding BENCH_PROF1_DIVERGE (a)). Only
+             * when the FILE was read, validated and adopted (used_file implies trustworthy and a
+             * mounted cfg) and its rev is STRICTLY above a decoded NVS blob's non-zero rev. An
+             * equal rev with differing bytes adopts NVS, and erasing it there would make the
+             * file look like a stale leftover of a deleted slot. The rev array (floor) is not
+             * touched, so s_profile_rev below is unchanged by the erase. */
+            if (trustworthy && used_file && !res_err && nvs_slot_valid[id] && !slot_blob_bad[id] &&
+                nvs_rev[id] != 0 && resolved_rev > nvs_rev[id]) {
+                esp_err_t rerr = retire_legacy_slot_blob(id);
+                if (rerr == ESP_OK) {
+                    ESP_LOGI(PROFILES_TAG, "prof%u: legacy NVS blob (rev %lu) retired, cfg file (rev %lu) is authoritative",
+                             (unsigned)id, (unsigned long)nvs_rev[id], (unsigned long)resolved_rev);
+                } else {
+                    ESP_LOGW(PROFILES_TAG, "prof%u: could not retire legacy NVS blob: %s (will retry next boot)",
+                             (unsigned)id, esp_err_to_name(rerr));
+                }
+            }
             if (trustworthy) {
                 out->profiles[id] = resolved;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
@@ -1256,6 +1275,42 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
 static bool caller_stack_is_external(void)
 {
     return !hal_kv_write_safe_here();
+}
+
+/* Erase ONLY this slot's legacy "profN" blob and its legacy used-bitmap bit. The prof_rev array
+ * (the rev floor) is deliberately left intact. Boot-time, single-threaded caller. */
+static esp_err_t retire_legacy_slot_blob(uint8_t id)
+{
+    if (caller_stack_is_external()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    hal_kv_handle_t h;
+    hal_status_t kv_err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, PROFILES_NVS_PARTITION);
+    if (kv_err != HAL_OK) {
+        return hal_status_to_esp_err(kv_err);
+    }
+    char key[8];
+    profile_nvs_key(id, key, sizeof(key));
+    kv_err = hal_kv_erase_key(&h, key);
+    if (kv_err == HAL_NOT_FOUND) {
+        kv_err = HAL_OK;
+    }
+    if (kv_err == HAL_OK) {
+        profiles_slot_bitmap_t nvs_used;
+        memset(&nvs_used, 0, sizeof(nvs_used));
+        kv_err = used_bitmap_load(&h, &nvs_used);
+        if (kv_err == HAL_NOT_FOUND) {
+            kv_err = HAL_OK;
+        } else if (kv_err == HAL_OK) {
+            profiles_slot_bitmap_clear(&nvs_used, id);
+            kv_err = used_bitmap_save(&h, &nvs_used);
+        }
+    }
+    if (kv_err == HAL_OK) {
+        kv_err = hal_kv_commit(&h);
+    }
+    hal_kv_close(&h);
+    return hal_status_to_esp_err(kv_err);
 }
 
 esp_err_t nvs_save_slot(uint8_t id)
