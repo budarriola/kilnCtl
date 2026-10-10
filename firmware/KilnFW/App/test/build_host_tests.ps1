@@ -2980,7 +2980,7 @@ try {
         "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",
         "update/update_release.c", "update/update_url.c", "update/update_fetch_heap.c",
         "update/update_stale_stage.c", "update/stage_header.c", "update/update_semver.c",
-        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "safety/system_mode_gate.c"
+        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "http/ota_http_util.c", "safety/system_mode_gate.c"
     ) | ForEach-Object { "`"$(Join-Path $driversDir $_)`"" }
     $cmdUf = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
             "/Fo:`"$ufObjDir\\`" /Fe:`"$exeUf`" " + ($ufSrcs -join " ")

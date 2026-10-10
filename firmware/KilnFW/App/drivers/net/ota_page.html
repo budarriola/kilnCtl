@@ -622,7 +622,7 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   }).catch(function (e) {
     if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Pico update failed: ' + e.message;
+    msg.textContent = 'Pico update failed: ' + (uploadTooSlowText(e) || e.message);
   });
 });
 
@@ -708,7 +708,18 @@ function loadStageStatus() {
  * 428 (safety processor not answering): ask, then replay once with the ack header,
  * the same contract as app.js's kcFetchWithSafetyAck. */
 /* 409 from the downgrade gate: {"error","reason","needs_typed_confirm"}. Say why, and how to override. */
+/* 503 upload_too_slow (stage: JSON body; Pico/ESP push: plain "upload too slow"): the overall upload
+ * deadline passed. Shared by the stage card and the Pico card. Returns null when e is something else. */
+var UPLOAD_TOO_SLOW_TEXT = 'The upload was too slow and the board gave up (overall deadline). Nothing was changed. ' +
+  'Check the Wi-Fi signal, move closer or use a wired path, and upload again.';
+function uploadTooSlowText(e) {
+  var m = (e && e.message) || '';
+  if (m.indexOf('upload_too_slow') >= 0 || m.indexOf('upload too slow') >= 0) return UPLOAD_TOO_SLOW_TEXT;
+  return null;
+}
 function stageRefusalText(e) {
+  var slow = uploadTooSlowText(e);
+  if (slow) return slow;
   var b = null;
   try { b = JSON.parse(e.message); } catch (x) { /* not JSON */ }
   if (!b || typeof b.reason !== 'string') return e.message;

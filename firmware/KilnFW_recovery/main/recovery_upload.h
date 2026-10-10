@@ -67,6 +67,7 @@ typedef enum {
     RECOVERY_UPLOAD_READ_ERROR,   // 400, client went away / timed out; sink aborted
     RECOVERY_UPLOAD_SINK_ERROR,   // 500, sink begin/write failed; sink aborted
     RECOVERY_UPLOAD_VERIFY_ERROR, // 422, finish() rejected the image
+    RECOVERY_UPLOAD_TOO_SLOW,     // 504, overall upload deadline passed (client alive but slow); sink aborted
 } recovery_upload_result_t;
 
 recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery_upload_cfg_t *cfg,

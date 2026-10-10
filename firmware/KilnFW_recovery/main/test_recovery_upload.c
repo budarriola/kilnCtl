@@ -407,7 +407,8 @@ static void test_overall_deadline(void)
     g_recv_script = drip;
     g_recv_script_len = 64;
     g_recv_advance_us = 10000000LL;
-    CHECK(run(10000, &st, &msg) == RECOVERY_UPLOAD_READ_ERROR && st == 400, "slow-drip first chunk: cut off by the overall deadline");
+    CHECK(run(10000, &st, &msg) == RECOVERY_UPLOAD_TOO_SLOW && st == 504 && strstr(msg, "too slow") != NULL,
+          "slow-drip first chunk: cut off by the overall deadline, reported as too slow not lost");
     CHECK(k_begin == 0, "slow-drip first chunk: nothing written");
     CHECK(s_script_pos <= 8, "slow-drip first chunk: stopped reading once the deadline passed (not by script end)");
 
@@ -487,6 +488,7 @@ static void test_send_error(void)
              {413, "413 Payload Too Large"},
              {422, "422 Unprocessable Entity"},
              {503, "503 Service Unavailable"},
+             {504, "504 Gateway Timeout"},
              {500, "500 Internal Server Error"},
              {418, "500 Internal Server Error"}};
     for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {

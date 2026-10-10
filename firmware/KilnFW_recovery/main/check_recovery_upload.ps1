@@ -118,8 +118,11 @@ try {
     Test-Mutant -Needle "if (got < want) {" -Replacement "got = want;<NL>        if (0) {" -Tag "shortmid"
     Test-Mutant -Needle "if (got < first) {" -Replacement "if (got < first && first == 0xFFFFFFFFu) {" -Tag "shortfirst"
     # Abort on failure.
-    Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = 400;" `
-        -Replacement "*http_status = 400;" -Tag "abortmid"
+    Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = too_slow ? 504 : 400;" `
+        -Replacement "*http_status = too_slow ? 504 : 400;" -Tag "abortmid"
+    # Deadline reported as too slow, not as a lost connection.
+    Test-Mutant -Needle "*too_slow = true; // distinct from a lost connection" `
+        -Replacement "(void)0; // distinct from a lost connection" -Tag "tooslow"
     Test-Mutant -Needle "sink->abort(sink->ctx);<NL>            *http_status = 500;" `
         -Replacement "*http_status = 500;" -Tag "abortwrite"
     # ESP sink: esp_ota_end failure must be reported, handle released exactly once.

@@ -31,12 +31,13 @@ static uint8_t *alloc_chunk_buffer(void)
 
 // Fills buf[0..want) from the request body. Returns bytes read (== want on
 // success, less on a dead/timed-out connection).
-static size_t read_exact(httpd_req_t *req, uint8_t *buf, size_t want, int64_t deadline_us)
+static size_t read_exact(httpd_req_t *req, uint8_t *buf, size_t want, int64_t deadline_us, bool *too_slow)
 {
     size_t got = 0;
     int timeouts = 0;
     while (got < want) {
         if (esp_timer_get_time() > deadline_us) {
+            *too_slow = true; // distinct from a lost connection: the client was alive but too slow
             break; // overall upload deadline: a slow-drip client must not hold httpd forever
         }
         esp_task_wdt_reset(); // harmless ESP_ERR_NOT_FOUND if this task is not subscribed
@@ -81,11 +82,13 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
     }
 
     size_t first = total < RECOVERY_UPLOAD_CHUNK ? total : RECOVERY_UPLOAD_CHUNK;
-    size_t got = read_exact(req, buf, first, deadline_us);
+    bool too_slow = false;
+    size_t got = read_exact(req, buf, first, deadline_us, &too_slow);
     if (got < first) {
-        *http_status = 400;
-        *msg = "connection lost before the first chunk completed";
-        result = RECOVERY_UPLOAD_READ_ERROR;
+        *http_status = too_slow ? 504 : 400;
+        *msg = too_slow ? "upload too slow: overall deadline passed before the first chunk completed"
+                        : "connection lost before the first chunk completed";
+        result = too_slow ? RECOVERY_UPLOAD_TOO_SLOW : RECOVERY_UPLOAD_READ_ERROR;
         goto done;
     }
 
@@ -120,12 +123,12 @@ recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery
         if (want > RECOVERY_UPLOAD_CHUNK) {
             want = RECOVERY_UPLOAD_CHUNK;
         }
-        got = read_exact(req, buf, want, deadline_us);
+        got = read_exact(req, buf, want, deadline_us, &too_slow);
         if (got < want) {
             sink->abort(sink->ctx);
-            *http_status = 400;
-            *msg = "connection lost mid-image";
-            result = RECOVERY_UPLOAD_READ_ERROR;
+            *http_status = too_slow ? 504 : 400;
+            *msg = too_slow ? "upload too slow: overall deadline passed mid-image" : "connection lost mid-image";
+            result = too_slow ? RECOVERY_UPLOAD_TOO_SLOW : RECOVERY_UPLOAD_READ_ERROR;
             goto done;
         }
     }
@@ -152,6 +155,7 @@ esp_err_t recovery_upload_send_error(httpd_req_t *req, int http_status, const ch
     case 413: status = "413 Payload Too Large"; break;
     case 422: status = "422 Unprocessable Entity"; break;
     case 503: status = "503 Service Unavailable"; break;
+    case 504: status = "504 Gateway Timeout"; break; // upload too slow (not 408: browsers auto-resend)
     default: break;
     }
     httpd_resp_set_status(req, status);

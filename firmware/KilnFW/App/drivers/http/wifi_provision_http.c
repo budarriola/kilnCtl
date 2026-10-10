@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/socket.h>
 
+#include "persist_scratch.h" /* persist_scratch_alloc() -- scan_get response */
 #include "esp_heap_caps.h" /* heap_caps_malloc() -- networks_get_handler() below */
 #include "esp_log.h"
 #include "esp_http_server.h"
@@ -408,7 +409,7 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
      * this is entirely device-controlled. */
     /* HEAP, not stack (httpd 8 KB stack); freed on every return path. */
     const size_t json_cap = 20 * 64 + 16;
-    char *json = malloc(json_cap);
+    char *json = persist_scratch_alloc(json_cap);
     if (json == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;

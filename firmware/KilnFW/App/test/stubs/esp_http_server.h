@@ -58,6 +58,7 @@ typedef enum {
     HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
     HTTPD_404_NOT_FOUND = 404, /* added 2026-09-27 for kiln_cfg_http.c's host tests (test_kiln_cfg_http.c) */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,
+    HTTPD_503_SERVICE_UNAVAILABLE = 503, /* upload deadline (OTA_HTTP_UPLOAD_SLOW_CODE), zones probe OOM */
 } httpd_err_code_t;
 
 #ifndef _SSIZE_T_DEFINED

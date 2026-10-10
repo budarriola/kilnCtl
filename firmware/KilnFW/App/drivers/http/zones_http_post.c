@@ -420,7 +420,9 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
          * channel is already set to." */
         if (!zones_http_parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, tmp.timing_profile_count,
                                &s_zones.cfg.zones[i], &tmp.zones[i], &err_reason)) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
+            /* The cycle-probe allocation failing is a server fault, not a bad request. */
+            httpd_resp_send_err(req, strcmp(err_reason, "out of memory") == 0 ? HTTPD_503_SERVICE_UNAVAILABLE : HTTPD_400_BAD_REQUEST,
+                                err_reason);
             free(body);
             return ESP_OK;
         }

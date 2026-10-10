@@ -259,6 +259,13 @@ def _push_image(host: str, path: str, endpoint: str,
                             detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            # The send died mid-upload: the board answered (and closed) before reading the whole body, so the
+            # response (e.g. 503 upload_too_slow, or another refusal) was lost with the socket. That is not "unreachable".
+            log.warning("OTA push: server closed the connection mid-upload: endpoint=%s host=%s sha256=%s detail=%s",
+                        endpoint, host, image_sha256, detail)
+            raise OtaHttpError(f"{endpoint}: server closed the connection mid-upload "
+                               f"(possibly upload_too_slow or another refusal): {exc.reason}") from exc
         log.warning("OTA push failed (unreachable): endpoint=%s host=%s sha256=%s detail=%s",
                     endpoint, host, image_sha256, detail)
         raise OtaHttpError(f"{endpoint} unreachable: {detail}") from exc

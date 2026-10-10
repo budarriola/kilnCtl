@@ -110,6 +110,12 @@ ota_http_drain_verdict_t ota_http_drain_verdict(int recv_ret, uint32_t elapsed_m
 uint64_t ota_http_upload_budget_ms(size_t content_len);
 /* True once now_ms - start_ms exceeds budget_ms (clock going backwards: false). */
 bool ota_http_upload_deadline_passed(uint64_t start_ms, uint64_t now_ms, uint64_t budget_ms);
+/* Status for a missed upload deadline. NOT 408: browsers silently resend a
+ * request that got 408 on a reused keep-alive socket, re-uploading the whole
+ * image. 503 is not auto-retried. Body error name stays "upload_too_slow". */
+#define OTA_HTTP_UPLOAD_SLOW_CODE 503
+#define OTA_HTTP_UPLOAD_SLOW_STATUS_LINE "503 Service Unavailable"
+#define OTA_HTTP_UPLOAD_SLOW_ERROR "upload_too_slow"
 
 #ifdef __cplusplus
 }

@@ -377,7 +377,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (ota_http_upload_deadline_passed(upload_start_ms, hal_time_now_us() / 1000u, upload_budget_ms)) {
                 ESP_LOGW(TAG, "stage upload from %s: overall deadline exceeded at %u/%u", ip,
                          (unsigned)(req->content_len - remaining), (unsigned)req->content_len);
-                (void)send_error_json(req, "408 Request Timeout", "upload_too_slow");
+                (void)send_error_json(req, OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, OTA_HTTP_UPLOAD_SLOW_ERROR);
                 failed_mid_body = true;
                 break;
             }
@@ -389,7 +389,7 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (r <= 0) {
                 ESP_LOGW(TAG, "stage upload from %s: receive failed at %u/%u (%d)", ip,
                          (unsigned)(req->content_len - remaining), (unsigned)req->content_len, r);
-                update_stage_upload_abort(&s_stage);
+                (void)update_stage_upload_abort_owned(&s_stage, STAGE_SOURCE_UPLOAD);
                 update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
                 // Socket is dead; nothing to send and nothing to drain.
                 ota_http_update_end();

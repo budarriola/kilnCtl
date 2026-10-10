@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "http_form.h"
+#include "persist_scratch.h" /* persist_scratch_alloc() -- probe copy */
 #include "zone_settings_source_chain.h"
 
 /* SRC_GROUP_LIMITS/RELAY_TIMING/CONTROL/GUARDS/TC order, indexed by the
@@ -1041,7 +1042,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
              * commit point -- see the comment there. */
             {
                 /* Heap, not stack: zone_cfg_t[3] is well over 1 KB on the httpd stack. */
-                zone_cfg_t *probe = malloc(sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
+                zone_cfg_t *probe = persist_scratch_alloc(sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
                 if (probe == NULL) {
                     *err_reason = "out of memory";
                     return false;

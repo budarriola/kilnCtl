@@ -468,6 +468,11 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
             // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
             s_c->wr_wedged = true;
             ESP_LOGE(TAG, "flash writer op %d: completion give missing after finishing in the timeout instant", (int)cmd);
+            // No flash access here (the writer may still own the scratch): say from the op alone whether
+            // an installable stage can exist. Only a completed WR_FINISH leaves a verified, installable stage.
+            ESP_LOGW(TAG, "wedge after op %d: %s", (int)cmd,
+                     cmd == WR_FINISH ? "the finish had completed -- a verified stage MAY remain installable (check /api/update/status)"
+                                      : "no finish had completed -- no verified stage is installable from this fetch");
             return UPDATE_STAGE_ERR_FLASH;
         }
     }

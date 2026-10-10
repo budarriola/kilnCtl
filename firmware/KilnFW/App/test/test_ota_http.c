@@ -2658,6 +2658,9 @@ static void test_upload_deadline_helpers(void)
     TEST_CHECK(!ota_http_upload_deadline_passed(1000, 1000 + 60000, 60000), "exactly at budget is not yet past");
     TEST_CHECK(ota_http_upload_deadline_passed(1000, 1000 + 60001, 60000), "one ms past budget is past");
     TEST_CHECK(!ota_http_upload_deadline_passed(5000, 1000, 60000), "clock going backwards never trips");
+    TEST_CHECK(OTA_HTTP_UPLOAD_SLOW_CODE == 503, "deadline status must be 503, never 408 (browser auto-resend)");
+    TEST_CHECK(strncmp(OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, "503 ", 4) == 0, "deadline status line is 503");
+    TEST_CHECK(strcmp(OTA_HTTP_UPLOAD_SLOW_ERROR, "upload_too_slow") == 0, "deadline error name");
 }
 
 void run_test_ota_http(void)

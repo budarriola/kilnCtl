@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "persist_scratch.h" /* persist_scratch_alloc() -- list_get response */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -149,7 +150,7 @@ static esp_err_t list_get_handler(httpd_req_t *req)
     /* HEAP, not stack (httpd 8 KB stack, "httpd stack blob class"); freed on
      * every return path. */
     const size_t json_cap = KILN_CFG_MAX_COUNT * 96 + 96;
-    char *json = malloc(json_cap);
+    char *json = persist_scratch_alloc(json_cap);
     if (json == NULL) {
         ESP_LOGE(TAG, "kiln_configs list: malloc(%u) failed", (unsigned)json_cap);
         httpd_resp_set_status(req, "500 Internal Server Error");

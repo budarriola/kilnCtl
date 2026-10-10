@@ -302,7 +302,7 @@ static bool ota_esp_do_transfer(httpd_req_t *req, const char *ip)
                 ota_http_set_fail_reason(fail_reason, sizeof(fail_reason), "upload exceeded its overall deadline at %u/%u bytes",
                          (unsigned)written, (unsigned)content_len);
                 ESP_LOGW(OTA_HTTP_TAG, "OTA esp update from %s: %s", ip, fail_reason);
-                httpd_resp_send_err(req, HTTPD_408_REQ_TIMEOUT, "upload too slow");
+                httpd_resp_send_err(req, OTA_HTTP_UPLOAD_SLOW_CODE, "upload too slow");
                 goto cleanup;
             }
             size_t want = content_len - written;

@@ -838,7 +838,7 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
 
 // Reads exactly `want` body bytes into buf. Returns bytes read (less on a dead
 // or stalled connection).
-static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
+static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want, bool *too_slow)
 {
     size_t got = 0;
     // Overall cap on top of the no-progress stall limit: 60 s + want at 2 KB/s.
@@ -848,11 +848,13 @@ static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
     int64_t last_progress_us = esp_timer_get_time();
     while (got < want) {
         if (esp_timer_get_time() > deadline_us) {
+            *too_slow = true;
             break;
         }
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
             if (esp_timer_get_time() - last_progress_us > (int64_t)BODY_STALL_LIMIT_MS * 1000) {
+                *too_slow = true;
                 break;
             }
             continue;
@@ -923,8 +925,12 @@ static esp_err_t pico_upload_post(httpd_req_t *req)
     if (!buf) {
         return recovery_upload_send_error(req, http_status, why);
     }
-    if (read_body_exact(req, buf, len) != len) {
+    bool too_slow = false;
+    if (read_body_exact(req, buf, len, &too_slow) != len) {
         recovery_pico_release();
+        if (too_slow) {
+            return recovery_upload_send_error(req, 504, "upload too slow: deadline passed before the whole image arrived");
+        }
         return recovery_upload_send_error(req, 400,
                                           "upload interrupted before the whole image arrived");
     }
