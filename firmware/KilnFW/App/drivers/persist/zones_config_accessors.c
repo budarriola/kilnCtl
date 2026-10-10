@@ -204,6 +204,28 @@ uint8_t zones_config_get_relay_count(void)
     return s_zones.cfg.relay_count;
 }
 
+bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count)
+{
+    if (thermo_count < 1 || thermo_count > MAX31856_CHANNEL_COUNT || relay_count > KILN_IO_RELAY_COUNT) {
+        return false;
+    }
+    bool ok = false;
+    zones_cfg_lock();
+    if (s_zones.cfg.thermo_count == 0) {
+        s_zones.cfg.thermo_count = thermo_count;
+        s_zones.cfg.relay_count = relay_count;
+        s_config_generation++;
+        ok = true;
+    }
+    zones_cfg_unlock();
+    return ok;
+}
+
+float zones_config_peek_slot_max_temp_c(uint8_t zone_index)
+{
+    return zone_index < MAX31856_CHANNEL_COUNT ? s_zones.cfg.zones[zone_index].max_temp_c : 0.0f;
+}
+
 uint8_t zones_config_get_max_simultaneous_relays(void)
 {
     return s_zones.cfg.max_simultaneous_relays;

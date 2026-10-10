@@ -331,7 +331,9 @@ esp_err_t backup_export_get_handler(httpd_req_t *req)
      * the default. */
     httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"kilnctl_backup.json\"");
 
-    backup_stream_printf(&s, "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"profiles\":[", BACKUP_FORMAT_VERSION);
+    backup_stream_printf(&s, "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":%u,\"relay_count\":%u,\"profiles\":[",
+                         BACKUP_FORMAT_VERSION, (unsigned)zones_config_get_thermo_count(),
+                         (unsigned)zones_config_get_relay_count());
 
     bool first_profile = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {

@@ -62,7 +62,12 @@ extern const char *BACKUP_TAG;
 // profiles[] carry on_off_rules[]. A v5 reader ignores those keys, so it would restore a RELAY_IO segment as
 // a ZONE_RAMP at 0 C and drop every rule; bumping makes older firmware refuse the file instead. This
 // firmware still reads v5 (it carries none of the new keys, which are all optional).
-#define BACKUP_FORMAT_VERSION 6
+// 6 -> 7 (owner decision 2026-10-09): top-level "thermo_count" and "relay_count" (board zone topology) so a
+// one-file restore works after a factory reset. Import applies them only onto an unconfigured board
+// (thermo_count 0) and refuses a configured board whose topology differs; a v6-or-older file carries
+// neither and keeps the old "set the zone count first" refusal. A v6 reader ignores the keys, so the bump
+// makes older firmware refuse the file rather than silently skip the topology.
+#define BACKUP_FORMAT_VERSION 7
 #define BACKUP_FORMAT_VERSION_MIN 1
 
 // Generous headroom over a legitimate full backup -- see backup_http.c's own

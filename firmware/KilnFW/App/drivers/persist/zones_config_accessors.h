@@ -475,6 +475,18 @@ bool zones_config_get_max_ramp(uint8_t zone_index, float *out_c_per_hr);
  * zone_mask checks. */
 uint8_t zones_config_get_relay_count(void);
 
+/* Backup restore onto an UNCONFIGURED board (owner decision 2026-10-09): sets thermo_count and
+ * relay_count in RAM only (no save -- the caller's batch persists once, and restores its snapshot on
+ * a mid-batch failure). Accepted ONLY while the live thermo_count is 0 and the counts are in range
+ * (thermo 1..MAX31856_CHANNEL_COUNT, relay 0..KILN_IO_RELAY_COUNT); a configured board is never
+ * re-shaped through this path (false, nothing changed). The zones settings page's whole-page POST is
+ * the other writer of these two fields. */
+bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count);
+
+/* max_temp_c stored in zone slot zone_index regardless of thermo_count (0 for an out-of-range
+ * index). Lets a restore compute the ceiling a freshly enabled slot would take on. */
+float zones_config_peek_slot_max_temp_c(uint8_t zone_index);
+
 /* TODO.md 6A.5 load-staggering: board-wide cap on relays energized at once
  * (0 = unlimited, the default). Global, not per-zone -- enforced by
  * profile_executor.c against every active zone's commanded relay state in

@@ -3,6 +3,8 @@
 Status: root cause found. A host sent a factory reset on purpose, and nobody recorded or undid it.
 It was not a silent firmware erase.
 
+Follow-up (owner decision 2026-10-09): backup format version 7 carries `thermo_count`/`relay_count`. `backup_import` onto a board with `thermo_count` 0 sets that topology first (validated, unwritten until the batched commit), then the zones; a configured board whose topology differs is refused with nothing written. A version 6 or older backup onto an empty board is still refused as before.
+
 ## Symptoms (seen on dev 8fcd3237, 2026-10-10)
 
 1. The zones config was gone. Zones loaded with `thermo_count=0, relay_count=0`.

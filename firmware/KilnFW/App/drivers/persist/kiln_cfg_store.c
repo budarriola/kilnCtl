@@ -243,6 +243,17 @@ static void migrate_store_v2_to_v3(const kiln_cfg_store_blob_v2_t *src, kiln_cfg
     }
 }
 
+static bool s_topology_override_active = false;
+static uint8_t s_topology_override_thermo = 0;
+static uint8_t s_topology_override_relay = 0;
+
+void kiln_cfg_store_restore_topology_override(bool active, uint8_t thermo_count, uint8_t relay_count)
+{
+    s_topology_override_thermo = thermo_count;
+    s_topology_override_relay = relay_count;
+    s_topology_override_active = active;
+}
+
 static kiln_cfg_store_blob_t s_store;
 
 /* Dual-write rev counter for the whole store document -- see
@@ -2228,8 +2239,9 @@ static bool validate_package_json_common(const char *json, kiln_cfg_import_scrat
      * DIFFERENT (different names/gains/a CT-less package on a CT-equipped
      * controller) is accepted -- only what this hardware cannot run at all
      * is refused. */
-    uint8_t live_relay_count = zones_config_get_relay_count();
-    uint8_t live_thermo_count = zones_config_get_thermo_count();
+    uint8_t live_relay_count = s_topology_override_active ? s_topology_override_relay : zones_config_get_relay_count();
+    uint8_t live_thermo_count =
+        s_topology_override_active ? s_topology_override_thermo : zones_config_get_thermo_count();
     for (uint8_t z = 0; z < MAX31856_CHANNEL_COUNT; z++) {
         const zone_cfg_t *zc = &s->cand.zones[z];
         for (uint8_t bit = 0; bit < 8; bit++) {

@@ -741,6 +741,13 @@ uint32_t kiln_cfg_store_generation(void);
  * a kiln-config slot yet. */
 size_t kiln_cfg_store_capture_expected_pico_fields(safety_ceiling_expected_param_t *out, size_t cap);
 
+/* Backup restore onto an unconfigured board (owner decision 2026-10-09): while active, the section 5.2a
+ * hardware-compatibility check of kiln_cfg_store_import_*() judges a package against this thermo/relay
+ * topology (the one the same restore is about to set) instead of the live zones config, which still reads
+ * 0/0 until the zones commit lands. Set by backup_import_apply() for the duration of one restore and cleared
+ * on every exit; restores are serialized, so a plain static is enough. */
+void kiln_cfg_store_restore_topology_override(bool active, uint8_t thermo_count, uint8_t relay_count);
+
 #ifdef __cplusplus
 }
 #endif

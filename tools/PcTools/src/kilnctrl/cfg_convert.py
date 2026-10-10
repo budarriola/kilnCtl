@@ -15,7 +15,7 @@ migration code untouched. This module never runs on the board and never
 changes firmware migration behaviour.
 
 SCOPE. The document this module converts is the BACKUP document -- the
-top-level "version" field is BACKUP_FORMAT_VERSION (currently 6, see
+top-level "version" field is BACKUP_FORMAT_VERSION (currently 7, see
 backup_http_internal.h), not ZONES_CFG_VERSION (the on-flash per-zone schema
 version, currently 26). The two are different numbers for a reason: most of
 the fields ZONES_CFG_VERSION bumps added to the on-flash struct were folded
@@ -106,7 +106,7 @@ from typing import Any, Optional
 # drift check (see module docstring) is what keeps them honest, not an
 # import-time reach into firmware/.
 # ---------------------------------------------------------------------------
-BACKUP_FORMAT_VERSION = 6
+BACKUP_FORMAT_VERSION = 7
 BACKUP_FORMAT_VERSION_MIN = 1
 
 # Every zone-level key this module knows firmware can emit/read today, by the
@@ -446,6 +446,15 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
                      f"zone {z.get('index', i)}")
         for i, z in enumerate(doc.get("zones", []))
     ]
+    # BACKUP_FORMAT_VERSION 7 added the board topology (thermo_count/relay_count)
+    # so a restore onto a factory-reset board can set it first. Below 7 the
+    # keys are not representable and are dropped, reported.
+    for key in ("thermo_count", "relay_count"):
+        if key in doc:
+            if target_version >= 7:
+                out[key] = doc[key]
+            else:
+                report.add("document", key, "dropped", "not representable below BACKUP_FORMAT_VERSION 7")
     if "safety_tc_type" in doc:
         out["safety_tc_type"] = doc["safety_tc_type"]
     if "update_repo" in doc:  # WP9 top-level string, never version-gated

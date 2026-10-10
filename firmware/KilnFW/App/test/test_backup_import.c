@@ -908,6 +908,26 @@ uint8_t zones_config_get_relay_count(void)
     return s_relay_count;
 }
 
+static int g_topology_set_calls = 0;
+static uint8_t g_topology_set_thermo = 0, g_topology_set_relay = 0;
+bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count)
+{
+    if (zones_config_get_thermo_count() != 0 || thermo_count < 1 || thermo_count > STUB_ZONE_COUNT) {
+        return false;
+    }
+    g_topology_set_calls++;
+    g_topology_set_thermo = thermo_count;
+    g_topology_set_relay = relay_count;
+    test_stub_zones_set_thermo_count(thermo_count);
+    s_relay_count = relay_count;
+    return true;
+}
+float zones_config_peek_slot_max_temp_c(uint8_t zone_index)
+{
+    (void)zone_index;
+    return 0.0f;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) {
@@ -2911,11 +2931,11 @@ static void test_unknown_version_refused(void)
      * kiln_configs[] array, safety_tc_type key), so 5 is now real/supported
      * too -- this test moves again, to version 6, the new too-new boundary.
      * 5 -> 6 (profile segment kinds, io fields, on_off_rules): the boundary is now 7. */
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = test_backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 7 is newer than this firmware's BACKUP_FORMAT_VERSION (6) -- must be refused");
+    TEST_CHECK(!ok, "version 8 is newer than this firmware's BACKUP_FORMAT_VERSION (7) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -3386,8 +3406,8 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
         "{",
         // wrong "kind"
         "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
-        // version newer than this firmware's BACKUP_FORMAT_VERSION (6)
-        "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (7)
+        "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}",
         // a version number "from the future", far past anything ever issued
         "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
         // valid JSON, in-range "kind"/"version", but a value outside the
@@ -4071,7 +4091,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
 
     TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
-    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (6)");
+    TEST_CHECK(strstr(s_export_body, "\"version\":7") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (7)");
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");
@@ -5117,6 +5137,14 @@ static void test_import_onto_empty_zones_config_refused_before_any_write(void)
         return;
     }
     test_stub_zones_set_thermo_count(0);
+    /* Emulate a pre-v7 backup: no topology keys, version 6. */
+    char *tk = strstr(s_export_body, "\"thermo_count\"");
+    char *rk = strstr(s_export_body, "\"relay_count\"");
+    char *vk = strstr(s_export_body, "\"version\":7");
+    TEST_CHECK(tk != NULL && rk != NULL && vk != NULL, "export carries topology and v7");
+    if (tk) { tk[1] = 'x'; }
+    if (rk) { rk[1] = 'x'; }
+    if (vk) { vk[11] = '6'; }
     char import_err[256] = "";
     bool partial = true;
     float kp_before = s_writes[1].kp;
@@ -5126,6 +5154,73 @@ static void test_import_onto_empty_zones_config_refused_before_any_write(void)
     TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
     TEST_CHECK(strstr(import_err, "not a configured zone") != NULL, "the error names the missing zone configuration");
     TEST_CHECK(s_writes[1].kp == kp_before, "no zone setter ran");
+    reset_stub_state();
+}
+
+static void test_backup_topology_round_trip(void)
+{
+    TEST_SECTION("backup topology -- export carries thermo_count/relay_count; empty board takes them then the zones; "
+                 "configured mismatch and pre-v7 backups are refused with nothing written");
+    reset_stub_state();
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (s_export_body) {
+        TEST_CHECK(strstr(s_export_body, "\"thermo_count\":3,\"relay_count\":4") != NULL,
+                   "export carries the board topology");
+        TEST_CHECK(BACKUP_FORMAT_VERSION >= 7, "format version bumped for topology");
+    }
+    char body[320];
+    char e[256] = "";
+    bool partial = true;
+
+    /* Empty board + v7 backup: topology set first, zones then land. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_total_write_calls = 0;
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, true, -1, true, &s_test_backup_plan, &partial, e,
+                                  sizeof(e));
+    TEST_CHECK(ok && g_topology_set_calls == 0, "dry run on an empty board validates and writes no topology");
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "import onto an empty board succeeds");
+    TEST_CHECK(g_topology_set_calls == 1 && g_topology_set_thermo == 2 && g_topology_set_relay == 4,
+               "topology applied once with the backup's values");
+    TEST_CHECK(s_writes[1].kp == 7.0f, "zone entry landed after the topology");
+
+    /* Configured board, different topology: refused, partial_write false, nothing written. */
+    reset_stub_state();
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_total_write_calls = 0;
+    partial = true;
+    e[0] = '\0';
+    ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan, &partial, e,
+                             sizeof(e));
+    TEST_CHECK(!ok && !partial, "mismatching topology on a configured board is refused, not a partial write");
+    TEST_CHECK(strstr(e, "thermo_count 2") != NULL && strstr(e, "thermo_count 3") != NULL,
+               "message names both topologies");
+    TEST_CHECK(g_total_write_calls == 0 && g_topology_set_calls == 0, "nothing written");
+
+    /* Pre-v7 backup onto an empty board: the old refusal. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":6,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}");
+    g_total_write_calls = 0;
+    partial = true;
+    ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan, &partial, e,
+                             sizeof(e));
+    TEST_CHECK(!ok && !partial && strstr(e, "not a configured zone") != NULL, "v6 backup keeps the old refusal");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written");
     reset_stub_state();
 }
 
@@ -6683,14 +6778,14 @@ static void test_backup_format_version_is_6_and_5_still_imports(void)
 {
     TEST_SECTION("backup format version is 6 (seg_kind/io_*/on_off_rules); a version-5 file is still accepted");
     reset_stub_state();
-    TEST_CHECK(BACKUP_FORMAT_VERSION == 6, "BACKUP_FORMAT_VERSION is 6");
+    TEST_CHECK(BACKUP_FORMAT_VERSION == 7, "BACKUP_FORMAT_VERSION is 7");
     TEST_CHECK(run_export() == ESP_OK, "export ok");
-    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "export stamps version 6");
+    TEST_CHECK(strstr(s_export_body, "\"version\":7") != NULL, "export stamps version 7");
     char err[200] = "";
     const char *v5 = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
     TEST_CHECK(test_backup_import_apply(v5, err, sizeof(err)), "a version-5 backup is still accepted");
-    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
-    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 6 is refused");
+    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 7 is refused");
 }
 
 static void test_aux_outputs_dry_run_and_partial_write(void)
@@ -7245,6 +7340,7 @@ void run_test_backup_import(void)
     test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_import_refuses_duplicate_zone_index();
     test_import_onto_empty_zones_config_refused_before_any_write();
+    test_backup_topology_round_trip();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();

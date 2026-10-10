@@ -964,6 +964,56 @@ static bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *
 static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
                                              size_t err_cap);
 
+/* Board topology a restore works against (owner decision 2026-10-09: a one-file restore must work after a
+ * factory reset). A v7+ backup carries top-level thermo_count/relay_count. Onto an UNCONFIGURED board (live
+ * thermo_count 0) the restore sets them first (apply = true) and every later zone/profile check judges
+ * against them; a configured board must already match. A backup with neither key (v6 or older) leaves the
+ * live counts in force. Pass 1 only: reads and validates, writes nothing. */
+typedef struct {
+    uint8_t thermo;
+    uint8_t relay;
+    bool apply;
+} backup_topology_t;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_resolve_topology(const char *body, backup_topology_t *out,
+                                                                   char *err_msg, size_t err_cap)
+{
+    out->thermo = zones_config_get_thermo_count();
+    out->relay = zones_config_get_relay_count();
+    out->apply = false;
+    double dt = 0.0, dr = 0.0;
+    bool has_t = backup_json_field_num(body, "thermo_count", &dt);
+    bool has_r = backup_json_field_num(body, "relay_count", &dr);
+    if (!has_t && !has_r) {
+        return true; /* older backup: keep the live counts (and the zone-count refusal in the precheck) */
+    }
+    if (!has_t || !has_r || dt < 0 || dt > MAX31856_CHANNEL_COUNT || dt != (double)(int)dt || dr < 0 ||
+        dr > KILN_IO_RELAY_COUNT || dr != (double)(int)dr) {
+        snprintf(err_msg, err_cap,
+                 "backup thermo_count/relay_count must both be present integers (thermo 0-%u, relay 0-%u). "
+                 "Nothing was written.",
+                 (unsigned)MAX31856_CHANNEL_COUNT, (unsigned)KILN_IO_RELAY_COUNT);
+        return false;
+    }
+    uint8_t bt = (uint8_t)dt, br = (uint8_t)dr;
+    if (out->thermo == 0) {
+        if (bt > 0) {
+            out->thermo = bt;
+            out->relay = br;
+            out->apply = true;
+        }
+        return true;
+    }
+    if (bt != out->thermo || br != out->relay) {
+        snprintf(err_msg, err_cap,
+                 "backup board topology (thermo_count %u, relay_count %u) differs from this board's "
+                 "(thermo_count %u, relay_count %u). Nothing was written.",
+                 (unsigned)bt, (unsigned)br, (unsigned)out->thermo, (unsigned)out->relay);
+        return false;
+    }
+    return true;
+}
+
 static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates,
@@ -987,7 +1037,11 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
     uint32_t bound_dwell_max;
     profiles_http_get_bounds(&bound_target_min, &bound_target_max, &bound_ramp_min, &bound_ramp_max,
                              &bound_dwell_max);
-    uint8_t thermo_count = zones_config_get_thermo_count();
+    backup_topology_t topo;
+    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
+        return false;
+    }
+    uint8_t thermo_count = topo.thermo;
     uint8_t valid_zone_bits = thermo_count >= 8 ? 0xFFu : (uint8_t)((1u << thermo_count) - 1u);
 
     /* ---- Pass 1a: profiles ---- */
@@ -1430,7 +1484,7 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
              * config via zones_config_get_relay_count() (added this pass for
              * exactly this check), same as thermo_count already was for the
              * zone_mask/thermo_mask checks elsewhere in this function. */
-            uint8_t relay_count = zones_config_get_relay_count();
+            uint8_t relay_count = topo.relay;
             uint8_t valid_relay_bits = relay_count >= 8 ? 0xFFu : (uint8_t)((1u << relay_count) - 1u);
             if ((zc->relay_mask & ~valid_relay_bits) != 0) {
                 snprintf(err_msg, err_cap,
@@ -2267,6 +2321,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             float cur_max = 0.0f, cur_min = 0.0f;
             zones_config_get_temp_limits(zi, &cur_max, &cur_min);
+            if (topo.apply && zi < topo.thermo) {
+                cur_max = zones_config_peek_slot_max_temp_c(zi); /* slot goes live with the topology */
+            }
             new_max_temp_c[zi] = cur_max;
         }
         for (size_t i = 0; i < zone_candidate_count; i++) {
@@ -2400,6 +2457,14 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
      * restore it first. */
     zones_cfg_t zones_snapshot;
     zones_config_get_full_copy(&zones_snapshot);
+    /* Topology first (unconfigured board only, planned in pass 1): the per-zone setters below refuse any
+     * index >= thermo_count and any relay_mask past relay_count. RAM only; the batch's single save persists
+     * it, and the snapshot above restores it on a mid-batch failure. */
+    if (topo.apply && !zones_config_set_topology_no_save(topo.thermo, topo.relay)) {
+        snprintf(err_msg, err_cap, "could not apply the backup's board topology (thermo_count %u, relay_count %u)",
+                 (unsigned)topo.thermo, (unsigned)topo.relay);
+        return false;
+    }
     /* Judge "does the file's tuning record equal the live one" NOW, before
      * the loop below runs. zones_config_set_pid_no_save() invalidates the
      * zone's tuning record (tuning_valid = 0) when a gain changes beyond
@@ -3579,7 +3644,11 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const ch
                                                                          size_t err_cap)
 {
     const char *zones_arr = backup_json_obj_find(body, "zones");
-    uint8_t thermo_count = zones_config_get_thermo_count();
+    backup_topology_t topo;
+    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
+        return false;
+    }
+    uint8_t thermo_count = topo.thermo;
     for (const char *ze = backup_json_arr_first(zones_arr); ze; ze = backup_json_arr_next(ze)) {
         double didx;
         if (!backup_json_field_num(ze, "index", &didx) || didx < 0) {
@@ -3588,7 +3657,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const ch
         if (didx >= thermo_count) {
             snprintf(err_msg, err_cap,
                      "zone %u in the backup is not a configured zone on this board (%u configured); the backup "
-                     "does not carry the zone count, so set it first (Thermocouples & Zones settings). "
+                     "does not carry the zone count (backup version below 7), so set it first (Thermocouples & Zones settings). "
                      "Nothing was written.",
                      (unsigned)didx, (unsigned)thermo_count);
             return false;
@@ -3643,11 +3712,14 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
     memset(sc, 0, sizeof(*sc));
     bool ok = false;
     profile_validate_state_t *st = &sc->st;
-    /* Live count is correct here (review L6): a backup import cannot change thermo_count. It restores
-     * only per-zone tuning entries, and the apply pass rejects any entry with index >= the live
-     * zones_config_get_thermo_count(); backup_export emits no thermo_count and the whole-blob
-     * zones_config_import_blob() path is not used by backups. */
-    st->zone_count = zones_config_get_thermo_count();
+    /* Effective topology (review L6, superseded 2026-10-09): the live count, or the backup's own
+     * thermo_count when this restore is about to set it on an unconfigured board. */
+    backup_topology_t topo;
+    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
+        free(sc);
+        return false;
+    }
+    st->zone_count = topo.thermo;
     if (st->zone_count > MAX31856_CHANNEL_COUNT) {
         st->zone_count = MAX31856_CHANNEL_COUNT;
     }
@@ -3867,7 +3939,7 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
  * *partial_write_out = true and the caller reports a distinct 500 naming
  * what landed rather than a 400 implying nothing did. Always set on entry;
  * never left indeterminate on any return path. */
-static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
+static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
                                  int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
                                  bool *partial_write_out, char *err_msg, size_t err_cap)
 {
@@ -4022,6 +4094,29 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
     return true;
+}
+
+/* Resolves the backup's board topology (pass 1, nothing written) and, for the length of the restore, tells
+ * kiln_cfg_store to judge kiln_configs[] packages against it instead of the still-empty live zones config.
+ * The system-mode gate and the factory-reset mark are re-checked by backup_import_job() before this runs. */
+static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
+                                 int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
+                                 bool *partial_write_out, char *err_msg, size_t err_cap)
+{
+    *partial_write_out = false;
+    backup_topology_t topo;
+    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
+        return false;
+    }
+    if (topo.apply && plan != NULL) {
+        kiln_cfg_plan_add(plan, "board topology: set thermo_count %u, relay_count %u first", (unsigned)topo.thermo,
+                          (unsigned)topo.relay);
+    }
+    kiln_cfg_store_restore_topology_override(topo.apply, topo.thermo, topo.relay);
+    bool ok = backup_import_apply_body(body, mode, dry_run, ack_delete_count, ack_no_safety_processor, plan,
+                                       partial_write_out, err_msg, err_cap);
+    kiln_cfg_store_restore_topology_override(false, 0, 0);
+    return ok;
 }
 
 /* Restore-in-flight flag (2026-09-28, A4 review follow-up A) -- see
