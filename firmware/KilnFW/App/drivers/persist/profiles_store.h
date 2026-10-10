@@ -72,6 +72,12 @@ bool profiles_http_slot_runnable(uint8_t id);
  * it is profiles_http_slot_runnable() plus "the save revision is unchanged".
  * Lock-free (atomic load). A spurious refusal (save landed mid-copy) is safe. */
 uint32_t profiles_http_slot_rev(uint8_t id);
+/* Seqlock bracket around every RAM assign of a user slot (call under the save
+ * lock): begin makes the per-slot generation odd, end makes it even again after
+ * the persist attempt, success or failure. profiles_http_slot_rev() is that
+ * generation; an odd or changed value refuses a start. */
+void profiles_slot_gen_begin(uint8_t id);
+void profiles_slot_gen_end(uint8_t id);
 bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev);
 
 /* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----

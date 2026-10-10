@@ -80,6 +80,27 @@ bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
  * residual: delete + re-save under the same id between a start's copy and its
  * s_exec.lock section). Stored AFTER s_profile_rev under the save lock. */
 static _Atomic uint32_t s_slot_rev_pub[PROFILES_MAX_COUNT];
+/* Seqlock-style generation per slot (profile start vs RAM assign). ODD while a
+ * RAM assign + persist is in flight, bumped again (EVEN) after every path
+ * (success, failure, revert). profiles_http_slot_rev() returns it; a start that
+ * captured gen G before its unlocked copy passes the recheck only if gen is
+ * still G and even, so a copy that overlapped or preceded any assign (including
+ * a FAILED save, which leaves RAM changed but s_slot_rev_pub unchanged) is refused. */
+static _Atomic uint32_t s_slot_gen[PROFILES_MAX_COUNT];
+
+void profiles_slot_gen_begin(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        atomic_fetch_add(&s_slot_gen[id], 1u);
+    }
+}
+
+void profiles_slot_gen_end(uint8_t id)
+{
+    if (id < PROFILES_MAX_COUNT) {
+        atomic_fetch_add(&s_slot_gen[id], 1u);
+    }
+}
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -1776,9 +1797,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         return false;
     }
 
+    profiles_slot_gen_begin(target_id);
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
+    profiles_slot_gen_end(target_id);
     profiles_save_unlock();
     if (err != ESP_OK) {
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
@@ -1856,7 +1879,7 @@ uint32_t profiles_http_slot_rev(uint8_t id)
     if (id >= PROFILES_MAX_COUNT) {
         return 0; /* builtins and out-of-range: no save revision */
     }
-    return atomic_load(&s_slot_rev_pub[id]);
+    return atomic_load(&s_slot_gen[id]);
 }
 
 bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
@@ -1864,7 +1887,10 @@ bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
     if (!profiles_http_slot_runnable(id)) {
         return false;
     }
-    /* A save or delete + re-save since the copy bumped the rev: the copy is stale. */
+    /* Any assign since the capture (or one in flight: odd) makes the copy stale. */
+    if ((captured_rev & 1u) != 0u) {
+        return false;
+    }
     return profiles_http_slot_rev(id) == captured_rev;
 }
 
@@ -1930,11 +1956,13 @@ profiles_delete_result_t profiles_delete_slot(uint8_t id)
      * stays fully live and the caller can retry; only after it succeeds is the
      * slot cleared. */
     profiles_save_lock();
+    profiles_slot_gen_begin((uint8_t)id);
     esp_err_t err = nvs_erase_slot_locked((uint8_t)id);
     if (err == ESP_OK) {
         profiles_slot_clear(id);
         memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
     }
+    profiles_slot_gen_end((uint8_t)id);
     profiles_save_unlock();
     /* Step (4): only after the used bit is clear (or the slot is known kept). */
     delete_pending_release(id);
@@ -2335,8 +2363,11 @@ static bool retarget_revert(const uint8_t *journal, uint8_t n, uint8_t from, uin
     bool clean = true;
     while (n > 0) {
         uint8_t id = journal[--n];
+        profiles_slot_gen_begin(id);
         (void)retarget_swap_rules(&s_profiles.profiles[id], from, to);
-        if (nvs_save_slot_locked(id) != ESP_OK || !retarget_verify_slot(id)) {
+        esp_err_t rv_save = nvs_save_slot_locked(id);
+        profiles_slot_gen_end(id);
+        if (rv_save != ESP_OK || !retarget_verify_slot(id)) {
             clean = false;
         }
     }
@@ -2401,9 +2432,11 @@ static bool retarget_commit(uint8_t zone, uint8_t relay, bool zone_has_tc, bool 
             fail = "rewritten profile failed validation";
             break;
         }
+        profiles_slot_gen_begin(id);
         s_profiles.profiles[id] = *trial;
         journal[jn++] = id;
         esp_err_t rt_save = nvs_save_slot_locked(id);
+        profiles_slot_gen_end(id);
         if (rt_save != ESP_OK) {
             fail = "persisting the rewritten profile failed";
             break;

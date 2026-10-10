@@ -2060,6 +2060,43 @@ static esp_err_t l23_delete_fn(const char *rel_path)
     return cfg_fs_delete(rel_path);
 }
 
+// Seqlock generation: a start that captured the slot generation before its copy
+// is refused after ANY RAM assign, including a save whose persist FAILED (RAM
+// changed, published rev unchanged), and while an assign is in flight (odd).
+static void test_profiles_slot_gen_seqlock(void)
+{
+    TEST_SECTION("slot generation: failed save and in-flight assign refuse a captured start");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save slot 4");
+    uint32_t cap = profiles_http_slot_rev(4);
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "captured generation runnable");
+
+    /* Failed save: persist refused, RAM still takes the new content. */
+    s_profile_rev_unknown[4] = true;
+    (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
+    s_profile_rev_unknown[4] = false;
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "failed save after capture: old copy refused");
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh capture runnable after failed save");
+
+    /* Assign in flight. */
+    uint32_t cap2 = profiles_http_slot_rev(4);
+    profiles_slot_gen_begin(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap2), "assign in progress: refused");
+    uint32_t odd = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, odd), "capture taken mid-assign (odd): refused");
+    profiles_slot_gen_end(4);
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, odd), "odd capture stays refused after the assign ends");
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap2), "pre-assign capture refused after the assign ends");
+}
+
 static void test_profiles_delete_start_race_l23(void)
 {
     TEST_SECTION("L23: a start is refused while a delete of the slot is in flight; delete refused while running");
@@ -4807,6 +4844,7 @@ void run_test_profiles_http(void)
     test_favorites_legacy_nvs_migrates();
     test_profiles_http_delete_refuses_running_slot();
     test_profiles_delete_start_race_l23();
+    test_profiles_slot_gen_seqlock();
     test_delete_clears_favorite_before_erase_wiring();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
