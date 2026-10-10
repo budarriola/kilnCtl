@@ -1996,6 +1996,10 @@ static void test_static_ip_problem_text(void)
     TEST_CHECK(p && strstr(p, "contiguous"), "non-contiguous mask");
     p = wifi_prov_static_ip_config_problem("192.168.1.255", nm, "192.168.1.1");
     TEST_CHECK(p && strstr(p, "ip is not a usable"), "broadcast ip");
+    p = wifi_prov_static_ip_config_problem("192.168.1.50", nm, "192.168.1.50");
+    TEST_CHECK(p && strstr(p, "must differ"), "gateway equals ip");
+    p = wifi_prov_static_ip_config_problem("192.168.1.50", nm, "192.168.1.255");
+    TEST_CHECK(p && strstr(p, "gateway is not a usable"), "broadcast gateway");
 }
 
 void run_test_wifi_prov(void)
