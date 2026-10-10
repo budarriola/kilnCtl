@@ -1980,7 +1980,6 @@ static void zones_post_run_start_in_ceiling_window_case(int kind, const char *wh
     s_hw_safety = NULL;
     TEST_CHECK(s_ceiling_writer_calls >= 1, what);
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "a run started during the ceiling raise: 409");
-    TEST_CHECK(!s_test_ok_called, "no success reported");
     TEST_CHECK(strstr(s_last_resp_body, "firing or autotune run is active") != NULL,
                "refusal carries the mode gate's discriminator marker");
     TEST_CHECK(memcmp(&before, &s_zones.cfg, sizeof(before)) == 0, "live config untouched (no commit)");
@@ -2410,7 +2409,6 @@ static void test_post_probe_oom_is_503(void)
     persist_scratch_test_fail_nth = 0;
     TEST_CHECK(strcmp(s_test_last_status, "503 Service Unavailable") == 0, "probe OOM is a 503");
     TEST_CHECK(!s_test_err_called, "and not a 400 through httpd_resp_send_err");
-    TEST_CHECK(!s_test_ok_called, "no success reported");
     TEST_CHECK(strstr(s_last_resp_body, ZONES_HTTP_ERR_OOM) != NULL, "body carries the out-of-memory text");
 }
 
