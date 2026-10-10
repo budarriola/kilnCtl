@@ -105,13 +105,13 @@ is expected behavior for a scope-kiln factory reset. The defect is in process an
 ## Recommendations
 
 1. Bench practice: log every UART or HTTP factory reset in BENCH_TEST_LOG with its scope and
-   reason. Run `backup_export` first. **DONE <SHA>**: rule added to the `docs/BENCH_TEST_LOG.md` header.
+   reason. Run `backup_export` first. **DONE bc334d45**: rule added to the `docs/BENCH_TEST_LOG.md` header.
 2. Tooling: make `run_action("System: Factory Reset")` and `factory_default_then_load_preset` take
    a `backup_export` automatically before sending, and put the backup path in the result.
-   **DONE <SHA>**: `factory_reset_guard.backup_before_reset()` runs first in the action, `factory_default_then_load_preset` and the GUI Danger Zone; refuses on export failure unless `skip_backup=True`; a failed preset apply now says `BOARD WIPED` and names the backup. MCP servers need a restart to pick it up.
+   **DONE bc334d45**: `factory_reset_guard.backup_before_reset()` runs first in the action, `factory_default_then_load_preset` and the GUI Danger Zone; refuses on export failure unless `skip_backup=True`; a failed preset apply now says `BOARD WIPED` and names the backup. MCP servers need a restart to pick it up.
 3. Tooling: log every MCP tool call with a timestamp (tool name, caller, time) so that a
    destructive call can be traced to its sender.
-   **DONE <SHA>**: `mcpkit/call_log.py` appends `<UTC time> <tool> <arg keys>` (never values) to gitignored `logs/mcp_calls/<port>_<date>.log`, hooked on every `kiln_call`/`kiln_batch` target and kept direct tool. Caller identity is not available to the server.
+   **DONE bc334d45**: `mcpkit/call_log.py` appends `<UTC time> <tool> <arg keys>` (never values) to gitignored `logs/mcp_calls/<port>_<date>.log`, hooked on every `kiln_call`/`kiln_batch` target and kept direct tool. Caller identity is not available to the server.
 4. Firmware: a crash record that is missing after a deliberate reset should not bring back an
    already-reviewed dump as a fresh one. Either have factory reset scope kiln/all also erase the
    coredump, or have crash_report cross-check the dump's `app_elf_sha256` and not stamp it with the
