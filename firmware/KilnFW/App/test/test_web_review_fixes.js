@@ -130,7 +130,7 @@ function makeCtx(responses) {
     const rn = els['relayNames'];
     assert(rn && typeof rn.ls.input === 'function' && typeof rn.ls.change === 'function',
       '#relayNames gets input and change listeners');
-    const before = dReloads; rn.ls.input(); rn.ls.change();
+    const before = dReloads; if (rn) { rn.ls.input && rn.ls.input(); rn.ls.change && rn.ls.change(); }
     assert(dReloads === before + 200, '#relayNames edits invoke markZonesFormDirty');
   }
 
