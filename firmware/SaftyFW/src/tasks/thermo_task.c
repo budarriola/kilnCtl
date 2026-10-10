@@ -38,6 +38,8 @@
 #include "thermo_task_drdy_recovery.h" // pure missed-edge decision, see its own header
 #include "watchdog_task.h"
 
+static bool thermo_relay_armed_or_energized(void); // defined below, used by the snapshot-override read path
+
 // 2026-09-09: check_saftyfw_task_stack_budgets.py's ARM/Thumb static-call-graph
 // walk (firmware/SaftyFW/test/stack_budget_lib_arm.py) measures a resolved
 // lower bound of 800 B for thermo_task_fn's own call graph against a bare

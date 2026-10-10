@@ -24,7 +24,7 @@ Owner rules checked:
 
 ## Findings
 
-### F1 HIGH: the ESP can blind the Pico's own thermocouple while K4 stays ARMED
+### F1 HIGH: the ESP can blind the Pico's own thermocouple while K4 stays ARMED -- FIXED in 3b5b2213a
 
 **Where:**
 
@@ -85,7 +85,7 @@ while ARMED, each finite-checked only:
 - Add a host test: ARMED plus a volatile install of `safety_tc_installed=0` is
   refused.
 
-### F2 MED: `tc_offset_c` is unbounded and shifts the reading S1 sees
+### F2 MED: `tc_offset_c` is unbounded and shifts the reading S1 sees -- FIXED in 3b5b2213a
 
 **Where:**
 
@@ -111,7 +111,7 @@ correction for a type K/N/S thermocouple is a few degrees.
 - Treat any `tc_offset_c` change while ARMED as loosening, or at least a more
   negative value.
 
-### F3 MED: S9 (welded contactor) is blind whenever ESP context is invalid
+### F3 MED: S9 (welded contactor) is blind whenever ESP context is invalid -- FIXED in 3b5b2213a
 
 **Where:**
 
@@ -147,7 +147,7 @@ test removing the gate was MISSED (see below).
 - Drop `in->context_valid` from the S9 condition.
 - Add tests in which S9 escalates with `context_valid = false` after an S6b trip.
 
-### F4 LOW-MED: S12 passes silently on a NaN cold-junction reading
+### F4 LOW-MED: S12 passes silently on a NaN cold-junction reading -- FIXED in 3b5b2213a
 
 **Where:**
 
@@ -178,7 +178,7 @@ still feeds S1 as valid.
   accumulator and raise a WARN.
 - Consider adding CJRANGE to `s5_bad_read_now()`.
 
-### F5 LOW-MED: unvalidated CONTEXT floats can silence S2 and S10
+### F5 LOW-MED: unvalidated CONTEXT floats can silence S2 and S10 -- FIXED in 3b5b2213a
 
 **Where:**
 
@@ -199,7 +199,7 @@ guards are WARN/TRIP layers above S1, so S1 still holds.
 `measured_c` is not finite, either at unpack or in `context_reduce_zones()`.
 Add a host test with a NaN in zone 0.
 
-### F6 LOW: an S5 bad read skips the TC-independent guards
+### F6 LOW: an S5 bad read skips the TC-independent guards -- FIXED in 3b5b2213a
 
 **Where:** `safety_guards.c:620-624`. On any bad read the tick returns before
 S1/S11/S12/S8 and before the context block (S3, S13, S14, S15).
@@ -216,7 +216,7 @@ S1/S11/S12/S8 and before the context block (S3, S13, S14, S15).
 **Suggested fix:** skip only the TC-consuming guards on a bad read, and still
 evaluate S3, S14 and S15 against current and context.
 
-### F7 INFO: the 32-bit ms tick wraps after ~49.7 days
+### F7 INFO: the 32-bit ms tick wraps after ~49.7 days -- FIXED in 3b5b2213a
 
 **Where:**
 

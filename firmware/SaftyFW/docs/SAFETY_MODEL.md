@@ -688,6 +688,16 @@ tripped (K4 de-energized) for  trip_verify_s
 Default `trip_verify_s` = **10 s** (comfortably past the 1 s peak-hold decay and
 any contactor drop-out delay).
 
+S9 needs **no ESP context** (guard review 2026-10-09 F3): it reasons about the
+Pico's own de-energize command, so it runs with `context_valid == false`. The
+related hardening from the same review: a volatile config install while ARMED
+refuses any change to the thermocouple/CT/margin fields (F1), `INJECT_TC` is
+refused while ARMED or energized, `tc_offset_c` is bounded to +/-50 C (F2), S12
+treats an unknown cold junction as a hold-and-warn, never a pass or a clearable
+trip (F4), non-finite CONTEXT floats make a zone ineligible (F5), an S5 bad read
+no longer suspends S3/S4/S13/S14/S15 (F6), and the S6b reboot grace expires once
+so the 32-bit tick wrap cannot re-arm it (F7).
+
 **This is the single most valuable guard after S1, and it costs nothing to
 build** — the sensors are already there. `SAFETY_MODEL.md` §7 lists "welded line
 contactor" as an unclosable gap, because no firmware on this board can open a
