@@ -10,6 +10,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "relay_authority.h"
+#include "kiln_cfg_swap.h"
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
 
@@ -114,6 +115,11 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
             ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused by system mode gate: %s", mode_reason);
             return system_mode_gate_http_send_refusal(req, mode_reason);
         }
+    }
+
+    if (kiln_cfg_swap_zone_edits_at_risk()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused: rollback journal pending");
+        return system_mode_gate_http_send_refusal(req, KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT);
     }
 
     if (req->content_len <= 0 || req->content_len > ZONES_PID_BODY_MAX) {

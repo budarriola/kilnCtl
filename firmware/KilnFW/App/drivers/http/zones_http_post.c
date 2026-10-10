@@ -225,8 +225,7 @@ esp_err_t zones_post_handler(httpd_req_t *req)
     if (kiln_cfg_swap_zone_edits_at_risk()) {
         ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones refused: rollback journal pending");
         return system_mode_gate_http_send_refusal(
-            req, "a kiln-config rollback is pending (saving the active kiln failed); a zones save would be reverted "
-                 "at the next boot -- reboot to retry it");
+            req, KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT);
     }
 
     /* ota_http_check_interlocks() is that shared gate rather than a private

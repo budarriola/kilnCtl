@@ -35,7 +35,7 @@ static SafetyLinkClass *s_link = NULL;
 static volatile int32_t s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
 /* LOW-1 (review 10): true while a rollback left the journal KEPT because the active_id restore failed. Every
  * boot then re-imports the rollback blob over the live zones, so a zones save in between would be silently
- * reverted. POST /api/zones refuses while this is set (kiln_cfg_swap_zone_edits_at_risk()). Re-set by each
+ * reverted. nvs_save() (every zones writer) refuses while this is set (kiln_cfg_swap_zone_edits_at_risk()). Re-set by each
  * boot's rollback_ex() that still cannot restore the id; cleared with the journal. */
 static volatile bool s_rollback_id_kept = false;
 
@@ -591,6 +591,7 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
      * no longer matches either side) or be re-imported over (PICO_DONE
      * re-applies R). Reported via KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE. */
     if (!clear_pending()) {
+        s_rollback_id_kept = true; /* review 12 LOW-2: the kept journal makes zone edits at risk here too */
         ESP_LOGE(TAG, "rollback: both sides are back on the previous config, but clearing the swap journal "
                       "failed -- autosave stays suppressed; boot recovery retries the clear, but edits made "
                       "before then may latch a boot fault or be overwritten");

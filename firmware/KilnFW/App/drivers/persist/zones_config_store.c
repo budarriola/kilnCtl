@@ -22,6 +22,7 @@
 #include "freertos/semphr.h"
 #include "cfg_save_lock.h" /* s_zcfg_save_mutex */
 #include "freertos/task.h" /* xTaskGetCurrentTaskHandle() -- autosave dispatcher identity, 2026-09-16 */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_zone_edits_at_risk() -- review 12 LOW-1 */
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
                              * section 2.4, item 13. */
 #include "kiln_io.h"
@@ -859,6 +860,13 @@ bool zones_config_persisted_equals_ram(void)
 
 esp_err_t nvs_save(void)
 {
+    /* Review 12 LOW-1: ONE shared gate for every zones writer (POST /api/zones, /pid, adaptive tune, autotune
+     * finalize, UART bridge, accessors, backup import ...). While a kept rollback journal would re-import or
+     * fault over a zones edit at the next boot, refuse the save; HTTP writers map this to 409. */
+    if (kiln_cfg_swap_zone_edits_at_risk()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zones config NOT saved: a kiln-config rollback journal is pending");
+        return ESP_ERR_INVALID_STATE;
+    }
     /* Persist a SNAPSHOT, never the live struct: copy s_zones.cfg and read the rev under
      * zones_cfg_lock() (portMUX: copy only, no I/O/alloc/log inside), stamp version/CRC
      * on the copy (last, after every other field is final -- see

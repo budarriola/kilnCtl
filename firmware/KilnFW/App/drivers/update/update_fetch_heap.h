@@ -42,8 +42,8 @@
 //   re-measure of the idle minimum is PENDING, so treat the value as provisional.
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
-// idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 16500 = 13147 B,
-// 4955 B above the 8192 B floor.
+// idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 17524 = 12123 B,
+// 3931 B above the 8192 B floor.
 // Largest block at idle is 9728 B (same log), so the block floor must sit below that. The biggest
 // single internal allocation is the 4096 B update_fetch_wr stack (+ heap overhead); the 2 KB
 // client buffers and TLS pieces are smaller and separate. 6144 B = 1.5x the stack, passes at idle.

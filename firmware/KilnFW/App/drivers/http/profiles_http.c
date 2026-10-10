@@ -1246,7 +1246,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
                     ESP_LOGI(PROFILES_TAG, "prof%u: legacy NVS blob (rev %lu) retired, cfg file (rev %lu) is authoritative",
                              (unsigned)id, (unsigned long)nvs_rev[id], (unsigned long)resolved_rev);
                 } else {
-                    ESP_LOGW(PROFILES_TAG, "prof%u: could not retire legacy NVS blob: %s (will retry next boot)",
+                    ESP_LOGW(PROFILES_TAG, "prof%u: could not retire legacy NVS blob: %s (cfg file stays authoritative; retried next boot only if the used bit is still set)",
                              (unsigned)id, esp_err_to_name(rerr));
                 }
             }
@@ -1322,19 +1322,23 @@ static esp_err_t retire_legacy_slot_blob(uint8_t id)
     }
     char key[8];
     profile_nvs_key(id, key, sizeof(key));
-    kv_err = hal_kv_erase_key(&h, key);
+    /* Review 12 LOW-4: clear the used bit FIRST, erase the key SECOND. A failure part-way then leaves a
+     * harmless orphan key (bit clear, nothing loads it) instead of a dangling bit with no blob, which the
+     * next boot would report as "load failed" and never retire. A bitmap-save failure leaves both intact
+     * (bit set, key present), so the next boot retries. */
+    profiles_slot_bitmap_t nvs_used;
+    memset(&nvs_used, 0, sizeof(nvs_used));
+    kv_err = used_bitmap_load(&h, &nvs_used);
     if (kv_err == HAL_NOT_FOUND) {
         kv_err = HAL_OK;
+    } else if (kv_err == HAL_OK) {
+        profiles_slot_bitmap_clear(&nvs_used, id);
+        kv_err = used_bitmap_save(&h, &nvs_used);
     }
     if (kv_err == HAL_OK) {
-        profiles_slot_bitmap_t nvs_used;
-        memset(&nvs_used, 0, sizeof(nvs_used));
-        kv_err = used_bitmap_load(&h, &nvs_used);
+        kv_err = hal_kv_erase_key(&h, key);
         if (kv_err == HAL_NOT_FOUND) {
             kv_err = HAL_OK;
-        } else if (kv_err == HAL_OK) {
-            profiles_slot_bitmap_clear(&nvs_used, id);
-            kv_err = used_bitmap_save(&h, &nvs_used);
         }
     }
     if (kv_err == HAL_OK) {

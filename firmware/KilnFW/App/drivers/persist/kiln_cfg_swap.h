@@ -238,6 +238,10 @@ bool kiln_cfg_swap_is_pending(void);
  * Each boot re-imports the pre-swap zones until the id restore succeeds, so a zones save made meanwhile would be
  * silently reverted: POST /api/zones refuses while this is true. */
 bool kiln_cfg_swap_zone_edits_at_risk(void);
+/* Shared 409 text for every HTTP zones writer (review 12 LOW-2: true on the ESP_DONE path too). */
+#define KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT \
+    "a kiln-config rollback is pending (saving the active kiln failed); a zones save may be lost or latch a boot " \
+    "fault at the next boot -- reboot to retry it"
 
 /* M13 ("every fault says what was detected and what to do", ROADMAP.md
  * standing rule): kiln_cfg_swap_boot_recover() (section 4.4's five-case

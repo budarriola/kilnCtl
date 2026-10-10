@@ -1846,8 +1846,11 @@ static void test_zones_post_refused_while_rollback_pending(void)
     s_ceiling_writer_calls = 0;
     s_test_profile_status.state = PROFILE_EXEC_IDLE;
     s_test_ok_called = false;
+    uint32_t rev_before = s_zones_cfg_rev;
     run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
     s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "review 12 INFO-5: refusal is HTTP 409");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "review 12 INFO-5: nothing was persisted (rev unchanged)");
     TEST_CHECK(strstr(s_last_resp_body, "rollback is pending") != NULL, "refusal body names the pending rollback");
     TEST_CHECK(!s_test_ok_called, "must not report success");
     TEST_CHECK(s_ceiling_writer_calls == 0, "nothing reached the Pico ceiling write");
@@ -2357,6 +2360,22 @@ static void test_zones_pid_post_accepts_while_idle(void)
     TEST_CHECK_NEAR(kp, 0.0318, 1e-6, "kp must be applied exactly");
     TEST_CHECK_NEAR(ki, 0.00012, 1e-6, "ki must be applied exactly");
     TEST_CHECK_NEAR(kd, 0.8401, 1e-6, "kd must be applied exactly");
+}
+
+static void test_zones_pid_post_refused_while_rollback_pending(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- review 12 LOW-1: 409 and no write while a rollback journal is kept");
+    seed_two_zone_pid_baseline();
+    float kp0 = 0.0f, ki0 = 0.0f, kd0 = 0.0f;
+    (void)zones_config_get_pid(0, &kp0, &ki0, &kd0);
+    s_test_swap_zone_edits_at_risk = true;
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "pid post answered 409");
+    TEST_CHECK(!s_test_ok_called, "pid post not reported ok");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    (void)zones_config_get_pid(0, &kp, &ki, &kd);
+    TEST_CHECK_NEAR(kp, kp0, 1e-9, "kp unchanged");
 }
 
 static void test_zones_pid_post_refuses_embedded_nul(void)
@@ -3707,6 +3726,22 @@ static void test_zones_saves_refuse_under_reset_mark(void)
     s_zrf_mark = false;
     TEST_CHECK(nvs_save() == ESP_OK, "nvs_save works again once the mark clears");
     pref_cfg_fs_set_reset_refuse_hook(NULL);
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
+static void test_nvs_save_refuses_while_rollback_pending(void)
+{
+    TEST_SECTION("nvs_save -- review 12 LOW-1: the shared gate refuses every zones writer while a rollback journal is kept");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    uint32_t rev_before = s_zones_cfg_rev;
+    s_test_swap_zone_edits_at_risk = true;
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "nvs_save refuses while edits are at risk");
+    TEST_CHECK(s_zones_cfg_rev == rev_before, "refused save persisted nothing (rev unchanged)");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save works once the journal is clear");
+    TEST_CHECK(s_zones_cfg_rev != rev_before, "the allowed save bumped the rev");
     nvs_test_enable(false);
     nvs_test_clear();
 }
@@ -17108,6 +17143,8 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();
     test_zones_current_sweep_start_refused_when_factory_reset_in_flight();
     test_zones_saves_refuse_under_reset_mark();
+    test_nvs_save_refuses_while_rollback_pending();
+    test_zones_pid_post_refused_while_rollback_pending();
     test_zones_config_set_coupling_cell_refused_during_factory_reset();
 
     test_reconcile_on_link_up_null_link_is_a_noop();

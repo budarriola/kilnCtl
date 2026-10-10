@@ -1507,6 +1507,7 @@ static void test_low4_low5_rollback_uncleared_journal_reported(void)
                "reason carries the uncleared-journal note instead of staying silent");
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_PICO_DONE,
                "record still on flash -- boot recovery will clear it");
+    TEST_CHECK(kiln_cfg_swap_zone_edits_at_risk(), "review 12 LOW-2: an uncleared journal marks zone edits at risk");
     TEST_CHECK(kiln_cfg_swap_is_pending(), "autosave stays suppressed while the record is uncleared");
 
     TEST_SECTION("LOW-5: rollback restores active_id under kiln_cfg_store_lock");
