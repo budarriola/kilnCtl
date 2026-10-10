@@ -153,7 +153,9 @@ STACK_BYTES = 6144
 # 2026-10-09 (LongCallTracker union-merge fix): a register loaded with several literals now yields every edge,
 # not just the last, so the walk reaches the __assert_func/panic_abort tail it used to miss: measured 3920 B (was 3360 B).
 # Honest free still above 10% of the declared stack; re-baselined for this stated cause only.
-CEILING_BYTES = 3920
+# 2026-10-09 (stack analyser review F2): the nvs_save -> zones_autosave_job edge is now dropped everywhere except the
+# bx_flash_worker root (stack_budget_lib.WORKER_ONLY_EDGES), so the executor measures 3408 B (was 3920 B). Lowered to it.
+CEILING_BYTES = 3408
 
 # See "UNMODELED_OVERHEAD_BYTES" above -- this task's own live-measured figure,
 # not the httpd checker's 1800 B placeholder.

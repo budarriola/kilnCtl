@@ -151,7 +151,9 @@ HANDLER_DIRS = [HTTP_DIR, UPDATE_DIR]
 # 2026-10-09: profile_exec_start_post_handler ran 5248 B (14.0% honest headroom, under the 15% CRITICAL line) once the
 # literal-merge fix exposed it. Fixed by moving the handlers' JSON refusal buffers into noinline helpers (start + autotune
 # handlers) and kiln_cfg_store.c populate_pico_half_and_hash's two 896 B canonical[] buffers to persist_scratch_alloc: now 4496 B.
-CEILING_BYTES = 4496
+# 2026-10-09 (stack analyser review F2/F7/F8): worker-only autosave edge dropped, long-call edges only to function entries:
+# profile_exec_start_post_handler measures 4448 B (was 4496 B). Lowered to it.
+CEILING_BYTES = 4448
 
 # 2026-09-08 honesty fix (docs/audits/2026-09-08-httpd-stack-gap.md, `022bde0a`):
 # the static walk's "N B free" framing was misleading. It measures only each

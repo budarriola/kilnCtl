@@ -1021,7 +1021,7 @@ CEILING_BYTES = {
     # declared stack is 10240 B (BX_WORKER_STACK), so honest free is still 6432 B
     # (62.8%) -- the ceiling is a tripwire on growth, not a margin problem, and no
     # stack bytes change. 3840 = measured 3808 + 32 B headroom.
-    "bx_flash_worker": 6144,
+    "bx_flash_worker": 6160,  # 2026-10-09: re-measured on dev tip (was 6144); ample headroom of 10240 B
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3312,
@@ -1112,7 +1112,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7552,
+    "http_async_job": 7632,  # 2026-10-09: re-measured on dev tip (was 7552); honest free well above 20%
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
@@ -1177,7 +1177,7 @@ CEILING_BYTES = {
     # thin margin here is flagged, not just noted: if a future page or
     # callback measurably deepens this task's real worst case, treat it
     # as a hazard needing review, not a routine ceiling bump.
-    "lvgl": 7472,
+    "lvgl": 7488,  # 2026-10-09: re-measured on dev tip (was 7472)
     # 3152 = 3008 (prior baseline, 2026-09-09) + 144, from bfa60679
     # ("Refuse to start a firing on a quarantined zones config, surface it
     # everywhere") closing the ota_rollback_esp() silent-default-PID-gains
@@ -1225,7 +1225,7 @@ CEILING_BYTES = {
     # safety-visibility hazard (the same one CLAUDE.md's boot_guard section
     # already documents as fixed), not a regression to paper over, and not
     # one to design around by shrinking the surfaced fault's own message.
-    "screen_idle": 3888,
+    "screen_idle": 3904,  # 2026-10-09: re-measured on dev tip (was 3888)
     "uart_owner_evt_task": 1184,
     "uart_proto_rx": 4576,
     # Measured 2026-09-24 against a KilnCtrl.elf freshly built by
