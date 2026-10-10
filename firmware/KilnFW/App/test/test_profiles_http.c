@@ -1564,6 +1564,58 @@ static void test_pcfg_resolve_scratch_oom_leaves_file_untouched(void)
     TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact after boot load");
 }
 
+static void test_pcfg_boot_profile_scratch_oom_fails_closed(void)
+{
+    TEST_SECTION("boot load: sizeof(profile_t) / 2*sizeof(profile_t) scratch OOM is an error and marks slots unknown (review M2, 794fce57)");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    profile_t file_p = make_stored_profile();
+    strncpy(file_p.name, "CurrentFile", PROFILE_NAME_MAX_LEN);
+    TEST_CHECK(profiles_cfg_fs_save(2, &file_p, 7) == ESP_OK, "file at rev 7");
+
+    /* nvs_load_all_from: resolve scratch (one profile_t); a rev blob creates the kiln_cfg namespace so the
+     * function does not delegate to the files-only path */
+    uint32_t revs0[PROFILES_MAX_COUNT] = {0};
+    pcfg_set_rev_blob(revs0, sizeof(revs0));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    persist_scratch_test_fail_size = sizeof(profile_t);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    profiles_state_t st;
+    bool any_found = false;
+    esp_err_t lerr = nvs_load_all_from(PROFILES_NVS_PARTITION, &st, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the sizeof(profile_t) allocation was reached");
+    TEST_CHECK(lerr == ESP_ERR_NO_MEM, "OOM reported as an error, never absent/OK");
+    bool all_unknown = true;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        all_unknown = all_unknown && s_profile_rev_unknown[id];
+    }
+    TEST_CHECK(all_unknown, "every slot marked rev-unknown (resolve-error flags set)");
+    profile_t after;
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact");
+
+    /* nvs_load_files_only: two-profile scratch */
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    persist_scratch_test_fail_size = 2 * sizeof(profile_t);
+    persist_scratch_test_fail_nth = 1;
+    persist_scratch_test_seen = 0;
+    memset(&st, 0, sizeof(st));
+    any_found = false;
+    lerr = nvs_load_files_only(PROFILES_NVS_PARTITION, &st, &any_found);
+    persist_scratch_test_fail_nth = 0;
+    TEST_CHECK(persist_scratch_test_seen == 1, "the 2*sizeof(profile_t) allocation was reached");
+    TEST_CHECK(lerr == ESP_ERR_NO_MEM, "files-only OOM reported as an error");
+    all_unknown = true;
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        all_unknown = all_unknown && s_profile_rev_unknown[id];
+    }
+    TEST_CHECK(all_unknown, "every slot marked rev-unknown, none absent");
+    TEST_CHECK(!any_found, "nothing reported found");
+    TEST_CHECK(pcfg_file_profile(2, &after) && strcmp(after.name, "CurrentFile") == 0, "file intact");
+}
+
 static void test_pcfg_junk_rev_repair_scratch_oom_fails_closed(void)
 {
     TEST_SECTION("junk rev repair: scratch allocation failure fails closed (review 5 L4)");
@@ -5426,6 +5478,7 @@ void run_test_profiles_http(void)
     test_pcfg_longer_rev_array_is_known_tail_ignored();
     test_pcfg_junk_rev_repair_raises_fileless_to_max();
     test_pcfg_resolve_scratch_oom_leaves_file_untouched();
+    test_pcfg_boot_profile_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_scratch_oom_fails_closed();
     test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();

@@ -38,8 +38,7 @@ Fixed in 650f6159 (analyser), 794fce57 (boot path) and 6ecf90f6 (ceilings), SHAs
   resolved ROM calls". Not a failure: all 33 tasks are already INDETERMINATE, so a failure would only add noise.
 - F5, F6, F7, F8 fixed (650f6159) with new tests in `test_stack_budget_symbol_bounds.py`; F7 negative-tested with
   negtest (mutation `if True:` in the legacy edge rule CAUGHT).
-- Also re-baselined four `check_all` ceilings that had drifted on dev with no analyser change (bx_flash_worker 6144 ->
-  6160, http_async_job 7552 -> 7632, lvgl 7472 -> 7488, screen_idle 3888 -> 3904); the unmodified analyser fails the same four.
+- Also re-baselined four `check_all` ceilings that had grown on dev (growth is code, not the analyser: http_async_job +80 B from `backup_import_apply_body` in 3cb3fb94a; bx_flash_worker, screen_idle and lvgl +16 B each from `dashboard_status_t` growth; see STACK_FIX_BATCH_REVIEW_2026-10-09.md M1) (bx_flash_worker 6144 ->  6160, http_async_job 7552 -> 7632, lvgl 7472 -> 7488, screen_idle 3888 -> 3904); the unmodified analyser fails the same four.
 - F4 left open (no instance).
 
 ## Findings

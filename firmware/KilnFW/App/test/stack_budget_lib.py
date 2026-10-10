@@ -417,6 +417,11 @@ def parse(objdump, elf):
                 calls[fn].add(addr)
             elif ROM_ADDR_RANGE[0] <= addr < ROM_ADDR_RANGE[1]:
                 bodyless.setdefault(fn, set()).add(name)
+            else:
+                # Review L1: a called literal that is neither a function entry nor
+                # a ROM body (e.g. a mid-function address) is an unresolved target,
+                # not a dropped one: the walk is a lower bound for this caller.
+                indirect[fn] = True
     return ParsedElf(frames, calls, names, name_addrs, indirect, bodyless)
 
 

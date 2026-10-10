@@ -1020,7 +1020,10 @@ CEILING_BYTES = {
     # (walk total 3808 B) after unrelated profile-path commits; 16 B over. The
     # declared stack is 10240 B (BX_WORKER_STACK), so honest free is still 6432 B
     # (62.8%) -- the ceiling is a tripwire on growth, not a margin problem, and no
-    # stack bytes change. 3840 = measured 3808 + 32 B headroom.
+    # stack bytes change. (3840 was set against a 3808 B walk; that figure is stale.)
+    # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
+    # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
+    # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
     "bx_flash_worker": 6160,  # 2026-10-09: re-measured on dev tip (was 6144); ample headroom of 10240 B
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,

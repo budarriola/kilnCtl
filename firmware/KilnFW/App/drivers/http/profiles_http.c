@@ -1037,6 +1037,8 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
      * unexamined: refused this boot, exactly like a per-slot resolve error. */
     profile_t *scratch = persist_scratch_alloc(2 * sizeof(profile_t));
     if (!scratch) {
+        ESP_LOGE(PROFILES_TAG, "files-only profile load: out of memory for %u B scratch -- every slot unexamined, "
+                 "saves/deletes refused this boot, profile table empty", (unsigned)(2 * sizeof(profile_t)));
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             s_profile_rev[id] = floors[id];
             s_profile_rev_unknown[id] = true;
@@ -1213,7 +1215,9 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
     profile_t *resolved_p = NULL;
     if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
         /* Heap, not stack (check_main_task_stack_budget). OOM: every slot unexamined,
-         * refused this boot, NVS-decoded content left as loaded. */
+         * refused this boot (slot_res_err), and the function returns ESP_ERR_NO_MEM.
+         * The NVS-decoded content is NOT kept: profiles_boot_load_body() memsets
+         * s_profiles on any error and retries files-only. */
         resolved_p = persist_scratch_alloc(sizeof(profile_t));
         if (!resolved_p) {
             any_resolve_err = true;
@@ -2141,7 +2145,11 @@ static esp_err_t profiles_boot_load_body(void)
         memcpy(keep_unknown, s_profile_rev_unknown, sizeof(keep_unknown));
         memset(&s_profiles, 0, sizeof(s_profiles));
         bool any = false;
-        (void)nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        esp_err_t files_err = nvs_load_files_only(PROFILES_NVS_PARTITION, &s_profiles, &any);
+        if (files_err != ESP_OK) {
+            ESP_LOGE(PROFILES_TAG, "files-only profile load also failed: %s -- affected slots refused this boot",
+                     esp_err_to_name(files_err));
+        }
         for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
             if (keep_unknown[id]) {
                 s_profile_rev_unknown[id] = true;

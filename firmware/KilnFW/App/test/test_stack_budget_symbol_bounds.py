@@ -285,6 +285,26 @@ class LongCallFilterTest(unittest.TestCase):
         self.assertNotIn(0x300, parsed.calls[0x10])            # cb_fn literal: never called via a reg
         self.assertTrue(parsed.indirect[0x10])                 # callx0 a12 is indirect (F5)
 
+    def test_non_entry_long_call_target_marks_caller_indirect(self):
+        # Review L1: callx8 to far_fn+0x4 (not an entry) must not be silently dropped.
+        # callers with ONLY the non-entry call and no other indirect: isolate it
+        iso = '''
+Disassembly of section .flash.text:
+
+00000010 <caller_fn>:
+10:	006136        	entry	a1, 32
+13:	c90c81        	l32r	a9, 00000008 <x> (00000204 <far_fn+0x4>)
+1c:	0009e0        	callx8	a9
+1f:	f01d          	retw.n
+
+00000200 <far_fn>:
+200:	006236        	entry	a1, 48
+203:	f01d          	retw.n
+'''
+        parsed = self._parse(addr_keyed, iso)
+        self.assertEqual(parsed.calls[0x10], set())
+        self.assertTrue(parsed.indirect[0x10])
+
     def test_worker_only_edge_dropped_outside_worker_root(self):
         p = addr_keyed.ParsedElf({1: 8, 2: 8}, {1: {2}, 2: set()}, {1: "nvs_save", 2: "zones_autosave_job"},
                                  {"nvs_save": [1], "zones_autosave_job": [2]}, {1: False, 2: False})
