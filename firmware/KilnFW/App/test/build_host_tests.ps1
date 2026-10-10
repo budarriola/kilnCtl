@@ -657,7 +657,7 @@ try {
     # separate .c files (like zones_config_json.c below), not textually
     # included -- neither defines anything test_zones_http.c's #includes
     # already define, so there is no multiple-definition risk.
-    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
+    $cmd2 = "cl @`"$hostTestsRsp`" /std:c11 /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK /DKILNCTL_ZONES_UNLOCK_TEST_HOOK " +
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
@@ -1045,7 +1045,7 @@ try {
     # <stdatomic.h> -- same MSVC requirement test_live_profile.c/
     # test_profile_executor_live_pickup.c already needed for the same reason
     # (see this file's own comment above them).
-    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK " +
+    $cmd7 = "cl @`"$hostTestsRsp`" /std:c11 /experimental:c11atomics /DKILNCTL_PERSIST_SCRATCH_TEST_HOOK /DKILNCTL_PROFILES_LOADED_TEST_HOOK " +
             "/Fo:`"$phObjDir\\`" /Fe:`"$exe7`" `"$(Join-Path $testDir 'test_profiles_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +

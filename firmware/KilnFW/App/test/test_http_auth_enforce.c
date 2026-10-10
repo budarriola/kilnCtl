@@ -736,6 +736,42 @@ static void test_host_allowlist(void) {
     TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "label prefix refused");
     f.host = "captive.apple.com";
     TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "captive probe host refused");
+    {
+        /* review LOW-2/3/4: edge cases */
+        static const struct { const char *host; const char *name; bool refused; const char *what; } k[] = {
+            {"kilnctl..lan", "kilnctl", true, "empty label refused"},
+            {"kilnctl.lan..", "kilnctl", true, "two trailing dots refused"},
+            {"kilnctl.", "kilnctl", false, "bare name with one trailing dot passes"},
+            {"kilnctl.lan:abc", "kilnctl", true, "non-numeric port refused"},
+            {"kilnctl.lan:", "kilnctl", true, "empty port refused"},
+            {":", "kilnctl", true, "bare colon refused"},
+            {".lan", "kilnctl", true, ".lan alone refused"},
+            {"kilnctl.lan", "", true, "empty name arg refuses names"},
+            {"kilnctl.lan", "KilnCtl", false, "mixed-case name arg matches"},
+            {"localhost.", "kilnctl", false, "localhost. passes (consistent trailing dot)"},
+            {"192.168.1.50.", "kilnctl", false, "IPv4 with trailing dot passes"},
+            {"192.168.1.50..", "kilnctl", true, "IPv4 two trailing dots refused"},
+            {"[::1]", "kilnctl", false, "IPv6 literal passes"},
+            {"[::ffff:192.168.1.1]:80", "kilnctl", false, "IPv4-mapped IPv6 passes"},
+            {"[kilnctl.attacker.com]", "kilnctl", true, "bracketed name refused"},
+            {"[::g]", "kilnctl", true, "bracketed non-hex refused"},
+            {"[]", "kilnctl", true, "empty brackets refused"},
+        };
+        for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+            f.host = k[i].host;
+            TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, k[i].name) == k[i].refused, k[i].what);
+        }
+        char h95[96], h96[97];
+        memcpy(h95, "kilnctl.lan", 11);
+        memset(h95 + 11, 'a', 95 - 11);
+        h95[95] = '\0';
+        memset(h96, 'a', 96);
+        h96[96] = '\0';
+        f.host = h95;
+        TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "95-byte unlisted host refused (fits buffer)");
+        f.host = h96;
+        TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "96-byte host refused (overlong)");
+    }
     f.host = NULL;
     TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "missing Host not refused here");
     {

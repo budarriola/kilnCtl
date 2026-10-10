@@ -86,11 +86,19 @@ bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
 static _Atomic uint32_t s_slot_gen[PROFILES_MAX_COUNT];
 /* False until profiles_http_start() finished the boot load/migration; every profile start is refused until then. */
 static _Atomic bool s_profiles_loaded;
+static _Atomic bool s_boot_loading; /* review LOW-9: boot load writes RAM slots unlocked; saves are refused meanwhile */
 
+bool profiles_http_loaded(void) { return atomic_load(&s_profiles_loaded); }
+#ifdef KILNCTL_PROFILES_LOADED_TEST_HOOK /* host test only; compiled out of the target (review LOW-7) */
 void profiles_http_test_set_loaded(bool v)
 {
     atomic_store(&s_profiles_loaded, v);
 }
+void profiles_http_test_set_boot_loading(bool v)
+{
+    atomic_store(&s_boot_loading, v);
+}
+#endif
 
 /* Ordering: both are seq_cst RMWs under the save lock; a reader must acquire-fence between its unlocked
  * copy and the generation recheck (profiles_http_slot_runnable_rev). */
@@ -1490,7 +1498,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
     hal_kv_close(&h);
     if (kv_err != HAL_OK) {
         s_profile_rev[id] = old_rev;
-            ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
+        ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
         return hal_status_to_esp_err(kv_err);
     }
 
@@ -1820,6 +1828,10 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
         snprintf(err_msg, err_cap, "busy: zone conversion running, retry");
         return false;
     }
+    if (atomic_load(&s_boot_loading)) { /* review LOW-9: a save would race the unlocked boot load writes */
+        snprintf(err_msg, err_cap, "busy: profiles still loading, retry");
+        return false;
+    }
     profiles_save_lock(); /* slot allocation, duplicate-name check, validate, assign and save: one section */
     uint8_t target_id;
     if (requested_id < PROFILES_MAX_COUNT) {
@@ -2117,6 +2129,7 @@ static esp_err_t profiles_boot_load_body(void)
  * profiles_http_slot_runnable() refuses until s_profiles_loaded is published. */
 static esp_err_t profiles_boot_load(void)
 {
+    atomic_store(&s_boot_loading, true);
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         profiles_slot_gen_begin(id);
     }
@@ -2124,6 +2137,7 @@ static esp_err_t profiles_boot_load(void)
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         profiles_slot_gen_end(id);
     }
+    atomic_store(&s_boot_loading, false);
     return r;
 }
 

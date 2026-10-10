@@ -305,7 +305,14 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
     }
     /* review LOW-3: the up window scales with poll_period_ms; the fixed SAFETY_LINK_STALE_MS bound the rest of
      * the firmware uses must also trigger the clear, so a slow-poll config cannot keep stale peer info. */
-    if (!safety_link_up_locked(link) || safety_link_is_stale(safety_age_ms_locked(link), SAFETY_LINK_STALE_MS)) {
+    uint32_t stale_bound = link->poll_period_ms * SAFETY_LINK_UP_PERIODS; /* review LOW-5: scale with the poll period */
+    if (stale_bound < (uint32_t)SAFETY_LINK_STALE_MS) {
+        stale_bound = (uint32_t)SAFETY_LINK_STALE_MS;
+    }
+    if (stale_bound > 0xFFFEu) {
+        stale_bound = 0xFFFEu;
+    }
+    if (!safety_link_up_locked(link) || safety_link_is_stale(safety_age_ms_locked(link), (uint16_t)stale_bound)) {
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;

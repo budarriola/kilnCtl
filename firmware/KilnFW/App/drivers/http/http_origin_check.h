@@ -207,18 +207,29 @@ static inline bool http_origin_host_name_allowed(const char *host, const char *m
     if (!http_origin_parse_authority_(host, &hp)) {
         return false;
     }
-    if (hp.host[0] == '[' || http_origin_host_is_ipv4_literal_(hp.host)) {
+    size_t hl = strlen(hp.host);
+    if (hp.host[0] == '[') {
+        // Bracketed IPv6 literal: only hex digits, colons and dots (IPv4-mapped) inside.
+        if (hl < 3 || hp.host[hl - 1] != ']') {
+            return false;
+        }
+        for (size_t i = 1; i + 1 < hl; i++) {
+            char ch = hp.host[i];
+            bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || ch == ':' || ch == '.';
+            if (!ok) {
+                return false;
+            }
+        }
         return true;
     }
-    if (strcmp(hp.host, "localhost") == 0) {
+    if (hl > 0 && hp.host[hl - 1] == '.') {
+        hp.host[--hl] = '\0'; // one trailing dot (FQDN form), for every non-bracketed form
+    }
+    if (http_origin_host_is_ipv4_literal_(hp.host) || strcmp(hp.host, "localhost") == 0) {
         return true;
     }
     if (mdns_name != NULL && mdns_name[0] != '\0') {
         size_t n = strlen(mdns_name);
-        size_t hl = strlen(hp.host);
-        if (hl > 0 && hp.host[hl - 1] == '.') {
-            hp.host[--hl] = '\0'; // one trailing dot (FQDN form)
-        }
         if (n <= hl && (hp.host[n] == '\0' || hp.host[n] == '.')) {
             for (size_t i = 0; i < n; i++) {
                 if (http_origin_lc_(mdns_name[i]) != hp.host[i]) {

@@ -375,6 +375,7 @@ uint32_t profiles_http_slot_rev(uint8_t id)
     }
     return r;
 }
+bool profiles_http_loaded(void) { return true; }
 bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
 {
     return profiles_http_slot_runnable(id) && captured_rev == s_test_slot_rev;

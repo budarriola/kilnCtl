@@ -1987,6 +1987,25 @@ static void test_stale_reset_clears_flags_once_link_is_observed_down(void)
                                          "'known' flag is -- nothing reads it while known is false");
 }
 
+static void test_stale_reset_slow_poll_one_missed_reply_keeps_boot_id(void)
+{
+    TEST_SECTION("safety_reset_stale_peer_info_if_link_down -- review LOW-5: with a 1000 ms poll period one "
+                 "missed reply (age ~1600 ms, inside the 3*P up window) must NOT clear pico_boot_id_known");
+    SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.poll_period_ms = 1000u;
+    link.cached_tick = (uint32_t)(0u - 1600u / portTICK_PERIOD_MS); // stub clock is 0: elapsed ~1600 ms
+    link.peer_version_known = true;
+    link.pico_boot_id_known = true;
+    link.peer_build_known = true;
+    TEST_CHECK(safety_age_ms_locked(&link) > 1500u && safety_age_ms_locked(&link) < 1700u, "setup: age ~1600 ms");
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == true, "slow poll, link up: boot id kept");
+    link.poll_period_ms = 500u;
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == false, "500 ms poll, same age: link down, cleared");
+}
+
 static void test_stale_reset_never_received_is_also_down(void)
 {
     TEST_SECTION("safety_reset_stale_peer_info_if_link_down -- a link that has NEVER received "
@@ -3274,6 +3293,7 @@ int main(void)
     test_get_stack_margin_survives_a_leading_unrelated_frame();
     test_stale_reset_leaves_flags_alone_while_link_is_up();
     test_stale_reset_clears_flags_once_link_is_observed_down();
+    test_stale_reset_slow_poll_one_missed_reply_keeps_boot_id();
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();

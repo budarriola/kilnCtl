@@ -5062,6 +5062,14 @@ static void test_profiles_refused_until_boot_load_done(void)
     (void)profiles_http_start();
     TEST_CHECK(profiles_http_slot_runnable(4), "profiles_http_start publishes loaded after the boot load");
     TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u, "boot load bracket leaves the generation even");
+    /* review LOW-9: a save while the boot load runs is refused busy (409), nothing written */
+    profiles_http_test_set_boot_loading(true);
+    uint32_t rev_before = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)) && strncmp(err, "busy:", 5) == 0,
+               "save refused busy during boot load");
+    TEST_CHECK(profiles_http_slot_rev(4) == rev_before, "refused save did not touch the slot");
+    profiles_http_test_set_boot_loading(false);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "save works again after boot load");
 }
 
 void run_test_profiles_http(void)

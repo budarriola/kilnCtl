@@ -540,6 +540,10 @@ esp_err_t wifi_prov_start(void)
         ESP_LOGE(WIFI_PROV_TAG, "esp_netif_create_default_wifi_* failed");
         return ESP_FAIL;
     }
+    /* DHCP hostname = the mDNS name (main_boot_early.c "kilnctl", fixed for the life of the
+     * boot), set before the STA DHCP client starts so router DNS registers <name>.lan instead
+     * of ESP-IDF's default "espressif". The Host allow-list (http_origin_check.h) relies on it. */
+    (void)esp_netif_set_hostname(s_wifi.sta_netif, "kilnctl");
 
     wifi_init_config_t init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&init_cfg);

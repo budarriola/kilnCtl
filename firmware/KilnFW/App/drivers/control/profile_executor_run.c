@@ -459,7 +459,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * s_exec.lock (order: flash worker -> save lock -> s_exec.lock). */
     if (!profiles_http_slot_runnable_rev(profile_id, slot_rev)) {
         xSemaphoreGive(s_exec.lock);
-        if (err_msg) snprintf(err_msg, err_cap, "profile is being deleted, was deleted or was re-saved -- not started");
+        if (err_msg) {
+            snprintf(err_msg, err_cap, profiles_http_loaded()
+                         ? "profile is being deleted, was deleted or was re-saved -- not started"
+                         : "profiles still loading -- not started, retry in a moment");
+        }
         return false;
     }
 
