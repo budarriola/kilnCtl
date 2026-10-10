@@ -324,10 +324,12 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                  * thermal_guard_cfg_t.progress_band_c. */
                 float band_c = effective_f(cfg->progress_band_c, PROGRESS_BAND_C);
                 bool climbing = (error > band_c);
-                float window_s = effective_f(cfg->wrong_dir_window_s,
-                                              climbing
-                                                  ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
-                                                  : WRONG_DIR_WINDOW_S);
+                /* Review F3: on the climbing branch an explicit progress_window_s wins over
+                 * wrong_dir_window_s; wrong_dir_window_s is the fallback, then the default. */
+                float window_s = climbing
+                                     ? effective_f(cfg->progress_window_s,
+                                                   effective_f(cfg->wrong_dir_window_s, PROGRESS_WINDOW_S))
+                                     : effective_f(cfg->wrong_dir_window_s, WRONG_DIR_WINDOW_S);
                 /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_
                  * trip_2026-09-10.md): wrong_dir_window_s is sized for
                  * guard 2's falling-while-heating case and can be

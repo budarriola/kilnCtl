@@ -34,8 +34,35 @@ void apply_relay(uint8_t zi, bool want_on)
         /* Firing review item 4: an unreadable mask must still drive OFF --
          * fall back to every mask this run has claimed, and keep retrying. */
         s_exec.zones[zi].relay_commanded_on = false;
+        /* Review F4: drive OFF only the claimed relays that could be THIS zone's:
+         * drop other zones' readable masks and every aux relay this run still
+         * drives, so a fault here does not chatter relays that should be ON. */
         uint8_t fb = s_exec.claimed_relay_mask;
-        if (fb != 0 && s_exec.io) {
+        for (uint8_t oz = 0; oz < MAX31856_CHANNEL_COUNT; oz++) {
+            uint8_t om = 0;
+            if (oz != zi && zones_config_get_relay_mask(oz, &om)) {
+                fb &= (uint8_t)~om;
+            }
+        }
+        fb &= (uint8_t)~s_exec.aux_claim_mask;
+        for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
+            if (s_exec.aux[ai].commanded_on || s_exec.aux[ai].actuated_on) {
+                fb &= (uint8_t)~(1u << ai);
+            }
+        }
+        static bool s_fb_logged;
+        if (!s_fb_logged) {
+            ESP_LOGE(PE_TAG, "zone %u relay mask unreadable -- fallback OFF mask 0x%02X (claimed 0x%02X)",
+                     (unsigned)zi, (unsigned)fb, (unsigned)s_exec.claimed_relay_mask);
+            s_fb_logged = true;
+        }
+        if (fb == 0) {
+            /* Nothing this run claimed can be attributed to this zone, so there is
+             * nothing to write and nothing to mark pending: refuse (relay stays
+             * uncommanded). Logged above; heat is never turned ON on this path. */
+            return;
+        }
+        if (s_exec.io) {
             esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(fb, 0);
             if (off_err == ESP_OK) {
                 relay_off_tracker_note_write(fb, 0);
@@ -489,6 +516,21 @@ void zone_off_pending_retry(void)
     uint8_t mask = s_exec.zone_off_pending_mask;
     if (mask == 0 || !s_exec.io) {
         return;
+    }
+    if (s_exec.state != PROFILE_EXEC_PAUSED) {
+        /* Review F4: once the run has ended another owner (manual, autotune, rule)
+         * may hold a relay; never write to it, just forget the bit. */
+        for (uint8_t b = 0; b < 8; b++) {
+            if (!(mask & (1u << b))) continue;
+            relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+            if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+                mask &= (uint8_t)~(1u << b);
+                s_exec.zone_off_pending_mask &= (uint8_t)~(1u << b);
+            }
+        }
+        if (mask == 0) {
+            return;
+        }
     }
     esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
     if (off_err == ESP_OK) {

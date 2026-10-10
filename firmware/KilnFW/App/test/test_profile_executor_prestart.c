@@ -122,11 +122,15 @@ static void test_task_delay_hook(TickType_t ticks)
 // translation unit must still link.
 // ---------------------------------------------------------------------------
 
+static int g_pe_seq = 0;                 /* call-order spy shared by the two stubs below */
+static int g_seq_all_relays_off = 0;
+static int g_seq_set_fault_source = 0;
 static int g_kiln_io_all_relays_off_calls = 0;
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
 {
     (void)io;
     g_kiln_io_all_relays_off_calls++;
+    g_seq_all_relays_off = ++g_pe_seq;
     return ESP_OK;
 }
 
@@ -479,6 +483,12 @@ void relay_authority_claim_mask(uint8_t relay_mask, relay_owner_t owner)
     g_last_claim_owner = owner;
 }
 
+static relay_owner_t g_stub_relay_owner[9]; /* index = 1-based relay number; default RELAY_OWNER_NONE */
+relay_owner_t relay_authority_get_owner(uint8_t relay_index)
+{
+    return relay_index < 9 ? g_stub_relay_owner[relay_index] : RELAY_OWNER_NONE;
+}
+
 void relay_authority_release_mask(uint8_t relay_mask)
 {
     g_relay_release_calls++;
@@ -674,6 +684,7 @@ esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_ma
 {
     (void)link;
     g_set_fault_source_calls++;
+    g_seq_set_fault_source = ++g_pe_seq;
     g_last_fault_source_mask = source_mask;
     g_last_fault_source_assert = assert_fault;
     return ESP_OK;
@@ -2312,6 +2323,7 @@ static void test_guard9_fault_source_cleared_on_halt(void)
 
 static void test_relay_state_unknown_is_a_fault(void);
 static void test_guard9_watchdog_source_order(void);
+static void test_guard9_pending_verdict_survives_lock_timeout(void);
 static void test_heat_acquire_result_not_discarded(void);
 static void test_zone_off_pending_retry(void);
 
@@ -12067,6 +12079,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fires_while_another_task_holds_exec_lock();
     test_relay_state_unknown_is_a_fault();
     test_guard9_watchdog_source_order();
+    test_guard9_pending_verdict_survives_lock_timeout();
     test_heat_acquire_result_not_discarded();
     test_zone_off_pending_retry();
     test_profile_zones_have_ceiling_refuses_on_zero();
@@ -12833,25 +12846,55 @@ static void test_thermo_channels_read_fault_filter(void)
     reset_test_thermo_readings();
 }
 
+/* Review F1/F2: behavioural guard-9 pass tests (replace the old source-order scan). */
 static void test_guard9_watchdog_source_order(void)
 {
-    TEST_SECTION("watchdog_task_entry() -- guard9_prelock_check precedes the lock and the lock take is bounded");
-    char *text = profile_executor_c_read_source();
-    if (!text) { TEST_CHECK(false, "could not read profile_executor.c"); return; }
-    char *code = pe_strip_c_comments(text);
-    free(text);
-    if (!code) { TEST_CHECK(false, "malloc failed"); return; }
-    const char *b = strstr(code, "void watchdog_task_entry(void *arg)");
-    TEST_CHECK(b != NULL, "watchdog body found");
-    if (b) {
-        const char *pre = strstr(b, "guard9_prelock_check(&since_ms)");
-        const char *take = strstr(b, "guard9_take_lock_bounded()");
-        TEST_CHECK(pre && take && pre < take, "MUST GO RED if the lock is taken before the lock-free stale check");
-        TEST_CHECK(strstr(b, "xSemaphoreTake(s_exec.lock, portMAX_DELAY)") == NULL ||
-                       strstr(b, "xSemaphoreTake(s_exec.lock, portMAX_DELAY)") > strstr(b, "heat_enable_reconcile();"),
-                   "the watchdog must not block forever on s_exec.lock before the stale check");
-    }
-    free(code);
+    TEST_SECTION("guard 9 -- APP fault source is asserted BEFORE the relay cut (F2)");
+    reset_relay_claim_test_state();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    g_seq_all_relays_off = g_seq_set_fault_source = 0;
+    TEST_CHECK(guard9_prelock_check(NULL), "stale");
+    TEST_CHECK(g_seq_set_fault_source > 0 && g_seq_all_relays_off > 0 && g_seq_set_fault_source < g_seq_all_relays_off,
+               "fault source asserted before the relays are cut");
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+}
+
+static void test_guard9_pending_verdict_survives_lock_timeout(void)
+{
+    TEST_SECTION("guard 9 F1 -- stale pass whose lock take times out, then the tick recovers: next pass still FAULTS the run");
+    reset_relay_claim_test_state();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+    /* Pass 1: stale, lock not obtainable -> loop would `continue`. */
+    s_exec.last_tick_tick = (TickType_t)(0u - (TickType_t)pdMS_TO_TICKS(WATCHDOG_TICK_DEAD_MS + 5000u));
+    uint32_t since1 = 0;
+    bool stale1 = guard9_prelock_check(&since1);
+    TEST_CHECK(stale1 && s_guard9_bookkeeping_pending, "pass 1 stale, verdict pending");
+    /* Pass 2: control task recovered -> fresh tick, lock obtained. */
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    uint32_t since2 = 0;
+    bool stale2 = guard9_prelock_check(&since2);
+    TEST_CHECK(!stale2, "pass 2 sees a fresh tick");
+    uint32_t ms = since2;
+    bool merged = guard9_merge_pending(stale2, since2, &ms);
+    TEST_CHECK(merged && ms >= WATCHDOG_TICK_DEAD_MS, "pending verdict and its age carry into pass 2");
+    TEST_CHECK(!s_guard9_bookkeeping_pending, "pending consumed");
+    profile_executor_wd_input_t in;
+    memset(&in, 0, sizeof(in));
+    in.tick_stale = merged;
+    in.tick_stale_ms = ms;
+    in.state_running_or_paused = true;
+    profile_executor_wd_result_t out = profile_executor_wd_decide(&in);
+    TEST_CHECK(out.action == PROFILE_EXECUTOR_WD_ACTION_FAULT, "run is classified FAULTED");
+    /* No pending and fresh: nothing carried. */
+    uint32_t ms3 = 0;
+    TEST_CHECK(!guard9_merge_pending(false, 5, &ms3) && ms3 == 5, "no pending verdict: fresh pass stays fresh");
 }
 
 /* Firing review 2026-10-09 item 7: start and resume both act on (log) a failed heat request. */
@@ -12990,6 +13033,41 @@ static void test_zone_off_pending_retry(void)
     g_relay_write_fail = false;
     TEST_CHECK(s_exec.zone_off_pending_mask == 0x02, "failed fallback OFF must be pending too");
     s_exec.io = NULL;
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Review F4: fallback excludes other zones' readable masks and live aux relays. */
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    g_stub_relay_mask[1] = 0x01; /* zone 1 owns relay 1 (readable) */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x0F;
+    s_exec.aux_claim_mask = 0x08;
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    apply_relay(0, true); /* zone 0 unreadable */
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x06 && g_last_relay_write_value == 0,
+               "fallback OFF mask excludes zone 1's relay (0x01) and the live aux relay (0x08)");
+    /* Nothing attributable: refuse, write nothing, mark nothing pending. */
+    s_exec.claimed_relay_mask = 0x01;
+    g_relay_write_calls = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 0 && s_exec.zone_off_pending_mask == 0 && !s_exec.zones[0].relay_commanded_on,
+               "empty fallback mask: refuse, never ON, no write");
+    s_exec.claimed_relay_mask = 0;
+    apply_relay(0, true);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.zones[0].relay_commanded_on, "no claim at all: refuse");
+
+    /* Review F4: after the run ended a relay now owned by someone else is not written. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.zone_off_pending_mask = 0x03;
+    g_stub_relay_owner[2] = RELAY_OWNER_MANUAL; /* relay 2 = bit 0x02 */
+    g_relay_write_calls = 0;
+    zone_off_pending_retry();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x01 && s_exec.zone_off_pending_mask == 0,
+               "retry skips (and forgets) the relay another owner took, still opens ours");
+    g_stub_relay_owner[2] = RELAY_OWNER_NONE;
     memset(&s_exec, 0, sizeof(s_exec));
 
     /* The tick loop must actually call the retry, in the not-RUNNING branch. */

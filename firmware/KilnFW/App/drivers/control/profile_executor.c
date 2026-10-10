@@ -2118,12 +2118,14 @@ void executor_task_entry(void *arg)
 /* Set by guard9_prelock_check() when it cut heat, cleared once the locked
  * bookkeeping (global_fault_source OR) has run. */
 static volatile bool s_guard9_bookkeeping_pending = false;
+/* Age (ms) the stale tick had when guard9_prelock_check() set the pending flag. */
+static volatile uint32_t s_guard9_pending_since_ms = 0;
 
 /* Guard 9, lock-free half (audit 2026-10-09 item 1). Reads the control task's
  * liveness tick without s_exec.lock (single 32-bit writer, volatile field;
  * nothing else is derived from it so no ordering is needed). On stale it
- * forces relays off through kiln_io (own owner-task serialisation) and
- * asserts SAFETY_FAULT_SRC_APP on the safety link (own lock), all without
+ * asserts SAFETY_FAULT_SRC_APP on the safety link (own lock) and then forces
+ * relays off through kiln_io (direct SX1509 write), all without
  * s_exec.lock. Returns true when stale; *since_ms_out gets the age. */
 static bool guard9_prelock_check(uint32_t *since_ms_out)
 {
@@ -2135,16 +2137,40 @@ static bool guard9_prelock_check(uint32_t *since_ms_out)
     }
     ESP_LOGE(PE_TAG, "guard 9: control tick stale for %lums -- cutting heat before taking s_exec.lock",
              (unsigned long)since_ms);
+    /* Review F2: assert the APP fault source FIRST so relay_authority blocks any
+     * re-assertion of ON, then cut. kiln_io_all_relays_off() writes the SX1509
+     * directly from this task (chip access is locked inside
+     * sx1509_write_port_locked); it is not serialised through the owner task. */
+    if (s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+    }
     if (s_exec.io) {
         kiln_io_all_relays_off(s_exec.io);
     }
     /* io_segs_force_all_off() mutates s_exec and needs the lock; it runs in
      * the locked half. */
-    if (s_exec.safety) {
-        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+    if (!s_guard9_bookkeeping_pending || since_ms > s_guard9_pending_since_ms) {
+        s_guard9_pending_since_ms = since_ms;
     }
     s_guard9_bookkeeping_pending = true;
     return true;
+}
+
+/* Review fix F1: folds a verdict latched by an earlier pass (whose bounded lock
+ * take timed out) into this pass's fresh one, so a control task that recovers
+ * before the next pass still gets the run classified (FAULTED) instead of only
+ * having relays cut. Call with s_exec.lock held; consumes the pending flag. */
+static bool guard9_merge_pending(bool tick_stale, uint32_t since_ms, uint32_t *since_ms_out)
+{
+    bool pending = s_guard9_bookkeeping_pending;
+    uint32_t ms = since_ms;
+    if (pending && (!tick_stale || s_guard9_pending_since_ms > ms)) {
+        ms = s_guard9_pending_since_ms;
+    }
+    s_guard9_bookkeeping_pending = false;
+    s_guard9_pending_since_ms = 0;
+    if (since_ms_out) *since_ms_out = ms;
+    return tick_stale || pending;
 }
 
 /* K7 MED-1: relay_state_unknown (an ON write landed and the bus then died, or
@@ -2312,7 +2338,9 @@ void watchdog_task_entry(void *arg)
         }
 
         relay_unknown_release_locked();
-        if (tick_stale || s_guard9_bookkeeping_pending) {
+        /* F1: carry a verdict latched on an earlier lock-timeout pass. */
+        tick_stale = guard9_merge_pending(tick_stale, since_ms, &since_ms);
+        if (tick_stale) {
             /* The relay cut itself already happened in guard9_prelock_check();
              * repeated here under the lock as a cheap idempotent retry (the
              * profile_executor_wd_decide() below classifies the STATE, this
@@ -2326,7 +2354,6 @@ void watchdog_task_entry(void *arg)
             }
             io_segs_force_all_off(false);
             guard9_assert_stale_tick_fault();
-            s_guard9_bookkeeping_pending = false;
         }
 
         /* profile_executor_wd_decide() (profile_executor.h) is the pure

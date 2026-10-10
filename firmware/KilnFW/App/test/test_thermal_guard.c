@@ -607,21 +607,30 @@ void run_test_thermal_guard(void)
         TEST_CHECK(trip_tick >= 11 && trip_tick <= 13, detail);
     }
 
-    /* Item 6, same scenario with an explicit progress_window_s: the operator's own value is honoured. */
+    /* Item 6 / review F3: distinct values tell WHICH window guard 1's climbing branch used. */
     {
-        thermal_guard_state_t s;
-        thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f,
-                                    .wrong_dir_window_s = 60.0f, .progress_window_s = 60.0f};
-        thermal_guard_reset(&s);
-        thermal_guard_input_t in = base_input();
-        in.setpoint_c = 500.0f;
-        in.measurement_c = 20.0f;
-        in.commanded_duty = 1.0f;
-        int trip_tick = -1;
-        for (int i = 0; i < 40; i++) {
-            if (thermal_guard_tick(&s, &cfg, &in)) { trip_tick = i; break; }
+        const float wd[2] = {60.0f, 300.0f};
+        const float pw[2] = {300.0f, 60.0f};
+        const int lo[2] = {28, 4};
+        const int hi[2] = {32, 7};
+        for (int c = 0; c < 2; c++) {
+            thermal_guard_state_t s;
+            thermal_guard_cfg_t cfg = {.max_temp_c = 1300.0f, .min_temp_c = -20.0f, .sanity_rate_c_per_min = 10.0f,
+                                        .wrong_dir_window_s = wd[c], .progress_window_s = pw[c]};
+            thermal_guard_reset(&s);
+            thermal_guard_input_t in = base_input();
+            in.setpoint_c = 500.0f;
+            in.measurement_c = 20.0f;
+            in.commanded_duty = 1.0f;
+            int trip_tick = -1;
+            for (int i = 0; i < 60; i++) {
+                if (thermal_guard_tick(&s, &cfg, &in)) { trip_tick = i; break; }
+            }
+            char msg[160];
+            snprintf(msg, sizeof(msg), "wrong_dir=%.0f progress=%.0f: explicit progress_window_s wins on the climbing "
+                     "branch (tripped at tick %d, expected %d..%d)", wd[c], pw[c], trip_tick, lo[c], hi[c]);
+            TEST_CHECK(trip_tick >= lo[c] && trip_tick <= hi[c], msg);
         }
-        TEST_CHECK(trip_tick >= 0 && trip_tick <= 6, "an explicit progress_window_s=60 is not floored by the no-model rule");
     }
 
     /* Same scenario, but with wrong_dir_window_s left at 0 ("not configured")

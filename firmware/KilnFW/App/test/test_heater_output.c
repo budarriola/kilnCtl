@@ -469,19 +469,12 @@ void run_test_heater_output(void)
         TEST_CHECK(r == false && s.on_ms_this_window == 0, "-inf duty renders OFF");
         heater_output_reset(&s);
         r = heater_output_duty(&s, &cfg, INFINITY, 0);
-        TEST_CHECK(r == true && s.on_ms_this_window == 60000, "+inf duty clamps to a full window");
-    }
-    /* (float)NaN * window cast to an integer is undefined; host and target may disagree, so also pin the
-     * positive-form clamp in the source. */
-    {
-        static const char *const cands[] = {"../drivers/control/heater_output.c", "App/drivers/control/heater_output.c",
-                                            "firmware/KilnFW/App/drivers/control/heater_output.c"};
-        char *text = test_read_source_anchored(__FILE__, "../drivers/control/heater_output.c", cands, 3);
-        TEST_CHECK(text != NULL, "could locate heater_output.c");
-        if (text) {
-            TEST_CHECK(strstr(text, "if (!(duty > 0.0f)) {") != NULL,
-                       "MUST GO RED if the NaN-safe positive-form duty clamp is reverted");
-            free(text);
-        }
+        TEST_CHECK(r == false && s.on_ms_this_window == 0, "+inf duty is non-finite, so OFF (review item 5 follow-up)");
+        heater_output_reset(&s);
+        r = heater_output_duty(&s, &cfg, 1.0f, 0);
+        TEST_CHECK(r == true && s.on_ms_this_window == 60000, "finite duty 1.0 is still a full window");
+        heater_output_reset(&s);
+        r = heater_output_duty(&s, &cfg, 7.5f, 0);
+        TEST_CHECK(r == true && s.on_ms_this_window == 60000, "finite over-range duty still clamps to a full window");
     }
 }

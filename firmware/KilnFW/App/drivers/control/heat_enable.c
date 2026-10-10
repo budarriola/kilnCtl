@@ -741,9 +741,9 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                  (unsigned)boot_reason);
     }
     if (log_benign) {
-        /* TODO(owner decision, safety-link review MED-1): whether a benign
-         * reboot (power-on / unknown) may silently restore heat mid-firing is
-         * still open. Today it does: F1 re-requests once the Pico is ARMED. */
+        /* Owner decision 2026-10-10: a benign Pico reboot (power-on / unknown
+         * cause) mid-firing auto-resumes heat -- F1 re-requests once the Pico is
+         * ARMED. A fatal cause (handled above) pauses instead. */
         ESP_LOGW(TAG, "Pico rebooted during a heat claim (benign cause) -- F1 will re-request heat");
     }
 }

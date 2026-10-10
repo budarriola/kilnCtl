@@ -46,8 +46,8 @@ stack depth (MED-4).
 - Suggested direction: across a Pico boot_id change, do not re-request when DIAG
   `boot_reason` carries the watchdog or fatal bits (watchdog, stack overflow,
   malloc failed, assert). Fault the run instead, or require an operator action.
-  **Owner decision needed:** is "a benign Pico reboot restores heat mid-firing"
-  intended for every reboot cause? (`bench_pico_reboot_midfiring.py` E4 only
+  **Owner decision 2026-10-10:** a benign Pico reboot restores heat mid-firing
+  (current behaviour); fatal causes pause. (Question was: is it intended for every reboot cause?) (`bench_pico_reboot_midfiring.py` E4 only
   requires the firing to stay RUNNING.)
 
 ### MED-2 (F1): a grant that cannot be obtained stays invisible to the run
@@ -324,9 +324,10 @@ Opus-review follow-up commit (see git log).
   boot_reason bit (WATCHDOG, BROWNOUT, STACK_OVERFLOW, MALLOC_FAILED, ASSERT_FAILED)
   withdraws the grant and holds the firing paused (`pause_reason` `pico_fatal_reboot` in
   `/api/profile_exec`) with K4 open. There is no timeout fallback: an undecided cause
-  withholds heat, and a late fatal DIAG still holds. OPEN OWNER DECISION: whether a benign
-  reboot (POWERON/unknown) may silently restore heat mid-firing; `heat_enable.c` carries
-  a TODO and keeps the F1 re-request for now.
+  withholds heat, and a late fatal DIAG still holds. OWNER DECISION 2026-10-10: a benign
+  reboot (POWERON/unknown) auto-resumes heat mid-firing (F1 re-request, current
+  behaviour); fatal causes pause. F6 stays deferred to the next protocol bump that
+  is needed for another reason.
 - MED-2 FIXED: an unconfirmed grant pauses with `heat_grant_unconfirmed`.
 - MED-3 FIXED. MED-4 FIXED: `profile_exec_wdt` stack 4096 to 6144; static walk 2736 B,
   ceiling re-pinned 2720 to 2736 (static walk, not a live high-water mark; a bench
