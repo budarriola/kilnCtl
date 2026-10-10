@@ -46,7 +46,7 @@ stale, or a legitimate command sequence whose state goes out of step.
 
 ## Findings
 
-### M1. Pico boot_id is an 8-bit time sample, yet the ESP relies on it for reboot detection (reset-one-side) -- FIXED in f94ba9cf
+### M1. Pico boot_id is an 8-bit time sample, yet the ESP relies on it for reboot detection (reset-one-side) -- FIXED in bcc75d61
 
 - Fix: `boot_id` now folds `get_rand_32()` (ROSC, unique id and time), so
   consecutive boots no longer repeat it by construction. The 8-bit id still
@@ -174,7 +174,7 @@ stale, or a legitimate command sequence whose state goes out of step.
   argument at lines 1326-1339 does not apply to it), or add a
   DISCARD_STAGED command that the ESP sends before each staging session.
 
-### M4. CLEAR_TRIP is not bound to a specific trip occurrence; a duplicated or stale frame can clear a later trip with the same reason -- FIXED in 0f1ef130, 0f5f222d
+### M4. CLEAR_TRIP is not bound to a specific trip occurrence; a duplicated or stale frame can clear a later trip with the same reason -- FIXED in c2b151b5, 5ade853b
 
 - Fix: kilnlink 16 -> 17, compatible (`KILNLINK_MIN_COMPATIBLE` stays 7).
   DIAG gains optional byte30 `trip_seq` (31 bytes), sent only to a peer whose
@@ -222,7 +222,7 @@ stale, or a legitimate command sequence whose state goes out of step.
   CLEAR_TRIP and refuse a mismatch on the Pico. This is a protocol version
   bump.
 
-### L1. S6b link liveness accepts any CRC-valid frame, including the Pico's own echoed output -- FIXED in 225bc354
+### L1. S6b link liveness accepts any CRC-valid frame, including the Pico's own echoed output -- FIXED in 59b0d6af
 
 - Fix: the liveness refresh (and dispatch) in
   `link_task_handle_raw_frame()` now requires `src_device == ESP (0)` and
@@ -248,7 +248,7 @@ stale, or a legitimate command sequence whose state goes out of step.
 - Suggested fix: refresh liveness only for frames whose `src_device` is the
   ESP and whose opcode the Pico dispatches.
 
-### L2. SET_CT_CAL / SET_PARAM accept any finite ct_cal gain or offset; gain 0 blinds the S14 over-current WARN -- FIXED in 1bc2bbdb
+### L2. SET_CT_CAL / SET_PARAM accept any finite ct_cal gain or offset; gain 0 blinds the S14 over-current WARN -- FIXED in 50d2826b
 
 - Fix: SET_PARAM 0x0310-0x0315 bounds ct_cal gain to [0, 10] and offset to
   |x| <= 50 A (finite). `config_params_validate_ex()` (COMMIT/APPLY) refuses a
