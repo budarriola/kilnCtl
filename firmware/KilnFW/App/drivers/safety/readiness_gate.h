@@ -122,6 +122,10 @@ typedef enum {
  * agreement check greps readiness_http.c's append_item() calls for exactly
  * these, so an item renamed on one side and not the other fails the repo
  * checks rather than silently un-gating a firing. */
+/* Buffer size that holds the longest refusal text readiness_gate_evaluate() can emit untruncated
+ * (167 chars today; test_readiness_gate.c asserts every message fits). */
+#define READINESS_GATE_MSG_CAP 192
+
 #define READINESS_GATE_KEY_RECOVERY_MODE "recovery_mode"
 #define READINESS_GATE_KEY_SAFETY_TRIP   "safety_trip"
 #define READINESS_GATE_KEY_CRASH_REPORT  "crash_report"

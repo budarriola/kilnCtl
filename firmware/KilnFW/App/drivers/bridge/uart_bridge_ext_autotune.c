@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 
 #include "autotune_engine.h"
+#include "readiness_gate.h"
 #include "uart_task_ids.h"
 
 /* ==========================================================================
@@ -136,7 +137,7 @@ static void autotune_handle_message(void *vargs)
                 float relay_h = uart_bridge_ext_f32_le(&msg.payload[11]);
                 uint8_t rule_byte = msg.payload[15];
 
-                char err_msg[96] = "";
+                char err_msg[READINESS_GATE_MSG_CAP] = "";
                 bool ok;
                 if (method == AUTOTUNE_METHOD_WIRE_RELAY) {
                     autotune_rule_t rule = (rule_byte == AUTOTUNE_RULE_WIRE_ZN) ? AUTOTUNE_RULE_ZIEGLER_NICHOLS

@@ -493,7 +493,7 @@ static void test_messages_are_json_safe(void)
         case READINESS_GATE_BLOCK_CT_LEAK_ALARM: s_fake_facts.ct_leak_alarm_active = true; break;
         default: s_fake_facts.estop_verified = false; break;
         }
-        char msg[192];
+        char msg[READINESS_GATE_MSG_CAP];
         memset(msg, 0, sizeof(msg));
         readiness_gate_block_t which = readiness_gate_evaluate(&s_fake_facts, msg, sizeof(msg));
         TEST_CHECK(which == all[i], "precondition: the intended item is the one that blocked");
@@ -502,6 +502,8 @@ static void test_messages_are_json_safe(void)
         /* 191 chars + NUL is the most dashboard_exec_http.c's recovery_err[192]
          * can carry; a message longer than that would be silently truncated
          * mid-sentence in the operator's refusal. */
+        TEST_CHECK(strlen(msg) < sizeof(msg) - 1,
+                   "the message is not truncated by READINESS_GATE_MSG_CAP, the buffer the autotune start paths use");
         TEST_CHECK(strlen(msg) < 191, "the message fits the HTTP handler's 192-byte refusal buffer");
         TEST_CHECK(readiness_gate_item_key(which) != NULL, "the blocking item maps to an /api/readiness key");
     }

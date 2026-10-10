@@ -216,8 +216,9 @@ static __attribute__((noinline)) esp_err_t autotune_send_gate_refusal(httpd_req_
 
 static __attribute__((noinline)) esp_err_t autotune_send_run_failure(httpd_req_t *req, const char *err_msg)
 {
-    char json[192];
-    char err_escaped[128 * 2 + 1];
+    /* Longest readiness_gate refusal text is 167 chars (+NUL); sized so none is cut. */
+    char json[320];
+    char err_escaped[256];
     json_escape(err_msg, err_escaped, sizeof(err_escaped));
     int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
     httpd_resp_set_status(req, "400 Bad Request");
@@ -334,7 +335,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
      * engine's own refusals do, rather than httpd_resp_send_err()'s HTML: the
      * page parses this response as JSON and shows `error` verbatim, so an
      * error sent the other way would reach the operator as a silent failure. */
-    char err_msg[128] = "";
+    char err_msg[READINESS_GATE_MSG_CAP] = "";
     bool params_ok = true;
     bool started = false;
     bool want_relay = false;
