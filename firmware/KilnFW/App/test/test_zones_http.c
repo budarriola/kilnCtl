@@ -3449,6 +3449,25 @@ static void ssp_capture_zones_ram(void)
     memcpy(s_ssp_name_at_enter, s_relay_names.cfg.names[2], sizeof(s_ssp_name_at_enter));
     s_ssp_normal_at_enter = s_zone_normals.cfg.normal_current_a[0];
 }
+static bool s_zrf_mark = false;
+static bool zrf_hook(void) { return s_zrf_mark; }
+static void test_zones_saves_refuse_under_reset_mark(void)
+{
+    TEST_SECTION("zones saves -- nvs_save, relay names and zone normals refuse under the save lock while the reset mark is set");
+    nvs_test_enable(true);
+    nvs_test_clear();
+    pref_cfg_fs_set_reset_refuse_hook(zrf_hook);
+    s_zrf_mark = true;
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "nvs_save refuses");
+    TEST_CHECK(relay_names_save() == ESP_ERR_INVALID_STATE, "relay_names_save refuses");
+    TEST_CHECK(!zone_normals_set(0, 7.5f), "zone_normals_set refuses (save refused)");
+    s_zrf_mark = false;
+    TEST_CHECK(nvs_save() == ESP_OK, "nvs_save works again once the mark clears");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    nvs_test_enable(false);
+    nvs_test_clear();
+}
+
 static void test_zones_saves_run_in_save_section(void)
 {
     TEST_SECTION("zones saves -- worker reserved around the save mutex; setters edit RAM inside it (MED-1)");
@@ -16839,6 +16858,7 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_restore_in_flight_refused_early();
     test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();
     test_zones_current_sweep_start_refused_when_factory_reset_in_flight();
+    test_zones_saves_refuse_under_reset_mark();
     test_zones_config_set_coupling_cell_refused_during_factory_reset();
 
     test_reconcile_on_link_up_null_link_is_a_noop();

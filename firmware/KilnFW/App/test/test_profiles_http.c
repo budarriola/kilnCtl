@@ -1936,6 +1936,23 @@ static bool fav_nvs_has_keys(void)
     return any;
 }
 
+static bool s_prf_mark = false;
+static bool prf_hook(void) { return s_prf_mark; }
+static void test_profiles_saves_refuse_under_reset_mark(void)
+{
+    TEST_SECTION("nvs_save_slot and profiles_favorites_set -- refused under the save lock while the reset mark is set");
+    nvs_stub_reset();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_set(&s_profiles.used_bitmap, 3);
+    pref_cfg_fs_set_reset_refuse_hook(prf_hook);
+    s_prf_mark = true;
+    TEST_CHECK(nvs_save_slot(3) == ESP_ERR_INVALID_STATE, "nvs_save_slot refuses");
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_ERR_INVALID_STATE, "profiles_favorites_set refuses");
+    TEST_CHECK(!fav_file_exists(), "no favorites file written");
+    s_prf_mark = false;
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+}
+
 static void test_favorites_cfg_only_storage(void)
 {
     TEST_SECTION("profiles_favorites -- cfg file only; a save never writes the legacy NVS keys");
@@ -4810,6 +4827,7 @@ void run_test_profiles_http(void)
     test_pcfg_junk_rev_repair_refuses_on_external_ram_stack();
     test_pcfg_boot_fallback_keeps_rev_unknown_marks();
     test_save_mutex_serializes_rev_write_bump();
+    test_profiles_saves_refuse_under_reset_mark();
     test_profiles_save_reserves_flash_worker();
     test_delete_paths_hold_save_lock_at_erase_seam();
     test_pcfg_junk_repair_load_error_fails_closed();

@@ -309,6 +309,23 @@ static void test_ts_set_tz_runs_in_save_section(void)
     cfg_fs_deinit();
 }
 
+static bool s_tsr_mark = false;
+static bool tsr_hook(void) { return s_tsr_mark; }
+static void test_ts_set_tz_refused_under_reset_mark(void)
+{
+    TEST_SECTION("time_sync_set_tz: refused under the save lock while the reset mark is set, nothing written");
+    ts_fresh_mounted();
+    pref_cfg_fs_set_reset_refuse_hook(tsr_hook);
+    s_tsr_mark = true;
+    uint32_t r0 = s_tz_rev;
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_ERR_INVALID_STATE, "refused");
+    TEST_CHECK(s_tz_rev == r0, "rev not bumped");
+    s_tsr_mark = false;
+    TEST_CHECK(time_sync_set_tz("EST5EDT") == ESP_OK, "works once the mark clears");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    cfg_fs_deinit();
+}
+
 static void run_test_time_sync(void)
 {
     TEST_SECTION("time_sync (TZ validation + degrade-to-UTC)");
@@ -454,6 +471,7 @@ static void run_test_time_sync(void)
     test_ts_sntp_init_failure_returns_error_and_tz_still_applied();
     test_ts_sntp_init_failure_on_empty_nvs_defaults_to_utc();
     test_ts_set_tz_runs_in_save_section();
+    test_ts_set_tz_refused_under_reset_mark();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
