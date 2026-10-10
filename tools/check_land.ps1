@@ -268,17 +268,17 @@ try {
     $c = New-Clone "c_pin0"
     Commit-File $c "pin0.txt" "x" "pin0"
     $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 0))
-    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -eq 'pass') "exit 0 lands with submodule_pins=pass (got $($r.Json.submodule_pins))"
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -match '^pass\(stub:' -and $r.Json.checks_script_override) "exit 0 lands with submodule_pins=pass (got $($r.Json.submodule_pins))"
     $c = New-Clone "c_pin2"
     Commit-File $c "pin2.txt" "x" "pin2"
     $before = OriginHead
     $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 2))
-    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "exit 2 refused with submodule_pins=fail"
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -match '^fail\(stub:') "exit 2 refused with submodule_pins=fail(stub)"
     Assert ((OriginHead) -eq $before) "exit 2: nothing pushed"
     $c = New-Clone "c_pin3"
     Commit-File $c "pin3.txt" "x" "pin3"
     $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 3))
-    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -eq 'skipped' -and $r.Out -match 'WARNING: submodule pin check could not run') "exit 3 warns, lands, submodule_pins=skipped"
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -match '^skipped\(stub:' -and $r.Out -match 'WARNING: submodule pin check could not run') "exit 3 warns, lands, submodule_pins=skipped"
     Assert ((OriginHead) -ne $before) "exit 3: pushed"
 
     Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
@@ -303,6 +303,46 @@ try {
     Commit-File $wt2 "wt2.txt" "x" "wt2"
     $r = Run-Land $wt2 @("-ChecksScript", $okStub)
     Assert ($r.Out -notmatch 'GetFullPath') "linked worktree: no GetFullPath exception"
+    Write-Host "case: -PinCheckScript / -ChecksScript refused without -AllowStandaloneClone (L-1)"
+    $mainl = New-Clone "c_l1main"
+    $wtl = Join-Path $tmp "c_l1_linked"
+    git -C $mainl worktree add -b l1branch $wtl *>$null
+    Commit-File $wtl "l1.txt" "x" "l1"
+    $before = OriginHead
+    foreach ($flag in @("-PinCheckScript", "-ChecksScript")) {
+        Push-Location $wtl
+        try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land $flag $okStub 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
+        Assert ($code -eq 1 -and $out -match 'test seams') "$flag refused outside -AllowStandaloneClone"
+        Assert ((OriginHead) -eq $before) "$flag refusal pushed nothing"
+    }
+
+    Write-Host "case: pin check retry skip is keyed on the gitlinks (L-2)"
+    $counter = Join-Path $tmp "pin.count"
+    function CountStub() {
+        $p = Join-Path $tmp ("cnt_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".ps1")
+        Set-Content -LiteralPath $p -Value ("param([string]`$RepoPath,[string]`$Commit)`nAdd-Content -LiteralPath '$counter' -Value x`nexit 0") -Encoding ascii
+        return $p
+    }
+    function PinCalls() { if (Test-Path -LiteralPath $counter) { @(Get-Content -LiteralPath $counter).Count } else { 0 } }
+    foreach ($variant in @("gitlink", "plainfile")) {
+        if (Test-Path -LiteralPath $counter) { [IO.File]::Delete($counter) }
+        $c = New-Clone "c_l2_$variant"
+        Commit-File $c "l2_$variant.txt" "x" "l2 $variant"
+        $racer = New-Clone "c_l2r_$variant"; git -C $racer checkout -b r origin/dev *>$null
+        $marker = Join-Path $tmp "l2_$variant.marker"
+        $om = $origin -replace '\\', '/'
+        if ($variant -eq "gitlink") {
+            $racerBody = '[IO.File]::WriteAllText(''RACER\.gitmodules'', ''[submodule "m"]'' + [char]10 + [char]9 + ''path = m'' + [char]10 + [char]9 + ''url = OMURL'' + [char]10); git -C ''RACER'' add .gitmodules; git -C ''RACER'' update-index --add --cacheinfo ''160000,2222222222222222222222222222222222222222,m'''.Replace('RACER', $racer).Replace('OMURL', $om)
+        } else {
+            $racerBody = "Set-Content -LiteralPath '$racer\race2.txt' -Value r; git -C '$racer' add race2.txt"
+        }
+        $rs = Stub ("if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; $racerBody; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:dev }`nexit 0")
+        $r = Run-Land $c @("-ChecksScript", $rs, "-PinCheckScript", (CountStub))
+        $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+        Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true -and $rebases -eq 2) "$variant racer: landed after one retry (code $($r.Code), rebases $rebases)"
+        $want = if ($variant -eq "gitlink") { 2 } else { 1 }
+        Assert ((PinCalls) -eq $want) "$variant racer: pin check ran $(PinCalls) time(s), want $want"
+    }
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

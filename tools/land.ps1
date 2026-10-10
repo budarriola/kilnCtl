@@ -47,7 +47,8 @@
 #   -DryRun               do the refusals + log gate + fetch, report what would
 #       happen, change nothing (no rebase, no push).
 #   -ChecksScript         override run_all_checks.ps1 path (tests).
-#   -PinCheckScript       override check_submodule_pins_pushed.ps1 path (tests).
+#   -PinCheckScript       override check_submodule_pins_pushed.ps1 path (tests; needs -AllowStandaloneClone,
+#       recorded in the verdict as submodule_pins=pass(stub:<path>)).
 #   -AllowStandaloneClone permit running in a non-linked checkout (tests /
 #       private clones). Without it a main/shared tree is always refused.
 #
@@ -92,6 +93,8 @@ $script:knownFails = @()
 $script:newFails = @()
 $script:sha = $null
 $script:subPins = 'not-run'
+$script:pinOverride = $null
+$script:checksOverride = $null
 
 function Finish([int]$code, [string]$err, [bool]$landed = $false) {
     $o = [ordered]@{
@@ -102,7 +105,8 @@ function Finish([int]$code, [string]$err, [bool]$landed = $false) {
         known_fails   = @($script:knownFails)
         new_fails     = @($script:newFails)
         dry_run       = [bool]$DryRun
-        submodule_pins = $script:subPins
+        submodule_pins = $(if ($script:pinOverride -and $script:subPins -ne 'not-run') { "$($script:subPins)(stub:$($script:pinOverride))" } else { $script:subPins })
+        checks_script_override = $script:checksOverride
         error         = $(if ($err) { $err } else { $null })
     }
     if ($err) { Write-Host "REFUSED/FAILED: $err" -ForegroundColor Red }
@@ -185,6 +189,11 @@ $isLinked = ($gitDir.TrimEnd('\') -ne $commonDir)
 if (-not $isLinked -and -not $AllowStandaloneClone) {
     Finish 1 "this is the main/shared tree (not a linked worktree); mint one with tools\worktree_mint.ps1 and land from there"
 }
+if (($PinCheckScript -or $ChecksScript) -and -not $AllowStandaloneClone) {
+    Finish 1 "-PinCheckScript / -ChecksScript are test seams: refused unless -AllowStandaloneClone is given"
+}
+if ($PinCheckScript) { $script:pinOverride = $PinCheckScript }
+if ($ChecksScript) { $script:checksOverride = $ChecksScript }
 $mainRoot = if ($isLinked) { Split-Path -Parent $commonDir } else { $top }
 
 # Fetch BEFORE anything reads origin/main: the -AllowKnownFailures gate below computes a
@@ -343,8 +352,8 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
 
     # Skip the (network, up to minutes) pin check on a retry when the gitlinks did not change
     # since a run that already PASSED.
-    $headSha = (& git rev-parse HEAD 2>$null | Out-String).Trim()
-    if (-not $headSha) { Finish 1 "git rev-parse HEAD returned nothing; cannot run the submodule pin check; nothing pushed" }
+    $headSha = (& git rev-parse --verify -q HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $headSha -notmatch '^[0-9a-f]{40}$') { Finish 1 "git rev-parse HEAD failed; cannot run the submodule pin check; nothing pushed" }
     $glNow = (& git ls-tree -r $headSha 2>$null | Where-Object { $_ -match '^160000 commit ' } | Out-String).Trim() + "|" + (& git show "${headSha}:.gitmodules" 2>$null | Out-String).Trim()
     if ($script:subPins -eq 'pass' -and $script:pinTreeSeen -eq $glNow) {
         Step "submodule pins pushed (unchanged gitlinks since the passing check; skipped re-run)"

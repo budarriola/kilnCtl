@@ -94,6 +94,12 @@ try {
     $r = Run @("-Commit", $xg, "-Push", "-PinCheckScript", (PinStub 2))
     Assert ($r.Code -eq 1 -and $r.Out -match 'submodule-pins' -and (Rev main) -eq $mainBefore) "pin check exit 2 refused, main untouched (T-5)"
 
+    Write-Host "case: -PinCheckScript refused when -RepoPath is this repo (L-1)"
+    $own = & powershell -NoProfile -ExecutionPolicy Bypass -File $promote -Commit $xg -PinCheckScript (PinStub 0) 2>&1 | Out-String
+    Assert ($LASTEXITCODE -eq 1 -and $own -match 'pin-check-script') "stub refused without a foreign -RepoPath"
+    $r = Run @("-Commit", $xg, "-Push", "-PinCheckScript", (PinStub 3))
+    Assert ($r.Out -match 'OVERRIDE: submodule_pins=pass\(stub:') "foreign -RepoPath stub is announced as OVERRIDE"
+    git -C $origin update-ref refs/heads/main $mainBefore
     Write-Host "case: second promote lists only new subjects"
     CommitFile $work "c.txt" "c" "dev change C"
     git -C $work push origin dev *>$null

@@ -25,12 +25,22 @@ $TimeoutSec = 60
 if ($env:KILNCTL_SUBPIN_TIMEOUT_SEC) { $TimeoutSec = [int]$env:KILNCTL_SUBPIN_TIMEOUT_SEC }
 # Default resolved in the body: $PSScriptRoot is empty inside a param() default under Windows PowerShell 5.1 -File.
 if (-not $RepoPath) { $RepoPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
-# Keep the user's ssh (GIT_SSH_COMMAND > GIT_SSH > core.sshCommand): only default when all are unset.
+# Keep the user's ssh. git's real precedence is GIT_SSH_COMMAND > core.sshCommand > GIT_SSH; default only when all are unset.
+# Batch mode is added only for a command whose program is ssh (-o BatchMode=yes) or plink/TortoisePlink (-batch);
+# any other program (a wrapper, an unknown client) is left alone.
+function Add-SshBatch([string]$cmd) {
+    $c = $cmd.Trim()
+    $first = if ($c.StartsWith('"')) { ($c.Substring(1) -split '"', 2)[0] } else { ($c -split '\s+', 2)[0] }
+    $leaf = ([IO.Path]::GetFileName(($first -replace '\\', '/'))).ToLowerInvariant() -replace '\.exe$', ''
+    if ($leaf -eq 'ssh') { if ($c -notmatch 'BatchMode') { return "$c -o BatchMode=yes" } }
+    elseif ($leaf -eq 'plink' -or $leaf -eq 'tortoiseplink') { if ($c -notmatch '(^|\s)-batch(\s|$)') { return "$c -batch" } }
+    return $c
+}
 $cfgSsh = (& git -C $RepoPath config --get core.sshCommand 2>$null)
 if ($env:GIT_SSH_COMMAND) {
-    if ($env:GIT_SSH_COMMAND -notmatch 'BatchMode') { $env:GIT_SSH_COMMAND = "$($env:GIT_SSH_COMMAND) -o BatchMode=yes" }
-} elseif ($cfgSsh -and -not $env:GIT_SSH) {
-    $env:GIT_SSH_COMMAND = "$cfgSsh -o BatchMode=yes"
+    $env:GIT_SSH_COMMAND = Add-SshBatch $env:GIT_SSH_COMMAND
+} elseif ($cfgSsh) {
+    $env:GIT_SSH_COMMAND = Add-SshBatch ([string]$cfgSsh)
 } elseif (-not $env:GIT_SSH) {
     $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes -o ConnectTimeout=20'
 }
@@ -53,7 +63,7 @@ function Invoke-GitBounded([string[]]$GitArgs) {
     } finally { Remove-Item -Force -ErrorAction SilentlyContinue $so, $se }
 }
 # Only a genuine network/DNS/timeout failure is "unreachable"; bad URL / auth / not found is a FAIL.
-$netPattern = 'Could not resolve host|Failed to connect|Connection timed out|Connection refused|Network is unreachable|Operation timed out|Connection reset|Recv failure|SSL_ERROR_SYSCALL|Temporary failure in name resolution|Name or service not known|No route to host|unable to connect to'
+$netPattern = 'Could not resolve host|Failed to connect|Connection timed out|Connection refused|Network is unreachable|Operation timed out|Connection (was )?reset|errno 10054|schannel: (failed to receive handshake|SEC_E_)|SSL_connect|returned error: 5\d\d|Recv failure|SSL_ERROR_SYSCALL|Temporary failure in name resolution|Name or service not known|No route to host|unable to connect to'
 
 # Read .gitmodules from the commit being checked, not the working tree.
 $treeEntries = & git -C $RepoPath ls-tree -r $Commit 2>$null

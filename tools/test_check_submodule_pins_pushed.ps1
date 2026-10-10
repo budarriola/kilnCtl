@@ -92,19 +92,37 @@ try {
     G -C $sup2 remote set-url origin "$rp/no-such-origin"
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup2 2>&1 | Out-String
     if ($LASTEXITCODE -ne 1 -or $out -notmatch 'origin probe failed') { Write-Host "FAIL: origin-probe-auth: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: origin-probe-auth" }
-    # T-1: the user's core.sshCommand is kept (with BatchMode appended), not overridden by the default
-    $fake = Join-Path $root 'fakessh.sh'; $mark = Join-Path $root 'ssh.marker'
-    Set-Content -Path $fake -Encoding ascii -Value "echo `"`$@`" >> '$($mark -replace [regex]::Escape('\'),'/')'`nexit 255"
+    # T-1/L-3/L-4/L-7: the user's ssh is kept; batch mode is added per program (ssh -> -o BatchMode=yes,
+    # plink -> -batch, anything else untouched). Fake clients are shell scripts named ssh / plink / wrap.
+    $rootFwd = $root -replace [regex]::Escape('\'),'/'
+    $bin = Join-Path $root 'fakebin'; New-Item -ItemType Directory $bin | Out-Null
+    $script:mark = Join-Path $root 'ssh.marker'
+    foreach ($nm in 'ssh', 'plink', 'wrap') {
+        [IO.File]::WriteAllText((Join-Path $bin $nm), "#!/bin/sh`necho `"`$@`" >> '$rootFwd/ssh.marker'`necho `"`$SSL_MSG`" >&2`nexit 255`n")
+    }
     $sup3 = Join-Path $root 'sup3'
     git init -q $sup3 2>&1 | Out-Null
     G -C $sup3 config user.email t@t; G -C $sup3 config user.name t
-    G -C $sup3 config core.sshCommand "sh '$($fake -replace [regex]::Escape('\'),'/')'"
     Set-Content -Path (Join-Path $sup3 '.gitmodules') -Value "[submodule `"m`"]`n`tpath = m`n`turl = ssh://git@nonexistent-host.invalid/x.git`n"
     G -C $sup3 add .gitmodules; G -C $sup3 update-index --add --cacheinfo "160000,$tip,m"; G -C $sup3 commit -q -m s
-    $env:GIT_SSH_COMMAND = ''; $env:GIT_SSH = ''
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup3 2>&1 | Out-String
-    $mk = if (Test-Path $mark) { Get-Content -Raw $mark } else { '' }
-    if ($mk -notmatch 'BatchMode=yes') { Write-Host "FAIL: user-sshcommand: user's ssh not used with BatchMode (marker: '$mk')`n$out"; $fails++ } else { Write-Host "ok: user-sshcommand" }
+    function SshCase($name, $cfg, $envCmd, $envSsh, $mustMatch, $mustNot, $wantExit = $null, $msg = '') {
+        if (Test-Path $script:mark) { [IO.File]::Delete($script:mark) }
+        git -C $sup3 config --unset core.sshCommand 2>&1 | Out-Null
+        if ($cfg) { G -C $sup3 config core.sshCommand $cfg }
+        $env:GIT_SSH_COMMAND = $envCmd; $env:GIT_SSH = $envSsh; $env:SSL_MSG = $msg
+        $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup3 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $env:GIT_SSH_COMMAND = ''; $env:GIT_SSH = ''; $env:SSL_MSG = ''
+        $mk = if (Test-Path $script:mark) { Get-Content -Raw $script:mark } else { '' }
+        $bad = ($mustMatch -and $mk -notmatch $mustMatch) -or ($mustNot -and $mk -match $mustNot) -or ($null -ne $wantExit -and $code -ne $wantExit)
+        if ($bad) { Write-Host "FAIL: ${name}: exit $code (want $wantExit), marker '$mk'`n$out"; $script:fails++ } else { Write-Host "ok: $name" }
+    }
+    SshCase 'user-sshcommand' "`"$rootFwd/fakebin/ssh`" -p 22" '' '' 'BatchMode=yes' $null
+    SshCase 'env-ssh-command-batchmode' $null "`"$rootFwd/fakebin/ssh`" -p 22" '' 'BatchMode=yes' $null
+    SshCase 'sshcommand-beats-GIT_SSH' "`"$rootFwd/fakebin/ssh`" -p 22" '' 'C:/nonexistent/ssh.exe' 'BatchMode=yes' $null
+    SshCase 'plink-gets-dash-batch' "`"$rootFwd/fakebin/plink`" -P 22" '' '' '-batch' 'BatchMode'
+    SshCase 'unknown-wrapper-untouched' "`"$rootFwd/fakebin/wrap`" -x" '' '' '-x' 'BatchMode|-batch'
+    SshCase 'transient-tls-reset-is-skip' "`"$rootFwd/fakebin/ssh`"" '' '' $null $null 3 'schannel: failed to receive handshake: Connection was reset'
     # S-6: no-arg run (default RepoPath) under -File must not crash at param binding (exit 2 = script error)
     Push-Location (Join-Path $PSScriptRoot '..')
     $env:KILNCTL_SUBPIN_TIMEOUT_SEC = '5'
