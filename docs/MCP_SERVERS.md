@@ -841,6 +841,9 @@ argument order and reads only `$LASTEXITCODE`, never `$?`, never push output.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
+    # -Commit is REQUIRED (no HEAD default: a forgotten commit would report the base commit
+    # LANDED). The fetch uses an explicit refspec for the branch, so a narrowed remote.origin.fetch
+    # cannot leave a stale ref; -FetchTimeoutSec must be > 0 and the fetch tree is killed on timeout.
     # prints "VERDICT: LANDED -- ..." or "VERDICT: NOT LANDED -- ...",
     # and on NOT LANDED also names the local branch(es) the commit IS
     # reachable from, if any (the actual common root cause)

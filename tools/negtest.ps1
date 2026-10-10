@@ -53,11 +53,11 @@
 # DEFAULT VERDICT PATTERNS (used only when no -ExpectPattern is given; never pass a bare "FAIL" for the host
 # presets: passing test titles contain it and the baseline then errors out):
 #   kilnfw-host   'RUN FAILURES \(' (the script's own failure summary header)
-#   saftyfw-host  'SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)' (the script's own verdict line)
+#   saftyfw-host  'SAFTYFW HOST TESTS: FAILED' (the script's own verdict line; BUILD FAILED is a compile error, never CAUGHT)
 #   pytest        '(?m)^FAILED \S+' (a failed assertion in the -rf summary; a collection/import crash prints ERROR
 #                 and is therefore MISSED with a note, not CAUGHT)
-# -RequireAssertion: for -Command runs (e.g. a node/JS test script) and any preset, when no -ExpectPattern is given,
-# CAUGHT requires an assertion-failure line (AssertionError / ERR_ASSERTION / assertion failed / "not ok" /
+# -RequireAssertion: for -Command runs (e.g. a node/JS test script) only; combining it with -ExpectPattern or a preset is refused.
+# CAUGHT requires a case-sensitive assertion-failure line (AssertionError / ERR_ASSERTION / assertion failed /
 # "FAIL:"), not merely a nonzero exit -- a mutation that makes the script crash (syntax error, ReferenceError)
 # exits nonzero but proves nothing about the assertions.
 #
@@ -384,6 +384,34 @@ function Stop-CopyProcesses([string]$copy) {
     } while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
 }
 
+# Orphan tracking: host_build_worker.ps1 / kilnctl_host_tests_*.exe detach from the cmd tree and keep the
+# copy's directories busy. While the command runs we remember every descendant (pid + creation time); after
+# the run (any exit path) the ones still alive are killed. Shared per-user daemons are spared.
+$script:SpareNames = @('mspdbsrv.exe', 'vctip.exe', 'conhost.exe', 'ccache.exe')
+function Add-Descendants([int]$rootId, $tracked) {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $kids = @{}
+    foreach ($q in $all) { if (-not $kids.ContainsKey([int]$q.ParentProcessId)) { $kids[[int]$q.ParentProcessId] = @() }; $kids[[int]$q.ParentProcessId] += $q }
+    $stack = New-Object System.Collections.Stack
+    $stack.Push($rootId)
+    while ($stack.Count -gt 0) {
+        $id = [int]$stack.Pop()
+        foreach ($c in @($kids[$id])) {
+            if (-not $c -or $c.ProcessId -eq $PID) { continue }
+            if (-not $tracked.ContainsKey([int]$c.ProcessId)) { $tracked[[int]$c.ProcessId] = "$($c.CreationDate)|$($c.Name)" }
+            $stack.Push([int]$c.ProcessId)
+        }
+    }
+}
+function Stop-Tracked($tracked) {
+    foreach ($k in @($tracked.Keys)) {
+        $cp, $nm = "$($tracked[$k])".Split('|', 2)
+        if ($script:SpareNames -contains $nm.ToLowerInvariant()) { continue }
+        $cur = Get-CimInstance Win32_Process -Filter "ProcessId = $k" -ErrorAction SilentlyContinue
+        if ($cur -and "$($cur.CreationDate)" -eq $cp) { & taskkill.exe /T /F /PID $k 2>&1 | Out-Null }
+    }
+}
+
 function Read-SharedText([string]$path) {
     # A killed child (timeout) can hold the log open for a moment; read with
     # full sharing and retry instead of letting an IOException abort the run.
@@ -429,11 +457,16 @@ exit 0
     $job = [NegJob]::Create()
     if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
     $script:liveChild = $p
+    $tracked = @{}
+    $script:liveTracked = $tracked
+    $nextScan = 0
     $limitMs = [long]($spec.timeout_min * 60000)
     $timedOut = $false
     while (-not $p.WaitForExit(500)) {
+        if ($sw.ElapsedMilliseconds -ge $nextScan) { try { Add-Descendants $p.Id $tracked } catch { }; $nextScan = $sw.ElapsedMilliseconds + 1500 }
         if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
     }
+    try { Add-Descendants $p.Id $tracked } catch { }
     if ($timedOut) { Stop-CopyProcesses $copy }
     # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
     # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
@@ -442,8 +475,10 @@ exit 0
         if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { [NegJob]::Disarm($job) | Out-Null }
         [NegJob]::Close($job)
     }
+    Stop-Tracked $tracked
     if (-not $timedOut) { Stop-CopyProcesses $copy }
     $script:liveChild = $null
+    $script:liveTracked = $null
     if ($timedOut) { $script:lastTimedOut = $true }
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }
     $text = ''
@@ -523,7 +558,9 @@ function Invoke-Chunk($spec) {
         $res.error = "$($_.Exception.Message)"
     } finally {
         if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+        if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
         if ($script:liveCopy) {
+            try { Stop-CopyProcesses $script:liveCopy } catch { }
             $res.copy_removed = Remove-Copy $spec.repo $script:liveCopy
             if (-not $res.copy_removed) { Write-Line "negtest: COPY NOT REMOVED: $($script:liveCopy)" Red }
             $script:liveCopy = $null
@@ -604,7 +641,7 @@ $cmdText = $Command
 switch ($Preset) {
     'kilnfw-host' { $presetExpect = 'RUN FAILURES \('; $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\build_host_tests.ps1 -OutDir "{OUT}"' }
     'saftyfw-host' {
-        $presetExpect = 'SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)'
+        $presetExpect = 'SAFTYFW HOST TESTS: FAILED'
         if ($CopyRoot.Length -gt 8) { Write-Line "negtest: WARNING SaftyFW host tests need a short path; -CopyRoot $CopyRoot may overflow the MSVC command line" Yellow }
         $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\SaftyFW\test\build_host_tests.ps1 -OutDir "{OUT}"'
     }
@@ -626,9 +663,10 @@ switch ($Preset) {
         $cmdText = "`$env:PYTHONPATH = (Join-Path '{ROOT}' 'tools\PcTools\src'); Set-Location -LiteralPath (Join-Path '{ROOT}' 'tools\PcTools'); & '$py' -m pytest $pa -p no:cacheprovider -rfE --basetemp `"{OUT}\pt`""
     }
 }
+if ($RequireAssertion -and ($ExpectPattern -or $presetExpect)) { Finish 2 "-RequireAssertion cannot be combined with -ExpectPattern or a -Preset (it would be silently ignored); drop one" }
 if (-not $ExpectPattern) {
     if ($presetExpect) { $ExpectPattern = $presetExpect }
-    elseif ($RequireAssertion) { $ExpectPattern = '(?im)(AssertionError|ERR_ASSERTION|assertion failed|^not ok|\bFAIL:)' }
+    elseif ($RequireAssertion) { $ExpectPattern = '(?-i)(AssertionError|ERR_ASSERTION|assertion failed|\bFAIL:)' }
 }
 if ($Command -and $Command -notmatch '\{OUT\}') {
     Write-Line "negtest: note: -Command has no {OUT}; every run still starts from a pristine copy (reset + clean -fdx), so no build output is reused" DarkGray
@@ -842,6 +880,7 @@ try {
 } finally {
     foreach ($wk in $workers) { try { if (-not $wk.P.HasExited) { Stop-Tree $wk.P.Id } } catch { } }
     if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+    if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
     if ($script:liveCopy) { Remove-Copy $RepoRoot $script:liveCopy | Out-Null; $script:liveCopy = $null }
     if ($workers.Count -gt 0) { Start-Sleep -Seconds 1; Remove-StaleCopies $CopyRoot }
     try { Remove-TreeSafe -Path $stateDir } catch { }

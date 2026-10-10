@@ -61,16 +61,44 @@ try {
     Assert ($r.Rc -eq 1 -and $r.Out -match "does not resolve") "unknown commit -> NOT LANDED"
     $r = Run-PV @("-Commit", $c1, "-Branch", "origin/nosuch")
     Assert ($r.Rc -eq 1 -and $r.Out -match "UNKNOWN") "missing remote branch -> UNKNOWN, not LANDED"
-    Write-Host "case: -Commit defaults to HEAD; fetch is bounded"
+    Write-Host "case: -Commit is required (P2); -FetchTimeoutSec validated (P3)"
+    $r = Run-PV @()
+    Assert ($r.Rc -eq 2 -and $r.Out -match "-Commit <sha> is required" -and $r.Out -notmatch "LANDED --") "no -Commit -> usage error exit 2, never LANDED for HEAD"
     git -C $work fetch -q origin *>$null
-    git -C $work checkout -q -B dev origin/dev *>$null
-    $r = Run-PV @()
-    Assert ($r.Rc -eq 0 -and $r.Out -match "VERDICT: LANDED") "no -Commit: HEAD (pushed) -> LANDED"
-    $c4 = Commit $work "d.txt" "c4 unpushed head"
-    $r = Run-PV @()
-    Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: NOT LANDED") "no -Commit: unpushed HEAD -> NOT LANDED"
     $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "0")
-    Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
+    Assert ($r.Rc -eq 2 -and $r.Out -match "must be > 0") "-FetchTimeoutSec 0 -> usage error"
+    $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "-5")
+    Assert ($r.Rc -eq 2 -and $r.Out -match "must be > 0") "negative -FetchTimeoutSec -> usage error"
+
+    Write-Host "case: failed fetch -> UNKNOWN, never LANDED (P3)"
+    $goodUrl = (git -C $work remote get-url origin).Trim()
+    git -C $work remote set-url origin (Join-Path $tmp "no_such_remote.git") *>$null
+    $r = Run-PV @("-Commit", $c1)
+    Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "failed" -and $r.Out -notmatch "LANDED --") "unreachable remote -> UNKNOWN (a stale ref would have said LANDED)"
+
+    Write-Host "case: hung fetch times out and the git process tree is killed (P3)"
+    $lis = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $lis.Start(); $port = $lis.LocalEndpoint.Port
+    try {
+        git -C $work remote set-url origin "http://127.0.0.1:$port/x.git" *>$null
+        $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2")
+        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
+        Start-Sleep -Milliseconds 500
+        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" })
+        Assert ($left.Count -eq 0) "no git process for the hung fetch survives the timeout"
+    } finally { $lis.Stop() }
+    git -C $work remote set-url origin $goodUrl *>$null
+
+    Write-Host "case: explicit refspec beats a narrowed fetch refspec (P1)"
+    git -C $work config remote.origin.fetch "+refs/heads/main:refs/remotes/origin/main"
+    $cx = Commit $other "x.txt" "cx doomed"
+    git -C $other push origin dev *>$null
+    git -C $work fetch -q origin "+refs/heads/dev:refs/remotes/origin/dev" *>$null      # work now knows cx on origin/dev
+    git -C $other reset -q --hard HEAD~1 *>$null
+    git -C $other push -q --force origin dev *>$null                                    # remote dev no longer has cx
+    $r = Run-PV @("-Commit", $cx)
+    Assert ($r.Rc -eq 1 -and $r.Out -match "NOT LANDED") "narrowed remote.origin.fetch cannot leave a stale ref that reports LANDED"
+    git -C $work config remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"
 } finally { Set-Location $here; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:fails -gt 0) { Write-Host "check_push_verify: $script:fails FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "check_push_verify: all cases passed"; exit 0

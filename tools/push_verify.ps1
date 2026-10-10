@@ -25,7 +25,7 @@
 # correctly-ordered ancestry check, after a fresh `git fetch`.
 #
 # USAGE
-#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 [-Commit <hash>=HEAD] [-Branch origin/dev] [-FetchTimeoutSec 90]
+#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash>   (required; no HEAD default) [-Branch origin/dev] [-FetchTimeoutSec 90]
 #   (-Branch is always resolved on the remote: "dev" and "origin/dev" both mean refs/remotes/origin/dev)
 #
 # OUTPUT: exactly one unambiguous verdict line, prefixed "VERDICT: ", plus
@@ -41,8 +41,10 @@
 
 [CmdletBinding()]
 param(
-    # Defaults to HEAD when omitted (agents kept failing on the old mandatory parameter).
-    [string]$Commit = "HEAD",
+    # REQUIRED (P2, review 2026-10-10): a HEAD default reported LANDED for the base commit when the
+    # caller forgot to commit or ran in the wrong tree. Name the sha you mean. Checked in the body
+    # (not Mandatory=$true) so a missing value exits 2 instead of prompting.
+    [string]$Commit = "",
 
     [string]$Branch = "origin/dev",
 
@@ -66,6 +68,15 @@ function Get-RepoRoot {
 }
 
 
+if (-not $Commit) {
+    Write-Host "ERROR: -Commit <sha> is required (there is no HEAD default: a forgotten commit would report the base commit LANDED)." -ForegroundColor Red
+    exit 2
+}
+if ($FetchTimeoutSec -le 0) {
+    Write-Host "ERROR: -FetchTimeoutSec must be > 0 (got $FetchTimeoutSec)." -ForegroundColor Red
+    exit 2
+}
+
 $repoRoot = Get-RepoRoot
 
 # Resolve the remote side of $Branch (e.g. "origin/main" -> remote "origin"). F7: the verdict is
@@ -80,19 +91,30 @@ if ($Branch -match '^([^/]+)/(.+)$' -and ($remoteList -contains $Matches[1])) {
 }
 $Branch = "refs/remotes/$remote/$branchName"
 
-Write-Host "Fetching $remote ..."
+Write-Host "Fetching $remote $branchName ..."
 # Bounded fetch: run git as a child process, never prompt for credentials, kill the tree on timeout.
+# P1: fetch with an EXPLICIT refspec so refs/remotes/<remote>/<branch> is updated even when the
+# remote's configured fetch refspec does not cover this branch (a plain `git fetch` then exits 0 and
+# leaves the ref stale, which would report LANDED off old data).
 $env:GIT_TERMINAL_PROMPT = "0"
-$fetchProc = Start-Process -FilePath "git" -ArgumentList @("-C", "`"$repoRoot`"", "fetch", $remote) -NoNewWindow -PassThru `
-    -RedirectStandardOutput ([IO.Path]::GetTempFileName()) -RedirectStandardError ([IO.Path]::GetTempFileName())
-$null = $fetchProc.Handle
-if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
-    & taskkill /PID $fetchProc.Id /T /F *>$null
-    Write-Host "VERDICT: UNKNOWN -- git fetch $remote timed out after ${FetchTimeoutSec}s; cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
-    exit 1
+$outTmp = [IO.Path]::GetTempFileName(); $errTmp = [IO.Path]::GetTempFileName()
+$fetchOk = $false; $fetchMsg = ""
+try {
+    $fetchProc = Start-Process -FilePath "git" -NoNewWindow -PassThru -RedirectStandardOutput $outTmp -RedirectStandardError $errTmp `
+        -ArgumentList @("-C", "`"$repoRoot`"", "fetch", "--no-tags", $remote, "+refs/heads/${branchName}:refs/remotes/$remote/$branchName")
+    $null = $fetchProc.Handle
+    if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
+        & taskkill /PID $fetchProc.Id /T /F *>$null
+        $null = $fetchProc.WaitForExit(5000)
+        $fetchMsg = "timed out after ${FetchTimeoutSec}s"
+    } elseif ($fetchProc.ExitCode -ne 0) {
+        $fetchMsg = "failed (exit $($fetchProc.ExitCode))"
+    } else { $fetchOk = $true }
+} finally {
+    foreach ($tf in @($outTmp, $errTmp)) { try { [IO.File]::Delete($tf) } catch {} }
 }
-if ($fetchProc.ExitCode -ne 0) {
-    Write-Host "VERDICT: UNKNOWN -- git fetch $remote failed (exit $($fetchProc.ExitCode)); cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
+if (-not $fetchOk) {
+    Write-Host "VERDICT: UNKNOWN -- git fetch $remote $fetchMsg; cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
     exit 1
 }
 

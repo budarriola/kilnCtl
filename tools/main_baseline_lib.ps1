@@ -229,12 +229,20 @@ function Select-MainBaseline {
     # for-each-ref prints nothing and no stderr when the ref is absent (a missing origin/dev must not
     # throw under the caller's $ErrorActionPreference = Stop).
     $mbDev = ""; $devTree = ""
-    if ($DevRef -and (& git -C $RepoRoot for-each-ref --format=%(objectname) "refs/remotes/$DevRef" 2>$null | Out-String).Trim()) {
+    if ($DevRef -and (& git -C $RepoRoot for-each-ref "--format=%(objectname)" "refs/remotes/$DevRef" 2>$null | Out-String).Trim()) {
         $mbDev = (& git -C $RepoRoot merge-base HEAD $DevRef 2>$null | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) { $mbDev = "" }
         $devTree = (& git -C $RepoRoot rev-parse "$DevRef^{tree}" 2>$null | Out-String).Trim()
         if ($LASTEXITCODE -ne 0) { $devTree = "" }
     }
+    # B2a: on a main-side HEAD the dev merge-base is the dev fork point, a stale main commit that is an
+    # ancestor of (or equal to) the main merge-base. It must not make a baseline Exact there.
+    if ($mbDev -and $mb -and $mbDev -cne $mb) {
+        & git -C $RepoRoot merge-base --is-ancestor $mbDev $mb 2>$null
+        if ($LASTEXITCODE -eq 0) { $mbDev = "" }
+    }
+    $headTree = (& git -C $RepoRoot rev-parse "HEAD^{tree}" 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { $headTree = "" }
     foreach ($f in $files) {
         $b = Read-MainBaselineFile -Path $f.FullName
         if ($null -eq $b -or $b.mode -cne $Mode) { $r.Ignored++; continue }
@@ -254,14 +262,22 @@ function Select-MainBaseline {
         $ctText = (& git -C $RepoRoot show -s --format=%ct ([string]$b.commit) 2>$null | Out-String).Trim()
         [void][long]::TryParse($ctText, [ref]$ct)
         $isExact = ($mb -and $b.commit -ceq $mb) -or ($mainTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $mainTree) -or ($mbDev -and $b.commit -ceq $mbDev) -or ($devTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $devTree)
-        [void]$usable.Add([PSCustomObject]@{ B = $b; Ct = $ct; Exact = [bool]$isExact })
+        # B2b: rank Exact baselines by specificity (HEAD tree, then dev merge-base/tree, then main), never by file order.
+        $bTree = if ($b.PSObject.Properties['tree']) { [string]$b.tree } else { "" }
+        $rank = 9
+        if ($isExact) {
+            if ($headTree -and $bTree -ceq $headTree) { $rank = 0 }
+            elseif (($mbDev -and $b.commit -ceq $mbDev) -or ($devTree -and $bTree -ceq $devTree)) { $rank = 1 }
+            else { $rank = 2 }
+        }
+        [void]$usable.Add([PSCustomObject]@{ B = $b; Ct = $ct; Exact = [bool]$isExact; Rank = $rank })
     }
     if ($usable.Count -eq 0) {
         $r.Reason = "no $Mode baseline is from an ancestor of HEAD ($($r.Ignored) from other lineages ignored)"
         return $r
     }
     $pick = $null
-    $pick = @($usable | Where-Object { $_.Exact })[0]
+    $pick = @($usable | Where-Object { $_.Exact } | Sort-Object @{Expression={$_.Rank}}, @{Expression={$_.Ct};Descending=$true}, @{Expression={[string]$_.B.commit}})[0]
     if ($null -ne $pick) { $r.Exact = $true }
     else {
         $pick = @($usable | Sort-Object Ct -Descending)[0]

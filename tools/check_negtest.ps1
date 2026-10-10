@@ -230,7 +230,35 @@ exit 0
     $r = Run-Neg "assert_reqassert" (@('-Command', $testCmd, '-RequireAssertion') + $mutA)
     Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "assert_reqassert: a real assertion failure must still be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
     $src = Get-Content -LiteralPath $script:ScriptUnderTest -Raw
-    Assert-True ($src.Contains('$presetExpect = ''SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)''')) "saftyfw-host preset must default to the real verdict pattern, not a bare FAIL"
+    $mS = [regex]::Match($src, '\$presetExpect = ''(SAFTYFW HOST TESTS: [^'']*)''')
+    Assert-True ($mS.Success -and $mS.Groups[1].Value -eq 'SAFTYFW HOST TESTS: FAILED') "saftyfw-host preset must default to the real verdict line, never BUILD FAILED (got '$($mS.Groups[1].Value)')"
+    Assert-True ('SAFTYFW HOST TESTS: BUILD FAILED' -notmatch $mS.Groups[1].Value -and 'SAFTYFW HOST TESTS: FAILED (2)' -match $mS.Groups[1].Value) "saftyfw-host pattern: BUILD FAILED must not match, FAILED must"
+    # N3: the pytest preset pattern, applied to sample output the way Get-MatchLines does
+    $mP = [regex]::Match($src, '''pytest''\s*\{\s*\$presetExpect = ''([^'']*)''')
+    Assert-True $mP.Success "pytest preset pattern not found in negtest.ps1"
+    $pp = $mP.Groups[1].Value
+    $pyFail = "x`nFAILED tests/test_a.py::test_one - assert 1 == 2`n1 failed"
+    $pyErr = "x`nERROR tests/test_a.py - ImportError`n1 error"
+    $pyPass = "x`n1 passed`ntests/test_a.py::test_failed_name PASSED"
+    Assert-True (@($pyFail -split "`n" | Where-Object { $_ -match $pp }).Count -eq 1) "pytest pattern: a FAILED summary line must match"
+    Assert-True (@($pyErr -split "`n" | Where-Object { $_ -match $pp }).Count -eq 0) "pytest pattern: a collection ERROR must not match"
+    Assert-True (@($pyPass -split "`n" | Where-Object { $_ -match $pp }).Count -eq 0) "pytest pattern: a passing run must not match"
+    # N2: -RequireAssertion refuses to combine with -ExpectPattern, and rejects 'not ok' / lowercase 'fail:'
+    $r = Run-Neg "reqassert_expect" (@('-Command', $testCmd, '-RequireAssertion', '-ExpectPattern', 'FAIL') + $mutA)
+    Assert-True ($r.Exit -eq 2 -and -not (Ran)) "reqassert_expect: -RequireAssertion with -ExpectPattern must be refused before running (exit $($r.Exit))"
+    $mutNotOk = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Output 'not ok 1 - x'; Write-Output 'fail: x'; throw 'boom'")
+    $r = Run-Neg "reqassert_notok" (@('-Command', $testCmd, '-RequireAssertion') + $mutNotOk)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_notok: 'not ok' and lowercase 'fail:' must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    # Extra: a detached grandchild (not in the copy's command line, outliving its parent) must be killed
+    # when the run ends, on the normal-exit path (the job object is disarmed there on purpose).
+    $tok = 'negorph' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $orphCmd = "Start-Process powershell -WindowStyle Hidden -ArgumentList '-NoProfile','-Command','Start-Sleep 300 # $tok'; Start-Sleep 4; if ((Get-Content calc.ps1 -Raw) -match '-gt 10') { exit 0 } else { exit 1 }"
+    $r = Run-Neg "orphan_reaped" @('-Command', $orphCmd, '-File', 'calc.ps1', '-Find', '-gt 10', '-Replace', '-ge 10')
+    Start-Sleep -Milliseconds 800
+    $surv = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($tok) })
+    foreach ($sv in $surv) { & taskkill.exe /T /F /PID $sv.ProcessId 2>&1 | Out-Null }
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "orphan_reaped: run should be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))`n$($r.Text)"
+    Assert-True ($surv.Count -eq 0) "orphan_reaped: $($surv.Count) detached grandchild process(es) survived the run"
     Assert-True ($src.Contains('$presetExpect = ''RUN FAILURES \(''')) "kilnfw-host preset must default to its failure-summary header"
     Step "missed"
     }

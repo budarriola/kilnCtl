@@ -16,7 +16,10 @@ $tools = $PSScriptRoot
 . (Join-Path $tools "checkcache_lib.ps1")
 . (Join-Path $tools "main_baseline_lib.ps1")
 $script:fails = 0
+$script:asserts = 0
+$script:ExpectedAssertions = 81   # measured 2026-10-10; a skipped/aborted block must fail, raise when adding cases
 function Assert([bool]$cond, [string]$what) {
+    $script:asserts++
     if ($cond) { Write-Host "  ok: $what" } else { Write-Host "  FAIL: $what" -ForegroundColor Red; $script:fails++ }
 }
 function Same($a, $b) { return ((@($a) -join '|') -ceq (@($b) -join '|')) }
@@ -223,6 +226,41 @@ try {
     Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $DT) "after dev advances the older dev-tip baseline is still found (as an ancestor)"
     Assert (-not $sel.Exact -and $sel.Warning) "but it is no longer Exact once dev moved past it"
     Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+
+    Write-Host "case: B2 fork-point baseline vs main-side and dev-side HEAD"
+    $bb = Join-Path $tmp "b2repo"
+    git init -b main $bb *>$null
+    Commit-File $bb "f.txt" "r" "R"
+    Commit-File $bb "f.txt" "f" "F"
+    $FP = Rev $bb HEAD
+    git -C $bb checkout -b dev *>$null
+    Commit-File $bb "d.txt" "1" "D1"
+    Commit-File $bb "d.txt" "2" "D2"
+    $DD2 = Rev $bb HEAD
+    git -C $bb checkout main *>$null
+    $PP = (git -C $bb commit-tree "$DD2^{tree}" -p $FP -m "Promote dev ${DD2}: squash").Trim()
+    git -C $bb reset -q --hard $PP *>$null
+    Commit-File $bb "m.txt" "m2" "M2"
+    git -C $bb update-ref refs/remotes/origin/main (Rev $bb HEAD)
+    git -C $bb update-ref refs/remotes/origin/dev $DD2
+    Commit-File $bb "m.txt" "m3" "main-side work"
+    $rf = @((Row "tools\check_x.ps1" "FAIL"))
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $FP -Tree (Tree $bb $FP) -Results $rf)
+    $selA = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $bb
+    Assert ($null -ne $selA.Baseline -and $selA.Baseline.commit -ceq $FP) "B2a: fork-point baseline is found for a main-side HEAD"
+    Assert (-not $selA.Exact) "B2a: fork-point baseline is NOT Exact for a main-side HEAD (mbDev clause must not apply)"
+    Assert ((Compare-MainBaseline -Current $rf -Baseline $selA.Baseline -Exact:$selA.Exact).Known.Count -eq 0) "B2a: the failure is not KNOWN"
+    Remove-Item -LiteralPath $bdir -Recurse -Force
+    git -C $bb checkout -q $DD2 *>$null
+    Commit-File $bb "d.txt" "3" "dev-side work"
+    $rpass = @((Row "tools\check_x.ps1" "PASS"))
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $FP -Tree (Tree $bb $FP) -Results $rf)
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $DD2 -Tree (Tree $bb $DD2) -Results $rpass)
+    $selB = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $bb
+    Assert ($null -ne $selB.Baseline -and $selB.Baseline.commit -ceq $DD2 -and $selB.Exact) "B2b: dev-tip baseline beats the fork-point baseline for a dev-side HEAD"
+    $cmpB = Compare-MainBaseline -Current $rf -Baseline $selB.Baseline -Exact:$selB.Exact
+    Assert ((Same $cmpB.New @("tools\check_x.ps1")) -and $cmpB.Known.Count -eq 0) "B2b: failing at HEAD while passing at the dev tip is NEW"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
     # ---------------------------------------------------------------- 4
     Write-Host "case: recordable only at a clean HEAD == origin/main"
     Assert ((Test-MainBaselineRecordable -RepoRoot $repo).Ok) "clean HEAD == origin/main records"
@@ -412,11 +450,16 @@ try {
     $sa = if (Test-Path $argsFile) { Get-Content -Raw $argsFile } else { "" }
     Assert ($lcode -eq 0) "land with a known failure lands (exit $lcode)"
     Assert ($sa -match 'check_known' -and $sa -match 'FOON=True') "post-rebase run re-runs the known-failing check under -FailOnlyOnNew (stub saw: $($sa.Trim()))"
+} catch {
+    Write-Host "  FAIL: uncaught error: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)" -ForegroundColor Red
+    $script:fails++
 } finally {
     $env:KILNCTL_MAINBASELINE_DIR = $savedDir
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Host "assertions run: $($script:asserts)"
+if ($script:asserts -lt $script:ExpectedAssertions) { Write-Host "check_main_baseline: only $($script:asserts) of $($script:ExpectedAssertions) assertions ran (a block was skipped)" -ForegroundColor Red; exit 1 }
 if ($script:fails -gt 0) { Write-Host "check_main_baseline: $($script:fails) FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "check_main_baseline: all cases passed" -ForegroundColor Green
 exit 0

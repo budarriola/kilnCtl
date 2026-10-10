@@ -14,7 +14,7 @@
 # missing repo or auth failure is FAIL). Git runs with prompts disabled and a bounded wait.
 [CmdletBinding()]
 param(
-    [string]$RepoPath = (Split-Path -Parent $PSScriptRoot),
+    [string]$RepoPath = "",
     [string]$Commit = 'HEAD'
 )
 $ErrorActionPreference = 'Continue'
@@ -23,6 +23,8 @@ $env:GIT_TERMINAL_PROMPT = '0'
 $env:GCM_INTERACTIVE = 'never'
 $TimeoutSec = 60
 if ($env:KILNCTL_SUBPIN_TIMEOUT_SEC) { $TimeoutSec = [int]$env:KILNCTL_SUBPIN_TIMEOUT_SEC }
+# Default resolved in the body: $PSScriptRoot is empty inside a param() default under Windows PowerShell 5.1 -File.
+if (-not $RepoPath) { $RepoPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
 
 # Run git with a bounded wait; kill the whole process tree on timeout.
 # Returns @{ Exit; Out; TimedOut }.
