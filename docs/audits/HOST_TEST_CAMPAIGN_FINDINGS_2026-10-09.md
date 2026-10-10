@@ -106,6 +106,8 @@ modules over `fake_kv` and a real `cfg_fs` scratch directory, with the
 "CHARACTERIZATION K10-xx" check that asserts today's behavior; when a fix
 lands, invert that check. `backup_import.c` was out of scope (another agent).
 
+**Status: K10-01..K10-14 (incl. 08b, 09b) FIXED in fd18342d6.** Every CHARACTERIZATION check was inverted (test now 144 checks). `backup_import.c` gained two "name too long or malformed" rejections as a consequence of the strict `backup_json_field_str`; `zones_current_sweep_task.c` stores 0 for non-finite CT verdict floats (K10-12).
+
 ### K10-10 (HIGH) pref_cfg_fs_resolve: transient OOM reading the file overwrites a NEWER file with older NVS
 
 - File: `firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c`, `load_raw_impl` and `pref_cfg_fs_resolve`
