@@ -699,7 +699,8 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     return ESP_OK;
 }
 
-esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags)
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied)
 {
     if (!link || !out_ever_received || !out_flags) {
         return ESP_ERR_INVALID_ARG;
@@ -712,6 +713,9 @@ esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_recei
     }
     *out_ever_received = link->cached.diag_ever_received;
     *out_flags = link->cached.diag_flags;
+    if (out_diag_applied) {
+        *out_diag_applied = link->stats.diag_applied;
+    }
     safety_unlock(link);
     return ESP_OK;
 }

@@ -594,6 +594,10 @@ void profile_executor_get_status(profile_exec_status_t *out)
 
         if (s_exec.state == PROFILE_EXEC_PAUSED) {
             strncpy(out->pause_reason, s_exec.pause_reason, sizeof(out->pause_reason) - 1);
+        } else if (s_exec.state == PROFILE_EXEC_RUNNING && heat_enable_reboot_undecided()) {
+            /* Pico rebooted, cause not yet known (no DIAG of the new boot):
+             * heat is withheld; say why instead of a silent cold run. */
+            strncpy(out->pause_reason, "pico_reboot_undecided", sizeof(out->pause_reason) - 1);
         }
         if (s_exec.state == PROFILE_EXEC_FAULTED) {
             strncpy(out->fault_reason, s_exec.fault_reason, sizeof(out->fault_reason) - 1);

@@ -762,6 +762,14 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     }
 }
 
+bool heat_enable_reboot_undecided(void)
+{
+    bool taken = he_lock();
+    bool u = s_he.reboot_classify_pending && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return u;
+}
+
 bool heat_enable_reboot_hold(void)
 {
     bool taken = he_lock();

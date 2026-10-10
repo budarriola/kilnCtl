@@ -2512,8 +2512,11 @@ void watchdog_task_entry(void *arg)
         bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
         if (hold_reboot) {
             (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
+            /* Autotune has no pause state: abort is its equivalent (relays off). */
+            autotune_engine_abort("pico_fatal_reboot");
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
+            autotune_engine_abort("heat_grant_unconfirmed");
         }
         heat_enable_reconcile();
     }

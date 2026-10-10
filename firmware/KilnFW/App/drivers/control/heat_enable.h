@@ -284,6 +284,10 @@ bool heat_enable_grant_unconfirmed(void);
 void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
                                 uint32_t now_ms);
 bool heat_enable_reboot_hold(void);
+// True while a Pico reboot with a claim held is still unclassified (no DIAG of
+// the new boot yet): heat is withheld, the cause is unknown. The profile
+// executor shows it as pause_reason "pico_reboot_undecided" while RUNNING.
+bool heat_enable_reboot_undecided(void);
 
 // Diagnostics/host-test counters: how many REQUEST_ENABLE(true) frames were
 // accepted by the link, and how many REQUEST_ENABLE(false) frames were sent.

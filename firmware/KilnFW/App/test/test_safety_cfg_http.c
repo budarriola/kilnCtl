@@ -638,11 +638,12 @@ esp_err_t safety_link_send_apply_config_volatile(SafetyLinkClass *link, uint16_t
 // 0x0212 commit and NOT on any other param.
 // ---------------------------------------------------------------------------
 static int s_stub_estop_verif_clear_calls = 0;
+static esp_err_t s_stub_estop_verif_clear_result = ESP_OK;
 
 esp_err_t estop_verification_clear(void)
 {
     s_stub_estop_verif_clear_calls++;
-    return ESP_OK;
+    return s_stub_estop_verif_clear_result;
 }
 
 esp_err_t estop_verification_confirm(void)
@@ -666,10 +667,17 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
 static uint8_t s_stub_diag_flags = 0u;
 static bool s_stub_diag_ever = true;
 static int s_stub_diag_calls = 0;
-esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags)
+/* Item 5: stats.diag_applied. Each call advances it by s_stub_diag_count_step AFTER
+ * reporting, so step 0 models "only the pre-commit DIAG ever cached". */
+static uint32_t s_stub_diag_count = 5u;
+static uint32_t s_stub_diag_count_step = 1u;
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied)
 {
     (void)link;
     s_stub_diag_calls++;
+    if (out_diag_applied) *out_diag_applied = s_stub_diag_count;
+    s_stub_diag_count += s_stub_diag_count_step;
     if (out_ever_received) *out_ever_received = s_stub_diag_ever;
     if (out_flags) *out_flags = s_stub_diag_flags;
     return ESP_OK;
@@ -868,6 +876,9 @@ static void reset_all(void)
     s_stub_set_ct_cal_trim_nvs_err = ESP_OK;
     s_stub_set_ct_cal_trim_calls = 0;
     s_stub_estop_verif_clear_calls = 0;
+    s_stub_estop_verif_clear_result = ESP_OK;
+    s_stub_diag_count = 5u;
+    s_stub_diag_count_step = 1u;
     s_stub_recapture_calls = 0;
     s_stub_recapture_result = true;
     s_stub_recapture_reason = NULL;
@@ -1484,7 +1495,8 @@ static void test_estop_polarity_unconfirmed_persist_still_clears_verification(vo
     TEST_CHECK(s_stub_estop_verif_clear_calls == 1,
                "but the polarity is live, so the E-stop verification is cleared exactly once");
 
-    /* A read-back MISMATCH means the value is not live: nothing to clear. */
+    /* Review LOW-C: an ACKed commit whose read-back MISMATCHES or cannot be fetched may
+     * still have landed (a lost reply is not proof), so the verification is cleared too. */
     reset_all();
     s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
     s_stub_params[0].param_id = 0x0212u;
@@ -1492,8 +1504,34 @@ static void test_estop_polarity_unconfirmed_persist_still_clears_verification(vo
     s_stub_params[0].set = true;
     s_stub_params[0].value.u8_val = 0; /* Pico still reports the OLD polarity */
     ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
-    TEST_CHECK(ok == false && s_stub_estop_verif_clear_calls == 0,
-               "read-back mismatch: the value is not live, verification untouched");
+    TEST_CHECK(ok == false && s_stub_estop_verif_clear_calls == 1,
+               "read-back mismatch after an ACK: verification still cleared (fail closed)");
+
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_refetch_result = false; /* the read-back itself fails */
+    ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false && s_stub_estop_verif_clear_calls == 1,
+               "read-back FETCH failure after an ACK: verification still cleared (fail closed)");
+
+    /* A rejected commit changed nothing on the Pico: no clear. */
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_commit_rejected = true;
+    ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false && s_stub_estop_verif_clear_calls == 0, "a rejected commit leaves the verification alone");
+
+    /* The clear itself failing must fail the POST even if everything else succeeded. */
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].param_id = 0x0212u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_U8;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.u8_val = 1;
+    s_stub_estop_verif_clear_result = ESP_FAIL;
+    ok = safety_cfg_write_apply_pairs(&fake_link, pairs, 1, true, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false && strstr(reason, "could NOT be cleared") != NULL,
+               "a failed verification clear fails the POST (never reports success)");
 }
 
 // LOW-8-3: the non-blocking (safety_poll_task) writer must never wait for a DIAG -- it IS
@@ -1516,7 +1554,7 @@ static void test_nonblocking_persist_check_never_sleeps(void)
     char reason[200];
     bool ok = safety_cfg_write_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == false, "dirty DIAG: not confirmed persisted");
-    TEST_CHECK(s_stub_diag_calls == 1, "non-blocking caller read the DIAG exactly once, no wait loop");
+    TEST_CHECK(s_stub_diag_calls == 2, "non-blocking caller: one baseline read before the commit and the DIAG exactly once, no wait loop");
     TEST_CHECK(strstr(reason, "may predate") != NULL,
                "and says the DIAG may predate the commit rather than claiming an ARMED refusal (LOW-5)");
 
@@ -1528,7 +1566,38 @@ static void test_nonblocking_persist_check_never_sleeps(void)
     s_stub_diag_calls = 0;
     s_stub_diag_flags = 0u;
     ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
-    TEST_CHECK(ok == true && s_stub_diag_calls == 1, "blocking caller with a clean DIAG returns at once");
+    TEST_CHECK(ok == true && s_stub_diag_calls == 2, "blocking caller with a clean, fresh DIAG returns at once (baseline + one judged read)");
+}
+
+// Item 5 (F3 limitation): a DIAG that predates the commit and reads VOLATILE_DIRTY clear must
+// NOT be taken as proof of persistence by a blocking caller; only a DIAG applied after the
+// commit counts. A non-blocking caller still judges the cached DIAG once (documented limit).
+static void test_blocking_persist_needs_post_commit_diag(void)
+{
+    TEST_SECTION("safety_cfg_write -- a blocking persisted check ignores a pre-commit DIAG (item 5)");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "abs_max_temp_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f;
+    s_stub_diag_flags = 0u;       /* the cached DIAG says clean ... */
+    s_stub_diag_count_step = 0u;  /* ... but no DIAG ever arrives after the commit */
+    char reason[200];
+    bool ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false, "pre-commit clean DIAG alone does not confirm a persistent commit");
+    TEST_CHECK(strstr(reason, "no DIAG to confirm") != NULL, "reported as UNCONFIRMED");
+
+    s_stub_diag_count_step = 0u;
+    ok = safety_cfg_write_set_and_confirm_f32(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == true, "the non-blocking caller keeps judging the cached DIAG once (must not delay a ceiling raise)");
+
+    s_stub_diag_count_step = 1u;
+    ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == true, "a DIAG applied after the commit is believed");
 }
 
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
@@ -3124,6 +3193,7 @@ int main(void)
     test_set_and_confirm_f32_uses_nonblocking_refetch();
     test_estop_polarity_unconfirmed_persist_still_clears_verification();
     test_nonblocking_persist_check_never_sleeps();
+    test_blocking_persist_needs_post_commit_diag();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
     test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();

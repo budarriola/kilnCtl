@@ -305,6 +305,7 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 
 #define SAFETY_DIAG_REANNOUNCE_MAX 3u
 #define SAFETY_DIAG_REANNOUNCE_GAP_MS 2000u
+#define SAFETY_DIAG_REANNOUNCE_SLOW_GAP_MS 10000u
 
 /* Bounded re-announce when the Pico has not learned our version: a Pico >= 17 sends the 31-byte DIAG
  * (trip_seq) only once it knows our version is >= 17, so a 30-byte DIAG from one means our ANNOUNCE
@@ -326,9 +327,17 @@ static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32
     if (link->diag_reannounce_count >= SAFETY_DIAG_REANNOUNCE_MAX) {
         if (link->diag_reannounce_count == SAFETY_DIAG_REANNOUNCE_MAX) {
             link->diag_reannounce_count++; /* saturate: log once per budget */
-            ESP_LOGW(TAG, "re-announce budget exhausted but safety processor still sends 30-byte DIAGs "
-                          "(no trip_seq binding until reboot or link-down)");
+            ESP_LOGW(TAG, "re-announce burst exhausted but safety processor still sends 30-byte DIAGs "
+                          "(no trip_seq binding yet) -- continuing at a slow bounded rate");
         }
+        /* SAFTY-LOW-2: one lost ANNOUNCE burst must not leave the Pico at protocol 0 until the next
+         * reboot. Keep re-announcing, slowly: at most one frame per SLOW_GAP_MS, only while a 30-byte
+         * DIAG proves the Pico has not learned our version (the 31-byte DIAG branch above ends it). */
+        if ((uint32_t)(now_ms - link->diag_reannounce_last_ms) < SAFETY_DIAG_REANNOUNCE_SLOW_GAP_MS) {
+            return;
+        }
+        link->reannounce_pending = true;
+        link->diag_reannounce_last_ms = now_ms;
         return;
     }
     if (link->diag_reannounce_count != 0u &&

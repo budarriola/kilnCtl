@@ -3013,7 +3013,7 @@ static void test_diag_reannounce_is_bounded(void)
     link.diag_reannounce_count = 0u;
 
     unsigned owed = 0;
-    for (unsigned i = 0; i < 20u; i++) {
+    for (unsigned i = 0; i < 6u; i++) {
         s_fake_tick_count = 1000u + i * 2100u; // each DIAG a full gap after the last
         m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
         if (link.reannounce_pending) {
@@ -3021,7 +3021,29 @@ static void test_diag_reannounce_is_bounded(void)
             link.reannounce_pending = false; // safety_poll_task consumed it
         }
     }
-    TEST_CHECK(owed == SAFETY_DIAG_REANNOUNCE_MAX, "re-announce owed exactly MAX times, then stops");
+    TEST_CHECK(owed == SAFETY_DIAG_REANNOUNCE_MAX, "burst: re-announce owed exactly MAX times at the fast gap");
+
+    // SAFTY-LOW-2: after the burst the re-announce continues, slowly and boundedly, while the Pico
+    // still sends 30-byte DIAGs (one lost ANNOUNCE must not last until the next reboot).
+    uint32_t slow_base = link.diag_reannounce_last_ms;
+    owed = 0;
+    for (unsigned i = 1; i <= 40u; i++) {
+        s_fake_tick_count = slow_base + i * 2100u; // 84 s of 30-byte DIAGs
+        m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0u, true);
+        if (link.reannounce_pending) {
+            owed++;
+            link.reannounce_pending = false;
+        }
+    }
+    TEST_CHECK(owed >= 6u && owed <= 8u, "after the burst, a slow re-announce (about one per 10 s) continues");
+    // A 31-byte DIAG ends it.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    s_fake_tick_count += 20000u;
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(!link.reannounce_pending, "binding learned: slow re-announce stops");
+    low_fw_version(&link, 42u, 17u);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = 0u;
 
     // Rate limit: a fresh budget, DIAGs 100 ms apart owe only the first.
     low_fw_version(&link, 43u, 17u); // Pico boot_id change resets the budget

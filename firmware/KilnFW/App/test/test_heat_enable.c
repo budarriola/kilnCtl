@@ -1247,8 +1247,61 @@ static void test_executor_wires_k4_and_reboot_state(void){
     free(text);
 }
 
+static void test_reboot_resets_k4_episode_and_undecided_is_visible(void)
+{
+    TEST_SECTION("heat_enable -- K5: a Pico reboot restarts the K4 episode; undecided state is visible (sl3)");
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    uint32_t t = 1000;
+    heat_enable_note_pico_boot(1u, true, 0u, t);
+    for (int i = 0; i < 40 && !heat_enable_grant_unconfirmed(); i++) {
+        t += 30000;
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(heat_enable_grant_unconfirmed(), "setup: old boot's K4 episode gave up");
+    TEST_CHECK(!heat_enable_reboot_undecided(), "no reboot yet: not undecided");
+    int sends_before = enable_sends();
+    t += 100;
+    heat_enable_note_pico_boot(2u, false, 0u, t);
+    TEST_CHECK(heat_enable_reboot_undecided(), "reboot seen, no DIAG of the new boot: undecided");
+    TEST_CHECK(!heat_enable_grant_unconfirmed(),
+               "the new boot starts a new K4 episode: the old boot's give-up is cleared");
+    t += 100;
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, t);
+    TEST_CHECK(!heat_enable_reboot_undecided(), "DIAG decides it");
+    /* The new episode gets its own full retry budget, not the exhausted one. */
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    t += 3200;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() > sends_before, "new episode re-requests again after the reboot");
+}
+
+static void test_executor_autotune_and_stale_diag_wiring(void)
+{
+    TEST_SECTION("profile_executor -- autotune is stopped with the run, stale-boot DIAG fed as INIT (K9, sl3)");
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c");
+        return;
+    }
+    const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    const char *at1 = strstr(text, "autotune_engine_abort(\"pico_fatal_reboot\")");
+    const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
+    const char *at2 = strstr(text, "autotune_engine_abort(\"heat_grant_unconfirmed\")");
+    TEST_CHECK(hold && at1 && at1 > hold && at1 < unc, "fatal-reboot hold also aborts autotune");
+    TEST_CHECK(unc && at2 && at2 > unc, "unconfirmed grant also aborts autotune");
+    TEST_CHECK(strstr(text, "safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT") != NULL,
+               "an old-boot DIAG is fed as INIT so its ARMED cannot satisfy the new boot's K4 check");
+    free(text);
+}
+
 void run_test_heat_enable(void)
 {
+    test_reboot_resets_k4_episode_and_undecided_is_visible();
+    test_executor_autotune_and_stale_diag_wiring();
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
     test_enable_in_flight_under_reboot_hold_queues_release();

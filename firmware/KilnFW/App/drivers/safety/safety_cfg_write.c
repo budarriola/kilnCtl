@@ -189,11 +189,8 @@ static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, con
 static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
                                    char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class,
                                    bool nonblocking_refetch, bool require_persisted,
-                                   bool *out_readback_matched)
+                                   uint32_t diag_applied_before_commit)
 {
-    if (out_readback_matched) {
-        *out_readback_matched = false;
-    }
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
     }
@@ -310,11 +307,6 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
             return false;
         }
     }
-    /* The Pico's RAM record now equals the submitted values: whatever happens
-     * to the persisted check below, the new values are LIVE (MED-3). */
-    if (out_readback_matched) {
-        *out_readback_matched = true;
-    }
     if (require_persisted) {
         /* F3 (safety link review 2026-10-09): the read-back above serves the
          * Pico's RAM record, which matches a prior volatile install even when
@@ -327,8 +319,17 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
         for (int waited = 0;; waited += SAFETY_CFG_PERSIST_POLL_MS) {
             bool diag_ever = false;
             uint8_t diag_flags = 0u;
-            if (safety_link_get_diag_flags(link, &diag_ever, &diag_flags) == ESP_OK) {
-                v = safety_cfg_persist_verdict(diag_ever, diag_flags);
+            uint32_t diag_count = 0u;
+            if (safety_link_get_diag_flags(link, &diag_ever, &diag_flags, &diag_count) == ESP_OK) {
+                /* Item 5 (F3 limitation): the cached DIAG may PREDATE the commit, and a
+                 * pre-commit DIAG with VOLATILE_DIRTY clear would read as PERSISTED. A
+                 * blocking caller therefore only believes a DIAG applied after the commit
+                 * was sent (diag_applied advanced). The poll-task caller cannot wait for
+                 * one and keeps judging the cached DIAG once (its documented limit: it
+                 * must not delay a ceiling raise, which the Pico may never hold tighter). */
+                bool fresh = nonblocking_refetch || (int32_t)(diag_count - diag_applied_before_commit) > 0;
+                v = fresh ? safety_cfg_persist_verdict(diag_ever, diag_flags)
+                          : SAFETY_CFG_PERSIST_VERDICT_UNKNOWN;
             }
             if (v == SAFETY_CFG_PERSIST_VERDICT_PERSISTED || nonblocking_refetch ||
                 waited >= SAFETY_CFG_PERSIST_WAIT_MS) {
@@ -536,6 +537,12 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
         uint16_t reject_param_id = 0;
         uint8_t reject_reason = 0;
         bool rejected = false;
+        uint32_t diag_applied_before_commit = 0u;
+        {
+            bool ever_unused = false;
+            uint8_t flags_unused = 0u;
+            (void)safety_link_get_diag_flags(link, &ever_unused, &flags_unused, &diag_applied_before_commit);
+        }
         esp_err_t err = volatile_install
                             ? safety_link_send_apply_config_volatile(link, &reject_param_id, &reject_reason, &rejected)
                             : safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
@@ -569,62 +576,22 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
             }
             return false;
         }
-        /* ESP_OK and not rejected within the reply window is NOT proof the
-         * write landed (see confirm_commit_landed()'s header comment for the
-         * full audit trail) -- force a live read-back before this function
-         * is allowed to report success. */
-        bool readback_matched = false;
-        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch,
-                                   /*require_persisted=*/!volatile_install, &readback_matched)) {
-            /* MED-3 (safety-link fix batch 2): a polarity value that read back
-             * from the Pico is LIVE even when the persisted/DIAG check could not
-             * be confirmed (timeout, no DIAG ever). The standing E-stop
-             * verification no longer describes it, so fail toward
-             * re-verification here too, before returning the failure. */
-            if (readback_matched) {
-                for (int i = 0; i < n_pairs; i++) {
-                    if (pairs[i].param_id == SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL) {
-                        esp_err_t early_clear_err = estop_verification_clear();
-                        if (early_clear_err != ESP_OK) {
-                            ESP_LOGE("safety_cfg_write",
-                                     "estop_active_level is live on the Pico but the E-stop verification "
-                                     "record could NOT be cleared (%s) -- re-run the bench procedure",
-                                     esp_err_to_name(early_clear_err));
-                        }
-                        break;
-                    }
-                }
-            }
-            return false;
-        }
-        /* Landed for real -- now invalidate a standing E-stop verification if
-         * estop_active_level was one of the committed params. See
-         * SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL's comment above for why this
-         * fires on ANY commit of the param, not just a value change. */
+        /* MED-3 / review LOW-C (fail closed): the commit was ACKed and not rejected, so
+         * the Pico MAY have applied a new polarity whatever the read-back or the persisted
+         * check below later says (a lost read-back reply is not proof the write did not
+         * land). Invalidate the standing E-stop verification NOW, before any of those
+         * checks can return early, and fail the POST if the record cannot be cleared
+         * (estop_verification_clear() only returns ESP_OK once a read-back confirms it).
+         * Fires on ANY ACKed commit of the param, same-value included (see
+         * SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL's comment). */
         for (int i = 0; i < n_pairs; i++) {
             if (pairs[i].param_id == SAFETY_PARAM_ID_ESTOP_ACTIVE_LEVEL) {
-                /* The clear's own result decides this POST's result. If the
-                 * record could not be cleared (and estop_verification_clear()
-                 * only returns ESP_OK once a read-back confirms it), a
-                 * standing verified=1 survives a polarity commit and
-                 * /api/readiness keeps reporting "confirmed by operator" for
-                 * a polarity nobody verified. Answering {"ok":true} there
-                 * would be this file's own "logging unchecked success" class
-                 * -- the commit DID land, so the reason says so explicitly
-                 * rather than implying the values were not written. */
                 esp_err_t clear_err = estop_verification_clear();
                 if (clear_err != ESP_OK) {
-                    /* Kept inside reason[160] deliberately: the full
-                     * "do not trust the readiness page" explanation lives in
-                     * estop_verification.c's own ESP_LOGE, not here. */
                     snprintf(reason_out, reason_cap,
-                             "estop_active_level committed, but the E-stop verification record "
+                             "estop_active_level commit was ACKed, but the E-stop verification record "
                              "could NOT be cleared (%s) -- re-run the bench procedure",
                              esp_err_to_name(clear_err));
-                    /* Not a Pico-ceiling refusal of any kind (the commit
-                     * itself landed) -- explicit OTHER, overriding whatever
-                     * confirm_commit_landed() left (irrelevant here, since
-                     * it succeeded). */
                     if (out_class) {
                         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
                     }
@@ -632,6 +599,13 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
                 }
                 break;
             }
+        }
+        /* ESP_OK and not rejected within the reply window is NOT proof the write landed
+         * (see confirm_commit_landed()'s header comment for the full audit trail) -- force
+         * a live read-back before this function is allowed to report success. */
+        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch,
+                                   /*require_persisted=*/!volatile_install, diag_applied_before_commit)) {
+            return false;
         }
     }
     if (out_class) {

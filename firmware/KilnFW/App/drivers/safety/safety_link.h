@@ -1837,7 +1837,11 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
  * DIAG was ever received and its flags byte, without copying the whole (large)
  * safety_link_status_t onto a caller's task stack. Same locking as
  * safety_link_get_status(). */
-esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags);
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied);
+/* out_diag_applied (may be NULL): stats.diag_applied, a count that advances once per
+ * applied DIAG frame, so a caller can tell a DIAG that arrived AFTER some event from
+ * the cached one that predates it (safety_cfg_write.c, F3 pre-commit-DIAG limitation). */
 
 /* ROADMAP.md "Safety TC display audit, 2026-09-05" -- the single shared
  * predicate every "Thermocouple faults"-style display site (LCD, web,

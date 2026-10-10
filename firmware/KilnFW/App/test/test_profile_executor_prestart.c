@@ -3600,6 +3600,44 @@ static void test_pause_releases_heat_enable_and_resume_reacquires(void)
     TEST_CHECK(heat_enable_is_granted(), "granted again after resume");
 }
 
+static void test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced(void)
+{
+    TEST_SECTION("pause_reason reaches /api/profile_exec (review K11); an undecided Pico reboot is "
+                 "shown while RUNNING (sl3 item 2)");
+    reset_relay_claim_test_state();
+    arm_heat_enable_as_if_running();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x01;
+
+    profile_exec_status_t st;
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.pause_reason[0] == 0, "healthy RUNNING shows no pause_reason");
+
+    /* Pico reboot with a claim held, new boot's DIAG not seen: undecided. */
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.state == PROFILE_EXEC_RUNNING && strcmp(st.pause_reason, "pico_reboot_undecided") == 0,
+               "RUNNING with an undecided reboot reports pause_reason pico_reboot_undecided");
+    /* Benign DIAG decides it: the marker goes away, the run continues. */
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2500u);
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.pause_reason[0] == 0, "decided benign reboot clears the marker");
+
+    BaseType_t saved_take = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE; /* bounded path honours a failed take */
+    TEST_CHECK(profile_executor_pause_with_reason_bounded("pico_fatal_reboot"), "bounded pause succeeds");
+    g_test_stub_semaphore_take_default = saved_take;
+    memset(&st, 0, sizeof(st));
+    profile_executor_get_status(&st);
+    TEST_CHECK(st.state == PROFILE_EXEC_PAUSED && strcmp(st.pause_reason, "pico_fatal_reboot") == 0,
+               "the stored pause_reason reaches the status snapshot");
+}
+
 static void test_heat_enable_release_survives_a_down_link(void)
 {
     TEST_SECTION("profile_executor_halt() -- releases K4 even when the safety link is down");
@@ -12155,6 +12193,7 @@ void run_test_profile_executor_prestart(void)
     test_operator_halt_still_records_halted();
     test_halt_passes_clean_false_to_adaptive_tune_run_end();
     test_pause_releases_heat_enable_and_resume_reacquires();
+    test_pause_reason_reaches_status_and_undecided_reboot_is_surfaced();
     test_heat_enable_release_survives_a_down_link();
 
     test_fuzzy_prepare_gains_zero_strength_is_base_gains_bit_exact();
