@@ -664,9 +664,21 @@ void dualwrite_window_note_firing_complete(void)
 static esp_err_t g_stub_safety_rc = ESP_FAIL;
 static safety_link_status_t g_stub_safety_st;
 
+/* LD-01: relay_authority_start_blocked() (the start gate) reads link_up through this stub.
+ * Default: link up, so the many tests that reach the gate stay unaffected; aux_tick_case() turns
+ * it off to keep its explicit rc/st control, and the LD-01 test drives g_stub_link_mode. */
+static bool g_stub_force_link_up = true;
+static int g_stub_link_mode = 0; /* 0 = up, 1 = never up (link_up false), 2 = uninitialised (INVALID_STATE) */
+
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
+    if (g_stub_force_link_up) {
+        if (out) memset(out, 0, sizeof(*out));
+        if (g_stub_link_mode == 2) return ESP_ERR_INVALID_STATE;
+        if (out) out->link_up = (g_stub_link_mode == 0);
+        return ESP_OK;
+    }
     if (out) {
         if (g_stub_safety_rc == ESP_OK) *out = g_stub_safety_st;
         else memset(out, 0, sizeof(*out));
@@ -2781,6 +2793,33 @@ static void test_run_decodes_fault_sources_instead_of_hex(void)
     s_test_zones_config_valid = false;
     s_test_relay_authority_blocked = false;
     s_test_relay_authority_blocked_sources = 0;
+}
+
+/* LD-01: with NO fault source asserted (relay_authority_on_blocked() false -- the un-latched
+ * window) the start gate must still refuse unless the link is positively up and fresh. */
+static void test_run_refuses_unless_link_positively_up(void)
+{
+    TEST_SECTION("profile_executor_run() refuses when the link is not positively up even with no fault source (LD-01)");
+    for (int mode = 1; mode <= 2; mode++) {
+        reset_relay_claim_test_state();
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.state = PROFILE_EXEC_IDLE;
+        memset(&s_test_profiles_http_get_out, 0, sizeof(s_test_profiles_http_get_out));
+        s_test_profiles_http_get_out.zone_mask = 0x01;
+        s_test_profiles_http_get_out.segment_count = 1;
+        s_test_profiles_http_get_ok = true;
+        s_test_zones_config_valid = true;
+        s_test_relay_authority_blocked = false;
+        g_stub_link_mode = mode;
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        TEST_CHECK(!ok, mode == 1 ? "never-up/stale link refuses the start" : "uninitialised link refuses the start");
+        TEST_CHECK(strstr(err, "safety link is down") != NULL, "the refusal is decoded and names the safety link");
+        TEST_CHECK(strstr(err, "0x") == NULL, "no bare hex");
+        g_stub_link_mode = 0;
+        s_test_profiles_http_get_ok = false;
+        s_test_zones_config_valid = false;
+    }
 }
 
 // CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16: a config the
@@ -11233,8 +11272,10 @@ static bool aux_tick_case(bool received, uint16_t age_ms, uint8_t diag)
     g_stub_safety_st.age_ms = age_ms;
     g_stub_safety_st.diag_state = diag;
     g_stub_safety_rc = ESP_OK;
+    g_stub_force_link_up = false;
     s_exec.safety = (SafetyLinkClass *)0x1;
     aux_test_run_task_ticks(1);
+    g_stub_force_link_up = true;
     g_stub_safety_rc = ESP_FAIL;
     s_exec.safety = NULL;
     return aux_test_wrote(0x01, 0x00);
@@ -12093,6 +12134,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_while_zone_sweep_is_active();
     test_run_refuses_slot_being_deleted();
     test_run_decodes_fault_sources_instead_of_hex();
+    test_run_refuses_unless_link_positively_up();
     test_run_refuses_with_named_reason_on_config_quarantine();
     test_run_refuses_at_atomic_heat_claim_gate();
     test_run_refuses_when_update_claims_after_early_check();

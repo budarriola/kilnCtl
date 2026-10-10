@@ -394,25 +394,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * heat is the failure this refuses to repeat; the message stays under
      * the char[128] dashboard_http.c's start handler passes. */
     {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_exec.safety, &sources)) {
-            if (err_msg) {
-                /* ROADMAP.md M13: decode the mask instead of showing a bare
-                 * hex value -- same shortening (first source + "(+more)")
-                 * zones_http.c's ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case and
-                 * autotune_engine.c's matching refusal already use. */
-                char src_words[160];
-                safety_fault_source_words(sources, src_words, sizeof(src_words));
-                char *comma = strchr(src_words, ',');
-                bool more = (comma != NULL);
-                if (comma != NULL) {
-                    *comma = '\0';
-                }
-                snprintf(err_msg, err_cap,
-                         "heat is blocked (%.32s%s, usually the safety link down) -- "
-                         "a firing cannot start",
-                         src_words, more ? " (+more)" : "");
-            }
+        if (relay_authority_start_blocked(s_exec.safety, err_msg, err_cap,
+                                          "a firing cannot start")) {
             return false;
         }
     }

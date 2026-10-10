@@ -20,7 +20,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <stdio.h>
+#include <string.h>
+
 #include "safety_link.h"
+#include "safety_trip_words.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -321,6 +325,41 @@ bool relay_authority_reset_refuses_writer(void);
  * (~500 ms after the erase) is refused and lost -- there are no shutdown handlers. */
 void relay_authority_reset_set_erases_kiln_nvs(bool erases);
 bool relay_authority_reset_refuses_kiln_nvs_writer(void);
+
+/* LD-01 (HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09): the ONE start gate for the two engines that
+ * heat (autotune_begin_run_locked(), profile_executor_run()). relay_authority_on_blocked() alone
+ * is not enough: the SAFETY_LINK fault source is raised only by the poll task and only when
+ * fault_on_link_loss is on, so a never-up / stale-within-one-period / override-off / uninitialised
+ * link reads fault_sources == 0 and a run would start and enable the safety link. This refuses
+ * unless no fault source is asserted AND the link is positively up and fresh
+ * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down).
+ * Fail closed. Never consults fault_on_link_loss, so the bench override opens no start path.
+ * Writes a decoded refusal (<128 chars) to err when non-NULL; `what` completes the sentence
+ * ("autotune cannot drive the element"). Returns true when the start must be refused. */
+static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *err, size_t cap, const char *what)
+{
+    uint32_t sources = 0;
+    if (relay_authority_on_blocked(safety, &sources)) {
+        if (err && cap) {
+            char words[160];
+            safety_fault_source_words(sources, words, sizeof(words));
+            char *comma = strchr(words, ',');
+            bool more = (comma != NULL);
+            if (comma) *comma = '\0';
+            snprintf(err, cap, "heat is blocked (%.32s%s, usually the safety link down) -- %s",
+                     words, more ? " (+more)" : "", what);
+        }
+        return true;
+    }
+    safety_link_status_t st;
+    if (safety_link_get_status(safety, &st) != ESP_OK || !st.link_up) {
+        if (err && cap) {
+            snprintf(err, cap, "safety link is down or not yet confirmed up -- %s", what);
+        }
+        return true;
+    }
+    return false;
+}
 
 #ifdef __cplusplus
 }

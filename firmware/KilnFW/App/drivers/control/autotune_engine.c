@@ -1099,29 +1099,8 @@ bool autotune_begin_run_locked(uint8_t zone_index, char *err_msg, size_t err_cap
      * that cannot heat should say so at the point the operator asks for it,
      * in the same words. */
     {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_at.safety, &sources)) {
-            if (err_msg) {
-                /* Kept under 128 chars: dashboard_http.c's autotune handler
-                 * passes a char[128], and the first draft of this message was
-                 * truncated mid-word on the page ("...so it w"). ROADMAP.md
-                 * M13: decode the mask instead of showing a bare hex value --
-                 * same shortening (first source + "(+more)") zones_http.c's
-                 * ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case already uses, since
-                 * the full comma-joined safety_fault_source_words() sentence
-                 * can run to 141 bytes on its own. */
-                char src_words[160];
-                safety_fault_source_words(sources, src_words, sizeof(src_words));
-                char *comma = strchr(src_words, ',');
-                bool more = (comma != NULL);
-                if (comma != NULL) {
-                    *comma = '\0';
-                }
-                snprintf(err_msg, err_cap,
-                         "heat is blocked (%.32s%s, usually the safety link down) -- "
-                         "autotune cannot drive the element",
-                         src_words, more ? " (+more)" : "");
-            }
+        if (relay_authority_start_blocked(s_at.safety, err_msg, err_cap,
+                                          "autotune cannot drive the element")) {
             return false;
         }
     }

@@ -256,6 +256,19 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
     return false;
 }
 
+/* LD-01: autotune_begin_run_locked() now also requires safety_link_get_status() link_up
+ * (relay_authority_start_blocked(), the REAL inline helper from relay_authority.h).
+ * Default: link up; modes 1/2 = never-up / uninitialised. */
+static int s_stub_link_mode = 0;
+esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
+{
+    (void)link;
+    if (out) memset(out, 0, sizeof(*out));
+    if (s_stub_link_mode == 2) return ESP_ERR_INVALID_STATE;
+    if (out) out->link_up = (s_stub_link_mode == 0);
+    return ESP_OK;
+}
+
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
@@ -3771,9 +3784,7 @@ static void test_autotune_manual_abort_releases_heat_enable(void)
 
 /* Host-test campaign (linkdn). With the safety link down/stale/never up AND the poll task's
  * SAFETY_FAULT_SRC_SAFETY_LINK source latched, the begin-run gate refuses, names the source and
- * requests no heat. The un-latched variant (link down, fault_sources == 0 -- the window before
- * the poll task's next tick, or fault_on_link_loss off) is NOT committed: the real engine starts
- * and requests heat there. See docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md, LD-01. */
+ * requests no heat. The un-latched variant is test_begin_run_refuses_unlatched_link_down() (LD-01, fixed). See docs/audits/HOST_TEST_CAMPAIGN_FINDINGS_2026-10-09.md, LD-01. */
 static void test_begin_run_refuses_on_down_link_with_latched_link_source(void)
 {
     TEST_SECTION("autotune begin-run: link down with SAFETY_LINK source latched -- refuses, names it, no heat request");
@@ -3802,6 +3813,40 @@ static void test_begin_run_refuses_on_down_link_with_latched_link_source(void)
     TEST_CHECK(s_req_enable_true_calls == 0, "and no heat-enable request may be made");
     TEST_CHECK(strstr(errbuf, "heat is blocked") != NULL, "and the refusal says why");
     TEST_CHECK(strstr(errbuf, "0x") == NULL, "with a decoded source, not a hex value");
+}
+
+/* LD-01 fixed: link never up / stale / uninitialised with NO fault source latched (the un-latched
+ * window) must refuse and request no heat. */
+static void test_begin_run_refuses_unlatched_link_down(void)
+{
+    TEST_SECTION("autotune begin-run: link not positively up, no fault source latched -- refuses, no heat (LD-01)");
+    for (int mode = 1; mode <= 2; mode++) {
+        static MAX31856BusClass bus;
+        static SafetyLinkClass safety;
+        reset_heat_enable_recorder(false);
+        memset(&s_at, 0, sizeof(s_at));
+        memset(&bus, 0, sizeof(bus));
+        memset(&safety, 0, sizeof(safety));
+        bus.initialized = true;
+        safety.initialized = (mode == 1);
+        safety.fault_sources = 0;
+        s_at.thermo_bus = &bus;
+        s_at.safety = &safety;
+        s_at.lock = xSemaphoreCreateMutex();
+        s_stub_max_temp_c = 0.0f;
+        s_stub_min_temp_c = 0.0f;
+        s_stub_ch0_ok = true;
+        s_stub_blocked_real_semantics = true;
+        s_stub_link_mode = mode;
+        char errbuf[128] = {0};
+        bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+        s_stub_blocked_real_semantics = false;
+        s_stub_link_mode = 0;
+        TEST_CHECK(!ok, "start refused while the link is not positively up");
+        TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
+        TEST_CHECK(strstr(errbuf, "safety link is down") != NULL, "refusal names the safety link");
+        TEST_CHECK(strstr(errbuf, "0x") == NULL, "decoded, not hex");
+    }
 }
 
 static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
@@ -7442,6 +7487,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_manual_abort_releases_heat_enable();
     test_autotune_start_on_a_down_link_does_not_claim_heat();
     test_begin_run_refuses_on_down_link_with_latched_link_source();
+    test_begin_run_refuses_unlatched_link_down();
 
     // Target-temperature step mode (slice 1) -- order-independent, each
     // re-zeroes s_at via its own helper.
