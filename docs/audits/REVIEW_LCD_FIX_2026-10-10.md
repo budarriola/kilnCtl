@@ -28,7 +28,7 @@ with no role held.
 
 ## Findings
 
-### R1 (MED) Danger mode and autotune still do not exclude each other
+### R1 (MED) FIXED in 6d4cc7ab6: Danger mode and autotune still do not exclude each other
 
 `safety/system_mode_gate.c:193` refuses only `SYS_ACTION_START_PROFILE` while
 danger mode is open. `autotune_engine_run()` (`control/autotune_engine.c:1033`)
@@ -50,7 +50,7 @@ Fix direction: gate `SYS_ACTION_START_AUTOTUNE` on `danger_mode_active` too, and
 make `danger_mode_request_start()` refuse while the heat claim is held (any
 owner), not only while the executor is RUNNING/PAUSED.
 
-### R2 (MED) Danger-mode start check is early only
+### R2 (MED) FIXED in 6d4cc7ab6: Danger-mode start check is early only
 
 `control/profile_executor_run.c:258` samples `danger_mode_active()` at the top of
 `profile_executor_run()`, before the `s_exec.lock` check, baseline SPI reads and
@@ -70,7 +70,7 @@ Fix direction: re-test `danger_mode_active()` at the commit point, alongside the
 `restore_in_flight` re-check, or have danger mode refuse once a start has
 claimed heat (see R1).
 
-### R3 (LOW) `danger_mode_active()` fails open
+### R3 (LOW) FIXED in 6d4cc7ab6: `danger_mode_active()` fails open
 
 `danger_mode_active()` returns false when the `s_dm.lock` take times out after
 50 ms. The new start gate therefore reads "unknown" as "not active". Under lock
@@ -132,7 +132,7 @@ constants for the F case would remove it. The bound clamp handles the edge
 (3659 F converts to 2015.0009 C and is clamped to 2015). The ramp conversion
 correctly applies scale only, no offset.
 
-### R9 (NIT) Stale log text
+### R9 (NIT) FIXED in 6d4cc7ab6: Stale log text
 
 `control/profile_executor_run.c:260` still logs "refused by the system mode gate
 (recovery mode or restore)" when the refusal can now be danger mode. The

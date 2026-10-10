@@ -36,7 +36,7 @@ All three confirmed by probe runs of the fake.
 
 ## Campaigns 5 and 6: safety_link payload builders, danger_mode
 
-### F5-1 (LOW) fw_version worst-case length comment miscounts
+### F5-1 (LOW) FIXED in 6d4cc7ab6: fw_version worst-case length comment miscounts
 
 - File: `firmware/KilnFW/App/drivers/safety/safety_link_payload.c:252`
 - Input: `safety_link_build_fw_version_payload` with a 64-byte commit and a
@@ -49,7 +49,7 @@ All three confirmed by probe runs of the fake.
   short.
 - Test status: the test asserts the real value (108); nothing left out.
 
-### F6-1 (LOW) re-entering danger mode clears heat_requested without releasing the wire request
+### F6-1 (LOW) FIXED in 6d4cc7ab6: re-entering danger mode clears heat_requested without releasing the wire request
 
 - File: `firmware/KilnFW/App/drivers/safety/danger_mode.c:90` (inside
   `danger_mode_request_start`, `s_dm.heat_requested = false;`)
