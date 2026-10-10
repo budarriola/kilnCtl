@@ -2822,6 +2822,17 @@ try {
             "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`""
     Invoke-HostTestExe -Name "ui_lcd_lock" -ExePath $exeLl -BuildCmd $cmdLl
 
+    $exeWb = Join-Path $outDir "kilnctl_host_tests_security_backend_web_auth.exe"
+    $wbObjDir = Join-Path $outDir "wb"
+    New-Item -ItemType Directory -Force -Path $wbObjDir | Out-Null
+    $cmdWb = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$wbObjDir\\`" /Fe:`"$exeWb`" `"$(Join-Path $testDir 'test_security_backend_web_auth.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/web_auth_store.c')`" `"$(Join-Path $driversDir 'net/web_auth_session.c')`" " +
+            "`"$(Join-Path $driversDir 'http/security_backend_placeholder.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
+    Invoke-HostTestExe -Name "security_backend_web_auth" -ExePath $exeWb -BuildCmd $cmdWb
+
     Complete-HostTestQueue
 
     # ---- sim_iter_tune.exe / sim_wide_temp_sweep.exe: data-generating
@@ -3470,6 +3481,7 @@ try {
     # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
     $totalExpected = 90
     # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
+    # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
