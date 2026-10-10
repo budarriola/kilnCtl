@@ -478,7 +478,7 @@ bool zones_config_export_blob(void *out, size_t out_cap)
     memcpy(out, s_live_blob, s_live_blob_len);
     return true;
 }
-#define ZONES_IMPORT_REASON_RUN_CLAIMED "a profile or autotune run is active -- retry when it ends"
+#include "../drivers/persist/zones_import_reasons.h"
 static int s_zones_import_claimed_from_call = 0; /* >0: calls from this number on are refused as RUN_CLAIMED */
 static bool s_zones_import_should_fail = false;
 static bool s_import_writes_wrong_bytes = false;
@@ -784,6 +784,8 @@ static void test_rollback_claim_refusal_is_refused_not_failed(void)
     TEST_CHECK(!ok, "swap not applied");
     TEST_CHECK(strstr(reason, "ROLLBACK REFUSED") != NULL, "claim refusal is reported as REFUSED");
     TEST_CHECK(strstr(reason, "ROLLBACK FAILED") == NULL, "claim refusal is not reported as FAILED");
+    TEST_CHECK(strstr(reason, ZONES_IMPORT_REASON_RUN_CLAIMED) != NULL,
+               "the full run-claimed reason text survives (not cut mid-word)");
 }
 
 static void test_diverged_ceiling_moves_active_id_but_leaves_pending(void)

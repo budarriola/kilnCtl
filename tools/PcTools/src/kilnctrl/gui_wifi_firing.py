@@ -699,6 +699,9 @@ class WifiFiringMixin:
             lines.append(f"  Zone {z.get('zone', '?')}: {actual}   {mode}   {status}   duty={z.get('duty', 0):.2f}")
             if z.get("faulted") and z.get("fault_reason"):
                 lines.append(f"    -> {z.get('fault_reason')}")
+        if data.get("pause_reason"):
+            from .pause_reason import pause_reason_text
+            lines.append(pause_reason_text(data.get("pause_reason")))
         if state == "faulted" and data.get("fault_reason"):
             lines.append(f"FAULT (guard {data.get('fault_guard', '?')}): {data.get('fault_reason', '')}")
         self.firing_profile_var.set("\n".join(lines))

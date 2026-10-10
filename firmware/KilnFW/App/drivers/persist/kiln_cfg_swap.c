@@ -1,3 +1,4 @@
+#include "zones_import_reasons.h"
 #include "kiln_cfg_swap.h"
 
 #include <stddef.h>
@@ -539,9 +540,10 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
                  * REFUSED outcome (still false: the ESP side is still on the target, the journal is kept and
                  * boot recovery retries the rollback) instead of "ROLLBACK FAILED", which reads as the previous
                  * config being rejected. */
+                /* %s, not %.40s: the full ZONES_IMPORT_REASON_RUN_CLAIMED text (57 chars) must not be cut
+                 * mid-word (review SL3 A5); prefix + sub must fit the caller's wrapper inside KILN_CFG_SWAP_REASON_MAX (200); the test asserts it. */
                 snprintf(reason_out, reason_cap,
-                         "ROLLBACK REFUSED (a run holds the zones claim; the previous config is valid and "
-                         "the rollback is retried when the run ends or at next boot): %.40s",
+                         "ROLLBACK REFUSED, previous config valid (retried at run end or boot): %s",
                          sub);
                 return false;
             }

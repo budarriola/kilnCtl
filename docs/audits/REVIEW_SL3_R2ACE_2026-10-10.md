@@ -25,7 +25,7 @@ Path:
 
 Caveats (each LOW):
 
-- `pause_reason` has one consumer, the `/api/profile_exec` JSON (`dashboard_exec_http.c`). No web page, LCD page or PcTools tool displays it, so an operator watching a cold RUNNING firing sees nothing explain it.
+- **FIXED (uifx commit):** `pause_reason` had one consumer, the `/api/profile_exec` JSON (`dashboard_exec_http.c`). It is now shown on the web main page firing card (`pauseReasonText`, escaped), the LCD home notice strip (`ui_page_home_pause_reason_text`) and `profiles_get_exec_status` / the PcTools firing status text.
 - An autotune run is neither paused nor surfaced while the reboot is undecided. It runs cold until DIAG arrives.
 - `granted` is not cleared by `note_pico_boot()`, so `heat_enable_is_granted()` can read true while undecided. Its only caller is the LCD auth-reset gesture (`ui_page_home_actions.c:604`), so there is no heat consequence.
 
@@ -77,7 +77,7 @@ A fatal classification still clears it afterwards, so the exposure is one DIAG p
 
 **Reset-one-side check.** `diag_reannounce_count` and `diag_reannounce_last_ms` are reset together on both a Pico boot_id change and link-down. The fast/slow branch split keys on the count alone. Not an instance of the class.
 
-### A5 (LOW, cosmetic): `kiln_cfg_swap.c` `%.40s`
+### A5 (LOW, cosmetic): `kiln_cfg_swap.c` `%.40s` -- FIXED (uifx commit: `%s`; test shares `zones_import_reasons.h`)
 
 `kiln_cfg_swap.c:541-545` is reached only when `strcmp(sub, ZONES_IMPORT_REASON_RUN_CLAIMED) == 0`. That string is 57 chars ("a profile or autotune run is active -- retry when it ends"). `%.40s` cuts it to "a profile or autotune run is active -- r".
 

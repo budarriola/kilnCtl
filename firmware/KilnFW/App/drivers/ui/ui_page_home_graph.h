@@ -347,6 +347,13 @@ bool ui_page_home_lag_notice_should_show(uint32_t consecutive_ticks);
 bool ui_page_home_lag_notice_active(bool have_rich_zone_data, bool any_zone_sustained,
                                      uint32_t debounced_ticks);
 
+/* Short operator text for /api/profile_exec's pause_reason (profile_exec_status_t::pause_reason) for the home
+ * page notice strip (480x320, no scrolling: at most ~50 chars). Writes into out and returns the length; returns 0
+ * (out empty) for a NULL/empty reason. Known reasons: pico_reboot_undecided, pico_fatal_reboot,
+ * heat_grant_unconfirmed. An unknown non-empty reason is shown verbatim after "Paused: " (never hidden). The web
+ * main page (main_page.html pauseReasonText) mirrors the same wording. */
+size_t ui_page_home_pause_reason_text(const char *reason, char *out, size_t out_cap);
+
 /* Extracts the set bits of a ramp_lock_lagging_mask (profile_exec_status_t's
  * uint8_t bitmask, one bit per zone index) into out_indices, lowest zone
  * index first, capped at max_zones bits and out_cap slots (whichever is

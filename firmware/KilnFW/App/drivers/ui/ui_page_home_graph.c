@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 void ui_page_home_format_mmss(uint32_t seconds, char *out, size_t out_cap)
 {
@@ -290,4 +291,25 @@ float ui_page_home_history_tolerance_s(float horizon_s, size_t point_count, floa
         }
     }
     return tol;
+}
+
+size_t ui_page_home_pause_reason_text(const char *reason, char *out, size_t out_cap)
+{
+    if (out == NULL || out_cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (reason == NULL || reason[0] == '\0') {
+        return 0;
+    }
+    if (strcmp(reason, "pico_reboot_undecided") == 0) {
+        snprintf(out, out_cap, "Heat withheld: safety processor rebooted, cause unknown");
+    } else if (strcmp(reason, "pico_fatal_reboot") == 0) {
+        snprintf(out, out_cap, "Paused: safety processor rebooted after a fatal fault");
+    } else if (strcmp(reason, "heat_grant_unconfirmed") == 0) {
+        snprintf(out, out_cap, "Paused: heat grant not confirmed by safety processor");
+    } else {
+        snprintf(out, out_cap, "Paused: %.40s", reason);
+    }
+    return strlen(out);
 }

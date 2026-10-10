@@ -417,6 +417,18 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             goto lag_notice_done;
         }
 
+        /* pause_reason (executor-initiated pause, or Pico-reboot heat withhold while RUNNING): shown in this
+         * same strip so a cold firing explains itself. Below the config-mismatch message, above the lag notice. */
+        {
+            char pause_buf[96];
+            if (ui_page_home_pause_reason_text(st->pause_reason, pause_buf, sizeof(pause_buf)) > 0) {
+                lv_label_set_text(s_ui_home_lag_notice, pause_buf);
+                lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
+                s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
+                goto lag_notice_done;
+            }
+        }
+
         s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
 
         bool any_sustained = false;

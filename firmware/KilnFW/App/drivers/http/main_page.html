@@ -2342,6 +2342,16 @@ var lastExecStData = null;
 // "a run with many dropped samples must read as untrustworthy" is exactly
 // the kind of thing a one-line dashboard summary must not hide behind a
 // click-through, so a non-zero total gets its own short warning inline.
+// Human-readable text for /api/profile_exec's pause_reason (executor-initiated pause, or the Pico-reboot heat
+// withhold while RUNNING). Mirrors ui_page_home_pause_reason_text() on the LCD. Returns plain text -- callers
+// MUST pass it through kcEscapeHtml(); an unknown reason is shown verbatim (escaped by the caller), never hidden.
+function pauseReasonText(reason) {
+  if (!reason) return '';
+  if (reason === 'pico_reboot_undecided') return 'Heat withheld: the safety processor rebooted and the cause is not yet known';
+  if (reason === 'pico_fatal_reboot') return 'Paused: the safety processor rebooted after a fatal fault';
+  if (reason === 'heat_grant_unconfirmed') return 'Paused: heat grant not confirmed by the safety processor';
+  return 'Paused: ' + reason;
+}
 function renderRunQualityHeadline(st) {
   if (st.state !== 'done' && st.state !== 'faulted') return '';
   var worst = null;
@@ -2411,6 +2421,9 @@ function renderExec(st) {
   }
   if (st.state === 'faulted' && st.fault_reason) {
     html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(st.fault_reason) + '</div>';
+  }
+  if (st.pause_reason) {
+    html += '<div class="row fault kc-live-value">' + window.kcEscapeHtml(pauseReasonText(st.pause_reason)) + '</div>';
   }
   html += renderRunQualityHeadline(st);
   html += '</div>';

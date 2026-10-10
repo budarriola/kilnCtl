@@ -255,9 +255,10 @@ def profiles_delete(profile_id: int) -> str:
 
 
 @_core._tool()
-def profiles_get_exec_status() -> str:
+def profiles_get_exec_status(host: Optional[str] = None) -> str:
     """Read the current (or last) run's state: which profile, which segment,
-    dwell/ramp state, per-zone actuals and any fault."""
+    dwell/ramp state, per-zone actuals and any fault. While running/paused it
+    also reads pause_reason over HTTP (`host` overrides the board address)."""
     try:
         st = _srv._profiles.get_exec_status()
     except ProfilesQueryError as exc:
@@ -276,7 +277,25 @@ def profiles_get_exec_status() -> str:
             f"duty={z.duty:.2f} relay={'on' if z.relay_commanded_on else 'off'} "
             f"faulted={z.faulted}"
         )
+    if st.state in (1, 2):  # running / paused: pause_reason exists only in the HTTP JSON
+        lines.append(_pause_reason_line(host))
     return "\n".join(lines)
+
+
+def _pause_reason_line(host: Optional[str]) -> str:
+    """Best-effort pause_reason from GET /api/profile_exec (never raises, never blocks long)."""
+    from . import run_queue
+    from .pause_reason import pause_reason_text
+    try:
+        resolved = host
+        if not resolved:
+            status = _srv._wifi.get_status()
+            resolved = status.sta_ip if (status.sta_connected and status.sta_ip) else "192.168.4.1"
+        data = run_queue.get_exec(resolved, 3.0)
+    except Exception as exc:  # noqa: BLE001
+        return f"pause_reason: unavailable ({type(exc).__name__})"
+    text = pause_reason_text(data.get("pause_reason"))
+    return f"pause_reason: {data.get('pause_reason')} -- {text}" if text else "pause_reason: none"
 
 
 @_core._tool()

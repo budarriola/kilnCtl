@@ -510,6 +510,29 @@ void run_test_ui_page_home_graph(void)
                    "fallback path ignores any_zone_sustained entirely (older board never sets it)");
     }
 
+    TEST_SECTION("ui_page_home_graph: pause_reason_text");
+    {
+        char b[96];
+        TEST_CHECK(ui_page_home_pause_reason_text(NULL, b, sizeof(b)) == 0 && b[0] == '\0', "NULL reason: empty");
+        TEST_CHECK(ui_page_home_pause_reason_text("", b, sizeof(b)) == 0, "empty reason: empty");
+        TEST_CHECK(ui_page_home_pause_reason_text("pico_reboot_undecided", b, sizeof(b)) > 0 &&
+                       strstr(b, "Heat withheld") != NULL,
+                   "pico_reboot_undecided: heat withheld text");
+        TEST_CHECK(ui_page_home_pause_reason_text("pico_fatal_reboot", b, sizeof(b)) > 0 &&
+                       strstr(b, "fatal") != NULL,
+                   "pico_fatal_reboot text");
+        TEST_CHECK(ui_page_home_pause_reason_text("heat_grant_unconfirmed", b, sizeof(b)) > 0 &&
+                       strstr(b, "heat grant") != NULL,
+                   "heat_grant_unconfirmed text");
+        TEST_CHECK(ui_page_home_pause_reason_text("something_new", b, sizeof(b)) > 0 &&
+                       strstr(b, "something_new") != NULL,
+                   "unknown reason shown verbatim");
+        TEST_CHECK(strlen(b) < 60, "short enough for one 480px strip line");
+        char tiny[8];
+        ui_page_home_pause_reason_text("pico_fatal_reboot", tiny, sizeof(tiny));
+        TEST_CHECK(strlen(tiny) == 7, "truncates safely into a small buffer");
+    }
+
     TEST_SECTION("ui_page_home_graph: lagging_zone_indices");
     {
         uint8_t idx[8];
