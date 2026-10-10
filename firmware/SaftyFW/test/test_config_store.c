@@ -3434,6 +3434,48 @@ static void test_unpack_clamps_out_of_bound_tc_offset(void)
     config_store_pack(&rec, record);
     TEST_CHECK(!config_store_unpack(record, &back), "NaN offset still refused");
 }
+// Review LOW-C/LOW-A: the clamp must also run on the v2 migration branch
+// (the v1 branch cannot carry an offset: v1 has no tc_offset_c field and
+// migrates from defaults, so its clamp call is a documented no-op backstop),
+// and a clamp must be REPORTED through out_reject, never silent.
+static void test_unpack_clamps_tc_offset_on_v2_migration_and_reports(void)
+{
+    TEST_SECTION("config_store_unpack_ex -- v2 migration clamps tc_offset_c and reports it (LOW-A, LOW-C)");
+    uint8_t blob[CONFIG_STORE_RECORD_LEN];
+    memcpy(blob, FROZEN_V2_BLOB, sizeof blob);
+    const size_t off = 230u; // v2 tc_offset_c (v3 offset 232 minus the 2-byte fields_set widening)
+    float v = 80.0f;
+    memcpy(&blob[off], &v, sizeof v);
+    uint32_t crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    config_store_record_t back;
+    config_store_reject_info_t info;
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info), "v2 record with tc_offset_c=+80 still loads");
+    TEST_CHECK(back.tc_offset_c == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "v2 +80 clamps to +bound");
+    TEST_CHECK(info.tc_offset_clamped && info.tc_offset_stored_c == 80.0f && !info.rejected,
+               "clamp is reported (tc_offset_clamped + original value), not a rejection");
+    v = -80.0f;
+    memcpy(&blob[off], &v, sizeof v);
+    crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info) && back.tc_offset_c == -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C,
+               "v2 -80 clamps to -bound");
+    v = 12.5f;
+    memcpy(&blob[off], &v, sizeof v);
+    crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info) && back.tc_offset_c == 12.5f && !info.tc_offset_clamped,
+               "v2 in-bound offset untouched and not reported");
+
+    // current-format path reports too
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_offset_c = 80.0f;
+    uint8_t cur[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, cur);
+    TEST_CHECK(config_store_unpack_ex(cur, &back, &info) && info.tc_offset_clamped && info.tc_offset_stored_c == 80.0f,
+               "current-format clamp is reported");
+}
 void run_test_config_store(void)
 {
     test_tc_offset_magnitude_bound();
@@ -3492,4 +3534,5 @@ void run_test_config_store(void)
     test_config_params_is_set_through_get_config_page();
     test_config_params_commit_refused_while_armed();
     test_unpack_clamps_out_of_bound_tc_offset();
+    test_unpack_clamps_tc_offset_on_v2_migration_and_reports();
 }

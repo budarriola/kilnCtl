@@ -371,9 +371,12 @@ CEILING_BYTES = {
     # moving the measured total 2176 -> 2184 B. Re-pinned to the new
     # measured value, same convention.
     #
-    # 2026-10-10, guard-fixes review pass (F6 bad-read hold, tc_offset_c
-    # load-time clamp): measured total 2184 -> 2208 B. Re-pinned to the new
-    # measured value, same convention.
+    # 2026-10-10, guard-fixes review pass: measured total 2184 -> 2208 B.
+    # Re-pinned to the new measured value, same convention. Attribution
+    # (review LOW-B): the tc_offset_c load-time clamp is NOT the cause (it
+    # runs only in the boot/load path, never in the safety_core task); the
+    # growth most likely came from the earlier F1-F7 batch d53125fe, which
+    # changed safety_core/safety_guards without re-pinning.
     "safety_core": 2208,
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,

@@ -1855,7 +1855,7 @@ static const f1_field_t k_f1_fields[] = {
     F1(cj_time_s, K_SAFETY), F1(borrowed_stale_s, K_SAFETY), F1(borrowed_stale_trip_s, K_SAFETY),
     F1(borrowed_type_expected, K_SAFETY), F1(i_present_a, K_SAFETY), F1(zero_counts, K_SAFETY),
     F1(correlation_window_s, K_SAFETY), F1(stuck_on_time_s, K_SAFETY), F1(trip_verify_s, K_SAFETY),
-    F1(k_ct_v_per_a, K_ALLOWED), F1(gain, K_SAFETY), F1(mains_voltage_v, K_ALLOWED),
+    F1(k_ct_v_per_a, K_SAFETY), F1(gain, K_SAFETY), F1(mains_voltage_v, K_ALLOWED),
     F1(power_window_s, K_ALLOWED), F1(context_max_age_s, K_SAFETY), F1(link_timeout_s, K_SAFETY),
     F1(link_dead_hard_s, K_SAFETY), F1(mainfault_debounce_ms, K_SAFETY), F1(telemetry_period_ms, K_ALLOWED),
     F1(startup_grace_s, K_SAFETY), F1(estop_debounce_ms, K_SAFETY), F1(watchdog_timeout_ms, K_SAFETY),
@@ -2051,6 +2051,145 @@ static void test_volatile_gate_refuses_fields_set_only_changes(void)
     cur.fields_set ^= CONFIG_STORE_SET_MAINS_VOLTAGE_V;
     TEST_CHECK(config_store_write_volatile(&cur, NULL) == true, "the mains_voltage set-bit is allowlisted");
 }
+// 2026-10-10 review (HIGH-A, HIGH-B, MED-A, LOW-C): the gate's tightening
+// rule must judge DIRECTION and "does the guard run", itself and not via the
+// caller's validate_ex. S1 runs only when abs_max > 0, S8 only when
+// max_rate > 0, so 0 / negative / NaN are the LOOSEST values.
+static float gate_nan_f(void) { union { uint32_t u; float f; } x; x.u = 0x7FC00000u; return x.f; }
+static float gate_inf_f(void) { union { uint32_t u; float f; } x; x.u = 0x7F800000u; return x.f; }
+
+static void gate_setup_baseline(config_store_record_t *baseline)
+{
+    reset_all();
+    config_store_boot_load();
+    config_store_default(baseline);
+    baseline->fields_set |= (uint32_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                       CONFIG_STORE_SET_TC_TYPE);
+    baseline->abs_max_temp_c = 1100.0f;
+    baseline->max_rate_c_per_min = 20.0f;
+    baseline->tc_type = 0x03u;
+    baseline->k_ct_v_per_a[1] = 0.0333f;
+}
+
+// Installs `base` while de-energized, then arms and tries `next`.
+static bool gate_try_from(const config_store_record_t *base, const config_store_record_t *next)
+{
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_INIT);
+    TEST_CHECK(config_store_write_volatile(base, NULL) == true, "fixture: baseline installs while idle");
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    return config_store_write_volatile(next, NULL);
+}
+
+static void test_volatile_gate_tightening_direction_and_off_values(void)
+{
+    TEST_SECTION("config_store_flash: heat possible: abs_max/max_rate tightening judged by direction and "
+                 "'guard runs' (HIGH-A, MED-A, LOW-C)");
+    config_store_record_t base;
+    config_store_record_t n;
+
+    // --- abs_max_temp_c (S1) ---
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 1101.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1101 refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 1150.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1150 refused");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max equal resend accepted");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 900.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max lowered 1100 -> 900 accepted");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> 0 (S1 off) refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = -5.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> negative (S1 off) refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = gate_nan_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> NaN refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = gate_inf_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> +inf refused");
+    // MED-A: unset -> set is a tightening only for an enabled (>0, finite) value.
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max unset -> set-to-0 refused (gate does not trust validate_ex)");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = -3.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max unset -> set-to-negative refused");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = 800.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max unset -> set-to-800 accepted (first commissioning)");
+
+    // --- max_rate_c_per_min (S8) ---
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 20.5f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 20.5 refused");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 30.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 30 refused");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate equal resend accepted");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 10.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate lowered 20 -> 10 accepted");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> 0 (S8 off) refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = -1.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> negative (S8 off) refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = gate_nan_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> NaN refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; base.max_rate_c_per_min = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; n.max_rate_c_per_min = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate unset -> set-to-0 refused (MED-A)");
+    gate_setup_baseline(&base);
+    base.max_rate_c_per_min = 0.0f; // committed as 0 = S8 off
+    n = base; n.max_rate_c_per_min = 15.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate off (0) -> enabled 15 is a tightening, accepted");
+    gate_setup_baseline(&base);
+    base.max_rate_c_per_min = 0.0f;
+    n = base; n.max_rate_c_per_min = -4.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate off (0) -> negative refused");
+}
+
+static void test_volatile_gate_refuses_k_ct_change_but_accepts_resend(void)
+{
+    TEST_SECTION("config_store_flash: heat possible refuses a k_ct_v_per_a change (HIGH-B), resend accepted");
+    config_store_record_t base;
+    config_store_record_t n;
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = base.k_ct_v_per_a[1] * 1000.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct x1000 refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = -0.0333f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "negative k_ct refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct -> 0 refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[0] = 0.05f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct on another channel refused too");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "identical k_ct resend accepted");
+    // idle: a k_ct change installs (no heat possible)
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = 0.05f;
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_INIT);
+    TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture");
+    TEST_CHECK(config_store_write_volatile(&n, NULL) == true, "idle: k_ct change installs");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
@@ -2093,6 +2232,8 @@ int main(void)
     test_volatile_gate_follows_heat_probe_not_armed();
     test_volatile_gate_backfills_before_compare();
     test_volatile_gate_refuses_fields_set_only_changes();
+    test_volatile_gate_tightening_direction_and_off_values();
+    test_volatile_gate_refuses_k_ct_change_but_accepts_resend();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

@@ -739,16 +739,28 @@ bool config_store_unpack(const uint8_t in[CONFIG_STORE_RECORD_LEN],
 // to the bound on load instead (same stance as max_rate_c_per_min, which load
 // does not reject either). A non-finite offset is left alone so validation
 // still refuses it. The bound itself is unchanged for writes.
-static void config_store_clamp_stored_tc_offset(config_store_record_t *rec)
+//
+// 2026-10-10 review LOW-A: the clamp is NOT silent. A clamp changes an
+// S1-relevant value (a +80 stored offset clamped to +50 makes the Pico read
+// 30 C cool, so S1 trips late), so `out_reject` (when non-NULL) gets
+// tc_offset_clamped = true and tc_offset_stored_c = the original value on a
+// successful load; config_store_find_latest*_ex() carry it for the winning
+// slot and config_store_boot_load() logs it and latches
+// config_store_tc_offset_was_clamped().
+static void config_store_clamp_stored_tc_offset(config_store_record_t *rec,
+                                                 config_store_reject_info_t *out_reject)
 {
     const float v = rec->tc_offset_c;
     if (!(v == v) || v > 3.0e38f || v < -3.0e38f) {
         return; // NaN / inf: validation refuses
     }
-    if (v > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
-        rec->tc_offset_c = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
-    } else if (v < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
-        rec->tc_offset_c = -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    if (v > CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C || v < -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C) {
+        rec->tc_offset_c = (v > 0.0f) ? CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C
+                                      : -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+        if (out_reject != NULL) {
+            out_reject->tc_offset_clamped = true;
+            out_reject->tc_offset_stored_c = v;
+        }
     }
 }
 bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
@@ -819,7 +831,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // never be silent.
         const char *field = NULL;
         const char *rule = NULL;
-        config_store_clamp_stored_tc_offset(&scratch);
+        config_store_clamp_stored_tc_offset(&scratch, out_reject);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
@@ -886,7 +898,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // on a board that is, in fact, configured.
         const char *field = NULL;
         const char *rule = NULL;
-        config_store_clamp_stored_tc_offset(&scratch);
+        config_store_clamp_stored_tc_offset(&scratch, out_reject);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
@@ -955,7 +967,7 @@ bool config_store_unpack_ex(const uint8_t in[CONFIG_STORE_RECORD_LEN],
         // re-check is just as much a "found and refused" case as a v2 one.
         const char *field = NULL;
         const char *rule = NULL;
-        config_store_clamp_stored_tc_offset(&scratch);
+        config_store_clamp_stored_tc_offset(&scratch, out_reject);
         if (!config_params_validate_ranges(&scratch, &field, &rule, NULL)) {
             if (out_reject != NULL) {
                 out_reject->rejected = true;
@@ -1147,6 +1159,8 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     config_store_record_t best_rec;
     memset(&best_rec, 0, sizeof(best_rec));
     bool have_best = false;
+    bool best_clamped = false;
+    float best_clamped_stored_c = 0.0f;
 
     // Tracks the highest-seq REJECTED (structurally valid, range-refused)
     // slot seen so far, independent of `best_rec`/`have_best` above -- a
@@ -1180,6 +1194,8 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
             best_rec = candidate;
             best_slot = i;
             have_best = true;
+            best_clamped = reject_info.tc_offset_clamped;
+            best_clamped_stored_c = reject_info.tc_offset_stored_c;
         }
     }
 
@@ -1194,6 +1210,10 @@ size_t config_store_find_latest_ex(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLA
     }
 
     *out_rec = best_rec;
+    if (out_reject != NULL && best_clamped) {
+        out_reject->tc_offset_clamped = true; // rejected stays false: the record loaded
+        out_reject->tc_offset_stored_c = best_clamped_stored_c;
+    }
     return best_slot;
 }
 
@@ -1215,6 +1235,8 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
     config_store_record_t best_rec;
     memset(&best_rec, 0, sizeof(best_rec));
     bool have_best = false;
+    bool best_clamped = false;
+    float best_clamped_stored_c = 0.0f;
 
     // Same "highest-seq rejection, only reported if no sector has a good
     // record" bookkeeping as config_store_find_latest_ex(), just carried
@@ -1243,6 +1265,8 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
             best_slot = sector_slot;
             best_sector = s;
             have_best = true;
+            best_clamped = sector_reject.tc_offset_clamped;
+            best_clamped_stored_c = sector_reject.tc_offset_stored_c;
         }
     }
 
@@ -1255,6 +1279,10 @@ size_t config_store_find_latest_multi_ex(const uint8_t *sectors[SAFTYFW_CONFIG_S
 
     *out_sector_index = best_sector;
     *out_rec = best_rec;
+    if (out_reject != NULL && best_clamped) {
+        out_reject->tc_offset_clamped = true;
+        out_reject->tc_offset_stored_c = best_clamped_stored_c;
+    }
     return best_slot;
 }
 
@@ -1523,15 +1551,26 @@ bool config_store_only_ct_cal_differs(const config_store_record_t *current,
 //   format_version, seq        bookkeeping, set by the installer
 //   calibration_missing        derived from fields_set (itself compared)
 //   mains_voltage_v, max_expected_power_w (+ their fields_set bits)
-//                              reporting/plausibility only, no guard trips
-//   k_ct_v_per_a[]             "power estimate only" (config_store.h)
+//                              reporting/plausibility only, no guard trips.
+//                              (mains_voltage_v's set bit also feeds
+//                              calibration_missing, which gates only the next
+//                              REQUEST_ENABLE, never a running guard.)
 //   telemetry_period_ms        telemetry cadence
 //   power_window_s             power estimate averaging window
 //   i_present_a_manual         provenance flag; the value i_present_a is
 //                              itself compared
 //   reserved                   unused padding
 // Provable tightenings (the only value changes allowed through):
-//   abs_max_temp_c, max_rate_c_per_min: unset -> set, or set and lowered/held
+//   abs_max_temp_c, max_rate_c_per_min: unset -> set, or set and lowered/held,
+//                              with every value judged by "does the guard
+//                              run": S1 runs only when abs_max > 0, S8 only
+//                              when max_rate > 0, so <= 0 and NaN are the
+//                              LOOSEST value (guard off), never the lowest.
+// NOT allowlisted: k_ct_v_per_a[] (2026-10-10 review HIGH-B). It scales the
+//                              S3/S9/S6b/S11 presence threshold, gates S14/S15
+//                              (amps_valid_for_ct) and S9 (current_sensing_
+//                              commissioned); like gain[] it is compared, so a
+//                              change while heat is possible is refused.
 //   tc_type: first commissioning (unset -> set) only
 bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
                                                 const config_store_record_t *next)
@@ -1554,7 +1593,6 @@ bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
     nrm.calibration_missing = cur->calibration_missing;
     nrm.mains_voltage_v = cur->mains_voltage_v;
     nrm.max_expected_power_w = cur->max_expected_power_w;
-    memcpy(nrm.k_ct_v_per_a, cur->k_ct_v_per_a, sizeof nrm.k_ct_v_per_a);
     nrm.telemetry_period_ms = cur->telemetry_period_ms;
     nrm.power_window_s = cur->power_window_s;
     nrm.i_present_a_manual = cur->i_present_a_manual;
@@ -1563,18 +1601,28 @@ bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
     nrm.fields_set = (next->fields_set & ~allow_bits) | (cur->fields_set & allow_bits);
 
     // Provable tightenings.
+    // A provable tightening needs the NEW value to be a real, enabled limit
+    // (finite and > 0), judged HERE and not by the caller's validate_ex
+    // (review MED-A): write_volatile installs whatever this gate passes.
+    // `cur` <= 0 means the guard is currently off, so any enabled next value
+    // is a tightening; a NaN `cur` is never provably anything (fails closed
+    // to the memcmp below).
     const bool cur_abs_set = (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
     const bool next_abs_set = (next->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
-    if ((!cur_abs_set && next_abs_set) ||
-        (cur_abs_set && next_abs_set && next->abs_max_temp_c <= cur->abs_max_temp_c)) {
+    const float na = next->abs_max_temp_c;
+    const float ca = cur->abs_max_temp_c;
+    const bool next_abs_enabled = next_abs_set && (na > 0.0f) && (na <= 3.0e38f);
+    if (next_abs_enabled && (!cur_abs_set || (ca <= 0.0f) || (na <= ca))) {
         nrm.abs_max_temp_c = cur->abs_max_temp_c;
         nrm.fields_set = (nrm.fields_set & ~CONFIG_STORE_SET_ABS_MAX_TEMP_C) |
                          (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C);
     }
     const bool cur_rate_set = (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
     const bool next_rate_set = (next->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
-    if ((!cur_rate_set && next_rate_set) ||
-        (cur_rate_set && next_rate_set && next->max_rate_c_per_min <= cur->max_rate_c_per_min)) {
+    const float nr = next->max_rate_c_per_min;
+    const float cr = cur->max_rate_c_per_min;
+    const bool next_rate_enabled = next_rate_set && (nr > 0.0f) && (nr <= 3.0e38f);
+    if (next_rate_enabled && (!cur_rate_set || (cr <= 0.0f) || (nr <= cr))) {
         nrm.max_rate_c_per_min = cur->max_rate_c_per_min;
         nrm.fields_set = (nrm.fields_set & ~CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) |
                          (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);

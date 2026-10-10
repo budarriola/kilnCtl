@@ -704,6 +704,7 @@ static bool s_loaded = false;
 // diagnostics" case 2, distinct from an ordinary never-committed board (case
 // 1, this stays false). See config_store_is_config_rejected()'s own comment.
 static bool s_load_rejected = false;
+static bool s_load_tc_offset_clamped = false; // review LOW-A: winning record's tc_offset_c was clamped at load
 
 // Module-scope, not a local: SAFTYFW_CONFIG_STORE_FLASH_SIZE is 4096 bytes
 // (one erase sector, bootloader/flash_layout.h), and read_latest_or_default()'s
@@ -781,6 +782,7 @@ void config_store_boot_load(void)
 
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+    s_load_tc_offset_clamped = (s_cached_slot != CONFIG_STORE_NO_SLOT) && reject_info.tc_offset_clamped;
     s_persisted_record = s_cached_record; // opus review item 4: seed flash-truth from what boot found
     // Seed the periodic RAM-integrity check's tracked CRC from the same
     // boot-loaded record -- config_store_seqlock_write() is not the path
@@ -861,7 +863,24 @@ void config_store_boot_load(void)
                           "(UNCOMMISSIONED).\r\n");
     }
 
+    if (s_load_tc_offset_clamped) {
+        // Review LOW-A: loud, not silent. A stored offset beyond the write
+        // bound was clamped; the Pico thermocouple may read cooler than the
+        // sensor (S1 trips late) until the offset is re-commissioned.
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "SaftyFW: config_store tc_offset_c CLAMPED at load: stored %.1f C -> %.1f C "
+                 "(re-commission the safety TC offset)\r\n",
+                 (double)reject_info.tc_offset_stored_c, (double)s_cached_record.tc_offset_c);
+        console_uart_puts(line);
+    }
+
     s_loaded = true;
+}
+
+bool config_store_tc_offset_was_clamped(void)
+{
+    return s_loaded && s_load_tc_offset_clamped;
 }
 
 bool config_store_is_config_rejected(void)
@@ -1611,7 +1630,11 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
 // Without a registered probe the gate falls back to the old, stricter-than-
 // needed "relay_owner is ARMED" rule, so a host build or a boot-order slip
 // never silently opens it. GRACE/INIT/TRIPPED cannot energize K4, so they
-// never trigger the gate.
+// never trigger the gate by themselves. (With the probe registered, a stale
+// or absent ESP context also counts as heat possible, so in GRACE/idle right
+// after boot, before the first context frame, the gate DOES apply and an
+// early ESP config replay that loosens a field is refused until context
+// arrives -- fail-closed and intended; do not "fix" the code to the old text.)
 //
 // WHAT the gate refuses: config_store_volatile_would_loosen_safety()
 // (config_store.c) -- ANY trip-relevant field that differs from the running

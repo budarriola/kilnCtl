@@ -798,8 +798,10 @@ typedef struct {
     uint32_t correlation_window_s;    // s, S3/S4
     uint32_t stuck_on_time_s;         // s, S3
     uint32_t trip_verify_s;           // s, S9
-    float    k_ct_v_per_a[3];         // V/A, power estimate only -- no
-                                       // documented default ("--")
+    float    k_ct_v_per_a[3];         // V/A, power estimate AND the presence
+                                       // threshold's domain conversion; gates
+                                       // S14/S15 and S9 -- no documented
+                                       // default ("--")
     float    gain[3];                 // dimensionless, R46/R43 trim
     float    mains_voltage_v;         // V; gated by _SET_MAINS_VOLTAGE_V --
                                        // same "0 is plausible, ships
@@ -1153,6 +1155,13 @@ typedef struct {
                            // the sector fails validation, matching the
                            // "highest seq wins" rule the valid-record path
                            // already follows.
+    bool        tc_offset_clamped; // independent of `rejected`: set on a
+                           // SUCCESSFUL load when the stored tc_offset_c was
+                           // beyond +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C and
+                           // was clamped (2026-10-10 review LOW-A). Carried
+                           // by config_store_find_latest*_ex() for the
+                           // winning slot.
+    float       tc_offset_stored_c; // pre-clamp value; valid iff tc_offset_clamped.
 } config_store_reject_info_t;
 
 // --- Record pack/unpack ---------------------------------------------------
@@ -1253,7 +1262,7 @@ size_t config_store_find_latest(const uint8_t sector[SAFTYFW_CONFIG_STORE_FLASH_
 // be reported, logged, or treated the same as an ordinary empty/fresh
 // sector (`rejected == false`, every slot's magic/CRC itself was bad).
 // When a valid slot IS found (return != CONFIG_STORE_NO_SLOT), `*out_reject`
-// is always zeroed (rejected == false) regardless of whether some OTHER,
+// has rejected == false (tc_offset_clamped may be set for the winning slot) regardless of whether some OTHER,
 // lower-seq slot in the sector was also rejected -- a board that has a real,
 // trustworthy current config is not in the state this diagnostic exists to
 // surface. `*out_reject` is always written (never left uninitialised) when
@@ -1543,6 +1552,11 @@ bool config_store_is_rate_guard_disabled(void);
 // future consumer -- a DIAG bit, a boot-reason report -- does not have to
 // reconstruct the distinction from scratch.
 bool config_store_is_config_rejected(void);
+
+// True iff config_store_boot_load() loaded a valid record whose stored
+// tc_offset_c was beyond +/-CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C and was clamped
+// (2026-10-10 review LOW-A). The clamp is also logged on the console at boot.
+bool config_store_tc_offset_was_clamped(void);
 
 // True iff the cached record's tc_type has actually been commissioned
 // (CONFIG_STORE_SET_TC_TYPE, see that bit's own comment) rather than merely
