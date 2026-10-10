@@ -174,6 +174,62 @@ bool stack_margin_register(const char *name, void *task_handle_slot, uint32_t co
     return true;
 }
 
+// ---- R2-D (HOST_TEST_COVERAGE_GAPS round 2): controllable scan / netif fakes ----
+// The shared stubs/esp_wifi.h and stubs/esp_netif.h scan and IP stubs always report
+// zero access points and an empty dotted quad. Rather than edit those shared stubs
+// (other host executables include them), the call sites inside the #included driver
+// sources are redirected here with function-like macros, defined AFTER the stub
+// headers and BEFORE wifi_prov.c. Defaults reproduce the old stub behaviour.
+#include "esp_netif.h"
+static uint16_t g_r2d_scan_n = 0;
+static wifi_ap_record_t g_r2d_scan_recs[25];
+static esp_err_t g_r2d_scan_start_rc = ESP_OK;
+static esp_err_t g_r2d_scan_recs_rc = ESP_OK;
+static int g_r2d_scan_start_calls = 0;
+static uint16_t g_r2d_last_fetch_request = 0;
+static uint32_t g_r2d_netmask = 0;
+static esp_err_t r2d_scan_start(const wifi_scan_config_t *cfg, int block)
+{
+    (void)cfg; (void)block;
+    g_r2d_scan_start_calls++;
+    return g_r2d_scan_start_rc;
+}
+static esp_err_t r2d_scan_get_ap_num(uint16_t *num)
+{
+    if (num) *num = g_r2d_scan_n;
+    return ESP_OK;
+}
+static esp_err_t r2d_scan_get_ap_records(uint16_t *num, wifi_ap_record_t *records)
+{
+    g_r2d_last_fetch_request = *num;
+    if (g_r2d_scan_recs_rc != ESP_OK) return g_r2d_scan_recs_rc;
+    uint16_t n = *num < g_r2d_scan_n ? *num : g_r2d_scan_n;
+    for (uint16_t i = 0; i < n; i++) records[i] = g_r2d_scan_recs[i];
+    *num = n;
+    return ESP_OK;
+}
+static esp_err_t r2d_get_ip_info(esp_netif_t *netif, esp_netif_ip_info_t *info)
+{
+    (void)netif;
+    info->ip.addr = g_stub_netif_ip_addr;
+    info->netmask.addr = g_r2d_netmask;
+    info->gw.addr = 0;
+    return ESP_OK;
+}
+static char *r2d_ip4_ntoa(const esp_ip4_addr_t *addr, char *buf, uint32_t buflen)
+{
+    if (!buf || buflen == 0) return buf;
+    if (addr->addr == 0) { buf[0] = '\0'; return buf; }
+    snprintf(buf, buflen, "%u.%u.%u.%u", (unsigned)(addr->addr & 0xFFu), (unsigned)((addr->addr >> 8) & 0xFFu),
+             (unsigned)((addr->addr >> 16) & 0xFFu), (unsigned)((addr->addr >> 24) & 0xFFu));
+    return buf;
+}
+#define esp_wifi_scan_start(c, b) r2d_scan_start((c), (b))
+#define esp_wifi_scan_get_ap_num(n) r2d_scan_get_ap_num(n)
+#define esp_wifi_scan_get_ap_records(n, r) r2d_scan_get_ap_records((n), (r))
+#define esp_netif_get_ip_info(n, i) r2d_get_ip_info((n), (i))
+#define esp_ip4addr_ntoa(a, b, l) r2d_ip4_ntoa((a), (b), (l))
+
 #include "../drivers/net/wifi_prov.c"
 // wifi_prov.c split 2026-09-04 (ROADMAP.md M15 A3, "files over 1500 lines
 // should be broken up where it makes sense") -- the new wifi_prov_*.c pieces
@@ -2002,6 +2058,233 @@ static void test_static_ip_problem_text(void)
     TEST_CHECK(p && strstr(p, "gateway is not a usable"), "broadcast gateway");
 }
 
+// ======================= R2-D: wifi_prov_api.c command bodies =======================
+
+static void r2d_seed_nets(int n)
+{
+    reset_state();
+    for (int i = 0; i < n; i++) {
+        snprintf(s_wifi.saved_nets.nets[i].ssid, sizeof(s_wifi.saved_nets.nets[i].ssid), "net%d", i);
+        snprintf(s_wifi.saved_nets.nets[i].password, sizeof(s_wifi.saved_nets.nets[i].password), "pw%d-xxxxxxxx", i);
+    }
+    s_wifi.saved_nets.count = (uint8_t)n;
+}
+
+static void test_r2d_add_network_upsert_full_and_persist(void)
+{
+    TEST_SECTION("R2-D do_add_network: upsert, full-list refusal, AP->HOME, cache refresh, NVS persistence");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(WIFI_NVS_PARTITION) == HAL_OK, "setup: init wifi_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default partition");
+    reset_state();
+    bool join = false;
+    TEST_CHECK(do_add_network("alpha", "passwordA1", &join) == ESP_OK && join, "first add ok, join requested");
+    TEST_CHECK(do_add_network("beta", "passwordB1", &join) == ESP_OK, "second add ok");
+    TEST_CHECK(s_wifi.saved_nets.count == 2, "two saved");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[1].ssid, "beta") == 0 && strcmp(s_wifi.saved_nets.nets[1].password, "passwordB1") == 0,
+               "beta stored with its password");
+    TEST_CHECK(do_add_network("alpha", "newpassA2", &join) == ESP_OK, "upsert ok");
+    TEST_CHECK(s_wifi.saved_nets.count == 2, "upsert does not grow the list");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[0].password, "newpassA2") == 0, "alpha password replaced in place");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[1].ssid, "beta") == 0, "beta untouched, order kept");
+    TEST_CHECK(do_add_network("alpha", "short", &join) == ESP_OK, "shorter password ok");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[0].password, "short") == 0, "alpha password is exactly the new, shorter one");
+    wifi_prov_saved_network_t c[WIFI_PROV_MAX_SAVED_NETWORKS];
+    size_t cn = 99;
+    wifi_prov_get_saved_networks_cached(c, WIFI_PROV_MAX_SAVED_NETWORKS, &cn);
+    TEST_CHECK(cn == 2 && strcmp(c[0].ssid, "alpha") == 0 && strcmp(c[1].ssid, "beta") == 0, "cache refreshed by the add");
+    simulate_reboot_state();
+    nvs_load_saved_nets();
+    TEST_CHECK(s_wifi.saved_nets.count == 2, "after reboot two networks load");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[0].ssid, "alpha") == 0 && strcmp(s_wifi.saved_nets.nets[0].password, "short") == 0,
+               "persisted alpha carries the updated password");
+
+    r2d_seed_nets(WIFI_PROV_MAX_SAVED_NETWORKS);
+    s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
+    join = true;
+    TEST_CHECK(do_add_network("overflow", "passwordZ9", &join) == ESP_ERR_NO_MEM, "full list refuses a new SSID with ESP_ERR_NO_MEM");
+    TEST_CHECK(!join, "refusal asks for no join");
+    TEST_CHECK(s_wifi.state == WIFI_PROV_STATE_UNPROVISIONED, "refusal leaves state alone");
+    TEST_CHECK(s_wifi.saved_nets.count == WIFI_PROV_MAX_SAVED_NETWORKS, "count unchanged");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[0].ssid, "net0") == 0, "no entry evicted");
+    TEST_CHECK(do_add_network("net3", "updatedpw3", &join) == ESP_OK && strcmp(s_wifi.saved_nets.nets[3].password, "updatedpw3") == 0,
+               "an existing SSID in a full list can still be updated");
+
+    r2d_seed_nets(0);
+    s_wifi.mode = WIFI_PROV_MODE_AP;
+    TEST_CHECK(do_add_network("gamma", "passwordG1", &join) == ESP_OK, "add while in AP mode ok");
+    TEST_CHECK(s_wifi.mode == WIFI_PROV_MODE_HOME, "AP mode switched to HOME");
+}
+
+static void test_r2d_forget_network_compacts_and_persists(void)
+{
+    TEST_SECTION("R2-D do_forget_network: compaction order, zeroed tail, unknown SSID no-op, cache, persistence");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(WIFI_NVS_PARTITION) == HAL_OK, "setup: init wifi_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init default partition");
+    r2d_seed_nets(4);
+    wifi_prov_update_saved_nets_cache();
+    TEST_CHECK(do_forget_network("nope") == ESP_OK && s_wifi.saved_nets.count == 4, "unknown SSID: ESP_OK, nothing removed");
+    TEST_CHECK(do_forget_network("net1") == ESP_OK, "forget middle ok");
+    TEST_CHECK(s_wifi.saved_nets.count == 3, "count drops by one");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[0].ssid, "net0") == 0 && strcmp(s_wifi.saved_nets.nets[1].ssid, "net2") == 0 &&
+               strcmp(s_wifi.saved_nets.nets[2].ssid, "net3") == 0, "later entries shifted down, order preserved");
+    TEST_CHECK(strcmp(s_wifi.saved_nets.nets[1].password, "pw2-xxxxxxxx") == 0, "shifted entry keeps its own password");
+    uint8_t zero[sizeof(s_wifi.saved_nets.nets[0])];
+    memset(zero, 0, sizeof(zero));
+    TEST_CHECK(memcmp(&s_wifi.saved_nets.nets[3], zero, sizeof(zero)) == 0, "vacated tail slot is zeroed (no stale password)");
+    wifi_prov_saved_network_t c[WIFI_PROV_MAX_SAVED_NETWORKS];
+    size_t cn = 0;
+    wifi_prov_get_saved_networks_cached(c, WIFI_PROV_MAX_SAVED_NETWORKS, &cn);
+    TEST_CHECK(cn == 3 && strcmp(c[1].ssid, "net2") == 0, "cache follows the removal");
+    simulate_reboot_state();
+    nvs_load_saved_nets();
+    TEST_CHECK(s_wifi.saved_nets.count == 3 && strcmp(s_wifi.saved_nets.nets[1].ssid, "net2") == 0, "removal persisted");
+    TEST_CHECK(do_forget_network("net0") == ESP_OK && do_forget_network("net3") == ESP_OK, "forget first and last");
+    TEST_CHECK(s_wifi.saved_nets.count == 1 && strcmp(s_wifi.saved_nets.nets[0].ssid, "net2") == 0, "one entry left, net2");
+}
+
+static void test_r2d_saved_networks_getters(void)
+{
+    TEST_SECTION("R2-D do_get_saved_networks and the cached reader: truncation, bad args");
+    r2d_seed_nets(5);
+    wifi_result_t r;
+    memset(&r, 0, sizeof(r));
+    TEST_CHECK(do_get_saved_networks(3, &r) == ESP_OK && r.saved_count == 3, "max_results 3 truncates to 3");
+    TEST_CHECK(strcmp(r.saved[0].ssid, "net0") == 0 && strcmp(r.saved[2].ssid, "net2") == 0, "first three SSIDs in order");
+    memset(&r, 0, sizeof(r));
+    TEST_CHECK(do_get_saved_networks(100, &r) == ESP_OK && r.saved_count == 5, "large max returns the whole list");
+    memset(&r, 0, sizeof(r));
+    TEST_CHECK(do_get_saved_networks(0, &r) == ESP_OK && r.saved_count == 0, "max_results 0 returns none");
+
+    r2d_seed_nets(5);
+    wifi_prov_update_saved_nets_cache();
+    wifi_prov_saved_network_t out[8];
+    size_t n = 77;
+    wifi_prov_get_saved_networks_cached(out, 2, &n);
+    TEST_CHECK(n == 2 && strcmp(out[1].ssid, "net1") == 0, "cached reader truncates to max_results");
+    n = 77;
+    wifi_prov_get_saved_networks_cached(NULL, 4, &n);
+    TEST_CHECK(n == 0, "NULL out gives count 0");
+    n = 77;
+    wifi_prov_get_saved_networks_cached(out, 0, &n);
+    TEST_CHECK(n == 0, "max_results 0 gives count 0");
+    s_wifi.saved_nets.count = 1;
+    n = 0;
+    wifi_prov_get_saved_networks_cached(out, 8, &n);
+    TEST_CHECK(n == 5, "cache stays at the last published snapshot");
+    wifi_prov_update_saved_nets_cache();
+    wifi_prov_get_saved_networks_cached(out, 8, &n);
+    TEST_CHECK(n == 1, "update republishes");
+
+    reset_state();
+    size_t cnt = 5;
+    TEST_CHECK(wifi_prov_get_saved_networks(NULL, 4, &cnt) == ESP_ERR_INVALID_ARG, "NULL out refused");
+    TEST_CHECK(wifi_prov_get_saved_networks(out, 0, &cnt) == ESP_ERR_INVALID_ARG, "max 0 refused");
+    TEST_CHECK(wifi_prov_get_saved_networks(out, 4, NULL) == ESP_ERR_INVALID_ARG, "NULL count refused");
+    TEST_CHECK(wifi_prov_get_saved_networks(out, 4, &cnt) == ESP_ERR_INVALID_STATE && cnt == 0, "not started: INVALID_STATE, count zeroed");
+    s_wifi.started = true;
+    TEST_CHECK(wifi_prov_get_saved_networks(out, 4, &cnt) == ESP_ERR_TIMEOUT && cnt == 0, "started but owner never replies: TIMEOUT");
+}
+
+static void test_r2d_simple_getters(void)
+{
+    TEST_SECTION("R2-D direct-read getters: connected, pending teardown, ip mode, rssi, AP clients");
+    reset_state();
+    TEST_CHECK(!wifi_prov_is_sta_connected(), "not connected by default");
+    s_wifi.state = WIFI_PROV_STATE_CONNECTED;
+    TEST_CHECK(wifi_prov_is_sta_connected(), "CONNECTED reports true");
+    s_wifi.state = WIFI_PROV_STATE_CONNECTING;
+    TEST_CHECK(!wifi_prov_is_sta_connected(), "CONNECTING is not connected");
+    TEST_CHECK(!wifi_prov_get_ap_pending_teardown(), "no pending teardown by default");
+    s_wifi.ap_pending_teardown = true;
+    TEST_CHECK(wifi_prov_get_ap_pending_teardown(), "pending teardown reported");
+    s_wifi.ip_mode = WIFI_PROV_IP_MODE_STATIC;
+    strcpy(s_wifi.static_ip, "10.1.2.3");
+    strcpy(s_wifi.static_netmask, "255.255.0.0");
+    strcpy(s_wifi.static_gateway, "10.1.0.1");
+    strcpy(s_wifi.static_dns, "9.9.9.9");
+    strcpy(s_wifi.static_dns2, "8.8.4.4");
+    TEST_CHECK(wifi_prov_get_ip_mode() == WIFI_PROV_IP_MODE_STATIC, "ip mode static");
+    TEST_CHECK(strcmp(wifi_prov_get_static_ip(), "10.1.2.3") == 0 && strcmp(wifi_prov_get_static_netmask(), "255.255.0.0") == 0 &&
+               strcmp(wifi_prov_get_static_gateway(), "10.1.0.1") == 0 && strcmp(wifi_prov_get_static_dns(), "9.9.9.9") == 0 &&
+               strcmp(wifi_prov_get_static_dns2(), "8.8.4.4") == 0, "static strings returned verbatim");
+}
+
+static void test_r2d_sta_ip_cache(void)
+{
+    TEST_SECTION("R2-D STA ip cache");
+    char ip[16], nm[16];
+    wifi_prov_update_sta_ip_cache("192.168.1.20", "255.255.255.0");
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(ip, sizeof(ip), nm, sizeof(nm)) == ESP_OK &&
+               strcmp(ip, "192.168.1.20") == 0 && strcmp(nm, "255.255.255.0") == 0, "cache round trip");
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(NULL, 16, nm, 16) == ESP_ERR_INVALID_ARG, "NULL ip refused");
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(ip, 0, nm, 16) == ESP_ERR_INVALID_ARG, "ip cap 0 refused");
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(ip, 16, NULL, 16) == ESP_ERR_INVALID_ARG, "NULL netmask refused");
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(ip, 16, nm, 0) == ESP_ERR_INVALID_ARG, "netmask cap 0 refused");
+    wifi_prov_update_sta_ip_cache(NULL, NULL);
+    TEST_CHECK(wifi_prov_get_cached_sta_ip_netmask(ip, sizeof(ip), nm, sizeof(nm)) == ESP_OK && ip[0] == '\0' && nm[0] == '\0',
+               "NULL update clears the cache");
+}
+
+static void r2d_set_rec(int i, const char *ssid, int8_t rssi, wifi_auth_mode_t auth)
+{
+    memset(&g_r2d_scan_recs[i], 0, sizeof(g_r2d_scan_recs[i]));
+    strncpy((char *)g_r2d_scan_recs[i].ssid, ssid, sizeof(g_r2d_scan_recs[i].ssid) - 1);
+    g_r2d_scan_recs[i].rssi = rssi;
+    g_r2d_scan_recs[i].authmode = auth;
+}
+
+static void test_r2d_do_scan(void)
+{
+    TEST_SECTION("R2-D do_scan: AP-mode refusal, STA bring-up, result mapping and caps");
+    wifi_prov_scan_result_t res[30];
+    size_t n = 99;
+    reset_state();
+    g_r2d_scan_start_calls = 0;
+    g_r2d_scan_n = 0;
+    g_r2d_scan_start_rc = ESP_OK;
+    g_r2d_scan_recs_rc = ESP_OK;
+    s_wifi.mode = WIFI_PROV_MODE_AP;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_ERR_NOT_SUPPORTED && n == 0 && g_r2d_scan_start_calls == 0,
+               "AP mode: refused, no scan started");
+    s_wifi.mode = WIFI_PROV_MODE_HOME;
+    g_stub_wifi_mode = WIFI_MODE_AP;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_OK && n == 0, "AP-only radio, zero results");
+    TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_APSTA, "AP-only radio brought up to APSTA first");
+    TEST_CHECK(g_r2d_scan_start_calls == 1, "scan started once");
+
+    g_stub_wifi_mode = WIFI_MODE_STA;
+    r2d_set_rec(0, "OpenNet", -40, WIFI_AUTH_OPEN);
+    r2d_set_rec(1, "SecureNet", -72, (wifi_auth_mode_t)3);
+    g_r2d_scan_n = 2;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_OK && n == 2, "two results");
+    TEST_CHECK(g_stub_wifi_mode == WIFI_MODE_STA, "STA radio mode untouched");
+    TEST_CHECK(strcmp(res[0].ssid, "OpenNet") == 0 && res[0].rssi == -40 && !res[0].secure, "open network: secure=false");
+    TEST_CHECK(strcmp(res[1].ssid, "SecureNet") == 0 && res[1].rssi == -72 && res[1].secure, "protected network: secure=true");
+
+    TEST_CHECK(do_scan(res, 1, &n) == ESP_OK && n == 1 && strcmp(res[0].ssid, "OpenNet") == 0, "max_results 1 truncates");
+    TEST_CHECK(g_r2d_last_fetch_request == 1, "driver asked for only max_results records");
+
+    for (int i = 0; i < 25; i++) {
+        char nm[16];
+        snprintf(nm, sizeof(nm), "N%02d", i);
+        r2d_set_rec(i, nm, (int8_t)(-30 - i), WIFI_AUTH_OPEN);
+    }
+    g_r2d_scan_n = 25;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_OK && n == 20, "internal record buffer caps at 20");
+    TEST_CHECK(g_r2d_last_fetch_request == 20 && strcmp(res[19].ssid, "N19") == 0, "20th record is the last returned");
+
+    g_r2d_scan_start_rc = ESP_ERR_INVALID_STATE;
+    n = 99;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_ERR_INVALID_STATE && n == 0, "scan_start failure propagates");
+    g_r2d_scan_start_rc = ESP_OK;
+    g_r2d_scan_recs_rc = ESP_FAIL;
+    TEST_CHECK(do_scan(res, 30, &n) == ESP_FAIL && n == 0, "get_ap_records failure propagates, nothing reported");
+    g_r2d_scan_recs_rc = ESP_OK;
+    g_r2d_scan_n = 0;
+}
+
 void run_test_wifi_prov(void)
 {
     test_refused_record_never_readopts_legacy();
@@ -2071,6 +2354,12 @@ void run_test_wifi_prov(void)
     test_static_reachability_v4_mapped_af_inet6_matches();
     test_static_reachability_v4_mapped_af_inet6_no_match();
     test_static_reachability_refuses_legacy_ap_subnet_static_ip();
+    test_r2d_add_network_upsert_full_and_persist();
+    test_r2d_forget_network_compacts_and_persists();
+    test_r2d_saved_networks_getters();
+    test_r2d_simple_getters();
+    test_r2d_sta_ip_cache();
+    test_r2d_do_scan();
 }
 
 int main(void)
