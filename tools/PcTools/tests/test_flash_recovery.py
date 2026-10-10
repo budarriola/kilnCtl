@@ -378,7 +378,7 @@ class LinkDownWaiverTest(unittest.TestCase):
 
     def test_latched_trip_without_link_down_waiver_is_still_a_hazard(self):
         h, _ = recovery_flash.board_state_refusals(
-            self._pf(True, False), lambda: ["a safety trip is latched (trip_reason=7)"])
+            self._pf(link_up=True, safety_armed=True, ota_interlock_ok=True, ota_interlock_reason="ok", ota_interlock_needs_ack=None), lambda: ["a safety trip is latched (trip_reason=7)"])
         self.assertEqual(len(h), 1)
 
     def test_armed_conditions_read_failure_is_unreadable_in_link_down_mode(self):
