@@ -58,7 +58,7 @@ call it on the relock edge beside `ui_confirm_close_open()`.
 
 ### L2 (LOW, FIXED) -- LCD live-edit generation check window
 
-Fixed: `live_profile_save_working_if_gen()` compares and writes under live_profile's save lock; LCD apply and `profiles_live_http.c` (when `gen=` is sent) use it; test in `test_live_profile.c`.
+Fixed upstream in `062456379` (Web4 review A1): `live_profile_save_working_if_gen()` compares and writes under live_profile's save lock; LCD apply and `profiles_live_http.c` both use it and the LCD adopts the generation its own save produced.
 
 `ui_edit_firing_apply.c:168` compares `live_profile_generation()` against the
 generation captured when the page opened (`:140`), then validates (`:179`),
