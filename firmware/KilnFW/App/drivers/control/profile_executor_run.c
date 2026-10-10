@@ -710,6 +710,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * memset(s_exec.zones, ...) a few lines down. */
     s_exec.dwell_credit_applied_s = 0.0f;
     s_exec.fault_reason[0] = '\0';
+    s_exec.pause_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     s_exec.global_fault_source = 0;
     /* Per-run, not cumulative: carrying a previous firing's claim forward

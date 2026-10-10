@@ -60,7 +60,7 @@ bool danger_mode_request_start(void)
     /* danger_mode_task's own stack is 3072 B (the 2026-10-09 4096 B bump was reverted: measured
    * 800 B static lower bound, 780 B live used; DEV_STACK_ANALYSER_REVIEW_2026-10-09.md Q5), and this is also
      * reachable from the httpd task (diagnostics_http.c calls straight
-     * into this function) -- a 1464-byte profile_exec_status_t stack local
+     * into this function) -- a 1512-byte profile_exec_status_t stack local
      * would be a real bite out of either budget. state_refuses_start()
      * only needs RUNNING/PAUSED, so use profile_executor_get_active_id(),
      * the narrow accessor profile_executor.h recommends for exactly this,

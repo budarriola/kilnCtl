@@ -272,6 +272,19 @@ void heat_enable_reconcile(void);
 void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed, uint32_t now_ms);
 bool heat_enable_grant_unconfirmed(void);
 
+// Safety-link fix batch 2, MED-1: Pico reboot cause. The watchdog feeds
+// safety_link's pico_reboot_seq, whether a DIAG frame arrived since that
+// reboot, and that DIAG's boot_reason (call BEFORE note_pico_state). A reboot
+// with a claim held is classified from the new boot's DIAG: WATCHDOG, BROWNOUT,
+// STACK_OVERFLOW, MALLOC_FAILED or ASSERT_FAILED -> heat_enable_reboot_hold()
+// reads true, the standing/queued request is withdrawn and neither F1 nor
+// reconcile will re-request (the caller pauses the firing with a reason).
+// Anything else keeps the F1 behaviour (re-request once ARMED). Cleared when
+// the last claim is released.
+void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
+                                uint32_t now_ms);
+bool heat_enable_reboot_hold(void);
+
 // Diagnostics/host-test counters: how many REQUEST_ENABLE(true) frames were
 // accepted by the link, and how many REQUEST_ENABLE(false) frames were sent.
 // A run that starts and stops once, on a healthy link, moves each by exactly

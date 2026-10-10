@@ -174,6 +174,8 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
     json_escape(st->profile_name, name_escaped, sizeof(name_escaped));
     char reason_escaped[sizeof(st->fault_reason) * 2 + 1];
     json_escape(st->fault_reason, reason_escaped, sizeof(reason_escaped));
+    char pause_escaped[sizeof(st->pause_reason) * 2 + 1];
+    json_escape(st->pause_reason, pause_escaped, sizeof(pause_escaped));
 
     int64_t total_planned_s, remaining_s;
     uint32_t elapsed_s;
@@ -270,7 +272,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         "\"segment_elapsed_s\":%lu,\"dwell_remaining_s\":%lu,\"ramp_lock_held\":%s,"
         "\"ramp_lock_lagging_mask\":%u,\"ramp_stretch_segment_s\":%.2f,\"ramp_stretch_total_s\":%.2f,"
         "\"ramp_dwell_credit_applied_s\":%.2f,"
-        "\"fault_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
+        "\"fault_reason\":\"%s\",\"pause_reason\":\"%s\",\"fault_guard\":%u,\"mode_state_fault_latched\":%s,"
         "\"mode_state_violation_count\":%lu,\"zone_blocked_mask\":%u,"
         "\"total_planned_s\":%s,\"elapsed_s\":%lu,\"remaining_s\":%s,\"remaining_is_estimate\":%s,",
         exec_state_name(st->state), st->profile_id, name_escaped, st->zone_mask, st->segment_index,
@@ -278,7 +280,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req)
         (unsigned long)st->segment_elapsed_s, (unsigned long)st->dwell_remaining_s,
         st->ramp_lock_held ? "true" : "false", st->ramp_lock_lagging_mask,
         (double)st->ramp_stretch_segment_s, (double)st->ramp_stretch_total_s,
-        (double)st->ramp_dwell_credit_applied_s, reason_escaped, st->fault_guard,
+        (double)st->ramp_dwell_credit_applied_s, reason_escaped, pause_escaped, st->fault_guard,
         st->mode_state_fault_latched ? "true" : "false", (unsigned long)st->mode_state_violation_count,
         (unsigned)st->zone_blocked_mask,
         total_planned_buf, (unsigned long)elapsed_s, remaining_buf, remaining_is_estimate ? "true" : "false");

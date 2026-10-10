@@ -378,7 +378,7 @@ static size_t profiles_build_get(uint8_t *out, uint8_t id)
  * see uart_task_ids.h for why. */
 static size_t profiles_build_exec_status(uint8_t *out)
 {
-    /* profile_exec_status_t is 1464 B; this runs on bx_flash_worker, whose
+    /* profile_exec_status_t is 1512 B; this runs on bx_flash_worker, whose
      * stack ceiling profile_executor_get_active_id()'s own doc comment
      * measures at 3792 B (zero headroom on clean main) -- a stack-local
      * instance here would be the same class of regression that function

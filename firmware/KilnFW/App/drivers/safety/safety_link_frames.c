@@ -271,6 +271,13 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 {
     link->cached.trip_event_ever_received = false;
     link->cached.trip_last_seq = 0u;
+    /* Safety-link fix batch 2 (MED-1, LOW-3): the last DIAG describes the
+     * OLD boot. Mark it so consumers can ignore its state (an old ARMED must
+     * not satisfy a new boot's F1 check) and treat the boot cause as unknown
+     * until the new boot's DIAG. cached.diag_state itself is left alone: the
+     * clear-trip command path judges it, and stays as before. */
+    link->cached.pico_reboot_seq++;
+    link->cached.diag_since_reboot = false;
     /* kilnlink review LOW-1: the cached DIAG trip_seq (byte 30) is the other
      * half of the same pair -- the new boot restarts trip_seq at 1, so a
      * bound clear built from the old boot's cached seq 1 (same mask) would
@@ -495,7 +502,7 @@ void safety_build_and_send_context(SafetyLinkClass *link)
      * whose stack is only SAFETY_POLL_TASK_STACK = 8192 B and lives in
      * PSRAM (safety_link.c:1636-1638's own comment on why nothing here can
      * risk a stack overflow with the flash cache disabled) -- heap-allocate
-     * rather than materialize a 1464-byte profile_exec_status_t on that
+     * rather than materialize a 1512-byte profile_exec_status_t on that
      * stack, same pattern as safety_cfg_http.c/dashboard_exec_http.c. Every
      * field below is read, not just the active-firing bool, so the narrow
      * profile_executor_get_active_id() accessor does not fit here. */
@@ -1096,6 +1103,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_context_frames_bad = safety_read_u32_le(&p[16]);
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
+    link->cached.diag_since_reboot = true;
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
     /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip

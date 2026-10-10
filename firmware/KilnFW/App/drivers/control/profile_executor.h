@@ -550,6 +550,10 @@ void profile_executor_fault_halt(const char *reason);
  * Both return false (no state change) if the executor isn't in a state
  * where the transition makes sense. */
 bool profile_executor_pause(void);
+/* Same as profile_executor_pause(), recording `reason` (a string literal, at
+ * most 47 chars) in /api/profile_exec's pause_reason so an executor-initiated
+ * pause is distinguishable from an operator pause. */
+bool profile_executor_pause_with_reason(const char *reason);
 bool profile_executor_resume(void);
 
 

@@ -112,6 +112,7 @@ void profile_executor_halt(void)
      * precondition the helper documents. */
     exec_enter_terminal_state(PROFILE_EXEC_IDLE);
     s_exec.fault_reason[0] = '\0';
+    s_exec.pause_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     xSemaphoreGive(s_exec.lock);
 
@@ -271,6 +272,11 @@ void profile_executor_fault_halt(const char *reason)
 
 bool profile_executor_pause(void)
 {
+    return profile_executor_pause_with_reason(NULL);
+}
+
+bool profile_executor_pause_with_reason(const char *reason)
+{
     /* See profile_executor_run()'s guard comment above. */
     if (s_exec.lock == NULL) {
         ESP_LOGW(PE_TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
@@ -308,6 +314,12 @@ bool profile_executor_pause(void)
      * just handed the relay mask itself back to MANUAL ownership. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_MANUAL);
     s_exec.state = PROFILE_EXEC_PAUSED;
+    if (reason != NULL) {
+        strncpy(s_exec.pause_reason, reason, sizeof(s_exec.pause_reason) - 1);
+        s_exec.pause_reason[sizeof(s_exec.pause_reason) - 1] = '\0';
+    } else {
+        s_exec.pause_reason[0] = '\0';
+    }
     run_snapshot_buf_t pause_snap;
     capture_run_snapshot(&pause_snap);
     xSemaphoreGive(s_exec.lock);
@@ -381,6 +393,7 @@ bool profile_executor_resume(void)
         }
     }
     s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.pause_reason[0] = '\0';
     run_snapshot_buf_t resume_snap;
     capture_run_snapshot(&resume_snap);
     /* Epoch sampled under s_exec.lock -- a halt landing between this unlock
@@ -565,6 +578,9 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->ramp_dwell_credit_s = z->dwell_credit_s;
         }
 
+        if (s_exec.state == PROFILE_EXEC_PAUSED) {
+            strncpy(out->pause_reason, s_exec.pause_reason, sizeof(out->pause_reason) - 1);
+        }
         if (s_exec.state == PROFILE_EXEC_FAULTED) {
             strncpy(out->fault_reason, s_exec.fault_reason, sizeof(out->fault_reason) - 1);
             out->fault_guard = (uint8_t)s_exec.fault_guard;

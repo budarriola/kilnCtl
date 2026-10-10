@@ -58,7 +58,7 @@ static bool gpio_probe_is_denied(int gpio_num)
  * probe should not be poking pins in the meantime either. */
 static bool gpio_probe_run_blocked(void)
 {
-    /* gpio_probe_task's own stack is 6144 B -- a 1464-byte profile_exec_
+    /* gpio_probe_task's own stack is 6144 B -- a 1512-byte profile_exec_
      * status_t local here is ~22.5% of the whole budget for a value only
      * ever reduced to a RUNNING/PAUSED bool. Use profile_executor_get_
      * active_id(), the narrow accessor profile_executor.h recommends for

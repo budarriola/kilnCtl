@@ -68,6 +68,10 @@ static const char *TAG = "heat_enable";
 /* F1: K4 must read closed within this long of an ARMED, fresh status, else re-request. */
 #define HE_K4_CONFIRM_MS      3000u
 #define HE_K4_MAX_RESENDS     4
+/* Safety-link fix batch 2, MED-1: a Pico reboot is classified from the DIAG
+ * frame of the NEW boot; if none arrives within this long the reboot is treated
+ * as benign (the pre-existing F1 behaviour) rather than blocking retries forever. */
+#define HE_REBOOT_CLASSIFY_TIMEOUT_MS 10000u
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -84,6 +88,12 @@ typedef struct {
     uint32_t          k4_next_resend_ms;
     uint8_t           k4_resends;         /* re-requests spent on this episode */
     bool              k4_unconfirmed;     /* retries exhausted, Pico still reports K4 open */
+    /* Safety-link fix batch 2, MED-1: Pico reboot handling. */
+    bool              reboot_seq_known;      /* seen_reboot_seq is valid */
+    uint32_t          seen_reboot_seq;       /* safety_link pico_reboot_seq last observed */
+    bool              reboot_classify_pending; /* reboot seen with a claim held, cause not yet known */
+    uint32_t          reboot_classify_since_ms;
+    bool              reboot_hold;           /* fatal-cause reboot: do NOT re-request heat */
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -184,6 +194,11 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.release_pending = false;
     s_he.release_inflight = false;
     he_k4_reset_locked();
+    s_he.reboot_seq_known = false;
+    s_he.seen_reboot_seq = 0u;
+    s_he.reboot_classify_pending = false;
+    s_he.reboot_classify_since_ms = 0u;
+    s_he.reboot_hold = false;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -509,6 +524,8 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         s_he.pending = false;
         s_he.warned_pending = false;
         he_k4_reset_locked();
+        s_he.reboot_classify_pending = false;
+        s_he.reboot_hold = false;
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -673,19 +690,95 @@ bool heat_enable_grant_unconfirmed(void)
     return u;
 }
 
+void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
+                                uint32_t now_ms)
+{
+    bool taken = he_lock();
+    bool log_hold = false;
+    bool log_benign = false;
+    if (!s_he.reboot_seq_known) {
+        s_he.reboot_seq_known = true;
+        s_he.seen_reboot_seq = reboot_seq;
+    } else if (reboot_seq != s_he.seen_reboot_seq) {
+        s_he.seen_reboot_seq = reboot_seq;
+        /* The new boot starts a new episode: counters from the old boot say
+         * nothing about it (reset-one-side class: the Pico side restarted). */
+        he_k4_reset_locked();
+        if (s_he.held_mask != 0u) {
+            s_he.reboot_classify_pending = true;
+            s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
+        }
+    }
+    if (s_he.held_mask == 0u) {
+        s_he.reboot_classify_pending = false;
+        s_he.reboot_hold = false;
+    } else if (s_he.reboot_classify_pending) {
+        if (diag_since_reboot) {
+            s_he.reboot_classify_pending = false;
+            const uint8_t fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
+                                  SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
+                                  SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
+                                  SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
+            if ((boot_reason & fatal) != 0u) {
+                s_he.reboot_hold = true;
+                /* Withdraw any queued or standing re-request. K4 stays open. */
+                s_he.granted = false;
+                s_he.pending = false;
+                s_he.warned_pending = false;
+                log_hold = true;
+            } else {
+                log_benign = true;
+            }
+        } else if ((int32_t)(now_ms - s_he.reboot_classify_since_ms) >= (int32_t)HE_REBOOT_CLASSIFY_TIMEOUT_MS) {
+            s_he.reboot_classify_pending = false;
+            log_benign = true;
+        }
+    }
+    he_unlock(taken);
+    if (log_hold) {
+        ESP_LOGE(TAG, "Pico rebooted with a fatal cause (boot_reason 0x%02x) during a heat claim -- "
+                      "NOT re-requesting heat; K4 stays open until an operator resumes",
+                 (unsigned)boot_reason);
+    }
+    if (log_benign) {
+        /* TODO(owner decision, safety-link review MED-1): whether a benign
+         * reboot (power-on / unknown) may silently restore heat mid-firing is
+         * still open. Today it does: F1 re-requests once the Pico is ARMED. */
+        ESP_LOGW(TAG, "Pico rebooted during a heat claim (benign cause) -- F1 will re-request heat");
+    }
+}
+
+bool heat_enable_reboot_hold(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return h;
+}
+
 void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed, uint32_t now_ms)
 {
     bool taken = he_lock();
     bool log_giveup = false;
     bool log_resend = false;
+    bool armed_or_warn = diag_state == SAFETY_LINK_DIAG_STATE_ARMED ||
+                         diag_state == SAFETY_LINK_DIAG_STATE_WARN;
     if (s_he.held_mask == 0u) {
         he_k4_reset_locked();
+    } else if (s_he.reboot_hold) {
+        /* MED-1: a fatal-cause Pico reboot -- never re-request; nothing to time. */
+        s_he.k4_open_since_ms = 0u;
     } else if (!s_he.granted) {
         /* Nothing to compare (a send or a re-request is outstanding). */
-    } else if (!fresh || diag_state != SAFETY_LINK_DIAG_STATE_ARMED) {
-        /* GRACE/INIT/TRIPPED/unknown: K4 cannot be expected closed, so do not
-         * time it. A GRACE->ARMED transition restarts the clock below. */
+    } else if (!fresh) {
+        /* Stale: keep the episode counters, just stop timing. */
         s_he.k4_open_since_ms = 0u;
+    } else if (!armed_or_warn) {
+        /* GRACE/INIT/TRIPPED: K4 cannot be expected closed, so do not time it
+         * AND (LOW-1) end the episode: the retry budget and the unconfirmed
+         * latch belong to one ARMED stretch, so they restart with the next. A
+         * GRACE->ARMED transition restarts the clock below. */
+        he_k4_reset_locked();
     } else if (k4_closed) {
         he_k4_reset_locked();
     } else if (s_he.k4_open_since_ms == 0u) {
@@ -746,7 +839,8 @@ void heat_enable_reconcile(void)
      * 2026-09-15.md finding HIGH-2. */
 
     bool taken = he_lock();
-    bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted;
+    bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted &&
+                      !s_he.reboot_hold && !s_he.reboot_classify_pending;
     he_unlock(taken);
 
     if (!want_retry) {

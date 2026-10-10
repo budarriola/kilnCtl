@@ -2044,7 +2044,7 @@ profiles_delete_result_t profiles_delete_slot(uint8_t id)
      * profile_executor_run()'s copied-at-start name/segments as the only
      * surviving record of what is actually executing, and a later re-save
      * of this id would silently relabel that run's history. The narrow
-     * accessor avoids a 1464-byte profile_exec_status_t stack local; it takes
+     * accessor avoids a 1512-byte profile_exec_status_t stack local; it takes
      * and drops s_exec.lock, and nothing is held here while it does. */
     uint8_t active_id = 0;
     if (profile_executor_get_active_id(&active_id) && active_id == id) {

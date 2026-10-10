@@ -2231,6 +2231,9 @@ void watchdog_task_entry(void *arg)
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
         bool safety_k4_closed = false;
+        uint32_t safety_reboot_seq = 0u;
+        bool safety_diag_since_reboot = false;
+        uint8_t safety_boot_reason = 0u;
         if (s_exec.safety) {
             safety_link_status_t safety_status;
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
@@ -2247,6 +2250,9 @@ void watchdog_task_entry(void *arg)
                 safety_diag_valid = safety_status.diag_ever_received &&
                                      !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
                 safety_diag_state = safety_status.diag_state;
+                safety_reboot_seq = safety_status.pico_reboot_seq;
+                safety_diag_since_reboot = safety_status.diag_since_reboot;
+                safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
                 safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;
             }
@@ -2454,8 +2460,24 @@ void watchdog_task_entry(void *arg)
          * blocking call must not be put ahead of the staleness checks either.
          */
         /* F1: tell heat_enable what the Pico reports so a lost grant is re-requested. */
-        heat_enable_note_pico_state(safety_diag_valid, safety_diag_state, safety_k4_closed,
-                                    (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS));
+        uint32_t wdt_now_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS);
+        heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason, wdt_now_ms);
+        /* A DIAG from before the latest Pico reboot describes the old boot: feed
+         * INIT so its ARMED cannot satisfy the new boot's K4 check (LOW-3). */
+        heat_enable_note_pico_state(safety_diag_valid,
+                                    safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT,
+                                    safety_k4_closed, wdt_now_ms);
+        /* Safety-link fix batch 2 (MED-1, MED-2): an executor-initiated pause
+         * (non-blocking: relays off, claim released, release frame deferred to
+         * safety_poll_task) instead of a firing that runs cold with K4 open.
+         * Before reconcile so a withdrawn request is not retried. */
+        bool hold_reboot = heat_enable_reboot_hold();
+        bool hold_unconfirmed = !hold_reboot && heat_enable_grant_unconfirmed();
+        if (hold_reboot) {
+            (void)profile_executor_pause_with_reason("pico_fatal_reboot");
+        } else if (hold_unconfirmed) {
+            (void)profile_executor_pause_with_reason("heat_grant_unconfirmed");
+        }
         heat_enable_reconcile();
     }
 }

@@ -76,7 +76,7 @@ bool ui_home_profile_name_for_id(uint8_t id, char *out, size_t out_cap)
 static bool ui_home_resolve_start_profile_id(uint8_t *out_id)
 {
     /* Runs on the LVGL task (button press callback) -- heap-allocate rather
-     * than add a 1464-byte profile_exec_status_t stack local (see
+     * than add a 1512-byte profile_exec_status_t stack local (see
      * ui_page_home_refresh.c's own comment on this task's measured stack
      * ceiling for why it is treated as tight, not generous). Needs the full
      * struct's .state and .profile_id, so the narrow
@@ -312,7 +312,7 @@ void ui_home_fire_btn_cb(lv_event_t *e)
 {
     (void)e;
     /* Only "is a firing active" is needed here, not which fields -- use the
-     * narrow accessor profile_executor.h recommends over a 1464-byte
+     * narrow accessor profile_executor.h recommends over a 1512-byte
      * profile_exec_status_t stack local (this runs on the lvgl task, whose
      * own 2026-09-04 stack-corruption panic is exactly why this file's
      * budget is tracked by check_all_task_stack_budgets.py). */
@@ -344,7 +344,7 @@ static void ui_home_pause_resume_gated_cb(void *user_data)
 {
     (void)user_data;
     /* Runs on the LVGL task -- heap-allocate rather than add another
-     * 1464-byte profile_exec_status_t stack local; needs the full struct's
+     * 1512-byte profile_exec_status_t stack local; needs the full struct's
      * .state to distinguish RUNNING from PAUSED, which the narrow
      * profile_executor_get_active_id() accessor cannot report (it collapses
      * both into a single "active" bool). */
@@ -595,7 +595,7 @@ void ui_home_auth_reset_corner_tap_cb(lv_event_t *e)
 
     bool estop_asserted = dashboard_http_estop_asserted();
     /* Only "is a firing active" is needed here -- narrow accessor instead of
-     * a 1464-byte profile_exec_status_t stack local (this runs on the lvgl
+     * a 1512-byte profile_exec_status_t stack local (this runs on the lvgl
      * task; see this file's own header comment on that task's stack
      * history). */
     uint8_t active_id = 0;

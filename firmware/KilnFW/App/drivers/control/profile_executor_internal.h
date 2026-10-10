@@ -1000,6 +1000,10 @@ typedef struct {
      * exactly that and nothing another caller may have separately asserted. */
     uint32_t global_fault_source; /* 0 = none asserted by this run */
     char     fault_reason[96];
+    /* Safety-link fix batch 2 (MED-1/MED-2): why the executor paused ITSELF
+     * (not an operator pause). Empty for an operator pause. Cleared on
+     * resume/halt/start. Points at string literals only. */
+    char     pause_reason[48];
     thermal_guard_trip_t fault_guard;
 
     /* Warm-start (PROFILES.md, owner request 2026-08-30) -- mirrors

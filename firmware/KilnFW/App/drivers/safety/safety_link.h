@@ -1031,6 +1031,12 @@ typedef struct {
     uint32_t diag_context_frames_bad;  /* CRC/framing/length errors, Pico-side */
     uint32_t diag_tx_frames_dropped;   /* Pico's TX ring full */
     uint8_t  diag_state;               /* SAFETY_LINK_DIAG_STATE_* */
+    /* Safety-link fix batch 2 (MED-1, LOW-3): bumped on every detected Pico
+     * reboot; diag_since_reboot is false from that moment until the first DIAG
+     * of the new boot, so diag_boot_reason/diag_state are only trusted once it
+     * reads true. diag_state itself is reset to INIT at the reboot. */
+    uint32_t pico_reboot_seq;
+    bool     diag_since_reboot;
     uint8_t  diag_flags;               /* SAFETY_LINK_DIAG_FLAG_* bits */
     uint32_t diag_log_frames_dropped;  /* Pico's log_task.c s_dropped -- LOG
                                          * frames never enqueued/sent (queue

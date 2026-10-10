@@ -1071,7 +1071,19 @@ CEILING_BYTES = {
     # heat_enable_note_pico_state() (K4 reconcile) before heat_enable_reconcile(),
     # measured 2688 -> 2704 B (26.7% of the 4096 B stack still free). Re-pinned.
     # firing review item 1 (guard9_prelock_check inlined in watchdog_task_entry): measured 2704 -> 2720 B (honest free 1076 B of 4096 B).
-    "profile_exec_wdt": 2720,
+    # 2026-10-10, safety-link fix batch 2 (review MED-4): the declared stack
+    # went 4096 -> 6144 B (profile_executor_start.c) because the heat_enable
+    # reconcile/resend chain (send_enable -> safety_link_request_enable ->
+    # safety_exchange -> uart send) runs routinely on this task now, and the
+    # static walk reaches 2736 B through it (measured on the 2026-10-10 target
+    # ELF; the 2720 B ceiling was 16 B short once note_pico_boot and
+    # pause_with_reason joined the loop). Honest free at 6144 B: 3108 B
+    # (50.6%); the same walk at the old 4096 B would leave 1060 B -- both far
+    # above the 512 B margin the review asked for. NOT a live high-water
+    # measurement (no bench run in this batch): the walk stays INDETERMINATE
+    # on unresolved indirect calls, so a bench HWM after forcing a K4
+    # re-request mid-firing is still the honest confirmation.
+    "profile_exec_wdt": 2736,
     "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,

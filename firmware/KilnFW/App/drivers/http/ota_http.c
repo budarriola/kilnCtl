@@ -420,7 +420,7 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
     // pstat.zones[] itself is the WRONG source for temperature/heater-
     // commanded data.
     /* Heap, not a stack local: this runs on the httpd task (8192-byte
-     * stack, wifi_provision_http.c), and profile_exec_status_t is 1464
+     * stack, wifi_provision_http.c), and profile_exec_status_t is 1512
      * bytes -- same reasoning and pattern as safety_cfg_http.c's reads.
      * Freed right after the switch below; nothing past this point needs
      * more than the enum it already copied out. */

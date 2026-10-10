@@ -195,7 +195,15 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * task instead of arguing about how much of it fits. Not done here: it
      * is a second restructuring on top of this commit's epoch change, and
      * stacking both at once on the heat path is not worth the risk. */
-    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 4096, NULL, 5,
+    /* 2026-10-10 safety-link fix batch 2, MED-4: raised 4096 -> 6144 B. F1 made the deep
+     * send chain (reconcile -> send_enable -> safety_exchange -> UART) a ROUTINE path here
+     * (every mismatched K4, e.g. each benign Pico reboot mid-firing), and the watchdog now
+     * also calls profile_executor_pause_with_reason(). Margin on that path was never
+     * measured (no bench in this pass), so the stack is sized from the 4 KB figure that
+     * produced four stack-smash panics on profile_executor: +2 KB buys >= 512 B of
+     * margin under the same worst case. Read the real high-water mark with
+     * get_stack_margin after forcing a K4 re-request mid-firing and tighten then. */
+    ok = xTaskCreatePinnedToCore(watchdog_task_entry, "profile_exec_wdt", 6144, NULL, 5,
                                  &s_exec.watchdog_task, tskNO_AFFINITY);
     if (ok != pdPASS) {
         ESP_LOGE(PE_TAG, "xTaskCreatePinnedToCoreWithCaps(profile_exec_wdt) failed -- guard 9 unavailable this boot");
@@ -205,8 +213,8 @@ esp_err_t profile_executor_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo
      * reads *task_handle_slot fresh at report time (stack_margin.h's own
      * doc comment), so a creation failure just reads back alive=false
      * rather than needing a second branch here. Must match the literal
-     * xTaskCreatePinnedToCore() argument two lines up exactly (4096). */
-    stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 4096);
+     * xTaskCreatePinnedToCore() argument two lines up exactly (6144). */
+    stack_margin_register("profile_exec_wdt", &s_exec.watchdog_task, 6144);
 
     ESP_LOGI(PE_TAG, "profile executor up (io_ready=%d, thermo_ready=%d, safety_ready=%d) -- "
                   "NOT YET VERIFIED AGAINST REAL RELAY/THERMOCOUPLE HARDWARE (single- or multi-zone), "

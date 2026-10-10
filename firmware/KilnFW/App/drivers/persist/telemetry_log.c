@@ -132,14 +132,14 @@ static void telemetry_log_task(void *arg)
 {
     (void)arg;
     /* telemetry_log_task's own stack is 6144 B (xTaskCreatePinnedToCoreWithCaps
-     * below) and this task runs forever, so a 1464-byte profile_exec_status_t
+     * below) and this task runs forever, so a 1512-byte profile_exec_status_t
      * still must not live on this stack -- but a heap allocation made exactly
      * once per task lifetime and never freed is functionally the same as a
      * .bss static, and the heap-alloc shape had a real failure mode: on OOM
      * the task logged and deleted itself, silently ending firing telemetry
      * forever with no other symptom. Since fst is used for the task's entire
      * life and never released, own it as a static instead -- .dram0.bss
-     * +1464 B, but the OOM-and-vanish failure mode is gone entirely rather
+     * +1512 B, but the OOM-and-vanish failure mode is gone entirely rather
      * than just retried. */
     static profile_exec_status_t fst_storage;
     profile_exec_status_t *fst = &fst_storage;

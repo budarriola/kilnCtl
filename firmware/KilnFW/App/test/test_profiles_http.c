@@ -652,7 +652,7 @@ esp_err_t firing_stats_erase(uint8_t profile_id)
 // refuse to delete the slot the executor is currently running/paused on.
 // Defaults to IDLE (nothing running); tests that need a "delete refused"
 // case set g_fake_exec_state/g_fake_exec_profile_id first.
-_Static_assert(sizeof(profile_exec_status_t) == 1464, "profile_exec_status_t size: comments across drivers/ cite 1464 B -- update them");
+_Static_assert(sizeof(profile_exec_status_t) == 1512, "profile_exec_status_t size: comments across drivers/ cite 1512 B -- update them");
 static profile_exec_state_t g_fake_exec_state = PROFILE_EXEC_IDLE;
 static uint8_t              g_fake_exec_profile_id = 0xFF;
 void profile_executor_get_status(profile_exec_status_t *out)
