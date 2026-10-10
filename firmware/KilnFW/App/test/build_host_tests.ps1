@@ -3479,9 +3479,9 @@ try {
     # 85 -> 86: test_dashboard_autotune_http_handlers.c (campaign 8 autotune)
     # 86 -> 88: test_dashboard_autotune_http_get_handlers.c, test_zone_aux_convert_http.c (c78b)
     # 88 -> 90: test_thermo_owner.c, test_safety_link_endian.c (round 2, R2-9/R2-10)
-    $totalExpected = 90
     # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
     # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
+    $totalExpected = 92
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
