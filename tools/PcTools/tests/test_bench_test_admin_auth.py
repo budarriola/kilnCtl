@@ -132,9 +132,13 @@ class BoolToggleAdminAuthTest(_CredsMixin, unittest.TestCase):
         login_url = f"{ORIGIN}{http_auth.LOGIN_PATH}"
         post_url = f"{ORIGIN}/api/watchdog_cfg"
         recorder = _Recorder(
-            # initial GET current value: 401 -> login -> retry succeeds
-            _unauthorized(get_url),
+            # idle gate (idle_gate_reason) runs first: the first admin read
+            # (/api/profile_exec) 401s -> login -> retry succeeds
+            _unauthorized(f"{ORIGIN}/api/profile_exec"),
             _response(b"{}", set_cookie=f"{http_auth.SESSION_COOKIE_NAME}=sess1; Path=/"),
+            _response(b'{"state": "idle"}'),
+            _response(b'{"state": "idle"}'),  # /api/autotune (session reused)
+            # initial GET current value
             _response(b'{"panic_disabled": false}'),
             # POST test value (session already remembered -- no relogin)
             _response(b'{"ok": true}'),
@@ -152,22 +156,24 @@ class BoolToggleAdminAuthTest(_CredsMixin, unittest.TestCase):
         # First GET 401'd, then a single login, then every subsequent call
         # reused the remembered session cookie with no further logins.
         self.assertEqual(recorder.urls.count(login_url), 1)
-        # 6 requests hit /api/watchdog_cfg: the initial 401'd GET, its
-        # authenticated retry, POST-write, GET-verify, POST-restore,
-        # GET-verify-restore -- only the ONE login above is inserted among
-        # them, never a second.
-        self.assertEqual(recorder.urls.count(post_url), 6)
+        # 5 requests hit /api/watchdog_cfg: initial GET, POST-write,
+        # GET-verify, POST-restore, GET-verify-restore -- all reuse the
+        # session the gate's login established, never a second login.
+        self.assertEqual(recorder.urls.count(post_url), 5)
 
     def test_no_credential_in_any_case_result_field(self):
         get_url = f"{ORIGIN}/api/ramp_assist"
         recorder = _Recorder(
+            _response(b'{"state": "idle"}'),  # idle gate: /api/profile_exec
+            _response(b'{"state": "idle"}'),  # idle gate: /api/autotune
             _unauthorized(get_url),
             _unauthorized(f"{ORIGIN}{http_auth.LOGIN_PATH}"),
         )
         ctx = {"suite": "web", "host": HOST}
         with unittest.mock.patch.object(urllib.request, "urlopen", recorder):
             result = CWR._case_diag08(ctx)
-        self.assertEqual(result.verdict, "FAIL")
+        # L5: a failed first read is INCONCLUSIVE (not a verdict on the route).
+        self.assertEqual(result.verdict, "INCONCLUSIVE")
         blob = repr(result.reason) + repr(result.observed)
         self.assertNotIn("not-a-real-password", blob)
 
