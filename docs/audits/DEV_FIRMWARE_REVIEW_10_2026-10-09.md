@@ -32,6 +32,8 @@ Already covered elsewhere, so not repeated here:
 
 ### LOW-1: a kept swap journal re-imports the rollback blob on every boot and silently reverts zone edits (`6fbbb28b`)
 
+**FIXED in 462eb838:** refused POST /api/zones (409, names the pending rollback) while a kept rollback journal would re-import the pre-swap zones; banner and id note now say saved edits are at risk; host tests in test_zones_http.c and test_kiln_cfg_swap.c.
+
 Location: `drivers/persist/kiln_cfg_swap.c:510-527`, `:556-567` and `:1343-1358`.
 
 When `kiln_cfg_store_set_active_id_raw()` fails during a rollback, `rollback_ex()` now keeps the journal. The record's marker is PICO_DONE, or ESP_DONE via the fallback path at :1123. Each later boot runs `kiln_cfg_swap_boot_recover_impl()` -> `rollback_ex(..., esp_was_committed=true)`. That path calls `zones_config_import_blob(p->rollback_blob, ...)` unconditionally (:520), and then retries the id.
@@ -50,6 +52,8 @@ No test covers a zones edit made between the kept rollback and the next boot.
 
 ### LOW-2: update fetch precheck sits only 91 B below the observed idle minimum, and its comments are damaged (`f354981b`)
 
+**FIXED in 462eb838:** comments repaired (merged line, 17524 B); 91 B margin and pending bench re-measure noted; 29556 unchanged.
+
 Location: `drivers/update/update_fetch_heap.h:40` and `:75`.
 
 `FETCH_HEAP_PRECHECK_MIN` is 29556 B. The idle minimum recorded in `logs/sk04_sampling` is 29647 B. Any internal-DRAM growth over about 91 B makes `update_check` refuse on an idle board again, which is the bench failure this commit fixed. An unexplained ~30 kB internal DRAM growth is already under investigation. There is no check that ties this constant to a measured idle figure. Gate (b), the bench run, is the only confirmation.
@@ -62,6 +66,8 @@ Two comment defects:
 Both are cosmetic, but this header is the record of how the budget was derived.
 
 ### LOW-3: two pref writers change RAM before the new reset-mark refusal, so live state diverges after a refused reset (`d7d11578`)
+
+**FIXED in 462eb838:** both writers refuse on reset-in-flight before changing RAM; host tests in test_ramp_assist_cfg.c and test_setup_wizard_progress.c.
 
 Location: `drivers/control/ramp_assist_cfg.c:157-166` and `drivers/persist/setup_wizard_progress.c:632-641` (via `persist_all()` :578-585).
 
