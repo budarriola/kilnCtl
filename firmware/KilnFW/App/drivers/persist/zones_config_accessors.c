@@ -558,10 +558,24 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
     return true;
 }
 
-bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
+/* Owner decision 2026-09-25 (blanket refuse zone writes while running), enforced where the
+ * generation bumps (dev review 9 L2): the PID/model setters re-read the heat claim INSIDE the
+ * zones_cfg_lock section that bumps s_config_generation, the same pairing zones_http_post.c uses
+ * (a starter publishes its claim, then reads the generation under this lock: either this read
+ * sees the claim or the starter sees the bump). Covers zones_http_pid.c, UART SET_ZONE_PID/MODEL,
+ * autotune Accept, the adaptive revert and backup import. No exception is needed for the adaptive
+ * tuner's own run-end write or autotune Accept: both run after the run claim is released (the
+ * executor never calls these setters under its own claim). Leaf spinlock read only. */
+static bool zones_config_run_claimed_locked(void)
+{
+    bool profile_running = false, autotune_running = false;
+    relay_authority_heat_run_active(&profile_running, &autotune_running);
+    return profile_running || autotune_running;
+}
+zones_set_result_t zones_config_set_pid_no_save_checked(uint8_t zone_index, float kp, float ki, float kd)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
-        return false;
+        return ZONES_SET_REJECTED;
     }
     /* Same bound parse_zone_fields()'s z%u_kp/z%u_ki/z%u_kd handling enforces
      * (ZONE_PID_GAIN_MAX, zones_http.h) -- this used to check only isfinite()
@@ -574,7 +588,7 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
      * like this stops being harmless. */
     if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || kp < 0.0f || ki < 0.0f || kd < 0.0f ||
         kp > ZONE_PID_GAIN_MAX || ki > ZONE_PID_GAIN_MAX || kd > ZONE_PID_GAIN_MAX) {
-        return false;
+        return ZONES_SET_REJECTED;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     /* Judged BEFORE the stores below overwrite the old values. Uses
@@ -584,6 +598,10 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
     const bool gains_changed = zones_config_gain_changed(z->pid_kp, kp) || zones_config_gain_changed(z->pid_ki, ki) ||
                                zones_config_gain_changed(z->pid_kd, kd);
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return ZONES_SET_BUSY_RUNNING;
+    }
     z->pid_kp = kp;
     z->pid_ki = ki;
     z->pid_kd = kd;
@@ -613,15 +631,26 @@ bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float 
      * unchanged behaviour, and the generation reflects the in-RAM truth. */
     s_config_generation++;
     zones_cfg_unlock();
-    return true;
+    return ZONES_SET_OK;
+}
+
+bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd)
+{
+    return zones_config_set_pid_no_save_checked(zone_index, kp, ki, kd) == ZONES_SET_OK;
+}
+
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
+{
+    zones_set_result_t r = zones_config_set_pid_no_save_checked(zone_index, kp, ki, kd);
+    if (r != ZONES_SET_OK) {
+        return r;
+    }
+    return nvs_save() == ESP_OK ? ZONES_SET_OK : ZONES_SET_SAVE_FAILED;
 }
 
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
-    if (!zones_config_set_pid_no_save(zone_index, kp, ki, kd)) {
-        return false;
-    }
-    return nvs_save() == ESP_OK;
+    return zones_config_set_pid_checked(zone_index, kp, ki, kd) == ZONES_SET_OK;
 }
 
 /* See zones_http.h -- Phase 3 control-loop wiring's read of the fuzzy
@@ -2156,10 +2185,10 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
     return true;
 }
 
-bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+zones_set_result_t zones_config_set_model_no_save_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
     if (zone_index >= s_zones.cfg.thermo_count) {
-        return false;
+        return ZONES_SET_REJECTED;
     }
     /* Same reject-without-writing-anything discipline as
      * zones_config_set_pid(): a caller handing us one bad number must not
@@ -2176,10 +2205,14 @@ bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s,
     if (!isfinite(k_dc) || !isfinite(tau_s) || !isfinite(dead_time_s) || k_dc < 0.0f || tau_s < 0.0f ||
         dead_time_s < 0.0f || k_dc > ZONE_MODEL_K_MAX || tau_s > ZONE_MODEL_TIME_MAX_S ||
         dead_time_s > ZONE_MODEL_TIME_MAX_S) {
-        return false;
+        return ZONES_SET_REJECTED;
     }
     zone_cfg_t *z = &s_zones.cfg.zones[zone_index];
     zones_cfg_lock();
+    if (zones_config_run_claimed_locked()) {
+        zones_cfg_unlock();
+        return ZONES_SET_BUSY_RUNNING;
+    }
     z->model_k_dc = k_dc;
     z->model_tau_s = tau_s;
     z->model_dead_time_s = dead_time_s;
@@ -2190,15 +2223,26 @@ bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s,
      * exists to prevent. */
     s_config_generation++;
     zones_cfg_unlock();
-    return true;
+    return ZONES_SET_OK;
+}
+
+bool zones_config_set_model_no_save(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    return zones_config_set_model_no_save_checked(zone_index, k_dc, tau_s, dead_time_s) == ZONES_SET_OK;
+}
+
+zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    zones_set_result_t r = zones_config_set_model_no_save_checked(zone_index, k_dc, tau_s, dead_time_s);
+    if (r != ZONES_SET_OK) {
+        return r;
+    }
+    return nvs_save() == ESP_OK ? ZONES_SET_OK : ZONES_SET_SAVE_FAILED;
 }
 
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
-    if (!zones_config_set_model_no_save(zone_index, k_dc, tau_s, dead_time_s)) {
-        return false;
-    }
-    return nvs_save() == ESP_OK;
+    return zones_config_set_model_checked(zone_index, k_dc, tau_s, dead_time_s) == ZONES_SET_OK;
 }
 
 /* Accepts the ZONE_MODEL_FIT_TEMP_UNKNOWN sentinel outright (that is the

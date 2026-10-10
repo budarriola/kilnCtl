@@ -346,6 +346,12 @@ typedef enum {
 // idiom as this module's other refusal-reason fields.
 adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *reason, size_t reason_cap);
 
+// Dev review 9 L1: true while any zone has a run-end apply (or a revert) writing
+// gains with adaptive_tune_lock released. autotune_engine_accept() refuses (busy)
+// while this is set so Accept cannot interleave with the run-end apply. Takes
+// adaptive_tune_lock briefly; the caller must hold no autotune or zones lock.
+bool adaptive_tune_any_write_in_flight(void);
+
 // ---- pure helpers, exposed for host tests (adaptive_tune.c has no other
 // seam into this math -- see test_adaptive_tune.c) --------------------------
 

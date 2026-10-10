@@ -2149,6 +2149,37 @@ static void test_zones_pid_post_refused_while_autotune_running(void)
     TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp must be untouched by a refused submit");
 }
 
+// Dev review 9 L2: the heat-claim re-check lives INSIDE the setters (under zones_cfg_lock), so a
+// writer that passed its own earlier gate still cannot write once a run has claimed heat. MUST GO RED
+// if zones_config_run_claimed_locked() stops being consulted by the PID/model setters.
+static void test_zones_setters_refuse_busy_running_inside_the_lock(void)
+{
+    TEST_SECTION("zones_config_set_pid/model_checked -- BUSY_RUNNING from inside the setter when a run holds the claim");
+    seed_two_zone_pid_baseline();
+    float kp0 = 0.0f, ki0 = 0.0f, kd0 = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp0, &ki0, &kd0), "baseline readable");
+    for (int pass = 0; pass < 2; pass++) {
+        if (pass == 0) s_test_profile_status.state = PROFILE_EXEC_RUNNING; else s_test_autotune_active = true;
+        TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_BUSY_RUNNING,
+                   "set_pid_checked must report BUSY_RUNNING while a run holds the claim");
+        TEST_CHECK(zones_config_set_pid_no_save_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_BUSY_RUNNING,
+                   "set_pid_no_save_checked must report BUSY_RUNNING");
+        TEST_CHECK(zones_config_set_model_checked(0, 10.0f, 100.0f, 5.0f) == ZONES_SET_BUSY_RUNNING,
+                   "set_model_checked must report BUSY_RUNNING");
+        TEST_CHECK(zones_config_set_model_no_save_checked(0, 10.0f, 100.0f, 5.0f) == ZONES_SET_BUSY_RUNNING,
+                   "set_model_no_save_checked must report BUSY_RUNNING");
+        TEST_CHECK(!zones_config_set_pid(0, 0.5f, 0.001f, 0.9f), "the bool wrapper must refuse too");
+        s_test_profile_status.state = PROFILE_EXEC_IDLE;
+        s_test_autotune_active = false;
+    }
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "readable after refusals");
+    TEST_CHECK_NEAR(kp, kp0, 1e-9, "a BUSY refusal must leave kp untouched");
+    TEST_CHECK_NEAR(ki, ki0, 1e-9, "a BUSY refusal must leave ki untouched");
+    TEST_CHECK(zones_config_set_pid_checked(0, 0.5f, 0.001f, 0.9f) == ZONES_SET_OK,
+               "positive control: idle write succeeds");
+}
+
 static void test_zones_pid_post_accepts_while_idle(void)
 {
     TEST_SECTION("POST /api/zones/pid -- positive control: still accepted while nothing is running");
@@ -16608,6 +16639,7 @@ void run_test_zones_http(void)
 
     test_zones_pid_post_refused_while_profile_running();
     test_zones_pid_post_refused_while_autotune_running();
+    test_zones_setters_refuse_busy_running_inside_the_lock();
     test_zones_pid_post_accepts_while_idle();
     test_zones_post_refused_by_mode_gate_before_interlock();
     test_zones_pid_post_refuses_embedded_nul();

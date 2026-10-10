@@ -134,8 +134,9 @@ static void control_handle_message(void *vargs)
                 float kp = uart_bridge_ext_f32_le(&msg.payload[2]);
                 float ki = uart_bridge_ext_f32_le(&msg.payload[6]);
                 float kd = uart_bridge_ext_f32_le(&msg.payload[10]);
-                bool ok = zones_config_set_pid(zi, kp, ki, kd);
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                zones_set_result_t r = zones_config_set_pid_checked(zi, kp, ki, kd);
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, r == ZONES_SET_OK,
+                                             r == ZONES_SET_BUSY_RUNNING ? "run active" : NULL);
                 break;
             }
             case CONTROL_CMD_SET_ZONE_MODEL: {
@@ -153,8 +154,9 @@ static void control_handle_message(void *vargs)
                 float k_dc = uart_bridge_ext_f32_le(&msg.payload[2]);
                 float tau_s = uart_bridge_ext_f32_le(&msg.payload[6]);
                 float dead_time_s = uart_bridge_ext_f32_le(&msg.payload[10]);
-                bool ok = zones_config_set_model(zi, k_dc, tau_s, dead_time_s);
-                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, ok, NULL);
+                zones_set_result_t r = zones_config_set_model_checked(zi, k_dc, tau_s, dead_time_s);
+                uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_CONTROL, subcmd, r == ZONES_SET_OK,
+                                             r == ZONES_SET_BUSY_RUNNING ? "run active" : NULL);
                 break;
             }
             case CONTROL_CMD_GET_UNIT_PREF: {

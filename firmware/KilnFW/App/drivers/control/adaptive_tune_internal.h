@@ -672,6 +672,12 @@ typedef struct {
     float k_dc, k_blended, tau_s, dead_time_s, kp, ki, kd;
     uint8_t profile_id;
     uint32_t clear_gen; // adaptive_tune_ki_clear_gen[zi] at plan time
+    // Dev review 9 L1: the live gains read at plan time. apply re-reads them and skips the writes
+    // if another writer (autotune Accept) changed them since; commit re-reads them to detect a
+    // writer that landed after ours. Either way no has_applied / revert snapshot is recorded.
+    bool have_prior;
+    float prior_kp, prior_ki, prior_kd;
+    bool stale; // apply found the gains changed since plan; nothing was written
 } adaptive_tune_zone_plan_t;
 
 typedef struct {

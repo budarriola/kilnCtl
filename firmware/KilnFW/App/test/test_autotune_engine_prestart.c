@@ -945,6 +945,28 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_stub_set_pid_result;
 }
 
+/* Dev review 9 L2: accept() now goes through the _checked setter so it can tell a run-claimed
+ * refusal from a bad value. s_stub_set_pid_busy makes the stub report BUSY_RUNNING without
+ * touching the fake store, modelling the real setter's claim re-check inside zones_cfg_lock. */
+static bool s_stub_set_pid_busy = false;
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
+{
+    if (s_stub_set_pid_busy) {
+        s_zones_write_total++;
+        s_fake_set_pid_call_count++;
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+
+/* Dev review 9 L1: stand-in for adaptive_tune_any_write_in_flight(); a test sets it to model the
+ * run-end apply pass holding write_in_flight. Never set outside the test that wants it. */
+static bool s_stub_adaptive_write_in_flight = false;
+bool adaptive_tune_any_write_in_flight(void)
+{
+    return s_stub_adaptive_write_in_flight;
+}
+
 /* TODO.md 6A.4 -- autotune_engine_accept()'s opt-in ceiling-adopt write.
  * Call-count/last-args capture, same convention as
  * s_stub_set_coupling_diag_k_dc_* above, so a test can prove both the
@@ -4181,6 +4203,44 @@ static void test_autotune_engine_accept_rechecks_gate_before_writes(void)
     s_stub_set_pid_result = false;
 }
 
+/* Dev review 9 L1/L2: Accept refuses (409 path) while an adaptive run-end write is in flight, and
+ * when the setter reports the zone is run-claimed. Both must write nothing and release the reservation. */
+static void test_autotune_engine_accept_refused_by_adaptive_write_and_run_claim(void)
+{
+    TEST_SECTION("autotune_engine_accept() refuses on adaptive write_in_flight and on BUSY_RUNNING");
+    for (int pass = 0; pass < 2; pass++) {
+        memset(&s_at, 0, sizeof(s_at));
+        s_at.lock = xSemaphoreCreateMutex();
+        s_at.state = AUTOTUNE_ENGINE_DONE;
+        s_at.method = AUTOTUNE_METHOD_STEP;
+        s_at.zone_index = 0;
+        s_at.model.valid = true;
+        s_at.model.settled = true;
+        s_at.model.extrapolation_converged = true;
+        s_at.model.tau_consistent_with_gain = true;
+        s_at.model.k_gain_c_per_duty = 10.0f;
+        s_at.model.tau_s = 100.0f;
+        s_at.model.dead_time_s = 5.0f;
+        s_stub_set_pid_result = true;
+        s_stub_profile_running = false;
+        s_stub_autotune_running = false;
+        s_fake_set_pid_call_count = 0;
+        s_zones_write_total = 0;
+        s_stub_adaptive_write_in_flight = (pass == 0);
+        s_stub_set_pid_busy = (pass == 1);
+        autotune_accept_result_t res = {0};
+        bool ok = autotune_engine_accept(NULL, &res);
+        s_stub_adaptive_write_in_flight = false;
+        s_stub_set_pid_busy = false;
+        TEST_CHECK(!ok, "accept must be refused");
+        TEST_CHECK(res.refused_by_mode_gate && res.mode_reason[0] != '\0', "flagged as a mode-gate refusal (409)");
+        TEST_CHECK(pass == 0 ? s_fake_set_pid_call_count == 0 : true, "adaptive write in flight: set_pid never called");
+        TEST_CHECK(s_at.state == AUTOTUNE_ENGINE_DONE, "result not consumed");
+        TEST_CHECK(!s_at.external_write_reserved, "reservation must be released on the refusal");
+    }
+    s_stub_set_pid_result = false;
+}
+
 /* Round-3 follow-up: the SAME gate, isolating extrapolation_converged ==
  * false (settled and tau_consistent both true) -- proves the gate was
  * genuinely EXTENDED to this flag, not left checking settled alone.
@@ -7121,6 +7181,7 @@ void run_test_autotune_engine_prestart(void)
     test_settle_detector_ignores_two_quantum_dead_time_noise();
     test_autotune_engine_accept_gates_on_settled();
     test_autotune_engine_accept_refused_by_mode_gate_while_running();
+    test_autotune_engine_accept_refused_by_adaptive_write_and_run_claim();
     test_autotune_engine_accept_rechecks_gate_before_writes();
     test_autotune_engine_accept_gates_on_extrapolation_converged();
     test_autotune_engine_accept_gates_on_tau_consistent();

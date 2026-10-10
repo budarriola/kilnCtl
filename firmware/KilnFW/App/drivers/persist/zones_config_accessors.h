@@ -783,6 +783,21 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd);
 
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd);
 
+/* Distinct outcome of the PID/model setters. BUSY_RUNNING: a profile or autotune run holds the
+ * heat claim (re-read inside the zones_cfg_lock section, nothing written); callers map it to
+ * their existing 409/mode-gate refusal. SAVE_FAILED: RAM changed, persist failed. */
+typedef enum {
+    ZONES_SET_OK = 0,
+    ZONES_SET_REJECTED,     /* bad zone or out-of-range value, nothing written */
+    ZONES_SET_BUSY_RUNNING, /* run claim held, nothing written */
+    ZONES_SET_SAVE_FAILED   /* RAM updated, persist failed */
+} zones_set_result_t;
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd);
+zones_set_result_t zones_config_set_pid_no_save_checked(uint8_t zone_index, float kp, float ki, float kd);
+zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s);
+zones_set_result_t zones_config_set_model_no_save_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s);
+
 /* The one definition of "this PID gain changed", shared by
  * zones_config_set_pid()/_no_save() (which clear zone_cfg_t::tuning_valid on a
  * change) and the whole-page POST /api/zones parser

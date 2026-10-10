@@ -741,6 +741,29 @@ static void test_run_end_during_revert_write_skips_the_zone(void)
     TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "a finished revert must clear write_in_flight");
 }
 
+static bool s_hook_in_flight_seen;
+static void hook_probe_in_flight(void)
+{
+    s_hook_in_flight_seen = adaptive_tune_any_write_in_flight();
+}
+
+// MUST GO RED if adaptive_tune_any_write_in_flight() stops reporting the apply window: Accept
+// (autotune_engine_accept) keys its 409 refusal on it (dev review 9 L1).
+static void test_any_write_in_flight_covers_the_apply_window(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    s_hook_in_flight_seen = false;
+    TEST_CHECK(!adaptive_tune_any_write_in_flight(), "idle: nothing in flight");
+    s_set_model_hook = hook_probe_in_flight;
+    profile_firing_run_record_t rec = make_clean_record(34, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(s_set_model_hook == NULL, "setup: hook fired inside the apply window");
+    TEST_CHECK(s_hook_in_flight_seen, "in flight must read true inside run_end's unlocked apply window");
+    TEST_CHECK(!adaptive_tune_any_write_in_flight(), "cleared after commit");
+}
+
 static float s_hook_simc_ki;
 static uint8_t s_hook_clear_zone;
 static void hook_accept_clears_baseline(void)
@@ -773,7 +796,15 @@ static void test_ki_clear_gen_is_per_zone(void)
         adaptive_tune_run_end(&rec, true);
         TEST_CHECK(s_set_pid_hook == NULL && s_hook_simc_ki > 0.0f, "setup: the hook must have fired after set_pid");
         TEST_CHECK(fabsf(s_hook_simc_ki - 0.03f) > 1e-6f, "setup: SIMC's fresh Ki must differ from the prior");
-        TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the refinement must genuinely apply");
+        if (pass == 0) {
+            TEST_CHECK(adaptive_tune_zones[1].has_applied, "setup: the refinement must genuinely apply");
+        } else {
+            // Dev review 9 L1: the Accept replaced the SIMC gains, so recording has_applied (and a
+            // revert snapshot) would later undo the operator's accepted gains.
+            TEST_CHECK(!adaptive_tune_zones[1].has_applied && !adaptive_tune_zones[1].revert_available,
+                       "L1: a writer that replaced the SIMC gains after our set_pid must leave no applied record "
+                       "and no revert snapshot");
+        }
         bool latched_simc = adaptive_tune_zones[1].ki_baseline_valid &&
                             fabsf(adaptive_tune_zones[1].ki_baseline - s_hook_simc_ki) < 1e-6f;
         if (pass == 0) {

@@ -1052,6 +1052,20 @@ void adaptive_tune_load_enable_flags(void)
 //      is already the worker task" and runs a dispatched fn() inline rather
 //      than deadlocking -- a second, generic backstop for any OTHER re-
 //      entrant caller this audit did not know to name explicitly.
+bool adaptive_tune_any_write_in_flight(void)
+{
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    bool busy = false;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (adaptive_tune_zones[zi].write_in_flight) {
+            busy = true;
+        }
+    }
+    xSemaphoreGive(adaptive_tune_lock);
+    return busy;
+}
+
 void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {

@@ -440,11 +440,12 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * is held and before the first write. relay_authority_heat_run_active()
      * is a leaf spinlock (takes no other lock), so calling it here -- after
      * s_at.lock was released, holding only the reservation flag -- cannot
-     * invert any lock order. A start that lands after this re-check is not
-     * closed here: profile_executor_run() has no cheap way to see the
-     * reservation, so a residual window of the few writes below remains.
-     * Other gated writers (e.g. zones_http_pid.c) share the same
-     * snapshot-then-write pattern; deliberately unchanged in this pass. */
+     * invert any lock order. A start that lands after this re-check is closed
+     * by the setters themselves (profile_executor_run() has no cheap way to see the
+     * reservation, so the claim is re-read at the write instead).
+     * L2 (dev review 9) closes that residual: zones_config_set_pid/model re-check the
+     * heat claim inside the zones_cfg_lock section that bumps the generation, and the
+     * busy result is mapped below. */
     {
         sys_mode_snapshot_t recheck = {0};
         relay_authority_heat_run_active(&recheck.profile_running, &recheck.autotune_running);
@@ -463,8 +464,30 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         }
     }
 
-    if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
+    /* Dev review 9 L1: refuse (busy, the same 409 path as the mode gate) while the adaptive tuner's
+     * run-end apply is writing this or any zone with its lock released; otherwise the SIMC gains
+     * would overwrite these or a stale revert snapshot would later undo them. The reservation is
+     * held and no s_at/zones lock is, so the brief adaptive_tune_lock take cannot invert an order. */
+    if (adaptive_tune_any_write_in_flight()) {
         autotune_engine_release_zone_for_external_write(zone);
+        ESP_LOGW(AT_TAG, "autotune_engine_accept() refused -- an adaptive-tune gain write is in progress");
+        if (out != NULL) {
+            out->refused_by_mode_gate = true;
+            snprintf(out->mode_reason, sizeof(out->mode_reason), "%s",
+                     "an adaptive-tune gain write is in progress -- retry in a moment");
+        }
+        return false;
+    }
+
+    zones_set_result_t pid_result = zones_config_set_pid_checked(zone, g.kp, g.ki, g.kd);
+    if (pid_result != ZONES_SET_OK) {
+        autotune_engine_release_zone_for_external_write(zone);
+        if (pid_result == ZONES_SET_BUSY_RUNNING && out != NULL) {
+            /* L2: a run claimed heat between the re-check above and the setter's own re-check. */
+            out->refused_by_mode_gate = true;
+            snprintf(out->mode_reason, sizeof(out->mode_reason), "%s",
+                     "a profile or autotune run is active -- zone writes refused");
+        }
         return false;
     }
 

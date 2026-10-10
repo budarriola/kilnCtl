@@ -171,7 +171,14 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (!zones_config_set_pid(zone_index, kp, ki, kd)) {
+    const zones_set_result_t set_result = zones_config_set_pid_checked(zone_index, kp, ki, kd);
+    if (set_result == ZONES_SET_BUSY_RUNNING) {
+        /* Dev review 9 L2: a run claimed heat after the entry gate above; the setter re-read the
+         * claim inside its commit lock and wrote nothing. Same 409 as the entry gate. */
+        ESP_LOGW(ZONES_HTTP_TAG, "POST /api/zones/pid refused: a run started during the request");
+        return system_mode_gate_http_send_refusal(req, "a profile or autotune run is active");
+    }
+    if (set_result != ZONES_SET_OK) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to apply/persist PID gains\"}");

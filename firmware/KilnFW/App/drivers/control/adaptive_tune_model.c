@@ -232,7 +232,12 @@ bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tun
     zones_config_get_pid(zi, &prior_kp, &prior_ki, &prior_kd); // best-effort -- an unreadable prior PID
                                                                 // just leaves the revert snapshot at 0s,
                                                                 // no worse than not having one
+    const bool have_prior = zones_config_get_pid(zi, &prior_kp, &prior_ki, &prior_kd);
     adaptive_tune_capture_revert_locked(z, prior_kp, prior_ki, prior_kd, k_dc, tau_s, dead_time_s);
+    plan->have_prior = have_prior;
+    plan->prior_kp = prior_kp;
+    plan->prior_ki = prior_ki;
+    plan->prior_kd = prior_kd;
 
     plan->have_model = true;
     plan->k_dc = k_dc;
@@ -252,6 +257,12 @@ void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan)
         plan->bootstrap_ok = zones_config_set_autotune_baseline_k_dc(zi, plan->baseline_k_dc);
     }
     if (!plan->have_model) {
+        return;
+    }
+    float live_kp, live_ki, live_kd;
+    if (plan->have_prior && zones_config_get_pid(zi, &live_kp, &live_ki, &live_kd) &&
+        (live_kp != plan->prior_kp || live_ki != plan->prior_ki || live_kd != plan->prior_kd)) {
+        plan->stale = true; // another writer (autotune Accept) changed the gains after the plan
         return;
     }
     plan->model_ok = zones_config_set_model(zi, plan->k_blended, plan->tau_s, plan->dead_time_s);
@@ -278,6 +289,11 @@ bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_
     if (!plan->have_model) {
         return false; // plan refused; its refusal reason is already set
     }
+    if (plan->stale) {
+        adaptive_tune_set_refusal(z, "zone gains were changed by another writer during the run-end apply -- skipped");
+        z->revert_available = false; // the snapshot taken at plan time describes a change that never landed
+        return false;
+    }
     if (!plan->model_ok) {
         adaptive_tune_set_refusal(z, "zones_config_set_model() rejected %.4f/%.1f/%.1f", (double)k_blended, (double)tau_s,
                     (double)dead_time_s);
@@ -294,6 +310,18 @@ bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_
         // are still correct for that (the live PID triple never actually
         // changed on this failed path).
         return false;
+    }
+
+    if (plan->have_prior) {
+        float live_kp, live_ki, live_kd;
+        if (zones_config_get_pid(zi, &live_kp, &live_ki, &live_kd) &&
+            (live_kp != gains.kp || live_ki != gains.ki || live_kd != gains.kd)) {
+            // A writer landed after our set_pid: our gains are no longer live, so recording has_applied
+            // and a revert snapshot would later undo THEIR gains.
+            adaptive_tune_set_refusal(z, "zone gains were changed by another writer right after the run-end apply");
+            z->revert_available = false;
+            return false;
+        }
     }
 
     z->last_refusal_reason[0] = '\0';

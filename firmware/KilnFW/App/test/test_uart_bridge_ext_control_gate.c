@@ -124,6 +124,14 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_fake_zone_cfg[zone_index].kd = kd;
     return true;
 }
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
+{
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    return zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
 // Under test (via CONTROL_CMD_SET_ZONE_MODEL).
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {

@@ -665,6 +665,7 @@ void run_test_adaptive_tune(void)
     test_revert_during_run_end_apply_is_refused_busy();
     test_run_end_during_revert_write_skips_the_zone();
     test_ki_clear_gen_is_per_zone();
+    test_any_write_in_flight_covers_the_apply_window();
 }
 
 // ---------------------------------------------------------------------
