@@ -7,6 +7,7 @@
 #include "adaptive_tune_internal.h"
 
 #include <math.h>
+#include <stdlib.h> // malloc/free: adaptive_tune_plan_coupled_locked() observation buffers
 #include <string.h>
 #include <time.h>
 
@@ -562,21 +563,36 @@ void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t 
         return;
     }
 
-    // Stack: ADAPTIVE_TUNE_JOINT_RING_CAPACITY(24) * MAX31856_CHANNEL_COUNT(3)
-    // * 4 bytes * 2 arrays = 576 bytes -- same order as this file's other
-    // stack-local fit buffers, well inside a FreeRTOS task's normal stack.
-    float duty_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
-    float rise_obs[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
+    // HEAP, not stack (2026-10-09): ADAPTIVE_TUNE_JOINT_RING_CAPACITY(24) *
+    // MAX31856_CHANNEL_COUNT(3) * 4 bytes * 2 arrays = 576 bytes. As stack
+    // locals they made this frame 704 B, and on the profile executor's
+    // run-end path (executor_task_entry -> adaptive_tune_run_end -> here ->
+    // adaptive_tune_coupled_fit -> zone_coupling_gauss_solve_partial_pivot_vec)
+    // that reached 2080 B against check_executor_task_stack_budget's 1936 B
+    // ceiling. Freed on every return path below.
+    typedef float joint_obs_t[ADAPTIVE_TUNE_JOINT_RING_CAPACITY][MAX31856_CHANNEL_COUNT];
+    struct {
+        joint_obs_t duty;
+        joint_obs_t rise;
+    } *obs = malloc(sizeof(*obs));
+    if (!obs) {
+        adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
+                   "out of memory for the coupled solve's observation buffers");
+        adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RETURNED, zi, adaptive_tune_joint_ring_count, 0);
+        return;
+    }
     for (uint32_t k = 0; k < adaptive_tune_joint_ring_count; k++) {
         uint32_t idx = (adaptive_tune_joint_ring_head + k) % ADAPTIVE_TUNE_JOINT_RING_CAPACITY;
-        memcpy(duty_obs[k], adaptive_tune_joint_ring[idx].duty, sizeof(duty_obs[k]));
-        memcpy(rise_obs[k], adaptive_tune_joint_ring[idx].rise_c, sizeof(rise_obs[k]));
+        memcpy(obs->duty[k], adaptive_tune_joint_ring[idx].duty, sizeof(obs->duty[k]));
+        memcpy(obs->rise[k], adaptive_tune_joint_ring[idx].rise_c, sizeof(obs->rise[k]));
     }
     adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_RING_COPIED, zi, adaptive_tune_joint_ring_count, 0);
 
     float C[MAX31856_CHANNEL_COUNT][MAX31856_CHANNEL_COUNT];
     adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_BEFORE_FIT, zi, adaptive_tune_joint_ring_count, 0);
-    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(duty_obs, rise_obs, adaptive_tune_joint_ring_count, n, C);
+    adaptive_tune_coupled_result_t r = adaptive_tune_coupled_fit(obs->duty, obs->rise, adaptive_tune_joint_ring_count, n, C);
+    free(obs);
+    obs = NULL;
     adaptive_tune_coupled_breadcrumb_mark(ADAPTIVE_TUNE_COUPLED_BC_AFTER_FIT, zi, adaptive_tune_joint_ring_count, 0);
     if (r == ADAPTIVE_TUNE_COUPLED_TOO_FEW_OBSERVATIONS) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),

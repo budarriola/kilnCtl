@@ -870,17 +870,22 @@ esp_err_t nvs_save(void)
      * nvs_save() IS reached on the flash worker: CONTROL SET_ZONE_PID/MODEL
      * and AUTOTUNE_CMD_ACCEPT run as worker jobs (corrected 2026-10-09; an
      * earlier comment here said it never was). On the worker the job runs
-     * inline -- the worker's own stack is the one this dispatch targets
-     * anyway, and dispatching would only re-enter the worker.
-     * uart_bridge_ext_run_on_flash_worker() also inlines on-worker, but the
-     * guard here makes that explicit rather than relying on it. Best-effort:
+     * inline (the worker's own stack is the one the dispatch targets anyway),
+     * but ONLY through a volatile function pointer, never a direct call: the
+     * static stack analyser counts a direct call on every path, worker or
+     * not, and the direct call 4271767d added put the ~2.8 KB autosave frame
+     * back into executor_task_entry's worst case (2816 B against its 1936 B
+     * ceiling, check_executor_task_stack_budget, 2026-10-09 on 047844c5).
+     * The volatile load stops GCC from folding the pointer back into a direct
+     * call. Do not "simplify" it to zones_autosave_job(...). Best-effort:
      * a dispatch/autosave failure is logged, never turned into this
      * function's own return value -- the zones write ITSELF already fully
      * succeeded by this point. */
     esp_err_t autosave_dispatch_err = ESP_OK; /* nothing saved: nothing to autosave */
     if (err == ESP_OK) {
         if (uart_bridge_ext_is_on_flash_worker()) {
-            zones_autosave_job((void *)xTaskGetCurrentTaskHandle());
+            void (*volatile job)(void *arg) = zones_autosave_job;
+            job((void *)xTaskGetCurrentTaskHandle());
         } else {
             autosave_dispatch_err =
                 uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle());
