@@ -2260,7 +2260,8 @@ void watchdog_task_entry(void *arg)
             continue_after_lock_timeout = true;
         }
         if (continue_after_lock_timeout) {
-            heat_enable_reconcile();
+            /* No reconcile here: it must stay the single, LAST statement of the loop body
+             * (test_heat_enable.c pins that), and it is only a retry -- next pass runs it. */
             continue;
         }
 
