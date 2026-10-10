@@ -29,7 +29,8 @@ static bool stub(const void *b, size_t len, uint8_t marker)
 bool adaptive_tune_kibase_file_validate(const void *b, size_t l) { return stub(b, l, 2); }
 bool ramp_assist_cfg_file_validate(const void *b, size_t l) { return stub(b, l, 3); }
 bool time_sync_tz_file_validate(const void *b, size_t l) { return stub(b, l, 4); }
-bool aux_outputs_cfg_file_validate(const void *b, size_t l) { return stub(b, l, 1); }
+/* Accepts a "newer version" byte (2) like the real loader validator, so only the POST wrapper can refuse it. */
+bool aux_outputs_cfg_file_validate(const void *b, size_t l) { return stub(b, l, 1) || stub(b, l, 2); }
 bool display_power_cfg_file_validate(const void *b, size_t l) { return stub(b, l, 5); }
 bool profiles_builtin_hidden_file_validate(const void *b, size_t l) { return stub(b, l, 11); }
 bool profiles_favorites_file_validate(const void *b, size_t l) { return stub(b, l, 6); }
