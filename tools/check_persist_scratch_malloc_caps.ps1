@@ -111,10 +111,6 @@ $allow = @(
       "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
       "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
-    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
-    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
       "24-byte job context handed to the async task, not scratch")
     ,@("firmware/KilnFW/App/drivers/http/diagnostics_http.c", "malloc((size_t)len_ul)", 1,

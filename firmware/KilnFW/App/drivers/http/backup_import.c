@@ -3937,16 +3937,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, ch
 {
     profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
                                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
-                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!zone_candidates) {
-        zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
-    timing_profile_candidate_t *tp = heap_caps_malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT,
-                                                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!tp) {
-        tp = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
+    zone_candidate_t *zone_candidates = persist_scratch_alloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
+    timing_profile_candidate_t *tp = persist_scratch_alloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
     bool ok = false;
     if (!candidates || !zone_candidates || !tp) {
         snprintf(err_msg, err_cap, "out of memory validating the backup -- nothing was changed");
@@ -4069,11 +4061,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
         *partial_write_out = true;
         return false;
     }
-    zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
-                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!zone_candidates) {
-        zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
+    zone_candidate_t *zone_candidates = persist_scratch_alloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
     if (!zone_candidates) {
         free(candidates);
         snprintf(err_msg, err_cap, "out of memory (zone candidates) -- kiln configs were already restored");
@@ -4082,12 +4070,7 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, ki
         return false;
     }
 
-    timing_profile_candidate_t *timing_profile_candidates =
-        heap_caps_malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT,
-                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!timing_profile_candidates) {
-        timing_profile_candidates = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
+    timing_profile_candidate_t *timing_profile_candidates = persist_scratch_alloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
     if (!timing_profile_candidates) {
         free(zone_candidates);
         free(candidates);
