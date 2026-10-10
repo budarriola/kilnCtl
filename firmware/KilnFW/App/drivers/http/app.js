@@ -1197,6 +1197,10 @@
         if (Object.prototype.hasOwnProperty.call(src, k)) retryInit[k] = src[k];
       }
       retryInit.__kcAuthRetried = true;
+      // The caller's own timeout (zones Save, 30 s) must not run while the login modal is
+      // open, and its original signal may already be aborted: a caller that supplies
+      // __kcAuthSignal() gets a freshly armed signal for the retry (dev web review LOW-1).
+      if (typeof src.__kcAuthSignal === 'function') retryInit.signal = src.__kcAuthSignal();
       return window.fetch(inputForRetry, retryInit);
     }
     function authCancelled(prompted) {
@@ -1216,6 +1220,7 @@
     }
     function promptThenRetry(titleText) {
       if (!authPromptAllowed(userInitiated)) return authCancelled(false);
+      if (init && typeof init.__kcOnAuthPrompt === 'function') init.__kcOnAuthPrompt();
       return ensureAdminLogin(titleText).then(function (ok) {
         if (!ok) {
           authPromptDeclined = true;

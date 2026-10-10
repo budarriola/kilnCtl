@@ -1462,6 +1462,8 @@ function renderStep11() {
         return;
       }
       renderErrList(errEl, []);
+      var unlock11 = lockSave('step11Save');
+      if (!unlock11) return;
       var chain = Promise.resolve();
       if (username && password) {
         chain = chain.then(function () {
@@ -1512,7 +1514,8 @@ function renderStep11() {
           return;
         }
         // Re-read the policy: the text below reports what the board says, not what was sent.
-        fetch('/api/auth/config').then(function (rb) {
+        // RETURNED so a rejection here (network, cancelled sign-in) reaches the catch below.
+        return fetch('/api/auth/config').then(function (rb) {
           if (!rb.ok) throw new Error('read-back refused');
           return rb.json();
         }).then(function (cfg) {
@@ -1522,7 +1525,8 @@ function renderStep11() {
             return null;
           }
           return postStepState(11, 'done');
-        }, function () {
+        }, function (rbErr) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(rbErr)) throw rbErr;
           msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
           renderErrList(errEl, ['Could not read the setting back to confirm it. Step 11 is NOT marked done -- try again.']);
           return null;
@@ -1534,7 +1538,7 @@ function renderStep11() {
         }
         renderErrList(errEl, [(err && err.message) ||
           'Could not reach the board to save this -- try again once it answers.']);
-      });
+      }).then(unlock11);
     });
     document.getElementById('step11Skip').addEventListener('click', function () {
       postStepState(11, 'skipped', 'optional, deferred').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
@@ -1546,11 +1550,11 @@ function renderStep11() {
  * (401, network): then only "sent" is claimed. Pure; unit-tested. */
 function wizardLoginReadBackText(wantEnable, cfg) {
   if (!cfg || typeof cfg.web_enabled === 'undefined') {
-    return 'Saved. The setting was sent but could not be read back to confirm it.';
+    return 'The setting was sent but could not be read back to confirm it.';
   }
   var on = !!cfg.web_enabled;
-  return 'Saved. Read back: web login is now ' + (on ? 'ON' : 'off') + '.' +
-    (on !== !!wantEnable ? ' This differs from what was requested.' : '');
+  return (on !== !!wantEnable ? 'Not as requested. ' : 'Saved. ') + 'Read back: web login is now ' +
+    (on ? 'ON' : 'off') + '.' + (on !== !!wantEnable ? ' This differs from what was requested.' : '');
 }
 
 /* ---- Step 7 (safety processor commissioning, embedded per owner decision).
@@ -1754,16 +1758,32 @@ function postStepState(stepId, state, note) {
 function postStepStateOrThrow(stepId, state, note) {
   return postStepState(stepId, state, note).then(function (r) {
     if (r && r.ok) return r;
-    throw new Error('Could not save this step: ' + ((r && r.body && r.body.error) || 'the board refused it') + ' -- try again.');
+    throw new Error('Could not save this step: ' + stepRefusalText(r) + ' -- try again.');
   });
+}
+
+/* A refusal code from the board as operator text: bad_host / cross_origin get the app.js
+ * guidance (dev web review LOW-5), anything else is shown as the code. */
+function stepRefusalText(r) {
+  var code = (r && r.body && r.body.error) || '';
+  var guide = (code && window.kcHostRefusalText) ? window.kcHostRefusalText({ error: code }) : null;
+  return guide || code || 'the board refused it';
+}
+
+/* Double-submit guard (dev web review LOW-3): disables the Save button and returns the
+ * release function, or null when a save is already in flight (the caller must then return). */
+function lockSave(id) {
+  var b = document.getElementById(id);
+  if (!b || b.disabled) return null;
+  b.disabled = true;
+  return function () { var b2 = document.getElementById(id); if (b2) b2.disabled = false; };
 }
 
 /* A step save the board refused (non-2xx) must be shown, not chained into loadAll. */
 function stepSaveFailed(r) {
   if (r && r.ok) return false;
   var el = document.getElementById('stepStatusLine');
-  var msg = 'Could not save this step: ' + ((r && r.body && r.body.error) || 'the board refused it') +
-    ' -- try again.';
+  var msg = 'Could not save this step: ' + stepRefusalText(r) + ' -- try again.';
   if (el) { el.textContent = msg; el.className = 'werr'; }
   return true;
 }
@@ -1866,6 +1886,8 @@ function renderStep1() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
+      var unlock1 = lockSave('step1Save');
+      if (!unlock1) return;
       fetch('/api/settings/tz', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'tz=' + encodeURIComponent(fields.tz),
@@ -1888,7 +1910,7 @@ function renderStep1() {
         // Rejection text rendered verbatim, never paraphrased (plan section 1).
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock1);
     });
   });
 }
@@ -2021,6 +2043,8 @@ function renderStep2() {
         copy.thermo_mask = liveZones[mi].thermo_mask;
         mergedZones.push(copy);
       }
+      var unlock2 = lockSave('step2Save');
+      if (!unlock2) return;
       submitZonesConfig(dataCopy, mergedZones).then(function () {
         return postStepStateOrThrow(2, 'done');
       }).then(function () {
@@ -2032,7 +2056,7 @@ function renderStep2() {
       }).catch(function (e) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock2);
     });
   });
 }
@@ -2131,7 +2155,10 @@ function renderStep3() {
         if (allVerified) {
           okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
           return postStepState(3, 'done').then(function (r) {
-            if (stepSaveFailed(r)) return;
+            if (stepSaveFailed(r)) {
+              okEl.innerHTML = '<p class="hint">The thermocouple settings were written, but this step was NOT marked done.</p>';
+              return;
+            }
             armStepMessage(3, function () {
               var ok2 = document.getElementById('step3Ok');
               if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
@@ -2273,6 +2300,8 @@ function renderStep4() {
       var newlyOnOff = step4ZoneTypeConfirmLines(zones, liveZones, thermoCount);
 
       function doSubmit() {
+        var unlock4 = lockSave('step4Save');
+        if (!unlock4) return;
         submitZonesConfig(data, liveZones).then(function () {
           return postStepStateOrThrow(4, 'done');
         }).then(function () {
@@ -2284,7 +2313,7 @@ function renderStep4() {
         }).catch(function (e) {
           if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
           renderErrList(errEl, [String(e.message || e)]);
-        });
+        }).then(unlock4);
       }
 
       function revertNewlyOnOff() {
@@ -2470,6 +2499,8 @@ function renderStep5() {
       document.querySelectorAll('#s5names .s5relayname').forEach(function (inp) {
         relayNameParams.push('relay' + (parseInt(inp.dataset.relay, 10) + 1) + '_name=' + encodeURIComponent(inp.value));
       });
+      var unlock5 = lockSave('step5Save');
+      if (!unlock5) return;
       submitZonesConfig(dataCopy, liveZones, relayNameParams).then(function () {
         return postStepStateOrThrow(5, 'done');
       }).then(function () {
@@ -2481,7 +2512,7 @@ function renderStep5() {
       }).catch(function (e) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock5);
     });
   });
 }
@@ -2581,6 +2612,8 @@ function renderStep6() {
       var changedLines = step6LimitConfirmLines(zones, liveZones, thermoCount);
 
       function doCommitCheckAndSubmit() {
+        var unlock6 = lockSave('step6Save');
+        if (!unlock6) return;
         // Commit-time re-check (requirement 4 / plan section 1 "Validation"):
         // re-fetch the Pico's ceiling right now -- step 7 could commission it
         // in another tab while this one sits open, and this is exactly the
@@ -2588,7 +2621,7 @@ function renderStep6() {
         fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
           var freshAbsMax = getAbsMaxTempC(freshCommissioning);
           var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
-          if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
+          if (!v2.valid) { renderErrList(errEl, v2.errors); unlock6(); return; }
           submitZonesConfig(data, liveZones).then(function () {
             return postStepStateOrThrow(6, 'done');
           }).then(function () {
@@ -2600,8 +2633,8 @@ function renderStep6() {
           }).catch(function (e) {
             if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
             renderErrList(errEl, [String(e.message || e)]);
-          });
-        });
+          }).then(unlock6);
+        }, unlock6);
       }
 
       if (!changedLines.length) {
@@ -3003,6 +3036,7 @@ function gRenderStepDetail(stepId) {
   } else {
     safetyNote.hidden = true;
   }
+  document.getElementById('stepStatusLine').className = 'hint';
   document.getElementById('stepStatusLine').textContent = 'Current state (from the board, not this ' +
     'browser tab): ' + s.state.toUpperCase() + (s.detail ? ' -- ' + s.detail : '');
   var regressedNote = document.getElementById('stepRegressedNote');

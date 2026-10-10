@@ -2663,6 +2663,37 @@ function blankGuardKeys(params) {
   return params.filter(function (p) { return ZONE_GUARD_BLANK_RE.test(p); })
     .map(function (p) { return p.slice(0, p.indexOf('=')); });
 }
+/* Operator-facing text for the blank-guard refusal (dev web review LOW-2): the page's own
+   labels and 1-based zone numbers, never wire keys. isHidden(zoneIdx0, suffix) lets the caller
+   skip a field the operator cannot see (heater-only rows of an on/off zone): a blank there is
+   dropped by omitBlankOptionalParams (stored value kept), not refused. */
+var ZONE_GUARD_LABELS = {
+  wrongdirwindow: 'Wrong-direction window', wrongdirrate: 'Wrong-direction rate',
+  offsettle: 'Runaway off-settle', runawayrate: 'Runaway rate', runawaymargin: 'Runaway margin',
+  driftperiod: 'Drift period', debounce: 'Sensor debounce', frozenwindow: 'Frozen-sensor window',
+  xzone: 'Cross-zone limit'
+};
+function blankGuardLabels(params, isHidden) {
+  var out = [];
+  blankGuardKeys(params).forEach(function (k) {
+    var m = /^z(\d+)_(.+)$/.exec(k);
+    if (!m || !ZONE_GUARD_LABELS[m[2]]) return;
+    var zi = parseInt(m[1], 10);
+    if (isHidden && isHidden(zi, m[2])) return;
+    out.push('Zone ' + (zi + 1) + ' ' + ZONE_GUARD_LABELS[m[2]]);
+  });
+  return out;
+}
+var ZONE_GUARD_INPUT_CLASS = {
+  wrongdirwindow: 'wdwindow', wrongdirrate: 'wdrate', offsettle: 'offsettle', runawayrate: 'runrate',
+  runawaymargin: 'runmargin', driftperiod: 'driftperiod', debounce: 'debounce', frozenwindow: 'frozenwindow'
+};
+function guardFieldHidden(zi, suffix) {
+  var zdiv = document.querySelector('#zones .zone[data-index="' + zi + '"]');
+  var el = zdiv && zdiv.querySelector('.' + ZONE_GUARD_INPUT_CLASS[suffix]);
+  var wrap = el && el.closest('.heaterOnly');
+  return !!(wrap && wrap.style.display === 'none');
+}
 var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
@@ -2911,21 +2942,33 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     var tval = div.querySelector('.relaytypeinput').value;
     params.push('relay' + (r + 1) + '_type=' + encodeURIComponent(tval));
   });
-  var blankGuards = blankGuardKeys(params);
+  var blankGuards = blankGuardLabels(params, guardFieldHidden);
   if (blankGuards.length) {
     msg.textContent = 'Not saved: guard threshold field(s) are blank or not a number (' +
-      blankGuards.join(', ') + '). Enter a value for each, then save again.';
+      blankGuards.join('; ') + '). Enter a value for each, then save again.';
     return;
   }
   msg.textContent = 'Saving…';
   saveBtnEl.disabled = true;
   params = omitBlankOptionalParams(params);
   /* A stalled connection must not leave Save disabled until the browser gives up. */
-  var saveAbort = (typeof AbortController === 'function') ? new AbortController() : null;
-  var saveTimer = saveAbort ? setTimeout(function () { saveAbort.abort(); }, 30000) : null;
+  var saveTimer = null;
+  /* Arms a fresh 30 s timer + signal. app.js's fetch wrapper clears the timer while its login
+     modal is open (__kcOnAuthPrompt) and re-arms it for the post-login retry (__kcAuthSignal),
+     so time spent typing a password never counts against the board (dev web review LOW-1). */
+  function armSaveTimer() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    if (typeof AbortController !== 'function') return undefined;
+    var ac = new AbortController();
+    saveTimer = setTimeout(function () { ac.abort(); }, 30000);
+    return ac.signal;
+  }
   fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
-    signal: saveAbort ? saveAbort.signal : undefined,
+    signal: armSaveTimer(),
+    __kcOnAuthPrompt: function () { if (saveTimer) clearTimeout(saveTimer); saveTimer = null; },
+    __kcAuthSignal: armSaveTimer,
   }).then(function (r) {
     if (saveTimer) clearTimeout(saveTimer);
     saveBtnEl.disabled = false;
@@ -2943,7 +2986,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     if (saveTimer) clearTimeout(saveTimer);
     saveBtnEl.disabled = false;
     if (e && e.name === 'AbortError') {
-      msg.textContent = 'Save timed out after 30 s -- the board did not answer. Check the connection and try again.';
+      /* The abort may fire after the POST reached the board, so the save may or may not have
+         landed: say so and reload the form from the board instead of implying nothing happened. */
+      msg.textContent = 'No answer from the board after 30 s -- the save may or may not have been applied. ' +
+        'Reloading the current settings; check them before saving again.';
+      loadCurrent();
       return;
     }
     /* POST /api/zones's safety-ceiling-raise refusal (owner request
@@ -2957,6 +3004,8 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       var parsed = JSON.parse(text);
       if (parsed && parsed.reason) text = parsed.reason;
     } catch (parseErr) { /* not JSON -- show as-is */ }
+    /* LOW-5: a bad_host / cross_origin refusal reads as guidance, not raw {"error":"bad_host"}. */
+    text = (window.kcHostRefusalFromText && window.kcHostRefusalFromText(e.message)) || text;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Save failed: ' + text;
   });

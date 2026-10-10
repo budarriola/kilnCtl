@@ -55,15 +55,17 @@ assert(/saveBtnEl\.disabled = true;[\s\S]*?omitBlankOptionalParams\(params\)[\s\
   'Save disables the button and filters params before the POST');
 assert(/\.then\(function \(r\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);\s*saveBtnEl\.disabled = false;/.test(ZONES), 'button re-enabled on response');
 assert(/\.catch\(function \(e\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);\s*saveBtnEl\.disabled = false;/.test(ZONES), 'button re-enabled on failure');
-assert(/new AbortController\(\)[\s\S]*?setTimeout\(function \(\) \{ saveAbort\.abort\(\); \}, 30000\)[\s\S]*?signal: saveAbort/.test(ZONES), 'save has an AbortController timeout');
+assert(/new AbortController\(\)[\s\S]*?setTimeout\(function \(\) \{ ac\.abort\(\); \}, 30000\)[\s\S]*?signal: armSaveTimer\(\)/.test(ZONES), 'save has an AbortController timeout');
 const g1 = ZONES.match(/var ZONE_GUARD_BLANK_RE = [^\n]*\n/), g2 = ZONES.match(/function blankGuardKeys\(params\) \{[\s\S]*?\r?\n\}\r?\n/);
 assert(!!g1 && !!g2, 'found blankGuardKeys');
 const bg = new Function(g1[0] + g2[0] + '; return blankGuardKeys;')();
 assert(bg(['z0_driftperiod=', 'z1_runawaymargin= ', 'z0_kp=', 'z0_k=', 'z0_debounce=5']).join(',') === 'z0_driftperiod,z1_runawaymargin',
   'blank guard thresholds detected, other blanks and set values not');
+
 assert(bg(['z0_xzone=', 'z1_xzone=5']).join(',') === 'z0_xzone', 'blank xzone (guard 8) refused client-side, set xzone kept');
 assert(!/ZONE_OPTIONAL_KEY_RE[^\n]*xzone/.test(ZONES), 'xzone is not in the optional-drop regex');
-assert(/blankGuardKeys\(params\);\s*if \(blankGuards\.length\) \{[\s\S]*?return;\s*\}\s*msg\.textContent = 'Saving/.test(ZONES), 'blank guard field refuses before the POST');
+
+assert(/blankGuardLabels\(params, guardFieldHidden\);\s*if \(blankGuards\.length\) \{[\s\S]*?return;\s*\}\s*msg\.textContent = 'Saving/.test(ZONES), 'blank guard field refuses before the POST');
 assert(!/omit-PRESERVES each one/.test(ZONES), 'wrong omit-PRESERVES comment gone');
 
 // ---- setup_wizard_page.html ----
