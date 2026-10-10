@@ -1032,24 +1032,35 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
     bool floors_known = (floors_state == REV_KNOWN);
     bool any_resolve_err = false;
     bool slot_res_err[PROFILES_MAX_COUNT] = {false};
+    /* Boot-path stack budget (check_main_task_stack_budget): the two profile_t
+     * scratch copies live on the heap, not in this frame. OOM = every slot
+     * unexamined: refused this boot, exactly like a per-slot resolve error. */
+    profile_t *scratch = persist_scratch_alloc(2 * sizeof(profile_t));
+    if (!scratch) {
+        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+            s_profile_rev[id] = floors[id];
+            s_profile_rev_unknown[id] = true;
+        }
+        return ESP_ERR_NO_MEM;
+    }
+    profile_t *resolved_p = &scratch[0];
+    profile_t *none_p = &scratch[1];
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-        profile_t resolved;
         uint32_t resolved_rev = 0;
         bool used_file = false;
-        profile_t none;
-        memset(&none, 0, sizeof(none));
+        memset(none_p, 0, sizeof(*none_p));
         /* Floor 0 on purpose: with nvs_valid=false resolve() deletes a file whose rev is
          * <= a nonzero nvs_rev as stale, and the dual-write-era rev array equals the
          * file rev for every slot not re-saved since. This degraded path must never
          * delete; the floor only seeds s_profile_rev below. */
         bool res_err = false;
-        bool have = profiles_cfg_fs_resolve_ex(id, &none, false, 0, &resolved, &resolved_rev, &used_file, &res_err);
+        bool have = profiles_cfg_fs_resolve_ex(id, none_p, false, 0, resolved_p, &resolved_rev, &used_file, &res_err);
         if (res_err) {
             any_resolve_err = true;
             slot_res_err[id] = true; /* review 7 L3: file unexamined -> slot unknown, saves/deletes refused */
         }
         if (have) {
-            out->profiles[id] = resolved;
+            out->profiles[id] = *resolved_p;
             profiles_slot_bitmap_set(&out->used_bitmap, id);
             if (out_any_found) {
                 *out_any_found = true; /* a file-backed profile counts as "recorded": keeps the pre-split migration from re-running over it */
@@ -1062,6 +1073,7 @@ static esp_err_t nvs_load_files_only(const char *partition, profiles_state_t *ou
             s_profile_rev_unknown[id] = true;
         }
     }
+    free(scratch);
     if (floors_state == REV_JUNK && rev_repair_junk(partition, &out->used_bitmap)) {
         memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
     }
@@ -1198,14 +1210,24 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
      * from this function's pre-existing behavior. */
     bool any_resolve_err = false;
     bool slot_res_err[PROFILES_MAX_COUNT] = {false};
+    profile_t *resolved_p = NULL;
     if (strcmp(partition, PROFILES_NVS_PARTITION) == 0) {
-        for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
-            profile_t resolved;
+        /* Heap, not stack (check_main_task_stack_budget). OOM: every slot unexamined,
+         * refused this boot, NVS-decoded content left as loaded. */
+        resolved_p = persist_scratch_alloc(sizeof(profile_t));
+        if (!resolved_p) {
+            any_resolve_err = true;
+            for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+                slot_res_err[id] = true;
+                s_profile_rev[id] = nvs_rev[id];
+            }
+        }
+        for (uint8_t id = 0; resolved_p && id < PROFILES_MAX_COUNT; id++) {
             uint32_t resolved_rev = 0;
             bool used_file = false;
             bool res_err = false;
             bool trustworthy = profiles_cfg_fs_resolve_ex(id, &out->profiles[id], nvs_slot_valid[id],
-                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], &resolved, &resolved_rev,
+                                                           slot_blob_bad[id] ? 0 : nvs_rev[id], resolved_p, &resolved_rev,
                                                            &used_file, &res_err);
             if (res_err) {
                 any_resolve_err = true;
@@ -1229,7 +1251,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
                 }
             }
             if (trustworthy) {
-                out->profiles[id] = resolved;
+                out->profiles[id] = *resolved_p;
                 profiles_slot_bitmap_set(&out->used_bitmap, id);
                 if (out_any_found) {
                     *out_any_found = true; /* see nvs_load_files_only() */
@@ -1249,6 +1271,7 @@ static esp_err_t nvs_load_all_from(const char *partition, profiles_state_t *out,
             }
             slot_rev_unknown[id] = !rev_floors_known;
         }
+        free(resolved_p);
     } else {
         memset(s_profile_rev, 0, sizeof(s_profile_rev));
     }
