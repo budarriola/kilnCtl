@@ -265,7 +265,8 @@ function readJsonResult(r) {
 // Unsaved-edit guard: set when a segment input changes, cleared once the
 // working copy is (re)loaded, saved, or decided.
 var dirty = false;
-document.getElementById('segments').addEventListener('input', function () { dirty = true; });
+var editSeq = 0; // bumped by every real edit; a save only clears edits made before it was sent
+document.getElementById('segments').addEventListener('input', function () { dirty = true; editSeq++; });
 window.addEventListener('beforeunload', function (e) {
   if (!dirty) return undefined;
   e.preventDefault();
@@ -355,16 +356,25 @@ function refreshLive() {
       forkCard.style.display = 'none';
       editorCard.style.display = 'none';
       lastWorkingId = null;
+      dirty = false; // editor gone: nothing left that could be saved
       return;
     }
     if (live.active && !hasWorking) {
       forkCard.style.display = '';
       editorCard.style.display = 'none';
       lastWorkingId = null;
+      dirty = false; // working copy disappeared: nothing left that could be saved
       return;
     }
     forkCard.style.display = 'none';
     if (hasWorking && live.working_id !== lastWorkingId) {
+      if (dirty) {
+        // Never silently overwrite unsaved edits with a changed working copy:
+        // keep them, keep the guard armed, and say so. Reload discards them.
+        document.getElementById('saveMsg').innerHTML = '<span class="err">The working copy changed on the board, but ' +
+          'this form has unsaved edits and was NOT reloaded. Press Reload to discard your edits and load it.</span>';
+        return;
+      }
       lastWorkingId = live.working_id;
       return loadWorkingCopy(live.working_id, live.editable_from_segment);
     }
@@ -400,6 +410,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   var params = ['id=' + btn.dataset.id, 'name=' + encodeURIComponent(btn.dataset.name || ''),
     'zone_mask=' + (btn.dataset.zoneMask || '0')];
   params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));
+  var savedSeq = editSeq;
   msg.textContent = 'Saving...';
   fetch('/api/profile/live', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
@@ -414,7 +425,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
         return;
       }
       msg.textContent = 'Saved.';
-      dirty = false;
+      if (editSeq === savedSeq) dirty = false; // edits typed while the save was in flight stay dirty
       lastWorkingId = null;
       refreshLive();
     }).catch(function (authErr) {
@@ -424,6 +435,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
 });
 
 document.getElementById('reloadBtn').addEventListener('click', function () {
+  dirty = false; // explicit reload = discard edits
   lastWorkingId = null;
   refreshLive();
 });

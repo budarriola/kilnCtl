@@ -1739,6 +1739,23 @@ function gGoto(target) {
   gRenderTarget(target);
 }
 
+/* Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real input/change event
+ * inside a step body; cleared when a step is (re)rendered from board data
+ * (gRenderStepDetail) and when a step's progress save succeeds (postStepState). */
+var kcDirty = false;
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].forEach(function (id) {
+  var body = document.getElementById('stepBody' + id);
+  if (!body) return;
+  body.addEventListener('input', function () { kcDirty = true; });
+  body.addEventListener('change', function () { kcDirty = true; });
+});
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 // Marks a step's stored state via the already-landed POST /api/setup/progress
 // (implementation step 2) -- never a second store, per plan section 5.
 // Reloads readiness+progress afterward so the overview/stepper immediately
@@ -1749,6 +1766,7 @@ function postStepState(stepId, state, note) {
   return fetch('/api/setup/progress', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
+    if (r.ok) kcDirty = false;
     return { ok: r.ok, body: j };
   }); });
 }
@@ -3027,6 +3045,7 @@ function consumeArmedStepMessage(stepId) {
 function gRenderStepDetail(stepId) {
   var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
   if (!s) return;
+  kcDirty = false;
   document.getElementById('stepHeading').textContent = (stepId + 1) + '. ' + s.title;
   var safetyNote = document.getElementById('stepSafetyNote');
   if (s.safety) {

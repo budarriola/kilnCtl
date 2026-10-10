@@ -288,6 +288,7 @@ function loadCurrent() {
     current = d;
     document.getElementById('pcLink').value = d.pc_link_abort_silence_ms || 0;
     render();
+    kcDirty = false;
     msg.textContent = '';
   }).catch(function (e) {
     /* Never swallow this: an empty catch here is what turns a failed fetch
@@ -300,6 +301,21 @@ function loadCurrent() {
     msg.textContent = 'Could not load the current settings: ' + e.message;
   });
 }
+
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real user edit,
+// cleared once a save succeeds or the form is re-rendered from the board.
+var kcDirty = false;
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+['profiles', 'zones', 'pcLink'].forEach(function (id) {
+  var el = document.getElementById(id);
+  el.addEventListener('input', function () { kcDirty = true; });
+  el.addEventListener('change', function () { kcDirty = true; });
+});
 
 document.getElementById('save').addEventListener('click', function () {
   if (!current) { msg.textContent = 'Nothing loaded yet.'; return; }
@@ -364,6 +380,7 @@ document.getElementById('save').addEventListener('click', function () {
     body: params.join('&'),
   }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    kcDirty = false;
     msg.textContent = 'Saved.';
     loadCurrent();
   }).catch(function (e) {

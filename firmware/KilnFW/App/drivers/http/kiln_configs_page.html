@@ -426,13 +426,31 @@ function refreshDivergence() {
   });
 }
 
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): the only free-text fields are the
+// three name boxes. Armed by a real input event while any holds text, cleared when
+// the save/clone/rename that consumed the text succeeds (the box is emptied).
+var kcDirty = false;
+var KC_NAME_INPUTS = ['kcSaveNewName', 'kcCloneName', 'kcRenameName'];
+function kcRecomputeDirty() {
+  kcDirty = KC_NAME_INPUTS.some(function (id) { return document.getElementById(id).value.trim() !== ''; });
+}
+KC_NAME_INPUTS.forEach(function (id) {
+  document.getElementById(id).addEventListener('input', kcRecomputeDirty);
+});
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 document.getElementById('kcSaveNewBtn').addEventListener('click', function () {
   var input = document.getElementById('kcSaveNewName');
   var name = input.value.trim();
   if (!name) { kcSetMsg('Enter a name first.', true); return; }
   kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(name)).then(function (result) {
     kcHandleResult(result, 'Saved current setup as "' + name + '".').then(function (ok) {
-      if (ok) input.value = '';
+      if (ok) { input.value = ''; kcRecomputeDirty(); }
     });
   });
 });
@@ -457,7 +475,7 @@ document.getElementById('kcCloneBtn').addEventListener('click', function () {
   kcPost('/api/kiln_configs/clone', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
     .then(function (result) {
       kcHandleResult(result, 'Cloned "' + cfg.name + '" as "' + name + '".').then(function (ok) {
-        if (ok) input.value = '';
+        if (ok) { input.value = ''; kcRecomputeDirty(); }
       });
     });
 });
@@ -471,7 +489,7 @@ document.getElementById('kcRenameBtn').addEventListener('click', function () {
   kcPost('/api/kiln_configs/rename', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
     .then(function (result) {
       kcHandleResult(result, 'Renamed to "' + name + '".').then(function (ok) {
-        if (ok) input.value = '';
+        if (ok) { input.value = ''; kcRecomputeDirty(); }
       });
     });
 });

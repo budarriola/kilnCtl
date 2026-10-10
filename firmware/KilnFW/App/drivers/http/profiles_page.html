@@ -1353,6 +1353,29 @@ function onOffRulesSummaryHtml(rules) {
   return '<p class="hint"><strong>On/off devices:</strong><br>' + lines.join('<br>') + '</p>';
 }
 
+/* Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real user event in the
+ * editor (typing, zone tick, segment/rule edit, add/remove row); programmatic loads
+ * (resetEditor, editProfile, loadIntoEditor) and a successful save clear it. */
+var kcDirty = false;
+function kcMarkDirty() { kcDirty = true; }
+['pname', 'pzone', 'segments', 'oorules'].forEach(function (id) {
+  var el = document.getElementById(id);
+  el.addEventListener('input', kcMarkDirty);
+  el.addEventListener('change', kcMarkDirty);
+  el.addEventListener('click', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('remove')) kcDirty = true;
+  });
+});
+['addSegBtn', 'addOoBtn'].forEach(function (id) {
+  document.getElementById(id).addEventListener('click', kcMarkDirty);
+});
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 function resetEditor() {
   editingId = null;
   document.getElementById('editorTitle').textContent = 'New profile';
@@ -1363,6 +1386,7 @@ function resetEditor() {
   document.getElementById('addSegBtn').click();
   document.getElementById('oorules').innerHTML = '';
   document.getElementById('msg').innerHTML = '';
+  kcDirty = false;
 }
 
 /* ---- Combined list state (owner request 2026-09-18, items 2/3/4/5/6/7) --
@@ -2010,6 +2034,7 @@ function copyBuiltin(p) {
 
 function loadIntoEditor(p) {
   editingId = p.id; /* a builtin id: the board turns the save into a copy */
+  kcDirty = false;
   document.getElementById('editorTitle').textContent = 'Copy of: ' + (p.title || p.name);
   document.getElementById('pname').value = p.name;
   var container = document.getElementById('segments');
@@ -2062,6 +2087,7 @@ function editProfile(id) {
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
     renderSegPreview();
     loadOoRulesIntoEditor(p.on_off_rules || []);
+    kcDirty = false;
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(function (authErr) {
@@ -2276,6 +2302,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       }
       msg.innerHTML = html;
       editingId = result.data.id;
+      kcDirty = false;
       refreshAll();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;

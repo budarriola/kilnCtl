@@ -2612,6 +2612,14 @@ function showDirtyReloadNotice(msgEl, what) {
   b.addEventListener('click', function () { loadCurrent(); });
   msgEl.appendChild(b);
 }
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): reuses zonesFormDirty, which only
+// real input/change events set and a render from board data or a save clears.
+window.addEventListener('beforeunload', function (e) {
+  if (!zonesFormDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
 function loadCurrent() {
   /* The fetch/parse step and the render step are kept in SEPARATE catch
      scopes on purpose. They used to share one .catch(), which meant any
@@ -3028,6 +3036,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       ? ' Also updated zone' + (dependents.length > 1 ? 's' : '') + ' ' + dependents.join(', ') +
         ' from ' + (dependents.length > 1 ? 'their' : 'its') + ' settings source.'
       : '');
+    zonesFormDirty = false;
     loadCurrent();
   }).catch(function (e) {
     if (saveTimer) clearTimeout(saveTimer);

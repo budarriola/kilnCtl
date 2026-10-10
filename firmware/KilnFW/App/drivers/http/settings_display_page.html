@@ -146,6 +146,19 @@ browser only.</p>
   var status = document.getElementById('kcDpStatus');
   var brightnessNote = document.getElementById('kcDpBrightnessNote');
 
+  // Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7).
+  var kcDirty = false;
+  window.addEventListener('beforeunload', function (e) {
+    if (!kcDirty) return undefined;
+    e.preventDefault();
+    e.returnValue = '';
+    return '';
+  });
+  [brightness, timeout, keepOnFiring, onError].forEach(function (el) {
+    el.addEventListener('input', function () { kcDirty = true; });
+    el.addEventListener('change', function () { kcDirty = true; });
+  });
+
   brightness.addEventListener('input', function () {
     brightnessVal.textContent = brightness.value + '%';
   });
@@ -159,6 +172,7 @@ browser only.</p>
         timeout.value = String(d.timeout_setting);
         keepOnFiring.checked = !!d.keep_on_while_firing;
         onError.checked = !!d.display_on_error;
+        kcDirty = false;
         // brightness_inert reflects CONFIG_KILNCTL_BACKLIGHT_PWM_ENABLE
         // (settings_http.c) -- since be02d34 that's on and the ON duty
         // follows this setting, so only show the "no hardware line" hint
@@ -194,7 +208,7 @@ browser only.</p>
         if (!r.ok) throw new Error('save failed');
         return r.json();
       })
-      .then(function () { status.textContent = 'Saved.'; })
+      .then(function () { kcDirty = false; status.textContent = 'Saved.'; })
       .catch(function (authErr) {
         // Quiet note, never a stale "Saving...".
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
