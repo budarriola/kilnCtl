@@ -220,7 +220,10 @@ void esp_restart(void) {}
 // existing convention of defining its own minimal stand-ins for symbols it
 // never actually exercises rather than linking a real backend/fake.
 // ---------------------------------------------------------------------------
-void hal_wdt_reboot(void) {}
+// 2026-10-09: counts calls, so the factory-reset "reboot task could not be created" path can prove it
+// reboots inline (factory_reset_reboot_fallback()) instead of leaving erased storage under live RAM.
+static int g_hal_wdt_reboot_calls = 0;
+void hal_wdt_reboot(void) { g_hal_wdt_reboot_calls++; }
 
 // ---------------------------------------------------------------------------
 // profiles_builtin.h -- factory_reset.c's execute_scope() calls this for
@@ -431,15 +434,26 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
 // like the real one. g_stub_run_starts_at_reset_mark models a firing that started after the entry
 // mode-gate check but before the mark: it flips the run state as the mark is set, so only the late
 // re-check after the mark can see it.
+// g_stub_sweep_starts_at_reset_mark does the same for a zone current sweep (the sweep heat claim).
 static int g_reset_in_flight_depth = 0;
 static bool g_stub_run_starts_at_reset_mark = false;
+static bool g_stub_sweep_starts_at_reset_mark = false;
+static bool g_stub_heat_sweep_active = false;
 void relay_authority_reset_in_flight_begin(void)
 {
     g_reset_in_flight_depth++;
     if (g_stub_run_starts_at_reset_mark) {
         g_stub_profile_state = PROFILE_EXEC_RUNNING;
     }
+    if (g_stub_sweep_starts_at_reset_mark) {
+        g_stub_heat_sweep_active = true;
+    }
 }
+bool relay_authority_heat_sweep_active(void) { return g_stub_heat_sweep_active; }
+
+// backup_restore_state.h -- factory_reset.c refuses while a backup restore is in flight.
+static bool g_stub_restore_in_flight = false;
+bool backup_import_restore_in_flight(void) { return g_stub_restore_in_flight; }
 void relay_authority_reset_in_flight_end(void)
 {
     if (g_reset_in_flight_depth > 0) {
@@ -1404,7 +1418,9 @@ static void test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase
 {
     TEST_SECTION("factory_reset_execute() -- reset mark cleared on dispatch failure, kept after the erase");
     fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
     TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
     g_stub_profile_state = PROFILE_EXEC_IDLE;
     g_reset_in_flight_depth = 0;
     g_flash_worker_dispatches = 0;
@@ -1415,11 +1431,158 @@ static void test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase
     TEST_CHECK(err == ESP_FAIL, "a dispatch failure is reported");
     TEST_CHECK(g_reset_in_flight_depth == 0, "the mark is cleared when nothing was erased");
 
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdPASS;
     err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_stub_task_create_result = saved_task_result;
+    TEST_CHECK(err == ESP_OK, "the erase and the reboot-task creation both succeed");
     TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
     TEST_CHECK(g_reset_in_flight_depth == 1,
               "the mark stays set after the erase, so no run can start before the reboot");
-    (void)err;
+    g_reset_in_flight_depth = 0;
+}
+
+// MED-1 (review of ffcea431), reset side, UART entry: factory_reset_execute() has no interlock call, so
+// it must refuse a running zone current sweep itself, and a backup restore in flight (MED-2).
+static void test_factory_reset_execute_refused_by_sweep_or_restore(void)
+{
+    TEST_SECTION("factory_reset_execute() -- refused while a zone current sweep runs or a backup restore "
+                 "is in flight, nothing erased, reset mark clear");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+
+    g_stub_heat_sweep_active = true;
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_heat_sweep_active = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a running sweep refuses the UART reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a sweep");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+
+    g_stub_restore_in_flight = true;
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_restore_in_flight = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a backup restore in flight refuses the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a restore");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+}
+
+// MED-1, reset side, late check: a sweep that starts after the entry check (its claim published before
+// the reset mark is visible to it) is seen by the late re-check taken after the mark is set.
+static void test_factory_reset_execute_refused_when_sweep_starts_during_dispatch(void)
+{
+    TEST_SECTION("factory_reset_execute() -- a sweep started after the entry check is refused at dispatch");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_stub_sweep_starts_at_reset_mark = true;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_sweep_starts_at_reset_mark = false;
+    g_stub_heat_sweep_active = false;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED,
+              "a sweep that started during the dispatch must refuse the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+}
+
+// Same sweep race through POST /api/factory_reset (the entry interlock saw no sweep): 409, not 500.
+static void test_factory_reset_http_refused_when_sweep_starts_during_dispatch(void)
+{
+    TEST_SECTION("reset_post_handler -- a sweep started after the entry check answers 409 at dispatch");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    g_stub_sweep_starts_at_reset_mark = true;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_sweep_starts_at_reset_mark = false;
+    g_stub_heat_sweep_active = false;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0, "the late sweep refusal is a 409");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+}
+
+// LOW-2: the erase ran but the reboot task could not be created. UART entry: a distinct error, the
+// mark stays set (storage is erased; no run may start before the reboot).
+static void test_factory_reset_execute_reboot_task_failure_is_distinct(void)
+{
+    TEST_SECTION("factory_reset_execute() -- reboot task failure after the erase returns "
+                 "FACTORY_RESET_ERR_REBOOT_FAILED and keeps the mark");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdFAIL;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_stub_task_create_result = saved_task_result;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_REBOOT_FAILED,
+              "a reboot task that cannot be created is FACTORY_RESET_ERR_REBOOT_FAILED, not ESP_ERR_NO_MEM");
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the mark stays set: storage is already erased");
+    g_reset_in_flight_depth = 0;
+}
+
+// LOW-2, HTTP: 500 with the exact operator text, then an inline reboot (hal_wdt_reboot()).
+static void test_factory_reset_http_reboot_task_failure_reboots_inline(void)
+{
+    TEST_SECTION("reset_post_handler -- reboot task failure after the erase answers 500 "
+                 "\"storage erased, reboot failed -- power-cycle now\" and reboots inline");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_hal_wdt_reboot_calls = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=profiles";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdFAIL;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_task_create_result = saved_task_result;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(strcmp(s_last_resp_status, "500 Internal Server Error") == 0, "the reply is a 500");
+    TEST_CHECK(strcmp(s_last_sendstr_body, "storage erased, reboot failed -- power-cycle now") == 0,
+              "the reply names what happened and what the operator must do");
+    TEST_CHECK(g_hal_wdt_reboot_calls == 1, "the handler reboots inline once the reply is sent");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the mark stays set until the reboot");
     g_reset_in_flight_depth = 0;
 }
 
@@ -1457,7 +1620,7 @@ static void test_credential_survives_factory_reset_kiln_scope(void)
               "a cfg mirror that cannot be deleted fails the kiln reset (a stale file would undo it)");
     g_kiln_scope_cfg_delete_result = ESP_OK;
     g_stub_task_create_result = pdFAIL;
-    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_ERR_NO_MEM,
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == FACTORY_RESET_ERR_REBOOT_FAILED,
               "a reboot task that cannot be created fails the reset");
     g_stub_task_create_result = pdPASS;
     assert_webauth12b_credential_survived(
@@ -2681,6 +2844,11 @@ void run_test_ota_http(void)
     test_factory_reset_execute_refused_when_run_starts_during_dispatch();
     test_factory_reset_http_refused_when_run_starts_during_dispatch();
     test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase();
+    test_factory_reset_execute_refused_by_sweep_or_restore();
+    test_factory_reset_execute_refused_when_sweep_starts_during_dispatch();
+    test_factory_reset_http_refused_when_sweep_starts_during_dispatch();
+    test_factory_reset_execute_reboot_task_failure_is_distinct();
+    test_factory_reset_http_reboot_task_failure_reboots_inline();
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();

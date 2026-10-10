@@ -10,6 +10,7 @@
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
 
 static const char *TAG = "iter_tune_store";
@@ -277,7 +278,12 @@ esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zon
     // in-RAM blob keeps the new entry (live now, same contract as before);
     // the rev only advances once the write verified, so a retry reuses it.
     uint32_t new_rev = s_rev + 1;
-    esp_err_t err = pref_cfg_fs_commit(ITER_TUNE_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "iter_tune store");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(ITER_TUNE_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "iter_tune store");
+    }
     if (err == ESP_OK) {
         s_rev = new_rev;
     }

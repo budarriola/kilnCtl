@@ -102,7 +102,7 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 | L34 | fix in progress (E1 #8) | `http/http_auth_http.c:526` | `s_route_count++` happens before registration succeeds, so a failed registration consumes a slot (startup only). `ctx->uri` is truncated at 79 characters. | n/a (startup) | No |
 | L35 | fixed-by 595bd701 | `http/http_origin_check.h` ~136 | An empty `Origin:` header is treated as absent, and then a missing Referer is allowed. Theoretical. | State-changing POST with `Origin:` (empty) and no Referer | `test_http_auth_enforce.c` does not cover the empty value |
 | L36 | fix in progress (E1 #10) | `http/zones_http_post.c` ~253, `zones_http_post_parse.c` ~1013 | The combined stack in `POST /api/zones` is about 2.5-3 KB: a temporary `zones_cfg_t` (about 1.1 KB), a relay_names temporary, and a probe `zone_cfg_t[3]` (about 1 KB). That exceeds the 2 KB combined-depth threshold. | Any `POST /api/zones` | n/a |
-| L37 | TOCTOU fixed-by ffcea431 (reset-in-flight mark + late mode-gate re-check; OTA interlock not re-checked late); no confirm field, unchanged | `http/factory_reset.c` ~545-590 | There is no confirm field: `scope=all` from any admin session wipes and reboots. The gate and interlock run before the erase, but `execute_scope` does not re-check them (TOCTOU against a firing start). | `POST /api/factory_reset` with `scope=all` | No |
+| L37 | TOCTOU fixed-by ffcea431 (reset-in-flight mark + late mode-gate re-check), extended by the review follow-up (see the L37 note below); no confirm field, unchanged | `http/factory_reset.c` ~545-590 | There is no confirm field: `scope=all` from any admin session wipes and reboots. The gate and interlock run before the erase, but `execute_scope` does not re-check them (TOCTOU against a firing start). | `POST /api/factory_reset` with `scope=all` | No |
 | L38 | fix in progress (E2 #3) | `http/dashboard_autotune_http.c` ~293-340; `security_http.c` ~411-418; `setup_progress_http.c` ~196-198 | An over-long field (`-2`) is treated as absent. In autotune, `step_duty` falls back to 0.5, relay_d/h to 0, and `method` to step test despite the comment saying a typo is refused. In `set_policy`, a missing or over-long `web_enabled` reads as 0, which turns login off (the server's transition checks still apply). In setup progress, an over-long note can clear the existing note. | `method=relay_feedbackXXXXXXXX`; `web_enabled=` | No |
 | L39 | fix in progress (E2 #4) | `http/adaptive_tune_http.c:160,231`; `iter_tune_http.c:123`; `settings_http.c:206,212` | `atoi`/`strtol` with no end check. `zone=abc` enables or reverts zone 0. `restore_commissioned?zone=abc` writes PID to zone 0. `brightness=abc` sets brightness 0 (dark), and `timeout=abc` sets timeout 0. | `POST /api/display_power` with `brightness=abc` | Gate test only |
 | L40 | fix in progress (E2 #5) | `http/profiles_export_http.c` ~356-394 | The import on_off_rules loop uses `if (opt_num(...) && has_v)`, which silently coerces an out-of-range value to 0 instead of refusing it, contrary to the code comment. | Import a rule with `"temp_cmp":999` | No |
@@ -124,6 +124,26 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 - **L35:** treat a present-but-empty Origin as a refusal.
 - **L43:** return `ESP_OK` after `send_err`.
 - **L44:** record backoff on every refusal.
+
+### L37 follow-up (review of ffcea431)
+
+Done in the follow-up commit:
+
+- **Zone current sweep.** The late check after the reset mark also refuses a running sweep (`relay_authority_heat_sweep_active()`), and so does the UART entry `factory_reset_execute()`, which has no interlock call. `zones_current_sweep_start()` re-reads the mark after it publishes its sweep claim, and refuses with `ZONE_SWEEP_REFUSE_FACTORY_RESET`, releasing the claim. Both sides use relay_authority's leaf spinlock, so at least one of them refuses.
+- **Backup restore.** The reset refuses while `backup_import_restore_in_flight()` is set, at entry and in the late check.
+- **Writers that refuse while the mark is set:** `zones_config_set_coupling_cell()` (before RAM is touched), `aux_outputs_cfg_set()` (under its save lock), `ramp_assist_cfg`, `display_power_cfg`, `update_settings`, `setup_wizard_progress` and `iter_tune_store`. The check is per setter, not in `pref_cfg_fs_commit()`, because the reset job itself restores builtin profiles through that path.
+- **Reboot task failure.** It now returns `FACTORY_RESET_ERR_REBOOT_FAILED`. HTTP answers 500 "storage erased, reboot failed -- power-cycle now"; HTTP and UART both reboot inline via `factory_reset_reboot_fallback()`. The mark stays set.
+- **`/api/status`** has a new `factory_reset_in_flight` field.
+
+Residual window: a writer that passes its check just before the mark is set can still save after the erase. The erase does not take any writer's save lock, so these checks narrow the window but do not close it. Closing it needs a mark check under each save lock. These are the insertion points, in files reserved for another change (the save-lock deadlock fix):
+
+- `cfg_save_lock.h`: a mark check in `cfg_save_lock_take()` would cover every cfg-save-lock writer at once. It must not block the reset's own `profiles_builtin_restore_all()` path.
+- `zones_config_store.c`: `nvs_save()`, the relay-names save (~1324) and the zone-normals save (~1506).
+- `profiles_http.c`: inside the profile save lock.
+- `unit_pref.c`: `unit_pref_set()` (~167).
+- `backup_import.c`: the savers (the entry refusal above already covers a restore that starts first).
+
+Other writers not yet guarded: `profiles_favorites.c`, `ct_verify_store.c`, the `adaptive_tune.c` ki_base save, `relay_cycles.c`, `time_sync.c` and `live_profile.c`.
 
 ## Handlers checked and found clean
 

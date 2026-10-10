@@ -45,6 +45,15 @@ typedef enum {
  * guessing. */
 #define FACTORY_RESET_ERR_MODE_GATE_REFUSED ((esp_err_t)-1000)
 
+/* The erase ran (fully or partly) but the reboot task could not be created, so no reboot is scheduled.
+ * Distinct from ESP_ERR_NO_MEM, which an erase can also return. The caller must report "storage erased,
+ * reboot failed -- power-cycle now" and then call factory_reset_reboot_fallback(). */
+#define FACTORY_RESET_ERR_REBOOT_FAILED ((esp_err_t)-1001)
+
+/* Inline reboot for the FACTORY_RESET_ERR_REBOOT_FAILED path: waits ~500 ms on the caller's task (so a
+ * reply already queued can leave) and then calls hal_wdt_reboot(). Never returns on the real backend. */
+void factory_reset_reboot_fallback(void);
+
 /* Erases the NVS partition(s) for `scope` and schedules a reboot ~500ms out
  * (same reboot_task() this file's HTTP handler uses, so a reply already
  * queued by the caller -- HTTP response or this UART command's ACK -- has a
@@ -54,7 +63,8 @@ typedef enum {
  * out-of-range scope (no erase attempted, no reboot scheduled).
  * FACTORY_RESET_ERR_MODE_GATE_REFUSED if system_mode_gate refused (a firing
  * or autotune run is active, at entry or at the late re-check taken after the
- * reset-in-flight mark is set, relay_authority.h) -- no erase attempted, no
+ * reset-in-flight mark is set, relay_authority.h), or a zone current sweep or a
+ * backup restore is in flight -- no erase attempted, no
  * reboot scheduled, and this is the ONLY function in this file that can return it, so a
  * caller need not guess whether an ESP_ERR_INVALID_STATE meant "refused" or
  * "erase partially failed". */

@@ -722,9 +722,19 @@ bool autotune_engine_is_active(void)
 static relay_heat_sweep_claim_result_t s_test_heat_sweep_claim_result = RELAY_HEAT_SWEEP_CLAIM_OK;
 static int s_test_heat_sweep_claim_begin_calls = 0;
 static int s_test_heat_sweep_claim_end_calls = 0;
+// relay_authority.h's factory reset in flight mark (HTTP audit L37 follow-up): read by
+// zones_current_sweep_start() after it publishes its claim, and by zones_config_set_coupling_cell().
+// s_test_reset_mark_set_at_sweep_claim models a reset that sets its mark between the sweep's early
+// checks and its post-claim re-read.
+static bool s_test_reset_in_flight = false;
+static bool s_test_reset_mark_set_at_sweep_claim = false;
+bool relay_authority_reset_in_flight(void) { return s_test_reset_in_flight; }
 relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void)
 {
     s_test_heat_sweep_claim_begin_calls++;
+    if (s_test_reset_mark_set_at_sweep_claim) {
+        s_test_reset_in_flight = true;
+    }
     return s_test_heat_sweep_claim_result;
 }
 void relay_authority_heat_sweep_claim_end(void)
@@ -11180,6 +11190,9 @@ static void test_zone_sweep_check_refusal_each_reason_fires(void)
     TEST_CHECK(strcmp(zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT),
                        "a backup restore is in progress; wait for it to finish before starting") == 0,
               "ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT has its own reason string");
+    TEST_CHECK(strcmp(zone_sweep_refusal_str(ZONE_SWEEP_REFUSE_FACTORY_RESET),
+                       "a factory reset is in progress -- the controller reboots when it finishes") == 0,
+              "ZONE_SWEEP_REFUSE_FACTORY_RESET has its own reason string");
 }
 
 static void test_zone_sweep_ceiling_hit(void)
@@ -14286,6 +14299,78 @@ static void test_zones_current_sweep_start_restore_in_flight_refused_during_refe
     s_test_backup_restore_in_flight = false;
 }
 
+// HTTP audit L37 follow-up (MED-1), sweep side: a factory reset that sets its in-flight mark after the
+// sweep's early checks but before its post-claim re-read is caught there. The sweep refuses with its
+// own reason, hands the claim back, and never marks itself active.
+static void test_zones_current_sweep_start_refused_when_factory_reset_in_flight(void)
+{
+    static kiln_io_t dummy_io;
+    static SafetyLinkClass dummy_safety;
+    static MAX31856BusClass dummy_thermo;
+    memset(&dummy_io, 0, sizeof(dummy_io));
+    memset(&dummy_safety, 0, sizeof(dummy_safety));
+    memset(&dummy_thermo, 0, sizeof(dummy_thermo));
+    dummy_thermo.initialized = true;
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    s_test_reset_in_flight = false;
+    s_test_reset_mark_set_at_sweep_claim = true;
+
+    zone_sweep_refusal_t r = zones_current_sweep_start();
+    s_test_reset_mark_set_at_sweep_claim = false;
+    s_test_reset_in_flight = false;
+
+    TEST_CHECK(r == ZONE_SWEEP_REFUSE_FACTORY_RESET,
+              "a reset mark set after the claim refuses the sweep at the post-claim re-read");
+    TEST_CHECK(!s_sweep.active, "a sweep refused for a factory reset is never left active");
+    TEST_CHECK(s_sweep.task == NULL, "a refused start never spawns the sweep task");
+    TEST_CHECK(s_test_heat_sweep_claim_begin_calls == 1, "the claim was taken before the re-read");
+    TEST_CHECK(s_test_heat_sweep_claim_end_calls == 1, "...and handed back on the refusal");
+
+    // GREEN: identical setup with no reset -- the refusal above was the reset check.
+    reset_sweep_state_for_test();
+    zones_http_set_hw(&dummy_io, &dummy_thermo, &dummy_safety);
+    s_zones_config_valid = true;
+    s_zones.cfg.thermo_count = 1;
+    TEST_CHECK(zones_current_sweep_start() == ZONE_SWEEP_REFUSE_OK, "with no reset the identical setup starts");
+
+    reset_sweep_state_for_test();
+    zones_http_set_hw(NULL, NULL, NULL);
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones_config_valid = false;
+}
+
+// HTTP audit L37 follow-up (MED-2): zones_config_set_coupling_cell() refuses while a factory reset is in
+// flight and leaves the RAM cell untouched, so no later save writes it back over erased storage.
+static void test_zones_config_set_coupling_cell_refused_during_factory_reset(void)
+{
+    TEST_SECTION("zones_config_set_coupling_cell() -- refused during a factory reset, RAM untouched");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 2;
+    s_zones.cfg.zones[0].coupling_coeff[1] = 0.25f;
+    s_zones.cfg.zones[0].coupling_tau_s[1] = 100.0f;
+    s_zones.cfg.zones[0].coupling_dead_time_s[1] = 10.0f;
+
+    s_test_reset_in_flight = true;
+    bool ok = zones_config_set_coupling_cell(0, 1, 0.5f, 200.0f, 20.0f);
+    s_test_reset_in_flight = false;
+    TEST_CHECK(!ok, "the setter refuses while the reset mark is set");
+    TEST_CHECK(s_zones.cfg.zones[0].coupling_coeff[1] == 0.25f &&
+                   s_zones.cfg.zones[0].coupling_tau_s[1] == 100.0f &&
+                   s_zones.cfg.zones[0].coupling_dead_time_s[1] == 10.0f,
+              "the RAM cell is unchanged by the refused call");
+
+    // GREEN: with the mark clear the same call writes the RAM cell (the save result does not matter here).
+    (void)zones_config_set_coupling_cell(0, 1, 0.5f, 200.0f, 20.0f);
+    TEST_CHECK(s_zones.cfg.zones[0].coupling_coeff[1] == 0.5f,
+              "with no reset in flight the same call updates the RAM cell");
+
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+}
+
 // ---------------------------------------------------------------------------
 // 2026-09-10 opus review, "the Pico-ceiling invariant is enforced at one
 // door only": zones_post_handler's guard_raise()/apply_lower() calls
@@ -16722,6 +16807,8 @@ void run_test_zones_http(void)
     test_zones_current_sweep_start_restore_in_flight_refused();
     test_zones_current_sweep_start_restore_in_flight_refused_early();
     test_zones_current_sweep_start_restore_in_flight_refused_during_refetch();
+    test_zones_current_sweep_start_refused_when_factory_reset_in_flight();
+    test_zones_config_set_coupling_cell_refused_during_factory_reset();
 
     test_reconcile_on_link_up_null_link_is_a_noop();
     test_reconcile_on_link_up_invalid_config_is_a_noop();

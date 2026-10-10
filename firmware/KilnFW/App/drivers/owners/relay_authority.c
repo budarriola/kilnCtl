@@ -199,6 +199,15 @@ void relay_authority_heat_sweep_claim_end(void)
     portEXIT_CRITICAL(&s_heat_claim_mux);
 }
 
+bool relay_authority_heat_sweep_active(void)
+{
+    bool active;
+    portENTER_CRITICAL(&s_heat_claim_mux);
+    active = s_heat_sweep_active;
+    portEXIT_CRITICAL(&s_heat_claim_mux);
+    return active;
+}
+
 /* Leaf getter for kiln_io_owner.c's system_mode_gate_blocks_relay() --
  * docs/SYSTEM_MODE_GATE.md review, 2026-09-25. Deliberately reads only
  * these two bools under the existing s_heat_claim_mux spinlock, mirroring

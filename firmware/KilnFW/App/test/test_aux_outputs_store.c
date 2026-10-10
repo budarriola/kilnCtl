@@ -172,6 +172,30 @@ static void test_set_round_trip(void)
     TEST_CHECK(aux_outputs_cfg_get(1, &o) && !o.enabled, "other relays stay disabled");
 }
 
+/* HTTP audit L37 follow-up (MED-2): aux_outputs_cfg_set() refuses while a factory reset is in flight
+ * (relay_authority_reset_in_flight(), stubbed by test_backup_import.c in this executable), so nothing
+ * is written back over storage the reset is erasing. RAM and NVS stay as they were. */
+extern bool g_test_reset_in_flight;
+static void test_set_refused_during_factory_reset(void)
+{
+    TEST_SECTION("aux_outputs_cfg_set: refused while a factory reset is in flight, nothing persisted");
+    fresh_board();
+    aux_outputs_cfg_start(0x03);
+    aux_output_entry_t e = on_entry();
+
+    g_test_reset_in_flight = true;
+    esp_err_t err = aux_outputs_cfg_set(4, &e, 0x03);
+    g_test_reset_in_flight = false;
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE, "set refuses with ESP_ERR_INVALID_STATE during a reset");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "RAM is unchanged by the refused set");
+
+    simulate_reboot();
+    TEST_CHECK(aux_outputs_cfg_start(0x03) == ESP_OK, "restart ok");
+    TEST_CHECK(aux_outputs_cfg_enabled_mask() == 0, "nothing was persisted by the refused set");
+
+    TEST_CHECK(aux_outputs_cfg_set(4, &e, 0x03) == ESP_OK, "with no reset the same set lands");
+}
+
 /* "Save mutex vs. flash worker" (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md):
  * s_set_lock is a cfg_save_lock_t, so the set reserves the flash worker
  * before the mutex and releases it after, with its cfg write inside. */
@@ -568,6 +592,7 @@ void run_test_aux_outputs_store(void)
     test_predicate();
     test_defaults_all_disabled();
     test_set_round_trip();
+    test_set_refused_during_factory_reset();
     test_set_refuses_invalid();
     test_set_refuses_zone_claimed_relay();
     test_boot_conflict_forces_aux_off_in_ram_only();

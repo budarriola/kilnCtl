@@ -9,6 +9,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "cfg_save_lock.h"
 
 static const char *TAG = "display_power_cfg";
@@ -216,7 +217,12 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     blob.display_on_error = display_on_error ? 1 : 0;
 
     // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
-    esp_err_t err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
+    }
     if (err == ESP_OK) {
         s_display_power_rev = new_rev;
     }
