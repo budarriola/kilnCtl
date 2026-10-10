@@ -1015,10 +1015,10 @@ de-energized board accepts it.
 
 **CT commissioning order (SaftyFW review LOW-1, documented, check unchanged pending owner).** The heat-possible
 probe counts `current_task_any_current_present()` as heat, and on a CT chain marked fitted but not yet calibrated
-the op-amp offset floor reads as current present, so the probe stays true. While that holds, `APPLY_CONFIG_VOLATILE`
+the op-amp offset floor can read as current present (hardware-dependent: the uncalibrated fallback margin is 25 counts), so the probe can stay true. While that holds, `APPLY_CONFIG_VOLATILE`
 refuses every non-tightening trip-relevant change (`k_ct_v_per_a`, an `abs_max_temp_c` raise), and `COMMIT_CONFIG`
-is refused while ARMED. Commission the CT parameters (`SET_CT_CAL` / `COMMIT_CONFIG`) while the Pico is disarmed,
-before arming; do not try to calibrate a fitted CT through the volatile path on an armed board. The check fails
+is refused while ARMED. `link_task_heat_possible_probe()` does not check ARMED, so the volatile path may be refused on a disarmed board too. Commission the CT parameters (`SET_CT_CAL` / `COMMIT_CONFIG`) while the Pico is disarmed,
+before arming; do not rely on the volatile path to calibrate a fitted CT. The check fails
 closed on purpose and is pinned by `scenario_heat_probe_current_floor` in `test_link_task_fuzz.c`; loosening it
 is a safety-semantics change that needs an owner decision.
 

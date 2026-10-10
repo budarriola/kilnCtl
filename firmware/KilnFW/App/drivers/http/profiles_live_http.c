@@ -677,7 +677,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         if (!persisted) {
             /* S5: the slot is live in RAM but not in storage; keep the working copy (do NOT clear it) so the
              * edit is not lost, and do not report success. */
-            profiles_http_drop_unpersisted(id); /* review L1: no phantom RAM-only profile; a same-name retry works */
+            /* review L1 / fwlow16 LOW-1: save_ex already rolled the fresh slot back under its lock */
             snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
             return LIVE_DECIDE_SERVER_ERROR;
         }

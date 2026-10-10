@@ -1942,6 +1942,13 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     s_profiles.profiles[target_id] = *candidate;
     profiles_slot_set(target_id);
     esp_err_t err = nvs_save_slot_locked(target_id);
+    if (err != ESP_OK && out_persisted && requested_id >= PROFILES_MAX_COUNT) {
+        /* fwlow16 LOW-1: a caller that takes the persisted flag as a failure (live save_as) must not leave a
+         * RAM-only phantom in a freshly allocated slot. Roll back here, still inside the save lock and the
+         * generation window, so no other save or delete can have touched the slot in a gap. */
+        profiles_slot_clear(target_id);
+        memset(&s_profiles.profiles[target_id], 0, sizeof(s_profiles.profiles[target_id]));
+    }
     profiles_slot_gen_end(target_id);
     profiles_save_unlock();
     if (err != ESP_OK) {
@@ -1960,20 +1967,6 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     return true;
 }
 
-void profiles_http_drop_unpersisted(uint8_t id)
-{
-    if (id >= PROFILES_MAX_COUNT) {
-        return;
-    }
-    profiles_save_lock();
-    profiles_slot_gen_begin(id);
-    if (profiles_slot_used(id)) {
-        profiles_slot_clear(id);
-        memset(&s_profiles.profiles[id], 0, sizeof(s_profiles.profiles[id]));
-    }
-    profiles_slot_gen_end(id);
-    profiles_save_unlock();
-}
 /* ---- Delete-in-flight mark (HTTP input parsing audit L23) -----------------
  *
  * The race: a delete checks "is the executor running this slot" and then

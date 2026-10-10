@@ -204,17 +204,19 @@ static int nested_child(void)
 static void test_harness_nested_run_guard(const char *self)
 {
     TEST_SECTION("task_harness -- nested th_run_captured_task() exits 2");
-    char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "\"\"%s\" --nested-child 2> nested_child_stderr.txt\"", self);
+    char cmd[1200];
+    char errpath[1024]; /* beside the test executable (build output dir), never the caller's cwd */
+    snprintf(errpath, sizeof(errpath), "%s.nested_child_stderr.txt", self);
+    snprintf(cmd, sizeof(cmd), "\"\"%s\" --nested-child 2> \"%s\"\"", self, errpath);
     int rc = system(cmd);
     TEST_CHECK(rc == 2, "nested run exits with code 2");
     char buf[256] = {0};
-    FILE *f = fopen("nested_child_stderr.txt", "rb");
+    FILE *f = fopen(errpath, "rb");
     if (f) {
         size_t n = fread(buf, 1, sizeof(buf) - 1, f);
         buf[n] = 0;
         fclose(f);
-        remove("nested_child_stderr.txt");
+        remove(errpath);
     }
     TEST_CHECK(strstr(buf, "nested th_run_captured_task") != NULL, "nested run says why it exited");
 }

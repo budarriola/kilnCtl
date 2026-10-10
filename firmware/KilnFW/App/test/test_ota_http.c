@@ -1624,6 +1624,40 @@ static void test_factory_reset_http_refused_when_run_starts_during_dispatch(void
     g_stub_profile_state = PROFILE_EXEC_IDLE;
 }
 
+// fwlow16 LOW-2: a second reset while one is in flight is refused by try_begin (nothing erased, first mark kept).
+static void test_factory_reset_refused_when_another_reset_in_flight(void)
+{
+    TEST_SECTION("factory reset -- try_begin refusal (another reset in flight): sentinel, 409, nothing erased");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 1;
+    g_stub_try_begin_enforce = true;
+    g_flash_worker_dispatches = 0;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "execute refuses with the mode-gate sentinel");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the first reset's mark is left alone");
+
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    err = reset_post_handler(&req);
+    s_fake_recv_body = NULL;
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0, "HTTP answers 409");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "HTTP path dispatches nothing");
+
+    g_stub_try_begin_enforce = false;
+    g_reset_in_flight_depth = 0;
+}
+
 // The mark is cleared when the erase job could not be dispatched (nothing erased), and kept once the
 // erase ran (the board reboots next).
 static void test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase(void)
@@ -3084,6 +3118,7 @@ void run_test_ota_http(void)
     test_factory_reset_execute_refused_when_run_starts_during_dispatch();
     test_factory_reset_execute_runs_writer_barrier_after_mark();
     test_factory_reset_http_refused_when_run_starts_during_dispatch();
+    test_factory_reset_refused_when_another_reset_in_flight();
     test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase();
     test_factory_reset_execute_refused_by_sweep_or_restore();
     test_factory_reset_execute_refused_when_sweep_starts_during_dispatch();

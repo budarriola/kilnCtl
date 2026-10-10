@@ -2224,6 +2224,44 @@ static esp_err_t gen_probe_write_fn(const char *rel_path, const void *data, size
     return cfg_fs_write_atomic(rel_path, data, len);
 }
 
+static esp_err_t failing_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)rel_path; (void)data; (void)len;
+    return ESP_FAIL;
+}
+
+static void test_save_ex_fresh_slot_rolled_back_in_lock(void)
+{
+    TEST_SECTION("fwlow16 LOW-1: failed persist of a fresh slot rolls back inside save_ex; overwrite stays applied");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    uint8_t warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "fresh save reports persisted=false");
+    TEST_CHECK(!profiles_slot_used(out_id), "fresh slot rolled back (no phantom RAM-only profile)");
+    uint8_t id1 = out_id;
+    persisted = false;
+    ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    TEST_CHECK(ok && persisted && out_id == id1, "same-name retry succeeds in the freed slot");
+
+    /* Overwrite of an existing slot keeps the applied-live convention. */
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    persisted = true;
+    ok = profiles_http_save_ex(id1, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && profiles_slot_used(id1), "overwrite stays applied when persist fails");
+}
+
 static void test_profiles_slot_gen_seqlock(void)
 {
     TEST_SECTION("slot generation: failed save and in-flight assign refuse a captured start");
@@ -5568,6 +5606,7 @@ void run_test_profiles_http(void)
     test_profiles_http_delete_refuses_running_slot();
     test_profiles_delete_start_race_l23();
     test_profiles_slot_gen_seqlock();
+    test_save_ex_fresh_slot_rolled_back_in_lock();
     test_profile_edit_post_slot_gen();
     test_retarget_slot_gen();
     test_delete_slot_gen();

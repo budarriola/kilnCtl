@@ -169,6 +169,9 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     }
     g_fake_slots[id] = *candidate;
     profiles_slot_set(id);
+    if (g_fake_profiles_http_save_unpersisted && requested_id >= PROFILES_MAX_COUNT) {
+        profiles_slot_clear(id); /* mirrors the real save_ex in-lock rollback */
+    }
     if (out_id) {
         *out_id = id;
     }
@@ -176,12 +179,6 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
         *out_warning_count = 0;
     }
     return true;
-}
-void profiles_http_drop_unpersisted(uint8_t id)
-{
-    if (id < PROFILES_MAX_COUNT && profiles_slot_used(id)) {
-        profiles_slot_clear(id);
-    }
 }
 bool profiles_http_delete(uint8_t id)
 {

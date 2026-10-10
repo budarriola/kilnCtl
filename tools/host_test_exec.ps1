@@ -2,7 +2,7 @@
 # Dot-source, then: $code = Invoke-HostTestProcess -Name n -ExePath p -TimeoutSec 300
 # Output is captured to files and echoed afterwards (same text, now after the run).
 # On timeout: kills the whole process tree, prints "FAIL <name>: timed out after N s"
-# plus the captured output tail, and returns -1 (nonzero) so callers count a failure.
+# plus the captured output tail, and returns 124 (nonzero) so callers count a failure.
 function Invoke-HostTestProcess {
     param(
         [Parameter(Mandatory)][string]$Name,

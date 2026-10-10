@@ -301,7 +301,8 @@ void relay_authority_heat_run_active(bool *profile, bool *autotune);
  * THEN read relay_authority_reset_in_flight() and refuse, releasing their claims, if it is set. Every
  * access is under the same leaf s_heat_claim_mux, so at least one of the two sides sees the other.
  *
- * A depth counter, not a bool, so two concurrent resets (HTTP and UART) cannot clear each other's mark.
+ * A depth counter; a second reset while one is in flight is refused by relay_authority_reset_try_begin()
+ * (fwlow16 L2), so the counter never exceeds 1 in production.
  * _end() is called only on a path where no erase ran; once the erase has run the board reboots, and the
  * mark deliberately stays set until then. Spinlock only, never blocks. */
 void relay_authority_reset_in_flight_begin(void);
@@ -320,7 +321,8 @@ bool relay_authority_reset_refuses_writer(void);
 /* kiln_nvs fence refinement (fwbatch13 LOW-4): main.c's hal_kv hook refuses a kiln_nvs mutation from another
  * task only when the in-flight reset's scope ERASES kiln_nvs ("kiln"/"all"); a "wifi" or "profiles" reset
  * leaves kiln_nvs alone, so wear counters / lockout counters / boot_guard keep writing normally. The caller
- * (factory_reset.c) sets the flag BEFORE relay_authority_reset_in_flight_begin(); the last _end() clears it.
+ * (factory_reset.c) uses relay_authority_reset_try_begin(), which sets the flag and begins the mark in one step;
+ * the last _end() clears it.
  * Remaining behaviour for an erasing scope: every other-task kiln_nvs write between the mark and the reboot
  * (~500 ms after the erase) is refused and lost -- there are no shutdown handlers. */
 void relay_authority_reset_set_erases_kiln_nvs(bool erases);

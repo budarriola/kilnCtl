@@ -119,7 +119,8 @@ static void system_bridge_task(void *arg)
                      * that overlap -- see factory_reset.h's doc comment on
                      * FACTORY_RESET_ERR_MODE_GATE_REFUSED. */
                     ESP_LOGW(TAG, "system: FACTORY_RESET scope %u refused -- a firing, autotune run, "
-                                  "zone current sweep or backup restore is active, nothing erased",
+                                  "zone current sweep or backup restore is active, or another factory reset is "
+                                  "already in progress; nothing erased",
                              msg->payload[1]);
                 } else if (err == FACTORY_RESET_ERR_REBOOT_FAILED) {
                     ESP_LOGE(TAG, "system: FACTORY_RESET scope %u: storage erased, reboot failed -- "
