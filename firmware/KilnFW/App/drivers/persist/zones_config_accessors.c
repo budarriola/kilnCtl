@@ -433,8 +433,11 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
     if (!out || out_cap == 0 || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
+    /* L30: copy under the zones lock so a concurrent rename cannot tear it. */
+    zones_cfg_lock();
     strncpy(out, s_zones.cfg.zones[zone_index].name, out_cap - 1);
     out[out_cap - 1] = '\0';
+    zones_cfg_unlock();
     return true;
 }
 
