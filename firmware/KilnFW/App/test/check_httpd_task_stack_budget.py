@@ -277,7 +277,7 @@ def main():
             return 1
 
     try:
-        frames, calls = base.parse(objdump, args.elf)
+        frames, calls, dropped = base.parse_ex(objdump, args.elf)
     except base.ElfParseError as exc:
         if exc.skip:
             print(f"check_httpd_task_stack_budget: SKIP: {exc}")
@@ -301,6 +301,8 @@ def main():
         total, path = base.deepest(r, frames, calls)
         results.append((total, r, path))
     results.sort(reverse=True)
+    base.indeterminate_note("check_httpd_task_stack_budget", [r for _t, r, _p in results],
+                            frames, calls, dropped)
 
     print(f"httpd handler roots measured: {len(results)} of {len(roots)} found in {os.path.basename(args.elf)}")
     print(f"ceiling: {ceiling} B of an 8192 B httpd_worker stack")

@@ -61,6 +61,16 @@ try {
     Assert ($r.Rc -eq 1 -and $r.Out -match "does not resolve") "unknown commit -> NOT LANDED"
     $r = Run-PV @("-Commit", $c1, "-Branch", "origin/nosuch")
     Assert ($r.Rc -eq 1 -and $r.Out -match "UNKNOWN") "missing remote branch -> UNKNOWN, not LANDED"
+    Write-Host "case: -Commit defaults to HEAD; fetch is bounded"
+    git -C $work fetch -q origin *>$null
+    git -C $work checkout -q -B dev origin/dev *>$null
+    $r = Run-PV @()
+    Assert ($r.Rc -eq 0 -and $r.Out -match "VERDICT: LANDED") "no -Commit: HEAD (pushed) -> LANDED"
+    $c4 = Commit $work "d.txt" "c4 unpushed head"
+    $r = Run-PV @()
+    Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: NOT LANDED") "no -Commit: unpushed HEAD -> NOT LANDED"
+    $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "0")
+    Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
 } finally { Set-Location $here; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:fails -gt 0) { Write-Host "check_push_verify: $script:fails FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "check_push_verify: all cases passed"; exit 0

@@ -50,6 +50,17 @@
 #      tree. (A status change in the shared main tree alone, when it is not the
 #      caller's tree, is only a warning: other sessions edit it concurrently.)
 #
+# DEFAULT VERDICT PATTERNS (used only when no -ExpectPattern is given; never pass a bare "FAIL" for the host
+# presets: passing test titles contain it and the baseline then errors out):
+#   kilnfw-host   'RUN FAILURES \(' (the script's own failure summary header)
+#   saftyfw-host  'SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)' (the script's own verdict line)
+#   pytest        '(?m)^FAILED \S+' (a failed assertion in the -rf summary; a collection/import crash prints ERROR
+#                 and is therefore MISSED with a note, not CAUGHT)
+# -RequireAssertion: for -Command runs (e.g. a node/JS test script) and any preset, when no -ExpectPattern is given,
+# CAUGHT requires an assertion-failure line (AssertionError / ERR_ASSERTION / assertion failed / "not ok" /
+# "FAIL:"), not merely a nonzero exit -- a mutation that makes the script crash (syntax error, ReferenceError)
+# exits nonzero but proves nothing about the assertions.
+#
 # COMMAND: exactly one of -Preset or -Command. -Command is PowerShell text run
 # with the copy as the current directory; `{OUT}` is replaced by a fresh empty
 # per-run output dir and `{ROOT}` by the copy root. Presets:
@@ -130,6 +141,7 @@ param(
     [string]$Name,
     [string]$Mutations,
     [string]$ExpectPattern,
+    [switch]$RequireAssertion,
     [switch]$NoBaseline,
     [switch]$IncludeDirty,
     [string]$Rev = 'HEAD',
@@ -585,8 +597,9 @@ foreach ($t in @($RepoRoot, $mainTree) | Where-Object { $_ }) {
 # ---- command
 $cmdText = $Command
 switch ($Preset) {
-    'kilnfw-host' { $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\build_host_tests.ps1 -OutDir "{OUT}"' }
+    'kilnfw-host' { $presetExpect = 'RUN FAILURES \('; $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\build_host_tests.ps1 -OutDir "{OUT}"' }
     'saftyfw-host' {
+        $presetExpect = 'SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)'
         if ($CopyRoot.Length -gt 8) { Write-Line "negtest: WARNING SaftyFW host tests need a short path; -CopyRoot $CopyRoot may overflow the MSVC command line" Yellow }
         $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\SaftyFW\test\build_host_tests.ps1 -OutDir "{OUT}"'
     }
@@ -597,6 +610,7 @@ switch ($Preset) {
         $cmdText = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PresetArg`""
     }
     'pytest' {
+        $presetExpect = '(?m)^FAILED \S+'
         $py = $null
         foreach ($t in @($RepoRoot, $mainTree) | Where-Object { $_ }) {
             $c = Join-Path $t 'tools\PcTools\.venv\Scripts\python.exe'
@@ -606,6 +620,10 @@ switch ($Preset) {
         $pa = if ($PresetArg) { $PresetArg } else { 'tests' }
         $cmdText = "`$env:PYTHONPATH = (Join-Path '{ROOT}' 'tools\PcTools\src'); Set-Location -LiteralPath (Join-Path '{ROOT}' 'tools\PcTools'); & '$py' -m pytest $pa -p no:cacheprovider -rfE --basetemp `"{OUT}\pt`""
     }
+}
+if (-not $ExpectPattern) {
+    if ($presetExpect) { $ExpectPattern = $presetExpect }
+    elseif ($RequireAssertion) { $ExpectPattern = '(?im)(AssertionError|ERR_ASSERTION|assertion failed|^not ok|\bFAIL:)' }
 }
 if ($Command -and $Command -notmatch '\{OUT\}') {
     Write-Line "negtest: note: -Command has no {OUT}; every run still starts from a pristine copy (reset + clean -fdx), so no build output is reused" DarkGray

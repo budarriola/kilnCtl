@@ -190,7 +190,7 @@ def main():
         return 3
 
     try:
-        frames, calls = base.parse(objdump, args.elf)
+        frames, calls, dropped = base.parse_ex(objdump, args.elf)
     except base.ElfParseError as exc:
         if exc.skip:
             print(f"check_executor_task_stack_budget: SKIP: {exc}")
@@ -206,6 +206,7 @@ def main():
     stack_bytes = args.stack_bytes
 
     total, path = base.deepest(args.root, frames, calls)
+    base.indeterminate_note("check_executor_task_stack_budget", [args.root], frames, calls, dropped)
     print(f"deepest static stack path from {args.root}: {total} B "
           f"(ceiling {ceiling} B of a {stack_bytes} B profile_executor stack)")
     running = 0

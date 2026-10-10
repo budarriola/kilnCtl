@@ -34,6 +34,12 @@
 # baseline row without a signature (older format) is CHANGED when the current failure has
 # one (a signature on only one side is never KNOWN); both sides unsigned matches, with a warning. A SKIP recorded
 # on another host is not KNOWN here (the missing toolchain may be this host's only).
+# DEV FLOW (2026-10-10): dev is never an ancestor of main (squash promote), so a run on dev has no main
+# baseline unless someone ran the suite on clean main. A coordinator full run on a CLEAN dev tip
+# (HEAD == origin/dev or an ancestor of it) therefore also records, keyed by its tree (ref=origin/dev).
+# Such a baseline is an ancestor of every later dev commit, and is Exact when its commit is the merge-base
+# of HEAD with origin/dev (or its tree is origin/dev's tree). When dev is later promoted, the squash commit
+# shares the dev tip's tree, so the same file is also the main baseline for that tree (tree match above).
 # RECORDING also requires HEAD and `git status --porcelain` identical at run START and END.
 
 $script:MainBaselineSchema = 1
@@ -64,7 +70,7 @@ function Write-MainBaselineJsonAtomic {
 function Write-MainBaseline {
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$Mode,
           [Parameter(Mandatory = $true)][string]$Commit, [Parameter(Mandatory = $true)][string]$Tree,
-          [string]$Fingerprint = "", [Parameter(Mandatory = $true)]$Results, [string]$RepoRoot = "")
+          [string]$Fingerprint = "", [Parameter(Mandatory = $true)]$Results, [string]$RepoRoot = "", [string]$Ref = "origin/main")
     $rows = @($Results | Sort-Object Path | ForEach-Object {
         $row = [ordered]@{ check = ([string]$_.Path -replace '/', '\'); status = [string]$_.Status }
         $sig = if ($_.PSObject.Properties['Signature']) { [string]$_.Signature } else { "" }
@@ -73,7 +79,7 @@ function Write-MainBaseline {
     $file = "$Tree-$Mode.json"
     $obj = [ordered]@{
         schema = $script:MainBaselineSchema; mode = $Mode; commit = $Commit; tree = $Tree
-        fingerprint = $Fingerprint; time_utc = (Get-Date).ToUniversalTime().ToString("o")
+        ref = $Ref; fingerprint = $Fingerprint; time_utc = (Get-Date).ToUniversalTime().ToString("o")
         host = $env:COMPUTERNAME; results = $rows
     }
     Write-MainBaselineJsonAtomic -Path (Join-Path $Dir $file) -Object $obj
@@ -160,7 +166,7 @@ function Get-MainBaselineStartState {
 # Recording is allowed only for a clean tree whose HEAD is origin/main or an ancestor of it.
 # Returns @{ Ok; Reason; Commit; Tree }.
 function Test-MainBaselineRecordable {
-    param([Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main", $Start = $null)
+    param([Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main", $Start = $null, [string]$DevRef = "origin/dev")
     $no = { param($why) [PSCustomObject]@{ Ok = $false; Reason = $why; Commit = ""; Tree = "" } }
     $head = (& git -C $RepoRoot rev-parse HEAD 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $head) { return (& $no "cannot resolve HEAD") }
@@ -168,9 +174,21 @@ function Test-MainBaselineRecordable {
     if ($LASTEXITCODE -ne 0 -or -not $main) { return (& $no "cannot resolve $MainRef") }
     # HEAD may be behind a ref that advanced (a fetch from another session) during
     # the long run; any commit on main's history is a legitimate main state.
+    $ref = $MainRef
     if ($head -cne $main) {
         & git -C $RepoRoot merge-base --is-ancestor $head $main 2>$null
-        if ($LASTEXITCODE -ne 0) { return (& $no "HEAD is not $MainRef nor an ancestor of it (expected on dev; only a clean checkout of main history seeds a baseline)") }
+        if ($LASTEXITCODE -ne 0) {
+            # Dev flow: a clean checkout of dev history records a dev-tip baseline.
+            $dev = ""
+            if ($DevRef) { $dev = (& git -C $RepoRoot rev-parse --verify --quiet "$DevRef^{commit}" 2>$null | Out-String).Trim() }
+            $onDev = $false
+            if ($dev) {
+                if ($head -ceq $dev) { $onDev = $true }
+                else { & git -C $RepoRoot merge-base --is-ancestor $head $dev 2>$null; $onDev = ($LASTEXITCODE -eq 0) }
+            }
+            if (-not $onDev) { return (& $no "HEAD is not $MainRef$(if ($DevRef) { " or $DevRef" }) nor an ancestor of either (only a clean checkout of main/dev history seeds a baseline)") }
+            $ref = $DevRef
+        }
     }
     $st = Get-CheckCacheTreeState -RepoRoot $RepoRoot
     if (-not $st.Clean) { return (& $no $st.Reason) }
@@ -180,7 +198,7 @@ function Test-MainBaselineRecordable {
         if ($now -cne $Start.Status) { return (& $no "working tree status changed during the run") }
         if ($Start.Status.Trim()) { return (& $no "working tree was not clean at run start") }
     }
-    return [PSCustomObject]@{ Ok = $true; Reason = ""; Commit = $head; Tree = $st.Tree }
+    return [PSCustomObject]@{ Ok = $true; Reason = ""; Commit = $head; Tree = $st.Tree; Ref = $ref }
 }
 
 function Read-MainBaselineFile {
@@ -195,7 +213,7 @@ function Read-MainBaselineFile {
 # Pick the usable baseline for HEAD. Returns @{ Baseline; Exact; Warning; Reason; Ignored }.
 function Select-MainBaseline {
     param([Parameter(Mandatory = $true)][string]$Dir, [Parameter(Mandatory = $true)][string]$Mode,
-          [Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main")
+          [Parameter(Mandatory = $true)][string]$RepoRoot, [string]$MainRef = "origin/main", [string]$DevRef = "origin/dev")
     $r = [PSCustomObject]@{ Baseline = $null; Exact = $false; Warning = ""; Reason = ""; Ignored = 0 }
     if (-not (Test-Path -LiteralPath $Dir)) { $r.Reason = "no baseline directory ($Dir)"; return $r }
     $files = @(Get-ChildItem -LiteralPath $Dir -Filter "*-$Mode.json" -File -ErrorAction SilentlyContinue |
@@ -207,6 +225,16 @@ function Select-MainBaseline {
     $histTrees = $null
     $mainTree = (& git -C $RepoRoot rev-parse "$MainRef^{tree}" 2>$null | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) { $mainTree = "" }
+    # Dev flow: merge-base / tree of origin/dev also make a baseline Exact (see DEV FLOW above).
+    # for-each-ref prints nothing and no stderr when the ref is absent (a missing origin/dev must not
+    # throw under the caller's $ErrorActionPreference = Stop).
+    $mbDev = ""; $devTree = ""
+    if ($DevRef -and (& git -C $RepoRoot for-each-ref --format=%(objectname) "refs/remotes/$DevRef" 2>$null | Out-String).Trim()) {
+        $mbDev = (& git -C $RepoRoot merge-base HEAD $DevRef 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { $mbDev = "" }
+        $devTree = (& git -C $RepoRoot rev-parse "$DevRef^{tree}" 2>$null | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { $devTree = "" }
+    }
     foreach ($f in $files) {
         $b = Read-MainBaselineFile -Path $f.FullName
         if ($null -eq $b -or $b.mode -cne $Mode) { $r.Ignored++; continue }
@@ -225,7 +253,7 @@ function Select-MainBaseline {
         $ct = 0
         $ctText = (& git -C $RepoRoot show -s --format=%ct ([string]$b.commit) 2>$null | Out-String).Trim()
         [void][long]::TryParse($ctText, [ref]$ct)
-        $isExact = ($mb -and $b.commit -ceq $mb) -or ($mainTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $mainTree)
+        $isExact = ($mb -and $b.commit -ceq $mb) -or ($mainTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $mainTree) -or ($mbDev -and $b.commit -ceq $mbDev) -or ($devTree -and $b.PSObject.Properties['tree'] -and ([string]$b.tree) -ceq $devTree)
         [void]$usable.Add([PSCustomObject]@{ B = $b; Ct = $ct; Exact = [bool]$isExact })
     }
     if ($usable.Count -eq 0) {
@@ -302,7 +330,8 @@ function Show-MainBaselineSection {
     $b = $sel.Baseline
     $ign = ""
     if ($sel.Ignored -gt 0) { $ign = " ($($sel.Ignored) other-lineage baseline(s) ignored)" }
-    Write-Host "Baseline: origin/main $(([string]$b.commit).Substring(0,10)) recorded $($b.time_utc)$ign"
+    $bref = if ($b.PSObject.Properties['ref']) { [string]$b.ref } else { "origin/main" }
+    Write-Host "Baseline: $bref $(([string]$b.commit).Substring(0,10)) recorded $($b.time_utc)$ign"
     if ($sel.Warning) { Write-Host "WARNING: $($sel.Warning)" -ForegroundColor Yellow }
     $cmp = Compare-MainBaseline -Current $Current -Baseline $b -Exact:$sel.Exact
     if (-not $sel.Exact) {

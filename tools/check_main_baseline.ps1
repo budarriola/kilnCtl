@@ -196,6 +196,33 @@ try {
     Assert ($null -eq $sel.Baseline) "a non-ancestor baseline whose tree is not in HEAD's history is still ignored"
     Remove-Item -LiteralPath $bdir -Recurse -Force
 
+    Write-Host "case: dev-tip baseline recorded on clean dev, compared against later dev commits"
+    $dd = Join-Path $tmp "devtip"
+    git init -b main $dd *>$null
+    Commit-File $dd "f.txt" "0" "root"
+    git -C $dd checkout -b dev *>$null
+    Commit-File $dd "f.txt" "1" "D1"
+    Commit-File $dd "g.txt" "2" "D2"
+    $DT = Rev $dd HEAD
+    git -C $dd update-ref refs/remotes/origin/main (Rev $dd main)
+    git -C $dd update-ref refs/remotes/origin/dev $DT
+    $recD = Test-MainBaselineRecordable -RepoRoot $dd
+    Assert ($recD.Ok -and $recD.Ref -ceq "origin/dev") "clean HEAD == origin/dev records, with ref origin/dev"
+    Assert (-not (Test-MainBaselineRecordable -RepoRoot $dd -DevRef "").Ok) "without a dev ref the old main-only rule still refuses a dev tip"
+    $rd = @((Row "tools\check_b.ps1" "FAIL"))
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $recD.Commit -Tree $recD.Tree -Results $rd -Ref $recD.Ref)
+    Commit-File $dd "h.txt" "3" "D3 (branch commit ahead of origin/dev)"
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dd
+    Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $DT) "dev-tip baseline is an ancestor of a later dev commit, so usable"
+    Assert ($sel.Exact) "baseline at the merge-base with origin/dev is Exact"
+    $cmpD = Compare-MainBaseline -Current @((Row "tools\check_b.ps1" "FAIL")) -Baseline $sel.Baseline -Exact:$sel.Exact
+    Assert (Same $cmpD.Known @("tools\check_b.ps1")) "same failure is KNOWN against the dev-tip baseline"
+    git -C $dd update-ref refs/remotes/origin/dev (Rev $dd HEAD)
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dd
+    Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $DT) "after dev advances the older dev-tip baseline is still found (as an ancestor)"
+    Assert (-not $sel.Exact -and $sel.Warning) "but it is no longer Exact once dev moved past it"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
     # ---------------------------------------------------------------- 4
     Write-Host "case: recordable only at a clean HEAD == origin/main"
     Assert ((Test-MainBaselineRecordable -RepoRoot $repo).Ok) "clean HEAD == origin/main records"

@@ -25,7 +25,7 @@
 # correctly-ordered ancestry check, after a fresh `git fetch`.
 #
 # USAGE
-#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 -Commit <hash> [-Branch origin/dev]
+#   powershell -ExecutionPolicy Bypass -File tools\push_verify.ps1 [-Commit <hash>=HEAD] [-Branch origin/dev] [-FetchTimeoutSec 90]
 #   (-Branch is always resolved on the remote: "dev" and "origin/dev" both mean refs/remotes/origin/dev)
 #
 # OUTPUT: exactly one unambiguous verdict line, prefixed "VERDICT: ", plus
@@ -41,10 +41,13 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$Commit,
+    # Defaults to HEAD when omitted (agents kept failing on the old mandatory parameter).
+    [string]$Commit = "HEAD",
 
-    [string]$Branch = "origin/dev"
+    [string]$Branch = "origin/dev",
+
+    # Bound on the fetch: a fetch that hangs (credential prompt, dead network) must not hang the caller.
+    [int]$FetchTimeoutSec = 90
 )
 
 # See worktree_mint.ps1's header for why this is "Continue", not "Stop":
@@ -62,10 +65,6 @@ function Get-RepoRoot {
     return ($top -replace '/', '\')
 }
 
-if (-not $Commit) {
-    Write-Host "ERROR: -Commit <hash> is required." -ForegroundColor Red
-    exit 2
-}
 
 $repoRoot = Get-RepoRoot
 
@@ -82,9 +81,18 @@ if ($Branch -match '^([^/]+)/(.+)$' -and ($remoteList -contains $Matches[1])) {
 $Branch = "refs/remotes/$remote/$branchName"
 
 Write-Host "Fetching $remote ..."
-git -C $repoRoot fetch $remote *>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "VERDICT: UNKNOWN -- git fetch $remote failed (exit $LASTEXITCODE); cannot verify against a stale view." -ForegroundColor Red
+# Bounded fetch: run git as a child process, never prompt for credentials, kill the tree on timeout.
+$env:GIT_TERMINAL_PROMPT = "0"
+$fetchProc = Start-Process -FilePath "git" -ArgumentList @("-C", "`"$repoRoot`"", "fetch", $remote) -NoNewWindow -PassThru `
+    -RedirectStandardOutput ([IO.Path]::GetTempFileName()) -RedirectStandardError ([IO.Path]::GetTempFileName())
+$null = $fetchProc.Handle
+if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
+    & taskkill /PID $fetchProc.Id /T /F *>$null
+    Write-Host "VERDICT: UNKNOWN -- git fetch $remote timed out after ${FetchTimeoutSec}s; cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
+    exit 1
+}
+if ($fetchProc.ExitCode -ne 0) {
+    Write-Host "VERDICT: UNKNOWN -- git fetch $remote failed (exit $($fetchProc.ExitCode)); cannot verify against a stale view. NOT LANDED (unverified)." -ForegroundColor Red
     exit 1
 }
 

@@ -1046,8 +1046,8 @@ function Exit-WithBaseline {
             $rec = Test-MainBaselineRecordable -RepoRoot $repoRoot -Start $script:MainBaselineStart
             if ($rec.Ok) {
                 $fp = Get-CheckCacheFingerprint -PcToolsPython $selfcheckPython
-                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot
-                Write-Host "Recorded main baseline ($mode) for origin/main $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
+                $file = Write-MainBaseline -Dir (Get-MainBaselineDir) -Mode $mode -Commit $rec.Commit -Tree $rec.Tree -Fingerprint $fp -Results $cur -RepoRoot $repoRoot -Ref $rec.Ref
+                Write-Host "Recorded main baseline ($mode) for $($rec.Ref) $($rec.Commit.Substring(0,10)): $file" -ForegroundColor Cyan
             } else {
                 Write-Host "This run is not recorded as a new main baseline: $($rec.Reason). The comparison above uses the stored main baseline." -ForegroundColor DarkGray
             }

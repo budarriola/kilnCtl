@@ -36,7 +36,7 @@ if (-not $Group) {
     $groups = 'A', 'A2', 'B', 'C', 'D', 'E', 'F', 'G', 'H1', 'H2', 'I'
     # Per-group minimum assertion counts (recorded from a green run); a group that
     # silently skips its body would report far fewer.
-    $minAssert = @{ 'A' = 14; 'A2' = 15; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
+    $minAssert = @{ 'A' = 14; 'A2' = 18; 'B' = 26; 'C' = 10; 'D' = 13; 'E' = 8; 'F' = 18; 'G' = 7; 'H1' = 9; 'H2' = 9; 'I' = 5 }
     # 4a: $groups and $minAssert must name exactly the same groups.
     $missingMin = @($groups | Where-Object { -not $minAssert.ContainsKey($_) })
     $extraMin = @($minAssert.Keys | Where-Object { $groups -notcontains $_ })
@@ -219,6 +219,19 @@ exit 0
     $r = Run-Neg "otherfail" (@('-Command', $testCmd) + $mutA + @('-ExpectPattern', 'FAIL: Test-Big'))
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "otherfail: a failure without the expect pattern must be MISSED (exit $($r.Exit))"
     Assert-True ("$($r.Json.mutations[0].note)" -match 'another reason') "otherfail: note should say it failed for another reason"
+    # crash vs assertion: a mutation that breaks the script's parse exits nonzero without any assertion
+    # line. Plain run counts it CAUGHT (legacy); -RequireAssertion must call it MISSED, and a real
+    # assertion failure must still be CAUGHT under it.
+    $mutCrash = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "throw 'boom'")
+    $r = Run-Neg "crash_plain" (@('-Command', $testCmd) + $mutCrash)
+    Assert-True ($r.Json.mutations[0].verdict -eq 'CAUGHT') "crash_plain: a crashing mutation is CAUGHT on exit code alone (got $($r.Json.mutations[0].verdict))"
+    $r = Run-Neg "crash_reqassert" (@('-Command', $testCmd, '-RequireAssertion') + $mutCrash)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "crash_reqassert: a crash without an assertion line must be MISSED under -RequireAssertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $r = Run-Neg "assert_reqassert" (@('-Command', $testCmd, '-RequireAssertion') + $mutA)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "assert_reqassert: a real assertion failure must still be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $src = Get-Content -LiteralPath $script:ScriptUnderTest -Raw
+    Assert-True ($src.Contains('$presetExpect = ''SAFTYFW HOST TESTS: (FAILED|BUILD FAILED)''')) "saftyfw-host preset must default to the real verdict pattern, not a bare FAIL"
+    Assert-True ($src.Contains('$presetExpect = ''RUN FAILURES \(''')) "kilnfw-host preset must default to its failure-summary header"
     Step "missed"
     }
     if ($Group -eq 'B') {

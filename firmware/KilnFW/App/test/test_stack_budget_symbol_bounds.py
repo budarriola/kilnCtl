@@ -329,6 +329,40 @@ Disassembly of section .flash.text:
                          {"nvs_save": ["zones_autosave_job"]})
 
 
+class LegacyDroppedLongCallIndeterminateTest(unittest.TestCase):
+    """Review S3: a non-entry long-call literal is dropped as an edge, but the
+    legacy main/executor/httpd checks must say so (INDETERMINATE), not stay silent."""
+
+    D = LONGCALL_D.replace("callx8	a11", "callx8	a10")
+
+    def _run(self, cmd, capture_output=True, text=True, check=False):
+        return mock.Mock(returncode=0, stderr="", stdout=LONGCALL_T if "-t" in cmd else self.D)
+
+    def _parse(self):
+        with mock.patch("os.path.getsize", return_value=len(self.D)),                 mock.patch.object(legacy.subprocess, "run", side_effect=self._run):
+            return legacy.parse_ex("objdump", "fake.elf")
+
+    def test_dropped_literal_recorded_and_edge_not_added(self):
+        frames, calls, dropped = self._parse()
+        self.assertIn("some_data", dropped.get("caller_fn", set()))
+        self.assertNotIn("some_data", calls["caller_fn"])
+        self.assertIn("far_fn", calls["caller_fn"])
+
+    def test_note_printed_only_when_reachable(self):
+        import io, contextlib
+        frames, calls, dropped = self._parse()
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hit = legacy.indeterminate_note("t", ["caller_fn"], frames, calls, dropped)
+        self.assertEqual(hit, ["caller_fn"])
+        self.assertIn("INDETERMINATE", buf.getvalue())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            hit = legacy.indeterminate_note("t", ["far_fn"], frames, calls, dropped)
+        self.assertEqual(hit, [])
+        self.assertEqual(buf.getvalue(), "")
+
+
 class DeclaredEdgesTest(unittest.TestCase):
     SITE = ("        if (uart_bridge_ext_is_on_flash_worker()) {\n"
             "            void (*volatile job)(void *arg) = zones_autosave_job;\n"
