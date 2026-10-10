@@ -1536,6 +1536,7 @@ try {
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
+    $cmdKod += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_io_owner_sx_dispatch" -ExePath $exeKod -BuildCmd $cmdKod
 
     # ---- test_safety_trip_words.c: its own TWELFTH, separate executable ------
