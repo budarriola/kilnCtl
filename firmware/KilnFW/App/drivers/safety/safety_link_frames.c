@@ -351,6 +351,8 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
                                                         peer_protocol, peer_min_compatible);
 
     bool boot_id_changed = false;
+    bool boot_id_was_known = false;
+    uint8_t boot_id_old = 0;
     if (!safety_lock(link)) {
         return;
     }
@@ -359,6 +361,8 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
     link->peer_protocol_version = peer_protocol;
     link->peer_min_compatible = peer_min_compatible;
     if (have_boot_id) {
+        boot_id_was_known = link->pico_boot_id_known;
+        boot_id_old = link->pico_boot_id;
         boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
@@ -400,6 +404,16 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
         link->peer_config_crc = config_crc;
     }
     safety_unlock(link);
+
+    /* Once per boot_id change (FW_VERSION is a boot push, not periodic). */
+    if (boot_id_changed) {
+        if (boot_id_was_known) {
+            ESP_LOGW(TAG, "safety processor rebooted (boot_id %u -> %u): reset trip dedup, re-announcing",
+                     (unsigned)boot_id_old, (unsigned)peer_boot_id);
+        } else {
+            ESP_LOGW(TAG, "safety processor boot_id first seen (%u): re-announcing", (unsigned)peer_boot_id);
+        }
+    }
 
     /* No synchronous send here any more -- reannounce_pending (set above,
      * under the same lock, in the boot_id_changed branch) is what actually

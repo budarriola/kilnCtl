@@ -1126,6 +1126,24 @@ static void test_k4_edge_counting_first_frame_counts_zero(void)
     TEST_CHECK(link.safety_relay_state == true, "and it correctly remembers ON");
 }
 
+static void test_pico_boot_id_change_logs_once(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- a boot_id change logs old and new boot_id exactly once");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/7, 0, 0);
+    safety_apply_fw_version(&link, &fw_msg);
+    esp_log_test_capture_reset();
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/9, 0, 0);
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(esp_log_test_capture_contains("boot_id 7 -> 9"), "reboot logs old and new boot_id");
+    TEST_CHECK(g_esp_log_capture_count == 1, "exactly one log line for the change");
+    esp_log_test_capture_reset();
+    safety_apply_fw_version(&link, &fw_msg);
+    TEST_CHECK(g_esp_log_capture_count == 0, "repeat of the same boot_id logs nothing");
+}
+
 static void test_k4_edge_counting_boot_id_change_counts_zero(void)
 {
     TEST_SECTION("safety_apply_fw_version -- a Pico boot_id change forgets the tracked K4 "
@@ -3225,6 +3243,7 @@ int main(void)
     test_apply_status_ignores_peer_link_up_and_fault_bits();
     test_k4_edge_counting_off_on_on_off_counts_two();
     test_k4_edge_counting_first_frame_counts_zero();
+    test_pico_boot_id_change_logs_once();
     test_k4_edge_counting_boot_id_change_counts_zero();
     test_pico_reboot_detected_by_uptime_regression();
     test_fw_version_unknown_before_any_frame_arrives();
