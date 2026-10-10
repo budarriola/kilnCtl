@@ -3191,3 +3191,13 @@ Board: origin/dev 8fcd3237 on both processors, host 192.168.1.156. Firmware was 
   - Crash report cleared, coredump erased.
   - Zones all zone_type 0; profiles #0 M18C_TEST and #1 B1_THROWAWAY only; aux disabled.
   - Readiness: 19 ok; not_done: safety_commissioned (3 of 68) and estop_verified; cannot_yet: ct_attribution.
+
+## 2026-10-09 -- Zones restore attempt after suspected wipe (no write needed)
+
+Task: restore zones config after the suspected untraced factory reset. Pre-wipe reference `logs/backup_export/kilnctl_backup_20261008T220350Z.json` (version 5; 3 zones, relay_mask/thermo_mask 1/2/4, tc_type 3, control_mode 3, 0..80 C, zone_type 0).
+
+- `backup_export` of current state first: `logs/backup_export/kilnctl_backup_20261010T043611Z.json` (version 6).
+- Found the board already at the pre-wipe state: `control_get_zones` reports 3 thermocouples / 4 relays and PID, plant model, coupling cells, limits, zone types all equal to the 20261008 backup. A key-by-key diff of the two backups shows zones, profiles (2), timing profile, kiln_configs and aux_outputs identical. Differences are only fields newer than backup v5 (display_power, relay_cycles, relay_names, tz, unit, ramp_assist, hidden_builtin_profiles, io_* segment fields, on_off_rules), i.e. new-format defaults, not data loss.
+- Therefore no topology write and no `backup_import` was performed; the board was not modified.
+- Readback: z0 `tuning_valid=no` (the backup carries no tuning_* block for z0 either), z1/z2 yes. Aux outputs: all four disabled (matches backup). `get_readiness`: 19 ok, 2 not_done (`safety_commissioned`: 3 of 68 params unset; `estop_verified`), 3 other (`guard_cross_zone` and `calibration` deliberately off, `ct_attribution` cannot_yet). Safety link up, armed, no trip.
+- Open: whoever restored the zones before this run is unrecorded; the 3 unset safety params were not compared to a pre-wipe state (`safety_get_unset_commissioning_params` would name them).
