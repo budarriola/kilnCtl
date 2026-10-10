@@ -143,7 +143,7 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     }
     /* LOW-2: the stored record is unreadable/newer; writing the in-RAM list
      * would destroy it. Refuse until it is readable or reset. */
-    if (s_saved_nets_refused) {
+    if (s_saved_nets_refused) { /* LOW-2 add */
         return ESP_ERR_NOT_SUPPORTED;
     }
 
@@ -450,7 +450,7 @@ esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
     }
     /* LOW-3: length-counted callers (UART bridge) can carry an embedded NUL,
      * which strncpy would silently truncate. */
-    if (memchr(ssid, '\0', ssid_len) != NULL) {
+    if (memchr(ssid, '\0', ssid_len) != NULL) { /* LOW-3 ssid */
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_wifi.started) {
@@ -517,7 +517,7 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
     }
     /* LOW-3: an embedded NUL would store a truncated (possibly < 8 char or
      * empty) value and bring the AP up open while reporting success. */
-    if (password_len > 0 && memchr(password, '\0', password_len) != NULL) {
+    if (password_len > 0 && memchr(password, '\0', password_len) != NULL) { /* LOW-3 pw */
         return ESP_ERR_INVALID_ARG;
     }
     if (!s_wifi.started) {

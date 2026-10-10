@@ -411,7 +411,7 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
     ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is version %u, newer than this firmware's %u -- "
                   "refusing to load, flash data left untouched",
              partition, (unsigned)out_blob->version, (unsigned)SAVED_NETS_VERSION);
-    s_saved_nets_refused = true;
+    s_saved_nets_refused = true; /* newer */
     memset(out_blob, 0, sizeof(*out_blob));
     out_blob->version = SAVED_NETS_VERSION;
     return ESP_OK;
