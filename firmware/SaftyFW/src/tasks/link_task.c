@@ -1807,6 +1807,16 @@ static bool link_task_heat_is_safe_for_tc_type_change(void)
                                           CONTEXT_FLAG_HEAT_OWNER_ACTIVE);
 }
 
+// Heat-possible predicate for config_store_write_volatile() (MED-1): the
+// exact complement of the tc_type gate, so both gates share one definition of
+// "idle and de-energized" and cannot drift. True on any doubt (K4 energized,
+// recent enable request, stale/absent context, any ESP heat flag, relay
+// on-time or current seen).
+static bool link_task_heat_possible_probe(void)
+{
+    return !link_task_heat_is_safe_for_tc_type_change();
+}
+
 // 2026-09-15 Opus re-review N2: called every poll from link_task_fn()'s main
 // loop. While s_tc_type_reapply_pending is set, the persisted flash record
 // and the physically configured MAX31856 may be diverged -- keep retrying
@@ -3449,6 +3459,13 @@ bool link_task_start(void)
     s_wall_clock_epoch_ms = 0;
 
     link_staging_reset(&s_staging);
+
+    // 2026-10-09 guard-fixes review MED-1: APPLY_CONFIG_VOLATILE's
+    // trip-relevant-change refusal applies while heat is POSSIBLE, not merely
+    // while relay_owner is ARMED (ARMED is the normal idle state). Same
+    // fail-closed signal the tc_type reapply gate uses. Registered before the
+    // task exists, so no volatile install can run without it.
+    config_store_set_heat_possible_probe(link_task_heat_possible_probe);
 
     // Mutex-guarded snapshot, same pattern/failure handling as
     // thermo_task_start()'s s_snapshot_lock.

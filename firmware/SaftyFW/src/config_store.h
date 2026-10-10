@@ -1661,50 +1661,46 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
 // what is now proven live", plan section 1a.4) still lands in the correct
 // next slot relative to that unchanged position.
 //
-// 2026-09-14 review (docs/audits/pico_volatile_install_and_unconfigured_
-// ceiling_2026-09-14.md, Finding A): "no ARMED check" was correct about the
-// FLASH half of config_store_decide_write()'s gate, but that gate is also
-// documented in three places (ARCHITECTURE.md sec 7/8, CONFIG_REFERENCE.md
-// sec 210, COMMISSIONING.md sec 2) as a SAFETY rule -- "retuning a safety
-// threshold during a firing is not a supported operation" -- and this
-// function, being the store's own second write path, is exactly the
-// "future second caller" COMMISSIONING.md sec 2 warned would forget it.
-// Now DOES refuse, ARMED-only, a specific narrow class: a volatile install
-// that would LOOSEN a trip threshold while the relay is
-// RELAY_OWNER_STATE_ARMED (config_store_volatile_would_loosen_safety_while_
-// armed(), config_store_flash.c) -- raising abs_max_temp_c (S1), raising
-// max_rate_c_per_min (S8), clearing either back to "unconfigured" (fields_
-// set-gated fields are their OWN loosest state, per CONFIG_REFERENCE.md sec
-// 7 -- "never trips" -- so un-setting one while ARMED loosens it exactly
-// like raising it does), or changing an ALREADY-commissioned tc_type to a
-// different type or back to unset (it rescales what abs_max_temp_c's
-// already-validated bound means, and there is no ordering between TC types
-// that maps to "safer" -- but a board's FIRST commissioning of tc_type,
-// same as the two numeric fields above, is a tightening and stays allowed). Deliberately gates on ARMED, not
-// on "is this an ordinary kiln-package swap": a swap is already refused
-// during a firing by its own separate interlock (KILN_PROFILES_PLAN.md),
-// so this carve-out only has to bite for the ARMED-and-firing case the
-// review named, and RELAY_OWNER_STATE_ARMED is exactly that state -- never
-// entered except by an actual energize request, and (unlike the trip latch
-// state machine elsewhere in this codebase) not held across an ordinary
-// swap performed while de-energized. Tightening or neutral changes (PID/
-// profile-shaped params, or any change that only lowers/holds a threshold)
-// are unaffected -- the plan's requirement that "a package swap must not
-// have to unarm the Pico" still holds for everything except the narrow set
-// of changes this file's own safety docs already said must not happen
-// during a firing.
+// 2026-10-09 guard-fixes review (HIGH-1, MED-1) -- the gate, as it is now:
+//
+//   WHEN: only while heat is POSSIBLE. config_store_set_heat_possible_probe()
+//   registers the predicate (link_task registers one: K4 energized, a recent
+//   accepted REQUEST_ENABLE(true), a stale/absent ESP context, or any ESP
+//   heat-requested/profile-running/heat-owner flag -- the same fail-closed
+//   signal the tc_type reapply gate uses). With no probe registered the gate
+//   is "relay_owner is ARMED". ARMED alone is NOT the criterion in the wired
+//   build: ARMED is the normal idle state from 60 s after boot, and refusing
+//   there blocked idle kiln-package swaps, rollbacks and ESP replays.
+//
+//   WHAT: refuse ANY change to a trip-relevant field (config_store_volatile_
+//   would_loosen_safety(), config_store.c): the whole packed record is
+//   compared against the running one after copying over an explicit
+//   allowlist of non-safety fields (telemetry cadence, power estimate
+//   inputs, bookkeeping, reserved) and after accepting provable tightenings
+//   (abs_max_temp_c / max_rate_c_per_min first-set or lowered, first
+//   commissioning of tc_type). A field added later is refused by default.
+//   An identical resend is not a change.
+//
+//   Idle and de-energized, every install is allowed (the plan's "a package
+//   swap must not have to unarm the Pico" requirement).
 //
 // Returns false and fills `*out_reason` (if non-NULL, same shape as
-// config_store_write()'s own contract) when refused by the ARMED-loosening
-// carve-out above; the caller (link_task_handle_apply_config_volatile())
-// reports this the same way it reports any other rejection, reusing the
-// existing KILNLINK_COMMIT_CONFIG_REJECT_ARMED wire reason -- no new wire
-// value, no protocol bump, since APPLY_CONFIG_VOLATILE's rejected reply
-// already carries that reason's slot, it was simply never reachable via
-// this path before now. Still cannot fail for any OTHER reason (no flash
-// I/O, no ARMED check outside the carve-out above) -- true, unconditional
-// success remains the only other outcome.
+// config_store_write()'s own contract) when refused; the caller (link_task_
+// handle_apply_config_volatile()) reports this with the existing
+// KILNLINK_COMMIT_CONFIG_REJECT_ARMED wire reason -- no new wire value, no
+// protocol bump. Cannot fail for any OTHER reason (no flash I/O).
 bool config_store_write_volatile(const config_store_record_t *rec, const char **out_reason);
+
+// True iff installing `next` over `cur` changes any trip-relevant field (see
+// above). Pure; exposed for host tests. Fail-closed on re-entry.
+bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
+                                                const config_store_record_t *next);
+
+// "Is heat possible right now" predicate consulted by config_store_write_
+// volatile(). Must be conservative: true on any doubt. Register once at
+// start-up (link_task); NULL restores the ARMED-only fallback.
+typedef bool (*config_store_heat_possible_probe_t)(void);
+void config_store_set_heat_possible_probe(config_store_heat_possible_probe_t probe);
 
 // TEST-ONLY instrumentation (opus review 2026-09-09): counts how many times
 // config_store_seqlock_read() has fallen through to the writer-owned

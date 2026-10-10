@@ -1602,96 +1602,34 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     return true;
 }
 
-// Loosening carve-out for config_store_write_volatile() below (2026-09-14
-// review, Finding A) -- see config_store.h's doc comment on that function
-// for the full rationale. `cur` is the live record BEFORE this install,
-// `next` is the record about to be installed; returns true iff installing
-// `next` would loosen any threshold this store treats as fields_set-gated
-// safety-relevant (S1's abs_max_temp_c, S8's max_rate_c_per_min, or
-// tc_type). Only meaningful while ARMED -- the caller is responsible for
-// only consulting this under that condition, exactly as config_store_
-// decide_write() only consults relay_owner_get_state() for its own gate.
+// 2026-10-09 guard-fixes review HIGH-1/MED-1: the volatile-install gate.
 //
-// What counts as "loosening", decided explicitly per field rather than left
-// implicit:
-//   - abs_max_temp_c (S1): a fields_set-gated field whose UNSET state is
-//     documented (CONFIG_REFERENCE.md sec 7, safety_guards.c/.h) as
-//     abs_max_temp_c == 0.0f, "never trips" -- i.e. unset IS the loosest
-//     possible state, not a neutral one. So: unset -> any set value is a
-//     TIGHTENING (a bound now exists where none did) and always allowed;
-//     set -> unset, or a set value raised, are both LOOSENING and refused
-//     while ARMED; a set value lowered or held is allowed.
-//   - max_rate_c_per_min (S8): same fields_set-gated "unset == loosest,
-//     rate check disabled" shape (config_store.h's own comment on this
-//     field) -- identical rule as abs_max_temp_c above.
-//   - tc_type: also CONFIG_STORE_SET_TC_TYPE-gated (config_store.h's
-//     2026-08-24 addition), same "unset is a real, distinguishable state"
-//     shape as the two fields above, so the same unset/set split applies:
-//     unset -> any type (first commissioning) is a tightening, always
-//     allowed. But unlike a numeric threshold, tc_type has no ordering once
-//     it IS commissioned -- it rescales what abs_max_temp_c's already-
-//     validated bound (TC_MAX_C_BY_TYPE[tc_type]) means, and feeds the
-//     borrowed/main-board type-mismatch guards elsewhere in this codebase,
-//     so there is no "safer" direction to compare against. Once set, ANY
-//     change away from the commissioned type (including clearing the bit
-//     back to "unset") is treated as loosening while ARMED.
-//   - Every other field (PID/profile-shaped params, CT cal, etc.) is
-//     unaffected -- an ordinary kiln-package swap's volatile install still
-//     never has to unarm the Pico, matching the plan's section 1a.2
-//     requirement.
-static bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
-                                                        const config_store_record_t *next)
+// WHEN the gate applies ("heat possible"): the installer registers a probe
+// (config_store_set_heat_possible_probe(), link_task registers one built on
+// the same fail-closed signal as the tc_type gate: K4 energized, a recent
+// REQUEST_ENABLE(true), a stale/absent ESP context, or any ESP heat flag).
+// Without a registered probe the gate falls back to the old, stricter-than-
+// needed "relay_owner is ARMED" rule, so a host build or a boot-order slip
+// never silently opens it. GRACE/INIT/TRIPPED cannot energize K4, so they
+// never trigger the gate.
+//
+// WHAT the gate refuses: config_store_volatile_would_loosen_safety()
+// (config_store.c) -- ANY trip-relevant field that differs from the running
+// record, except an explicit allowlist of non-safety fields and provable
+// tightenings. Fail-closed: a field added later is refused by default.
+static config_store_heat_possible_probe_t s_heat_possible_probe = NULL;
+
+void config_store_set_heat_possible_probe(config_store_heat_possible_probe_t probe)
 {
-    bool cur_abs_set = (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
-    bool next_abs_set = (next->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
-    if (cur_abs_set && !next_abs_set) {
-        return true; // clearing a commissioned ceiling loosens it back to "never trips"
-    }
-    if (cur_abs_set && next_abs_set && next->abs_max_temp_c > cur->abs_max_temp_c) {
-        return true; // raising an already-commissioned ceiling
-    }
+    s_heat_possible_probe = probe;
+}
 
-    bool cur_rate_set = (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
-    bool next_rate_set = (next->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
-    if (cur_rate_set && !next_rate_set) {
-        return true; // clearing a commissioned S8 rate cap loosens it back to "disabled"
+static bool config_store_heat_possible(void)
+{
+    if (s_heat_possible_probe != NULL) {
+        return s_heat_possible_probe();
     }
-    if (cur_rate_set && next_rate_set && next->max_rate_c_per_min > cur->max_rate_c_per_min) {
-        return true; // raising an already-commissioned S8 rate cap
-    }
-
-    bool cur_tc_set = (cur->fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
-    bool next_tc_set = (next->fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
-    if (cur_tc_set && (!next_tc_set || next->tc_type != cur->tc_type)) {
-        return true; // changing (or un-committing) an already-commissioned TC type
-    }
-
-    // 2026-10-09 guard review F1: every other trip-relevant field is
-    // refused on ANY change while ARMED (no per-field "tighter" proof is
-    // attempted: if in doubt, refuse). An identical resend is not a change.
-    // safety_tc_installed in particular gates INJECT_TC, so flipping it
-    // would let the ESP blind the Pico's thermocouple under a live K4.
-    // NaN compares as changed (!(a == b)).
-    if (cur->safety_tc_installed != next->safety_tc_installed ||
-        cur->ct_installed != next->ct_installed ||
-        ((cur->fields_set ^ next->fields_set) &
-         (CONFIG_STORE_SET_CT_INSTALLED | CONFIG_STORE_SET_ZONE_CT_CHANNEL |
-          CONFIG_STORE_SET_CT_CHANNEL_MAP)) != 0u ||
-        cur->ct_topology != next->ct_topology ||
-        memcmp(cur->zone_ct_channel, next->zone_ct_channel, sizeof cur->zone_ct_channel) != 0 ||
-        !(cur->tc_offset_c == next->tc_offset_c) ||
-        !(cur->cj_max_c == next->cj_max_c) ||
-        !(cur->cj_warn_c == next->cj_warn_c) ||
-        cur->cj_time_s != next->cj_time_s ||
-        cur->overcurrent_pct != next->overcurrent_pct ||
-        cur->overcurrent_time_s != next->overcurrent_time_s ||
-        !(cur->firing_margin_c == next->firing_margin_c) ||
-        !(cur->overshoot_margin_c == next->overshoot_margin_c) ||
-        !(cur->tc_disagreement_c == next->tc_disagreement_c)) {
-        return true;
-    }
-
-    return false;
+    return relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
 }
 
 // KILN_PROFILES_PLAN.md item 15 -- see config_store.h's own doc comment on
@@ -1702,14 +1640,13 @@ static bool config_store_volatile_would_loosen_safety(const config_store_record_
 // hal_flash_safe_execute()/s_cached_slot/s_cached_sector -- nothing here is
 // persisted.
 //
-// It DOES now consult relay_owner_get_state() for a second, narrower reason
-// (2026-09-14 review, Finding A): while ARMED, refuse an install that would
-// LOOSEN a trip threshold -- see config_store_volatile_would_loosen_safety()
-// above for exactly which changes that covers. This is not the same gate
-// config_store_decide_write() runs (that one refuses ALL writes while
-// ARMED, for a flash-stall reason that does not apply here); this one
-// refuses a specific subset of installs, for the safety reason that DOES
-// still apply here.
+// It DOES consult the heat-possible gate above for a second reason
+// (2026-09-14 review Finding A, widened 2026-10-09): while heat is possible,
+// refuse any install that changes a trip-relevant field (fail-closed, see
+// config_store_volatile_would_loosen_safety() in config_store.c). This is
+// not the same gate config_store_decide_write() runs (that one refuses ALL
+// writes while ARMED, for a flash-stall reason that does not apply here).
+// Idle and de-energized, every install is allowed.
 //
 // The only side effect on success is the seqlock-guarded update of
 // s_cached_record, exactly the field every guard and every config_store_
@@ -1724,14 +1661,6 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
         return false;
     }
 
-    if (relay_owner_get_state() == RELAY_OWNER_STATE_ARMED &&
-        config_store_volatile_would_loosen_safety(&s_cached_record, rec)) {
-        if (out_reason != NULL) {
-            *out_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
-        }
-        return false;
-    }
-
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
@@ -1740,9 +1669,19 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
     // firmware that cannot see zone_ct_channel still reads a meaningful
     // topology (a genuine split collapsing to SUMMED, never PER_ZONE).
     // Applied to the copy that is actually persisted/published, not to
-    // the caller's record, and after the write decision above so it can
-    // never turn a refusal into a write.
+    // the caller's record. 2026-10-09 review INFO: done BEFORE the heat-
+    // possible comparison below, so a stale legacy ct_topology in the
+    // caller's record is not refused spuriously -- the comparison sees
+    // exactly the bytes that would be installed.
     config_store_backfill_legacy_ct_topology(&to_write);
+
+    if (config_store_heat_possible() &&
+        config_store_volatile_would_loosen_safety(&s_cached_record, &to_write)) {
+        if (out_reason != NULL) {
+            *out_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
+        }
+        return false;
+    }
 
     // Seqlock write, not a plain struct assignment -- identical reasoning to
     // config_store_write()'s own call just above: every reader of

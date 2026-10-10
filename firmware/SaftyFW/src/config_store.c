@@ -1485,6 +1485,91 @@ bool config_store_only_ct_cal_differs(const config_store_record_t *current,
     return equal;
 }
 
+// 2026-10-09 guard-fixes review HIGH-1: fail-closed replacement for the
+// enumerated loosen-list. See config_store.h for the contract.
+//
+// Mechanism: normalise `next` into a scratch copy by overwriting every field
+// on the NON-SAFETY ALLOWLIST below (and every provable tightening) with the
+// running record's value, then compare both PACKED records byte for byte up
+// to the CRC. Anything not copied over is therefore compared, including a
+// field a future change carves out of `reserved` and packs: it is refused by
+// default until someone consciously adds it to the allowlist. A host test
+// (test_config_store_flash.c) walks every packed byte to prove this.
+//
+// Allowlist (fields no guard reads, or that only scale reporting):
+//   format_version, seq        bookkeeping, set by the installer
+//   calibration_missing        derived from fields_set (itself compared)
+//   mains_voltage_v, max_expected_power_w (+ their fields_set bits)
+//                              reporting/plausibility only, no guard trips
+//   k_ct_v_per_a[]             "power estimate only" (config_store.h)
+//   telemetry_period_ms        telemetry cadence
+//   power_window_s             power estimate averaging window
+//   i_present_a_manual         provenance flag; the value i_present_a is
+//                              itself compared
+//   reserved                   unused padding
+// Provable tightenings (the only value changes allowed through):
+//   abs_max_temp_c, max_rate_c_per_min: unset -> set, or set and lowered/held
+//   tc_type: first commissioning (unset -> set) only
+bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
+                                                const config_store_record_t *next)
+{
+    static uint8_t a[CONFIG_STORE_RECORD_LEN];
+    static uint8_t b[CONFIG_STORE_RECORD_LEN];
+    static config_store_record_t nrm;
+    static volatile bool s_in_progress = false;
+    if (s_in_progress) {
+        log_task_log(LOG_LEVEL_ERROR, "config_store",
+                     "config_store_volatile_would_loosen_safety re-entered -- refusing");
+        return true;
+    }
+    s_in_progress = true;
+    nrm = *next;
+
+    // Allowlisted fields take the running value.
+    nrm.format_version = cur->format_version;
+    nrm.seq = cur->seq;
+    nrm.calibration_missing = cur->calibration_missing;
+    nrm.mains_voltage_v = cur->mains_voltage_v;
+    nrm.max_expected_power_w = cur->max_expected_power_w;
+    memcpy(nrm.k_ct_v_per_a, cur->k_ct_v_per_a, sizeof nrm.k_ct_v_per_a);
+    nrm.telemetry_period_ms = cur->telemetry_period_ms;
+    nrm.power_window_s = cur->power_window_s;
+    nrm.i_present_a_manual = cur->i_present_a_manual;
+    memcpy(nrm.reserved, cur->reserved, sizeof nrm.reserved);
+    const uint32_t allow_bits = CONFIG_STORE_SET_MAINS_VOLTAGE_V | CONFIG_STORE_SET_MAX_EXPECTED_POWER_W;
+    nrm.fields_set = (next->fields_set & ~allow_bits) | (cur->fields_set & allow_bits);
+
+    // Provable tightenings.
+    const bool cur_abs_set = (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
+    const bool next_abs_set = (next->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
+    if ((!cur_abs_set && next_abs_set) ||
+        (cur_abs_set && next_abs_set && next->abs_max_temp_c <= cur->abs_max_temp_c)) {
+        nrm.abs_max_temp_c = cur->abs_max_temp_c;
+        nrm.fields_set = (nrm.fields_set & ~CONFIG_STORE_SET_ABS_MAX_TEMP_C) |
+                         (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C);
+    }
+    const bool cur_rate_set = (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
+    const bool next_rate_set = (next->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
+    if ((!cur_rate_set && next_rate_set) ||
+        (cur_rate_set && next_rate_set && next->max_rate_c_per_min <= cur->max_rate_c_per_min)) {
+        nrm.max_rate_c_per_min = cur->max_rate_c_per_min;
+        nrm.fields_set = (nrm.fields_set & ~CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) |
+                         (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN);
+    }
+    const bool cur_tc_set = (cur->fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
+    if (!cur_tc_set) {
+        nrm.tc_type = cur->tc_type;
+        nrm.fields_set = (nrm.fields_set & ~CONFIG_STORE_SET_TC_TYPE) |
+                         (cur->fields_set & CONFIG_STORE_SET_TC_TYPE);
+    }
+
+    config_store_pack(cur, a);
+    config_store_pack(&nrm, b);
+    bool differs = memcmp(a, b, REC_OFF_CRC) != 0;
+    s_in_progress = false;
+    return differs;
+}
+
 uint32_t config_store_record_crc(const config_store_record_t *rec)
 {
     uint8_t packed[CONFIG_STORE_RECORD_LEN];
