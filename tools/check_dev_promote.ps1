@@ -164,6 +164,20 @@ try {
     Assert ($r.Code -eq 1 -and $r.Out -match 'main-ahead-of-dev') "forged promote (named sha not on dev) refused"
     git -C $forge push --force origin "${mainSave}:refs/heads/main" *>$null
 
+    Write-Host "case: concurrent promote loses cleanly (main moves between verify and push)"
+    CommitFile $work "h.txt" "h" "dev change H"
+    git -C $work push origin dev *>$null
+    $xh = (git -C $work rev-parse HEAD).Trim()
+    $hook = Join-Path $origin "hooks/pre-receive"
+    $racerMark = (Join-Path $tmp "racer.marker") -replace '\\', '/'
+    [IO.File]::WriteAllText($hook, "#!/bin/sh`nunset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_QUARANTINE_PATH`nif [ ! -e '$racerMark' ]; then touch '$racerMark'; m=`$(git rev-parse main); n=`$(git commit-tree -p `$m -m 'racing promote' `$m^{tree}); git update-ref refs/heads/main `$n; fi`nexit 0`n")
+    $r = Run @("-Commit", $xh, "-Push")
+    Remove-Item -LiteralPath $hook -Force
+    $raced = (git -C $origin log -1 --format=%s main)
+    Assert (Test-Path -LiteralPath $racerMark) "fixture: racing hook ran"
+    Assert ($r.Code -eq 1) "concurrent promote fails loudly (code $($r.Code))"
+    Assert ($raced -eq 'racing promote') "winner's commit kept on main, nothing overwritten (got: $raced)"
+
     Write-Host "case: nothing to promote"
     $r = Run @("-Commit", $x4, "-Push")
     Assert ($r.Code -eq 1) "re-promoting the same commit refused"

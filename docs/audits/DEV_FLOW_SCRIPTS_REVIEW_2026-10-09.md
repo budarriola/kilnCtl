@@ -33,7 +33,7 @@ This is a review only. No code was changed. Line numbers refer to `1e6d375f`.
 | F15 | LOW | wt_status.ps1 | 200-commit cap on ahead list; stale header text says origin/main -- FIXED (no cap on the unlanded count; header names the real base) |
 | F16 | LOW | main_baseline.ps1 | `-Record` Start-Process arguments are unquoted (paths with spaces) -- FIXED (-Record quotes the run_all_checks path) |
 | F17 | LOW | commit_guard.ps1 | `-File` comma arrays, binary numstat, deleted files -- FIXED (comma strings split for -Path and -ExpectedMaxLines; binary `-` numstat is refused against a declared budget and labelled for -Confirm; a path deleted in the working tree is guarded against the branch blob) |
-| F18 | LOW | tests | No tests for release_merge, push_verify, commit_guard; land tests default to `-Target main` -- PARTLY FIXED (check_worktree_mint -Remove cases, check_release_merge.ps1, wt_status stale_ignored flipped, check_push_verify.ps1, check_commit_guard.ps1; land/dev_promote/main_baseline gaps remain) |
+| F18 | LOW | tests | No tests for release_merge, push_verify, commit_guard; land tests default to `-Target main` -- FIXED 2026-10-09 (check_worktree_mint -Remove cases, check_release_merge.ps1, wt_status stale_ignored flipped, check_push_verify.ps1, check_commit_guard.ps1; check_land/check_main_baseline already covered by 0b6c0c05; check_dev_promote concurrent-promote and check_wt_status mid-rebase/cwd-only cases added) |
 
 Things checked and found sound are listed at the end.
 
@@ -289,7 +289,7 @@ Things checked and found sound are listed at the end.
   confirmed"; allow deleted paths by checking `git ls-files` / the base tree
   instead of the working tree.
 
-### F18 LOW -- test coverage gaps
+### F18 LOW -- test coverage gaps [FIXED 2026-10-09; the list below is the original finding]
 
 - No test exists for `release_merge.ps1`, `push_verify.ps1` or
   `commit_guard.ps1` beyond `check_worktree_mint.ps1`'s default-branch text
