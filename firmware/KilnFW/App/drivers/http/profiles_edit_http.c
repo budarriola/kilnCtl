@@ -294,6 +294,8 @@ bool profiles_parse_profile_fields(const char *body, profile_t *p, char *err_msg
             snprintf(err_msg, err_cap, "rule %u: temp_c not finite", i);
             return false;
         }
+        /* A dormant threshold (no temperature condition) is never stored. */
+        if (r->temp_source == 0 || r->temp_cmp == 0) r->temp_threshold_c = 0.0f;
 
         snprintf(key, sizeof(key), "rule%u_time_start_s", i);
         len = http_form_find_field(body, key, val, sizeof(val));

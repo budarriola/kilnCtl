@@ -1483,10 +1483,21 @@ function renderStep11() {
           });
         });
       }
+      // set_policy requires all four fields (strict form parsing): read the
+      // current policy and change only web_enabled.
       chain = chain.then(function () {
+        return fetch('/api/auth/config').then(function (r) {
+          if (!r.ok) throw new Error('Could not read the current login policy -- nothing was changed.');
+          return r.json();
+        });
+      }).then(function (cur) {
+        var tmo = function (v) { return (typeof v === 'number' && isFinite(v)) ? Math.trunc(v) : -1; };
         return fetch('/api/auth/security', {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=set_policy&web_enabled=' + (wantEnable ? '1' : '0'),
+          body: 'cmd=set_policy&web_enabled=' + (wantEnable ? '1' : '0') +
+                '&lcd_enabled=' + (cur && cur.lcd_enabled ? '1' : '0') +
+                '&web_timeout_min=' + tmo(cur && cur.web_timeout_min) +
+                '&lcd_timeout_min=' + tmo(cur && cur.lcd_timeout_min),
         });
       });
       chain.then(function (res) {

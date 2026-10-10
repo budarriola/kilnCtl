@@ -1272,7 +1272,7 @@ function ooRulesToParams() {
   rows.forEach(function (row, i) {
     var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
     var tempSource = tempCmp === 0 ? 0 : 1;
-    var tempC = parseFloat(row.querySelector('.oo-tempval').value) || 0; // Celsius-only input, see ooRuleFieldsHtml()
+    var tempC = tempCmp === 0 ? 0 : (parseFloat(row.querySelector('.oo-tempval').value) || 0); // Celsius-only input, see ooRuleFieldsHtml()
     var phase = 0;
     row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
     var dir = 0;

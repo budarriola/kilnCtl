@@ -4160,7 +4160,7 @@ document.getElementById('atStartBtn').addEventListener('click', function () {
   if (zone === '') { document.getElementById('atStatus').textContent = 'No zone configured/selected.'; return; }
   fetch('/api/autotune/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'zone=' + zone + '&step_duty=' + duty + '&rule=' + encodeURIComponent(rule),
+    body: 'zone=' + zone + (duty === '' ? '' : '&step_duty=' + duty) + '&rule=' + encodeURIComponent(rule),
   }).then(function (r) { return r.json(); }).then(function (j) {
     if (!j.ok) document.getElementById('atStatus').textContent = 'Start failed: ' + j.error;
     else pollAutotune();
