@@ -597,11 +597,16 @@ esp_err_t safety_link_send_set_param(SafetyLinkClass *link, uint16_t param_id, u
     return s_stub_set_param_result;
 }
 
+static uint32_t s_stub_diag_count = 5u;
+static uint32_t s_stub_diag_count_step = 1u;
+/* SL3-R2 A1: DIAGs applied INSIDE the commit send (its drain / reply window). */
+static uint32_t s_stub_commit_drain_diags = 0u;
 esp_err_t safety_link_send_commit_config(SafetyLinkClass *link, uint16_t *out_param_id, uint8_t *out_reason,
                                           bool *out_rejected)
 {
     (void)link;
     s_stub_commit_calls++;
+    s_stub_diag_count += s_stub_commit_drain_diags;
     if (out_rejected) *out_rejected = s_stub_commit_rejected;
     if (out_param_id) *out_param_id = s_stub_commit_reject_param_id;
     if (out_reason) *out_reason = s_stub_commit_reject_reason;
@@ -669,8 +674,6 @@ static bool s_stub_diag_ever = true;
 static int s_stub_diag_calls = 0;
 /* Item 5: stats.diag_applied. Each call advances it by s_stub_diag_count_step AFTER
  * reporting, so step 0 models "only the pre-commit DIAG ever cached". */
-static uint32_t s_stub_diag_count = 5u;
-static uint32_t s_stub_diag_count_step = 1u;
 esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
                                      uint32_t *out_diag_applied)
 {
@@ -879,6 +882,7 @@ static void reset_all(void)
     s_stub_estop_verif_clear_result = ESP_OK;
     s_stub_diag_count = 5u;
     s_stub_diag_count_step = 1u;
+    s_stub_commit_drain_diags = 0u;
     s_stub_recapture_calls = 0;
     s_stub_recapture_result = true;
     s_stub_recapture_reason = NULL;
@@ -1598,6 +1602,28 @@ static void test_blocking_persist_needs_post_commit_diag(void)
     s_stub_diag_count_step = 1u;
     ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
     TEST_CHECK(ok == true, "a DIAG applied after the commit is believed");
+}
+
+static void test_blocking_persist_ignores_diag_applied_inside_commit_send(void)
+{
+    TEST_SECTION("safety_cfg_write -- SL3-R2 A1: a DIAG applied inside send_commit's own window is pre-commit "
+                 "evidence and must not confirm a blocking persist");
+    reset_all();
+    s_stub_lookup_type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_lookup_name = "abs_max_temp_c";
+    SafetyLinkClass fake_link;
+    memset(&fake_link, 0, sizeof(fake_link));
+    s_stub_params[0].param_id = 0x0104u;
+    s_stub_params[0].type = KILNLINK_PARAM_TYPE_F32;
+    s_stub_params[0].set = true;
+    s_stub_params[0].value.f32_val = 120.0f;
+    s_stub_diag_flags = 0u;
+    s_stub_diag_count_step = 0u;       /* nothing arrives after the send returns ... */
+    s_stub_commit_drain_diags = 1u;    /* ... but one DIAG was applied inside the send */
+    char reason[200];
+    bool ok = safety_cfg_write_set_and_confirm_f32_blocking(&fake_link, 0x0104u, 120.0f, reason, sizeof(reason), NULL);
+    TEST_CHECK(ok == false, "MUST GO RED if a DIAG drained inside the commit send counts as post-commit");
+    s_stub_commit_drain_diags = 0u;
 }
 
 static void test_apply_pairs_refetch_failure_reports_unconfirmed_not_success(void)
@@ -3194,6 +3220,7 @@ int main(void)
     test_estop_polarity_unconfirmed_persist_still_clears_verification();
     test_nonblocking_persist_check_never_sleeps();
     test_blocking_persist_needs_post_commit_diag();
+    test_blocking_persist_ignores_diag_applied_inside_commit_send();
     test_apply_pairs_refetch_failure_reports_unconfirmed_not_success();
     test_apply_pairs_refetch_failure_with_no_stash_classifies_as_other_not_armed();
     test_apply_pairs_late_rejection_attaches_pico_reason_to_confirmed_failure();

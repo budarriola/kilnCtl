@@ -1141,6 +1141,12 @@ void autotune_engine_get_status(autotune_engine_status_t *out)
  * whether/why it was called, the same shape as g_stub_autotune_status. */
 static int g_autotune_abort_calls = 0;
 static char g_last_autotune_abort_reason[160];
+bool autotune_engine_abort_bounded(const char *reason, uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    autotune_engine_abort(reason);
+    return true;
+}
 void autotune_engine_abort(const char *reason)
 {
     g_autotune_abort_calls++;

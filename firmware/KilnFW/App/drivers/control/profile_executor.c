@@ -2513,10 +2513,10 @@ void watchdog_task_entry(void *arg)
         if (hold_reboot) {
             (void)profile_executor_pause_with_reason_bounded("pico_fatal_reboot");
             /* Autotune has no pause state: abort is its equivalent (relays off). */
-            autotune_engine_abort("pico_fatal_reboot");
+            (void)autotune_engine_abort_bounded("pico_fatal_reboot", 100u);
         } else if (hold_unconfirmed) {
             (void)profile_executor_pause_with_reason_bounded("heat_grant_unconfirmed");
-            autotune_engine_abort("heat_grant_unconfirmed");
+            (void)autotune_engine_abort_bounded("heat_grant_unconfirmed", 100u);
         }
         heat_enable_reconcile();
     }

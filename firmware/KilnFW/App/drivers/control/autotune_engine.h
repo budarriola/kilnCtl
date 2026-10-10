@@ -373,6 +373,8 @@ bool autotune_engine_run_relay(uint8_t zone_index, float setpoint_c, float relay
  * trace's sample_count/state for diagnosis, does not write any tuning. A
  * no-op from IDLE/DONE/ABORTED. */
 void autotune_engine_abort(const char *reason);
+/* Bounded-wait variant for the guard-9 watchdog (SL3-R2 A2); false = lock busy, retry next tick. */
+bool autotune_engine_abort_bounded(const char *reason, uint32_t timeout_ms);
 
 /* Options for autotune_engine_accept() below. A zeroed struct (or opts ==
  * NULL) means the original default behavior: refuse an unsettled fit,

@@ -65,6 +65,8 @@ static bool g_reentrant_acquire_ran = false;
 // Review-2 LOW-1: a fatal Pico reboot is classified while an enable send is in flight.
 static bool g_hold_during_enable = false;
 static bool g_hold_during_enable_ran = false;
+static bool g_classify_during_enable = false; /* SL3-R2 A3 */
+static bool g_classify_during_enable_ran = false;
 
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 {
@@ -72,6 +74,10 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     g_last_enable_value = enable;
     if (enable) {
         g_enable_true_calls++;
+        if (g_classify_during_enable && !g_classify_during_enable_ran) {
+            g_classify_during_enable_ran = true;
+            heat_enable_note_pico_boot(6u, false, 0u, 2000u); /* reboot noticed, cause undecided */
+        }
         if (g_hold_during_enable && !g_hold_during_enable_ran) {
             g_hold_during_enable_ran = true;
             heat_enable_note_pico_boot(6u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
@@ -105,6 +111,8 @@ static void reset_all(bool link_up)
     g_reentrant_acquire_ran = false;
     g_hold_during_enable = false;
     g_hold_during_enable_ran = false;
+    g_classify_during_enable = false;
+    g_classify_during_enable_ran = false;
     heat_enable_init((SafetyLinkClass *)0x1);
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
@@ -1266,6 +1274,23 @@ static void test_reboot_verdict_survives_release_and_resume(void)
     TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "the second, deliberate resume proceeds");
 }
 
+static void test_enable_in_flight_under_classify_pending_queues_release(void)
+{
+    TEST_SECTION("heat_enable -- SL3-R2 A3: a reboot noticed (undecided) while an enable send is IN FLIGHT "
+                 "must not record granted=true");
+    reset_all(true);
+    heat_enable_note_pico_boot(5u, true, 0u, 1000u); /* baseline */
+    g_classify_during_enable = true;
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(g_classify_during_enable_ran, "sanity: classification became pending mid-send");
+    TEST_CHECK(heat_enable_reboot_undecided(), "sanity: undecided");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "MUST GO RED if send_enable records granted=true under a pending classification");
+    uint32_t rel0 = release_sends();
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == rel0 + 1, "the standing enable is released on the wire");
+}
+
 static void test_enable_in_flight_under_reboot_hold_queues_release(void)
 {
     TEST_SECTION("heat_enable -- review-2 LOW-1: a fatal-reboot hold set while an enable send is IN FLIGHT "
@@ -1355,9 +1380,12 @@ static void test_executor_autotune_and_stale_diag_wiring(void)
         return;
     }
     const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
-    const char *at1 = strstr(text, "autotune_engine_abort(\"pico_fatal_reboot\")");
+    const char *at1 = strstr(text, "autotune_engine_abort_bounded(\"pico_fatal_reboot\"");
+    TEST_CHECK(strstr(text, "autotune_engine_abort(\"pico_fatal_reboot\")") == NULL &&
+                   strstr(text, "autotune_engine_abort(\"heat_grant_unconfirmed\")") == NULL,
+               "SL3-R2 A2: the watchdog must not call the unbounded autotune_engine_abort()");
     const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
-    const char *at2 = strstr(text, "autotune_engine_abort(\"heat_grant_unconfirmed\")");
+    const char *at2 = strstr(text, "autotune_engine_abort_bounded(\"heat_grant_unconfirmed\"");
     TEST_CHECK(hold && at1 && at1 > hold && at1 < unc, "fatal-reboot hold also aborts autotune");
     TEST_CHECK(unc && at2 && at2 > unc, "unconfirmed grant also aborts autotune");
     TEST_CHECK(strstr(text, "safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT") != NULL,
@@ -1372,6 +1400,7 @@ void run_test_heat_enable(void)
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
     test_pico_reboot_after_tripped_holds();
+    test_enable_in_flight_under_classify_pending_queues_release();
     test_reboot_verdict_survives_release_and_resume();
     test_enable_in_flight_under_reboot_hold_queues_release();
     test_watchdog_loop_and_bounded_pause_wiring();

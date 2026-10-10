@@ -331,7 +331,8 @@ static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32
                           "(no trip_seq binding yet) -- continuing at a slow bounded rate");
         }
         /* SAFTY-LOW-2: one lost ANNOUNCE burst must not leave the Pico at protocol 0 until the next
-         * reboot. Keep re-announcing, slowly: at most one frame per SLOW_GAP_MS, only while a 30-byte
+         * reboot. Keep re-announcing, slowly: at most one announce BURST (4 frames, 250 ms apart, ~750 ms of poll-task
+         * block; SL3-R2 A4) per SLOW_GAP_MS, only while a 30-byte
          * DIAG proves the Pico has not learned our version (the 31-byte DIAG branch above ends it). */
         if ((uint32_t)(now_ms - link->diag_reannounce_last_ms) < SAFETY_DIAG_REANNOUNCE_SLOW_GAP_MS) {
             return;

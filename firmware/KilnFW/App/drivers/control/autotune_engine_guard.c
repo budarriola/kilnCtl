@@ -264,6 +264,29 @@ autotune_sample_t *autotune_unpack_zone_trace(uint8_t zone, size_t count)
     return out;
 }
 
+/* SL3-R2 A2: watchdog variant. The guard-9 task must never block on s_at.lock (the start path holds it
+ * across a long section). Returns true if no autotune is running or the abort was applied; false if the
+ * lock was not obtained within timeout_ms (caller retries next tick). */
+bool autotune_engine_abort_bounded(const char *reason, uint32_t timeout_ms)
+{
+    if (s_at.lock == NULL) {
+        return true;
+    }
+    if (xSemaphoreTake(s_at.lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        ESP_LOGW(AT_TAG, "autotune_engine_abort_bounded(%s): s_at.lock busy for %u ms -- retry next tick",
+                 reason ? reason : "?", (unsigned)timeout_ms);
+        return false;
+    }
+    if (!state_is_running(s_at.state)) {
+        xSemaphoreGive(s_at.lock);
+        return true;
+    }
+    abort_locked(reason);
+    xSemaphoreGive(s_at.lock);
+    ESP_LOGI(AT_TAG, "autotune zone %u aborted by watchdog: %s", s_at.zone_index, s_at.abort_reason);
+    return true;
+}
+
 void autotune_engine_abort(const char *reason)
 {
     /* See autotune_begin_run_locked()'s guard comment above. */

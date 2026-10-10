@@ -538,14 +538,18 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
         uint8_t reject_reason = 0;
         bool rejected = false;
         uint32_t diag_applied_before_commit = 0u;
+        esp_err_t err = volatile_install
+                            ? safety_link_send_apply_config_volatile(link, &reject_param_id, &reject_reason, &rejected)
+                            : safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
         {
+            /* Review SL3-R2 A1: sampled AFTER the send. The send drains the inbox and applies DIAGs
+             * that arrive inside its ~345 ms reply window; a DIAG built before the Pico processed the
+             * COMMIT could otherwise advance the count past a pre-send baseline and read as
+             * "post-commit". Only a DIAG applied after the send returns is believed. */
             bool ever_unused = false;
             uint8_t flags_unused = 0u;
             (void)safety_link_get_diag_flags(link, &ever_unused, &flags_unused, &diag_applied_before_commit);
         }
-        esp_err_t err = volatile_install
-                            ? safety_link_send_apply_config_volatile(link, &reject_param_id, &reject_reason, &rejected)
-                            : safety_link_send_commit_config(link, &reject_param_id, &reject_reason, &rejected);
         if (err != ESP_OK) {
             snprintf(reason_out, reason_cap, "the safety processor did not acknowledge the commit "
                                               "(%s) -- values were staged but NOT written",
