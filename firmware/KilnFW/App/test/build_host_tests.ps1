@@ -1525,6 +1525,14 @@ try {
             "`"$(Join-Path $hwAbsDir 'common/hal_status.c')`" `"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
     Invoke-HostTestExe -Name "dashboard_http_relay" -ExePath $exeDhr -BuildCmd $cmdDhr
 
+    # ---- test_dashboard_settings_http.c: unit_pref + safety log_level POST handlers (R3-C)
+    $exeDsh = Join-Path $outDir "kilnctl_host_tests_dashboard_settings_http.exe"
+    $dshObjDir = Join-Path $outDir "dsh"
+    New-Item -ItemType Directory -Force -Path $dshObjDir | Out-Null
+    $cmdDsh = "cl /I`"$(Join-Path $testDir 'stubs_dashboard_http_relay')`" /I`"$(Join-Path $testDir 'stubs_dashboard_status')`" @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$dshObjDir\\`" /Fe:`"$exeDsh`" `"$(Join-Path $testDir 'test_dashboard_settings_http.c')`""
+    Invoke-HostTestExe -Name "dashboard_settings_http" -ExePath $exeDsh -BuildCmd $cmdDsh
+
     # ---- test_kiln_io_owner_sx_dispatch.c: owner_task() relay/SX_RESET dispatch over the fake chip (R2-A)
     $exeKod = Join-Path $outDir "kilnctl_host_tests_kiln_io_owner_sx_dispatch.exe"
     $kodObjDir = Join-Path $outDir "kod"
@@ -1922,6 +1930,24 @@ try {
 
     $cmd24kcfg += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # persfx MED-1: no real cfg_fs.c in this exe
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
+
+    # ---- test_cfg_fs_format_http.c: cfg_fs_format_http.c format_confirm gate (round 3, R3-A)
+    $exeCff = Join-Path $outDir "kilnctl_host_tests_cfg_fs_format_http.exe"
+    $cffObjDir = Join-Path $outDir "cff"
+    New-Item -ItemType Directory -Force -Path $cffObjDir | Out-Null
+    $cmdCff = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$cffObjDir\\`" /Fe:`"$exeCff`" `"$(Join-Path $testDir 'test_cfg_fs_format_http.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`" " +
+            "`"$(Join-Path $driversDir 'persist/cfg_fs_format_gate.c')`""
+    Invoke-HostTestExe -Name "cfg_fs_format_http" -ExePath $exeCff -BuildCmd $cmdCff
+
+    # ---- test_setup_progress_http.c: setup_progress_http.c GET/POST handlers (round 3, R3-B)
+    $exeSph = Join-Path $outDir "kilnctl_host_tests_setup_progress_http.exe"
+    $sphObjDir = Join-Path $outDir "sph"
+    New-Item -ItemType Directory -Force -Path $sphObjDir | Out-Null
+    $cmdSph = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$sphObjDir\\`" /Fe:`"$exeSph`" `"$(Join-Path $testDir 'test_setup_progress_http.c')`""
+    Invoke-HostTestExe -Name "setup_progress_http" -ExePath $exeSph -BuildCmd $cmdSph
 
     # ---- test_diagnostics_http.c: its own separate executable ------------------
     # docs/audits/HOST_TEST_COVERAGE_GAPS_2026-10-09.md campaign 9: #includes
@@ -3533,7 +3559,8 @@ try {
     # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
     # 93 -> 94: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
     # 94 -> 95: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
-    $totalExpected = 95
+    # 95 -> 98: test_cfg_fs_format_http.c, test_setup_progress_http.c, test_dashboard_settings_http.c (round 3)
+    $totalExpected = 98
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

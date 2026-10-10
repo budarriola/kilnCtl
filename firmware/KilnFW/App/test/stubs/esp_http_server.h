@@ -39,6 +39,7 @@ typedef struct httpd_req {
     // (httpd_sess_trigger_close() needs the owning handle, not just a
     // sockfd).
     httpd_handle_t handle;
+    char uri[256]; /* real httpd_req_t::uri (request-target incl. query); added for cfg_fs_format_http.c's ?force_healthy= parse */
 } httpd_req_t;
 
 #ifndef ESP_ERR_HTTPD_RESULT_TRUNC
