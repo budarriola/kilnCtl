@@ -3962,6 +3962,125 @@ static esp_err_t run_profile_post(const char *body)
     return err;
 }
 
+// ---- Seqlock bracket coverage for the non-save writers (edit, retarget commit,
+// retarget revert, delete). Each probes the slot generation from inside the
+// persist seam: it must be odd while the RAM assign/persist is in flight and
+// even (and advanced) once the writer returns. Removing gen_begin leaves the
+// in-flight value even; removing gen_end leaves it odd afterward.
+static unsigned s_sg_writes;
+static unsigned s_sg_odd_writes;      /* writes that saw slot 4 odd */
+static unsigned s_sg_bad_writes;      /* retarget: writes that did not see exactly one odd of 0..3 */
+static bool s_sg_strict;
+static unsigned sg_odd_count_0_3(void)
+{
+    unsigned n = 0;
+    for (uint8_t i = 0; i < 4; i++) {
+        n += profiles_http_slot_rev(i) & 1u;
+    }
+    return n;
+}
+static esp_err_t sg_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    s_sg_writes++;
+    if (profiles_http_slot_rev(4) & 1u) {
+        s_sg_odd_writes++;
+    }
+    if (s_sg_strict && sg_odd_count_0_3() != 1u) {
+        s_sg_bad_writes++;
+    }
+    return cfg_fs_write_atomic(rel_path, data, len);
+}
+static esp_err_t sg_fail2_write_fn(const char *rel_path, const void *data, size_t len)
+{
+    unsigned i = s_sg_writes;
+    esp_err_t r = sg_write_fn(rel_path, data, len);
+    return (i == 1) ? ESP_FAIL : r; /* the 2nd write fails -> commit reverts */
+}
+static esp_err_t sg_delete_fn(const char *rel_path)
+{
+    if (profiles_http_slot_rev(4) & 1u) {
+        s_sg_odd_writes++;
+    }
+    return cfg_fs_delete(rel_path);
+}
+
+static void test_profile_edit_post_slot_gen(void)
+{
+    TEST_SECTION("slot generation: profile_post_handler (edit) brackets its RAM assign + persist");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t before = profiles_http_slot_rev(4);
+    s_sg_writes = s_sg_odd_writes = 0;
+    s_sg_strict = false;
+    profiles_cfg_fs_set_write_fn(sg_write_fn);
+    esp_err_t r = run_profile_post("id=4&name=SgEdit&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(r == ESP_OK && strstr(s_resp_capture, "\"ok\":true") != NULL, "edit POST succeeded");
+    TEST_CHECK(s_sg_writes >= 1 && s_sg_odd_writes >= 1, "generation odd while the edit persists (gen_begin)");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
+               "generation even and advanced after the edit (gen_end)");
+}
+
+static void test_retarget_slot_gen(void)
+{
+    TEST_SECTION("slot generation: retarget commit and revert bracket each slot's assign + persist");
+    for (int pass = 0; pass < 2; pass++) {
+        rt_seed();
+        uint32_t before[4];
+        for (uint8_t i = 0; i < 4; i++) {
+            before[i] = profiles_http_slot_rev(i);
+        }
+        profiles_retarget_counts_t c;
+        char err[160] = "";
+        s_sg_writes = s_sg_odd_writes = s_sg_bad_writes = 0;
+        s_sg_strict = true;
+        /* pass 0: clean commit. pass 1: 2nd write fails, so the revert writes too. */
+        profiles_cfg_fs_set_write_fn(pass == 0 ? sg_write_fn : sg_fail2_write_fn);
+        bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        profiles_cfg_fs_reset_write_fn_for_test();
+        s_sg_strict = false;
+        TEST_CHECK(ok == (pass == 0), pass == 0 ? "commit succeeds" : "injected failure fails the commit");
+        TEST_CHECK(s_sg_writes >= (pass == 0 ? 2u : 3u), pass == 0 ? "commit wrote slots" : "revert wrote after the failure");
+        TEST_CHECK(s_sg_bad_writes == 0, pass == 0 ? "every commit write saw exactly one slot in flight (gen_begin/gen_end)"
+                                                   : "every commit and revert write saw exactly one slot in flight (gen_begin/gen_end)");
+        TEST_CHECK(sg_odd_count_0_3() == 0, "all slot generations even afterward");
+        bool advanced = false;
+        for (uint8_t i = 0; i < 4; i++) {
+            advanced = advanced || profiles_http_slot_rev(i) != before[i];
+        }
+        TEST_CHECK(advanced, "generations advanced");
+    }
+}
+
+static void test_delete_slot_gen(void)
+{
+    TEST_SECTION("slot generation: profiles_delete_slot brackets its erase + RAM clear");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF;
+    char err[128];
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err)), "seed slot 4");
+    uint32_t before = profiles_http_slot_rev(4);
+    s_sg_odd_writes = 0;
+    profiles_cfg_fs_set_delete_fn(sg_delete_fn);
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4");
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    TEST_CHECK(s_sg_odd_writes >= 1, "generation odd while the erase runs (gen_begin)");
+    TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
+               "generation even and advanced after the delete (gen_end)");
+}
+
 // Strict input audit (2026-10-09): a non-numeric / trailing-garbage / overlong id must
 // be a 400, never slot 0 (overwrite) or "create new".
 static void test_profile_post_handler_rejects_malformed_id(void)
@@ -4865,6 +4984,9 @@ void run_test_profiles_http(void)
     test_profiles_http_delete_refuses_running_slot();
     test_profiles_delete_start_race_l23();
     test_profiles_slot_gen_seqlock();
+    test_profile_edit_post_slot_gen();
+    test_retarget_slot_gen();
+    test_delete_slot_gen();
     test_delete_clears_favorite_before_erase_wiring();
 
     test_pcfg_mounted_migrates_nvs_only_slot_to_file();
