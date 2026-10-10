@@ -2563,8 +2563,9 @@ function renderSweepStatus(st) {
     sweepPollTimer = null;
     /* Sweep just finished -- reload the config so the freshly measured
        normal_current_a/measured fields (and any resulting ct_warn_mask
-       change) show up without a manual page refresh. */
-    loadCurrent();
+       change) show up without a manual page refresh -- unless the operator
+       has unsaved edits in the form, which a silent reload would discard. */
+    reloadUnlessDirty('The current sweep finished');
   }
 }
 
@@ -2591,6 +2592,26 @@ document.getElementById('sweepAbortBtn').addEventListener('click', function () {
 });
 pollSweepStatus(); /* pick up a sweep already in progress from a previous page load */
 
+/* Unsaved-edit tracking (web batch W5): sweep completion and autotune Accept reload the
+   * form from the board, which silently discarded whatever the operator had typed. Any
+   * input/change inside the form sets the flag; a successful render of board data clears it. */
+var zonesFormDirty = false;
+function markZonesFormDirty() { zonesFormDirty = true; }
+function reloadUnlessDirty(what) {
+  if (!zonesFormDirty) { loadCurrent(); return true; }
+  showDirtyReloadNotice(document.getElementById('msg'), what);
+  return false;
+}
+function showDirtyReloadNotice(msgEl, what) {
+  msgEl.textContent = what + ', but the form was NOT reloaded because it has unsaved edits. ' +
+    'The board now holds newer values than the form shows: Saving as-is would overwrite them with ' +
+    'the stale ones. ';
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = 'Reload from board (discards your edits)';
+  b.addEventListener('click', function () { loadCurrent(); });
+  msgEl.appendChild(b);
+}
 function loadCurrent() {
   /* The fetch/parse step and the render step are kept in SEPARATE catch
      scopes on purpose. They used to share one .catch(), which meant any
@@ -2613,6 +2634,7 @@ function loadCurrent() {
   }).then(function (data) {
     try {
       current = data;
+      zonesFormDirty = false;
       document.getElementById('thermoCount').value = data.thermo_count;
       document.getElementById('relayCount').value = data.relay_count;
       document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
@@ -2709,6 +2731,20 @@ function showSaveTimeoutNotice(msgEl) {
   b.addEventListener('click', function () { loadCurrent(); });
   msgEl.appendChild(b);
 }
+/* The abort may fire after the POST reached the board, so the save may or may not have
+   landed. Keep the operator's unsaved edits (dev web review LOW-5): say the result is
+   unknown and offer an explicit reload, never an automatic one. Returns true when handled. */
+function handleSaveAbort(e, msgEl) {
+  if (!(e && e.name === 'AbortError')) return false;
+  showSaveTimeoutNotice(msgEl);
+  return true;
+}
+['zones', 'thermoCount', 'relayCount', 'maxSimultaneous', 'continueOnZoneTrip'].forEach(function (id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', markZonesFormDirty);
+  el.addEventListener('change', markZonesFormDirty);
+});
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');
   var saveBtnEl = document.getElementById('saveBtn');
@@ -2996,13 +3032,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }).catch(function (e) {
     if (saveTimer) clearTimeout(saveTimer);
     saveBtnEl.disabled = false;
-    if (e && e.name === 'AbortError') {
-      /* The abort may fire after the POST reached the board, so the save may or may not have
-         landed. Keep the operator's unsaved edits (dev web review LOW-5): say the result is
-         unknown and offer an explicit reload, never an automatic one. */
-      showSaveTimeoutNotice(msg);
-      return;
-    }
+    if (handleSaveAbort(e, msg)) return;
     /* POST /api/zones's safety-ceiling-raise refusal (owner request
        2026-09-10) answers 409 with a JSON body ({"ok":false,"reason":...})
        rather than the plain-text bodies most other refusals here use --
@@ -4294,7 +4324,7 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
     body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0') + '&adopt_ceiling=' + (adoptCeiling ? '1' : '0'),
   }).then(function (r) {
     if (!r.ok) { document.getElementById('atStatus').textContent = 'Accept failed.'; return; }
-    loadCurrent();
+    reloadUnlessDirty('The tuned gains were accepted');
     pollAutotune();
     // Review fix: surface the ceiling_adoption outcome the accept response
     // now carries (ADOPTED / SKIPPED_* / REJECTED_OUT_OF_RANGE) rather than

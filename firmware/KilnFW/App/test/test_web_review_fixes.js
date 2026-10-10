@@ -88,10 +88,84 @@ function makeCtx(responses) {
   assert(/unknown/i.test(fakeMsg.textContent) && /edits are still in the form/.test(fakeMsg.textContent), 'timeout notice says result unknown and edits kept');
   assert(reloads === 0 && kids.length === 1 && /Reload/.test(kids[0].textContent), 'timeout notice does not reload; offers a Reload button');
   clickFn(); assert(reloads === 1, 'Reload button reloads from the board');
-  const abortBranch = ZONES.slice(ZONES.indexOf("e.name === 'AbortError'"));
-  const abortBody = abortBranch.slice(0, abortBranch.indexOf('return;'));
-  assert(/showSaveTimeoutNotice\(msg\)/.test(abortBody) && !/loadCurrent\(/.test(abortBody),
-    'AbortError branch shows the notice and does NOT auto-reload');
+  // W4: behavioural -- run the production abort handler and watch for ANY reload, immediate or deferred.
+  const ha = ZONES.match(/function handleSaveAbort\(e, msgEl\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
+  let abortReloads = 0;
+  const abortKids = [];
+  const abortMsg = { textContent: '', appendChild: (c) => abortKids.push(c) };
+  const handleAbort = new Function('showSaveTimeoutNotice', 'loadCurrent', 'document', 'setTimeout',
+    ha + '; return handleSaveAbort;')(
+    (m) => { m.textContent = 'Save result unknown'; }, () => { abortReloads++; }, {}, setTimeout);
+  assert(handleAbort({ name: 'AbortError' }, abortMsg) === true && /unknown/.test(abortMsg.textContent),
+    'AbortError is handled with the unknown-result notice');
+  assert(handleAbort(new Error('x'), abortMsg) === false, 'non-abort errors fall through to the normal failure path');
+  await new Promise((r) => setTimeout(r, 30));
+  assert(abortReloads === 0, 'AbortError never reloads the form, immediately or deferred');
+  assert(/if \(handleSaveAbort\(e, msg\)\) return;/.test(ZONES), 'Save catch returns right after handleSaveAbort');
+
+  // ---- W5: sweep completion / autotune Accept must not discard unsaved edits ----
+  const dz = ZONES.match(/var zonesFormDirty = false;[\s\S]*?function showDirtyReloadNotice\(msgEl, what\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
+  let dReloads = 0, dClick = null;
+  const dKids = [];
+  const dMsg = { textContent: '', appendChild: (c) => dKids.push(c) };
+  const dz2 = new Function('loadCurrent', 'document', dz + '; return {reloadUnlessDirty, markZonesFormDirty};')(
+    () => { dReloads++; },
+    { getElementById: () => dMsg, createElement: () => ({ addEventListener: (ev, fn) => { dClick = fn; } }) });
+  assert(dz2.reloadUnlessDirty('Done') === true && dReloads === 1, 'clean form: reloads as before');
+  dz2.markZonesFormDirty();
+  assert(dz2.reloadUnlessDirty('The tuned gains were accepted') === false && dReloads === 1, 'dirty form: NOT reloaded');
+  assert(/unsaved edits/.test(dMsg.textContent) && /overwrite/.test(dMsg.textContent) && dKids.length === 1,
+    'dirty form: warns, names the stale-overwrite risk, offers a Reload button');
+  dClick(); assert(dReloads === 2, 'warning Reload button reloads on request');
+  assert(/reloadUnlessDirty\('The current sweep finished'\)/.test(ZONES) && /reloadUnlessDirty\('The tuned gains were accepted'\)/.test(ZONES),
+    'sweep completion and autotune Accept both go through reloadUnlessDirty');
+  assert(/current = data;\s*zonesFormDirty = false;/.test(ZONES), 'a successful board render clears the dirty flag');
+
+  // ---- guardFieldHidden (DOM half of LOW-2) ----
+  const gh = ZONES.match(/var ZONE_GUARD_INPUT_CLASS = \{[\s\S]*?\};\r?\nfunction guardFieldHidden\(zi, suffix\) \{[\s\S]*?\r?\n\}\r?\n/)[0];
+  const mkDoc = (display, hasWrap) => ({ querySelector: (sel) => /data-index="1"/.test(sel) ? {
+    querySelector: (c) => c === '.debounce' ? { closest: (w) => (w === '.heaterOnly' && hasWrap) ? { style: { display: display } } : null } : null } : null });
+  const ghf = (d) => new Function('document', gh + '; return guardFieldHidden;')(d);
+  assert(ghf(mkDoc('none', true))(1, 'debounce') === true, 'guardFieldHidden: field inside a display:none heater-only row is hidden');
+  assert(ghf(mkDoc('', true))(1, 'debounce') === false, 'guardFieldHidden: visible heater-only row is not hidden');
+  assert(ghf(mkDoc('none', false))(1, 'debounce') === false, 'guardFieldHidden: field outside a heater-only wrapper is not hidden');
+  assert(ghf(mkDoc('none', true))(0, 'debounce') === false, 'guardFieldHidden: missing zone block is not hidden');
+
+  // ---- kcHostRefusalFromText / kcHostRefusalText (app.js) and the forgot-flow password precheck (W1) ----
+  const hr = APP.match(/window\.kcHostRefusalText = function \(body\) \{[\s\S]*?\r?\n  \};\r?\n[\s\S]*?window\.kcHostRefusalFromText = function \(text\) \{[\s\S]*?\r?\n  \};\r?\n/)[0];
+  const pw = APP.match(/window\.kcResetPasswordProblem = function \(pw, username\) \{[\s\S]*?\r?\n  \};\r?\n/)[0];
+  const aw = {};
+  new Function('window', 'TextEncoder', hr + pw)(aw, TextEncoder);
+  assert(/IP address/.test(aw.kcHostRefusalFromText('{"error":"bad_host"}')) && /IP address/.test(aw.kcHostRefusalFromText('{"error":"cross_origin"}')),
+    'kcHostRefusalFromText: host/origin refusal bodies map to guidance');
+  assert(aw.kcHostRefusalFromText('{"error":"other"}') === null && aw.kcHostRefusalFromText('not json') === null && aw.kcHostRefusalFromText('') === null,
+    'kcHostRefusalFromText: other bodies and non-JSON give null');
+  const pp = aw.kcResetPasswordProblem;
+  assert(pp('Abcdefgh1', 'u') && !pp('Abcdefgh12', 'u'), 'reset precheck: 10-byte minimum');
+  assert(!pp('A' + 'b'.repeat(63), 'u') && pp('A' + 'b'.repeat(64), 'u'), 'reset precheck: 64-byte maximum');
+  assert(pp('abcdefghijk', 'u') && !pp('abcdefghij1', 'u'), 'reset precheck: all-lowercase refused');
+  assert(pp('MyPassword123', 'u') && pp('xxKILNxx999', 'u'), 'reset precheck: "password"/"kiln" refused, case-insensitive');
+  assert(pp('BenchAdmin99', 'BenchAdmin99') && !pp('BenchAdmin99', 'other'), 'reset precheck: equal to username refused');
+
+  // W1: step 2 with a weak password must NOT spend the token or POST; a strong one posts it.
+  const s2 = APP.match(/function onStep2Submit\(evt\) \{[\s\S]*?\r?\n    \}\r?\n/)[0];
+  const mkStep2 = (pass) => {
+    const st = { fetches: 0, back: 0 };
+    const el = (v) => ({ value: v, disabled: false, textContent: '' });
+    const e2 = el('');
+    const env = { forgotSubmit2El: el(''), forgotErrorEl2: e2, forgotNewPassEl: el(pass), forgotNewPass2El: el(pass),
+      forgotUserEl: el('BenchAdmin99'), nativeFetch: () => { st.fetches++; return new Promise(() => {}); },
+      forgotBackToStep1: () => { st.back++; }, KC_FORGOT_GENERIC_FAIL: 'x', forgotGeneration: 1, window: aw };
+    const run = new Function('env', 'with (env) { var forgotResetToken = "TOKEN"; ' + s2 +
+      '; return { submit: onStep2Submit, token: function () { return forgotResetToken; } }; }')(env);
+    run.submit({ preventDefault() {} });
+    return { st, e2, token: run.token() };
+  };
+  const weak = mkStep2('shortpw');
+  assert(weak.st.fetches === 0 && weak.token === 'TOKEN' && /too short/.test(weak.e2.textContent) && weak.st.back === 0,
+    'W1: weak password is refused client-side, token kept, no POST, stays on step 2');
+  const strong = mkStep2('Str0ngEnough!');
+  assert(strong.st.fetches === 1 && strong.token === null, 'W1: strong password POSTs and spends the token');
 
   // ---- wizard helpers ----
   const w1 = WIZ.match(/function stepRefusalText\(r\) \{[\s\S]*?\r?\n\}\r?\n/)[0];

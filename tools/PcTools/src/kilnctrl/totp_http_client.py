@@ -156,6 +156,29 @@ def post_forgot(host: str, username: str, code: str,
     return status, _parse_json_body(_FORGOT_PATH, status, body)
 
 
+def reset_password_problem(new_password: str, username: str = "") -> "str | None":
+    """Client-side mirror of the firmware's ``web_auth_password_check()``
+    (persist/web_auth_store.c): returns a refusal message, or None when the
+    password passes. /api/auth/reset answers a weak password with the same
+    generic 400 as a bad token, so a caller must check BEFORE ``forgot`` to
+    avoid wasting a TOTP code and the one-time token (web batch W1). The AP
+    SSID/passphrase equality rule is board-side only. Never echoes the
+    password."""
+    n = len(new_password.encode("utf-8"))
+    if n < 10:
+        return "new password too short (minimum 10 characters)"
+    if n > 64:
+        return "new password too long (maximum 64 characters)"
+    if all("a" <= c <= "z" for c in new_password):
+        return "new password is all lowercase letters (add a capital, digit or symbol)"
+    low = new_password.lower()
+    if "password" in low or "kiln" in low:
+        return 'new password contains "password" or "kiln"'
+    if username and new_password == username:
+        return "new password equals the username"
+    return None
+
+
 def post_reset(host: str, username: str, reset_token: str, new_password: str,
                 timeout: float = TOTP_HTTP_TIMEOUT_S) -> "tuple[int, dict]":
     """POST /api/auth/reset -- ``{"username","reset_token","new_password"}``.

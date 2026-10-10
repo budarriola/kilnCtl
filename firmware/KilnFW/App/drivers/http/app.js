@@ -948,6 +948,12 @@
         forgotErrorEl2.textContent = 'Passwords do not match.';
         return;
       }
+      // Weak password: refuse here, token still unspent, so the operator just retypes.
+      var pwProblem = window.kcResetPasswordProblem(forgotNewPassEl.value, forgotUserEl.value);
+      if (pwProblem) {
+        forgotErrorEl2.textContent = pwProblem;
+        return;
+      }
       if (!forgotResetToken) {
         // Token was discarded or already spent -- restart at step 1 rather
         // than POSTing a reset with nothing to authorize it.
@@ -1155,6 +1161,25 @@
   // use nativeFetch and read text); null when it is not a host/origin refusal.
   window.kcHostRefusalFromText = function (text) {
     try { return window.kcHostRefusalText(JSON.parse(text)); } catch (e) { return null; }
+  };
+
+  // Client-side mirror of web_auth_password_check() (persist/web_auth_store.c) for the
+  // forgot-password flow: /api/auth/reset spends its one-time token on a request that passes
+  // the strength rule, and answers a weak password with the same generic 400 as a bad token,
+  // so the page must refuse a weak password BEFORE the POST to keep the token usable (web
+  // batch W1). Returns a message, or null when the password passes. The AP SSID/passphrase
+  // equality rule is board-side only. Length is UTF-8 bytes, like the firmware's strlen.
+  window.kcResetPasswordProblem = function (pw, username) {
+    var bytes = (typeof TextEncoder !== 'undefined') ? new TextEncoder().encode(pw).length : pw.length;
+    if (bytes < 10) return 'Password too short: use at least 10 characters.';
+    if (bytes > 64) return 'Password too long: use at most 64 characters.';
+    if (/^[a-z]+$/.test(pw)) return 'Password cannot be all lowercase letters: add a capital, digit or symbol.';
+    var low = pw.toLowerCase();
+    if (low.indexOf('password') >= 0 || low.indexOf('kiln') >= 0) {
+      return 'Password cannot contain "password" or "kiln".';
+    }
+    if (username && pw === username) return 'Password cannot be the same as the username.';
+    return null;
   };
 
   window.fetch = function (input, init) {

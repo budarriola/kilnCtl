@@ -183,6 +183,13 @@ def totp_reset_password(confirm: bool = False, host: Optional[str] = None) -> st
                 f"{', '.join(missing)} -- set them and retry (values are never accepted as "
                 f"call parameters)")
 
+    weak = thc.reset_password_problem(new_password, username)
+    if weak:
+        # /api/auth/reset answers a weak password with the same generic 400 as a bad
+        # token and the code/token would be spent; refuse before any HTTP (web batch W1).
+        return (f"refused: {NEW_PASSWORD_ENV} fails the board's password rule ({weak}) -- "
+                f"no request was sent and no TOTP code was used")
+
     if confirm is not True:
         return (
             f"DRY RUN (pass confirm=True, exactly, to actually run the reset) -- "

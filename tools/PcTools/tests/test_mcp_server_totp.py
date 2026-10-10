@@ -120,6 +120,37 @@ class ResetRefusalTest(_Base):
         self.assertIn(mst.NEW_PASSWORD_ENV, result)
 
 
+class ResetWeakPasswordTest(_Base):
+    """Web batch W1: a weak password is refused before ANY request, so the TOTP code is unspent."""
+
+    def test_weak_passwords_refused_with_no_http(self):
+        for pw in ("short1A", "alllowercaseletters", "MyPassword123", "xxKILNxxxx9", "bench"):
+            self._set_env(new_password=pw)
+            with unittest.mock.patch.object(thc, "post_forgot") as pf,                     unittest.mock.patch.object(thc, "post_reset") as pr:
+                result = mst.totp_reset_password(confirm=True)
+            self.assertTrue(result.startswith("refused:"), (pw, result))
+            self.assertIn("no TOTP code was used", result)
+            self.assertNotIn(pw, result)
+            pf.assert_not_called()
+            pr.assert_not_called()
+
+    def test_username_equal_password_refused(self):
+        self._set_env(username="BenchAdmin99", new_password="BenchAdmin99")
+        with unittest.mock.patch.object(thc, "post_forgot") as pf:
+            result = mst.totp_reset_password(confirm=True)
+        self.assertTrue(result.startswith("refused:"))
+        pf.assert_not_called()
+
+    def test_rule_boundaries(self):
+        f = thc.reset_password_problem
+        self.assertIsNotNone(f("Abcdefgh1"))          # 9 bytes
+        self.assertIsNone(f("Abcdefgh12"))            # 10 bytes
+        self.assertIsNone(f("A" + "b" * 63))          # 64 bytes
+        self.assertIsNotNone(f("A" + "b" * 64))       # 65 bytes
+        self.assertIsNotNone(f("abcdefghijk"))        # all lowercase
+        self.assertIsNone(f("abcdefghij1"))           # not all lowercase
+
+
 class ResetSuccessPathTest(_Base):
     def test_full_success_reports_ok_and_never_echoes_secrets(self):
         self._set_env(code="654321", new_password="Sup3rSecretPW!")

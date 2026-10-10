@@ -444,6 +444,11 @@ static void test_fuzz_reset(void)
         totp_reset_token_store(reset_tokens(), tok, "admin", now_ms());
         st = fuzz_post(reset_post_handler, weak, (long long)strlen(weak), (size_t)-1, 0);
         TEST_CHECK(st >= 400 && s_setpw_calls == 0 && fuzz_state_intact(), "reset: weak password is refused, nothing changed");
+        /* W2: the weak refusal is a FAILURE record. Without it an unauthenticated caller could
+           probe the weak/AP-secret checks with no throttle (review W3). An immediate retry must
+           hit the ladder, not reach the setter. */
+        st = fuzz_post(reset_post_handler, good, (long long)gl, (size_t)-1, 0);
+        TEST_CHECK(st == 429 && s_setpw_calls == 0, "reset: weak password records a backoff failure (immediate retry is 429)");
         fake_time_advance_ms(6000); /* clear the 5 s failure backoff */
         st = fuzz_post(reset_post_handler, good, (long long)gl, (size_t)-1, 0);
         TEST_CHECK(s_setpw_calls == 1 && strstr(s_sendstr, "\"ok\":true") != NULL,
