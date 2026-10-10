@@ -32,8 +32,8 @@ referenced), X no execution test (none, or source-text only).
 |---|---|---|---|---|---|
 | 1 | SaftyFW `src/tasks/safety_core.c` (1952 L) | Guard loop: trips S1..S14, relay command, trip latch, clear | S R | Y (campaign 1: `test_safety_core_host.c`, 771 checks; text-grep tests remain) | Whole tick: each guard's trip/clear threshold, trip_mask derivation, relay de-energize order, clear_trip binding |
 | 2 | SaftyFW `src/tasks/link_task.c` (3592 L) | kilnlink RX/TX, frame dispatch, SET_PARAM, clear-trip, update commands | S N P | T (campaign 2: `test_link_task_fuzz.c` covers enable/heat-grant, CRC, resync, seq, unknown cmds; SET_PARAM and update commands not covered) | Dispatch table, CRC/length reject paths, commit/reject glue, TC type gate wiring (only extracted `link_task_*` helpers run) |
-| 3 | SaftyFW `src/tasks/thermo_task.c` (748 L) | MAX31856 read, fault bits, DRDY recovery feeding safety | S | X | Fault-bit to guard mapping, stale-sample handling, retry path |
-| 4 | SaftyFW `src/tasks/watchdog_task.c` (344 L) | Check-in aggregation, hardware watchdog feed | S | X | Missed check-in -> no-feed branch (only `watchdog_gate` runs) |
+| 3 | SaftyFW `src/tasks/thermo_task.c` (748 L) | MAX31856 read, fault bits, DRDY recovery feeding safety | S | Y (campaign 3: `test_thermo_task_faults.c`, 70 checks, task-loop harness) | Real SPI/DRDY timing; stuck-reading detection is the guards' job |
+| 4 | SaftyFW `src/tasks/watchdog_task.c` (344 L) | Check-in aggregation, hardware watchdog feed | S | Y (campaign 4: `test_watchdog_task_loop.c`, 134 checks) | Real scheduler, core affinity, `update_task_erase_slot()` feed |
 | 5 | KilnFW `drivers/safety/safety_link_payload.c` (337 L) | Builds status/trip/diag/stats payloads for the link | S N | T (0/5 referenced; compile test only) | `safety_link_build_status_payload`, `_trip_event_`, `_diag_`, `_stats_`, `_fw_version_` byte layouts |
 | 6 | KilnFW `drivers/safety/danger_mode.c` (378 L) | Operator danger-mode heat enable window | S R | T (1/9) | `request_start`, `set_heat_enable_request`, `remaining_ms` expiry, `stop`, `get_relay_status`, `init` |
 | 7 | KilnFW `drivers/owners/kiln_io_owner.c` (938 L), `kiln_io.c` (523 L) | SX1509 relay/IO command owner, relay writes | R S | T (6/18, 7/15) | `command_set_relay`, `set_io_dir`, sx reset/read/scan, irq paths |
@@ -72,10 +72,10 @@ Low risk or skipped: `ui_page_*`, `ui_topbar`, `panel_spi*`, `NS2009.c`,
    oversize, replayed-seq and wrong-boot-id frames through a fake UART. Assert
    no state change on rejects, correct NACK codes, SET_PARAM range refusal, and
    clear-trip / update commands refused when armed.
-3. **thermo_task to guard path (SaftyFW).** With `fake_spi` MAX31856, inject
+3. **thermo_task to guard path (SaftyFW). DONE (campaign 3).** With `fake_spi` MAX31856, inject
    open-circuit, out-of-range, stale DRDY and CRC faults. Assert the sample is
    flagged invalid and safety_core sees the fault rather than a last-good value.
-4. **watchdog_task starvation (SaftyFW).** Skip one required check-in and
+4. **watchdog_task starvation (SaftyFW). DONE (campaign 4).** Skip one required check-in and
    assert the feed is withheld within the bound; skip none and assert feeding.
    Cover the boot-checkin list so a new task cannot be omitted silently.
 5. **safety_link_payload golden byte layouts (KilnFW).** Golden vectors for

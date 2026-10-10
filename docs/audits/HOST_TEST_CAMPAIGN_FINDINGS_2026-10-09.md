@@ -320,3 +320,78 @@ Findings: no defects. Observations, not defects:
 - An enable payload of 0xFF counts as a grant (any nonzero payload[1]).
 - Coverage limits: no FreeRTOS scheduling, fibers only; ASan not in the
   standard build.
+
+## Campaign 3: thermo_task fault injection (test_thermo_task_faults.c)
+
+70 checks in `thermo_task_tests.exe`. A new task-loop harness
+(`firmware/SaftyFW/test/stubs/task_harness/`: captured `xTaskCreate`, scripted
+`ulTaskNotifyTake`/`vTaskDelayUntil` hooks, controllable gpio and ~DRDY ISR,
+longjmp exit from the `for(;;)` loop) lets the real `thermo_task.c` run on the
+host against the real `max31856.c` and `fake_spi`, with the real
+`safety_guards.c` consuming the published snapshot.
+
+Covered: OPEN, OVUV and TCRANGE fault bits (tc NaN, snapshot invalid); CJRANGE
+(cj NaN, tc still valid); the threshold flags passing through; per-tc_type
+plausibility bands, commissioned (K -200..1372) and the uncommissioned union;
+SPI timeout (`spi_failed`, NaN, invalid); an unverified CR1 readback
+downgrading a clean reading; DRDY silence and a missed edge; the tc offset
+(added, NaN stays NaN); a failed publish keeping the old snapshot with
+`snapshot_is_fresh` bounding it at 2000 ms; recovery after each fault; and the
+end state that the guards trip S5 after 12 ticks at `dt_s` 5 for every fault
+that leaves the input invalid.
+
+Negative tests (`negtest.ps1 -Preset saftyfw-host`, baseline PASS):
+
+| Mutation | Result |
+|---|---|
+| drop the unverified-CR1 downgrade (`thermo_task.c`) | CAUGHT |
+| OPEN/OVUV/TCRANGE no longer NaN the tc (`max31856.c`) | CAUGHT |
+| CJRANGE no longer NaNs the cj (`max31856.c`) | CAUGHT |
+| plausibility band ignored (`thermo_task.c`) | CAUGHT |
+| tc offset dropped (`thermo_task.c`) | CAUGHT |
+| `spi_failed` never set, or `snap.valid` ignoring it | MISSED, equivalent (see below) |
+| all three SPI-failure layers removed together | CAUGHT |
+
+Findings: no defect. An SPI failure is rejected by three independent layers
+(`max31856_read()` returns false, `snap.valid` includes `!spi_failed`, and a
+NaN tc fails the plausibility check), so removing any one or two of them is an
+equivalent mutant. That is defense in depth, not a gap; the test fails only
+when all three are removed. Stuck readings (a constant value with no fault
+bit) are not detected in `thermo_task`; that is the guards' job and the test
+documents it rather than asserting it.
+
+Not covered: the Pico-side hardware (real SPI timing, real DRDY edge latency),
+config_store persistence of the tc type (stubbed), and `thermo_task_inject`
+paths beyond the snapshot fields.
+
+## Campaign 4: watchdog_task starvation (test_watchdog_task_loop.c)
+
+134 checks in `watchdog_task_tests.exe`, driving the real `watchdog_task.c`
+and `watchdog_gate.c` with `fake_wdt`, `fake_gpio` and `fake_scratch`.
+
+Covered: initial state after `watchdog_task_start()` (LED off and an output,
+boot grace); `watchdog_task_all_checked_in_since_boot()` needing all 8 tasks
+and ignoring out-of-range ids; for each of the 8 tasks, elapsed = deadline-1
+and = deadline feed (no false trip), deadline+1 withholds the feed and latches
+exactly that task with overage 1 ms, both at tick 1000 and across the 32-bit
+tick wrap; a task that never checks in after boot; worst-task selection, the
+tie rule (lower id), saturation at the latch format maximum (8191 ms), and the
+latch clearing on recovery; the task loop feeding every 250 ms and toggling
+the LED when healthy; and for each task, kicking then going silent: the feed is
+withheld on the first evaluation past its deadline, the 1000 ms hardware
+watchdog does not fire before that, fires exactly 5 periods after the last
+feed, the LED freezes, and the surviving latch names the task; a stall that
+recovers inside the hardware timeout does not reset and clears the latch.
+
+Negative tests (baseline PASS): gate `<=` to `<` CAUGHT; link deadline 30 to 42
+ms CAUGHT; LED toggle removed CAUGHT; overdue mask not latched CAUGHT; hardware
+feed dropped CAUGHT.
+
+Findings: no defect. Observation: the overdue overage latch saturates at 8191
+ms (13 bits, `WATCHDOG_OVERDUE_DIAG_OVERAGE_MAX_MS`) while `watchdog_task.c`
+clamps to 0xFFFF before passing it on, so the clamp there is dead; harmless.
+
+Not covered: the real FreeRTOS scheduler (critical sections are no-ops), the
+second core affinity, `update_task_erase_slot()`'s between-erase feed call, and
+the RP2040 watchdog scratch-register survival across a real reset (`fake_scratch`
+only).
