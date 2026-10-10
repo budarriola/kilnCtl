@@ -338,6 +338,20 @@ class ApplyTest(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("UNSET", result.mismatches[0])
 
+    def test_readback_failure_after_post_says_state_unknown(self):
+        import urllib.error
+        seq = [_fake_response(json.dumps(_sample_get()).encode()),
+               _fake_response(json.dumps({"ok": True}).encode())]
+
+        def fake(req, timeout=None):
+            if seq:
+                return seq.pop(0)
+            raise urllib.error.URLError("down")
+        with unittest.mock.patch("urllib.request.urlopen", fake):
+            with self.assertRaises(sc.SafetyCfgHttpError) as cm:
+                sc.apply_safety_fields("host", {"tc_type": 3})
+        self.assertIn("UNKNOWN", str(cm.exception))
+
     def test_link_down_refuses_before_posting(self):
         down = _sample_get()
         down["link_up"] = False

@@ -492,7 +492,13 @@ def apply_safety_fields(host: str, fields: "dict[str, Any]",
     if not verify:
         return SafetyApplyResult(ok=bool(response.get("ok")), post_reason=reason)
 
-    after = get_commissioning(host, timeout)
+    try:
+        after = get_commissioning(host, timeout)
+    except SafetyCfgHttpError as exc:
+        raise SafetyCfgHttpError(
+            f"POST {_API_PATH} answered ok={bool(response.get('ok'))}, but the confirming read-back failed: "
+            f"{exc} -- state UNKNOWN, the Pico may have APPLIED the fields; re-read before retrying",
+            getattr(exc, "status", None), getattr(exc, "detail", "")) from exc
     confirmed, mismatches = verify_fields(after, fields)
     ok = bool(response.get("ok")) and not mismatches
     return SafetyApplyResult(
