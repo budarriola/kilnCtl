@@ -623,10 +623,39 @@ void force_all_relays_off(void)
     if (s_exec.state == PROFILE_EXEC_IDLE) {
         return; /* nothing loaded -- nothing to turn off */
     }
+    bool terminal = (s_exec.state == PROFILE_EXEC_DONE || s_exec.state == PROFILE_EXEC_FAULTED);
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        if (s_exec.zones[zi].active) {
-            force_zone_relay_off(zi);
+        if (!s_exec.zones[zi].active) {
+            continue;
         }
+        uint8_t zmask = 0;
+        if (terminal && s_exec.io && zones_config_get_relay_mask(zi, &zmask)) {
+            /* Firing-path audit MED-3 (the F4 filter of zone_off_pending_retry()): once the
+             * run has ended and released its claim, a relay held by another owner (autotune,
+             * manual, rule) is not ours to write OFF every tick. */
+            uint8_t m = zmask;
+            for (uint8_t b = 0; b < 8; b++) {
+                if (!(zmask & (1u << b))) continue;
+                relay_owner_t o = relay_authority_get_owner((uint8_t)(b + 1u));
+                if (o != RELAY_OWNER_NONE && o != RELAY_OWNER_PROFILE) {
+                    m &= (uint8_t)~(1u << b);
+                }
+            }
+            if (m != zmask) {
+                heater_output_force_off(&s_exec.zones[zi].heater_state);
+                s_exec.zones[zi].relay_commanded_on = false;
+                s_exec.zones[zi].duty = 0.0f;
+                if (m != 0) {
+                    if (kiln_io_owner_command_set_relay_mask_authorized(m, 0) == ESP_OK) {
+                        relay_off_tracker_note_write(m, 0);
+                    } else {
+                        s_exec.zone_off_pending_mask |= m;
+                    }
+                }
+                continue;
+            }
+        }
+        force_zone_relay_off(zi);
     }
 }
 
@@ -965,7 +994,11 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
             /* Disabled (or conflicted) after the run started: stop driving
              * it, and open it once if we had it closed. */
             if (s_exec.aux[i].commanded_on || s_exec.aux[i].actuated_on) {
-                aux_apply_relay(i, false);
+                if (!aux_apply_relay(i, false)) {
+                    /* Firing-path audit LOW-2: keep the commanded/actuated state so the
+                     * next tick retries the OFF instead of forgetting a closed relay. */
+                    continue;
+                }
             }
             profile_executor_aux_reset_runtime(i);
             continue;
@@ -1181,6 +1214,10 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
                 ESP_LOGE(PE_TAG, "relay/IO segment %u: force-off of relay %u failed: %s -- sweep_unowned_relays() "
                               "will keep retrying",
                          idx + 1, r->target, esp_err_to_name(err));
+                /* Firing-path audit MED-1: record the failed OFF so zone_off_pending_retry()
+                 * (every non-RUNNING tick) and zone_off_pending_retry_running() keep
+                 * retrying it after the claim below is dropped. */
+                s_exec.zone_off_pending_mask |= bit;
             }
         }
         /* Either way this run is done naming this bit: on the off path
@@ -1501,6 +1538,9 @@ void force_relay_mask_off(uint8_t zi, uint8_t mask)
             ESP_LOGE(PE_TAG, "zone %u: dropping superseded relay mask 0x%02X failed: %s -- "
                           "those contacts may still be closed and nothing owns them now",
                      zi, mask, esp_err_to_name(err));
+            /* Firing-path audit LOW-4: the sweep only runs while RUNNING; the pending
+             * mask is retried in every state. */
+            s_exec.zone_off_pending_mask |= mask;
         }
     }
     sim_backend_note_zone_relay(zi, false);

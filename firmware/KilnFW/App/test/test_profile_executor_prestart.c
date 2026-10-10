@@ -13225,6 +13225,69 @@ static void test_zone_off_pending_retry_ownership_edges(void)
     TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x01,
                "A-LOW-1: F4 fallback excludes the IO-segment relay");
     memset(&s_exec, 0, sizeof(s_exec));
+
+    /* MED-1: a failed IO-segment relay OFF stays pending after the claim is dropped. */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 2; /* relay 3 -> 0x04 */
+    g_relay_write_fail = true;
+    io_seg_finish(0, false);
+    g_relay_write_fail = false;
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) != 0, "MED-1: failed IO-segment OFF is recorded as pending");
+    TEST_CHECK(!s_exec.io_segs[0].active, "MED-1: segment is finished");
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x04 && s_exec.zone_off_pending_mask == 0,
+               "MED-1: the retry later opens it and clears the bit");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* LOW-4: a failed superseded-mask force-off is recorded as pending. */
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    g_relay_write_fail = true;
+    force_relay_mask_off(0, 0x08);
+    g_relay_write_fail = false;
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x08) != 0, "LOW-4: failed superseded-mask OFF is pending");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* LOW-2: aux disabled mid-run keeps its state until the OFF lands. */
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.aux_claim_mask = 0x01;
+    s_exec.aux[0].commanded_on = true;
+    s_exec.aux[0].actuated_on = true;
+    g_relay_write_fail = true;
+    profile_executor_aux_tick(1.0f, false, 0, 4);
+    TEST_CHECK(s_exec.aux[0].commanded_on || s_exec.aux[0].actuated_on,
+               "LOW-2: failed OFF of a mid-run-disabled aux is not forgotten");
+    g_relay_write_fail = false;
+    profile_executor_aux_tick(1.0f, false, 0, 4);
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "LOW-2: retry lands, state cleared");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* MED-3: DONE state does not write OFF to a relay now held by autotune; a free one still is. */
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    g_stub_relay_mask[0] = 0x01;
+    g_stub_relay_mask[1] = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.zones[0].active = true;
+    s_exec.zones[1].active = true;
+    g_stub_relay_owner[1] = RELAY_OWNER_AUTOTUNE; /* relay 1 */
+    g_relay_write_calls = 0;
+    force_all_relays_off();
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02,
+               "MED-3: only the relay not held by another owner is written OFF in DONE");
+    g_stub_relay_owner[1] = RELAY_OWNER_NONE;
+    g_relay_write_calls = 0;
+    force_all_relays_off();
+    TEST_CHECK(g_relay_write_calls == 2, "MED-3: unowned relays are still driven OFF in DONE");
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(&s_exec, 0, sizeof(s_exec));
 }
 
 static void test_zone_off_pending_retry_while_running(void)
