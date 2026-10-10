@@ -16,7 +16,8 @@ const J = (o, status) => ({ ok: (status || 200) < 300, status: status || 200, te
 function boot(state) {
   const listeners = {};
   const gate = { resolvePost: null };
-  const r = runPageScript(HTML, {
+  const r = { posts: [] };
+  Object.assign(r, runPageScript(HTML, {
     elements: ['themeBtn', 'forkBtn', 'saveBtn', 'reloadBtn', 'saveAsBtn', 'saveAsName', 'overwriteBtn',
       'overwriteConfirm', 'discardBtn', 'segments', 'forkMsg', 'saveMsg', 'decideMsg', 'statusText', 'refusalBanner'],
     extra: {
@@ -27,19 +28,24 @@ function boot(state) {
       kcIsAuthCancelled: () => false,
       fetch: (url, init) => {
         if (init && init.method === 'POST') {
-          if (state.holdPost) return new Promise((res) => { gate.resolvePost = () => res(J({ ok: true })); });
-          return Promise.resolve(J({ ok: true }));
+          r.posts.push(url);
+          if (state.holdPost) return new Promise((res) => { gate.resolvePost = () => res(J({ ok: true, generation: 9 })); });
+          if (state.postStatus) return Promise.resolve(J({ ok: false, error: 'working copy changed elsewhere -- reload' }, state.postStatus));
+          return Promise.resolve(J({ ok: true, generation: 9 }));
         }
-        if (url.indexOf('content=1') >= 0) return Promise.resolve(J({ name: 'w', zone_mask: 1, segments: [] }));
+        if (url.indexOf('content=1') >= 0) {
+          if (state.holdContent) return new Promise((res) => { gate.resolveContent = () => res(J({ name: 'w', zone_mask: 1, segments: [] })); });
+          return Promise.resolve(J({ name: 'w', zone_mask: 1, segments: [] }));
+        }
         return Promise.resolve(J(state.live));
       },
     },
-  });
+  }));
   r.gate = gate;
   r.prompts = () => { let p = false; listeners.beforeunload({ preventDefault() { p = true; } }); return p; };
   return r;
 }
-const ACTIVE = (id) => ({ active: true, working_id: id, editable_from_segment: 0, pending_decision: false });
+const ACTIVE = (id, gen) => ({ active: true, working_id: id, generation: gen === undefined ? 1 : gen, editable_from_segment: 0, pending_decision: false });
 
 (async () => {
   let st = { live: ACTIVE(5) };
@@ -72,7 +78,7 @@ const ACTIVE = (id) => ({ active: true, working_id: id, editable_from_segment: 0
   st = { live: ACTIVE(5) };
   r = boot(st); await flush();
   r.els.segments.fire('input');
-  st.live = ACTIVE(6);
+  st.live = ACTIVE(5, 2); // same id, newer generation (M1)
   await r.sandbox.refreshLive(); await flush();
   ok(r.prompts(), 'L3: a changed working copy does not clobber dirty edits (guard stays armed)');
   ok(/NOT reloaded/.test(r.els.saveMsg.innerHTML), 'L3: the operator is told the form was not reloaded');
@@ -86,6 +92,43 @@ const ACTIVE = (id) => ({ active: true, working_id: id, editable_from_segment: 0
   r.els.segments.fire('input'); // typed while the save is in flight
   r.gate.resolvePost(); await flush();
   ok(r.prompts(), 'L3: edits made while a save is in flight stay dirty');
+
+  // M1: save/decide echo the generation; the board's 409 keeps the guard armed.
+  st = { live: ACTIVE(5, 4) };
+  r = boot(st); await flush();
+  r.els.segments.fire('input');
+  st.live = ACTIVE(5, 9); // the board reports the generation our save produces
+  r.els.saveBtn.fire('click'); await flush();
+  ok(/\?gen=4$/.test(r.posts[0]), 'M1: save sends the loaded generation');
+  r.els.discardBtn.fire('click'); await flush();
+  ok(/decide\?gen=9$/.test(r.posts[1]), 'M1: decide sends the generation adopted from the save response');
+
+  st = { live: ACTIVE(5, 4), postStatus: 409 };
+  r = boot(st); await flush();
+  r.els.segments.fire('input');
+  r.els.saveBtn.fire('click'); await flush();
+  ok(r.prompts(), 'M1: a 409 stale save keeps the guard armed');
+  ok(/changed elsewhere/.test(r.els.saveMsg.innerHTML), 'M1: a 409 stale save shows the board text');
+
+  // L1: own save with edits typed in flight: no misleading Reload banner, still dirty.
+  st = { live: ACTIVE(5), holdPost: true };
+  r = boot(st); await flush();
+  r.els.segments.fire('input');
+  r.els.saveBtn.fire('click'); await flush();
+  r.els.segments.fire('input');
+  st.live = ACTIVE(5, 9); // the board now reports the generation our save produced
+  r.gate.resolvePost(); await flush();
+  await r.sandbox.refreshLive(); await flush();
+  ok(!/NOT reloaded/.test(r.els.saveMsg.innerHTML), 'L1: no "press Reload" banner after our own save');
+  ok(/not saved yet/.test(r.els.saveMsg.textContent), 'L1: tells the operator the later edits are unsaved');
+  ok(r.prompts(), 'L1: later edits keep the guard armed');
+
+  // L2: edits typed while the working copy is being (re)loaded are not overwritten.
+  st = { live: ACTIVE(5), holdContent: true };
+  r = boot(st); await flush();
+  r.els.segments.fire('input');
+  r.gate.resolveContent(); await flush();
+  ok(r.prompts(), 'L2: edits typed during the content fetch stay dirty');
 
   process.exit(failed ? 1 : 0);
 })();

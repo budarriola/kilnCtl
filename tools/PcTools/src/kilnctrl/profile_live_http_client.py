@@ -190,8 +190,17 @@ def fork_live(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
     return _post_form(host, "/api/profile/live/fork", {}, timeout)
 
 
-def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S
-              ) -> dict:
+def _gen_path(path: str, generation: Optional[int]) -> str:
+    """Append ?gen=N (the "generation" from get_live_status()/a prior edit or
+    fork response). The board answers 409 "changed elsewhere" when it no
+    longer matches. None omits it: an ABSENT gen is accepted by the board
+    (compat for callers that did not read first), so pass the generation
+    whenever a read preceded the write."""
+    return path if generation is None else f"{path}?gen={int(generation)}"
+
+
+def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+              generation: Optional[int] = None) -> dict:
     """POST /api/profile/live -- saves `segments` (a list of dicts, each
     shaped like one element of get_live_content()'s "segments" list) into the
     working slot. `kind` defaults to 0 (zone ramp/dwell) when omitted.
@@ -260,30 +269,33 @@ def edit_live(host: str, name: str, zone_mask: int, segments: list, timeout: flo
             fields[f"seg{i}_io_blocking"] = str(seg["io_blocking"])
         if "io_leave_on" in seg or "io_leave_on_at_end" in seg:
             fields[f"seg{i}_io_leave_on"] = str(seg.get("io_leave_on", seg.get("io_leave_on_at_end")))
-    return _post_form(host, "/api/profile/live", fields, timeout)
+    return _post_form(host, _gen_path("/api/profile/live", generation), fields, timeout)
 
 
-def decide_live_discard(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_discard(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                        generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=discard -> {"ok":true}. Raises
     ProfileLiveHttpError(status=409) if there is nothing pending, or
     status=500 if the firmware could not clear the pending record (the
     discard did NOT happen and the record is still pending)."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "discard"}, timeout)
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "discard"}, timeout)
 
 
-def decide_live_save_as(host: str, name: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_save_as(host: str, name: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                        generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=save_as&name=... ->
     {"ok":true,"id":uint} (the new profile slot). Raises
     ProfileLiveHttpError(status=400) on a missing/invalid name or a save
     failure, status=409 if there is nothing pending."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "save_as", "name": name}, timeout)
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "save_as", "name": name}, timeout)
 
 
-def decide_live_overwrite(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S) -> dict:
+def decide_live_overwrite(host: str, timeout: float = PROFILE_LIVE_HTTP_TIMEOUT_S,
+                          generation: Optional[int] = None) -> dict:
     """POST /api/profile/live/decide action=overwrite&confirm=1 ->
     {"ok":true} (origin slot overwritten in place). Raises
     ProfileLiveHttpError(status=403) if the origin is a builtin profile
     (never overwritable), status=409 if there is nothing pending. This
     function always sends confirm=1 -- the confirm gate belongs at the MCP
     tool layer (profile_live_decide's own `confirm` parameter), not here."""
-    return _post_form(host, "/api/profile/live/decide", {"action": "overwrite", "confirm": "1"}, timeout)
+    return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "overwrite", "confirm": "1"}, timeout)

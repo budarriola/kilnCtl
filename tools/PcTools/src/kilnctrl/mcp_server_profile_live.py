@@ -60,10 +60,11 @@ def profile_live_get(content: bool = False, host: Optional[str] = None) -> str:
     full profile body (name/zone_mask/segments).
 
     Status fields: active, origin_id, origin_is_builtin, working_id (-1 if
-    no working copy exists yet), editable_from_segment, pending_decision,
+    no working copy exists yet), generation (bumps on every working-copy
+    save/fork/discard; pass it back to profile_live_edit/decide), editable_from_segment, pending_decision,
     and last_refusal (null, or {"generation","result","message"} -- the
     board's own live-edit-generation-tagged refusal record; there is no
-    other generation counter exposed on this surface).
+    separate from the top-level working-copy generation).
 
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
@@ -110,7 +111,7 @@ def profile_live_fork(confirm: bool = False, host: Optional[str] = None) -> str:
 
 @_core._tool()
 def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool = False,
-                       host: Optional[str] = None) -> str:
+                       host: Optional[str] = None, generation: Optional[int] = None) -> str:
     """POST /api/profile/live -- saves a candidate profile body into the
     working slot (validated HARD, then window-checked against the running
     profile before being accepted).
@@ -140,6 +141,12 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
     Requires confirm=True: on confirm=False, no request is sent to the
     board at all.
 
+    `generation`: the "generation" from profile_live_get(). When given, the
+    board refuses (409 "changed elsewhere") if the working copy changed since
+    that read, instead of last-writer-wins. When omitted the board accepts the
+    write unconditionally (compatible with callers that did not read first);
+    pass it whenever you read the copy before editing.
+
     `host`: board IP/hostname; defaults to the board's current station IP,
     else its fallback-AP address 192.168.4.1.
     """
@@ -147,7 +154,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
         return "error: refused -- confirm=True is required. This overwrites the working copy's content."
     resolved = _profile_live_resolve_host(host)
     try:
-        obj = profile_live_http.edit_live(resolved, name, zone_mask, segments)
+        obj = profile_live_http.edit_live(resolved, name, zone_mask, segments, generation=generation)
     except ValueError as exc:
         return f"error: {exc}"
     except profile_live_http.ProfileLiveHttpError as exc:
@@ -159,7 +166,7 @@ def profile_live_edit(name: str, zone_mask: int, segments: list, confirm: bool =
 
 @_core._tool()
 def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool = False,
-                         host: Optional[str] = None) -> str:
+                         host: Optional[str] = None, generation: Optional[int] = None) -> str:
     """POST /api/profile/live/decide -- resolves a pending working copy.
 
     `action`: one of
@@ -171,6 +178,9 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
                      builtin profile (builtins are never overwritable).
 
     Refused (409, any action) if there is no pending working copy at all.
+
+    `generation`: from profile_live_get(); when given, a mismatch is refused
+    409 "changed elsewhere" (nothing decided). Omitted = unconditional (compat).
 
     Requires confirm=True: on confirm=False, no request is sent to the
     board at all -- this is true for EVERY action here, including
@@ -190,11 +200,11 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
     resolved = _profile_live_resolve_host(host)
     try:
         if action == "discard":
-            obj = profile_live_http.decide_live_discard(resolved)
+            obj = profile_live_http.decide_live_discard(resolved, generation=generation)
         elif action == "save_as":
-            obj = profile_live_http.decide_live_save_as(resolved, name)
+            obj = profile_live_http.decide_live_save_as(resolved, name, generation=generation)
         else:
-            obj = profile_live_http.decide_live_overwrite(resolved)
+            obj = profile_live_http.decide_live_overwrite(resolved, generation=generation)
     except profile_live_http.ProfileLiveHttpError as exc:
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""

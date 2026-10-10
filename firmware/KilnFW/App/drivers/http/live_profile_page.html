@@ -138,7 +138,12 @@
 // functions are the ones to delete in favour of it.
 
 var pollTimer = null;
-var lastWorkingId = null;
+// lastGen: the working-copy "generation" (GET /api/profile/live) this form was
+// last loaded from or saved at; null = load on the next poll. It is echoed as
+// ?gen= on save and decide so the board refuses (409) a stale form instead of
+// overwriting a copy that changed elsewhere (another tab, the LCD, a re-fork).
+var lastGen = null;
+var loadingCopy = false;
 
 function escapeHtml(s) {
   if (window.kcEscapeHtml) return window.kcEscapeHtml(s);
@@ -276,13 +281,23 @@ window.addEventListener('beforeunload', function (e) {
 
 var currentWorking = null; // last-fetched /api/profile?id=working_id response
 
-function loadWorkingCopy(workingId, editableFromSegment) {
+function loadWorkingCopy(workingId, editableFromSegment, gen) {
   // Review fix (landing pass): the working copy is NOT in the ordinary
   // profile catalogue (it deliberately lives outside profiles_http.c's slot
   // array, so it can never show up in /api/profiles or favorites), so
   // /api/profile?id=<working_id> 404s on it. The board serves the working
   // copy's body on the live route itself, ?content=1.
+  if (loadingCopy) return Promise.resolve();
+  loadingCopy = true;
+  var seqAtStart = editSeq;
   return fetch('/api/profile/live?content=1').then(function (r) { return r.json(); }).then(function (p) {
+    loadingCopy = false;
+    if (editSeq !== seqAtStart) {
+      // Edits typed while this fetch was in flight: never overwrite them.
+      showStaleBanner();
+      return;
+    }
+    lastGen = gen;
     currentWorking = p;
     document.getElementById('workingName').textContent = p.name;
     document.getElementById('saveBtn').dataset.zoneMask = p.zone_mask;
@@ -290,8 +305,19 @@ function loadWorkingCopy(workingId, editableFromSegment) {
     document.getElementById('saveBtn').dataset.id = workingId;
     renderSegments(p.segments, editableFromSegment);
     dirty = false;
+    document.getElementById('saveMsg').textContent = '';
     document.getElementById('editorCard').style.display = '';
-  });
+  }, function (e) { loadingCopy = false; throw e; });
+}
+
+function genQuery() {
+  return (lastGen === null || lastGen === undefined) ? '' : '?gen=' + encodeURIComponent(lastGen);
+}
+
+function showStaleBanner() {
+  document.getElementById('saveMsg').innerHTML = '<span class="err">Changed elsewhere -- reload. The working ' +
+    'copy on the board is not the one this form was loaded from, and this form has unsaved edits, so it was NOT ' +
+    'reloaded. Press Reload to discard your edits and load it.</span>';
 }
 
 function setStatusText(live) {
@@ -355,28 +381,26 @@ function refreshLive() {
     if (!live.active && !live.pending_decision) {
       forkCard.style.display = 'none';
       editorCard.style.display = 'none';
-      lastWorkingId = null;
+      lastGen = null;
       dirty = false; // editor gone: nothing left that could be saved
       return;
     }
     if (live.active && !hasWorking) {
       forkCard.style.display = '';
       editorCard.style.display = 'none';
-      lastWorkingId = null;
+      lastGen = null;
       dirty = false; // working copy disappeared: nothing left that could be saved
       return;
     }
     forkCard.style.display = 'none';
-    if (hasWorking && live.working_id !== lastWorkingId) {
+    if (hasWorking && live.generation !== lastGen) {
       if (dirty) {
         // Never silently overwrite unsaved edits with a changed working copy:
         // keep them, keep the guard armed, and say so. Reload discards them.
-        document.getElementById('saveMsg').innerHTML = '<span class="err">The working copy changed on the board, but ' +
-          'this form has unsaved edits and was NOT reloaded. Press Reload to discard your edits and load it.</span>';
+        showStaleBanner();
         return;
       }
-      lastWorkingId = live.working_id;
-      return loadWorkingCopy(live.working_id, live.editable_from_segment);
+      return loadWorkingCopy(live.working_id, live.editable_from_segment, live.generation);
     }
   }).catch(function (authErr) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
@@ -396,7 +420,7 @@ document.getElementById('forkBtn').addEventListener('click', function () {
         return;
       }
       msg.textContent = '';
-      lastWorkingId = null; // force the next refreshLive() to load the fresh working copy
+      lastGen = null; // force the next refreshLive() to load the fresh working copy
       refreshLive();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }
@@ -412,7 +436,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));
   var savedSeq = editSeq;
   msg.textContent = 'Saving...';
-  fetch('/api/profile/live', {
+  fetch('/api/profile/live' + genQuery(), {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(readJsonResult)
     .then(function (res) {
@@ -424,9 +448,16 @@ document.getElementById('saveBtn').addEventListener('click', function () {
         msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'save failed') + '</span>';
         return;
       }
-      msg.textContent = 'Saved.';
-      if (editSeq === savedSeq) dirty = false; // edits typed while the save was in flight stay dirty
-      lastWorkingId = null;
+      // The form already holds exactly what was saved, so no reload: adopt the
+      // new generation (L1/L2: no reload means no misleading banner and no
+      // re-render that could overwrite edits typed during the save).
+      if (res.data.generation !== undefined) lastGen = res.data.generation; else lastGen = null;
+      if (editSeq === savedSeq) {
+        dirty = false;
+        msg.textContent = 'Saved.';
+      } else {
+        msg.textContent = 'Saved. You made further edits while saving -- they are not saved yet.';
+      }
       refreshLive();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }
@@ -436,14 +467,14 @@ document.getElementById('saveBtn').addEventListener('click', function () {
 
 document.getElementById('reloadBtn').addEventListener('click', function () {
   dirty = false; // explicit reload = discard edits
-  lastWorkingId = null;
+  lastGen = null;
   refreshLive();
 });
 
 function decide(body) {
   var msg = document.getElementById('decideMsg');
   msg.textContent = 'Working...';
-  return fetch('/api/profile/live/decide', {
+  return fetch('/api/profile/live/decide' + genQuery(), {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(readJsonResult)
     .then(function (res) {
@@ -453,7 +484,7 @@ function decide(body) {
       }
       msg.textContent = 'Done.';
       dirty = false;
-      lastWorkingId = null;
+      lastGen = null;
       refreshLive();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) { msg.textContent = 'Sign-in cancelled'; return; }

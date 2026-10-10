@@ -92,7 +92,7 @@ class ProfileLiveEditConfirmGateTests(unittest.TestCase):
                                          return_value={"ok": True, "warnings": []}) as m:
             result = mpl.profile_live_edit("x", 1, segments, confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
-        m.assert_called_once_with("10.0.0.5", "x", 1, segments)
+        m.assert_called_once_with("10.0.0.5", "x", 1, segments, generation=None)
 
     def test_unknown_segment_key_value_error_surfaces_as_error_string(self):
         with unittest.mock.patch.object(
@@ -128,7 +128,7 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
                                          return_value={"ok": True}) as m:
             result = mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
-        m.assert_called_once_with("10.0.0.5")
+        m.assert_called_once_with("10.0.0.5", generation=None)
 
     def test_save_as_without_name_refuses_without_sending_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_save_as") as m:
@@ -142,14 +142,20 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
                                          return_value={"ok": True, "id": 3}) as m:
             result = mpl.profile_live_decide("save_as", name="new one", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
-        m.assert_called_once_with("10.0.0.5", "new one")
+        m.assert_called_once_with("10.0.0.5", "new one", generation=None)
+
+    def test_generation_is_passed_through(self):
+        with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_discard",
+                                         return_value={"ok": True}) as m:
+            mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5", generation=12)
+        m.assert_called_once_with("10.0.0.5", generation=12)
 
     def test_overwrite_sends_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_overwrite",
                                          return_value={"ok": True}) as m:
             result = mpl.profile_live_decide("overwrite", confirm=True, host="10.0.0.5")
         self.assertTrue(result.startswith("ok"))
-        m.assert_called_once_with("10.0.0.5")
+        m.assert_called_once_with("10.0.0.5", generation=None)
 
     def test_overwrite_builtin_origin_reports_403(self):
         with unittest.mock.patch.object(

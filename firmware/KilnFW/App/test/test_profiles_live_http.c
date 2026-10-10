@@ -630,6 +630,53 @@ static void test_accept_success_200(void)
     TEST_CHECK(strcmp(working.name, "cand") == 0, "working slot holds the parsed candidate");
 }
 
+static void test_generation_guard(void)
+{
+    TEST_SECTION("M1 generation -- GET reports it, stale gen on edit/decide is 409, matching gen accepted");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t greq = make_req(NULL);
+    api_profile_live_get_handler(&greq);
+    char want[48];
+    snprintf(want, sizeof(want), "\"generation\":%u", (unsigned)live_profile_generation());
+    TEST_CHECK(strstr(s_resp_body, want) != NULL, "GET carries the current generation");
+
+    char q[32];
+    snprintf(q, sizeof(q), "gen=%u", (unsigned)(live_profile_generation() + 1u));
+    s_stub_query = q;
+    profile_t before;
+    TEST_CHECK(live_profile_load_working(&before), "setup: working readable");
+    httpd_req_t sreq = make_req("body=ok");
+    api_profile_live_post_handler(&sreq);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "stale gen edit is 409");
+    TEST_CHECK(strstr(s_resp_body, "changed elsewhere") != NULL, "409 text names the cause");
+    profile_t after;
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+               "stale edit wrote nothing");
+
+    httpd_req_t dreq = make_req("action=discard");
+    api_profile_live_decide_post_handler(&dreq);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "stale gen decide is 409");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "stale decide left the record pending");
+
+    snprintf(q, sizeof(q), "gen=%u", (unsigned)live_profile_generation());
+    httpd_req_t ok1 = make_req("body=ok");
+    api_profile_live_post_handler(&ok1);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "matching gen edit accepted");
+    TEST_CHECK(strstr(s_resp_body, "\"generation\":") != NULL, "edit response returns the new generation");
+
+    snprintf(q, sizeof(q), "gen=zz");
+    httpd_req_t bad = make_req("body=ok");
+    api_profile_live_post_handler(&bad);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "malformed gen is refused");
+
+    s_stub_query = NULL; /* absent gen: compatible with old clients */
+    httpd_req_t ok2 = make_req("action=discard");
+    api_profile_live_decide_post_handler(&ok2);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "absent gen decide accepted (documented compat)");
+}
+
 static void test_decide_nothing_pending_409(void)
 {
     TEST_SECTION("POST /api/profile/live/decide -- 409 when nothing pending");
@@ -1344,6 +1391,7 @@ int main(void)
     test_accept_bad_parse_400();
     test_accept_bad_bound_400();
     test_accept_success_200();
+    test_generation_guard();
     test_decide_nothing_pending_409();
     test_decide_discard();
     test_decide_save_as_missing_name_400();

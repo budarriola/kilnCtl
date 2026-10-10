@@ -233,6 +233,35 @@ static esp_err_t live_send_working_content(httpd_req_t *req)
 #undef LIVE_CONTENT_CAP
 }
 
+/* M1 (REVIEW_D7GUARD): optimistic concurrency for the working copy. The
+ * client echoes the "generation" it last read (GET /api/profile/live, or the
+ * POST edit / fork response) as query parameter gen=N on POST edit and POST
+ * decide. A mismatch means the working copy changed (another tab, the LCD, a
+ * discard + re-fork) since that read: 409, nothing written. An ABSENT gen is
+ * accepted (compatible with clients that predate this field); the PcTools
+ * client and the page always send it. The check runs immediately before the
+ * write; a request landing between check and write is not excluded (two
+ * httpd workers), the window is the validate-to-save gap only. */
+static bool live_gen_stale(httpd_req_t *req)
+{
+    char query[48];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    char val[16];
+    if (httpd_query_key_value(query, "gen", val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long g = strtoul(val, &end, 10);
+    if (end == val || *end != '\0') {
+        return true; /* malformed gen is never silently ignored */
+    }
+    return (uint32_t)g != live_profile_generation();
+}
+
+#define LIVE_GEN_STALE_MSG "working copy changed elsewhere -- reload and re-apply your edit"
+
 static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
 {
     char query[64];
@@ -300,11 +329,11 @@ static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
     char json[640];
     int n = snprintf(json, sizeof(json),
                      "{\"active\":%s,\"origin_id\":%u,\"origin_is_builtin\":%s,"
-                     "\"working_id\":%d,\"editable_from_segment\":%u,"
+                     "\"working_id\":%d,\"generation\":%u,\"editable_from_segment\":%u,"
                      "\"pending_decision\":%s,\"last_refusal\":%s}",
                      st.active ? "true" : "false", (unsigned)(st.active ? st.profile_id : 0),
                      (have_rec && rec.origin_is_builtin) ? "true" : "false", working_id,
-                     (unsigned)(st.active ? st.segment_index : 0), pending_decision ? "true" : "false",
+                     (unsigned)live_profile_generation(), (unsigned)(st.active ? st.segment_index : 0), pending_decision ? "true" : "false",
                      refbuf);
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return send_server_error(req, "status response did not fit");
@@ -362,8 +391,8 @@ static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
     }
 
     char json[160];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"origin_id\":%u,\"working_id\":%u}", (unsigned)st.profile_id,
-             (unsigned)rec.working_id);
+    snprintf(json, sizeof(json), "{\"ok\":true,\"origin_id\":%u,\"working_id\":%u,\"generation\":%u}",
+             (unsigned)st.profile_id, (unsigned)rec.working_id, (unsigned)live_profile_generation());
     return send_json(req, json);
 }
 
@@ -460,6 +489,11 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     }
     heap_caps_free(running);
 
+    if (live_gen_stale(req)) {
+        heap_caps_free(warn_json);
+        heap_caps_free(candidate);
+        return send_conflict(req, LIVE_GEN_STALE_MSG);
+    }
     bool saved = live_profile_save_working(candidate, err, sizeof(err));
     heap_caps_free(candidate);
     if (!saved) {
@@ -470,13 +504,14 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
         return send_server_error(req, err);
     }
 
-    size_t resp_cap = warn_json_cap + 48;
+    size_t resp_cap = warn_json_cap + 80;
     char *json = heap_caps_malloc(resp_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         heap_caps_free(warn_json);
         return send_server_error(req, "out of memory");
     }
-    int rn = snprintf(json, resp_cap, "{\"ok\":true,\"warnings\":%s}", warn_json[0] ? warn_json : "[]");
+    int rn = snprintf(json, resp_cap, "{\"ok\":true,\"generation\":%u,\"warnings\":%s}",
+                      (unsigned)live_profile_generation(), warn_json[0] ? warn_json : "[]");
     heap_caps_free(warn_json);
     if (rn < 0 || (size_t)rn >= resp_cap) {
         heap_caps_free(json);
@@ -747,6 +782,13 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
     char confirm[4];
     bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 && strcmp(confirm, "1") == 0;
 
+    if (live_gen_stale(req)) {
+        profiles_live_decide_status_t gst;
+        profiles_live_decide_status(&gst);
+        if (gst.record_pending) {
+            return send_conflict(req, LIVE_GEN_STALE_MSG);
+        }
+    }
     uint8_t out_id = 0;
     profiles_live_decide_result_t r =
         profiles_live_decide_apply(kind, have_name ? name : NULL, confirmed, &out_id, err, sizeof(err));
