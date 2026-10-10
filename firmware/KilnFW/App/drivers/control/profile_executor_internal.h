@@ -1299,6 +1299,7 @@ void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
 void zone_off_pending_retry(void);
 void zone_off_pending_retry_running(TickType_t now);
+uint8_t exec_io_segment_relay_mask(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
  * claim-before-gate, same authorized kiln_io_owner write, but gated by the
  * global relay_authority_on_blocked() (an aux has no zone). force_aux_relays_off()

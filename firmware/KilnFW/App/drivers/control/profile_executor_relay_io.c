@@ -26,6 +26,24 @@
 #include "sim_backend.h"
 #include "zones_config_accessors.h"
 
+/* Relay bits switched by the ACTIVE relay-type IO segments of this run.
+ * io_seg_start() claims such a relay as RELAY_OWNER_PROFILE and writes it once;
+ * it is in no zone mask and not in aux_claim_mask, so every "relays this run owns"
+ * set (the running pending-OFF retry, apply_relay()'s F4 fallback) must add it.
+ * Must be called with s_exec.lock held. */
+uint8_t exec_io_segment_relay_mask(void)
+{
+    uint8_t m = 0;
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        const io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (r->active && r->is_relay && r->target >= PROFILE_IO_TARGET_RELAY_BASE &&
+            r->target < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT) {
+            m |= (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        }
+    }
+    return m;
+}
+
 void apply_relay(uint8_t zi, bool want_on)
 {
     uint8_t mask = 0;
@@ -45,6 +63,7 @@ void apply_relay(uint8_t zi, bool want_on)
             }
         }
         fb &= (uint8_t)~s_exec.aux_claim_mask;
+        fb &= (uint8_t)~exec_io_segment_relay_mask();
         for (uint8_t ai = 0; ai < AUX_OUTPUTS_COUNT; ai++) {
             if (s_exec.aux[ai].commanded_on || s_exec.aux[ai].actuated_on) {
                 fb &= (uint8_t)~(1u << ai);
@@ -575,6 +594,7 @@ void zone_off_pending_retry_running(TickType_t now)
         owned |= zm;
     }
     owned |= s_exec.aux_claim_mask;
+    owned |= exec_io_segment_relay_mask();
     mask &= (uint8_t)~owned;
     for (uint8_t b = 0; b < 8; b++) {
         if (!(mask & (1u << b))) continue;

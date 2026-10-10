@@ -255,10 +255,10 @@ static void arm_test_thermo_bus(void)
     s_exec.thermo_bus = &s_test_thermo_bus;
 }
 
+static uint8_t g_stub_autotune_zone_bits; /* bit z set = autotune active on zone z */
 bool autotune_engine_is_active_on_zone(uint8_t zone_index)
 {
-    (void)zone_index;
-    return false;
+    return zone_index < 8 && (g_stub_autotune_zone_bits & (1u << zone_index)) != 0;
 }
 
 /* Instrumentation for the leave-on-at-end tests below -- records every
@@ -2345,6 +2345,7 @@ static void test_guard9_pending_verdict_survives_lock_timeout(void);
 static void test_heat_acquire_result_not_discarded(void);
 static void test_zone_off_pending_retry(void);
 static void test_zone_off_pending_retry_while_running(void);
+static void test_zone_off_pending_retry_ownership_edges(void);
 
 // Guard 9 audit 2026-10-09 item 1: the staleness test and the relay cut must
 // not wait on s_exec.lock. The host stub is single-threaded, so "another task
@@ -12230,6 +12231,7 @@ void run_test_profile_executor_prestart(void)
     test_heat_acquire_result_not_discarded();
     test_zone_off_pending_retry();
     test_zone_off_pending_retry_while_running();
+    test_zone_off_pending_retry_ownership_edges();
     test_profile_zones_have_ceiling_refuses_on_zero();
     test_profile_zones_have_ceiling_passes_when_configured();
     test_profile_zones_have_ceiling_ignores_inactive_zones();
@@ -13146,6 +13148,83 @@ static char *profile_executor_run_c_read_source(void)
     };
     return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor_run.c", candidates,
                                       sizeof(candidates) / sizeof(candidates[0]));
+}
+
+static void test_zone_off_pending_retry_ownership_edges(void)
+{
+    TEST_SECTION("firefx4: running pending-OFF retry owner check, unreadable-mask early return, autotune-zone "
+                 "exclusion, IO-segment ownership (A-LOW-1)");
+    /* R1: a relay owned by someone else (manual) is never written and its bit is dropped. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    g_stub_autotune_zone_bits = 0;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zone_off_pending_mask = 0x03;
+    g_stub_relay_owner[1] = RELAY_OWNER_MANUAL; /* relay 1 */
+    g_relay_write_fail = false;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x02,
+               "R1: relay held by another owner is not driven OFF, the free one is");
+    TEST_CHECK(s_exec.zone_off_pending_mask == 0, "R1: foreign-owned bit is forgotten, written bit cleared");
+
+    /* R2: an active zone whose mask is unreadable -> write nothing this cycle. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    memset(g_stub_relay_owner, 0, sizeof(g_stub_relay_owner));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zones[0].active = true; /* g_stub_relay_mask[0] == 0 -> unreadable */
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 0 && s_exec.zone_off_pending_mask == 0x02,
+               "R2: unreadable zone mask -> nothing written, bit stays pending");
+
+    /* R4: an inactive zone with autotune active on it still owns its relays. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    g_stub_relay_mask[1] = 0x02;
+    g_stub_autotune_zone_bits = 0x02;
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.zone_off_pending_mask = 0x02;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 0, "R4: autotune-active zone's relay is never driven OFF by the retry");
+    g_stub_autotune_zone_bits = 0;
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+
+    /* A-LOW-1: relay switched on by an active relay IO segment is owned. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 1; /* relay 2 -> bit 0x02 */
+    s_exec.io_segs[1].active = false; /* inactive segment owns nothing */
+    s_exec.io_segs[1].is_relay = true;
+    s_exec.io_segs[1].target = PROFILE_IO_TARGET_RELAY_BASE + 2;
+    s_exec.zone_off_pending_mask = 0x06;
+    g_relay_write_calls = 0;
+    zone_off_pending_retry_running(100);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x04,
+               "A-LOW-1: IO-segment relay (0x02) is not driven OFF; the inactive segment's relay (0x04) is");
+    TEST_CHECK((s_exec.zone_off_pending_mask & 0x02) != 0, "A-LOW-1: owned bit stays pending");
+
+    /* A-LOW-1, F4 fallback in apply_relay(): unreadable zone mask must not cut the IO-segment relay. */
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.claimed_relay_mask = 0x03;
+    s_exec.io_segs[0].active = true;
+    s_exec.io_segs[0].is_relay = true;
+    s_exec.io_segs[0].target = PROFILE_IO_TARGET_RELAY_BASE + 1; /* relay 2 */
+    g_relay_write_calls = 0;
+    apply_relay(0, false); /* zone 0 mask unreadable */
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x01,
+               "A-LOW-1: F4 fallback excludes the IO-segment relay");
+    memset(&s_exec, 0, sizeof(s_exec));
 }
 
 static void test_zone_off_pending_retry_while_running(void)
