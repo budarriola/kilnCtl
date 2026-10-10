@@ -96,6 +96,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "esp_err.h"
 
@@ -503,6 +504,30 @@ static inline void wifi_prov_status_redact_field(bool may_disclose, const char *
     } else {
         snprintf(out, out_cap, "null");
     }
+}
+
+/* /api/wifi/status: the AP password is shown only to a request that arrived
+ * on the AP interface (on_ap). Pure so a host test can pin the gate; the
+ * handler (wifi_provision_http.c) cannot be host-compiled. */
+static inline const char *wifi_prov_status_ap_password_view(bool on_ap, const char *password)
+{
+    return (on_ap && password) ? password : "";
+}
+
+/* AP identity argument validators shared by the setters and by /provision,
+ * which must validate BOTH ap_ssid and ap_password before applying either.
+ * Length-counted, so an embedded NUL is refused rather than truncated. */
+static inline bool wifi_prov_ap_ssid_arg_valid(const char *ssid, size_t len)
+{
+    return ssid && len >= 1 && len <= WIFI_PROV_SSID_MAX_LEN && memchr(ssid, '\0', len) == NULL;
+}
+
+static inline bool wifi_prov_ap_password_arg_valid(const char *password, size_t len)
+{
+    if (!password || len > WIFI_PROV_PASSWORD_MAX_LEN || (len > 0 && len < 8)) {
+        return false;
+    }
+    return len == 0 || memchr(password, '\0', len) == NULL;
 }
 
 #ifdef __cplusplus

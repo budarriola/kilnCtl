@@ -328,9 +328,17 @@ void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *o
  * firmware-rollback case) -- refuse to load it and leave flash untouched
  * rather than risk misinterpreting fields/layout this build doesn't know
  * about, same rationale as zones_cfg_t's version check. */
+/* LOW-2: set when a saved_nets record exists but could not be loaded
+ * (read error, wrong size, newer version, corrupt count, open failure other
+ * than "absent"). Such a record is "present but unreadable": the board is not
+ * unprovisioned, add/forget are refused and the record is never overwritten.
+ * factory_reset(wifi) is the escape. */
+bool s_saved_nets_refused;
+
 static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob_t *out_blob)
 {
     memset(out_blob, 0, sizeof(*out_blob));
+    s_saved_nets_refused = false;
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
@@ -349,6 +357,7 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
         return ESP_OK;
     }
     if (err != HAL_OK) {
+        s_saved_nets_refused = true;
         return hal_status_to_esp_err(err);
     }
 
@@ -361,23 +370,36 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
         return ESP_OK;
     }
     if (err != HAL_OK) {
-        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob read from '%s' failed (%s) -- treating as empty",
+        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob read from '%s' failed (%s) -- record kept, add/forget refused",
                  partition, hal_status_to_name(err));
+        s_saved_nets_refused = true;
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
     if (len != sizeof(*out_blob)) {
-        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is the wrong size -- treating as empty", partition);
+        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is the wrong size -- record kept, add/forget refused", partition);
+        s_saved_nets_refused = true;
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
 
-    if (out_blob->version == SAVED_NETS_VERSION) {
-        return ESP_OK; /* current version -- happy path */
-    }
-    if (out_blob->version < SAVED_NETS_VERSION) {
+    if (out_blob->version <= SAVED_NETS_VERSION) {
+        /* LOW-1: a corrupt count would index past nets[]. */
+        if (out_blob->count > WIFI_PROV_MAX_SAVED_NETWORKS) {
+            ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' has count %u > %u -- record kept, add/forget refused",
+                     partition, (unsigned)out_blob->count, (unsigned)WIFI_PROV_MAX_SAVED_NETWORKS);
+            s_saved_nets_refused = true;
+            memset(out_blob, 0, sizeof(*out_blob));
+            out_blob->version = SAVED_NETS_VERSION;
+            return ESP_OK;
+        }
+        /* LOW-1: force NUL termination; later code uses strlen/strcmp. */
+        for (size_t i = 0; i < WIFI_PROV_MAX_SAVED_NETWORKS; i++) {
+            out_blob->nets[i].ssid[sizeof(out_blob->nets[i].ssid) - 1] = '\0';
+            out_blob->nets[i].password[sizeof(out_blob->nets[i].password) - 1] = '\0';
+        }
         /* v1 is the first version that has ever existed -- hook point for a
          * future migration, nothing to convert yet. */
         out_blob->version = SAVED_NETS_VERSION;
@@ -389,6 +411,7 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
     ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is version %u, newer than this firmware's %u -- "
                   "refusing to load, flash data left untouched",
              partition, (unsigned)out_blob->version, (unsigned)SAVED_NETS_VERSION);
+    s_saved_nets_refused = true;
     memset(out_blob, 0, sizeof(*out_blob));
     out_blob->version = SAVED_NETS_VERSION;
     return ESP_OK;
@@ -650,7 +673,10 @@ void nvs_load_saved_nets(void)
         s_wifi.saved_nets.version = SAVED_NETS_VERSION;
     }
 
-    if (s_wifi.saved_nets.count == 0 && s_legacy_single.has && s_legacy_single.net.ssid[0] != '\0') {
+    if (s_saved_nets_refused) {
+        /* LOW-2: never overwrite an unreadable/newer record with a migrated one. */
+        s_legacy_erase_pending = false;
+    } else if (s_wifi.saved_nets.count == 0 && s_legacy_single.has && s_legacy_single.net.ssid[0] != '\0') {
         ESP_LOGI(WIFI_PROV_TAG, "migrating legacy single-network credential ('%s') to the saved-networks list",
                  s_legacy_single.net.ssid);
         s_wifi.saved_nets.nets[0] = s_legacy_single.net;

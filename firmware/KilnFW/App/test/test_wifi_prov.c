@@ -211,6 +211,7 @@ int g_stub_queue_ring_head = 0;
 static void reset_state(void)
 {
     memset(&s_wifi, 0, sizeof(s_wifi));
+    s_saved_nets_refused = false;
     s_wifi.sta_rssi = -127;
     // post_event()/wifi_prov_post_and_wait() both refuse (silently, by design -- see
     // wifi_prov.c's owner-task comment) when s_wifi_cmd_queue is NULL, which it is
@@ -1745,6 +1746,181 @@ static void test_static_reachability_refuses_legacy_ap_subnet_static_ip(void)
 int g_test_failures = 0;
 int g_test_count = 0;
 
+// ---- WIFI_REVIEW_2026-10-09 fixes ----
+
+static void put_raw_saved_nets(const void *data, size_t len)
+{
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition(WIFI_NVS_PARTITION) == HAL_OK, "setup: init wifi_nvs partition");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, WIFI_NVS_PARTITION) == HAL_OK, "open");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_SAVED_NETS, data, len) == HAL_OK, "seed saved_nets");
+    hal_kv_commit(&h);
+    hal_kv_close(&h);
+}
+
+static void test_dns_query_admission(void)
+{
+    TEST_SECTION("MED-1: dns_hijack answers only plain queries from the AP subnet (no responses, opcodes, port 53, off-subnet)");
+    uint8_t q[12] = { 0x12, 0x34, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0 };
+    const uint8_t ap_client_b[4] = { 192, 168, 4, 2 };
+    const uint8_t off_b[4] = { 10, 0, 0, 5 };
+    const uint8_t gw_b[4] = { 192, 168, 4, 1 };
+    uint32_t ap_client, off, gw;
+    memcpy(&ap_client, ap_client_b, 4);
+    memcpy(&off, off_b, 4);
+    memcpy(&gw, gw_b, 4);
+    TEST_CHECK(wifi_prov_dns_query_acceptable(q, 12, ap_client, 40000), "plain query from an AP client is answered");
+    uint8_t r[12];
+    memcpy(r, q, 12);
+    r[2] |= 0x80;
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(r, 12, ap_client, 40000), "QR=1 (a response) is dropped");
+    uint8_t o[12];
+    memcpy(o, q, 12);
+    o[2] = 0x08; /* opcode 1 */
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(o, 12, ap_client, 40000), "non-zero opcode is dropped");
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(q, 12, ap_client, 53), "source port 53 is dropped (reflection loop)");
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(q, 11, ap_client, 40000), "short packet is dropped");
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(q, 12, off, 40000), "source outside the AP subnet is dropped");
+    TEST_CHECK(!wifi_prov_dns_query_acceptable(q, 12, gw, 40000), "the AP's own address as source is dropped");
+}
+
+static void test_saved_nets_loader_hardening(void)
+{
+    TEST_SECTION("LOW-1/LOW-2: count > 8 refused, fields NUL-terminated; unreadable/newer record is present-but-unreadable");
+    reset_state();
+    saved_nets_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = SAVED_NETS_VERSION;
+    b.count = 1;
+    memset(b.nets[0].ssid, 'A', sizeof(b.nets[0].ssid));
+    memset(b.nets[0].password, 'B', sizeof(b.nets[0].password));
+    put_raw_saved_nets(&b, sizeof(b));
+    saved_nets_blob_t rb;
+    TEST_CHECK(nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) == ESP_OK && rb.count == 1, "unterminated record loads");
+    TEST_CHECK(rb.nets[0].ssid[sizeof(rb.nets[0].ssid) - 1] == '\0', "ssid forced NUL-terminated");
+    TEST_CHECK(rb.nets[0].password[sizeof(rb.nets[0].password) - 1] == '\0', "password forced NUL-terminated");
+    TEST_CHECK(!s_saved_nets_refused, "a good record is not refused");
+
+    b.count = 200;
+    put_raw_saved_nets(&b, sizeof(b));
+    TEST_CHECK(nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) == ESP_OK && rb.count == 0, "count > 8 loads as empty");
+    TEST_CHECK(s_saved_nets_refused, "count > 8 marks the record refused");
+
+    b.count = 1;
+    b.version = SAVED_NETS_VERSION + 1;
+    put_raw_saved_nets(&b, sizeof(b));
+    reset_state();
+    nvs_load_saved_nets();
+    TEST_CHECK(s_saved_nets_refused, "newer-version record is refused");
+    s_wifi.state = WIFI_PROV_STATE_UNPROVISIONED;
+    TEST_CHECK(s_wifi.saved_nets.count == 0 && !wifi_prov_is_unprovisioned(),
+               "refused record: board is NOT unprovisioned");
+    s_wifi.started = true;
+    TEST_CHECK(wifi_prov_add_network("home", 4, "password1", 9) == ESP_ERR_NOT_SUPPORTED, "add refused");
+    TEST_CHECK(wifi_prov_forget_network("home", 4) == ESP_ERR_NOT_SUPPORTED, "forget refused");
+    TEST_CHECK(g_stub_queue_send_calls == 0, "refused add/forget post nothing");
+    saved_nets_blob_t after;
+    size_t len = sizeof(after);
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, WIFI_NVS_PARTITION) == HAL_OK, "reopen");
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_SAVED_NETS, &after, &len) == HAL_OK && len == sizeof(after) &&
+                   after.version == SAVED_NETS_VERSION + 1 && after.count == 1,
+               "the newer record is left untouched");
+    hal_kv_close(&h);
+
+    uint8_t junk[5] = { 1, 1, 0, 0, 0 };
+    put_raw_saved_nets(junk, sizeof(junk));
+    reset_state();
+    nvs_load_saved_nets();
+    TEST_CHECK(s_saved_nets_refused, "wrong-size record is refused");
+
+    b.version = SAVED_NETS_VERSION + 1;
+    put_raw_saved_nets(&b, sizeof(b));
+    reset_state();
+    memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+    s_legacy_single.has = true;
+    strcpy(s_legacy_single.net.ssid, "oldnet");
+    strcpy(s_legacy_single.net.password, "oldpass");
+    nvs_load_saved_nets();
+    len = sizeof(after);
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, WIFI_NVS_PARTITION) == HAL_OK, "reopen");
+    TEST_CHECK(hal_kv_get_blob(&h, NVS_KEY_SAVED_NETS, &after, &len) == HAL_OK && after.version == SAVED_NETS_VERSION + 1,
+               "legacy migration does not overwrite a refused record");
+    hal_kv_close(&h);
+    memset(&s_legacy_single, 0, sizeof(s_legacy_single));
+    s_saved_nets_refused = false;
+}
+
+static void test_ap_setters_reject_nul(void)
+{
+    TEST_SECTION("LOW-3: AP ssid/password setters refuse embedded NUL; shared arg validators agree");
+    reset_state();
+    s_wifi.started = true;
+    TEST_CHECK(wifi_prov_set_ap_ssid("ab\0cd", 5) == ESP_ERR_INVALID_ARG, "ssid with NUL refused");
+    TEST_CHECK(wifi_prov_set_ap_password("pass\0word1", 9) == ESP_ERR_INVALID_ARG, "password with NUL refused");
+    TEST_CHECK(g_stub_queue_send_calls == 0, "nothing posted");
+    TEST_CHECK(wifi_prov_set_ap_ssid("abcd", 4) == ESP_ERR_TIMEOUT, "clean ssid reaches the post");
+    TEST_CHECK(wifi_prov_set_ap_password("password1", 9) == ESP_ERR_TIMEOUT, "clean password reaches the post");
+    TEST_CHECK(!wifi_prov_ap_ssid_arg_valid("ab\0cd", 5) && wifi_prov_ap_ssid_arg_valid("abcd", 4), "ssid validator");
+    TEST_CHECK(!wifi_prov_ap_password_arg_valid("pass\0word1", 9) && !wifi_prov_ap_password_arg_valid("short", 5) &&
+                   wifi_prov_ap_password_arg_valid("", 0) && wifi_prov_ap_password_arg_valid("password1", 9),
+               "password validator");
+}
+
+static void test_static_ip_strict_validation(void)
+{
+    TEST_SECTION("LOW-4: static IP config validation (contiguous mask, gateway in subnet, no special addresses, no shorthand)");
+    TEST_CHECK(wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", "192.168.1.1"), "normal config");
+    TEST_CHECK(wifi_prov_static_ip_config_valid("10.0.0.5", "255.0.0.0", "10.0.0.1"), "/8 config");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.0.255.0", "192.168.1.1"), "non-contiguous mask");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "0.0.0.0", "192.168.1.1"), "zero mask");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.255", "192.168.1.1"), "/32 mask");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", "192.168.2.1"), "gateway outside subnet");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("0.0.0.0", "255.255.255.0", "192.168.1.1"), "0.0.0.0 ip");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", "0.0.0.0"), "0.0.0.0 gateway");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("127.0.0.2", "255.0.0.0", "127.0.0.1"), "loopback");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("239.1.1.5", "255.0.0.0", "239.1.1.1"), "multicast");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("255.255.255.255", "255.255.255.0", "192.168.1.1"), "broadcast");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.0", "255.255.255.0", "192.168.1.1"), "network address as host");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.255", "255.255.255.0", "192.168.1.1"), "broadcast address as host");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", "192.168.1.255"), "gateway = broadcast");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", "192.168.1.50"), "gateway = ip");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("10.1", "255.255.255.0", "10.0.0.1"), "shorthand ip");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.001.50", "255.255.255.0", "192.168.1.1"), "leading zero");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50 ", "255.255.255.0", "192.168.1.1"), "trailing space");
+    TEST_CHECK(!wifi_prov_static_ip_config_valid("192.168.1.50", "255.255.255.0", ""), "empty gateway");
+    reset_state();
+    s_wifi.started = true;
+    TEST_CHECK(wifi_prov_set_static_ip("10.1", "255.255.255.0", "10.0.0.1", NULL, NULL) == ESP_ERR_INVALID_ARG,
+               "setter refuses shorthand");
+    TEST_CHECK(wifi_prov_set_static_ip("192.168.1.50", "255.0.255.0", "192.168.1.1", NULL, NULL) == ESP_ERR_INVALID_ARG,
+               "setter refuses non-contiguous mask");
+    TEST_CHECK(wifi_prov_set_static_ip("192.168.1.50", "255.255.255.0", "192.168.1.1", "1.1", NULL) == ESP_ERR_INVALID_ARG,
+               "setter refuses shorthand dns");
+}
+
+static void test_sta_wpa2_min_pmf_capable(void)
+{
+    TEST_SECTION("LOW-5: STA config requires WPA2 minimum, PMF capable but not required");
+    reset_state();
+    s_wifi.sta_netif = esp_netif_create_default_wifi_sta();
+    strcpy(s_wifi.active_ssid, "home");
+    strcpy(s_wifi.active_password, "password1");
+    apply_sta_config();
+    wifi_config_t *c = stub_wifi_last_sta_cfg();
+    TEST_CHECK(c->sta.threshold.authmode == WIFI_AUTH_WPA2_PSK, "authmode threshold is WPA2-PSK");
+    TEST_CHECK(c->sta.pmf_cfg.capable && !c->sta.pmf_cfg.required, "PMF capable, not required");
+}
+
+static void test_status_ap_password_gate(void)
+{
+    TEST_SECTION("/api/wifi/status AP password view: only on_ap requests see it");
+    TEST_CHECK(strcmp(wifi_prov_status_ap_password_view(true, "secretpw1"), "secretpw1") == 0, "on_ap sees it");
+    TEST_CHECK(wifi_prov_status_ap_password_view(false, "secretpw1")[0] == '\0', "off-AP gets empty");
+    TEST_CHECK(wifi_prov_status_ap_password_view(true, NULL)[0] == '\0', "NULL password is empty");
+}
+
 void run_test_wifi_prov(void)
 {
     test_static_ip_confirmed_false_at_boot();
@@ -1770,6 +1946,12 @@ void run_test_wifi_prov(void)
     test_embedded_nul_refused();
     test_mode_and_ap_name_change_survives_reboot();
     test_apply_sta_config_dns();
+    test_dns_query_admission();
+    test_saved_nets_loader_hardening();
+    test_ap_setters_reject_nul();
+    test_static_ip_strict_validation();
+    test_sta_wpa2_min_pmf_capable();
+    test_status_ap_password_gate();
     test_set_dhcp_resets_confirmation();
     test_reply_slot_normal_roundtrip();
     test_reply_slot_abandon_then_owner_recycles();

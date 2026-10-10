@@ -289,6 +289,13 @@ extern struct wifi_prov_legacy_single s_legacy_single;
 /* ---- Wi-Fi driver config / event handlers / timers (wifi_prov_link.c) ---- */
 void apply_ap_config(void);
 bool parse_ipv4(const char *s, esp_ip4_addr_t *out);
+bool wifi_prov_parse_strict_ipv4(const char *s, esp_ip4_addr_t *out);
+bool wifi_prov_static_ip_config_valid(const char *ip, const char *netmask, const char *gateway);
+bool wifi_prov_dns_query_acceptable(const uint8_t *buf, int len, uint32_t src_addr_net, uint16_t src_port_host);
+/* LOW-2: true when the saved-networks record exists but could not be loaded
+ * (unreadable, wrong size, newer version, corrupt count). Defined in
+ * wifi_prov_nvs.c. */
+extern bool s_saved_nets_refused;
 void apply_sta_config(void);
 void wifi_prov_clear_backup_dns(void);
 void cancel_ap_fallback_timer(void);

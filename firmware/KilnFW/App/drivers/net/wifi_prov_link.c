@@ -22,6 +22,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_wifi.h"
+#include "stack_margin.h"
 #include "freertos/idf_additions.h"
 #include "freertos/task.h"
 #include "lwip/dns.h"
@@ -119,6 +120,98 @@ bool wifi_prov_ip_in_ap_subnet(const char *ip)
     return octets[0] == 192 && octets[1] == 168 && octets[2] == 4;
 }
 
+/* LOW-4: strict dotted-quad parse. lwIP's ip4addr_aton() also accepts
+ * shorthand ("10.1", "167772161") and octal/hex octets, so the stored string
+ * could differ from what the operator meant. This accepts only four decimal
+ * octets 0-255 separated by single dots (no leading zeros, no signs, no
+ * spaces, nothing trailing). */
+bool wifi_prov_parse_strict_ipv4(const char *s, esp_ip4_addr_t *out)
+{
+    if (!s || !*s || strlen(s) >= WIFI_PROV_IPV4_STR_MAX) {
+        return false;
+    }
+    uint8_t octets[4];
+    const char *p = s;
+    for (int i = 0; i < 4; i++) {
+        if (*p < '0' || *p > '9') {
+            return false;
+        }
+        const char *start = p;
+        unsigned v = 0;
+        while (*p >= '0' && *p <= '9') {
+            v = v * 10 + (unsigned)(*p - '0');
+            if (v > 255) {
+                return false;
+            }
+            p++;
+        }
+        if (p - start > 1 && *start == '0') {
+            return false; /* leading zero: ambiguous octal */
+        }
+        octets[i] = (uint8_t)v;
+        if (i < 3) {
+            if (*p != '.') {
+                return false;
+            }
+            p++;
+        }
+    }
+    if (*p != '\0') {
+        return false;
+    }
+    if (out) {
+        memcpy(&out->addr, octets, 4); /* network byte order: first octet first in memory */
+    }
+    return true;
+}
+
+static uint32_t ipv4_host_order(const esp_ip4_addr_t *a)
+{
+    const uint8_t *o = (const uint8_t *)&a->addr;
+    return ((uint32_t)o[0] << 24) | ((uint32_t)o[1] << 16) | ((uint32_t)o[2] << 8) | o[3];
+}
+
+/* A usable unicast host address inside the subnet `mask`: not 0.x, loopback,
+ * multicast/class E/broadcast, and not the subnet's network or broadcast
+ * address. */
+static bool ipv4_usable_host(uint32_t a, uint32_t mask)
+{
+    uint8_t first = (uint8_t)(a >> 24);
+    if (first == 0 || first == 127 || first >= 224) {
+        return false;
+    }
+    if ((a & ~mask) == 0 || (a & ~mask) == ~mask) {
+        return false;
+    }
+    return true;
+}
+
+/* LOW-4: whole static configuration makes sense: all three strictly dotted
+ * quad, netmask a contiguous run of ones no longer than /30, ip and gateway
+ * usable hosts of the same subnet, gateway distinct from ip. */
+bool wifi_prov_static_ip_config_valid(const char *ip, const char *netmask, const char *gateway)
+{
+    esp_ip4_addr_t a_ip, a_mask, a_gw;
+    if (!wifi_prov_parse_strict_ipv4(ip, &a_ip) || !wifi_prov_parse_strict_ipv4(netmask, &a_mask) ||
+        !wifi_prov_parse_strict_ipv4(gateway, &a_gw)) {
+        return false;
+    }
+    uint32_t ip_h = ipv4_host_order(&a_ip);
+    uint32_t mask_h = ipv4_host_order(&a_mask);
+    uint32_t gw_h = ipv4_host_order(&a_gw);
+    uint32_t inv = ~mask_h;
+    if (mask_h == 0 || (inv & (inv + 1u)) != 0 || inv < 3u) {
+        return false; /* empty, non-contiguous, or longer than /30 */
+    }
+    if (!ipv4_usable_host(ip_h, mask_h) || !ipv4_usable_host(gw_h, mask_h)) {
+        return false;
+    }
+    if ((ip_h & mask_h) != (gw_h & mask_h) || ip_h == gw_h) {
+        return false;
+    }
+    return true;
+}
+
 static esp_err_t clear_backup_dns_cb(void *ctx)
 {
     (void)ctx;
@@ -178,7 +271,12 @@ void apply_sta_config(void)
     wifi_config_t sta_cfg = { 0 };
     strncpy((char *)sta_cfg.sta.ssid, s_wifi.active_ssid, sizeof(sta_cfg.sta.ssid) - 1);
     strncpy((char *)sta_cfg.sta.password, s_wifi.active_password, sizeof(sta_cfg.sta.password) - 1);
-    sta_cfg.sta.threshold.authmode = strlen(s_wifi.active_password) > 0 ? WIFI_AUTH_WPA_PSK : WIFI_AUTH_OPEN;
+    /* LOW-5: WPA2 minimum (a rogue AP advertising the saved SSID as WPA/TKIP
+     * is refused; WPA2-PSK-only home APs still match), PMF capable but not
+     * required so WPA3/PMF APs negotiate it. */
+    sta_cfg.sta.threshold.authmode = strlen(s_wifi.active_password) > 0 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
+    sta_cfg.sta.pmf_cfg.capable = true;
+    sta_cfg.sta.pmf_cfg.required = false;
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &sta_cfg);
     if (err != ESP_OK) {
         ESP_LOGE(WIFI_PROV_TAG, "esp_wifi_set_config(STA) failed: %s", esp_err_to_name(err));
@@ -1037,6 +1135,40 @@ void on_ip_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     post_event(CMD_EV_GOT_IP);
 }
 
+/* Pure admission test for one captive-portal DNS datagram (WIFI_REVIEW_2026-10-09
+ * MED-1). Kept separate from the socket loop so a host test can drive it.
+ * Accepts only a plain standard query (QR=0, OPCODE=0) of at least a header's
+ * length, from a source port other than 53 (two responders must never talk to
+ * each other), whose source address is a station of the fallback AP's own
+ * 192.168.4.0/24 subnet and not the AP's own address (no self-loop through
+ * lwIP loopback). `src_addr_net` is the sender's IPv4 address in network byte
+ * order, so its first byte in memory is the first octet on any endianness.
+ * Anything else is dropped silently: the responder is a captive-portal
+ * convenience for AP clients, never a LAN resolver. */
+bool wifi_prov_dns_query_acceptable(const uint8_t *buf, int len, uint32_t src_addr_net, uint16_t src_port_host)
+{
+    if (!buf || len < 12) {
+        return false;
+    }
+    if (buf[2] & 0x80) {
+        return false; /* QR=1: a response, never answer one (ping-pong/reflection) */
+    }
+    if (((buf[2] >> 3) & 0x0F) != 0) {
+        return false; /* OPCODE != QUERY */
+    }
+    if (src_port_host == 53) {
+        return false;
+    }
+    const uint8_t *o = (const uint8_t *)&src_addr_net;
+    if (!(o[0] == 192 && o[1] == 168 && o[2] == 4)) {
+        return false; /* not an AP-subnet station */
+    }
+    if (o[3] == 0 || o[3] == 1 || o[3] == 255) {
+        return false; /* network, the AP itself, broadcast */
+    }
+    return true;
+}
+
 /* ---- Captive-portal DNS hijack -------------------------------------------
  *
  * 2026-08-19, explicit user report: phones joining the fallback AP
@@ -1103,6 +1235,12 @@ static void dns_hijack_task(void *arg)
         if (len < 12) {
             continue; /* shorter than a DNS header -- not a real query */
         }
+        /* MED-1: responses, non-query opcodes, port-53 senders and anything
+         * not from an AP-subnet station are dropped (see the helper). */
+        if (from_addr.sin_family != AF_INET ||
+            !wifi_prov_dns_query_acceptable(buf, len, from_addr.sin_addr.s_addr, ntohs(from_addr.sin_port))) {
+            continue;
+        }
 
         /* Only handles the single-question case every real stub resolver
          * sends (multi-question DNS queries are vanishingly rare and not
@@ -1160,6 +1298,8 @@ static void dns_hijack_task(void *arg)
     }
 }
 
+static TaskHandle_t s_dns_task_handle;
+
 void start_dns_hijack_task(void)
 {
     /* 2026-08-22: PSRAM stack. dns_hijack_task only does a UDP
@@ -1167,10 +1307,12 @@ void start_dns_hijack_task(void)
      * NVS/flash access, no direct SPI/I2C/UART hardware ownership. Unlike
      * wifi_prov's own owner_task (elsewhere in this split), this one never
      * calls esp_wifi_set_config()/nvs_save_*(). */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(dns_hijack_task, "dns_hijack", 3072, NULL, 4, NULL,
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(dns_hijack_task, "dns_hijack", 3072, NULL, 4, &s_dns_task_handle,
                                                          tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         ESP_LOGW(WIFI_PROV_TAG, "xTaskCreatePinnedToCoreWithCaps(dns_hijack) failed -- no captive-portal DNS redirect");
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
+        return;
     }
+    stack_margin_register("dns_hijack", &s_dns_task_handle, 3072);
 }

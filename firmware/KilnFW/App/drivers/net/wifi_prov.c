@@ -772,7 +772,9 @@ bool wifi_prov_is_unprovisioned(void)
      * STA-failure AP fallback) reuses UNPROVISIONED while credentials are
      * still saved. Both are single-word reads of owner_task()-written
      * fields, same unlocked-read shape as wifi_prov_get_state(). */
-    return s_wifi.state == WIFI_PROV_STATE_UNPROVISIONED && s_wifi.saved_nets.count == 0;
+    /* LOW-2: a saved-networks record that exists but could not be loaded is
+     * "provisioned, unreadable", never "no networks". */
+    return s_wifi.state == WIFI_PROV_STATE_UNPROVISIONED && s_wifi.saved_nets.count == 0 && !s_saved_nets_refused;
 }
 
 const char *wifi_prov_get_saved_ssid(void)

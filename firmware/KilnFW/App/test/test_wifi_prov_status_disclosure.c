@@ -9,8 +9,12 @@
 // `may_disclose = !http_auth_policy_web_enabled() || http_auth_caller_is_admin(req)`
 // disjunction as this commit's sibling readiness_http.c fix. The pre-existing
 // on_ap/ap_password narrowing (2026-08-22) is a separate, independent
-// condition and is untouched by this fix -- not covered by these tests
-// (already covered by test_wifi_prov.c's own AP-password tests).
+// condition and is untouched by this fix. Its decision is the header-inline
+// wifi_prov_status_ap_password_view(), pinned by test_ap_password_view()
+// below; test_wifi_prov.c covers wifi_prov_request_arrived_on_ap() (what
+// computes on_ap), NOT the handler's use of it. That the handler calls the
+// helper is not host-testable (wifi_provision_http.c does not host-compile)
+// and is checked by review only.
 //
 // sta_ip is deliberately excluded from this redaction (see
 // wifi_prov_status_redact_field()'s doc comment in wifi_prov.h for the full
@@ -306,6 +310,14 @@ static void test_gate_auth_on_admin_session(void)
     TEST_CHECK(strcmp(static_gateway_field, "\"203.0.113.1\"") == 0, "ADMIN role -- gateway disclosed");
 }
 
+static void test_ap_password_view(void)
+{
+    TEST_SECTION("wifi_prov_status_ap_password_view -- AP password only on AP-arrived requests");
+    TEST_CHECK(strcmp(wifi_prov_status_ap_password_view(true, "apsecret1"), "apsecret1") == 0, "on_ap -- shown");
+    TEST_CHECK(wifi_prov_status_ap_password_view(false, "apsecret1")[0] == '\0', "off AP -- empty");
+    TEST_CHECK(wifi_prov_status_ap_password_view(true, NULL)[0] == '\0', "NULL -- empty");
+}
+
 int main(void)
 {
     test_redact_field_disclosed();
@@ -316,6 +328,7 @@ int main(void)
     test_gate_auth_on_no_session();
     test_gate_auth_on_user_session();
     test_gate_auth_on_admin_session();
+    test_ap_password_view();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

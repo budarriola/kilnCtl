@@ -141,6 +141,11 @@ esp_err_t wifi_prov_add_network(const char *ssid, size_t ssid_len, const char *p
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
+    /* LOW-2: the stored record is unreadable/newer; writing the in-RAM list
+     * would destroy it. Refuse until it is readable or reset. */
+    if (s_saved_nets_refused) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     wifi_cmd_t cmd = { .type = CMD_ADD_NETWORK };
     memcpy(cmd.args.add_network.ssid, ssid, ssid_len);
@@ -216,6 +221,9 @@ esp_err_t wifi_prov_forget_network(const char *ssid, size_t ssid_len)
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
+    }
+    if (s_saved_nets_refused) { /* LOW-2, see wifi_prov_add_network() */
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     wifi_cmd_t cmd = { .type = CMD_FORGET_NETWORK };
@@ -440,6 +448,11 @@ esp_err_t wifi_prov_set_ap_ssid(const char *ssid, size_t ssid_len)
          * for a station password (open network); refuse it outright. */
         return ESP_ERR_INVALID_SIZE;
     }
+    /* LOW-3: length-counted callers (UART bridge) can carry an embedded NUL,
+     * which strncpy would silently truncate. */
+    if (memchr(ssid, '\0', ssid_len) != NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -501,6 +514,11 @@ esp_err_t wifi_prov_set_ap_password(const char *password, size_t password_len)
          * compile-time Kconfig default does in apply_ap_config() (there is
          * no request to fail in that case, just a build to warn about). */
         return ESP_ERR_INVALID_SIZE;
+    }
+    /* LOW-3: an embedded NUL would store a truncated (possibly < 8 char or
+     * empty) value and bring the AP up open while reporting success. */
+    if (password_len > 0 && memchr(password, '\0', password_len) != NULL) {
+        return ESP_ERR_INVALID_ARG;
     }
     if (!s_wifi.started) {
         return ESP_ERR_INVALID_STATE;
@@ -662,7 +680,7 @@ static bool dns_arg_valid(const char *s)
         return true;
     }
     esp_ip4_addr_t a;
-    return strlen(s) < WIFI_PROV_IPV4_STR_MAX && parse_ipv4(s, &a) && a.addr != 0;
+    return wifi_prov_parse_strict_ipv4(s, &a) && a.addr != 0;
 }
 
 esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const char *gateway, const char *dns,
@@ -678,7 +696,13 @@ esp_err_t wifi_prov_set_static_ip(const char *ip, const char *netmask, const cha
      * (wifi_prov_ip_in_ap_subnet() below does its own parse of `ip` for the
      * AP-subnet check). */
     esp_ip4_addr_t tmp;
-    if (!parse_ipv4(ip, &tmp) || !parse_ipv4(netmask, &tmp) || !parse_ipv4(gateway, &tmp)) {
+    if (!wifi_prov_parse_strict_ipv4(ip, &tmp) || !wifi_prov_parse_strict_ipv4(netmask, &tmp) ||
+        !wifi_prov_parse_strict_ipv4(gateway, &tmp)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    /* LOW-4: contiguous netmask, gateway inside the subnet, no special
+     * addresses (0.x, loopback, multicast, network/broadcast). */
+    if (!wifi_prov_static_ip_config_valid(ip, netmask, gateway)) {
         return ESP_ERR_INVALID_ARG;
     }
     /* Review fix (2026-09-29): reject a static IP inside the fallback AP's

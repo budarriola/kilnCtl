@@ -9,6 +9,7 @@
 #ifndef TEST_STUB_ESP_WIFI_H
 #define TEST_STUB_ESP_WIFI_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -51,6 +52,10 @@ typedef struct {
     struct {
         wifi_auth_mode_t authmode;
     } threshold;
+    struct {
+        bool capable;
+        bool required;
+    } pmf_cfg;
 } wifi_sta_config_t;
 
 typedef union {
@@ -143,10 +148,18 @@ static inline esp_err_t esp_wifi_init(const wifi_init_config_t *cfg)
     return ESP_OK;
 }
 
+/* Last STA config pushed (function-local static so no TU needs a definition). */
+static inline wifi_config_t *stub_wifi_last_sta_cfg(void)
+{
+    static wifi_config_t c;
+    return &c;
+}
+
 static inline esp_err_t esp_wifi_set_config(wifi_interface_t iface, wifi_config_t *cfg)
 {
-    (void)iface;
-    (void)cfg;
+    if (iface == WIFI_IF_STA && cfg) {
+        *stub_wifi_last_sta_cfg() = *cfg;
+    }
     return ESP_OK;
 }
 

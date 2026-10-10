@@ -211,7 +211,12 @@ $requiredNames = @(
     # enough on its own to justify raising the task's existing 4096 B stack,
     # but this task's high-water mark had never been measured at all before
     # this fix, on a heap-allocated stack that carries no .dram0.bss cost).
-    "wifi_prov_owner"  # liveness: always
+    "wifi_prov_owner",  # liveness: always
+
+    # 2026-10-09 (WIFI_REVIEW LOW-6): dns_hijack_task was exempted as "self-deletes"; it
+    # loops for the process lifetime (a vTaskDelete only on socket/bind failure) and is
+    # started unconditionally by wifi_prov_start().
+    "dns_hijack"  # liveness: always
 )
 # A stray unary comma / line-ending slip turns an entry into a nested Object[] (DEV_TOOLS_REVIEW_2026-10-09 LOW-1);
 # -contains and task_liveness.py would then silently miss it. Every entry must be a plain string.
@@ -557,7 +562,6 @@ $exemptCreatedNames = @{
     "wifi_scan_ui"      = "ui_page_network_manage.c scan_worker_task: one-shot Wi-Fi scan, self-deletes"
     "ota_confirm"       = "main_network_http.c main_ota_rollback_confirm_task: one-shot OTA confirm task (5120 B stack since OT-G06: after the boot_guard clear it runs the stale-stage check, a PSA SHA-256 plus a 1 KB work buffer and update_stage_clear), self-deletes; logs its own stack high-water mark once before deleting"
     "cfg_autofmt"       = "cfg_fs_mount.c cfg_fs_auto_format_task: one-shot cfg filesystem format, self-deletes"
-    "dns_hijack"        = "wifi_prov_link.c dns_hijack_task: provisioning-only captive-portal DNS, self-deletes"
     "factory_reset_reboot" = "factory_reset.c reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_rollback_reboot"  = "ota_http_esp.c ota_rollback_reboot_task: one-shot reboot-after-delay, never returns to measure"
     "ota_pico_rollback"    = "ota_http_pico.c ota_pico_rollback_task: one-shot reboot-after-delay, never returns to measure"

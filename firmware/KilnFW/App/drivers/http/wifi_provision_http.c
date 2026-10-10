@@ -286,7 +286,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * which would be a lie about an AP that is in fact protected. */
     const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
     char ap_password_escaped[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
-    json_escape(on_ap ? wifi_prov_get_ap_password() : "", ap_password_escaped,
+    json_escape(wifi_prov_status_ap_password_view(on_ap, wifi_prov_get_ap_password()), ap_password_escaped,
                 sizeof(ap_password_escaped));
 
     char sta_ip[16];
@@ -797,6 +797,16 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
     }
 
     if (ap_ssid_len >= 0 || ap_password_len >= 0) {
+        /* Validate both before applying either: a bad password must not
+         * leave the new SSID already live. */
+        if (ap_ssid_len >= 0 && !wifi_prov_ap_ssid_arg_valid(ap_ssid, (size_t)ap_ssid_len)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_ssid must be 1-32 characters");
+            return ESP_OK;
+        }
+        if (ap_password_len >= 0 && !wifi_prov_ap_password_arg_valid(ap_password, (size_t)ap_password_len)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_password must be empty (open) or 8-63 characters");
+            return ESP_OK;
+        }
         if (ap_ssid_len >= 0) {
             esp_err_t err = wifi_prov_set_ap_ssid(ap_ssid, (size_t)ap_ssid_len);
             if (err != ESP_OK) {
