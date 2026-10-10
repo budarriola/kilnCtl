@@ -257,7 +257,7 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $c 'm') -Force | Out-Null
     $before = OriginHead
     $r = Run-Land $c @("-ChecksScript", $okStub)
-    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail (out: $($r.Out.Trim() -replace '\s+',' '))"
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail"
     Assert ((OriginHead) -eq $before) "nothing pushed"
     Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
     $mainc = New-Clone "c_wtmain"
