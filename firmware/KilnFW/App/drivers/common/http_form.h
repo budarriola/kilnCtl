@@ -21,13 +21,23 @@ extern "C" {
  * application/x-www-form-urlencoded. Returns the decoded length (< out_cap)
  * on success, or -1 if the decoded value would not fit -- the caller must
  * treat that as a rejected request, not a truncated one, since silently
- * truncating e.g. a password is worse than refusing it. */
+ * truncating e.g. a password is worse than refusing it.
+ *
+ * On every -1 path out is left as the empty string (out[0] == '\0' when
+ * out_cap > 0), never an unterminated or truncated prefix. Several callers
+ * test http_form_find_field() != -1 (or >= 0) and then strtol()/strcmp() the
+ * buffer, so a -2 (too long, or %00) must leave nothing there to parse:
+ * "max_simultaneous_relays=00000000" used to strtol past the written bytes,
+ * and terminating the prefix instead would let "1%00" read as "1". */
 static inline int http_form_url_decode(const char *src, size_t src_len, char *out, size_t out_cap)
 {
     size_t o = 0;
     for (size_t i = 0; i < src_len; i++) {
         char c = src[i];
         if (o + 1 >= out_cap) {
+            if (out_cap > 0) {
+                out[0] = '\0';
+            }
             return -1;
         }
         if (c == '+') {
@@ -37,6 +47,7 @@ static inline int http_form_url_decode(const char *src, size_t src_len, char *ou
             char hex[3] = { src[i + 1], src[i + 2], '\0' };
             char dec = (char)strtol(hex, NULL, 16);
             if (dec == '\0') {
+                out[0] = '\0'; /* o + 1 < out_cap here, so out_cap > 0 */
                 return -1; /* %00: embedded NUL would truncate the value silently */
             }
             out[o++] = dec;

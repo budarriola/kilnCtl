@@ -1799,6 +1799,12 @@ static void test_zones_post_strict_optional_keys(void)
     strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=1111", "over-long continue_on_zone_trip -> 400");
     strict_zones_expect_400_untouched(STRICT_BASE "&pc_link_abort_silence_ms=1234567890123456", "over-long pc_link_abort_silence_ms -> 400");
     strict_zones_expect_400_untouched(STRICT_BASE "&relay1_type=12345678", "over-long relay1_type -> 400");
+    /* -2 from an all-digit over-long value or an embedded %00: the handler must
+     * never strtol()/strcmp() whatever prefix decode left in the buffer. */
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=00000000", "over-long all-zero max_simultaneous_relays -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&max_simultaneous_relays=0%00", "max_simultaneous_relays=0%00 -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=1%00", "continue_on_zone_trip=1%00 -> 400");
+    strict_zones_expect_400_untouched(STRICT_BASE "&continue_on_zone_trip=0%00", "continue_on_zone_trip=0%00 -> 400");
 
     TEST_SECTION("zones_post_handler -- valid optional keys are accepted and applied");
     strict_zones_seed();

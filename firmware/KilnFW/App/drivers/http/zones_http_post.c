@@ -338,12 +338,11 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         char val[8];
         int len = http_form_find_field(body, "max_simultaneous_relays", val, sizeof(val));
         if (len != -1) {
-            char *end = NULL;
-            long v = strtol(val, &end, 10);
-            /* *end != '\0' rejects trailing garbage after a valid numeric
-             * prefix (e.g. "2X"), same gap as zones_config_json_parse_u8_field()/
-             * zones_config_json_parse_float_field() above -- end == val alone lets it through. */
-            if (end == val || *end != '\0' || v < 0 || v > KILN_IO_RELAY_COUNT) {
+            /* Present: blank (0), over-long or %00 (-2), trailing garbage
+             * ("2X") and out-of-range values are all refused. len is passed
+             * through, so a -2 never reaches a strtol() of the buffer. */
+            long v = 0;
+            if (!http_form_parse_long(val, len, 0, KILN_IO_RELAY_COUNT, &v)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "max_simultaneous_relays out of range");
                 free(body);
                 return ESP_OK;
@@ -359,9 +358,9 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         char val[4];
         int len = http_form_find_field(body, "continue_on_zone_trip", val, sizeof(val));
         if (len != -1) {
-            if (strcmp(val, "1") == 0) {
+            if (http_form_is_bool01(val, len) && val[0] == '1') {
                 tmp.continue_on_zone_trip = 1;
-            } else if (strcmp(val, "0") == 0) {
+            } else if (http_form_is_bool01(val, len)) {
                 tmp.continue_on_zone_trip = 0;
             } else {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "continue_on_zone_trip must be 0 or 1");

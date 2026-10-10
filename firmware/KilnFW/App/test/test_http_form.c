@@ -105,6 +105,20 @@ static void test_decode(void)
     TEST_CHECK(http_form_find_field("a=", "a", out, sizeof(out)) == -1 || http_form_find_field("a=", "a", out, sizeof(out)) == 0,
                "empty value is reported as absent or zero-length, never a positive length");
     TEST_CHECK(http_form_find_field("b=1", "a", out, sizeof(out)) == -1, "absent returns -1");
+
+    /* A -2 must leave out as the empty string, never an unterminated or truncated
+     * prefix: callers that test != -1 then strtol()/strcmp() the buffer (zones
+     * POST max_simultaneous_relays/continue_on_zone_trip) would otherwise read
+     * stack bytes past the written prefix, or take "1%00" as "1". */
+    memset(out, '7', sizeof(out));
+    TEST_CHECK(http_form_find_field("a=00000000", "a", out, sizeof(out)) == -2 && out[0] == '\0',
+               "over-long value leaves out empty, not an unterminated \"0000000\" prefix");
+    memset(out, '7', sizeof(out));
+    TEST_CHECK(http_form_find_field("a=1%00", "a", out, sizeof(out)) == -2 && out[0] == '\0',
+               "%00 leaves out empty, so \"1%00\" can never read back as \"1\"");
+    char tiny[1] = { '7' };
+    TEST_CHECK(http_form_find_field("a=x", "a", tiny, sizeof(tiny)) == -2 && tiny[0] == '\0',
+               "out_cap 1: over-long still terminates out[0]");
 }
 
 int main(void)
