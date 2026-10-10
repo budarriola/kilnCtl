@@ -121,12 +121,72 @@ static void test_decode(void)
                "out_cap 1: over-long still terminates out[0]");
 }
 
+/* HTTP parser fuzz campaign 2026-10-09: adversarial inputs the handlers rely on helpers to refuse. */
+static void test_fuzz_inputs(void)
+{
+    TEST_SECTION("http_form fuzz -- empty body, duplicates, bad escapes, key-prefix, numeric edge cases");
+    char out[16];
+    long l = -7;
+    float f = 1.5f;
+
+    TEST_CHECK(http_form_find_field("", "a", out, sizeof(out)) == -1, "empty body: absent");
+    TEST_CHECK(http_form_find_field("&&&", "a", out, sizeof(out)) == -1, "only separators: absent");
+    TEST_CHECK(http_form_find_field("a", "a", out, sizeof(out)) == -1, "key without '=' is absent");
+    TEST_CHECK(http_form_find_field("ab=1", "a", out, sizeof(out)) == -1, "longer key sharing a prefix is not a match");
+    TEST_CHECK(http_form_find_field("a=1&ab=2", "ab", out, sizeof(out)) == 1 && out[0] == '2', "second field found");
+    TEST_CHECK(http_form_find_field("xa=1", "a", out, sizeof(out)) == -1, "key suffix is not a match");
+    TEST_CHECK(http_form_find_field("a=1&a=2", "a", out, sizeof(out)) == 1 && out[0] == '1', "duplicate key: first wins");
+    TEST_CHECK(http_form_find_field("a=%00&a=1", "a", out, sizeof(out)) == -2, "first duplicate with %00 refuses (no fallthrough)");
+    TEST_CHECK(http_form_find_field("a=1=2", "a", out, sizeof(out)) == 3 && strcmp(out, "1=2") == 0, "extra '=' stays in value");
+
+    TEST_CHECK(http_form_find_field("a=%", "a", out, sizeof(out)) == 1 && out[0] == '%', "lone % kept literal");
+    TEST_CHECK(http_form_find_field("a=%4", "a", out, sizeof(out)) == 2 && strcmp(out, "%4") == 0, "truncated escape kept literal");
+    TEST_CHECK(http_form_find_field("a=%zz", "a", out, sizeof(out)) == 3 && strcmp(out, "%zz") == 0, "non-hex escape kept literal");
+    TEST_CHECK(http_form_find_field("a=%4g", "a", out, sizeof(out)) == 3 && strcmp(out, "%4g") == 0, "half-hex escape kept literal");
+    TEST_CHECK(http_form_find_field("a=%25", "a", out, sizeof(out)) == 1 && out[0] == '%', "%25 decodes to %");
+    TEST_CHECK(http_form_find_field("a=%2500", "a", out, sizeof(out)) == 3 && strcmp(out, "%00") == 0, "%2500 is a literal '%00' string, not a NUL");
+    TEST_CHECK(http_form_find_field("a=%00%00", "a", out, sizeof(out)) == -2, "repeated %00 refused");
+
+    TEST_CHECK(http_form_find_field("a=1234567", "a", out, 8) == 7, "exactly cap-1 fits");
+    TEST_CHECK(http_form_find_field("a=12345678", "a", out, 8) == -2, "cap chars refused");
+    TEST_CHECK(http_form_find_field("a=%31%32%33%34%35%36%37%38", "a", out, 8) == -2, "escapes expanding past cap refused");
+    TEST_CHECK(http_form_find_field("a=++++++++", "a", out, 8) == -2, "plus signs past cap refused");
+    TEST_CHECK(http_form_find_field("a=+", "a", out, 8) == 1 && out[0] == ' ', "plus decodes to space");
+
+    TEST_CHECK(!http_form_parse_long("-", 1, -10, 10, &l), "lone minus refused");
+    TEST_CHECK(!http_form_parse_long("+", 1, -10, 10, &l), "lone plus refused");
+    TEST_CHECK(!http_form_parse_long("0x10", 4, 0, 100, &l), "hex refused");
+    TEST_CHECK(!http_form_parse_long("1e2", 3, 0, 1000, &l), "exponent refused for integer");
+    TEST_CHECK(!http_form_parse_long("1.0", 3, 0, 10, &l), "decimal refused for integer");
+    TEST_CHECK(!http_form_parse_long("5 ", 2, 0, 10, &l), "trailing space refused");
+    TEST_CHECK(!http_form_parse_long("-9223372036854775808", 20, -100, 100, &l), "LONG_MIN out of range refused");
+    TEST_CHECK(!http_form_parse_long("2147483648", 10, 0, 2147483647L, &l), "just above int32 refused");
+    TEST_CHECK(!http_form_parse_long(NULL, 1, 0, 10, &l), "NULL refused");
+    TEST_CHECK(!http_form_parse_long("", 0, 0, 10, &l), "empty refused");
+    TEST_CHECK(l == -7, "refusals never write *out");
+    TEST_CHECK(!http_form_parse_float("-nan", 4, &f), "-nan refused");
+    TEST_CHECK(!http_form_parse_float("-inf", 4, &f), "-inf refused");
+    TEST_CHECK(!http_form_parse_float("infinity", 8, &f), "infinity refused");
+    TEST_CHECK(!http_form_parse_float("NaN(1)", 6, &f), "nan payload refused");
+    TEST_CHECK(!http_form_parse_float("1e39", 4, &f), "float overflow refused");
+    TEST_CHECK(!http_form_parse_float("-1e39", 5, &f), "negative float overflow refused");
+    TEST_CHECK(!http_form_parse_float("1,5", 3, &f), "comma decimal refused");
+    TEST_CHECK(!http_form_parse_float("--1", 3, &f), "double minus refused");
+    TEST_CHECK(!http_form_parse_float(".", 1, &f), "lone dot refused");
+    TEST_CHECK(!http_form_parse_float("1.5 ", 4, &f), "trailing space refused");
+    TEST_CHECK(f == 1.5f, "refusals never write *out (float)");
+    TEST_CHECK(!http_form_value_has_ctl("abc", 3), "plain text has no ctl");
+    TEST_CHECK(http_form_value_has_ctl("a\tb", 3), "tab is a control byte");
+    TEST_CHECK(http_form_value_has_ctl("a\x7f", 2), "DEL is a control byte");
+}
+
 int main(void)
 {
     test_long();
     test_bool();
     test_float();
     test_decode();
+    test_fuzz_inputs();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
 }

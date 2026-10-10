@@ -1630,6 +1630,94 @@ static void run_zones_post(const char *body)
     TEST_CHECK(err == ESP_OK, "zones_post_handler must always return ESP_OK (errors go through httpd_resp_send_err)");
 }
 
+// HTTP parser fuzz campaign 2026-10-09: hostile values on every REQUIRED per-zone field, and
+// hostile top-level fields through the real handler. Expected: refused (400), nothing written.
+static bool fuzz_parse_with(const char *key, const char *val)
+{
+    char body[1024];
+    const char *fields[][2] = {
+        { "z0_name", "Top" }, { "z0_tctype", "2" }, { "z0_relay_mask", "1" }, { "z0_thermo_mask", "1" },
+        { "z0_timingprofile", "0" }, { "z0_cal", "1.5" }, { "z0_kp", "2.0" }, { "z0_ki", "0.3" },
+        { "z0_kd", "0.05" }, { "z0_ramp", "120" }, { "z0_sanity", "5" }, { "z0_mode", "2" },
+        { "z0_maxtemp", "1300" }, { "z0_mintemp", "-10" }, { "z0_window", "60000" },
+        { "z0_minon", "0" }, { "z0_minoff", "0" },
+    };
+    size_t n = 0;
+    body[0] = '\0';
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        const char *v = strcmp(fields[i][0], key) == 0 ? val : fields[i][1];
+        n += (size_t)snprintf(body + n, sizeof(body) - n, "%s%s=%s", n ? "&" : "", fields[i][0], v);
+    }
+    zone_cfg_t current = make_stored_zone();
+    zone_cfg_t out;
+    memset(&out, 0, sizeof(out));
+    const char *err_reason = "unset";
+    return zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+}
+
+static void test_fuzz_zone_fields_hostile_values(void)
+{
+    TEST_SECTION("parse_zone_fields fuzz -- NaN/inf/garbage/%00/overflow/out-of-range on required fields");
+    TEST_CHECK(fuzz_parse_with("z0_kp", "2.0"), "control: the base body parses");
+    const char *numeric[] = { "z0_cal", "z0_kp", "z0_ki", "z0_kd", "z0_ramp", "z0_maxtemp", "z0_mintemp",
+                              "z0_window", "z0_sanity" };
+    const char *hostile[] = { "nan", "inf", "-inf", "abc", "1.5x", "%00", "1%00", "1e39", "-1e39",
+                              "99999999999999999999", "" };
+    for (size_t k = 0; k < sizeof(numeric) / sizeof(numeric[0]); k++) {
+        for (size_t h = 0; h < sizeof(hostile) / sizeof(hostile[0]); h++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s=%s refused", numeric[k], hostile[h]);
+            TEST_CHECK(!fuzz_parse_with(numeric[k], hostile[h]), msg);
+        }
+    }
+    const char *intkeys[] = { "z0_relay_mask", "z0_thermo_mask", "z0_mode", "z0_tctype", "z0_timingprofile" };
+    const char *badint[] = { "-1", "256", "99999", "1.5", "0x2", "abc", "%00", "", "1e1", "nan" };
+    for (size_t k = 0; k < sizeof(intkeys) / sizeof(intkeys[0]); k++) {
+        for (size_t h = 0; h < sizeof(badint) / sizeof(badint[0]); h++) {
+            char msg[96];
+            snprintf(msg, sizeof(msg), "%s=%s refused", intkeys[k], badint[h]);
+            TEST_CHECK(!fuzz_parse_with(intkeys[k], badint[h]), msg);
+        }
+    }
+    TEST_CHECK(!fuzz_parse_with("z0_relay_mask", "16"), "relay_mask bit 4 with relay_count 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_relay_mask", "255"), "relay_mask 255 with relay_count 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_thermo_mask", "255"), "thermo_mask 255 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_tctype", "8"), "tctype 8 (voltage mode) refused");
+    TEST_CHECK(!fuzz_parse_with("z0_mode", "4"), "control_mode 4 refused");
+    TEST_CHECK(!fuzz_parse_with("z0_timingprofile", "1"), "timing profile index past count refused");
+    TEST_CHECK(!fuzz_parse_with("z0_name", "123456789012345678901234567890123456789012345678901234567890"),
+               "over-long name refused");
+    TEST_CHECK(!fuzz_parse_with("z0_name", "a%00b"), "name with %00 refused");
+}
+
+static void test_fuzz_zones_post_toplevel_hostile(void)
+{
+    TEST_SECTION("zones_post_handler fuzz -- hostile thermo_count/relay_count/max_simultaneous_relays -> 400, no OK");
+    const char *bodies[] = {
+        "", "thermo_count=0", "relay_count=0", "thermo_count=&relay_count=0",
+        "thermo_count=-1&relay_count=0", "thermo_count=4&relay_count=0", "thermo_count=99999&relay_count=0",
+        "thermo_count=0&relay_count=-1", "thermo_count=0&relay_count=255", "thermo_count=0&relay_count=99",
+        "thermo_count=nan&relay_count=0", "thermo_count=0%00&relay_count=0", "thermo_count=%00&relay_count=0",
+        "thermo_count=1e0&relay_count=0", "thermo_count=0&relay_count=0&max_simultaneous_relays=-1",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=99",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=%00",
+        "thermo_count=0&relay_count=0&max_simultaneous_relays=99999999999999999999",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=2",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=%00",
+        "thermo_count=0&relay_count=0&continue_on_zone_trip=true",
+        "thermo_count=0&relay_count=0&relay1_type=9", "thermo_count=0&relay_count=0&relay1_type=-1",
+        "thermo_count=0&relay_count=0&relay1_name=a%00b",
+        "thermo_count=0&relay_count=0&relay1_name=a%0Ab",
+        "%", "&&&&", "=", "thermo_count", "=thermo_count=0",
+    };
+    for (size_t k = 0; k < sizeof(bodies) / sizeof(bodies[0]); k++) {
+        char msg[200];
+        run_zones_post(bodies[k]);
+        snprintf(msg, sizeof(msg), "body \"%s\": answered 400 and never ok", bodies[k]);
+        TEST_CHECK(s_test_err_called && !s_test_ok_called, msg);
+    }
+}
+
 // Review fix, 2026-09-25 (item 1, docs/SYSTEM_MODE_GATE.md gate-slices-2/4/5
 // spec): zones_post_handler() used to call system_mode_gate_check() AFTER
 // ota_http_check_interlocks() -- which already refuses (409 "a profile is
@@ -16638,6 +16726,8 @@ static void test_zone_restore_refuses_on_aux_conflict(void)
 void run_test_zones_http(void)
 {
     test_zone_name_control_chars_refused();
+    test_fuzz_zone_fields_hostile_values();
+    test_fuzz_zones_post_toplevel_hostile();
     // cfg is the only save target now, so every handler test that commits a
     // config needs it mounted: a save with cfg unmounted is refused (503).
     zh_cfg_remount_fresh();
