@@ -110,6 +110,10 @@ static int g_setter_max_lock_depth = 0;
 // that re-enters a setter cannot recurse.
 static void (*s_set_model_hook)(void) = NULL;
 static void (*s_set_pid_hook)(void) = NULL;
+// Dev review 9 L1: fires on the first zones_config_get_pid() of a zone whose write_in_flight is set,
+// i.e. run_end's apply phase before its first write (between plan and apply).
+static void (*s_get_pid_in_flight_hook)(void) = NULL;
+static bool zone_write_in_flight_unlocked(uint8_t zone_index); // defined after the adaptive_tune .c includes
 static void run_setter_hook(void (**hook)(void))
 {
     void (*h)(void) = *hook;
@@ -160,6 +164,9 @@ bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
+    if (s_get_pid_in_flight_hook && zone_write_in_flight_unlocked(zone_index)) {
+        run_setter_hook(&s_get_pid_in_flight_hook);
+    }
     *out_kp = s_fake_zone_cfg[zone_index].kp;
     *out_ki = s_fake_zone_cfg[zone_index].ki;
     *out_kd = s_fake_zone_cfg[zone_index].kd;
@@ -342,6 +349,10 @@ bool profile_executor_get_active_id(uint8_t *out_id)
 #include "../drivers/control/adaptive_tune.c"
 #include "../drivers/control/adaptive_tune_model.c"
 #include "../drivers/control/adaptive_tune_ki.c"
+static bool zone_write_in_flight_unlocked(uint8_t zone_index)
+{
+    return adaptive_tune_zones[zone_index].write_in_flight; // test-only raw read: the caller already holds what it needs
+}
 
 #ifdef _WIN32
 #include <direct.h>
@@ -429,6 +440,7 @@ static void reset_module_state(void)
     memset(adaptive_tune_ki_clear_gen, 0, sizeof(adaptive_tune_ki_clear_gen));
     s_set_model_hook = NULL;
     s_set_pid_hook = NULL;
+    s_get_pid_in_flight_hook = NULL;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -666,6 +678,7 @@ void run_test_adaptive_tune(void)
     test_run_end_during_revert_write_skips_the_zone();
     test_ki_clear_gen_is_per_zone();
     test_any_write_in_flight_covers_the_apply_window();
+    test_apply_skips_zone_whose_gains_changed_since_plan();
 }
 
 // ---------------------------------------------------------------------

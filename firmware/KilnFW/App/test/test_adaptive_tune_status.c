@@ -764,6 +764,30 @@ static void test_any_write_in_flight_covers_the_apply_window(void)
     TEST_CHECK(!adaptive_tune_any_write_in_flight(), "cleared after commit");
 }
 
+static void hook_accept_before_apply(void)
+{
+    s_fake_zone_cfg[1].ki = 0.07f; // an Accept lands between run_end's plan and its first write
+}
+
+// MUST GO RED if run_end's apply stops skipping a zone whose gains changed after the plan: it would
+// overwrite the accepted gains with SIMC's, and the stored revert snapshot (the pre-Accept gains)
+// would later undo the Accept.
+static void test_apply_skips_zone_whose_gains_changed_since_plan(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    at_seed_zone1_for_refine();
+    s_get_pid_in_flight_hook = hook_accept_before_apply;
+    profile_firing_run_record_t rec = make_clean_record(35, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(s_get_pid_in_flight_hook == NULL, "setup: hook fired between plan and apply");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].ki, 0.07f, 1e-6, "the accepted Ki must survive; run_end must not overwrite it");
+    TEST_CHECK_NEAR(s_fake_zone_cfg[1].k_dc, 10.0f, 1e-5, "no model write for a skipped zone");
+    TEST_CHECK(!adaptive_tune_zones[1].has_applied && !adaptive_tune_zones[1].revert_available,
+               "a skipped zone has no applied record and no stale revert snapshot");
+    TEST_CHECK(!adaptive_tune_zones[1].write_in_flight, "commit must clear write_in_flight");
+}
+
 static float s_hook_simc_ki;
 static uint8_t s_hook_clear_zone;
 static void hook_accept_clears_baseline(void)
