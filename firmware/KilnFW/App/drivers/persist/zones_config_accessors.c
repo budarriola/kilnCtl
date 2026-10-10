@@ -592,8 +592,10 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
  * (a starter publishes its claim, then reads the generation under this lock: either this read
  * sees the claim or the starter sees the bump). Covers zones_http_pid.c, UART SET_ZONE_PID/MODEL,
  * autotune Accept, the adaptive revert and backup import. No exception is needed for the adaptive
- * tuner's own run-end write or autotune Accept: both run after the run claim is released (the
- * executor never calls these setters under its own claim). Leaf spinlock read only. */
+ * tuner's own run-end write or a profile/relay-method autotune Accept: both run after the run claim
+ * is released (the executor never calls these setters under its own claim). An Accept for an
+ * autotune on ANOTHER zone can still see a claim held by that other run and is refused (review 15
+ * INFO 9; the refusal is reported, see AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN). Leaf spinlock read only. */
 static bool zones_config_run_claimed_locked(void)
 {
     bool profile_running = false, autotune_running = false;

@@ -596,11 +596,11 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         return false;
     }
     /* TODO.md 6A.3's remaining named guard thresholds. OPTIONAL, same reason
-     * z%u_xzone below is: a submission that omits one leaves the
-     * corresponding firmware default in force (z is zero-initialized by the
-     * caller, and 0 is thermal_guard.c's own "substitute the default" value
-     * for every one of these -- unlike z%u_xzone, omitting one of these does
-     * NOT disable its guard). Bounds are generous sanity ceilings against a
+     * z%u_xzone below is: a submission that omits one keeps the
+     * STORED value (review 11 made omission preserve the stored guard rather
+     * than reset it to the firmware default; 0 is still thermal_guard.c's own
+     * "substitute the default" value, and unlike z%u_xzone, omitting one of
+     * these does NOT disable its guard). Bounds are generous sanity ceilings against a
      * typo, not real per-field tuning limits: rates 0-20C/min matches
      * z%u_sanity's own ceiling, windows/periods 0-7200s (2h) covers any
      * kiln's plausible time constant, debounce ticks 0-100, margin 0-500C. */
