@@ -354,6 +354,13 @@ class IoState:
     #: flags bit1 -- the firmware's last I2C transfer to the part failed, so
     #: everything else in this reply is the previous state at best.
     FLAG_I2C_FAILED = 0x02
+    #: flags bit2 -- the relay state could not be established (a coil may be
+    #: energised even though ``relays`` reads 0); treat as a fault, not as OFF.
+    FLAG_RELAY_UNKNOWN = 0x04
+
+    @property
+    def relay_state_unknown(self) -> bool:
+        return bool(self.flags & self.FLAG_RELAY_UNKNOWN)
 
     @property
     def int_asserted(self) -> bool:
@@ -410,6 +417,8 @@ class IoState:
             notes.append("~INT asserted")
         if self.i2c_failed:
             notes.append("I2C FAILED")
+        if self.relay_state_unknown:
+            notes.append("RELAY STATE UNKNOWN - a coil may be energised")
         return (
             f"data 0x{self.data:04X} dir 0x{self.dir:04X}  {relays}  {ios}  {drdy}"
             + (f"  [{'; '.join(notes)}]" if notes else "")

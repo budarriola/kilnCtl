@@ -595,6 +595,7 @@ static void test_relays_off_ms_saturates_below_the_relay_on_sentinel(void)
 
 int main(void)
 {
+    g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
     TEST_SECTION("kiln_io_owner relay-pin gates");
 
     test_relay_pin_mask_is_the_four_relay_pins();

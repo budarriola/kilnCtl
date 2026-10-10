@@ -40,6 +40,8 @@ static struct {
     int partial_bytes;        /* >=0: apply only that many data bytes then fail */
     uint8_t stuck_set[128];   /* bits forced to 1 on every write to reg */
     int write_transfers;
+    int attempts;             /* every transfer ATTEMPTED, success or not (K7 MED-3 bus-time bound) */
+    int reset_attempts;       /* attempted writes to RegReset */
     int reset_writes;
     int pair_split_violation; /* RegData/RegDir written as <2 data bytes */
 } F;
@@ -104,6 +106,8 @@ static void apply_write(uint8_t reg, const uint8_t *v, size_t n)
 esp_err_t i2c_master_transmit(i2c_master_dev_handle_t d, const uint8_t *tx, size_t n, int t)
 {
     (void)d; (void)t;
+    F.attempts++;
+    if (n >= 1 && tx[0] == SX1509_REG_RESET) F.reset_attempts++;
     if (F.fail_forever) return F.fail_err;
     if (F.die_after >= 0 && F.write_transfers >= F.die_after) return F.fail_err;
     F.write_transfers++;
@@ -122,6 +126,7 @@ esp_err_t i2c_master_transmit(i2c_master_dev_handle_t d, const uint8_t *tx, size
 esp_err_t i2c_master_transmit_receive(i2c_master_dev_handle_t d, const uint8_t *tx, size_t tl, uint8_t *rx, size_t rl, int t)
 {
     (void)d; (void)t; (void)tl;
+    F.attempts++;
     if (F.fail_forever) return F.fail_err;
     if (F.die_after >= 0 && F.write_transfers >= F.die_after) return F.fail_err;
     for (size_t i = 0; i < rl; i++) {
@@ -320,9 +325,11 @@ static void test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven(void)
 {
     setup_ready();
     TEST_CHECK(SX1509_reset(&g_exp, false) == ESP_OK, "soft reset");
+    /* The driver learned of the reset (SX1509_reset re-initialises its shadows),
+     * so the relay pins read as inputs there: the refusal is deterministic. */
     esp_err_t e = kiln_io_set_relay(&g_io, 1, true);
-    if (e == ESP_OK) TEST_CHECK(chip_relays_logical() & 0x01, "K7-03: OK reported => coil really energised");
-    else TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "K7-03: refused, nothing driven, no ON claim");
+    TEST_CHECK(e == ESP_ERR_INVALID_STATE, "K7-03: ON refused while the relay pins are inputs");
+    TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "K7-03: nothing driven, no ON claim");
 
     TEST_CHECK(kiln_io_reinit(&g_io) == ESP_OK, "K7-03: reinit after reset ok");
     TEST_CHECK((chip_dir() & 0x000F) == 0 && chip_relays_logical() == 0, "K7-03: relay pins outputs, all latched OFF");
@@ -340,6 +347,22 @@ static void test_k7_03_reinit_readback_catches_stuck_high_latch(void)
     TEST_CHECK(kiln_io_reinit(&g_io) == ESP_ERR_INVALID_RESPONSE, "reinit read-back rejects a relay pin reading high");
     TEST_CHECK(!g_io.initialized, "board not initialised");
     TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) != ESP_OK, "relay ON refused");
+    /* K7 HIGH-1: the failed re-init must not leave the stuck pin driving. */
+    TEST_CHECK((chip_dir() & 0x000F) == 0x000F, "K7 HIGH-1: relay pins returned to inputs after the failed re-init");
+    TEST_CHECK(chip_relays_logical() == 0, "K7 HIGH-1: no coil driven");
+    TEST_CHECK(g_io.relay_shadow == chip_relays_logical(), "K7 HIGH-1: shadow matches the chip");
+    TEST_CHECK(!kiln_io_relay_state_unknown(&g_io), "K7 HIGH-1: state is known (inputs verified)");
+}
+/* HIGH-1, boot path: init failing after the pins became outputs. */
+static void test_k7_high1_init_readback_failure_returns_pins_to_inputs(void)
+{
+    setup();
+    F.stuck_set[SX1509_REG_DATA_A] = 0x01;
+    TEST_CHECK(kiln_io_init(&g_io, &g_exp) != ESP_OK, "init rejects a relay pin reading high");
+    TEST_CHECK(!g_io.initialized, "not initialised");
+    TEST_CHECK((chip_dir() & 0x000F) == 0x000F && chip_relays_logical() == 0,
+               "K7 HIGH-1: relay pins are inputs, nothing driven, after the failed init");
+    TEST_CHECK(g_io.relay_shadow == 0 && !kiln_io_relay_state_unknown(&g_io), "shadow 0 and honest");
 }
 static void test_k7_03_reinit_failure_blocks_relay_on(void)
 {
@@ -363,6 +386,130 @@ static void test_all_relays_off_failfast_and_failsafe(void)
     g_io.initialized = false;
     TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK && chip_relays_logical() == 0, "all-off is allowed before init completes (fail-safe path)");
     TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) == ESP_ERR_INVALID_STATE, "but ON is refused until initialised");
+}
+
+/* K7 MED-1: an ON landed and the bus then died -- the coil is energised but the
+ * state cannot be read. Must be flagged, ON refused until a verified OFF. */
+static void test_k7_med1_unknown_state_flag(void)
+{
+    setup_ready();
+    F.land_then_fail = 1;
+    F.die_after = F.write_transfers + 1; /* first attempt lands, everything after is a dead bus */
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) != ESP_OK, "ON reports the failure");
+    F.land_then_fail = 0;
+    F.die_after = -1;
+    TEST_CHECK(chip_relays_logical() == 0x01, "(precondition) the ON write landed: coil energised");
+    TEST_CHECK(kiln_io_relay_state_unknown(&g_io), "K7 MED-1: relay_state_unknown raised, not 'OFF'");
+    kiln_io_state_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(kiln_io_read(&g_io, &st) == ESP_OK, "bus is back, read ok");
+    TEST_CHECK((st.flags & KILN_IO_FLAG_RELAY_UNKNOWN) != 0, "K7 MED-1: surfaced in the read flags");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) == ESP_ERR_INVALID_STATE, "K7 MED-1: no new ON while unknown");
+    TEST_CHECK(chip_relays_logical() == 0x01, "and relay 2 was not driven");
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK && chip_relays_logical() == 0, "verified all-off lands");
+    TEST_CHECK(!kiln_io_relay_state_unknown(&g_io), "K7 MED-1: a verified all-off clears the flag");
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(kiln_io_read(&g_io, &st) == ESP_OK && (st.flags & KILN_IO_FLAG_RELAY_UNKNOWN) == 0, "flag gone from reads");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) == ESP_OK, "ON works again");
+}
+
+/* K7 MED-2: fail-safe callers outside the owner task are serialised by the
+ * kiln_io lock, with a bounded wait. */
+static void test_k7_med2_lock_serialises_and_is_bounded(void)
+{
+    setup_ready();
+    TEST_CHECK(g_test_stub_lock_depth == 0, "no lock held after init");
+    int w = F.attempts;
+    g_test_stub_semaphore_fail_nth = 1; /* the kiln_io lock cannot be taken */
+    TEST_CHECK(kiln_io_reinit(&g_io) == ESP_ERR_TIMEOUT, "reinit: bounded lock wait, timeout error");
+    TEST_CHECK(F.attempts == w, "reinit with the lock busy touches no bus");
+    g_test_stub_semaphore_fail_nth = 1;
+    TEST_CHECK(kiln_io_set_relay(&g_io, 1, true) == ESP_ERR_TIMEOUT, "relay write: timeout, not an unserialised access");
+    TEST_CHECK(chip_relays_logical() == 0, "and nothing driven");
+    g_test_stub_semaphore_fail_nth = 0;
+
+    /* The fail-safe all-off still does the safest thing when the lock holder is stuck. */
+    TEST_CHECK(kiln_io_set_relay_mask(&g_io, 0x0F, 0x0F) == ESP_OK && chip_relays_logical() == 0x0F, "all on");
+    g_test_stub_semaphore_fail_nth = 1;
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK, "all-off with the lock busy still writes OFF");
+    TEST_CHECK(chip_relays_logical() == 0, "K7 MED-2: coils dropped without the lock");
+    TEST_CHECK(kiln_io_relay_state_unknown(&g_io), "but the state stays flagged unknown (could not serialise)");
+    g_test_stub_semaphore_fail_nth = 0;
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK && !kiln_io_relay_state_unknown(&g_io),
+               "a later locked, verified all-off clears it");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "no lock leaked on any path");
+}
+
+/* K7 MED-3: a dead bus must not trigger the reset + re-init (another ~30 s). */
+static void test_k7_med3_dead_bus_all_off_skips_reset(void)
+{
+    setup_ready();
+    (void)kiln_io_set_relay(&g_io, 1, true);
+    F.fail_forever = 1;
+    F.attempts = 0;
+    F.reset_attempts = 0;
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) != ESP_OK, "dead bus: failure reported");
+    int dead_attempts = F.attempts;
+    TEST_CHECK(F.reset_attempts == 0, "K7 MED-3: no reset attempted on a dead bus");
+    /* The failed write plus the chip read, each with the driver's bounded
+     * retries (26 transfers measured). The old path added a safe-off write, a
+     * reset and a full re-init on top, each retried the same way. */
+    TEST_CHECK(dead_attempts <= 30, "K7 MED-3: bounded bus attempts on a dead bus");
+    TEST_CHECK(kiln_io_relay_state_unknown(&g_io) && g_io.relay_shadow == 0x01,
+               "state unknown, shadow keeps the last verified value");
+    F.fail_forever = 0;
+    TEST_CHECK(kiln_io_all_relays_off(&g_io) == ESP_OK && chip_relays_logical() == 0 && !kiln_io_relay_state_unknown(&g_io),
+               "recovers on the next call once the bus answers");
+}
+
+/* K7 LOW-1: a reset/re-init restores what the user had configured. */
+static void test_k7_low1_reset_restores_user_io(void)
+{
+    setup_ready();
+    TEST_CHECK(kiln_io_set_io_dir(&g_io, 2, false, false) == ESP_OK, "IO 2 -> output");
+    TEST_CHECK(kiln_io_set_io(&g_io, 2, true) == ESP_OK, "IO 2 high");
+    TEST_CHECK(kiln_io_set_io_dir(&g_io, 4, true, true) == ESP_OK, "IO 4 input with pull-up");
+    TEST_CHECK(kiln_io_lcd_dc(&g_io, false) == ESP_OK, "D/C command");
+    TEST_CHECK(kiln_io_lcd_reset(&g_io, true) == ESP_OK, "LCD reset asserted");
+    uint16_t dir = chip_dir(), latch = chip_latch(), pu = g_exp.pu_shadow;
+    TEST_CHECK(kiln_io_reset_and_reinit(&g_io, false) == ESP_OK, "reset + re-init ok");
+    TEST_CHECK(chip_dir() == dir, "K7 LOW-1: directions restored");
+    TEST_CHECK(chip_latch() == latch, "K7 LOW-1: output levels (user IO, D/C, ~RESET) restored");
+    TEST_CHECK(g_exp.pu_shadow == pu, "K7 LOW-1: pull-ups restored");
+    TEST_CHECK(chip_relays_logical() == 0 && g_io.initialized, "relays OFF, board initialised");
+}
+
+/* K7 LOW-5 / NIT-1: reset path keeps the off-tracker honest; hard reset when wired. */
+static void test_k7_low5_nit1_reset_and_reinit(void)
+{
+    setup_ready();
+    (void)kiln_io_set_relay_mask(&g_io, 0x0F, 0x0F);
+    TEST_CHECK(kiln_io_relays_off_ms(&g_io) == UINT32_MAX, "(precondition) relays on: no off-time");
+    TEST_CHECK(kiln_io_reset_and_reinit(&g_io, false) == ESP_OK, "reset ok");
+    TEST_CHECK(g_io.relay_shadow == 0 && kiln_io_relays_off_ms(&g_io) != UINT32_MAX,
+               "K7 LOW-5: all-off time tracker follows the reset relay drop");
+
+    /* Soft reset = two RegReset writes; a hard (~RESET pulse) reset writes none. */
+    F.reset_attempts = 0;
+    TEST_CHECK(kiln_io_reinit(&g_io) == ESP_OK, "reinit without a wired reset GPIO");
+    TEST_CHECK(F.reset_attempts == 2, "no GPIO wired: soft reset (two RegReset writes)");
+    g_exp.reset_gpio = 7;
+    F.reset_attempts = 0;
+    TEST_CHECK(kiln_io_reinit(&g_io) == ESP_OK, "reinit with a wired reset GPIO");
+    TEST_CHECK(F.reset_attempts == 0, "K7 NIT-1: hard reset (~RESET pulsed, no RegReset write) when wired");
+    TEST_CHECK(kiln_io_reset_and_reinit(&g_io, true) == ESP_OK, "explicit hard reset when wired");
+    g_exp.reset_gpio = -1;
+    TEST_CHECK(kiln_io_reset_and_reinit(&g_io, true) == ESP_ERR_INVALID_STATE, "explicit hard reset refused when not wired");
+    TEST_CHECK(chip_relays_logical() == 0, "nothing driven by the refusal");
+
+    /* Reset on a dead bus while relays are on: honest, nothing assumed. */
+    setup_ready();
+    (void)kiln_io_set_relay_mask(&g_io, 0x0F, 0x0F);
+    F.fail_forever = 1;
+    TEST_CHECK(kiln_io_reset_and_reinit(&g_io, false) != ESP_OK, "reset on a dead bus fails");
+    TEST_CHECK(g_io.relay_shadow == 0x0F && kiln_io_relay_state_unknown(&g_io),
+               "K7 LOW-5: failed reset assumes nothing: shadow kept, state unknown");
+    F.fail_forever = 0;
 }
 
 static void test_arg_validation(void)
@@ -413,8 +560,15 @@ static void test_por_then_off_commands_are_honest(void)
     (void)kiln_io_set_relay(&g_io, 1, true);
     chip_por(); /* expander browns out; driver unaware */
     TEST_CHECK(chip_relays_logical() == 0, "a POR de-energises the coil (inputs)");
+    /* The driver shadow still says "output": the write lands in the latch but
+     * the pin is an input, so the pin read-back cannot match -- K7 LOW-3: that
+     * verify is the real backstop for an unnoticed POR. */
     esp_err_t e = kiln_io_set_relay(&g_io, 2, true);
-    if (e == ESP_OK) TEST_CHECK(chip_relays_logical() & 0x02, "if success is reported the coil must really be energised");
+    TEST_CHECK(e != ESP_OK, "an ON on a POR chip is never reported as success");
+    TEST_CHECK(chip_relays_logical() == 0 && g_io.relay_shadow == 0, "and no coil is energised or claimed");
+    /* K7 LOW-4: the failure path saw the relay pins as inputs and repaired them. */
+    TEST_CHECK((chip_dir() & 0x000F) == 0 && g_io.initialized, "the failed write left the board repaired, not half-configured");
+    TEST_CHECK(kiln_io_set_relay(&g_io, 2, true) == ESP_OK && chip_relays_logical() == 0x02, "next ON works");
 }
 
 /* K7-04: chip POR behind the driver's back; all_relays_off repairs direction. */
@@ -464,6 +618,7 @@ static void test_sx_reset_failure_is_reported(void)
 
 int main(void)
 {
+    g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
     TEST_SECTION("kiln_io + SX1509 against a fake I2C expander");
     test_init_leaves_relays_off_and_outputs_driven();
     test_init_dying_midway_never_energises_a_relay_and_is_not_ready();
@@ -480,6 +635,12 @@ int main(void)
     test_k7_03_on_after_sx_reset_never_ok_with_nothing_driven();
     test_k7_03_reinit_failure_blocks_relay_on();
     test_k7_03_reinit_readback_catches_stuck_high_latch();
+    test_k7_high1_init_readback_failure_returns_pins_to_inputs();
+    test_k7_med1_unknown_state_flag();
+    test_k7_med2_lock_serialises_and_is_bounded();
+    test_k7_med3_dead_bus_all_off_skips_reset();
+    test_k7_low1_reset_restores_user_io();
+    test_k7_low5_nit1_reset_and_reinit();
     test_k7_04_all_relays_off_after_por_repairs_direction();
     test_k7_04_unrepairable_por_reports_failure();
     test_all_relays_off_failfast_and_failsafe();

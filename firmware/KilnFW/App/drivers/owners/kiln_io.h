@@ -69,6 +69,7 @@ extern "C" {
 /* kiln_io_state_t::flags */
 #define KILN_IO_FLAG_INT_ASSERTED 0x01u /* the SX1509's ~INT line is low */
 #define KILN_IO_FLAG_I2C_FAILED   0x02u /* the most recent expander transfer failed */
+#define KILN_IO_FLAG_RELAY_UNKNOWN 0x04u /* relay_shadow is NOT trustworthy: a coil may be energised (K7 MED-1) */
 
 /* Snapshot of the board's I/O, laid out to match the IO task's READ response
  * payload (see uart_task_ids.h) field for field -- the bridge copies these
@@ -122,6 +123,24 @@ typedef struct {
     int64_t relays_all_off_since_us;
 
     bool initialized;
+
+    /* K7 MED-1: true when the relay state could not be established from the
+     * chip -- an ON write may have landed and the bus then died, so neither
+     * the chip nor a safe-off write could be read/verified. relay_shadow keeps
+     * its last verified value ON PURPOSE (flipping it to "ON" would disarm the
+     * Pico S3 and ESP H9 guards that catch a stuck coil); this flag is the
+     * separate honest report. Raised by kiln_io_resync_relay_shadow(), cleared
+     * only by a verified chip read or a verified all-off. While set, relay ON
+     * is refused and the profile executor's watchdog treats it as a fault
+     * (kiln_io_relay_state_unknown()). */
+    bool relay_state_unknown;
+
+    /* K7 MED-2: serialises every multi-step access (relay RMW, re-init, LCD
+     * lines, IO config) between the owner task, lvgl_port_task and the
+     * fail-safe callers outside the owner task. Lock order: this lock, then the
+     * SX1509 driver's own lock; never the reverse. NULL (hand-built structs in
+     * host tests) means "no lock". */
+    SemaphoreHandle_t io_lock;
 } kiln_io_t;
 
 /* Configure the whole board and leave it safe.
@@ -172,11 +191,36 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value);
  * half-succeed. */
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io);
 
-/* Re-runs bring-up after the expander was reset/POR'd (CMD_SX_RESET, K7-03):
- * reset, relays latched OFF, relay pins back to outputs, verified by chip
- * read-back. Marks the board not-initialised until the read-back passes, so
- * relay ON is refused meanwhile. Relays are never energised by this call. */
+/* Re-runs bring-up after the expander was reset/POR'd (K7-03): reset (the hard
+ * ~RESET pulse when the GPIO is wired, else soft -- K7 NIT-1), relays latched
+ * OFF, relay pins back to outputs, verified by chip read-back. Marks the board
+ * not-initialised until the read-back passes, so relay ON is refused meanwhile.
+ * Relays are never energised by this call. If a step fails after the relay pins
+ * became outputs they are returned to inputs (de-energised) so a failed
+ * re-init can never leave a driven pin behind the shadow (K7 HIGH-1).
+ *
+ * Takes the kiln_io lock (bounded wait, ESP_ERR_TIMEOUT), so it is safe to call
+ * from fail-safe callers outside the owner task (K7 MED-2).
+ *
+ * Recovery from a failed re-init (K7 LOW-2): the board stays not-initialised
+ * (relay ON refused, OFF always allowed). The profile executor's watchdog calls
+ * kiln_io_all_relays_off() every period on a fault, which re-runs this repair
+ * when the chip answers; CMD_SX_RESET is the operator's manual retry. */
 esp_err_t kiln_io_reinit(kiln_io_t *io);
+
+/* Same as kiln_io_reinit() but performs the expander reset itself under the
+ * kiln_io lock (CMD_SX_RESET): hard = pulse the ~RESET GPIO (refused with
+ * ESP_ERR_INVALID_STATE if it is not wired), otherwise a soft reset. The user's
+ * IO_1..IO_7 configuration and the LCD D/C / ~RESET lines are captured before
+ * the reset and re-applied after the verified re-init (K7 LOW-1). If the reset
+ * itself fails the relay state is re-derived from the chip, or flagged unknown
+ * (K7 LOW-5). Relays are never energised by this call. */
+esp_err_t kiln_io_reset_and_reinit(kiln_io_t *io, bool hard);
+
+/* True when the relay state could not be established from the chip (see
+ * kiln_io_t::relay_state_unknown). Treat as a fault: retry kiln_io_all_relays_off
+ * and assert a fault source; never as "OFF". */
+bool kiln_io_relay_state_unknown(const kiln_io_t *io);
 
 /* The expander pin bits (IO0..IO3, see this header's top comment) that are
  * relay drives -- SX1509 pin numbering, not the schematic's Relay1..4

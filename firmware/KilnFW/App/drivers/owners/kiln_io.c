@@ -139,12 +139,30 @@ static void kiln_io_note_relay_shadow_changed(kiln_io_t *io); /* forward decl --
                                                                   used by both this function and
                                                                   the write paths further down */
 
+#define KILN_IO_LOCK_WAIT_MS          6500u /* normal callers: a little over the SX1509 driver's own lock wait */
+#define KILN_IO_FAILSAFE_LOCK_WAIT_MS 2000u /* fail-safe all-off: bounded, then an unlocked OFF write */
+
+/* K7 MED-2. Lock order: this lock, then the SX1509 driver's lock, never the
+ * reverse. A NULL io_lock (hand-built struct in a host test) means no locking. */
+static bool kiln_io_lock(kiln_io_t *io, uint32_t wait_ms)
+{
+    if (!io->io_lock) return true;
+    return xSemaphoreTake(io->io_lock, pdMS_TO_TICKS(wait_ms)) == pdTRUE;
+}
+
+static void kiln_io_unlock(kiln_io_t *io)
+{
+    if (io->io_lock) xSemaphoreGive(io->io_lock);
+}
+
 /* Reads the chip's real relay state: a relay is energised only if its pin is an
  * OUTPUT (RegDir bit 0) AND reads high. Both registers are read from the part,
  * never from the driver's shadows (K7-02: the driver data shadow records what
  * was last ACKed, not what the pins hold). Returns false if the chip cannot be
- * read. *out_logical is in logical relay-bit order. */
-static bool kiln_io_read_chip_relays(kiln_io_t *io, uint8_t *out_logical)
+ * read. *out_logical is in logical relay-bit order; *out_pins_input (optional)
+ * is true if any relay pin is an input, i.e. the expander was reset behind the
+ * driver's back. */
+static bool kiln_io_read_chip_relays(kiln_io_t *io, uint8_t *out_logical, bool *out_pins_input)
 {
     uint8_t dir_b[2] = { 0xFF, 0xFF };
     uint16_t port = 0;
@@ -153,25 +171,36 @@ static bool kiln_io_read_chip_relays(kiln_io_t *io, uint8_t *out_logical)
     uint16_t dir = (uint16_t)(((uint16_t)dir_b[0] << 8) | dir_b[1]);
     uint16_t driven = (uint16_t)(port & ~dir & (uint16_t)KILN_IO_RELAY_MASK);
     *out_logical = kiln_io_remap_relay_bits((uint8_t)driven);
+    if (out_pins_input) *out_pins_input = (dir & (uint16_t)KILN_IO_RELAY_MASK) != 0;
     return true;
 }
 
 /* Re-derives the relay shadow from the CHIP after a failed or uncertain write.
- * If the chip cannot be read, the state is unknown: first try to drive every
- * relay OFF (the only safe direction); if that also fails, the shadow
- * keeps its last verified state (the caller still gets the error) and logs it. */
-static void kiln_io_resync_relay_shadow(kiln_io_t *io)
+ * If the chip cannot be read and allow_safe_off, first try to drive every relay
+ * OFF (the only safe direction). If the state still cannot be established the
+ * shadow keeps its last verified value -- flipping it to ON would disarm the
+ * Pico S3 and ESP H9 guards that catch a stuck coil -- and relay_state_unknown
+ * is raised instead (K7 MED-1); the caller still gets its error. A verified chip
+ * read clears the flag. Returns true when the chip was read.
+ *
+ * The fail-safe all-off passes allow_safe_off=false: its own write just failed,
+ * repeating it would double the stuck-bus latency (K7 MED-3). */
+static bool kiln_io_resync_relay_shadow(kiln_io_t *io, bool allow_safe_off, bool *out_pins_input)
 {
     uint8_t actual = 0;
-    if (!kiln_io_read_chip_relays(io, &actual)) {
-        if (SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0) == ESP_OK &&
-            kiln_io_read_chip_relays(io, &actual)) {
-            /* fall through with the verified read-back */
-        } else {
-            actual = io->relay_shadow; /* keep the last verified state; the failure is reported to the caller */
-            ESP_LOGE(TAG, "relay state unknown (chip unreadable, safe-off failed): keeping shadow 0x%X",
-                     actual);
-        }
+    bool pins_input = false;
+    bool known = kiln_io_read_chip_relays(io, &actual, &pins_input);
+    if (!known && allow_safe_off) {
+        known = SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0) == ESP_OK &&
+                kiln_io_read_chip_relays(io, &actual, &pins_input);
+    }
+    if (!known) {
+        actual = io->relay_shadow; /* keep the last verified state; the failure is reported to the caller */
+        io->relay_state_unknown = true;
+        ESP_LOGE(TAG, "RELAY STATE UNKNOWN (chip unreadable): shadow stays 0x%X, relay_state_unknown set",
+                 actual);
+    } else {
+        io->relay_state_unknown = false;
     }
     if (actual != io->relay_shadow) {
         ESP_LOGE(TAG, "relay shadow mismatch: commanded 0x%X, chip holds 0x%X (logical) -- "
@@ -179,7 +208,29 @@ static void kiln_io_resync_relay_shadow(kiln_io_t *io)
                  io->relay_shadow, actual);
         io->relay_shadow = actual;
     }
+    if (out_pins_input) *out_pins_input = known && pins_input;
     kiln_io_note_relay_shadow_changed(io);
+    return known;
+}
+
+/* K7 HIGH-1: a bring-up / re-init that failed after the relay pins became
+ * outputs must not leave them driving behind a zeroed shadow. Return the relay
+ * pins to inputs (the POR state: gate not driven, coil de-energised). The
+ * verifying set_dir either lands -- then shadow 0 is honest -- or fails, in
+ * which case the shadow is re-derived from the chip (an energised pin reads ON)
+ * or relay_state_unknown is raised. */
+static void kiln_io_relays_to_inputs(kiln_io_t *io)
+{
+    uint16_t dir = (uint16_t)(SX1509_get_dir_shadow(io->exp) | (uint16_t)KILN_IO_RELAY_MASK);
+    if (SX1509_set_dir(io->exp, dir) == ESP_OK) {
+        io->relay_shadow = 0;
+        io->relay_state_unknown = false;
+        kiln_io_note_relay_shadow_changed(io);
+        ESP_LOGE(TAG, "relay pins returned to inputs after a failed (re)configuration");
+        return;
+    }
+    ESP_LOGE(TAG, "could not return relay pins to inputs -- re-reading the chip");
+    (void)kiln_io_resync_relay_shadow(io, false, NULL);
 }
 
 /* Steps 2-5 of bring-up (after a reset), then a read-back of the relay pins:
@@ -239,23 +290,108 @@ static esp_err_t kiln_io_configure_pins(kiln_io_t *io)
     return ESP_OK;
 }
 
-esp_err_t kiln_io_reinit(kiln_io_t *io)
+static esp_err_t kiln_io_lcd_dc_locked(kiln_io_t *io, bool data);
+static esp_err_t kiln_io_lcd_reset_locked(kiln_io_t *io, bool asserted);
+
+/* K7 LOW-1: a reset is a POR, so IO_1..IO_7 directions/pull-ups/levels and the
+ * LCD lines go back to defaults. Re-apply what the user had configured (best
+ * effort, logged). The relay and display pins keep the verified
+ * kiln_io_configure_pins() result; the latch is loaded before the direction so
+ * an output never glitches. */
+static void kiln_io_restore_user_io(kiln_io_t *io, uint16_t saved_dir, uint16_t saved_pu,
+                                    uint8_t saved_io_shadow)
 {
-    if (!io || !io->exp) return ESP_ERR_INVALID_ARG;
+    uint16_t user = 0;
+    for (uint8_t i = 0; i < KILN_IO_DIGITAL_COUNT; ++i) user |= KILN_BIT(kiln_io_pins[i]);
+    uint16_t dir = (uint16_t)((KILN_IO_DIR_MASK & ~user) | (saved_dir & user));
+    uint16_t pu = (uint16_t)((KILN_IO_PULLUP_MASK & ~user) | (saved_pu & user));
+    uint16_t out_mask = 0, levels = 0;
+    for (uint8_t i = 0; i < KILN_IO_DIGITAL_COUNT; ++i) {
+        uint16_t bit = KILN_BIT(kiln_io_pins[i]);
+        if (!(dir & bit)) {
+            out_mask |= bit;
+            if (saved_io_shadow & (uint8_t)(1u << i)) levels |= bit;
+        }
+    }
+    esp_err_t err = ESP_OK;
+    if (out_mask) err = SX1509_write_masked(io->exp, out_mask, levels);
+    if (err == ESP_OK && pu != KILN_IO_PULLUP_MASK) err = SX1509_set_pullup(io->exp, pu);
+    if (err == ESP_OK && dir != KILN_IO_DIR_MASK) err = SX1509_set_dir(io->exp, dir);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "user IO configuration not fully restored after re-init: %s", esp_err_to_name(err));
+    }
+}
+
+/* mode 0 = auto: hard reset when the ~RESET GPIO is wired (a soft reset cannot
+ * recover a wedged I2C state machine -- K7 NIT-1), else soft. 1 = soft. 2 = hard
+ * (SX1509_reset refuses if the GPIO is not wired). Caller holds io_lock. */
+static esp_err_t kiln_io_reinit_locked(kiln_io_t *io, int mode)
+{
+    /* Captured BEFORE the reset: SX1509_reset() re-initialises the driver shadows. */
+    uint16_t saved_dir = SX1509_get_dir_shadow(io->exp);
+    uint16_t saved_pu = io->exp->pu_shadow;
+    uint8_t saved_io_shadow = io->io_shadow;
+    bool saved_dc = io->lcd_dc_data;
+    bool saved_reset = io->lcd_reset_asserted;
+
     io->initialized = false; /* relay ON is refused until the read-back below passes */
-    esp_err_t err = SX1509_reset(io->exp, false);
+    esp_err_t err;
+    if (mode == 1) {
+        err = SX1509_reset(io->exp, false);
+    } else if (mode == 2) {
+        err = SX1509_reset(io->exp, true);
+    } else {
+        err = io->exp->reset_gpio >= 0 ? SX1509_reset(io->exp, true) : ESP_FAIL;
+        if (err != ESP_OK) err = SX1509_reset(io->exp, false);
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "expander reset failed: %s", esp_err_to_name(err));
+        /* K7 LOW-5: the reset may or may not have landed; take the chip's word
+         * for the relay state (or raise relay_state_unknown), assume nothing. */
+        (void)kiln_io_resync_relay_shadow(io, false, NULL);
         return kiln_io_track(io, err);
     }
     /* All pins are inputs now, so no relay can be energised. */
     io->relay_shadow = 0;
+    io->relay_state_unknown = false;
     kiln_io_note_relay_shadow_changed(io);
     err = kiln_io_configure_pins(io);
-    if (err != ESP_OK) return kiln_io_track(io, err);
+    if (err != ESP_OK) {
+        kiln_io_relays_to_inputs(io); /* K7 HIGH-1 */
+        return kiln_io_track(io, err);
+    }
     io->initialized = true;
+    /* configure_pins left the display lines at SAFE_DATA (D/C data, ~RESET high). */
+    io->lcd_dc_data = (KILN_IO_SAFE_DATA & KILN_BIT(SX1509_LCD_DC_PIN)) != 0;
+    io->lcd_reset_asserted = false;
+    kiln_io_restore_user_io(io, saved_dir, saved_pu, saved_io_shadow);
+    if (saved_dc != io->lcd_dc_data) (void)kiln_io_lcd_dc_locked(io, saved_dc);
+    if (saved_reset) (void)kiln_io_lcd_reset_locked(io, true);
     ESP_LOGI(TAG, "board I/O re-initialised, all relays off");
     return kiln_io_track(io, ESP_OK);
+}
+
+esp_err_t kiln_io_reinit(kiln_io_t *io)
+{
+    if (!io || !io->exp) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_reinit_locked(io, 0);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_reset_and_reinit(kiln_io_t *io, bool hard)
+{
+    if (!io || !io->exp) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_reinit_locked(io, hard ? 2 : 1);
+    kiln_io_unlock(io);
+    return err;
+}
+
+bool kiln_io_relay_state_unknown(const kiln_io_t *io)
+{
+    return io && io->relay_state_unknown;
 }
 
 esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
@@ -263,6 +399,11 @@ esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
     if (!io || !exp) return ESP_ERR_INVALID_ARG;
 
     memset(io, 0, sizeof(*io));
+    io->io_lock = xSemaphoreCreateMutex();
+    if (!io->io_lock) {
+        ESP_LOGE(TAG, "kiln_io lock allocation failed");
+        return ESP_ERR_NO_MEM;
+    }
     io->exp = exp;
     io->relay_shadow = 0;
     io->io_shadow = 0;
@@ -284,7 +425,10 @@ esp_err_t kiln_io_init(kiln_io_t *io, SX1509Class *exp)
     /* Steps 2-5: latches first, conditioning, interrupts, then directions; see
      * kiln_io_configure_pins(). Relay pins are read back before init succeeds. */
     err = kiln_io_configure_pins(io);
-    if (err != ESP_OK) return kiln_io_track(io, err);
+    if (err != ESP_OK) {
+        kiln_io_relays_to_inputs(io); /* K7 HIGH-1: never leave relay pins driving */
+        return kiln_io_track(io, err);
+    }
 
     io->initialized = true;
     kiln_io_note_relay_shadow_changed(io); /* relay_shadow is 0 here -- stamps relays_all_off_since_us */
@@ -316,7 +460,7 @@ esp_err_t kiln_io_set_relay(kiln_io_t *io, uint8_t relay, bool on)
     return kiln_io_set_relay_mask(io, bit, on ? bit : 0u);
 }
 
-esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
+static esp_err_t kiln_io_set_relay_mask_locked(kiln_io_t *io, uint8_t mask, uint8_t value)
 {
     if (!io) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -333,12 +477,25 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
 
     uint8_t phys_mask = kiln_io_remap_relay_bits(mask);
     uint8_t phys_value = kiln_io_remap_relay_bits(value);
-    /* K7-03: never energise on uncertainty. If the driver's own direction
+    /* K7 LOW-3: the pre-check below only sees the DRIVER's direction shadow. An
+     * expander POR the driver never learned about is caught by the write itself:
+     * SX1509_write_masked() verifies by reading the pins back, and a relay pin
+     * that is still an input does not read what was written, so the write fails
+     * (INVALID_RESPONSE) and the failure path below repairs the board. The
+     * verify is the real backstop for an unnoticed POR; the shadow check is the
+     * cheap early refusal once the driver does know.
+     * K7-03: never energise on uncertainty. If the driver's own direction
      * shadow says a relay pin to be driven ON is not an output (an expander
      * reset/POR left it an input), the latch write would "succeed" with nothing
      * driven. Refuse; kiln_io_reinit() is the repair. OFF is always allowed. */
     if ((SX1509_get_dir_shadow(io->exp) & (uint16_t)phys_value) != 0) {
         ESP_LOGE(TAG, "relay ON refused: relay pin(s) 0x%X are not outputs (expander reset?)", phys_value);
+        return kiln_io_track(io, ESP_ERR_INVALID_STATE);
+    }
+    /* K7 MED-1: never energise while the relay state is unknown; OFF stays
+     * allowed. Cleared by a verified chip read or a verified all-off. */
+    if (phys_value != 0 && io->relay_state_unknown) {
+        ESP_LOGE(TAG, "relay ON refused: relay state unknown (a coil may be energised)");
         return kiln_io_track(io, ESP_ERR_INVALID_STATE);
     }
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)phys_mask, (uint16_t)phys_value);
@@ -356,7 +513,17 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
          * claiming a coil is off while it is energized. */
         ESP_LOGE(TAG, "relay write (mask 0x%X value 0x%X) failed: %s", mask, value,
                  esp_err_to_name(err));
-        kiln_io_resync_relay_shadow(io);
+        bool pins_input = false;
+        (void)kiln_io_resync_relay_shadow(io, true, &pins_input);
+        if (pins_input) {
+            /* K7 LOW-4: the relay pins are inputs -- the expander lost its
+             * configuration (POR) behind the driver. Nothing is driven, so the
+             * relays are off; repair now so the NEXT command works instead of
+             * the board sitting half-configured until someone notices. The
+             * original error is still what the caller gets. */
+            ESP_LOGE(TAG, "relay pins are inputs after a failed write -- re-initialising the expander");
+            (void)kiln_io_reinit_locked(io, 0);
+        }
     }
     return kiln_io_track(io, err);
 }
@@ -364,6 +531,41 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
 uint16_t kiln_io_relay_pin_mask(void)
 {
     return (uint16_t)KILN_IO_RELAY_MASK;
+}
+
+/* Caller holds io_lock. */
+static esp_err_t kiln_io_all_relays_off_locked(kiln_io_t *io)
+{
+    esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0);
+    if (err == ESP_OK) {
+        io->relay_shadow = 0;
+        io->relay_state_unknown = false;
+        kiln_io_note_relay_shadow_changed(io);
+        ESP_LOGI(TAG, "all relays off");
+        return kiln_io_track(io, ESP_OK);
+    }
+    ESP_LOGE(TAG, "ALL RELAYS OFF FAILED: %s -- checking the chip", esp_err_to_name(err));
+    /* K7 MED-3: no safe-off retry inside the resync (it would repeat the write
+     * that just failed). */
+    bool known = kiln_io_resync_relay_shadow(io, false, NULL);
+    if (!known && err != ESP_ERR_INVALID_RESPONSE) {
+        /* Transport failure AND an unreadable chip: the bus is dead. A reset +
+         * re-init would only spend another ~30 s retrying it (K7 MED-3: the
+         * fail-safe path went from ~25 s to ~55 s). Report the failure;
+         * relay_state_unknown is already raised, and the watchdog retries this
+         * call every period, so the repair happens as soon as the chip answers. */
+        ESP_LOGE(TAG, "bus unresponsive -- skipping the reset/re-init, relay state UNKNOWN");
+        return kiln_io_track(io, err);
+    }
+    /* K7-04: a chip POR behind the driver's back leaves relay pins as inputs
+     * (safe) but the data write cannot verify. Repair direction via a reset +
+     * verified re-configure; if that fails the original error stands (and the
+     * board stays not-initialised, so ON is refused). */
+    if (kiln_io_reinit_locked(io, 0) == ESP_OK) {
+        ESP_LOGI(TAG, "all relays off after re-init");
+        return kiln_io_track(io, ESP_OK);
+    }
+    return kiln_io_track(io, err);
 }
 
 esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
@@ -374,28 +576,30 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
      * attached expander and nothing else. */
     if (!io || !io->exp) return ESP_ERR_INVALID_ARG;
 
+    if (kiln_io_lock(io, KILN_IO_FAILSAFE_LOCK_WAIT_MS)) {
+        esp_err_t err = kiln_io_all_relays_off_locked(io);
+        kiln_io_unlock(io);
+        return err;
+    }
+    /* K7 MED-2: the lock holder is stuck (a dead-bus transfer). The fail-safe
+     * must not wait forever: do the safest possible action without the lock --
+     * one bare OFF write (the SX1509 driver's own lock still serialises the
+     * wire). The unlocked fields are only ever moved toward OFF here, and
+     * relay_state_unknown is left RAISED either way: we could not serialise
+     * against whatever the holder is doing, so only a later locked, verified
+     * all-off may clear it (the watchdog retries every period). */
+    ESP_LOGE(TAG, "ALL RELAYS OFF: kiln_io lock busy for %u ms -- unlocked OFF write",
+             (unsigned)KILN_IO_FAILSAFE_LOCK_WAIT_MS);
     esp_err_t err = SX1509_write_masked(io->exp, (uint16_t)KILN_IO_RELAY_MASK, 0);
+    io->relay_state_unknown = true;
     if (err == ESP_OK) {
         io->relay_shadow = 0;
         kiln_io_note_relay_shadow_changed(io);
-        ESP_LOGI(TAG, "all relays off");
-    } else {
-        ESP_LOGE(TAG, "ALL RELAYS OFF FAILED: %s -- trying a verified re-init",
-                 esp_err_to_name(err));
-        kiln_io_resync_relay_shadow(io);
-        /* K7-04: a chip POR behind the driver's back leaves relay pins as
-         * inputs (safe) but the data write cannot verify. Repair direction via
-         * a reset + verified re-configure; if that fails the original error
-         * stands (and the board stays not-initialised, so ON is refused). */
-        if (kiln_io_reinit(io) == ESP_OK) {
-            ESP_LOGI(TAG, "all relays off after re-init");
-            return kiln_io_track(io, ESP_OK);
-        }
     }
     return kiln_io_track(io, err);
 }
 
-esp_err_t kiln_io_set_io(kiln_io_t *io, uint8_t index, bool level)
+static esp_err_t kiln_io_set_io_locked(kiln_io_t *io, uint8_t index, bool level)
 {
     if (!io || index < 1u || index > KILN_IO_DIGITAL_COUNT) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -409,7 +613,7 @@ esp_err_t kiln_io_set_io(kiln_io_t *io, uint8_t index, bool level)
     return kiln_io_track(io, err);
 }
 
-esp_err_t kiln_io_set_io_dir(kiln_io_t *io, uint8_t index, bool input, bool pullup)
+static esp_err_t kiln_io_set_io_dir_locked(kiln_io_t *io, uint8_t index, bool input, bool pullup)
 {
     if (!io || index < 1u || index > KILN_IO_DIGITAL_COUNT) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -439,7 +643,7 @@ esp_err_t kiln_io_set_io_dir(kiln_io_t *io, uint8_t index, bool input, bool pull
     return kiln_io_track(io, err);
 }
 
-esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
+static esp_err_t kiln_io_read_locked(kiln_io_t *io, kiln_io_state_t *out)
 {
     if (!io || !out) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -456,7 +660,8 @@ esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
         out->relay_shadow = io->relay_shadow;
         out->dir = SX1509_get_dir_shadow(io->exp);
         out->flags = (uint8_t)((SX1509_irq_asserted(io->exp) ? KILN_IO_FLAG_INT_ASSERTED : 0u) |
-                               KILN_IO_FLAG_I2C_FAILED);
+                               KILN_IO_FLAG_I2C_FAILED |
+                               (io->relay_state_unknown ? KILN_IO_FLAG_RELAY_UNKNOWN : 0u));
         io->last_i2c_failed = true;
         return err;
     }
@@ -481,12 +686,13 @@ esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
         if (!(data & KILN_BIT(kiln_io_drdy_pins[ch]))) out->drdy_bits |= (uint8_t)(1u << ch);
     }
     if (SX1509_irq_asserted(io->exp)) out->flags |= KILN_IO_FLAG_INT_ASSERTED;
+    if (io->relay_state_unknown) out->flags |= KILN_IO_FLAG_RELAY_UNKNOWN;
 
     io->last_i2c_failed = false;
     return ESP_OK;
 }
 
-esp_err_t kiln_io_get_drdy(kiln_io_t *io, uint8_t channel, bool *out_asserted)
+static esp_err_t kiln_io_get_drdy_locked(kiln_io_t *io, uint8_t channel, bool *out_asserted)
 {
     if (!io || channel >= KILN_IO_DRDY_COUNT || !out_asserted) {
         return ESP_ERR_INVALID_ARG;
@@ -498,7 +704,7 @@ esp_err_t kiln_io_get_drdy(kiln_io_t *io, uint8_t channel, bool *out_asserted)
     return kiln_io_track(io, err);
 }
 
-esp_err_t kiln_io_lcd_dc(kiln_io_t *io, bool data)
+static esp_err_t kiln_io_lcd_dc_locked(kiln_io_t *io, bool data)
 {
     if (!io) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -532,7 +738,7 @@ esp_err_t kiln_io_lcd_dc(kiln_io_t *io, bool data)
     return kiln_io_track(io, err);
 }
 
-esp_err_t kiln_io_lcd_reset(kiln_io_t *io, bool asserted)
+static esp_err_t kiln_io_lcd_reset_locked(kiln_io_t *io, bool asserted)
 {
     if (!io) return ESP_ERR_INVALID_ARG;
     if (!kiln_io_ready(io)) return ESP_ERR_INVALID_STATE;
@@ -585,4 +791,73 @@ uint32_t kiln_io_relays_off_ms(const kiln_io_t *io)
         return UINT32_MAX - 1u;
     }
     return (uint32_t)elapsed_ms;
+}
+
+/* ---- locked public entry points (K7 MED-2) ------------------------------
+ * Every multi-step access to the expander is serialised here so a fail-safe
+ * re-init from outside the owner task cannot interleave with a relay
+ * read-modify-write or an LCD line write. Normal callers wait a bounded time
+ * and get ESP_ERR_TIMEOUT; kiln_io_all_relays_off() has its own shorter wait
+ * and an unlocked OFF fallback. */
+esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_set_relay_mask_locked(io, mask, value);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_set_io(kiln_io_t *io, uint8_t index, bool level)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_set_io_locked(io, index, level);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_set_io_dir(kiln_io_t *io, uint8_t index, bool input, bool pullup)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_set_io_dir_locked(io, index, input, pullup);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_read(kiln_io_t *io, kiln_io_state_t *out)
+{
+    if (!io || !out) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_read_locked(io, out);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_get_drdy(kiln_io_t *io, uint8_t channel, bool *out_asserted)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_get_drdy_locked(io, channel, out_asserted);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_lcd_dc(kiln_io_t *io, bool data)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_lcd_dc_locked(io, data);
+    kiln_io_unlock(io);
+    return err;
+}
+
+esp_err_t kiln_io_lcd_reset(kiln_io_t *io, bool asserted)
+{
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    esp_err_t err = kiln_io_lcd_reset_locked(io, asserted);
+    kiln_io_unlock(io);
+    return err;
 }

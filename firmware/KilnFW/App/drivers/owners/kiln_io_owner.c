@@ -552,30 +552,20 @@ static void owner_task(void *arg)
             r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_RESET:
-            r.err = SX1509_reset(s_io->exp, cmd.args.sx_reset.hard);
+            /* A reset -- soft OR hard -- is a POR: every pin goes back to being an
+             * input, which de-energizes every relay coil. kiln_io_reset_and_reinit()
+             * does the reset under the kiln_io lock, then K7-03's verified re-init
+             * (relay pins back to outputs, all latched OFF), restores the user's
+             * IO_1..IO_7 config (K7 LOW-1) and keeps relay_shadow / the off-tracker
+             * honest on every path (K7 HIGH-1, LOW-5). On failure the board stays
+             * not-initialised (relay ON refused) and the error is returned. No
+             * safety/ownership gate is needed (same as CMD_ALL_RELAYS_OFF): a reset
+             * can only ever turn relays OFF, never on. */
+            r.err = kiln_io_reset_and_reinit(s_io, cmd.args.sx_reset.hard);
             if (r.err == ESP_OK) {
-                /* A reset -- soft OR hard, SX1509_reset()'s own comment --
-                 * is a POR: every one of the 16 pins goes back to being an
-                 * input, which de-energizes every relay coil exactly the
-                 * way kiln_io_init()'s step-1 comment describes for the
-                 * boot-time case. This is the runtime equivalent, reached
-                 * from uart_bridge.c's IO_CMD_SX_RESET debug subcommand, and
-                 * it was leaving relay_shadow claiming whatever it last
-                 * said -- coils reading ON on the dashboard/LCD after they
-                 * had actually just been silently floated off. No
-                 * safety/ownership gate is needed here (same as
-                 * CMD_ALL_RELAYS_OFF above): a reset can only ever turn
-                 * relays OFF, never on, so there is nothing for those gates
-                 * to protect against. */
-                s_io->relay_shadow = 0;
-                /* K7-03: a POR left the relay pins as inputs. Restore outputs with
-                 * every relay latched OFF, verified by read-back, before any later
-                 * relay command can report success. On failure the board stays
-                 * not-initialised (relay ON refused) and the error is returned. */
-                esp_err_t re = kiln_io_reinit(s_io);
-                if (re != ESP_OK) r.err = re;
-                ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, all relay pins now inputs, "
-                              "relay_shadow cleared to match", cmd.args.sx_reset.hard ? "hard" : "soft");
+                relay_off_tracker_note_write(0xFFu, 0u);
+                ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, re-initialised, all relays off",
+                         cmd.args.sx_reset.hard ? "hard" : "soft");
             }
             break;
         case CMD_SX_SCAN: {

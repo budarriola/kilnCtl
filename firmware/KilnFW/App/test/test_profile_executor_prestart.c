@@ -130,6 +130,13 @@ esp_err_t kiln_io_all_relays_off(kiln_io_t *io)
     return ESP_OK;
 }
 
+static bool g_kiln_io_relay_unknown = false;
+bool kiln_io_relay_state_unknown(const kiln_io_t *io)
+{
+    (void)io;
+    return g_kiln_io_relay_unknown;
+}
+
 // profile_executor_firing_stats.c's last-run cache (PROFILE_SLOTS_100.md
 // review LOW, "list perf") now #includes profiles_builtin.h to size/index
 // itself; this executable does not link profiles_builtin.c (not needed for
@@ -2303,6 +2310,7 @@ static void test_guard9_fault_source_cleared_on_halt(void)
     TEST_CHECK(s_exec.global_fault_source == 0, "global_fault_source must be back to 0 after halt()");
 }
 
+static void test_relay_state_unknown_is_a_fault(void);
 static void test_guard9_watchdog_source_order(void);
 static void test_heat_acquire_result_not_discarded(void);
 static void test_zone_off_pending_retry(void);
@@ -2350,6 +2358,55 @@ static void test_guard9_fires_while_another_task_holds_exec_lock(void)
     g_kiln_io_all_relays_off_calls = 0;
     TEST_CHECK(!guard9_prelock_check(NULL) && g_kiln_io_all_relays_off_calls == 0,
                "a fresh tick must not trip guard 9");
+}
+
+// K7 MED-1: relay_state_unknown must surface as a fault, not as OFF. The
+// watchdog retries the fail-safe all-off and holds SAFETY_FAULT_SRC_APP until
+// the flag clears; only then is the hold released (and a guard-9 assertion of
+// the same bit is never released by this path).
+static void test_relay_state_unknown_is_a_fault(void)
+{
+    TEST_SECTION("K7 MED-1 -- relay_state_unknown retries all-off and holds the APP fault source until it clears");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = false;
+    g_kiln_io_all_relays_off_calls = 0;
+    g_set_fault_source_calls = 0;
+
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 0 && g_set_fault_source_calls == 0,
+               "known relay state: no retry, no fault");
+
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_kiln_io_all_relays_off_calls == 1, "unknown state: fail-safe all-off retried");
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   g_last_fault_source_assert,
+               "unknown state: SAFETY_FAULT_SRC_APP asserted (fault, not OFF)");
+    relay_unknown_prelock_check();
+    TEST_CHECK(g_set_fault_source_calls == 1, "still unknown: asserted once, not every pass");
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 1, "still unknown: hold not released");
+
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+                   !g_last_fault_source_assert,
+               "cleared by a verified read/all-off: hold released");
+
+    /* A guard-9 assertion of the same bit must survive. */
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 0, "guard-9 held APP bit is not released by the relay-unknown path");
+    s_exec.global_fault_source = 0;
+    s_exec.io = NULL;
 }
 
 // profile_zones_have_ceiling() tests (audit 2026-08-27 items 1/2: "Guard 5's
@@ -12008,6 +12065,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_ors_without_clobbering_an_earlier_global_trip();
     test_guard9_fault_source_cleared_on_halt();
     test_guard9_fires_while_another_task_holds_exec_lock();
+    test_relay_state_unknown_is_a_fault();
     test_guard9_watchdog_source_order();
     test_heat_acquire_result_not_discarded();
     test_zone_off_pending_retry();

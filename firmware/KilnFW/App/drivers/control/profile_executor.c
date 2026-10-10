@@ -2147,6 +2147,44 @@ static bool guard9_prelock_check(uint32_t *since_ms_out)
     return true;
 }
 
+/* K7 MED-1: relay_state_unknown (an ON write landed and the bus then died, or
+ * the chip could not be read after a failed write) means a coil may be
+ * energised while the shadow says otherwise. Treat it as a fault, not as OFF:
+ * retry the fail-safe all-off every watchdog period (which also repairs the
+ * expander once it answers) and hold SAFETY_FAULT_SRC_APP -- which blocks
+ * relay-ON everywhere -- until a verified read or all-off clears the flag.
+ * Rising edge here, lock-free; the falling edge is released in the locked half
+ * (relay_unknown_release_locked). */
+static bool s_relay_unknown_fault_asserted = false;
+
+static void relay_unknown_prelock_check(void)
+{
+    if (!s_exec.io) return;
+    if (!kiln_io_relay_state_unknown(s_exec.io) && !s_relay_unknown_fault_asserted) return;
+    if (kiln_io_relay_state_unknown(s_exec.io)) {
+        ESP_LOGE(PE_TAG, "relay state unknown -- forcing relays off and holding the app fault source");
+        (void)kiln_io_all_relays_off(s_exec.io);
+    }
+    if (kiln_io_relay_state_unknown(s_exec.io) && !s_relay_unknown_fault_asserted) {
+        if (s_exec.safety) {
+            safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
+        }
+        s_relay_unknown_fault_asserted = true;
+    }
+}
+
+/* Must be called with s_exec.lock held. Releases only a hold this check took:
+ * a guard-9 / global-fault assertion of the same bit stays. */
+static void relay_unknown_release_locked(void)
+{
+    if (!s_relay_unknown_fault_asserted) return;
+    if (s_exec.io && kiln_io_relay_state_unknown(s_exec.io)) return;
+    s_relay_unknown_fault_asserted = false;
+    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && s_exec.safety) {
+        safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, false);
+    }
+}
+
 static bool guard9_take_lock_bounded(void)
 {
     return xSemaphoreTake(s_exec.lock, pdMS_TO_TICKS(WATCHDOG_LOCK_TIMEOUT_MS)) == pdTRUE;
@@ -2251,6 +2289,7 @@ void watchdog_task_entry(void *arg)
          * while holding the lock must not also blind its own watchdog. */
         uint32_t since_ms = 0;
         bool tick_stale = guard9_prelock_check(&since_ms);
+        relay_unknown_prelock_check();
         if (!guard9_take_lock_bounded()) {
             /* Lock still held by someone else. Relays are already off and the
              * APP fault source is asserted (above); bookkeeping (state to
@@ -2266,6 +2305,7 @@ void watchdog_task_entry(void *arg)
             continue;
         }
 
+        relay_unknown_release_locked();
         if (tick_stale || s_guard9_bookkeeping_pending) {
             /* The relay cut itself already happened in guard9_prelock_check();
              * repeated here under the lock as a cheap idempotent retry (the
