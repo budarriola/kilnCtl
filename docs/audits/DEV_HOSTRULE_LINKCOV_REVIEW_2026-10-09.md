@@ -72,3 +72,12 @@ At the default 500 ms period the two bounds are identical (3*500 = 1500), so not
 
 ### LOW-9 (existing before this commit, next to its claim) Saves are not gated on the loaded flag
 `profiles_http.c:2005-2042` and `:1753`. `profiles_boot_load_body()` writes `s_profiles`/`s_profile_rev` without `profiles_save_lock()`, and on the NVS-failure fallback it does `memset(&s_profiles, 0, ...)`. The new flag gates only starts. A save that reaches `profiles_http_save()` while boot load runs, for example the LCD profile builder (LVGL is already up), races the unlocked load writes and can be overwritten or clobbered. The window is narrow, because the HTTP and UART save routes register later. The commit comment ("Boot load/migration writes RAM slots ... while /api/profile_exec/start is already registered") covers starts only. A save-side refusal until loaded, or taking the save lock across boot load, would close it.
+
+## Fixes
+
+LOW-1..LOW-9 fixed in 4805274f (esp_netif stub for the host build in the following commit; F4 audit text corrected in WEB_UI_XSS_AUDIT_2026-10-09.md).
+- LOW-1: `wifi_prov.c` sets the STA netif hostname to `kilnctl` before DHCP starts (the name is fixed per boot, so no change hook is needed).
+- LOW-2: one trailing dot is stripped for localhost and IPv4 literals too; LOW-3: `[...]` hosts must be hex, colon, dot only. Tests in `test_http_auth_enforce.c` (LOW-4 cases included). Negative test: bracket-character check mutation CAUGHT.
+- LOW-5: stale bound is max(1500, 3 * poll_period_ms); test with a 1000 ms period; mutation CAUGHT.
+- LOW-6: `profiles_http_loaded()` selects a "profiles still loading" refusal. LOW-7: `profiles_http_test_set_*` compiled only under `KILNCTL_PROFILES_LOADED_TEST_HOOK` (host build defines it). LOW-8: indentation.
+- LOW-9: saves return `busy:` (409) while the boot load runs (`s_boot_loading`); a save before the load starts is persisted and re-read by it. Mutation CAUGHT.
