@@ -7,9 +7,9 @@ No board, no target build. Line numbers are against `fa041edc`.
 
 | Sev | Where | Finding |
 |-----|-------|---------|
-| MED | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:497-501` | reset handler: missing-field early return leaves `new_password` / `reset_token` on the stack, not zeroed |
-| LOW | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:348,360-437` | forgot handler: stack `body` (holds the TOTP code) is zeroed only on the recv-failure path, never after parsing |
-| LOW | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:366-369` | forgot handler: missing-field early return leaves `code` not zeroed |
+| MED | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:497-501` | reset handler: missing-field early return leaves `new_password` / `reset_token` on the stack, not zeroed | FIXED in d16ae782 |
+| LOW | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:348,360-437` | forgot handler: stack `body` (holds the TOTP code) is zeroed only on the recv-failure path, never after parsing | FIXED in d16ae782 |
+| LOW | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:366-369` | forgot handler: missing-field early return leaves `code` not zeroed | FIXED in d16ae782 |
 | INFO | `docs/audits/INTERNAL_HEAP_MARGIN_2026-10-09.md` sec 5c | real saving is about 8.1 kB, not 7.6 kB; `s_touch_groups` is 2176 B, not 1904 B |
 | INFO | `firmware/KilnFW/App/drivers/http/auth_totp_http.c:470-472` | reset OOM path records no backoff (no secret involved) |
 
@@ -69,7 +69,7 @@ the commit note says 1904). The real `.dram0.bss` reduction is about 8.1 kB less
 alignment slack, so the "~7.6 kB" estimate is conservative and the saving is real.
 Still to do, as the commit note says: measure `.dram0.bss` on the next target build
 and ratchet `check_kilnfw_dram_bss_budget`. Another 700 B candidate of the same shape
-remains internal: `s_scan_results` (0x2bc, `drivers/ui/ui_page_network_manage.c:98`, LVGL task and memcpy only).
+remains internal: `s_scan_results` (0x2bc, `drivers/ui/ui_page_network_manage.c:98`, LVGL task and memcpy only). Moved to PSRAM in d16ae782.
 
 ## 2. f8860c92: auth_totp_http.c CRITICAL-1 / HIGH-1 / LOW-3
 
