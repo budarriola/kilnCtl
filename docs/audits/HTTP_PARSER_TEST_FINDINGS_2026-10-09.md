@@ -20,9 +20,22 @@ profile POST hostile fields, Content-Length longer than the received body / 0 / 
 kiln_cfg apply id forms. A source scan of every `httpd_req_recv` loop (aux, kiln_cfg, profiles edit/live,
 auth_totp forgot/reset) found each treats `ret <= 0` as failure and bounds `content_len`.
 
-Not covered: profiles retarget/delete/run_queue/live-edit handlers (no body-feeding harness for them in
-the existing test files), auth/TOTP form handlers (`test_totp_http_core.c` tests the core only; login and
-bootstrap are not built with a recv stub), zones-style per-field fuzz of live-edit.
+Part 3 (2026-10-09, same findings file, no new defect found) covered: `POST /api/auth/login`
+(`test_web_auth_login_http.c`), live-edit `decide`/`accept` (`test_profiles_live_http.c`), profile
+delete/favorite/builtin hide/builtin restore (`test_profiles_http.c`) and OPEN-tier `POST
+/api/auth/forgot` and `/api/auth/reset` (new `test_auth_totp_http_fuzz.c`, own executable). Inputs:
+every truncation, recv error/EOF at every offset, Content-Length 0/-1/over-cap/INT64_MAX/longer than
+the body, bad and NUL escapes, duplicate and prefix-colliding keys, sign/whitespace/overflow numbers,
+8 KB values, over-long names. Asserted per refusal: password record, TOTP state, reset-token store
+and session table unchanged, setter never reached, nothing erased/hidden/favorited/decided.
+
+Not covered: there is no `run_queue` body handler and no retarget body handler under
+`drivers/http` (retarget is internal to `profiles_http.c`/`zone_aux_convert_http.c`, covered by the
+existing `test_retarget_*`); `bootstrap_password` and `security_http.c` POST (their cores are tested,
+but no recv-stub harness exists; `security_backend_web_auth.c` pulls the full backend and was not
+built this round); `live edit` (`profile_live_edit` field editor) and `zones`-style per-field fuzz.
+Design note, not a defect: `/api/auth/reset` consumes the one-time token before the backend's
+strength check, so a weak `new_password` burns the token and the caller must redo `forgot`.
 
 ## F1 (Low) `http_form_url_decode` writes `out[0]` when `out_cap == 0` and `src_len == 0` [FIXED 2026-10-09 in 20e1263f]
 - `firmware/KilnFW/App/drivers/common/http_form.h:32-60`. The `o + 1 >= out_cap` guard sits

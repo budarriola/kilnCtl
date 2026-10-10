@@ -5232,7 +5232,8 @@ static void test_fuzz_small_body_handlers(void)
     }
     const char *dbad[] = { "id=", "id=+8", "id=8x", "id=-8", "id=%00", "id=8%00", "id=9999999999999", "id=256",
                            "id=8%", "id=%zz", "xid=8", "id[]=8", "ID=8", "id=1.5", "id=0x8", "id= 8", "id=8 ",
-                           "id=%ff" };
+                           "id=%ff",
+                           "id=8&pad=pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp" /* valid id, body over the 64-byte cap */ };
     for (size_t i = 0; i < sizeof(dbad) / sizeof(dbad[0]); i++) {
         fuzz_small_setup();
         st = fuzz_post(profile_delete_post_handler, dbad[i], (long long)strlen(dbad[i]), (size_t)-1, 0);
