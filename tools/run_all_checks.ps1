@@ -721,12 +721,16 @@ function Start-CheckAsync {
         $procArgs = @($Check.FullName)
     } else {
         $exe = "powershell"
-        $procArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Check.FullName)
+        $procArgs = @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", $Check.FullName)
     }
 
     $tag = ($rel -replace '[\\/:]', '_')
     $outFile = Join-Path $ScratchDir "$tag.out.txt"
     $errFile = Join-Path $ScratchDir "$tag.err.txt"
+    # stdin from an empty file (EOF): a prompt (Read-Host, Remove-Item Confirm?)
+    # fails fast instead of hanging the whole suite.
+    $inFile = Join-Path $ScratchDir "$tag.in.txt"
+    [IO.File]::WriteAllText($inFile, "")
 
     # Start-Process launches a genuinely separate process (same isolation the
     # original in-process `&` call to a child powershell already relied on --
@@ -743,7 +747,7 @@ function Start-CheckAsync {
     if ($Check.FullName -eq $SelfcheckPy) { $env:PYTHONPATH = (Join-Path $checkDir "src") }
     try {
         $proc = Start-Process -FilePath $exe -ArgumentList $procArgs -WorkingDirectory $checkDir `
-            -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
+            -RedirectStandardInput $inFile -RedirectStandardOutput $outFile -RedirectStandardError $errFile -PassThru -NoNewWindow
     } finally {
         $env:PYTHONPATH = $savedPyPath
     }
@@ -861,7 +865,7 @@ function Invoke-ChecksParallel {
         foreach ($r in $running) {
             if ($r.Proc.HasExited) {
                 $results += Complete-CheckResult -Running $r -SkipExitCode $SkipExitCode
-            } elseif ($PerCheckTimeoutSec -gt 0 -and ([DateTime]::UtcNow - $r.Started).TotalSeconds -gt $PerCheckTimeoutSec) {
+            } elseif ($PerCheckTimeoutSec -gt 0 -and ([DateTime]::UtcNow - $r.Started).TotalSeconds -gt $(if ($script:gateWaitingRels -contains $r.Rel) { [Math]::Max($PerCheckTimeoutSec, 1800) } else { $PerCheckTimeoutSec })) {
                 try {
                     $tk = Start-Process -FilePath taskkill -ArgumentList @('/PID', "$($r.Proc.Id)", '/T', '/F') -NoNewWindow -PassThru
                     if (-not $tk.WaitForExit(15000)) { try { $tk.Kill() } catch {} }
@@ -871,8 +875,8 @@ function Invoke-ChecksParallel {
                     if (Test-Path $f) { $partial += (Get-Content -Raw -ErrorAction SilentlyContinue $f) }
                 }
                 Remove-Item -ErrorAction SilentlyContinue $r.OutFile, $r.ErrFile
-                Write-Host "  FAIL  $($r.Rel) (killed: exceeded ${PerCheckTimeoutSec}s wall-clock cap)" -ForegroundColor Red
-                $results += [pscustomobject]@{ Bucket = "fail"; Path = $r.Rel; Code = "timeout"; Output = ("TIMEOUT: exceeded ${PerCheckTimeoutSec}s per-check wall-clock cap; process tree killed.`n" + $partial) }
+                Write-Host "  FAIL  $($r.Rel) (timed out: killed after exceeding ${PerCheckTimeoutSec}s wall-clock cap)" -ForegroundColor Red
+                $results += [pscustomobject]@{ Bucket = "fail"; Path = $r.Rel; Code = "timeout"; Output = ("TIMEOUT: check timed out, exceeded ${PerCheckTimeoutSec}s per-check wall-clock cap; process tree killed.`n" + $partial) }
             } else {
                 $stillRunning += $r
             }
@@ -986,12 +990,12 @@ $script:gateWaitingRels = @($gateWaitingPaths | ForEach-Object { $_.Substring($r
 $results = @()
 if ($buildChecks.Count -gt 0) {
     Write-Host "Phase 1/3: full target builds ($($buildChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) `
+    $results += Invoke-ChecksParallel -ChecksToRun $buildChecks -MaxParallel ([Math]::Max(1, $buildChecks.Count)) -PerCheckTimeoutSec 1800 `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($restChecks.Count -gt 0) {
     Write-Host "Phase 2/3: remaining checks ($($restChecks.Count))" -ForegroundColor Cyan
-    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -UnthrottledPaths $gateWaitingPaths `
+    $results += Invoke-ChecksParallel -ChecksToRun $restChecks -MaxParallel $MaxParallel -PerCheckTimeoutSec 900 -UnthrottledPaths $gateWaitingPaths `
         -RepoRoot $repoRoot -SelfcheckPy $selfcheckPy -SelfcheckPython $selfcheckPython -ScratchDir $scratchDir -SkipExitCode $SkipExitCode
 }
 if ($uiSweepChecks.Count -gt 0) {

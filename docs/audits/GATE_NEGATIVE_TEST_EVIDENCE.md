@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 191.
+Gate rows: 193.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 177 |
+| NEGATIVE-TESTED | 179 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 14 |
 | NOT AUDITED | 0 |
@@ -230,3 +230,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_dev_promote.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | dev_promote.ps1: Test-RealPromote tree-equality and named-sha-on-dev checks removed one at a time | RED each time (forged-promote cases refused no longer); check returned to PASS on restore |
 | `tools/check_worktree_mint.ps1` | NEGATIVE-TESTED | 10-09 | worktree_mint.ps1 default changed to origin/main; -Base ignored; commit_guard.ps1 / push_verify.ps1 defaults changed to origin/main | RED each time; hand-restored; PASS |
 | `tools/test_check_duplicate_symbols.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (hand mutation, worktree off origin/dev) | check_duplicate_symbols.ps1 line 218 manifest selection: `Descending = $true` -> `$false` (picks the least-covering source); ran test_check_duplicate_symbols.ps1 | RED: `FAIL: A: output says the manifest was used`, `2 check(s) FAILED`, exit 1; restored by hand; `all passed`, exit 0 |
+| `tools/check_no_alias_shadowing.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | check_worktree_mint.ps1: `function Rm {}` injected at line 3 | CAUGHT (exit 1): `FAIL: tools\check_worktree_mint.ps1:3 defines function 'Rm' shadowing built-in alias 'rm' -> Remove-Item`; baseline PASS |
+| `tools/check_runner_noninteractive.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | run_all_checks.ps1: `-NonInteractive` dropped from the .ps1 child args; `-RedirectStandardInput $inFile` replaced | CAUGHT both (exit 1): `does not launch .ps1 checks with ... -NonInteractive`, `does not redirect child stdin`; baseline PASS |
