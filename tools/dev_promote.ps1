@@ -30,6 +30,7 @@ param(
     [Parameter(Mandatory)][string]$Commit,
     [switch]$Push,
     [string]$CheckLog = "",
+    [string]$PinCheckScript = "",
     [string]$RepoPath = "",
     [string]$Trailer = "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 )
@@ -150,7 +151,8 @@ if ($nFail -gt 0) {
     Write-Host "check log: $nFail failure(s), all KNOWN on main (0 NEW)" -ForegroundColor Yellow
 } else { Write-Host "check log OK: full run on tree of $x, 0 failed" -ForegroundColor Green }
 
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $scriptRoot 'check_submodule_pins_pushed.ps1') -RepoPath $RepoPath -Commit $m
+if (-not $PinCheckScript) { $PinCheckScript = Join-Path $scriptRoot 'check_submodule_pins_pushed.ps1' }
+& powershell -NoProfile -ExecutionPolicy Bypass -File $PinCheckScript -RepoPath $RepoPath -Commit $m
 if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { Fail 'submodule-pins' "submodule pin check refused (exit $LASTEXITCODE): a pin is not on its remote or the check errored; push the submodule commit first." }
 if ($LASTEXITCODE -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
 G push origin "${m}:refs/heads/main" | Out-Null

@@ -259,6 +259,28 @@ try {
     $r = Run-Land $c @("-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "refused with submodule_pins=fail"
     Assert ((OriginHead) -eq $before) "nothing pushed"
+    Write-Host "case: pin check exit 0 -> pass, 2 -> refused, 3 -> skipped but pushed (T-5)"
+    function PinStub([int]$code) {
+        $p = Join-Path $tmp ("pin_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".ps1")
+        Set-Content -LiteralPath $p -Value ("param([string]`$RepoPath,[string]`$Commit)`nexit $code") -Encoding ascii
+        return $p
+    }
+    $c = New-Clone "c_pin0"
+    Commit-File $c "pin0.txt" "x" "pin0"
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 0))
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -eq 'pass') "exit 0 lands with submodule_pins=pass (got $($r.Json.submodule_pins))"
+    $c = New-Clone "c_pin2"
+    Commit-File $c "pin2.txt" "x" "pin2"
+    $before = OriginHead
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 2))
+    Assert ($r.Code -eq 1 -and $r.Json.submodule_pins -eq 'fail') "exit 2 refused with submodule_pins=fail"
+    Assert ((OriginHead) -eq $before) "exit 2: nothing pushed"
+    $c = New-Clone "c_pin3"
+    Commit-File $c "pin3.txt" "x" "pin3"
+    $r = Run-Land $c @("-ChecksScript", $okStub, "-PinCheckScript", (PinStub 3))
+    Assert ($r.Code -eq 0 -and $r.Json.submodule_pins -eq 'skipped' -and $r.Out -match 'WARNING: submodule pin check could not run') "exit 3 warns, lands, submodule_pins=skipped"
+    Assert ((OriginHead) -ne $before) "exit 3: pushed"
+
     Write-Host "case: -RemoveWorktree from a linked worktree whose process cwd is inside it"
     $mainc = New-Clone "c_wtmain"
     $wt = Join-Path $tmp "c_wt_linked"

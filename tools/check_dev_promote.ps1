@@ -34,6 +34,11 @@ function Run([string[]]$more) {
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $promote -RepoPath $work @more 2>&1 | Out-String
     return [pscustomobject]@{ Code = $LASTEXITCODE; Out = $out }
 }
+function PinStub([int]$code) {
+    $p = Join-Path $tmp ("pin_" + [guid]::NewGuid().ToString("N").Substring(0, 6) + ".ps1")
+    Set-Content -LiteralPath $p -Value ("param([string]`$RepoPath,[string]`$Commit)`nexit $code") -Encoding ascii
+    return $p
+}
 function Rev([string]$ref) { (git -C $origin rev-parse $ref).Trim() }
 try {
     git init --bare -b main $origin *>$null
@@ -86,13 +91,15 @@ try {
     Assert ($r.Code -eq 1 -and (Rev main) -eq $mainBefore) "log without summary refused"
     $r = Run @("-Commit", $xg)
     Assert ($r.Code -eq 0 -and $r.Out -match 'DRY RUN') "dry run needs no log"
+    $r = Run @("-Commit", $xg, "-Push", "-PinCheckScript", (PinStub 2))
+    Assert ($r.Code -eq 1 -and $r.Out -match 'submodule-pins' -and (Rev main) -eq $mainBefore) "pin check exit 2 refused, main untouched (T-5)"
 
     Write-Host "case: second promote lists only new subjects"
     CommitFile $work "c.txt" "c" "dev change C"
     git -C $work push origin dev *>$null
     $x2 = (git -C $work rev-parse HEAD).Trim()
-    $r = Run @("-Commit", $x2, "-Push")
-    Assert ($r.Code -eq 0) "second promote exits 0"
+    $r = Run @("-Commit", $x2, "-Push", "-PinCheckScript", (PinStub 3))
+    Assert ($r.Code -eq 0 -and $r.Out -match 'WARNING: submodule pin check could not run') "second promote exits 0; pin exit 3 only warns (T-5)"
     $subj = (git -C $origin log -1 --format=%s main)
     Assert ($subj -match ('^Promote dev ' + $x2 + ': dev change G; dev change C$')) "only new subject listed (got: $subj)"
 

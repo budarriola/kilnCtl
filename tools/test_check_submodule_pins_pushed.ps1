@@ -88,10 +88,29 @@ try {
     G -C $sup2 remote set-url origin https://nonexistent-host.invalid/o.git
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup2 2>&1 | Out-String
     if ($LASTEXITCODE -ne 3) { Write-Host "FAIL: both-down: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: both-down" }
+    # T-2: submodule host down, origin probe fails for a non-network reason (auth/bad repo) -> FAIL, not SKIP
+    G -C $sup2 remote set-url origin "$rp/no-such-origin"
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup2 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 1 -or $out -notmatch 'origin probe failed') { Write-Host "FAIL: origin-probe-auth: exit $LASTEXITCODE`n$out"; $fails++ } else { Write-Host "ok: origin-probe-auth" }
+    # T-1: the user's core.sshCommand is kept (with BatchMode appended), not overridden by the default
+    $fake = Join-Path $root 'fakessh.sh'; $mark = Join-Path $root 'ssh.marker'
+    Set-Content -Path $fake -Encoding ascii -Value "echo `"`$@`" >> '$($mark -replace [regex]::Escape('\'),'/')'`nexit 255"
+    $sup3 = Join-Path $root 'sup3'
+    git init -q $sup3 2>&1 | Out-Null
+    G -C $sup3 config user.email t@t; G -C $sup3 config user.name t
+    G -C $sup3 config core.sshCommand "sh '$($fake -replace [regex]::Escape('\'),'/')'"
+    Set-Content -Path (Join-Path $sup3 '.gitmodules') -Value "[submodule `"m`"]`n`tpath = m`n`turl = ssh://git@nonexistent-host.invalid/x.git`n"
+    G -C $sup3 add .gitmodules; G -C $sup3 update-index --add --cacheinfo "160000,$tip,m"; G -C $sup3 commit -q -m s
+    $env:GIT_SSH_COMMAND = ''; $env:GIT_SSH = ''
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk -RepoPath $sup3 2>&1 | Out-String
+    $mk = if (Test-Path $mark) { Get-Content -Raw $mark } else { '' }
+    if ($mk -notmatch 'BatchMode=yes') { Write-Host "FAIL: user-sshcommand: user's ssh not used with BatchMode (marker: '$mk')`n$out"; $fails++ } else { Write-Host "ok: user-sshcommand" }
     # S-6: no-arg run (default RepoPath) under -File must not crash at param binding (exit 2 = script error)
     Push-Location (Join-Path $PSScriptRoot '..')
+    $env:KILNCTL_SUBPIN_TIMEOUT_SEC = '5'
     $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk 2>&1 | Out-String
     $code = $LASTEXITCODE
+    Remove-Item Env:KILNCTL_SUBPIN_TIMEOUT_SEC -ErrorAction SilentlyContinue
     Pop-Location
     if ($out -match 'Cannot bind|ParameterBinding' -or $out -notmatch 'PASS|SKIP|FAIL: ') { Write-Host "FAIL: no-arg: exit $code`n$out"; $fails++ } else { Write-Host "ok: no-arg (exit $code)" }} catch { Write-Host "ERROR: $_"; $fails++ } finally { Remove-Item -Recurse -Force $root -ErrorAction SilentlyContinue }
 if ($fails) { Write-Host "$fails FAILED"; exit 1 }

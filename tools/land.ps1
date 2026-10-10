@@ -47,6 +47,7 @@
 #   -DryRun               do the refusals + log gate + fetch, report what would
 #       happen, change nothing (no rebase, no push).
 #   -ChecksScript         override run_all_checks.ps1 path (tests).
+#   -PinCheckScript       override check_submodule_pins_pushed.ps1 path (tests).
 #   -AllowStandaloneClone permit running in a non-linked checkout (tests /
 #       private clones). Without it a main/shared tree is always refused.
 #
@@ -72,6 +73,7 @@ param(
     [switch]$Coordinator,
     [double]$WaitTimeoutMin = 120,
     [string]$ChecksScript,
+    [string]$PinCheckScript,
     [switch]$AllowStandaloneClone,
     [int]$MaxPushTries = 3,
     [double]$McpTimeoutMin = 10
@@ -339,11 +341,23 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks @extra
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
-    Step "submodule pins pushed"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1") -RepoPath $top -Commit (git rev-parse HEAD).Trim()
-    $script:subPins = $(if ($LASTEXITCODE -eq 0) { 'pass' } elseif ($LASTEXITCODE -eq 3) { 'skipped' } else { 'fail' })
-    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { Finish 1 "submodule pin check refused (exit $LASTEXITCODE): a pin is not on its remote or the check errored; nothing pushed" }
-    if ($LASTEXITCODE -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
+    # Skip the (network, up to minutes) pin check on a retry when the gitlinks did not change
+    # since a run that already PASSED.
+    $headSha = (& git rev-parse HEAD 2>$null | Out-String).Trim()
+    if (-not $headSha) { Finish 1 "git rev-parse HEAD returned nothing; cannot run the submodule pin check; nothing pushed" }
+    $glNow = (& git ls-tree -r $headSha 2>$null | Where-Object { $_ -match '^160000 commit ' } | Out-String).Trim() + "|" + (& git show "${headSha}:.gitmodules" 2>$null | Out-String).Trim()
+    if ($script:subPins -eq 'pass' -and $script:pinTreeSeen -eq $glNow) {
+        Step "submodule pins pushed (unchanged gitlinks since the passing check; skipped re-run)"
+    } else {
+        Step "submodule pins pushed"
+        if (-not $PinCheckScript) { $PinCheckScript = Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1" }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $PinCheckScript -RepoPath $top -Commit $headSha
+        $pinExit = $LASTEXITCODE
+        $script:subPins = $(if ($pinExit -eq 0) { 'pass' } elseif ($pinExit -eq 3) { 'skipped' } else { 'fail' })
+        $script:pinTreeSeen = $glNow
+        if ($pinExit -ne 0 -and $pinExit -ne 3) { Finish 1 "submodule pin check refused (exit $pinExit): a pin is not on its remote or the check errored; nothing pushed" }
+        if ($pinExit -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $pinExit); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
+    }
 
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)

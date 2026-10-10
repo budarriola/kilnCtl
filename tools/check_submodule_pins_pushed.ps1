@@ -21,11 +21,19 @@ $ErrorActionPreference = 'Continue'
 # Never let git raise a credential prompt or hang: a missing/private repo must FAIL, not block.
 $env:GIT_TERMINAL_PROMPT = '0'
 $env:GCM_INTERACTIVE = 'never'
-if (-not $env:GIT_SSH_COMMAND) { $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes -o ConnectTimeout=20' }
 $TimeoutSec = 60
 if ($env:KILNCTL_SUBPIN_TIMEOUT_SEC) { $TimeoutSec = [int]$env:KILNCTL_SUBPIN_TIMEOUT_SEC }
 # Default resolved in the body: $PSScriptRoot is empty inside a param() default under Windows PowerShell 5.1 -File.
 if (-not $RepoPath) { $RepoPath = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path) }
+# Keep the user's ssh (GIT_SSH_COMMAND > GIT_SSH > core.sshCommand): only default when all are unset.
+$cfgSsh = (& git -C $RepoPath config --get core.sshCommand 2>$null)
+if ($env:GIT_SSH_COMMAND) {
+    if ($env:GIT_SSH_COMMAND -notmatch 'BatchMode') { $env:GIT_SSH_COMMAND = "$($env:GIT_SSH_COMMAND) -o BatchMode=yes" }
+} elseif ($cfgSsh -and -not $env:GIT_SSH) {
+    $env:GIT_SSH_COMMAND = "$cfgSsh -o BatchMode=yes"
+} elseif (-not $env:GIT_SSH) {
+    $env:GIT_SSH_COMMAND = 'ssh -o BatchMode=yes -o ConnectTimeout=20'
+}
 
 # Run git with a bounded wait; kill the whole process tree on timeout.
 # Returns @{ Exit; Out; TimedOut }.
@@ -102,6 +110,10 @@ try {
         if (-not (Test-Path $scratch)) { & git init --bare -q $scratch 2>&1 | Out-Null }
         $f = Invoke-GitBounded @('-C', $scratch, 'fetch', '--depth', '1', $url, $sha)
         if ($f.Exit -eq 0) { Write-Host "PASS: $path $sha is fetchable from $url"; continue }
+        if ($f.TimedOut) {
+            Write-Host "FAIL: $path pins $sha; fetch timed out after ${TimeoutSec}s, cannot confirm it is on $url (retry, or raise KILNCTL_SUBPIN_TIMEOUT_SEC)" -ForegroundColor Red
+            $failed++; continue
+        }
         Write-Host "FAIL: $path pins $sha, not on $url" -ForegroundColor Red
         Write-Host "      push the submodule commit to its remote before landing" -ForegroundColor Red
         $failed++
@@ -112,8 +124,11 @@ try {
 if ($failed -gt 0) { exit 1 }
 if ($skipped -gt 0) {
     # If origin answers, the network is up and the submodule host failure is real: FAIL, not SKIP.
-    $o = Invoke-GitBounded @('-C', $RepoPath, 'ls-remote', 'origin', 'HEAD')
+    $o = @{ Exit = 1; Out = 'no origin remote'; TimedOut = $true }  # no origin to probe -> stays SKIP
+    & git -C $RepoPath remote get-url origin 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { $o = Invoke-GitBounded @('-C', $RepoPath, 'ls-remote', 'origin', 'HEAD') }
     if ($o.Exit -eq 0) { Write-Host "FAIL: submodule host unreachable but origin answers; cannot confirm pins are pushed" -ForegroundColor Red; exit 1 }
+    if (-not ($o.TimedOut -or $o.Out -match $netPattern)) { Write-Host "FAIL: origin probe failed, not a network outage (auth?); cannot confirm pins are pushed: $($o.Out.Trim())" -ForegroundColor Red; exit 1 }
 }
 if ($skipped -gt 0) { Write-Host "SKIP: $skipped submodule(s) unchecked (network); this is not a PASS"; exit 3 }
 Write-Host "PASS: all submodule pins are on their remotes"
