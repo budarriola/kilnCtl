@@ -112,9 +112,10 @@ void fr_reset(void)
 // ---------------------------------------------------------------------------------------------------------
 // heap
 volatile long g_fr_heap_live;
+bool g_fr_alloc_fail_all;
 void *heap_caps_malloc(size_t size, uint32_t caps)
 {
-    if ((caps & MALLOC_CAP_INTERNAL) && g_fr_internal_alloc_fail) {
+    if (g_fr_alloc_fail_all || ((caps & MALLOC_CAP_INTERNAL) && g_fr_internal_alloc_fail)) {
         return NULL;
     }
     void *p = malloc(size);

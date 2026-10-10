@@ -529,6 +529,9 @@ int main(void)
     test_claim_released_on_failures();
     test_handler_refusals();
     test_stage_upload_and_clear();
+#ifdef UF_EXTRA_TESTS
+    extra_tests(); // test_update_http_refusals.c: runs before the permanent writer wedge
+#endif
     test_writer_wedge();
 
     printf("test_update_fetch: %d checks, %d failed\n", g_checks, g_fail);

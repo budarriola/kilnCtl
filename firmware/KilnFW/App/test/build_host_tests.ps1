@@ -3153,6 +3153,26 @@ try {
             "/Fo:`"$ufObjDir\\`" /Fe:`"$exeUf`" " + ($ufSrcs -join " ")
 
     Invoke-HostTestExe -Name "update_fetch" -ExePath $exeUf -BuildCmd $cmdUf
+    # ---- test_update_http_refusals.c: campaign 9c. #includes test_update_fetch.c (so the REAL update_fetch.c /
+    # update_http.c / update_stage.c over the same fakes) and adds the REAL update_settings_http.c; gate-refusal
+    # and failure paths of every update_*_http handler. Same private stub dir / shim as update_fetch.
+    $exeUr = Join-Path $outDir "kilnctl_host_tests_update_http_refusals.exe"
+    $urObjDir = Join-Path $outDir "ur"
+    New-Item -ItemType Directory -Force -Path $urObjDir | Out-Null
+    $urSrcs = @(
+        "test_update_http_refusals.c", "stubs_update_fetch/fake_support.c"
+    ) | ForEach-Object { "`"$(Join-Path $testDir $_)`"" }
+    $urSrcs += @(
+        "update/update_fetch.c", "update/update_http.c", "update/update_stage.c", "update/update_policy.c",
+        "update/update_release.c", "update/update_url.c", "update/update_fetch_heap.c",
+        "update/update_stale_stage.c", "update/stage_header.c", "update/update_semver.c",
+        "update/update_settings_http.c",
+        "http/ota_esp_image_header.c", "http/ota_image_crc.c", "http/ota_http_util.c", "safety/system_mode_gate.c"
+    ) | ForEach-Object { "`"$(Join-Path $driversDir $_)`"" }
+    $cmdUr = "cl /I`"$ufStubDir`" @`"$hostTestsRsp`" /std:c11 /FI`"$(Join-Path $ufStubDir 'shim.h')`" " +
+            "/Fo:`"$urObjDir\\`" /Fe:`"$exeUr`" " + ($urSrcs -join " ")
+
+    Invoke-HostTestExe -Name "update_http_refusals" -ExePath $exeUr -BuildCmd $cmdUr
 
     # ---- firing_score_from_capture.exe: ITER_TUNE_REDESIGN.md sec
     # 3.1.1's "recommended next step" -- feeds a recorded capture's real
@@ -3358,7 +3378,8 @@ try {
     # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
     # 80 -> 81: test_persist_campaign10.c (campaign 10)
     # 81 -> 82: test_ota_http_refusals.c (campaign 9b)
-    $totalExpected = 82
+    # 82 -> 83: test_update_http_refusals.c (campaign 9c)
+    $totalExpected = 83
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
