@@ -231,7 +231,10 @@ try {
     $bb = Join-Path $tmp "b2repo"
     git init -b main $bb *>$null
     Commit-File $bb "f.txt" "r" "R"
+    # F gets a far-future committer date so a commit-time-only ordering would wrongly prefer the fork-point baseline (B2b).
+    $env:GIT_COMMITTER_DATE = "2099-01-01T00:00:00"
     Commit-File $bb "f.txt" "f" "F"
+    Remove-Item Env:\GIT_COMMITTER_DATE
     $FP = Rev $bb HEAD
     git -C $bb checkout -b dev *>$null
     Commit-File $bb "d.txt" "1" "D1"
