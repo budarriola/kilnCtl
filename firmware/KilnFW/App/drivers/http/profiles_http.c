@@ -76,6 +76,10 @@ NVS_KEY_LEN_CHECK(NVS_KEY_PROFILE_REV);
 
 uint32_t s_profile_rev[PROFILES_MAX_COUNT];
 bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
+/* Lock-free published copy of s_profile_rev[] for profiles_http_slot_rev() (L23
+ * residual: delete + re-save under the same id between a start's copy and its
+ * s_exec.lock section). Stored AFTER s_profile_rev under the save lock. */
+static _Atomic uint32_t s_slot_rev_pub[PROFILES_MAX_COUNT];
 
 /* profiles_nvs is the 2026-08-13 split target for fire profiles (see
  * partitions.csv and TODO.md 8.1) -- profiles are the one section of the old
@@ -1253,6 +1257,7 @@ esp_err_t nvs_save_slot_locked(uint8_t id)
         return ferr;
     }
     s_profile_rev[id] = new_rev;
+    atomic_store(&s_slot_rev_pub[id], new_rev);
     return ESP_OK;
 }
 
@@ -1333,6 +1338,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
      * (bx_flash_worker stack ceiling). */
     uint32_t old_rev = s_profile_rev[id];
     s_profile_rev[id] = new_rev;
+    atomic_store(&s_slot_rev_pub[id], new_rev);
     profiles_slot_bitmap_t nvs_used;
     memset(&nvs_used, 0, sizeof(nvs_used));
     kv_err = used_bitmap_load(&h, &nvs_used);
@@ -1386,6 +1392,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
     hal_kv_close(&h);
     if (kv_err != HAL_OK) {
         s_profile_rev[id] = old_rev;
+        atomic_store(&s_slot_rev_pub[id], old_rev);
         ESP_LOGE(PROFILES_TAG, "nvs_erase_slot(%u): legacy NVS erase failed, file kept", (unsigned)id);
         return hal_status_to_esp_err(kv_err);
     }
@@ -1839,6 +1846,23 @@ bool profiles_http_slot_runnable(uint8_t id)
         return false;
     }
     return profiles_slot_used(id);
+}
+
+uint32_t profiles_http_slot_rev(uint8_t id)
+{
+    if (id >= PROFILES_MAX_COUNT) {
+        return 0; /* builtins and out-of-range: no save revision */
+    }
+    return atomic_load(&s_slot_rev_pub[id]);
+}
+
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
+{
+    if (!profiles_http_slot_runnable(id)) {
+        return false;
+    }
+    /* A save or delete + re-save since the copy bumped the rev: the copy is stale. */
+    return profiles_http_slot_rev(id) == captured_rev;
 }
 
 profiles_delete_result_t profiles_delete_slot(uint8_t id)

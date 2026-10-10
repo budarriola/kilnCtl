@@ -362,6 +362,23 @@ bool profiles_http_slot_runnable(uint8_t id)
     (void)id;
     return s_test_slot_runnable;
 }
+// L23 residual: revision capture. s_test_slot_rev_bump_on_capture simulates a
+// delete + re-save landing between the capture and the locked re-check.
+static uint32_t s_test_slot_rev = 7;
+static bool s_test_slot_rev_bump_on_capture = false;
+uint32_t profiles_http_slot_rev(uint8_t id)
+{
+    (void)id;
+    uint32_t r = s_test_slot_rev;
+    if (s_test_slot_rev_bump_on_capture) {
+        s_test_slot_rev++;
+    }
+    return r;
+}
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
+{
+    return profiles_http_slot_runnable(id) && captured_rev == s_test_slot_rev;
+}
 #endif
 
 // Settable for the M13 fault-source-decode negative test below -- see
@@ -2569,6 +2586,19 @@ static void test_run_refuses_slot_being_deleted(void)
     err[0] = '\0';
     profile_executor_run(3, err, sizeof(err));
     TEST_CHECK(strstr(err, "deleted") == NULL, "control: no delete in flight, no delete refusal");
+
+#ifndef PEX_STORE_LINK_TEST
+    // Residual edge: slot deleted and re-saved (rev bumped) after the capture.
+    s_test_slot_runnable = true;
+    s_test_slot_rev_bump_on_capture = true;
+    err[0] = '\0';
+    ok = profile_executor_run(3, err, sizeof(err));
+    s_test_slot_rev_bump_on_capture = false;
+    TEST_CHECK(!ok, "L23: a start whose slot was re-saved after the copy is refused");
+    TEST_CHECK(strstr(err, "re-saved") != NULL, "the refusal names the re-save");
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_IDLE, "a stale-rev run never leaves IDLE");
+
+#endif
 
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;

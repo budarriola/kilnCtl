@@ -65,6 +65,15 @@ bool profiles_http_delete(uint8_t id);
  * always runnable (they cannot be deleted). */
 bool profiles_http_slot_runnable(uint8_t id);
 
+/* L23 residual: a slot deleted and re-saved under the same id between the
+ * caller's profiles_http_get() copy and its s_exec.lock section is "used"
+ * again but holds different content. Call profiles_http_slot_rev() BEFORE
+ * profiles_http_get(), then profiles_http_slot_runnable_rev() under s_exec.lock:
+ * it is profiles_http_slot_runnable() plus "the save revision is unchanged".
+ * Lock-free (atomic load). A spurious refusal (save landed mid-copy) is safe. */
+uint32_t profiles_http_slot_rev(uint8_t id);
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev);
+
 /* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
  *
  * Rewrites every stored profile's on/off rules with zone_index == `zone` to

@@ -285,6 +285,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* L23 residual: capture the slot's save revision BEFORE the copy. */
+    const uint32_t slot_rev = profiles_http_slot_rev(profile_id);
     profile_t p;
     if (!profiles_http_get(profile_id, &p)) {
         if (err_msg) snprintf(err_msg, err_cap, "no such profile");
@@ -455,9 +457,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * below, so one side always sees the other. Lock-free read only: never
      * take the profiles save lock or wait on the flash worker under
      * s_exec.lock (order: flash worker -> save lock -> s_exec.lock). */
-    if (!profiles_http_slot_runnable(profile_id)) {
+    if (!profiles_http_slot_runnable_rev(profile_id, slot_rev)) {
         xSemaphoreGive(s_exec.lock);
-        if (err_msg) snprintf(err_msg, err_cap, "profile is being deleted or was deleted -- not started");
+        if (err_msg) snprintf(err_msg, err_cap, "profile is being deleted, was deleted or was re-saved -- not started");
         return false;
     }
 

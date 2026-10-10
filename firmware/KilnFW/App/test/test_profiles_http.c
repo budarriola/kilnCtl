@@ -2073,6 +2073,23 @@ static void test_profiles_delete_start_race_l23(void)
     TEST_CHECK(s_l23_nested_delete == (int)PROFILES_DELETE_BUSY, "a second delete of the same slot mid-erase is BUSY");
     TEST_CHECK(!profiles_http_slot_runnable(4), "after the delete the slot is not runnable");
 
+    /* Residual edge: delete + re-save under the same id changes the published rev. */
+    {
+        s_profiles.profiles[4] = make_stored_profile();
+        profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+        TEST_CHECK(nvs_save_slot(4) == ESP_OK, "save slot 4 (rev capture)");
+        uint32_t cap = profiles_http_slot_rev(4);
+        TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "unchanged rev: runnable");
+        TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4 (rev capture)");
+        s_profiles.profiles[4] = make_stored_profile();
+        profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
+        TEST_CHECK(nvs_save_slot(4) == ESP_OK, "re-save slot 4 under the same id");
+        TEST_CHECK(profiles_slot_used(4) && profiles_http_slot_runnable(4), "slot used and runnable again");
+        TEST_CHECK(profiles_http_slot_rev(4) != cap, "rev moved on delete + re-save");
+        TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "stale captured rev: refused");
+        TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh rev: runnable");
+    }
+
     /* Delete refused while running releases the mark: the slot stays runnable. */
     s_profiles.profiles[4] = make_stored_profile();
     profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x10);
