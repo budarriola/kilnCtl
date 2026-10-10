@@ -114,7 +114,8 @@ def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     Refused unconditionally for GPIO6. Refused for any other pin not already
     configured OUTPUT via :func:`pico_gpio_set_mode` in this same process.
     Requires confirm=True (exactly). The input level is read back afterwards;
-    a mismatch is a WARNING (a loaded pin can legitimately differ).
+    a mismatch is reported as FAILED (a loaded pin can legitimately differ,
+    but is still not the commanded level).
     """
     if confirm is not True:
         return "error: pico_gpio_write refused without confirm=True -- it drives a live Pico pin"
@@ -128,7 +129,8 @@ def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     note = ""
     try:
         if bool(pico_gpio_probe.read(gpio_num)) != bool(level):
-            note = " (WARNING: input level reads back different -- pin loaded, or the write did not take)"
+            return (f"FAILED - pico gpio{gpio_num} commanded {'high' if level else 'low'} but the input level "
+                    "reads back different (pin loaded, or the write did not take)")
     except Exception:  # noqa: BLE001
         note = " (read-back unavailable; UNVERIFIED)"
     return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}{note}"

@@ -38,6 +38,28 @@ class FixtureRelayTests(unittest.TestCase):
         with um.patch.object(fx, "_get_fixture", return_value=f):
             self.assertTrue(fx.fixture_set_relay("r", True, confirm=True).startswith("ok"))
 
+    def test_relay_missing_from_readback_fails(self):
+        f = um.MagicMock()
+        f.get_relays.return_value = {"other": True}
+        with um.patch.object(fx, "_get_fixture", return_value=f):
+            self.assertIn("FAILED", fx.fixture_set_relay("r", True, confirm=True))
+        f.get_relays.side_effect = OSError("x")
+        with um.patch.object(fx, "_get_fixture", return_value=f):
+            self.assertIn("FAILED", fx.fixture_set_relay("r", True, confirm=True))
+
+
+class RealToolThroughRegistryTests(unittest.TestCase):
+    """Review LOW-4: a real gated tool refuses a non-bool gate flag through the facade."""
+
+    def test_flash_firmware_allow_stale_string_refused(self):
+        from kilnctrl import mcp_server  # noqa: F401
+        reg = mcp_server.registry
+        with um.patch("kilnctrl.mcp_server_flash.flash_firmware") as ff:
+            out = reg.invoke("flash_firmware", {"allow_stale": "yes"})
+        self.assertIn("refused flash_firmware", out)
+        self.assertIn("allow_stale", out)
+        ff.assert_not_called()
+
 
 class PicoGpioConfirmTests(unittest.TestCase):
     def test_unconfirmed_refused(self):
@@ -51,7 +73,7 @@ class PicoGpioConfirmTests(unittest.TestCase):
     def test_write_readback_warning(self):
         with um.patch.object(pg.pico_gpio_probe, "write"), \
                 um.patch.object(pg.pico_gpio_probe, "read", return_value=False):
-            self.assertIn("WARNING", pg.pico_gpio_write(4, True, confirm=True))
+            self.assertIn("FAILED", pg.pico_gpio_write(4, True, confirm=True))
 
 
 if __name__ == "__main__":

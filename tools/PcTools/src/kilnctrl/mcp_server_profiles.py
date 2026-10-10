@@ -185,8 +185,11 @@ def profiles_save(
     except Exception:  # noqa: BLE001
         got = None
     if got is None:
-        return f"ok - saved as #{result.id}{suffix} (read-back unavailable; UNVERIFIED)"
-    if got.name != name or len(got.segments) != len(segments):
+        return (f"FAILED - board reported ok for #{result.id} but the read-back failed; "
+                "slot content UNVERIFIED")
+    got_mask = getattr(got, "zone_mask", None)
+    if got.name != name or len(got.segments) != len(segments) or (
+            got_mask is not None and got_mask != zone_mask):
         return (f"FAILED - board reported ok for #{result.id} but read-back differs "
                 f"(name {got.name!r}, {len(got.segments)} segment(s); wanted {name!r}, {len(segments)})")
     return f"ok - saved as #{result.id}{suffix}, read back verified"

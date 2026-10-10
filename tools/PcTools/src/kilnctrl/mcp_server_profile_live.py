@@ -49,7 +49,7 @@ def _live_readback(resolved: str, expect: str, name: Optional[str] = None) -> st
     elif expect == "edit":
         ok = isinstance(body, dict) and body.get("name") == name
     else:  # decide: the pending working copy is resolved
-        ok = not st.get("pending_decision")
+        ok = not st.get("pending_decision") and st.get("working_id") == -1
     return "; read-back OK" if ok else f"; FAILED read-back: live status {st!r} does not show the {expect} took effect"
 
 

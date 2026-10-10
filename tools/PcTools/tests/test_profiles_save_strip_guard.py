@@ -42,6 +42,18 @@ class StripGuardTests(unittest.TestCase):
                                 return_value=None if isinstance(detail, Exception) else detail):
             return mp.profiles_save(3, "p", 1, SEGS, **kw), prof
 
+    def test_readback_throw_or_field_mismatch_fails(self):
+        class Throws(_Prof):
+            def get(self, pid):
+                raise OSError("x")
+        out, _ = self._run({"on_off_rules": [], "segments": []}, prof=Throws())
+        self.assertIn("FAILED", out)
+        class Mask(_Prof):
+            def get(self, pid):
+                return types.SimpleNamespace(name="p", segments=[0], zone_mask=7)
+        out, _ = self._run({"on_off_rules": [], "segments": []}, prof=Mask())
+        self.assertIn("FAILED", out)
+
     def test_aux_rules_refused(self):
         out, prof = self._run({"on_off_rules": [{"zone": 8}], "segments": []})
         self.assertIn("STRIP", out)

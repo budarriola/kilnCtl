@@ -76,8 +76,10 @@ def fixture_set_relay(name: str, on: bool, confirm: bool = False) -> str:
     try:
         got = fixture.get_relays().get(name)
     except Exception:  # noqa: BLE001 - the write already happened
-        return f"ok - {name} {'energized' if on else 'de-energized'} (read-back unavailable; UNVERIFIED)"
-    if got is not None and bool(got) != bool(on):
+        return f"FAILED - {name} commanded {'on' if on else 'off'} but the read-back failed; state UNVERIFIED"
+    if got is None:
+        return f"FAILED - {name} commanded {'on' if on else 'off'} but the relay is missing from the read-back; state UNVERIFIED"
+    if bool(got) != bool(on):
         return f"FAILED - {name} commanded {'on' if on else 'off'} but reads back {'energized' if got else 'de-energized'}"
     return f"ok - {name} {'energized' if on else 'de-energized'}"
 

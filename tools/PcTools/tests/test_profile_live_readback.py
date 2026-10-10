@@ -32,6 +32,12 @@ class ReadbackTests(unittest.TestCase):
 
     def test_decide_pending_remains(self):
         with self._hostpatch(), um.patch.object(H, "decide_live_discard", return_value={"ok": True}):
+            with um.patch.object(H, "get_live_status", return_value={"pending_decision": False, "working_id": 4}):
+                self.assertIn("FAILED read-back", pl.profile_live_decide("discard", confirm=True))
+            with um.patch.object(H, "get_live_status", return_value={"pending_decision": False}):
+                self.assertIn("FAILED read-back", pl.profile_live_decide("discard", confirm=True))
+            with um.patch.object(H, "get_live_status", return_value={"pending_decision": False, "working_id": -1}):
+                self.assertIn("read-back OK", pl.profile_live_decide("discard", confirm=True))
             with um.patch.object(H, "get_live_status", return_value={"pending_decision": True}):
                 self.assertIn("FAILED read-back", pl.profile_live_decide("discard", confirm=True))
             with um.patch.object(H, "get_live_status", side_effect=OSError("x")):
