@@ -156,10 +156,19 @@ bool thermo_task_reconfig_gave_up(void) { return false; }
 void thermo_task_request_tc_type_reapply(void) {}
 
 bool update_task_get_active_slot(bool *b) { *b = false; return false; }
-void update_task_handle_abort(const uint8_t *p, uint8_t n) { (void)p; (void)n; }
-void update_task_handle_begin(const uint8_t *p, uint8_t n) { (void)p; (void)n; }
-void update_task_handle_data(const uint8_t *p, uint8_t n) { (void)p; (void)n; }
-void update_task_handle_end(const uint8_t *p, uint8_t n) { (void)p; (void)n; }
+static int g_upd_calls[4];
+static uint8_t g_upd_last_len[4];
+static uint8_t g_upd_last_cmd[4];
+static void upd_rec(int i, const uint8_t *p, uint8_t n)
+{
+    g_upd_calls[i]++;
+    g_upd_last_len[i] = n;
+    g_upd_last_cmd[i] = (n > 0 && p) ? p[0] : 0xEE;
+}
+void update_task_handle_abort(const uint8_t *p, uint8_t n) { upd_rec(3, p, n); }
+void update_task_handle_begin(const uint8_t *p, uint8_t n) { upd_rec(0, p, n); }
+void update_task_handle_data(const uint8_t *p, uint8_t n) { upd_rec(1, p, n); }
+void update_task_handle_end(const uint8_t *p, uint8_t n) { upd_rec(2, p, n); }
 bool update_task_reboot_allowed(const char **why, uint8_t *code) { *why = "fake"; *code = 0; return false; }
 void update_task_reboot_now(void) { g_reboots++; }
 bool update_task_request_rollback(const char **why, uint8_t *code) { *why = "fake"; *code = 0; return false; }
@@ -609,6 +618,121 @@ static void scenario_unknown_commands(void)
     }
 }
 
+
+// --- campaign 2 extension: SET_PARAM range refusal + update command routing ----
+
+static void send_set_param(uint16_t id, uint8_t type, const uint8_t *val, uint8_t vlen)
+{
+    uint8_t p[8];
+    p[0] = KILNLINK_SET_PARAM_CMD;
+    p[1] = (uint8_t)(id & 0xFFu);
+    p[2] = (uint8_t)(id >> 8);
+    p[3] = type;
+    memcpy(&p[4], val, vlen);
+    send_esp(p, (uint8_t)(4u + vlen));
+}
+
+static void scenario_set_param_refusals(void)
+{
+    reset_link_state();
+    link_staging_reset(&s_staging);
+    g_cfg_writes = 0;
+    uint8_t v;
+
+    v = 8; // tc_type max is 7
+    send_set_param(0x0105u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    CHECK(link_staging_count(&s_staging) == 0, "tc_type 8 (out of range) staged");
+    v = 255;
+    send_set_param(0x0105u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    CHECK(link_staging_count(&s_staging) == 0, "tc_type 255 staged");
+    v = 7;
+    send_set_param(0x0105u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    CHECK(link_staging_count(&s_staging) == 1, "tc_type 7 (in range) must stage, count=%u", (unsigned)link_staging_count(&s_staging));
+
+    v = 200; // tc_placement_mode above its max
+    send_set_param(0x0103u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    CHECK(link_staging_count(&s_staging) == 1, "tc_placement_mode 200 staged");
+
+    uint8_t two[2] = { 5, 0 }; // wrong wire type for a real id
+    send_set_param(0x0105u, KILNLINK_PARAM_TYPE_U16, two, 2);
+    CHECK(link_staging_count(&s_staging) == 1, "tc_type as U16 staged");
+
+    v = 1; // unknown ids
+    send_set_param(0x7777u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    send_set_param(0x0000u, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    send_set_param(0xFFFFu, KILNLINK_PARAM_TYPE_U8, &v, 1);
+    CHECK(link_staging_count(&s_staging) == 1, "unknown param ids staged");
+
+    // abs_max_temp_c: NaN, negative, zero, -inf refused; positive finite accepted
+    uint32_t bad_bits[4] = { 0x7FC00000u, 0xBF800000u, 0x00000000u, 0xFF800000u };
+    for (int i = 0; i < 4; i++) {
+        uint8_t b[4];
+        memcpy(b, &bad_bits[i], 4);
+        send_set_param(0x0104u, KILNLINK_PARAM_TYPE_F32, b, 4);
+    }
+    CHECK(link_staging_count(&s_staging) == 1, "abs_max_temp_c non-positive/NaN staged, count=%u", (unsigned)link_staging_count(&s_staging));
+    float good = 1300.0f;
+    uint8_t gb[4];
+    memcpy(gb, &good, 4);
+    send_set_param(0x0104u, KILNLINK_PARAM_TYPE_F32, gb, 4);
+    CHECK(link_staging_count(&s_staging) == 2, "abs_max_temp_c 1300 must stage");
+
+    uint8_t mal[6] = { KILNLINK_SET_PARAM_CMD, 0x05, 0x01, KILNLINK_PARAM_TYPE_U8, 1, 1 };
+    send_esp(mal, 6);
+    send_esp(mal, 3);
+    mal[3] = 0x77;
+    send_esp(mal, 5);
+    CHECK(link_staging_count(&s_staging) == 2, "malformed SET_PARAM staged");
+
+    uint8_t p[5] = { KILNLINK_SET_PARAM_CMD, 0x05, 0x01, KILNLINK_PARAM_TYPE_U8, 3 };
+    link_staging_reset(&s_staging);
+    send_frame(KILNLINK_MSG_BROADCAST, LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_ESP, p, 5);
+    send_frame(KILNLINK_MSG_BROADCAST, LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_ESP, p, 5);
+    CHECK(link_staging_count(&s_staging) == 0, "wrong-direction SET_PARAM staged");
+
+    uint8_t st[KILNLINK_FRAME_STUFFED_MAX];
+    size_t sn = make_stuffed(st, sizeof(st), KILNLINK_MSG_BROADCAST, 0, 2, p, 5, g_msg_index++);
+    st[sn / 2] ^= 0x01;
+    feed(st, sn);
+    CHECK(link_staging_count(&s_staging) == 0, "bad-CRC SET_PARAM staged");
+
+    CHECK(g_cfg_writes == 0, "SET_PARAM must never reach config_store_write, writes=%d", g_cfg_writes);
+    CHECK(g_enable_true == 0, "SET_PARAM granted heat");
+}
+
+static void scenario_update_routing(void)
+{
+    static const uint8_t cmds[4] = { LINK_FRAME_UPDATE_BEGIN_CMD, LINK_FRAME_UPDATE_DATA_CMD,
+                                     LINK_FRAME_UPDATE_END_CMD, LINK_FRAME_UPDATE_ABORT_CMD };
+    reset_link_state();
+    memset(g_upd_calls, 0, sizeof(g_upd_calls));
+    uint8_t p[40];
+    memset(p, 0xA5, sizeof(p));
+    for (int i = 0; i < 4; i++) {
+        p[0] = cmds[i];
+        send_esp(p, 40);
+        for (int j = 0; j < 4; j++) {
+            CHECK(g_upd_calls[j] == (j <= i ? 1 : 0), "cmd 0x%02X: handler %d calls=%d", cmds[i], j, g_upd_calls[j]);
+        }
+        CHECK(g_upd_last_len[i] == 40 && g_upd_last_cmd[i] == cmds[i], "handler %d got len=%u cmd=0x%02X (payload incl. cmd byte)",
+              i, (unsigned)g_upd_last_len[i], g_upd_last_cmd[i]);
+    }
+    CHECK(g_enable_true == 0 && g_reboots == 0, "update commands granted heat / rebooted");
+
+    memset(g_upd_calls, 0, sizeof(g_upd_calls));
+    for (int i = 0; i < 4; i++) {
+        p[0] = cmds[i];
+        send_frame(KILNLINK_MSG_BROADCAST, LINK_FRAME_DEVICE_SAFETY, LINK_FRAME_DEVICE_ESP, p, 10);
+        send_frame(KILNLINK_MSG_BROADCAST, LINK_FRAME_DEVICE_ESP, LINK_FRAME_DEVICE_ESP, p, 10);
+        uint8_t st[KILNLINK_FRAME_STUFFED_MAX];
+        size_t sn = make_stuffed(st, sizeof(st), KILNLINK_MSG_BROADCAST, 0, 2, p, 10, g_msg_index++);
+        st[sn / 2] ^= 0x04;
+        feed(st, sn);
+    }
+    CHECK(g_upd_calls[0] + g_upd_calls[1] + g_upd_calls[2] + g_upd_calls[3] == 0,
+          "update handlers reached by wrong-direction/bad-CRC frames");
+}
+
 // --- seeded fuzzer ---------------------------------------------------------------
 
 #define FUZZ_ITERATIONS 30000
@@ -735,6 +859,10 @@ int main(void)
     scenario_trip_seq();
     printf("-> unknown_commands\n");
     scenario_unknown_commands();
+    printf("-> set_param_refusals\n");
+    scenario_set_param_refusals();
+    printf("-> update_routing\n");
+    scenario_update_routing();
     printf("-> fuzz\n");
     scenario_fuzz();
     printf("test_link_task_fuzz: %d checks, %d failures\n", g_checks, g_fail);
