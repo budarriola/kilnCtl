@@ -371,7 +371,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
         .static_netmask_field = static_netmask_field, .static_gateway_field = static_gateway_field,
         .static_dns_field = static_dns_field, .static_dns2_field = static_dns2_field,
         .sta_connected = sta_connected, .ap_password_known = on_ap,
-        .ap_password_set = wifi_prov_get_ap_password()[0] != ' ', .ap_pending_teardown = ap_pending_teardown,
+        .ap_password_set = wifi_prov_get_ap_password()[0] != '\0', .ap_pending_teardown = ap_pending_teardown,
         .sta_rssi = (int)sta_rssi, .ap_clients = (unsigned)ap_clients,
         .recovery_hint = wifi_prov_saved_nets_recovery_hint(),
     };
