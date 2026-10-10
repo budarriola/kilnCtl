@@ -421,6 +421,35 @@ static esp_err_t up_depth_probe_write(const char *rel_path, const void *data, si
     return g_up_orig_write_fn(rel_path, data, len);
 }
 
+static esp_err_t up_write_then_fail(const char *rel_path, const void *data, size_t len)
+{
+    (void)g_up_orig_write_fn(rel_path, data, len); /* the file really lands ... */
+    return ESP_FAIL;                               /* ... but the caller sees a failed read-back */
+}
+
+static void test_readback_failure_after_write_keeps_ram_and_file_consistent(void)
+{
+    TEST_SECTION("unit_pref_set: write landed but read-back failed -- RAM adopts the file's value");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "baseline Celsius saved");
+    g_up_orig_write_fn = pref_cfg_fs_get_write_fn();
+    pref_cfg_fs_set_write_fn(up_write_then_fail);
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) != ESP_OK, "failure is still reported");
+    pref_cfg_fs_set_write_fn(g_up_orig_write_fn);
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM adopted the value the file holds");
+    uint32_t live_rev = s_unit_pref_rev;
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "value after reboot equals the pre-reboot live value");
+    TEST_CHECK(s_unit_pref_rev == live_rev, "rev agrees across the reboot");
+    cfg_fs_deinit();
+}
+
 /* Same-rev race guard: the rev read, the commit and the rev bump are one section under
  * the save lock (unit_pref_set runs on httpd, the LCD task and the UART bridge task). */
 static void test_save_holds_lock_across_rev_read_and_commit(void)
@@ -478,6 +507,7 @@ void run_test_unit_pref(void)
     test_set_refuses_invalid_value();
     test_corrupted_value_falls_back_to_safe_default();
     test_set_without_cfg_partition_fails_loud();
+    test_readback_failure_after_write_keeps_ram_and_file_consistent();
     test_save_lands_in_cfg_file_only();
     test_nvs_fallback_when_file_absent_then_migrates();
     test_divergence_tie_break_higher_rev_wins();

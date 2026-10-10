@@ -164,6 +164,23 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     if (err == ESP_OK) {
         s_unit_pref = pref;
         s_unit_pref_rev = new_rev;
+    } else {
+        // Review LOW: the write may have landed (rename done) while its read-back failed, so the
+        // file could already hold the NEW value at new_rev -- which would win over RAM after a
+        // reboot. Choice: re-read the file and adopt what it holds when it carries exactly new_rev,
+        // so RAM and file agree. The failure is still reported (err) so the caller knows the save
+        // was not verified; a file that still holds the old value leaves RAM untouched (L12).
+        uint8_t f_raw = 0;
+        uint32_t f_rev = 0;
+        bool f_valid = false;
+        pref_cfg_fs_load_raw(UNIT_PREF_FILE_PATH, sizeof(f_raw), unit_pref_validate, &f_raw, &f_rev, &f_valid);
+        if (f_valid && f_rev == new_rev) {
+            s_unit_pref = (unit_pref_t)f_raw;
+            s_unit_pref_rev = f_rev;
+            ESP_LOGW(TAG, "unit preference save reported %s but the file holds the new value (rev %lu) -- RAM "
+                          "adopts it so a reboot cannot flip the live value",
+                     esp_err_to_name(err), (unsigned long)f_rev);
+        }
     }
     cfg_save_lock_give(&s_save_lock);
     if (err == ESP_OK) {

@@ -1543,6 +1543,8 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
     s_set_active_id_should_fail = false;
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_PICO_DONE,
                "boot recovery did not clear the record after an id restore failure");
+    TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,
+               "kept journal after a failed id restore latches the display-only active_id_unsaved fault");
 
     TEST_SECTION("MED: boot ESP_DONE fallback rollback (target unreadable) with id restore failing -- record kept");
     reset_state();

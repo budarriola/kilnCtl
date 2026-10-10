@@ -1337,8 +1337,19 @@ static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
                         sizeof(reason), &kept)) {
             if (!kept) {
                 clear_pending();
+                ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
+            } else {
+                /* Review LOW: both sides are back on R but the persisted active_id restore failed, so the
+                 * journal is kept (autosave stays suppressed, retried each boot). Never silent: latch the
+                 * display-only ACTIVE_ID_UNSAVED kind (web banner + LCD notice already exist). Heat is not
+                 * gated: kiln_cfg_swap_is_pending() only blocks autosave, never a firing start or an apply. */
+                ESP_LOGE(TAG, "boot: interrupted swap rolled back, but restoring the saved active kiln failed -- "
+                              "journal kept, autosave suppressed, will retry next boot");
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED, p->target_id,
+                                 "an interrupted kiln-config swap was rolled back on both processors, but saving "
+                                 "which kiln is active failed -- zone edits are not auto-saved until it is retried "
+                                 "at the next boot; heat is not affected");
             }
-            ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
         } else {
             ESP_LOGE(TAG, "boot: interrupted-swap recovery failed: %s -- staying alarmed, will retry", reason);
             char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];

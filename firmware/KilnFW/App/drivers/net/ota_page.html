@@ -179,7 +179,7 @@ done by the recovery image: <b>Install</b> below reboots the board into it.</p>
   </div>
   <p class="note">Install restarts the board into the recovery image, where you
   join its Wi-Fi (the passphrase is shown on the LCD) and press
-  <i>Apply staged update</i>. Uploading erases any previously staged image first.</p>
+  <i>Apply staged update</i>. Uploading may erase a previously staged image once the new image passes the checks.</p>
 </div>
 <div id="stageProgressWrap" style="display:none">
   <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
@@ -711,10 +711,11 @@ function loadStageStatus() {
 /* 503 upload_too_slow (stage: JSON body; Pico/ESP push: plain "upload too slow"): the overall upload
  * deadline passed. Shared by the stage card and the Pico card. Returns null when e is something else. */
 var UPLOAD_TOO_SLOW_TAIL = 'Check the Wi-Fi signal, move closer or use a wired path, and upload again.';
-/* Stage: begin erases the stage header sector before the body is read, so a previously staged image is gone.
+/* Stage: the header sector is erased only once the first bytes pass the identity/version/policy checks, and the
+ * deadline can fire before or after that point, so a previously staged image MAY have been cleared. */
  * Pico push: refused before any Pico flash write, so the Pico is unchanged. */
 var UPLOAD_TOO_SLOW_STAGE_TEXT = 'The upload was too slow and the board gave up (overall deadline). ' +
-  'No new image was staged; any previously staged image was cleared. ' + UPLOAD_TOO_SLOW_TAIL;
+  'No new image was staged; a previously staged image may have been cleared; check the Stage card. ' + UPLOAD_TOO_SLOW_TAIL;
 var UPLOAD_TOO_SLOW_PICO_TEXT = 'The upload was too slow and the board gave up (overall deadline). ' +
   'The Pico was not changed. ' + UPLOAD_TOO_SLOW_TAIL;
 function uploadTooSlowText(e, pico) {
@@ -805,7 +806,7 @@ document.getElementById('stageUploadBtn').addEventListener('click', function () 
     return window.kcOtaAuthedFetch('/api/update/stage', { method: 'GET' }).then(function (r) {
       if (!r.ok) throw new Error('stage not available (HTTP ' + r.status + ')');
       return window.kcConfirm('Upload ' + bytes.length + ' bytes to the stage? ' +
-        'Any previously staged image is erased first. Nothing is installed.');
+        'Any previously staged image may be erased once the new image passes the checks. Nothing is installed.');
     }).then(function (ok) {
       if (!ok) { msg.textContent = ''; return null; }
       btn.disabled = true;
