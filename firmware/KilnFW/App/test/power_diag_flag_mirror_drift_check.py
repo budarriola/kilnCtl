@@ -57,6 +57,7 @@ MIRROR_MAP = [
     ("kilnlink_power.h", "KILNLINK_POWER_FLAG_COUNTS_VALID",
      "safety_link.h", "SAFETY_LINK_POWER_FLAG_COUNTS_VALID"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_LEN", "safety_link.h", "SAFETY_LINK_DIAG_FRAME_LEN"),
+    ("kilnlink_diag.h", "KILNLINK_DIAG_LEN_V2", "safety_link.h", "SAFETY_LINK_DIAG_FRAME_LEN_V2"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN",
      "safety_link.h", "SAFETY_LINK_DIAG_FLAG_SIM_CONTEXT_SEEN"),
     ("kilnlink_diag.h", "KILNLINK_DIAG_FLAG_CALIBRATION_MISSING",

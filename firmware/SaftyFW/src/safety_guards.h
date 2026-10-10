@@ -813,7 +813,22 @@ typedef enum {
     SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,   // safety_guards_try_clear() retripped
     SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED, // is_tripped was already false
                                                         // by the time the request was dequeued
+    SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE, // bound request named an older trip_seq
+                                                        // than the latched one (audit M4)
 } safety_clear_trip_outcome_t;
+
+// kilnlink audit 2026-10-09 M4: does a queued CLEAR_TRIP request belong to
+// the trip occurrence latched right now? `bound` is true iff the request came
+// from a 4-byte (protocol >= 17) frame carrying `wire_trip_seq`;
+// `current_trip_seq` is safety_core's own s_trip_seq at dequeue. An unbound
+// (legacy) request carries no occurrence and matches anything, exactly as
+// before protocol 17 -- link_frame_decide_clear_trip() is what refuses an
+// unbound frame from a peer new enough to bind it. A bound request matches
+// only an equal seq: a trip that latched after the ESP last read DIAG bumps
+// the seq, so a stale or duplicated clear for the earlier occurrence (same
+// reason, same mask) is refused instead of clearing the new one.
+bool safety_guards_clear_trip_occurrence_matches(bool bound, uint8_t wire_trip_seq,
+                                                  uint8_t current_trip_seq);
 
 // Pure 3-way classification of a queued CLEAR_TRIP request's result, given
 // the two facts safety_core_task already has in hand right after it dequeues
@@ -825,7 +840,15 @@ typedef enum {
 // link_frame_decide_clear_trip()'s two-way one, and just as worth pinning
 // down with a test as that one was (see CommonFW's/this project's "every new
 // check must be proven capable of failing" standard).
+//
+// kilnlink audit 2026-10-09 M4 added `occurrence_matches`
+// (safety_guards_clear_trip_occurrence_matches()): a request for an older
+// occurrence than the latched one resolves to REFUSED_STALE_OCCURRENCE and
+// the caller must not run safety_guards_try_clear() for it at all;
+// `try_clear_result` is ignored in that case. NOTHING_LATCHED still wins
+// when no trip is latched.
 safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool occurrence_matches,
                                                                       bool try_clear_result);
 
 // Best-effort "what number decided this trip" for CommonFW/docs/LINK_PROTOCOL.md

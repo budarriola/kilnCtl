@@ -117,6 +117,10 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
     }
     bool diag_known = link->cached.diag_ever_received;
     uint16_t trip_mask = link->cached.diag_trip_mask;
+    /* kilnlink audit 2026-10-09 M4: read under the same lock as the mask so
+     * both describe the one DIAG frame. */
+    bool trip_seq_known = link->cached.diag_trip_seq_known;
+    uint8_t trip_seq = link->cached.diag_trip_seq;
     uint8_t diag_state = link->cached.diag_state;
     uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
     safety_unlock(link);
@@ -137,8 +141,12 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
         return ESP_ERR_INVALID_STATE;
     }
 
-    kilnlink_clear_trip_t msg = { .trip_mask = trip_mask };
-    uint8_t payload[KILNLINK_CLEAR_TRIP_LEN];
+    kilnlink_clear_trip_t msg = {
+        .trip_mask = trip_mask,
+        .has_trip_seq = trip_seq_known,
+        .trip_seq = trip_seq,
+    };
+    uint8_t payload[KILNLINK_CLEAR_TRIP_LEN_V2];
     kilnlink_clear_trip_status_t status = KILNLINK_CLEAR_TRIP_OK;
     size_t len = kilnlink_clear_trip_encode(&msg, payload, sizeof(payload), &status);
     if (len == 0) {
@@ -146,7 +154,13 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X", trip_mask);
+    if (trip_seq_known) {
+        ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X trip_seq=%u", trip_mask,
+                 (unsigned)trip_seq);
+    } else {
+        ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X (unbound, DIAG had no trip_seq)",
+                 trip_mask);
+    }
     /* Same (dst_device, dst_task, src_task) triple as ANNOUNCE_VERSION's own
      * broadcast call site above -- fire-and-forget, no ACK expected
      * (link_task_handle_clear_trip() never replies on the wire). */

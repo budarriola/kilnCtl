@@ -426,25 +426,25 @@ static void test_decide_clear_trip(void)
 {
     TEST_SECTION("link_frame_decide_clear_trip -- accept/refuse decision");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
                "nothing tripped, wire mask 0 -> REFUSE_NOTHING_TRIPPED");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0x0001u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0x0001u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
                "nothing tripped even with a nonzero wire mask -> still REFUSE_NOTHING_TRIPPED "
                "(checked before the mask comparison)");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0002u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0002u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
                "tripped OVERTEMP (mask 0x0001), wire sends 0x0002 -> REFUSE_MASK_MISMATCH");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
                "tripped OVERTEMP, wire sends 0 (stale clear queued before this trip) -> "
                "REFUSE_MASK_MISMATCH");
 
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0001u) == LINK_CLEAR_TRIP_ACCEPT,
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_OVERTEMP, 0x0001u, false, 0u) == LINK_CLEAR_TRIP_ACCEPT,
                "tripped OVERTEMP, wire mask matches exactly -> ACCEPT");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7)) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_ESTOP, (uint16_t)(1u << 7), false, 0u) ==
                    LINK_CLEAR_TRIP_ACCEPT,
                "tripped ESTOP, wire mask matches exactly -> ACCEPT");
 
@@ -456,14 +456,51 @@ static void test_decide_clear_trip(void)
      * even with a wire_trip_mask that matches S9's own mask exactly, proving
      * this is not reachable through the ACCEPT path by any mask coincidence. */
     TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE,
-                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE)) ==
+                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE), false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
                "tripped INEFFECTIVE (S9), wire mask matches exactly -> still REFUSE_INEFFECTIVE, "
                "never ACCEPT");
-    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE, 0u) ==
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE, 0u, false, 0u) ==
                    LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
                "tripped INEFFECTIVE (S9), wire mask 0 -> REFUSE_INEFFECTIVE, not REFUSE_MASK_MISMATCH "
                "(checked before the mask comparison, same ordering as NOTHING_TRIPPED)");
+
+    /* kilnlink audit 2026-10-09 M4: occurrence binding at the wire layer. */
+    const uint16_t s6a_mask = link_frame_trip_mask_for_reason(SAFETY_TRIP_MAIN_FAULT);
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,
+               "M4: legacy 3-byte clear from a protocol 17 peer -> REFUSE_SEQ_REQUIRED");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 200u) ==
+                   LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,
+               "M4: legacy clear from any newer peer -> REFUSE_SEQ_REQUIRED");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, true, 17u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: bound 4-byte clear from a protocol 17 peer, mask matches -> ACCEPT "
+               "(seq value is checked at dequeue)");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 16u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: legacy clear from a protocol 16 peer -> ACCEPT (unchanged)");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, false, 0u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: legacy clear before any ANNOUNCE (peer 0) -> ACCEPT, keeps the boot-time "
+               "S6a clear working");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, s6a_mask, true, 0u) ==
+                   LINK_CLEAR_TRIP_ACCEPT,
+               "M4: bound clear before any ANNOUNCE -> ACCEPT");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_MAIN_FAULT, 0x0001u, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,
+               "M4: mask mismatch still reported as MASK_MISMATCH, checked before seq-required");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_NONE, 0u, false, 17u) ==
+                   LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED,
+               "M4: nothing tripped still wins over seq-required");
+    TEST_CHECK(link_frame_decide_clear_trip(SAFETY_TRIP_INEFFECTIVE,
+                                             link_frame_trip_mask_for_reason(SAFETY_TRIP_INEFFECTIVE),
+                                             true, 17u) == LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,
+               "M4: S9 stays unclearable even with a bound frame");
+
+    TEST_CHECK(!link_frame_trip_seq_supported(0u), "trip_seq not sent before ANNOUNCE (peer 0)");
+    TEST_CHECK(!link_frame_trip_seq_supported(16u), "trip_seq not sent to a protocol 16 peer");
+    TEST_CHECK(link_frame_trip_seq_supported(17u), "trip_seq sent to a protocol 17 peer");
 }
 
 // --- link_frame_ceiling_is_active (SET_FIRING_CEILING bounds check) --------

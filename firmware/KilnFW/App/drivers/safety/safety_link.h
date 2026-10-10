@@ -300,6 +300,12 @@ extern "C" {
  * status frame -- see safety_apply_diag() in safety_link.c for the field
  * layout. */
 #define SAFETY_LINK_DIAG_FRAME_LEN 30u
+/* kilnlink audit 2026-10-09 M4 (KILNLINK_PROTOCOL_VERSION 16 -> 17): the
+ * 31-byte form, KILNLINK_DIAG_LEN_V2, adds byte30 = trip_seq. A protocol 17
+ * Pico sends it only after this ESP's ANNOUNCE named >= 17; safety_apply_
+ * diag() accepts both lengths and safety_link_send_clear_trip() echoes the
+ * seq back (4-byte CLEAR_TRIP) only when the cached DIAG carried it. */
+#define SAFETY_LINK_DIAG_FRAME_LEN_V2 31u
 
 /* DIAG flags byte (offset 25), kilnlink_diag.h's kilnlink_diag_flag_t
  * mirrored here for the same reason SAFETY_CMD_POWER/DIAG are hand-parsed
@@ -1030,6 +1036,13 @@ typedef struct {
                                          * frames never enqueued/sent (queue
                                          * full). Added KILNLINK_PROTOCOL_VERSION
                                          * 15 -> 16 / UART_PROTOCOL_VERSION 12 -> 13. */
+    /* kilnlink audit 2026-10-09 M4: the latched trip occurrence the most
+     * recent DIAG described (byte30 of the 31-byte form). diag_trip_seq_known
+     * is false after a 30-byte DIAG (Pico older than 17, or it has not seen
+     * this ESP's ANNOUNCE yet); safety_link_send_clear_trip() then sends the
+     * legacy unbound 3-byte clear. ESP-internal only: not on the PC wire. */
+    bool     diag_trip_seq_known;
+    uint8_t  diag_trip_seq;
 
     /* SAFETY_CMD_TRIP_EVENT (Frame D) -- the most recent trip event the Pico
      * has pushed, cached until a newer one replaces it. Deliberately never
@@ -2046,6 +2059,12 @@ esp_err_t safety_link_get_update_status(SafetyLinkClass *link, safety_link_updat
  *     currently latched to clear (the Pico would refuse anyway, but failing
  *     closed here means the operator gets an explanation immediately instead
  *     of after a round trip to a Pico that may not even be listening).
+ * kilnlink audit 2026-10-09 M4: when the cached DIAG carried trip_seq
+ * (31-byte form, protocol 17) the frame is the 4-byte CLEAR_TRIP echoing
+ * that seq too, so a stale or duplicated clear cannot clear a LATER trip of
+ * the same reason (same mask): the Pico refuses a seq that is not the one
+ * latched now. After a 30-byte DIAG it is the legacy 3-byte frame.
+ *
  * A resend after conditions changed (a second, different trip latched, or
  * the original trip cleared on its own) is safe to attempt again: the Pico's
  * own mask check is idempotent and simply refuses the mismatch, which is the

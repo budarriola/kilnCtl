@@ -232,10 +232,10 @@ DECL_ADAPTER(context, KILNLINK_CONTEXT_MAX_LEN + 32);
 DECL_ADAPTER(status, KILNLINK_STATUS_LEN_V2 + 32);
 DECL_ADAPTER(power, KILNLINK_POWER_LEN + 32);
 DECL_ADAPTER(announce, KILNLINK_ANNOUNCE_MAX_LEN + 32);
-DECL_ADAPTER(diag, KILNLINK_DIAG_LEN + 32);
+DECL_ADAPTER(diag, KILNLINK_DIAG_LEN_V2 + 32);
 DECL_ADAPTER(trip, KILNLINK_TRIP_LEN + 32);
 DECL_ADAPTER(ceiling, KILNLINK_CEILING_LEN + 32);
-DECL_ADAPTER(clear_trip, KILNLINK_CLEAR_TRIP_LEN + 32);
+DECL_ADAPTER(clear_trip, KILNLINK_CLEAR_TRIP_LEN_V2 + 32);
 DECL_ADAPTER(set_config, KILNLINK_SET_CONFIG_LEN + 32);
 DECL_ADAPTER(rollback, KILNLINK_ROLLBACK_LEN + 32);
 DECL_ADAPTER(get_fw_version, KILNLINK_GET_FW_VERSION_LEN + 32);
@@ -611,6 +611,10 @@ static size_t build_valid_diag(uint8_t *out, size_t out_cap)
     dg.tx_frames_dropped = 0;
     dg.state = 1;
     dg.flags = 0;
+    /* Build the protocol 17 31-byte form so the corpus reaches the trip_seq
+     * byte; the 30-byte form is the case's truncation_exception_len. */
+    dg.has_trip_seq = true;
+    dg.trip_seq = 0x5A;
     kilnlink_diag_status_t st;
     return kilnlink_diag_encode(&dg, out, out_cap, &st);
 }
@@ -641,7 +645,12 @@ static size_t build_valid_ceiling(uint8_t *out, size_t out_cap)
 static size_t build_valid_clear_trip(uint8_t *out, size_t out_cap)
 {
     kilnlink_clear_trip_t msg;
+    memset(&msg, 0, sizeof(msg));
     msg.trip_mask = 0x0004;
+    /* Protocol 17 bound form (4 bytes); the 3-byte legacy form is the
+     * case's truncation_exception_len. */
+    msg.has_trip_seq = true;
+    msg.trip_seq = 0x21;
     kilnlink_clear_trip_status_t st;
     return kilnlink_clear_trip_encode(&msg, out, out_cap, &st);
 }
@@ -861,10 +870,11 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_status_decode", decode_status, build_valid_status, status_MAX_LEN, 0},
     {"kilnlink_power_decode", decode_power, build_valid_power, power_MAX_LEN, KILNLINK_POWER_LEN_V1},
     {"kilnlink_announce_decode", decode_announce, build_valid_announce, announce_MAX_LEN, 0},
-    {"kilnlink_diag_decode", decode_diag, build_valid_diag, diag_MAX_LEN, 0},
+    {"kilnlink_diag_decode", decode_diag, build_valid_diag, diag_MAX_LEN, KILNLINK_DIAG_LEN},
     {"kilnlink_trip_decode", decode_trip, build_valid_trip, trip_MAX_LEN, 0},
     {"kilnlink_ceiling_decode", decode_ceiling, build_valid_ceiling, ceiling_MAX_LEN, 0},
-    {"kilnlink_clear_trip_decode", decode_clear_trip, build_valid_clear_trip, clear_trip_MAX_LEN, 0},
+    {"kilnlink_clear_trip_decode", decode_clear_trip, build_valid_clear_trip, clear_trip_MAX_LEN,
+     KILNLINK_CLEAR_TRIP_LEN},
     {"kilnlink_set_config_decode", decode_set_config, build_valid_set_config, set_config_MAX_LEN, 0},
     {"kilnlink_rollback_decode", decode_rollback, build_valid_none, rollback_MAX_LEN, 0},
     {"kilnlink_get_fw_version_decode", decode_get_fw_version, build_valid_none, get_fw_version_MAX_LEN, 0},

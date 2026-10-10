@@ -494,11 +494,35 @@ so the check had nothing left to guard against. `PROFILE_EXECUTOR_FIRING_CEILING
 |---|---|---|
 | 0 | u8 | `0x0A` |
 | 1..2 | u16 LE | `trip_mask` being acknowledged — must match the current one |
+| 3 | u8 | `trip_seq` (optional, 4-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the trip occurrence being acknowledged, echoed from DIAG byte 30 |
 
 Refused, with the reason reported in the next diagnostic frame, if the
 tripping condition is still true or if `trip_mask` does not match. Echoing the
 mask back prevents a stale "clear" queued before a *second*, different trip
 from clearing that one too.
+
+**Trip occurrence binding (kilnlink audit 2026-10-09 M4).** The mask alone
+cannot tell a clear for one trip from a later trip of the *same* guard: a
+duplicated or late 3-byte clear would clear the second occurrence too. Since
+protocol 17 the Pico sends DIAG byte 30 (`trip_seq`, the latched trip's
+`TRIP_EVENT` sequence number) to a peer whose `ANNOUNCE_VERSION` named >= 17,
+and the ESP echoes it here whenever its last DIAG carried it. The Pico then:
+
+- refuses a 4-byte clear whose `trip_seq` is not the one latched when
+  `safety_core` dequeues the request (`refused-stale-occurrence`, outcome 4
+  in the clear-trip diagnostic; `try_clear` never runs);
+- refuses a 3-byte clear from a peer that announced >= 17
+  (`LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED`), so a protocol 17 ESP cannot fall
+  back to an unbound clear;
+- accepts a 3-byte clear from a peer that announced < 17, or before any
+  `ANNOUNCE_VERSION` arrived (peer version 0), exactly as before. This keeps
+  the boot-time S6a clear working while the link handshake is still coming
+  up; the ESP's bounded boot-clear retry covers a 30-byte DIAG cached in the
+  short window before the Pico learned the ESP's version.
+
+Both lengths decode on both sides, so `KILNLINK_MIN_COMPATIBLE` stays 7. The
+PC wire is unchanged: `safety_clear_trip` still sends no mask or seq, and the
+ESP fills both from its own cached DIAG.
 
 This is the GUI's path to acknowledging a trip. The E-stop assert/release cycle
 remains available as the physical alternative (`firmware/SaftyFW/docs/SAFETY_MODEL.md` §6).
@@ -1082,6 +1106,7 @@ Everything the 23-byte frame has no room for. A `KilnFW` that has never heard of
 | 24 | u8 | `state` (0 init, 1 grace, 2 armed, 3 warn, 4 **tripped**) |
 | 25 | u8 | flags: bit0 `sim_context_seen`, bit1 `calibration_missing`, bit2 `estop_unwired_suspect` |
 | 26..29 | u32 LE | `log_frames_dropped` — `log_task.c`'s own drop counter (queue full), added `KILNLINK_PROTOCOL_VERSION` 15 -> 16 |
+| 30 | u8 | `trip_seq` (optional, 31-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the latched trip occurrence; sent only to a peer that announced >= 17. See §4 `CLEAR_TRIP` |
 
 `boot_reason` bit 1 is the one to watch on a bench: a safety processor that is
 silently watchdog-resetting in a loop presents as a working system with an

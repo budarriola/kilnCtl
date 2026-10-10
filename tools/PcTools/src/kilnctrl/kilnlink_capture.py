@@ -310,8 +310,10 @@ def _decode_context(payload: bytes) -> dict:
 
 def _decode_diag(payload: bytes) -> dict:
     """LINK_PROTOCOL.md sec 6 Frame B -- mirrors kilnlink_codec.encode_diag."""
-    if len(payload) != 30:
-        raise ValueError(f"DIAG (Frame B) must be 30 bytes, got {len(payload)}")
+    # 31 bytes = protocol 17 form with byte30 trip_seq (kilnlink audit
+    # 2026-10-09 M4).
+    if len(payload) not in (30, 31):
+        raise ValueError(f"DIAG (Frame B) must be 30 or 31 bytes, got {len(payload)}")
     (
         trip_reason,
         warn_mask,
@@ -326,7 +328,7 @@ def _decode_diag(payload: bytes) -> dict:
         flags,
         log_frames_dropped,
     ) = struct.unpack_from("<BHHIBBIIIBBI", payload, 1)
-    return {
+    out = {
         "trip_reason": trip_reason,
         "warn_mask": warn_mask,
         "trip_mask": trip_mask,
@@ -340,6 +342,9 @@ def _decode_diag(payload: bytes) -> dict:
         "flags": flags,
         "log_frames_dropped": log_frames_dropped,
     }
+    if len(payload) == 31:
+        out["trip_seq"] = payload[30]
+    return out
 
 
 def _decode_trip(payload: bytes) -> dict:
@@ -375,10 +380,15 @@ def _decode_ceiling(payload: bytes) -> dict:
 
 
 def _decode_clear_trip(payload: bytes) -> dict:
-    if len(payload) != 3:
-        raise ValueError(f"CLEAR_TRIP must be 3 bytes, got {len(payload)}")
+    # 4 bytes = protocol 17 form bound to a trip occurrence (kilnlink audit
+    # 2026-10-09 M4).
+    if len(payload) not in (3, 4):
+        raise ValueError(f"CLEAR_TRIP must be 3 or 4 bytes, got {len(payload)}")
     (trip_mask,) = struct.unpack_from("<H", payload, 1)
-    return {"trip_mask": trip_mask}
+    out = {"trip_mask": trip_mask}
+    if len(payload) == 4:
+        out["trip_seq"] = payload[3]
+    return out
 
 
 def _decode_set_clock(payload: bytes) -> dict:

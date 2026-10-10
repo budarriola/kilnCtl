@@ -510,11 +510,14 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
 // second CLEAR_TRIP arriving in the same 100ms window as the first (e.g. a
 // GUI double-click) is a real, if unlikely, case worth not silently
 // dropping; there is no legitimate reason for a third to queue up before
-// the tick drains the first two. The queue holds a one-byte token with no
-// payload -- link_task has already validated trip_mask
+// the tick drains the first two. link_task has already validated trip_mask
 // (link_frame_decide_clear_trip()) before ever calling
-// safety_core_request_clear_trip(), so there is nothing left to carry.
+// safety_core_request_clear_trip(). Since kilnlink audit 2026-10-09 M4 each
+// item is a uint16_t carrying the request's trip occurrence:
+// CLEAR_TRIP_TOKEN_BOUND | trip_seq for a 4-byte (protocol >= 17) frame, 0
+// for a legacy unbound one.
 #define SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN 2
+#define CLEAR_TRIP_TOKEN_BOUND 0x100u
 static QueueHandle_t s_clear_trip_queue = NULL;
 
 // Single-writer statics backing safety_core_get_clear_trip_stats() --
@@ -1500,9 +1503,17 @@ static void safety_core_task(void *arg)
         // the queue is picked up on the very next 100ms tick, never held up
         // by, and never itself holding up, anything link_task or the link
         // is doing.
-        uint8_t clear_trip_token;
+        uint16_t clear_trip_token;
         if (xQueueReceive(s_clear_trip_queue, &clear_trip_token, 0) == pdTRUE) {
-            (void)clear_trip_token; // no payload, see s_clear_trip_queue's doc comment
+            // kilnlink audit 2026-10-09 M4: the request's trip occurrence,
+            // compared against s_trip_seq HERE, on the task that bumps it,
+            // so a trip that latched after the ESP read DIAG (or between
+            // link_task's screen and this dequeue) cannot be cleared by a
+            // request for the earlier occurrence.
+            bool clear_trip_bound = (clear_trip_token & CLEAR_TRIP_TOKEN_BOUND) != 0u;
+            uint8_t clear_trip_seq = (uint8_t)(clear_trip_token & 0xFFu);
+            bool occurrence_matches = safety_guards_clear_trip_occurrence_matches(
+                clear_trip_bound, clear_trip_seq, s_trip_seq);
 
             // link_task already screened the "nothing tripped" case before
             // enqueuing (link_frame_decide_clear_trip(), against a
@@ -1532,7 +1543,7 @@ static void safety_core_task(void *arg)
             bool tc_valid_snapshot = false;
             bool spi_failed_snapshot = false;
             bool tc_c_is_nan_snapshot = false;
-            if (was_tripped) {
+            if (was_tripped && occurrence_matches) {
                 reason_u8 = (uint8_t)s_guard_state.reason;
                 fault_bits_u8 = input.fault_bits;
                 tc_valid_snapshot = input.tc_valid;
@@ -1565,8 +1576,8 @@ static void safety_core_task(void *arg)
                                       tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                       0u);
             }
-            safety_clear_trip_outcome_t outcome =
-                safety_guards_decide_clear_trip_outcome(was_tripped, try_clear_result);
+            safety_clear_trip_outcome_t outcome = safety_guards_decide_clear_trip_outcome(
+                was_tripped, occurrence_matches, try_clear_result);
             if (outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED) {
                 // Latch "a clear command is owed" unconditionally, the same
                 // instant the acceptance is decided -- see s_clear_command_
@@ -1585,10 +1596,17 @@ static void safety_core_task(void *arg)
                                   tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                   (uint8_t)outcome);
 
-            char msg[64];
-            snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s",
-                     (unsigned long)s_clear_trip_requested, (unsigned long)s_clear_trip_processed,
-                     clear_trip_outcome_str(outcome));
+            char msg[96];
+            if (clear_trip_bound) {
+                snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s seq=%u cur=%u",
+                         (unsigned long)s_clear_trip_requested,
+                         (unsigned long)s_clear_trip_processed, clear_trip_outcome_str(outcome),
+                         (unsigned)clear_trip_seq, (unsigned)s_trip_seq);
+            } else {
+                snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s unbound",
+                         (unsigned long)s_clear_trip_requested,
+                         (unsigned long)s_clear_trip_processed, clear_trip_outcome_str(outcome));
+            }
             log_task_log(outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED ? LOG_LEVEL_INFO : LOG_LEVEL_WARN,
                          "clear_trip", msg);
 
@@ -1748,16 +1766,16 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
 // queue, not a direct call" history -- this is now purely an enqueue, never
 // a direct touch of s_guard_state. safety_core_task() (below) is the only
 // code that actually runs safety_guards_try_clear().
-bool safety_core_request_clear_trip(void)
+bool safety_core_request_clear_trip(bool bound, uint8_t trip_seq)
 {
     if (s_clear_trip_queue == NULL) {
         return false;
     }
 
-    // Content unused -- see s_clear_trip_queue's own doc comment: this is a
-    // pure "a request is pending" signal, link_task already validated
-    // trip_mask before ever calling this function.
-    uint8_t token = 0;
+    // See s_clear_trip_queue's own doc comment: link_task already validated
+    // trip_mask; the token carries only the request's trip occurrence
+    // (kilnlink audit 2026-10-09 M4), checked at dequeue.
+    uint16_t token = bound ? (uint16_t)(CLEAR_TRIP_TOKEN_BOUND | trip_seq) : 0u;
     if (xQueueSend(s_clear_trip_queue, &token, 0) != pdTRUE) {
         return false;
     }
@@ -1778,6 +1796,8 @@ static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome)
         return "refused-still-tripped";
     case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED:
         return "refused-nothing-latched";
+    case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE:
+        return "refused-stale-occurrence";
     case SAFETY_CLEAR_TRIP_OUTCOME_NONE:
     default:
         return "none";
@@ -1916,7 +1936,7 @@ bool safety_core_start(void)
     // (callable from link_task the instant this returns true) must never
     // observe a NULL queue that safety_core_task would have created for
     // itself a moment later.
-    s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint8_t));
+    s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint16_t));
     if (s_clear_trip_queue == NULL) {
         return false;
     }

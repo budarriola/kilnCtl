@@ -114,11 +114,79 @@ static void test_decode_too_short(void)
 
 static void test_decode_too_long(void)
 {
-    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN + 1] = {0};
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V2 + 1] = {0};
     buf[0] = KILNLINK_CLEAR_TRIP_CMD;
     kilnlink_clear_trip_t out;
     CHECK(kilnlink_clear_trip_decode(buf, sizeof(buf), &out) == KILNLINK_CLEAR_TRIP_ERR_LENGTH_MISMATCH,
-          "decode() of a 4-byte (one too many) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 5-byte (one past the bound form) payload -> ERR_LENGTH_MISMATCH");
+}
+
+/* -- protocol 17 occurrence-bound form (kilnlink audit 2026-10-09 M4) ------ */
+
+static void test_round_trip_bound(void)
+{
+    kilnlink_clear_trip_t msg = {0};
+    msg.trip_mask = 0x0020;
+    msg.has_trip_seq = true;
+    msg.trip_seq = 0xA7;
+
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V2];
+    kilnlink_clear_trip_status_t status;
+    size_t n = kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_CLEAR_TRIP_OK, "bound encode() reports OK");
+    CHECK(n == KILNLINK_CLEAR_TRIP_LEN_V2, "bound encode() writes exactly 4 bytes");
+
+    kilnlink_clear_trip_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    CHECK(kilnlink_clear_trip_decode(buf, n, &decoded) == KILNLINK_CLEAR_TRIP_OK,
+          "decode() accepts the 4-byte bound form");
+    CHECK(decoded.trip_mask == 0x0020, "bound trip_mask round-trips");
+    CHECK(decoded.has_trip_seq, "4-byte frame decodes with has_trip_seq set");
+    CHECK(decoded.trip_seq == 0xA7, "trip_seq round-trips");
+}
+
+static void test_legacy_decode_has_no_seq(void)
+{
+    static const uint8_t legacy[] = {0x0a, 0x20, 0x00};
+    kilnlink_clear_trip_t decoded;
+    memset(&decoded, 0xFF, sizeof(decoded)); /* poison: decode must clear has_trip_seq */
+    CHECK(kilnlink_clear_trip_decode(legacy, sizeof(legacy), &decoded) == KILNLINK_CLEAR_TRIP_OK,
+          "decode() still accepts the 3-byte legacy form");
+    CHECK(!decoded.has_trip_seq, "3-byte frame decodes with has_trip_seq false");
+    CHECK(decoded.trip_seq == 0, "3-byte frame decodes trip_seq as 0");
+}
+
+static void test_vector_bound_s6a(void)
+{
+    static const uint8_t expected[] = {0x0a, 0x20, 0x00, 0x05};
+    kilnlink_clear_trip_t msg = {0};
+    msg.trip_mask = 0x0020;
+    msg.has_trip_seq = true;
+    msg.trip_seq = 5;
+
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V2];
+    kilnlink_clear_trip_status_t status;
+    size_t n = kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_CLEAR_TRIP_OK, "vector bound_s6a: encode OK");
+    if (n != sizeof(expected) || memcmp(buf, expected, sizeof(expected)) != 0) {
+        print_hex("  got     ", buf, n);
+        print_hex("  expected", expected, sizeof(expected));
+        CHECK(0, "vector bound_s6a: bytes match clear_trip_vectors.json");
+    } else {
+        CHECK(1, "vector bound_s6a: bytes match clear_trip_vectors.json");
+    }
+}
+
+static void test_encode_bound_buffer_too_small(void)
+{
+    kilnlink_clear_trip_t msg = {0};
+    msg.has_trip_seq = true;
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN]; /* 3: enough for legacy, one short for bound */
+    kilnlink_clear_trip_status_t status;
+    size_t n = kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status);
+    CHECK(n == 0, "bound encode() into a 3-byte buffer writes nothing");
+    CHECK(status == KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL,
+          "bound encode() into a 3-byte buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
 static void test_decode_wrong_cmd(void)
@@ -151,6 +219,10 @@ int main(void)
     test_decode_too_long();
     test_decode_wrong_cmd();
     test_encode_buffer_too_small();
+    test_round_trip_bound();
+    test_legacy_decode_has_no_seq();
+    test_vector_bound_s6a();
+    test_encode_bound_buffer_too_small();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

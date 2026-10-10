@@ -857,3 +857,63 @@ def test_decoders_match_commonfw_vectors(filename):
         # Non-vacuity: a vector that compared nothing would pass silently.
         if len(payload) > 1:
             assert compared > 0, f"{filename}:{vec.get('name')} compared no fields"
+
+
+# ---------------------------------------------------------------------------
+# kilnlink audit 2026-10-09 M4 (KILNLINK_PROTOCOL_VERSION 16 -> 17): DIAG may
+# carry byte30 trip_seq (31 bytes) and CLEAR_TRIP may carry byte3 trip_seq
+# (4 bytes). Both legacy lengths still decode, without the key.
+# ---------------------------------------------------------------------------
+
+_M4_DIAG_FIELDS = {
+    "trip_reason": 6,
+    "warn_mask": 0,
+    "trip_mask": 0x0020,
+    "uptime_ms": 1,
+    "boot_reason": "KILNLINK_DIAG_BOOT_POWERON",
+    "context_age_100ms": 0,
+    "context_frames_ok": 0,
+    "context_frames_bad": 0,
+    "tx_frames_dropped": 0,
+    "state": "KILNLINK_DIAG_STATE_TRIPPED",
+    "flags": 0,
+    "log_frames_dropped": 0,
+}
+
+
+def test_m4_diag_trip_seq_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    legacy = codec.encode_diag(_M4_DIAG_FIELDS)
+    bound = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7))
+    assert len(legacy) == 30
+    assert len(bound) == 31 and bound[:30] == legacy and bound[30] == 0xA7
+    assert "trip_seq" not in kc.decode_payload(7, 7, legacy)[1]
+    assert kc.decode_payload(7, 7, bound)[1]["trip_seq"] == 0xA7
+
+
+def test_m4_clear_trip_trip_seq_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    legacy = codec.encode_clear_trip({"trip_mask": 0x0020})
+    bound = codec.encode_clear_trip({"trip_mask": 0x0020, "trip_seq": 5})
+    assert legacy == bytes.fromhex("0a2000")
+    assert bound == bytes.fromhex("0a200005")
+    d_legacy = kc.decode_payload(7, 7, legacy)[1]
+    d_bound = kc.decode_payload(7, 7, bound)[1]
+    assert d_legacy == {"trip_mask": 0x0020}
+    assert d_bound == {"trip_mask": 0x0020, "trip_seq": 5}
+
+
+@pytest.mark.parametrize("payload_hex", ["0a20", "0a2000050f"])
+def test_m4_clear_trip_bad_lengths_rejected(payload_hex):
+    name, decoded, err = kc.decode_payload(7, 7, bytes.fromhex(payload_hex))
+    assert err is not None and decoded is None
+
+
+def test_m4_diag_32_bytes_rejected():
+    from kilnctrl import kilnlink_codec as codec
+
+    too_long = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=1)) + b"\x00"
+    name, decoded, err = kc.decode_payload(7, 7, too_long)
+    assert err is not None and decoded is None

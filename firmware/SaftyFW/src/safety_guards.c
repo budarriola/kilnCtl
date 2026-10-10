@@ -280,11 +280,21 @@ bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg
     return !safety_guards_tick(state, cfg, in);
 }
 
+bool safety_guards_clear_trip_occurrence_matches(bool bound, uint8_t wire_trip_seq,
+                                                  uint8_t current_trip_seq)
+{
+    return !bound || wire_trip_seq == current_trip_seq;
+}
+
 safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool occurrence_matches,
                                                                       bool try_clear_result)
 {
     if (!was_tripped) {
         return SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED;
+    }
+    if (!occurrence_matches) {
+        return SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE;
     }
     return try_clear_result ? SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED
                              : SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED;

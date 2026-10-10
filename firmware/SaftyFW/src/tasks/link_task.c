@@ -1031,6 +1031,15 @@ static uint8_t link_task_context_age_100ms(void)
 
 static void link_task_send_diag(void)
 {
+    // kilnlink audit 2026-10-09 M4: read the trip occurrence BEFORE the trip
+    // state below. Both reads are lock-free; if a trip latches between them
+    // this frame pairs the newer state with the older seq, and a clear the
+    // ESP binds to it is refused as stale at dequeue (fail safe). Reading in
+    // the other order could pair an older state with a newer seq and bind a
+    // clear to an occurrence the ESP never saw.
+    uint8_t diag_trip_seq = 0;
+    (void)safety_core_get_trip_event(&diag_trip_seq, NULL, NULL, NULL, NULL);
+
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     bool warn_active = false;
     uint8_t diag_state = 0;
@@ -1181,8 +1190,13 @@ static void link_task_send_diag(void)
         .state = diag_state,
         .flags = diag_flags,
         .log_frames_dropped = log_task_get_dropped(),
+        // kilnlink audit 2026-10-09 M4: the 31-byte form, only to a peer
+        // that announced it understands it (link_frame_trip_seq_supported());
+        // before ANNOUNCE and for a protocol 16 peer the frame stays 30 bytes.
+        .has_trip_seq = link_frame_trip_seq_supported(s_peer_protocol_version),
+        .trip_seq = diag_trip_seq,
     };
-    uint8_t payload[KILNLINK_DIAG_LEN];
+    uint8_t payload[KILNLINK_DIAG_LEN_V2];
     kilnlink_diag_status_t status;
     size_t len = kilnlink_diag_encode(&dg, payload, sizeof(payload), &status);
     // 2026-08-23 call-path diagnostic, checkpoint 2 -- recorded regardless of
@@ -1190,7 +1204,7 @@ static void link_task_send_diag(void)
     s_diag_encode_len = (uint32_t)len;
     s_diag_encode_status = (uint8_t)status;
     if (len == 0) {
-        return; // can't happen for a fixed sizeof(payload) == KILNLINK_DIAG_LEN buffer
+        return; // can't happen: sizeof(payload) == KILNLINK_DIAG_LEN_V2, the larger form
     }
 
     link_task_send_broadcast(payload, (uint8_t)len);
@@ -1562,7 +1576,8 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     // link_frame_decide_clear_trip() (src/tasks/link_frame.c) is the pure,
     // host-tested extraction of the two refusal checks documented above --
     // this function only acts on its verdict now.
-    link_clear_trip_decision_t decision = link_frame_decide_clear_trip(trip_reason, msg.trip_mask);
+    link_clear_trip_decision_t decision = link_frame_decide_clear_trip(
+        trip_reason, msg.trip_mask, msg.has_trip_seq, s_peer_protocol_version);
 
     // A switch with no default, deliberately. This was an if-chain that tested
     // the two refusal values it knew about and let everything else fall
@@ -1594,15 +1609,28 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
                      "REFUSED: trip ineffective (S9) -- contactor may be welded, "
                      "remove power at the breaker; not clearable from here");
         return;
+    case LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED:
+        // kilnlink audit 2026-10-09 M4: this peer announced protocol >= 17
+        // and is sent trip_seq in DIAG, so an unbound clear from it is a
+        // stale or duplicated frame -- never let it clear whatever trip is
+        // latched now.
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, unbound clear from protocol>=17 peer");
+        return;
     case LINK_CLEAR_TRIP_ACCEPT:
         break;
     }
 
-    bool queued = safety_core_request_clear_trip();
+    bool queued = safety_core_request_clear_trip(msg.has_trip_seq, msg.trip_seq);
     char msg_buf[64];
-    snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu",
-             queued ? "queued" : "dropped, safety_core queue full",
-             (unsigned long)s_clear_trip_rx_count);
+    if (msg.has_trip_seq) {
+        snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu seq=%u",
+                 queued ? "queued" : "dropped, safety_core queue full",
+                 (unsigned long)s_clear_trip_rx_count, (unsigned)msg.trip_seq);
+    } else {
+        snprintf(msg_buf, sizeof(msg_buf), "%s, rx=%lu unbound",
+                 queued ? "queued" : "dropped, safety_core queue full",
+                 (unsigned long)s_clear_trip_rx_count);
+    }
     log_task_log(queued ? LOG_LEVEL_INFO : LOG_LEVEL_WARN, "clear_trip", msg_buf);
 }
 

@@ -1,6 +1,7 @@
 #ifndef KILNLINK_CLEAR_TRIP_H
 #define KILNLINK_CLEAR_TRIP_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -23,28 +24,39 @@ extern "C" {
 
 #define KILNLINK_CLEAR_TRIP_CMD 0x0Au
 #define KILNLINK_CLEAR_TRIP_LEN 3u /* cmd(1) + trip_mask u16 LE(2) */
+/* KILNLINK_PROTOCOL_VERSION 16 -> 17 (kilnlink audit 2026-10-09 M4): the
+ * occurrence-bound form appends the trip_seq (u8, offset 3) the ESP read from
+ * a 31-byte DIAG (kilnlink_diag.h's trip_seq). The Pico refuses a bound clear
+ * whose trip_seq is not the occurrence latched right now, so a duplicated or
+ * stale frame meant for occurrence N can never clear occurrence N+1 of the
+ * same reason. Encoded only when has_trip_seq is set; the decoder accepts
+ * both lengths. */
+#define KILNLINK_CLEAR_TRIP_LEN_V2 4u /* + trip_seq u8(1) */
 
 typedef enum {
     KILNLINK_CLEAR_TRIP_OK = 0,
-    KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL, /* output buffer smaller than KILNLINK_CLEAR_TRIP_LEN */
-    KILNLINK_CLEAR_TRIP_ERR_LENGTH_MISMATCH,  /* input length != KILNLINK_CLEAR_TRIP_LEN (fixed-size frame) */
+    KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL, /* output buffer smaller than the encoded length */
+    KILNLINK_CLEAR_TRIP_ERR_LENGTH_MISMATCH,  /* input length is neither KILNLINK_CLEAR_TRIP_LEN nor _LEN_V2 */
     KILNLINK_CLEAR_TRIP_ERR_WRONG_CMD,        /* byte 0 isn't KILNLINK_CLEAR_TRIP_CMD */
 } kilnlink_clear_trip_status_t;
 
 typedef struct {
     uint16_t trip_mask; /* the trip mask being acknowledged; must match the latched one */
+    bool     has_trip_seq; /* true: 4-byte bound form, trip_seq is on the wire */
+    uint8_t  trip_seq;     /* the occurrence being acknowledged (DIAG trip_seq); valid iff has_trip_seq */
 } kilnlink_clear_trip_t;
 
 /* Serializes `msg` (SAFETY_CMD_CLEAR_TRIP payload, byte 0 = 0x0A included)
- * into `out`. Always exactly KILNLINK_CLEAR_TRIP_LEN (3) bytes -- this frame
- * has no variable-length fields. Returns 3, or 0 on
+ * into `out`: KILNLINK_CLEAR_TRIP_LEN_V2 (4) bytes when msg->has_trip_seq,
+ * else KILNLINK_CLEAR_TRIP_LEN (3). Returns that length, or 0 on
  * KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL. */
 size_t kilnlink_clear_trip_encode(const kilnlink_clear_trip_t *msg, uint8_t *out, size_t out_cap,
                                    kilnlink_clear_trip_status_t *status);
 
 /* Parses a CLEAR_TRIP payload (as extracted from kilnlink_frame_t::payload)
- * into `out`. `len` must be exactly KILNLINK_CLEAR_TRIP_LEN -- this is
- * untrusted input from another processor across an isolated link
+ * into `out`. `len` must be exactly KILNLINK_CLEAR_TRIP_LEN (legacy,
+ * has_trip_seq = false) or KILNLINK_CLEAR_TRIP_LEN_V2 (has_trip_seq = true)
+ * -- this is untrusted input from another processor across an isolated link
  * (CommonFW/README.md rule 6). */
 kilnlink_clear_trip_status_t kilnlink_clear_trip_decode(const uint8_t *payload, size_t len,
                                                          kilnlink_clear_trip_t *out);

@@ -544,7 +544,7 @@ static void set_status_frame(uint8_t *p, uint8_t flags, float tc_c, float cj_c,
 // zeroed (harmless -- safety_apply_diag() doesn't gate on them).
 static void set_diag_frame(uint8_t *p, uint8_t trip_reason, uint8_t state)
 {
-    memset(p, 0, SAFETY_LINK_DIAG_FRAME_LEN);
+    memset(p, 0, SAFETY_LINK_DIAG_FRAME_LEN_V2);
     p[0] = SAFETY_CMD_DIAG;
     p[1] = trip_reason;
     p[24] = state;
@@ -2877,6 +2877,63 @@ static unsigned drive_one_diag_and_service(SafetyLinkClass *link, uint8_t trip_r
     return s_stub_broadcast_count;
 }
 
+// kilnlink audit 2026-10-09 M4: the 31-byte DIAG carries trip_seq and the
+// ESP echoes it in a 4-byte CLEAR_TRIP; a 30-byte DIAG yields the legacy
+// 3-byte clear; any other length is rejected.
+static void m4_apply_diag(SafetyLinkClass *link, size_t len, uint8_t trip_seq, bool expect_ok)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    set_diag_frame(diag.payload, SAFETY_LINK_TRIP_REASON_MAIN_FAULT, SAFETY_LINK_DIAG_STATE_TRIPPED);
+    diag.payload[4] = (uint8_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u)); /* trip_mask LE */
+    diag.payload[5] = 0u;
+    diag.payload[30] = trip_seq;
+    diag.length = (uint16_t)len;
+    TEST_CHECK(safety_apply_diag(link, &diag) == expect_ok,
+               expect_ok ? "M4: DIAG frame of this length decodes"
+                         : "M4: DIAG frame of this length is rejected");
+}
+
+static void test_m4_clear_trip_echoes_diag_trip_seq(void)
+{
+    TEST_SECTION("M4 -- safety_apply_diag accepts 30/31-byte DIAG; send_clear_trip echoes "
+                 "trip_seq (4 bytes) only after a 31-byte DIAG");
+
+    SafetyLinkClass link = boot_clear_test_setup();
+    const uint16_t s6a_mask = (uint16_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u));
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 0x2Bu, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known == true, "31-byte DIAG marks trip_seq known");
+    TEST_CHECK(link.cached.diag_trip_seq == 0x2Bu, "31-byte DIAG caches byte30");
+
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "bound clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "exactly one frame sent");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2,
+               "after a 31-byte DIAG the clear is the 4-byte bound form");
+    TEST_CHECK(s_stub_broadcast_last_payload[0] == KILNLINK_CLEAR_TRIP_CMD, "cmd byte");
+    TEST_CHECK((uint16_t)(s_stub_broadcast_last_payload[1] |
+                          ((uint16_t)s_stub_broadcast_last_payload[2] << 8)) == s6a_mask,
+               "mask bytes carry the S6a mask");
+    TEST_CHECK(s_stub_broadcast_last_payload[3] == 0x2Bu, "byte3 echoes the DIAG trip_seq");
+
+    // A later 30-byte DIAG (e.g. the Pico rebooted to an older image) must
+    // forget the seq: the next clear is the legacy unbound 3-byte frame.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0x77u, true);
+    TEST_CHECK(link.cached.diag_trip_seq_known == false, "30-byte DIAG forgets trip_seq");
+    base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "legacy clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u, "exactly one frame sent");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
+               "after a 30-byte DIAG the clear is the 3-byte legacy form");
+
+    // Neither 29 nor 32 bytes is a DIAG; the cache keeps the last good one.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2 + 1u, 0x11u, false);
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN - 1u, 0x11u, false);
+    TEST_CHECK(link.cached.diag_trip_seq_known == false,
+               "rejected DIAG frames do not touch the cached trip_seq");
+}
+
 static void test_boot_clear_refused_then_retried_succeeds(void)
 {
     TEST_SECTION("safety_link_service_boot_clear_if_pending -- a Pico-refused clear "
@@ -3079,6 +3136,7 @@ int main(void)
     test_fault_edge_ring_wraps_and_keeps_oldest_to_newest_order();
     test_fault_edge_uninitialized_link_refuses();
 
+    test_m4_clear_trip_echoes_diag_trip_seq();
     test_boot_clear_refused_then_retried_succeeds();
     test_boot_clear_stops_after_own_fault_source_rises();
     test_boot_clear_persistent_refusal_gives_up_after_bound();

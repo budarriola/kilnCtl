@@ -15,6 +15,14 @@
         "trip_mask": 65535
       },
       "bytes_hex": "0affff"
+    },
+    {
+      "name": "bound_s6a",
+      "fields": {
+        "trip_mask": 32,
+        "trip_seq": 5
+      },
+      "bytes_hex": "0a200005"
     }
   ],
   "note": "bytes_hex fields here are documentation only -- the authoritative byte-exact expectations live inline in test/test_clear_trip.c (mirroring status/power/context/announce/diag/trip's own convention); this file records the field values that produced them for anyone re-deriving the vectors by hand. trip_mask is the mask being acknowledged; SaftyFW refuses the clear if it doesn't match the currently-latched trip (LINK_PROTOCOL.md sec 4) -- that refusal logic lives outside this codec."

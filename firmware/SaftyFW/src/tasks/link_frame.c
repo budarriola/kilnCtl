@@ -65,6 +65,11 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version)
     return peer_protocol_version >= LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL;
 }
 
+bool link_frame_trip_seq_supported(uint16_t peer_protocol_version)
+{
+    return peer_protocol_version >= LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL;
+}
+
 uint8_t link_frame_saturate_tx_dropped(uint32_t tx_dropped)
 {
     return (tx_dropped > LINK_FRAME_STATUS_TX_DROPPED_SAT_MAX)
@@ -256,7 +261,9 @@ bool link_frame_counts_for_liveness(uint8_t src_device, uint8_t dst_device)
 }
 
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
-                                                          uint16_t wire_trip_mask)
+                                                          uint16_t wire_trip_mask,
+                                                          bool frame_has_trip_seq,
+                                                          uint16_t peer_protocol_version)
 {
     if (current_trip_reason == SAFETY_TRIP_NONE) {
         return LINK_CLEAR_TRIP_REFUSE_NOTHING_TRIPPED;
@@ -267,6 +274,10 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
     uint16_t current_mask = link_frame_trip_mask_for_reason(current_trip_reason);
     if (wire_trip_mask != current_mask) {
         return LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH;
+    }
+    // kilnlink audit 2026-10-09 M4 -- see link_frame.h.
+    if (!frame_has_trip_seq && link_frame_trip_seq_supported(peer_protocol_version)) {
+        return LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED;
     }
     return LINK_CLEAR_TRIP_ACCEPT;
 }

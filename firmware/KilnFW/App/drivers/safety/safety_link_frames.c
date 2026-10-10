@@ -890,6 +890,8 @@ bool safety_apply_power(SafetyLinkClass *link, const uart_proto_message_t *msg)
  *   byte24       state
  *   byte25       flags
  *   bytes26..29  log_frames_dropped, u32 LE -- KILNLINK_PROTOCOL_VERSION 15 -> 16
+ *   byte30       trip_seq, 31-byte form only -- KILNLINK_PROTOCOL_VERSION 16 -> 17
+ *                (kilnlink audit 2026-10-09 M4)
  * Mirrors kilnlink_diag_decode() in firmware/CommonFW/src/kilnlink_diag.c
  * byte-for-byte; see uart_task_ids.h's SAFETY_CMD_DIAG comment for why this
  * driver hand-parses rather than linking that codec. */
@@ -995,7 +997,8 @@ void safety_link_mark_boot_clean(void)
 
 bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
-    if (msg->length != SAFETY_LINK_DIAG_FRAME_LEN || msg->payload[0] != SAFETY_CMD_DIAG) {
+    if ((msg->length != SAFETY_LINK_DIAG_FRAME_LEN && msg->length != SAFETY_LINK_DIAG_FRAME_LEN_V2) ||
+        msg->payload[0] != SAFETY_CMD_DIAG) {
         if (safety_lock(link)) {
             link->stats.frame_errors++;
             safety_unlock(link);
@@ -1033,6 +1036,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_state = p[24];
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
+    /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip
+     * occurrence; a 30-byte frame forgets any earlier seq so a later clear
+     * never echoes one this DIAG did not confirm. */
+    link->cached.diag_trip_seq_known = (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V2);
+    link->cached.diag_trip_seq = link->cached.diag_trip_seq_known ? p[30] : 0u;
     link->cached.diag_ever_received = true;
     link->stats.diag_applied++; /* 2026-08-23: real counter, see its own doc comment (safety_link.h) */
     bool want_boot_clear = false;

@@ -174,11 +174,104 @@ static void test_decode_too_short(void)
 
 static void test_decode_too_long(void)
 {
-    uint8_t buf[KILNLINK_DIAG_LEN + 1] = {0};
+    uint8_t buf[KILNLINK_DIAG_LEN_V2 + 1] = {0};
     buf[0] = KILNLINK_DIAG_CMD;
     kilnlink_diag_t out;
     CHECK(kilnlink_diag_decode(buf, sizeof(buf), &out) == KILNLINK_DIAG_ERR_LENGTH_MISMATCH,
-          "decode() of a 31-byte (one too many) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 32-byte (one past the trip_seq form) payload -> ERR_LENGTH_MISMATCH");
+}
+
+/* -- protocol 17 trip_seq form (kilnlink audit 2026-10-09 M4) -------------- */
+
+static void test_round_trip_trip_seq(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.trip_reason = 6;
+    dg.trip_mask = 0x0020;
+    dg.state = KILNLINK_DIAG_STATE_TRIPPED;
+    dg.log_frames_dropped = 0x01020304u;
+    dg.has_trip_seq = true;
+    dg.trip_seq = 0xC3;
+
+    uint8_t buf[KILNLINK_DIAG_LEN_V2];
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_DIAG_OK, "trip_seq encode() reports OK");
+    CHECK(n == KILNLINK_DIAG_LEN_V2, "trip_seq encode() writes exactly 31 bytes");
+    CHECK(buf[30] == 0xC3, "trip_seq lands at offset 30");
+
+    kilnlink_diag_t decoded;
+    memset(&decoded, 0, sizeof(decoded));
+    CHECK(kilnlink_diag_decode(buf, n, &decoded) == KILNLINK_DIAG_OK,
+          "decode() accepts the 31-byte form");
+    CHECK(decoded.has_trip_seq, "31-byte frame decodes with has_trip_seq set");
+    CHECK(decoded.trip_seq == 0xC3, "trip_seq round-trips");
+    CHECK(decoded.log_frames_dropped == 0x01020304u, "log_frames_dropped unaffected by the new byte");
+    CHECK(decoded.trip_mask == 0x0020, "trip_mask unaffected by the new byte");
+}
+
+static void test_legacy_decode_has_no_trip_seq(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.trip_reason = 6;
+    uint8_t buf[KILNLINK_DIAG_LEN];
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), NULL);
+    CHECK(n == KILNLINK_DIAG_LEN, "has_trip_seq=false still encodes the 30-byte form");
+
+    kilnlink_diag_t decoded;
+    memset(&decoded, 0xFF, sizeof(decoded)); /* poison: decode must clear has_trip_seq */
+    CHECK(kilnlink_diag_decode(buf, n, &decoded) == KILNLINK_DIAG_OK,
+          "decode() still accepts the 30-byte form");
+    CHECK(!decoded.has_trip_seq, "30-byte frame decodes with has_trip_seq false");
+    CHECK(decoded.trip_seq == 0, "30-byte frame decodes trip_seq as 0");
+}
+
+static void test_vector_tripped_with_trip_seq(void)
+{
+    static const uint8_t expected[] = {
+        0x08, 0x03, 0x01, 0x00, 0x04, 0x00, 0x3f, 0x42, 0x0f, 0x00, 0x02, 0x0c,
+        0xf4, 0x01, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0x04, 0x03, 0x07, 0x00, 0x00, 0x00, 0x09,
+    };
+    kilnlink_diag_t dg = {0};
+    dg.trip_reason = 3;
+    dg.warn_mask = 0x0001;
+    dg.trip_mask = 0x0004;
+    dg.uptime_ms = 999999;
+    dg.boot_reason = KILNLINK_DIAG_BOOT_WATCHDOG;
+    dg.context_age_100ms = 12;
+    dg.context_frames_ok = 500;
+    dg.context_frames_bad = 2;
+    dg.tx_frames_dropped = 1;
+    dg.state = KILNLINK_DIAG_STATE_TRIPPED;
+    dg.flags = KILNLINK_DIAG_FLAG_SIM_CONTEXT_SEEN | KILNLINK_DIAG_FLAG_CALIBRATION_MISSING;
+    dg.log_frames_dropped = 7;
+    dg.has_trip_seq = true;
+    dg.trip_seq = 9;
+
+    uint8_t buf[KILNLINK_DIAG_LEN_V2];
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_DIAG_OK, "vector tripped_with_trip_seq: encode OK");
+    if (n != sizeof(expected) || memcmp(buf, expected, sizeof(expected)) != 0) {
+        print_hex("  got     ", buf, n);
+        print_hex("  expected", expected, sizeof(expected));
+        CHECK(0, "vector tripped_with_trip_seq: bytes match diag_vectors.json");
+    } else {
+        CHECK(1, "vector tripped_with_trip_seq: bytes match diag_vectors.json");
+    }
+}
+
+static void test_encode_trip_seq_buffer_too_small(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.has_trip_seq = true;
+    uint8_t buf[KILNLINK_DIAG_LEN]; /* 30: one short for the trip_seq form */
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(n == 0, "trip_seq encode() into a 30-byte buffer writes nothing");
+    CHECK(status == KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL,
+          "trip_seq encode() into a 30-byte buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
 static void test_decode_wrong_cmd(void)
@@ -273,6 +366,10 @@ int main(void)
     test_decode_too_long();
     test_decode_wrong_cmd();
     test_encode_buffer_too_small();
+    test_round_trip_trip_seq();
+    test_legacy_decode_has_no_trip_seq();
+    test_vector_tripped_with_trip_seq();
+    test_encode_trip_seq_buffer_too_small();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

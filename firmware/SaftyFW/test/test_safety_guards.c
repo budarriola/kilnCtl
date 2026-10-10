@@ -3623,19 +3623,53 @@ static void test_decide_clear_trip_outcome(void)
 {
     TEST_SECTION("safety_guards_decide_clear_trip_outcome -- pure 3-way classification");
 
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, false) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true, false) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
                "was_tripped=false -> nothing-latched regardless of try_clear_result");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true, true) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
                "was_tripped=false, try_clear_result=true -> still nothing-latched "
                "(try_clear must not even have run against nothing)");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, false, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
+               "was_tripped=false with a stale occurrence -> nothing-latched wins");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true, true) ==
                SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED,
-               "was_tripped=true, try_clear succeeded -> accepted");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false) ==
+               "was_tripped=true, occurrence matches, try_clear succeeded -> accepted");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true, false) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,
                "was_tripped=true, try_clear refused -> refused-still-tripped");
+    /* kilnlink audit 2026-10-09 M4: a request bound to an older trip
+     * occurrence never clears, even if try_clear would have succeeded. */
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE,
+               "was_tripped=true, stale occurrence, try_clear_result=true -> refused-stale-occurrence");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false, false) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE,
+               "was_tripped=true, stale occurrence, try_clear_result=false -> refused-stale-occurrence");
+}
+
+/* kilnlink audit 2026-10-09 M4: the occurrence binding of a queued
+ * CLEAR_TRIP. A bound request must name exactly the latched trip_seq; an
+ * unbound (legacy, protocol < 17) one matches anything, as before. */
+static void test_clear_trip_occurrence_matches(void)
+{
+    TEST_SECTION("safety_guards_clear_trip_occurrence_matches -- M4 trip_seq binding");
+
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(true, 5u, 5u),
+               "bound, wire seq == latched seq -> matches");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 5u, 6u),
+               "bound, a later trip latched (seq 6) after the ESP read seq 5 -> stale, no match");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 6u, 5u),
+               "bound, wire seq ahead of latched seq -> no match");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 255u, 0u),
+               "bound, seq wrapped 255 -> 0 between read and dequeue -> no match");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(true, 0u, 0u),
+               "bound, both zero -> matches (pure equality)");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(false, 5u, 6u),
+               "unbound legacy request -> matches whatever is latched (pre-17 behaviour)");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(false, 0u, 200u),
+               "unbound legacy request, any seq -> matches");
 }
 
 /* GUARD_TEST_MATRIX.md: "Property tests: ceiling monotonicity over the float
@@ -4205,6 +4239,7 @@ void run_test_safety_guards(void)
     test_tx_independence_representative_sequence();
     test_try_clear();
     test_decide_clear_trip_outcome();
+    test_clear_trip_occurrence_matches();
     test_deciding_threshold();
     test_ct_disabled_guards();
     test_warn_mask();

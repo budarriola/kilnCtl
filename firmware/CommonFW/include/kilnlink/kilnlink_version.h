@@ -334,8 +334,28 @@
  * notice a dual-reflash skew. KILNLINK_MIN_COMPATIBLE is NOT raised: the
  * length check alone is sufficient, and an old (15) Pico paired with a new
  * (16) ESP, or vice versa, degrades to a clean ERR_LENGTH_MISMATCH on this
- * one frame while every other frame on the link is unaffected. */
-#define KILNLINK_PROTOCOL_VERSION 16
+ * one frame while every other frame on the link is unaffected.
+ *
+ * 16 -> 17 (2026-10-09, kilnlink robustness audit M4): CLEAR_TRIP binds to a
+ * trip occurrence. SAFETY_CMD_DIAG gains a trailing trip_seq byte
+ * (KILNLINK_DIAG_LEN_V2 = 31) and SAFETY_CMD_CLEAR_TRIP an optional trailing
+ * trip_seq byte (KILNLINK_CLEAR_TRIP_LEN_V2 = 4). Before this a duplicated or
+ * replayed `0A mask` frame, or one built from a DIAG cached up to
+ * SAFETY_LINK_STALE_MS old, could clear a LATER occurrence of the same
+ * reason once its condition had gone. Additive and gated both ways, so
+ * KILNLINK_MIN_COMPATIBLE is NOT raised:
+ *   - the Pico sends the 31-byte DIAG only to a peer that announced >= 17
+ *     (a 16 ESP rejects any DIAG length but 30);
+ *   - the ESP sends the 4-byte CLEAR_TRIP only when its cached DIAG was the
+ *     31-byte form, i.e. the Pico is >= 17 (a 16 Pico rejects any CLEAR_TRIP
+ *     length but 3);
+ *   - a 17 Pico refuses a 3-byte (unbound) CLEAR_TRIP from a peer that
+ *     announced >= 17, and refuses a 4-byte one whose trip_seq is not the
+ *     occurrence latched when safety_core dequeues it. A 3-byte frame from
+ *     a 16 peer, or before any ANNOUNCE_VERSION (peer version 0), keeps the
+ *     legacy mask-only behaviour, so the boot-time S6a clear and a mixed
+ *     pair still work. */
+#define KILNLINK_PROTOCOL_VERSION 17
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -395,7 +415,11 @@
  * NOT bumped alongside the 11 -> 12 step above either, same shape as
  * 8 -> 9: three brand-new frames, nothing existing changed shape, so a
  * peer built against 7 through 11 remains fully compatible with a
- * 12-built peer for everything it already knew how to speak. */
+ * 12-built peer for everything it already knew how to speak.
+ *
+ * NOT bumped alongside the 16 -> 17 step either: both new trailing bytes are
+ * sent only to a peer known to be >= 17 (see that step's comment), so a 7
+ * through 16 peer still sees exactly the frames it already knew. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

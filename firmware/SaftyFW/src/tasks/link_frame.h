@@ -126,6 +126,17 @@ bool link_frame_status_v3_supported(uint16_t peer_protocol_version);
 #define LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL 9u
 bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 
+// Same pure peer-version gate for the occurrence-bound CLEAR_TRIP (kilnlink
+// audit 2026-10-09 M4, KILNLINK_PROTOCOL_VERSION 16 -> 17). A peer that has
+// announced >= 17 is sent the 31-byte DIAG carrying trip_seq
+// (link_task_send_diag()), and its CLEAR_TRIP must carry that seq back
+// (link_frame_decide_clear_trip()'s REFUSE_SEQ_REQUIRED). Before ANNOUNCE
+// (peer 0) and for a 16 peer the legacy 30-byte DIAG / 3-byte clear stay in
+// use unchanged. Mirrors kilnlink_version.h's 16 -> 17 entry by value, same
+// no-include discipline as the two gates above.
+#define LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL 17u
+bool link_frame_trip_seq_supported(uint16_t peer_protocol_version);
+
 // flags byte (offset 1): bits 0/1 (LINK_UP, FAULT) are the ESP's to own --
 // this module never sets them, they simply are not parameters below.
 #define LINK_FLAG_ESTOP      0x04u
@@ -596,6 +607,8 @@ typedef enum {
     LINK_CLEAR_TRIP_REFUSE_MASK_MISMATCH,   // wire_trip_mask doesn't match the latched reason's mask
     LINK_CLEAR_TRIP_REFUSE_INEFFECTIVE,     // current_trip_reason == SAFETY_TRIP_INEFFECTIVE (S9) --
                                              // unclearable, see this function's own comment
+    LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,    // legacy 3-byte frame (no trip_seq) from a peer that
+                                             // announced >= LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL (M4)
 } link_clear_trip_decision_t;
 
 // `current_trip_reason` is read fresh from safety_core_get_diag_status()
@@ -620,8 +633,21 @@ typedef enum {
 // breaker" -- that has to be visible here, at the wire layer, with its own
 // reason code the ESP can log and surface to the operator, not just a refusal
 // that looks identical to any other still-tripped guard.
+//
+// kilnlink audit 2026-10-09 M4: `frame_has_trip_seq` says whether the frame
+// was the 4-byte occurrence-bound form, and `peer_protocol_version` is this
+// boot's cached ANNOUNCE value (0 until one arrives). A peer that announced
+// >= LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL is always sent the trip_seq DIAG, so a
+// 3-byte clear from it is a stale or duplicated frame that cannot be bound
+// to one trip occurrence -- refused, checked last so the three older reasons
+// keep their own log lines. The seq VALUE is not compared here: that check
+// runs in safety_core_task at dequeue (safety_guards_clear_trip_occurrence_
+// matches()), in the same task that bumps the seq, so a trip latching
+// between this check and the dequeue cannot slip through.
 link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_trip_reason,
-                                                          uint16_t wire_trip_mask);
+                                                          uint16_t wire_trip_mask,
+                                                          bool frame_has_trip_seq,
+                                                          uint16_t peer_protocol_version);
 
 // --- S6b liveness: only frames from the expected peer count ------------------
 // kilnlink audit 2026-10-09 L1. link_task_handle_raw_frame() refreshes S6b's
