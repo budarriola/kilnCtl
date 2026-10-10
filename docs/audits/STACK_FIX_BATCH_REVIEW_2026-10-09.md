@@ -125,7 +125,7 @@ most likely cause is a stale `build/` ELF or an unrebased working copy.
 
 ## Findings, severity ranked
 
-**M1 (MED): ceiling re-baseline commit names no cause, and the review doc
+**M1 (MED) FIXED in 479f3a473 (stale 3808 note and analyser-review wording corrected): ceiling re-baseline commit names no cause, and the review doc
 gives a false one.**
 
 - `6ecf90f6b` says only "re-measured on dev tip".
@@ -139,7 +139,7 @@ gives a false one.**
 - Stale comment: the `bx_flash_worker` note still says
   "3840 = measured 3808 + 32".
 
-**M2 (MED): the `794fce57b` OOM branches are untested and un-negtested.**
+**M2 (MED) FIXED in 479f3a473 (host test for both OOM branches; negtest of 4 mutations all CAUGHT): the `794fce57b` OOM branches are untested and un-negtested.**
 
 - Both new allocation-failure paths decide fail-closed behaviour: slots
   marked rev-unknown, saves refused.
@@ -148,7 +148,7 @@ gives a false one.**
 - A mutation that returns `ESP_OK` without marking slots unknown would go
   unnoticed. Confirmed: both mutations below were MISSED.
 
-**L1 (LOW): non-entry long-call literals are dropped silently (`650f6159e`
+**L1 (LOW) FIXED in 479f3a473 (non-entry long-call literal marks the caller indirect; negtested CAUGHT; legacy parser unchanged): non-entry long-call literals are dropped silently (`650f6159e`
 F8).**
 
 - An `l32r` literal that is inside a function but not at its entry now makes
@@ -160,7 +160,7 @@ F8).**
   concept at all, so the same case there is a silent lower bound reported as
   OK.
 
-**L2 (LOW): a double OOM at boot shows an empty profile table with nothing to
+**L2 (LOW) FIXED in 479f3a473 (ESP_LOGE on both OOM paths; no existing GET status field, none added): a double OOM at boot shows an empty profile table with nothing to
 explain it.**
 
 - If `nvs_load_all_from` and then the `nvs_load_files_only` retry both fail
@@ -178,7 +178,7 @@ explain it.**
 - The F3 ROM-call warning fires for 33 of 33 tasks.
 - Not caused by this batch, but it limits what a green check_all run proves.
 
-**INFO:**
+**INFO (I1 comment fixed in 479f3a473):**
 
 - I1: the `nvs_load_all_from` OOM comment says "NVS-decoded content left as
   loaded". On any error the caller memsets `s_profiles` and retries
