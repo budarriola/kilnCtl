@@ -269,6 +269,8 @@ static void fresh(void)
     C10_MKDIR(BASE);
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
     fake_kv_reset_all();
     fake_kv_set_write_safe_here(true);
     hal_kv_init_partition("kiln_nvs");
@@ -288,6 +290,44 @@ static esp_err_t failing_write(const char *p, const void *d, size_t n)
     (void)d;
     (void)n;
     return ESP_FAIL;
+}
+
+static void test_resolve_io_error_keeps_nvs_and_refuses_saves(void)
+{
+    TEST_SECTION("pref_cfg_fs M1: I/O error reading a present cfg file keeps the NVS copy, marks rev unknown, "
+                 "refuses saves until a clean resolve");
+    fresh();
+    uint8_t file[8], nvs[8], out[8];
+    memset(file, 5, sizeof(file));
+    file[0] = 1;
+    memset(nvs, 6, sizeof(nvs));
+    nvs[0] = 1;
+    uint32_t rev = 0;
+    bool used = true;
+    TEST_CHECK(pref_cfg_fs_save("small.bin", file, sizeof(file), 9) == ESP_OK, "setup: file rev 9");
+    cfg_fs_test_inject_read_error("small.bin", ESP_FAIL, 1);
+    bool ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(ok && !used && rev == 3 && memcmp(out, nvs, sizeof(nvs)) == 0,
+               "M1: transient I/O error: valid NVS copy adopted in RAM, not zeroed defaults / rev 0");
+    TEST_CHECK(pref_cfg_fs_rev_unknown("small.bin"), "M1: rev marked unknown");
+    TEST_CHECK(pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 4) == ESP_ERR_INVALID_STATE &&
+                   pref_cfg_fs_commit("small.bin", nvs, sizeof(nvs), 4, "t") == ESP_ERR_INVALID_STATE,
+               "M1: save and commit refused while the rev is unknown");
+    uint8_t back[8];
+    bool valid = false;
+    pref_cfg_fs_load_raw("small.bin", sizeof(back), v_first1, back, &rev, &valid);
+    TEST_CHECK(valid && rev == 9 && back[1] == 5, "M1: the unreadable file was not overwritten");
+    TEST_CHECK(pref_cfg_fs_save("other.bin", nvs, sizeof(nvs), 1) == ESP_OK, "M1: other paths still save");
+    /* No valid NVS: still defaults (false) and still refuses. */
+    cfg_fs_test_inject_read_error("small.bin", ESP_FAIL, 1);
+    ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), false, 0, v_first1, out, &rev, &used);
+    TEST_CHECK(!ok && pref_cfg_fs_save("small.bin", nvs, sizeof(nvs), 10) == ESP_ERR_INVALID_STATE,
+               "M1: no NVS candidate: false, saves still refused");
+    /* A clean resolve (file higher rev) adopts the file and clears the mark. */
+    ok = pref_cfg_fs_resolve("small.bin", nvs, sizeof(nvs), true, 3, v_first1, out, &rev, &used);
+    TEST_CHECK(ok && used && rev == 9 && !pref_cfg_fs_rev_unknown("small.bin"),
+               "M1: a clean resolve clears the mark and adopts the higher-rev file");
+    TEST_CHECK(pref_cfg_fs_save("small.bin", out, sizeof(out), 10) == ESP_OK, "M1: saves work again");
 }
 
 static void test_pref_cfg_fs(void)
@@ -397,8 +437,11 @@ static void test_pref_cfg_fs(void)
     arm_oom(4 + BIG, 1);
     bool rok = pref_cfg_fs_resolve("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev, &used);
     disarm_oom();
+    TEST_CHECK(rok && !used && rev == 3 && bout[1] == 6 && pref_cfg_fs_rev_unknown("big.bin"),
+               "M1: unreadable file + valid NVS: the NVS copy is kept (not defaults), rev marked unknown");
+    TEST_CHECK(pref_cfg_fs_save("big.bin", bnvs, BIG, 4) == ESP_ERR_INVALID_STATE,
+               "M1: a save over an unreadable file is refused");
     pref_cfg_fs_load_raw("big.bin", BIG, v_first1, bout, &rev, &valid);
-    TEST_CHECK(!rok, "K10-10: resolve reports failure when the file cannot be read");
     TEST_CHECK(valid && rev == 9 && bout[1] == 5,
                "K10-10: transient OOM reading the file leaves the NEWER file (rev 9) untouched");
     fresh();
@@ -407,7 +450,7 @@ static void test_pref_cfg_fs(void)
     rok = pref_cfg_fs_resolve("big.bin", bnvs, BIG, true, 3, v_first1, bout, &rev, &used);
     disarm_oom();
     pref_cfg_fs_load_raw("big.bin", BIG, v_first1, bout, &rev, &valid);
-    TEST_CHECK(!rok && valid && rev == 9, "resolve scratch OOM: reports failure, file untouched");
+    TEST_CHECK(rok && valid && rev == 9, "resolve scratch OOM: NVS kept in RAM, file untouched");
     {
         char p[300];
         snprintf(p, sizeof(p), "%s/big.bin", BASE);
@@ -565,6 +608,7 @@ int main(void)
     test_backup_json();
     test_touch_cal();
     test_pref_cfg_fs();
+    test_resolve_io_error_keeps_nvs_and_refuses_saves();
     test_ct_verify();
     fresh();
     cfg_fs_deinit();

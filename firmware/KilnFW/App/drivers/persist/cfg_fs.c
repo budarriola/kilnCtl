@@ -287,10 +287,31 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists)
     return ESP_OK;
 }
 
+static char s_inject_path[CFG_FS_PATH_MAX];
+static bool s_inject_any;
+static esp_err_t s_inject_err;
+static int s_inject_count;
+
+void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count)
+{
+    s_inject_any = (rel_path == NULL);
+    s_inject_path[0] = '\0';
+    if (rel_path) {
+        strncpy(s_inject_path, rel_path, sizeof(s_inject_path) - 1);
+        s_inject_path[sizeof(s_inject_path) - 1] = '\0';
+    }
+    s_inject_err = err;
+    s_inject_count = count > 0 ? count : 0;
+}
+
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len)
 {
     if (!rel_path || !buf || cap == 0) {
         return ESP_ERR_INVALID_ARG;
+    }
+    if (s_inject_count > 0 && (s_inject_any || strcmp(rel_path, s_inject_path) == 0)) {
+        s_inject_count--;
+        return s_inject_err;
     }
     if (!cfg_fs_is_available()) {
         return ESP_ERR_INVALID_STATE;

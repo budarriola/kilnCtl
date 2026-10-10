@@ -94,9 +94,26 @@ void zones_cfg_save_section_unlock(void) { zcfg_save_unlock(); }
  * its own tuned config." */
 static zones_cfg_load_fault_t s_zones_cfg_load_fault = {0};
 
+/* Review 2026-10-10 L1: set when nvs_load() could not DECIDE (the cfg file was present but unreadable, or a
+ * decode/scratch allocation failed), so this boot's RAM config is zeroed while a higher-rev file may hold the real
+ * tuning. nvs_save() refuses (409 at the HTTP writers) until a later nvs_load() decides cleanly (a reboot), so a
+ * near-empty config is never written over that file. Distinct from s_zones_cfg_load_fault, which
+ * zones_config_load_fault_clear() may reset after a successful POST; this one is only ever cleared by a clean load. */
+static bool s_zones_cfg_undecided = false;
+static void zones_cfg_load_fault_latch(zones_cfg_load_fault_kind_t kind, uint8_t on_disk_version, const char *reason);
+
+static void zones_cfg_mark_undecided(const char *why, bool latch_fault)
+{
+    s_zones_cfg_undecided = true;
+    if (latch_fault && !s_zones_cfg_load_fault.occurred) {
+        zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_UNREADABLE, 0, why);
+    }
+}
+
 void zones_config_load_fault_reset_for_test(void)
 {
     memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
+    s_zones_cfg_undecided = false;
 }
 
 void zones_config_load_fault_clear(void)
@@ -438,8 +455,9 @@ void migrate_from_default_partition(void)
     }
     /* Review 11 MED-1: a zones.json from NEWER firmware (latched by nvs_load) must not be
      * overwritten by an older legacy copy, nor a rejected file with no .bad copy. */
-    if (s_zones_cfg_load_fault.occurred &&
-        (s_zones_cfg_load_fault.kind == ZONES_CFG_LOAD_FAULT_NEWER || s_zones_cfg_load_fault.bad_copy_failed)) {
+    if (s_zones_cfg_undecided ||
+        (s_zones_cfg_load_fault.occurred &&
+         (s_zones_cfg_load_fault.kind == ZONES_CFG_LOAD_FAULT_NEWER || s_zones_cfg_load_fault.bad_copy_failed))) {
         ESP_LOGE(ZONES_HTTP_TAG, "legacy default-partition zones_cfg NOT migrated: it would overwrite a rejected "
                       "zones.json that is newer or has no %s copy", ZONES_CFG_BAD_FILE_PATH);
         return;
@@ -579,6 +597,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     bool migrated_from_nvs = false;
     uint8_t on_disk_version_before = 0;
     bool nvs_refused_as_newer = false;
+    s_zones_cfg_undecided = false; /* re-evaluated by this load; set again below on any cannot-decide exit */
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
@@ -586,6 +605,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
         /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
          * be compared against nothing), keep the rev floor, fail the load. */
         s_zones_cfg_rev = zones_cfg_rev_load();
+        zones_cfg_mark_undecided("cannot decide: NVS decode ran out of memory", false);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -612,6 +632,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
     if (!resolved) {
         s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
+        zones_cfg_mark_undecided("cannot decide: scratch allocation failed", false);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -675,6 +696,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
          * the newer authoritative file). */
         s_zones_cfg_rev = nvs_rev;
         free(resolved);
+        zones_cfg_mark_undecided("cfg file: unreadable or out of memory -- cannot decide", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -869,6 +891,11 @@ esp_err_t nvs_save(void)
      * fault over a zones edit at the next boot, refuse the save; HTTP writers map this to 409. */
     if (kiln_cfg_swap_zone_edits_at_risk()) {
         ESP_LOGW(ZONES_HTTP_TAG, "zones config NOT saved: a kiln-config rollback journal is pending");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_zones_cfg_undecided) {
+        ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT saved: this boot could not read the stored config (load fault "
+                                 "latched), a save would overwrite a possibly higher-rev file with defaults -- reboot");
         return ESP_ERR_INVALID_STATE;
     }
     /* Persist a SNAPSHOT, never the live struct: copy s_zones.cfg and read the rev under

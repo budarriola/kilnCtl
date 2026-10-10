@@ -260,10 +260,10 @@ live-edit, auth forms) is explicit.
 
 ## Fix status (fwbatch14)
 
-- LOW-1: FIXED for the boot restore path in d89acb987 (a restore refused only because a run holds the claim keeps the active id). The `kiln_cfg_swap.c` rollback path still reports a claim refusal as "ROLLBACK FAILED": SKIPPED, needs its own design for the swap state machine.
-- LOW-2: FIXED in f06944f45 (new outcome `REFUSED_NOT_WRITTEN`, distinct from `FAILED_TO_PERSIST`).
-- LOW-3: FIXED in 3f5afcd16.
-- LOW-4: FIXED in 6bda2442f.
-- LOW-5: FIXED in 38eaf6bcd (shared with review 14 LOW-5).
-- INFO 9 (accessors comment), 11 (omitted-guard comment), 14 (indentation): FIXED in e005c1983. The `backup_import.c` ":3637" comment from INFO 15 is already corrected on dev.
+- LOW-1: FIXED for the boot restore path in f7d4b08fb (a restore refused only because a run holds the claim keeps the active id). The `kiln_cfg_swap.c` rollback path still reports a claim refusal as "ROLLBACK FAILED": SKIPPED, needs its own design for the swap state machine.
+- LOW-2: FIXED in 3408a12ad (new outcome `REFUSED_NOT_WRITTEN`, distinct from `FAILED_TO_PERSIST`).
+- LOW-3: FIXED in 138975bee.
+- LOW-4: FIXED in e5bdb8a3c.
+- LOW-5: FIXED by e5bdb8a3c (the LOW-4 fix: the duplicate-index and ct_mask cases now carry all three gains and have positive controls, so the coverage claim in HTTP_PARSER_TEST_FINDINGS_2026-10-09.md is true). Earlier text citing review 14 LOW-5 was a different finding.
+- INFO 9 (accessors comment), 11 (omitted-guard comment), 14 (indentation): FIXED in a62493c24. The `backup_import.c` ":3637" comment from INFO 15 is already corrected on dev.
 - INFO 6, 7, 8, 10, 12, 13, 15 (message hint), 16, and the rest of INFO 9 (dead branch, double read): SKIPPED, behavioural or multi-file test work outside this batch.

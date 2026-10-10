@@ -229,7 +229,7 @@ Each mutation ran in a throwaway worktree copy at `51933463`, with a passing unm
 
 Stack-review items (M1, M2, L2, INFO) were fixed separately on origin/dev and are not covered here.
 
-- MED-1, LOW-1, LOW-7, LOW-8: FIXED in b77c0ce94 (plus 19bd98965, test registration).
-- LOW-2, LOW-3, LOW-4, LOW-6, NIT-1, NIT-2: FIXED in 283937330.
-- LOW-5: FIXED in 38eaf6bcd (save, delete, retarget and revert are refused until the boot load finishes).
+- MED-1, LOW-1, LOW-7, LOW-8: FIXED in ea14c8fbd (plus f81607868, test registration).
+- LOW-2, LOW-3, LOW-4, LOW-6, NIT-1, NIT-2: FIXED in f5c91ecde.
+- LOW-5: FIXED in c83c63584 (save, delete, retarget and revert are refused until the boot load finishes).
 - NIT-3: SKIPPED. The hostname constant is shared by three build configurations including the recovery image; consolidating it is out of proportion to a nit.

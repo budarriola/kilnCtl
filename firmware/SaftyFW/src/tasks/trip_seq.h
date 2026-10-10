@@ -2,8 +2,8 @@
 // 2026-10-09 F4). Header-only and link-free on purpose: safety_core.c may not
 // include any link/uart-named header (docs/ARCHITECTURE.md section 2,
 // tools/check_isolation.ps1), and F4's first version put this helper in
-// link_frame.h, which broke that rule. link_frame.c and the host tests use
-// this same function.
+// link_frame.h, which broke that rule. safety_core.c and the host tests use
+// this function; link_frame.c no longer does (its copy was removed in cf3359523).
 //
 // 0 means "no trip yet this boot" (safety_core_get_trip_event() returns
 // false, DIAG reports no trip, the ESP treats seq 0 as the unbound/none

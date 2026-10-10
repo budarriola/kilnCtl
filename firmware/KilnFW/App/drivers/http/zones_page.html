@@ -4332,29 +4332,38 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
     // tell adoption from a silent skip or refusal before this.
     r.json().then(function (data) {
       if (!data || !data.ceiling_adoption) return;
-      var msgs = {
-        ADOPTED: 'Accepted. Ramp ceiling adopted: ' + data.ceiling_old_c_per_hr + ' -> ' +
-                 data.ceiling_new_c_per_hr + ' °C/hr.',
-        SKIPPED_NOT_REQUESTED: 'Accepted.',
-        SKIPPED_RELAY_METHOD: 'Accepted. Ceiling not adopted -- a relay test measures no plant model.',
-        SKIPPED_MODEL_NOT_PERSISTED: 'Accepted. Ceiling not adopted -- the plant model failed to persist.',
-        SKIPPED_ZERO: 'Accepted. Ceiling not adopted -- no ramp rate could be predicted.',
-        SKIPPED_WOULD_TIGHTEN: 'Accepted. Ceiling NOT adopted -- the new estimate is tighter than the ' +
-                                'stored ceiling (' + data.ceiling_old_c_per_hr + ' °C/hr); adopting it ' +
-                                'would silently restrict this zone further, so it was left unchanged.',
-        REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
-                                'was not adopted or clamped.',
-        SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
-                              'read, so a new one was not written over an unknown value.',
-        FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED to save -- new ceiling (' +
-                            data.ceiling_new_c_per_hr + ' °C/hr) is live in RAM for this boot but was ' +
-                            'not persisted; will revert to ' + data.ceiling_old_c_per_hr +
-                            ' °C/hr on reboot.',
-      };
-      document.getElementById('atStatus').textContent = msgs[data.ceiling_adoption] || 'Accepted.';
+      document.getElementById('atStatus').textContent = atCeilingMessage(data);
     }).catch(function () {});
   }).catch(function () {});
 });
+
+// Operator text for the accept response's ceiling_adoption. An unknown value must never read as
+// plain success (review 2026-10-10 L2: REFUSED_NOT_WRITTEN used to fall through to 'Accepted.').
+function atCeilingMessage(data) {
+  var msgs = {
+    ADOPTED: 'Accepted. Ramp ceiling adopted: ' + data.ceiling_old_c_per_hr + ' -> ' +
+             data.ceiling_new_c_per_hr + ' °C/hr.',
+    SKIPPED_NOT_REQUESTED: 'Accepted.',
+    SKIPPED_RELAY_METHOD: 'Accepted. Ceiling not adopted -- a relay test measures no plant model.',
+    SKIPPED_MODEL_NOT_PERSISTED: 'Accepted. Ceiling not adopted -- the plant model failed to persist.',
+    SKIPPED_ZERO: 'Accepted. Ceiling not adopted -- no ramp rate could be predicted.',
+    SKIPPED_WOULD_TIGHTEN: 'Accepted. Ceiling NOT adopted -- the new estimate is tighter than the ' +
+                            'stored ceiling (' + data.ceiling_old_c_per_hr + ' °C/hr); adopting it ' +
+                            'would silently restrict this zone further, so it was left unchanged.',
+    REFUSED_NOT_WRITTEN: 'Accepted. Ceiling NOT adopted -- the store refused the write, so nothing was ' +
+                        'written and the stored ceiling is unchanged.',
+  REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
+                            'was not adopted or clamped.',
+    SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
+                          'read, so a new one was not written over an unknown value.',
+    FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED to save -- new ceiling (' +
+                        data.ceiling_new_c_per_hr + ' °C/hr) is live in RAM for this boot but was ' +
+                        'not persisted; will revert to ' + data.ceiling_old_c_per_hr +
+                        ' °C/hr on reboot.',
+  };
+  return msgs[data.ceiling_adoption] || ('Accepted, but the ceiling result is unknown (' +
+    data.ceiling_adoption + ') -- check the stored ceiling before relying on it.');
+}
 
 (function () {
   var btn = document.getElementById('themeBtn');

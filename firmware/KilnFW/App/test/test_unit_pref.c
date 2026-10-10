@@ -50,6 +50,8 @@ static void up_cfg_fs_reset(void)
     TUP_MKDIR(UP_SCRATCH_BASE);
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -83,6 +85,21 @@ static void simulate_reboot(void)
     s_unit_pref = UNIT_PREF_FAHRENHEIT; // deliberately the WRONG value -- proves unit_pref_start()
                                          // actually overwrites it rather than the test happening to
                                          // already hold the expected result before start() runs.
+}
+
+static void test_unreadable_cfg_file_keeps_nvs_and_refuses_set(void)
+{
+    TEST_SECTION("unit_pref M1: I/O error reading a present cfg file keeps the NVS value, refuses set()");
+    up_mount_scratch();
+    up_stage_legacy_nvs(UNIT_PREF_FAHRENHEIT, 3);
+    simulate_reboot();
+    cfg_fs_test_inject_read_error(UNIT_PREF_FILE_PATH, ESP_FAIL, 1);
+    TEST_CHECK(unit_pref_start() == ESP_OK, "start succeeds");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT && s_unit_pref_rev == 3,
+               "the valid NVS value survives (not the Celsius default), rev 3");
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_ERR_INVALID_STATE, "set() is refused");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM unchanged by the refused set");
+    pref_cfg_fs_clear_rev_unknown_for_test();
 }
 
 static void test_default_is_celsius_on_empty_nvs(void)
@@ -553,6 +570,7 @@ void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
     test_default_is_celsius_on_empty_nvs();
+    test_unreadable_cfg_file_keeps_nvs_and_refuses_set();
     test_persistence_round_trip();
     test_set_refuses_invalid_value();
     test_corrupted_value_falls_back_to_safe_default();

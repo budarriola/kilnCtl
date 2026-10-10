@@ -145,6 +145,11 @@ esp_err_t cfg_fs_exists(const char *rel_path, bool *out_exists);
  * (nothing is copied into `buf` in that case -- no silent truncation). */
 esp_err_t cfg_fs_read(const char *rel_path, void *buf, size_t cap, size_t *out_len);
 
+/* Test-only fault injection: the next `count` cfg_fs_read() calls whose rel_path equals `rel_path`
+ * (NULL = any path) return `err` instead of reading. count 0 clears it. Lets host tests produce a
+ * transient I/O error (ESP_FAIL), which a real temp directory cannot. No on-device caller. */
+void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count);
+
 /* Atomic write: `<base>/.tmp/<flattened rel_path>` written+fsynced, then
  * renamed onto `<base>/<rel_path>`. On any failure before the rename, the
  * temp file is removed and the ORIGINAL file at `rel_path` (if any) is left

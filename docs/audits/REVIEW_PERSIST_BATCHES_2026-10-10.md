@@ -1,6 +1,6 @@
 # Review of three persist batches on origin/dev (2026-10-10)
 
-This is a review only. Nothing in this document has been fixed. All three batches were read at
+This document is a review. Fix status is in the last section. All three batches were read at
 origin/dev 1d3f7dac8.
 
 | Batch | Commits |
@@ -286,3 +286,14 @@ Checks run directly, all passing:
 - `ramp_stepping_gate_mirror_drift_check.py`
 - `check_relay_authority_paths.py`
 - `check_persist_scratch_malloc_caps.ps1`
+
+## Fix status (2026-10-10)
+
+- M1: FIXED. `pref_cfg_fs_resolve()` keeps the valid NVS copy and its rev when the cfg file is unreadable (read error or scratch allocation failure), marks the path rev-unknown, and `pref_cfg_fs_save`/`_commit` refuse every write to it (so the automatic writers are covered too) until reboot. Shared tests in `test_persist_campaign10.c`; representative caller test `test_unit_pref.c`. Test seam: `cfg_fs_test_inject_read_error()`.
+- L1: FIXED. A zones file read error latches the UNREADABLE load fault and `nvs_save` (and the default-partition migration) refuse with ESP_ERR_INVALID_STATE (HTTP 409) while the load is undecided.
+- L2: FIXED. `zones_page.html` `atCeilingMessage()` has a REFUSED_NOT_WRITTEN message and an unknown value no longer reads as "Accepted."; `test_zones_ceiling_message.js`.
+- L3: FIXED. `test_zones_config_cfg_fs.c` injects a generic ESP_FAIL read error; treating it as absent is caught.
+- N1: FIXED. Reviews 14 and 15 fix-status SHAs now name the landed commits.
+- N2: Review 15 LOW-5 is closed by e5bdb8a3c (the LOW-4 fix makes the coverage claim true); the mis-citation is corrected.
+- N3: FIXED. `trip_seq.h` comment names safety_core.c.
+- Negative tests (tools/negtest.ps1): save refusal removed, zones save refusal removed, load fault latch removed, transient error treated as absent, REFUSED_NOT_WRITTEN message removed, bare-success fallback: all CAUGHT.

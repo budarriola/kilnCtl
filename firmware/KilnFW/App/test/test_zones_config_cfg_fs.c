@@ -1090,10 +1090,20 @@ static void oom_setup_file_rev5_and_stale_nvs(void)
 static void oom_check_rev_floor_kept(void)
 {
     stage("after_oom", 9.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
+    /* Review 2026-10-10 L1: the load could not decide, so a save is refused (it would write a near-empty
+     * config over the higher-rev file); a later clean load decides and saves land again. */
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "L1: a save after a cannot-decide load is refused");
     uint32_t rev = 0;
     zones_cfg_t raw;
     bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 5, "L1: the refused save left the rev-5 file untouched");
+    {
+        bool f2 = false, v2 = false;
+        TEST_CHECK(nvs_load(&f2, &v2) == ESP_OK, "L1: a clean reload decides");
+    }
+    stage("after_oom", 9.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
     zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
     TEST_CHECK(raw_valid && rev > 1, "the save stamped a rev above the NVS rev floor (1), never restamped rev 1");
 }
@@ -1133,6 +1143,35 @@ static void test_oversize_file_is_cannot_decide_not_absent(void)
     TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, back, sizeof(back), &blen) == ESP_OK && blen == sizeof(big) &&
                    memcmp(back, big, blen) == 0,
                "the unreadable file is untouched (not overwritten from the older NVS copy)");
+}
+
+/* Review 2026-10-10 L1 + L3: a transient I/O error (not just over-size) reading zones.json is "cannot decide":
+ * the load fails, a UNREADABLE load fault is latched (visible in status/readiness), saves are refused with
+ * ESP_ERR_INVALID_STATE, and the higher-rev file survives. */
+static void test_transient_read_error_is_cannot_decide_and_latches(void)
+{
+    TEST_SECTION("zones cfg_fs: a transient I/O error reading zones.json is 'cannot decide', latches a load fault "
+                 "and refuses saves (review 2026-10-10 L1, L3)");
+    oom_setup_file_rev5_and_stale_nvs();
+    zones_config_load_fault_reset_for_test();
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    cfg_fs_test_inject_read_error(ZONES_CFG_FILE_PATH, ESP_FAIL, 1);
+    esp_err_t e = nvs_load(&found, &valid);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(e == ESP_ERR_NO_MEM && !valid && !found, "L3: ESP_FAIL read is cannot-decide, not absent: load fails");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "L1: an UNREADABLE load fault is latched");
+    stage("clobber", 9.0f);
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "L1: operator save refused");
+    uint32_t rev = 0;
+    zones_cfg_t raw;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 5 && strcmp(raw.zones[0].name, "newer_file") == 0,
+               "L1/L3: the rev-5 file is untouched by the refused save and by the load");
+    zones_config_load_fault_reset_for_test();
 }
 
 static void test_nvs_load_resolved_oom_keeps_rev_floor(void)
@@ -1628,6 +1667,7 @@ void run_test_zones_config_cfg_fs(void)
     test_resolve_oom_keeps_rev_floor_and_fails_load();
     test_nvs_load_resolved_oom_keeps_rev_floor();
     test_oversize_file_is_cannot_decide_not_absent();
+    test_transient_read_error_is_cannot_decide_and_latches();
     test_nvs_conversion_scratch_oom_is_not_corrupt();
     test_file_conversion_scratch_oom_does_not_overwrite_file();
     test_start_does_not_migrate_after_load_oom();

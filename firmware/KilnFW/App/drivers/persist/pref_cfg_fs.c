@@ -288,6 +288,64 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
     return newer;
 }
 
+/* M1 (review 2026-10-10): paths whose cfg file was present but UNREADABLE at resolve time. Their rev is unknown
+ * (the file may hold a higher rev than the NVS copy adopted in RAM), so every save to them is refused until a
+ * later resolve reads the file cleanly. Central here so every caller class, including the automatic writers,
+ * is covered by one rule. */
+#define PREF_UNKNOWN_MAX 32
+#define PREF_UNKNOWN_PATH_MAX 64
+static char s_unknown_paths[PREF_UNKNOWN_MAX][PREF_UNKNOWN_PATH_MAX];
+static portMUX_TYPE s_unknown_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void unknown_set(const char *rel_path, bool unknown)
+{
+    portENTER_CRITICAL(&s_unknown_mux);
+    int free_slot = -1;
+    bool done = false;
+    for (int i = 0; i < PREF_UNKNOWN_MAX; i++) {
+        if (s_unknown_paths[i][0] == '\0') {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (strcmp(s_unknown_paths[i], rel_path) == 0) {
+            if (!unknown) {
+                s_unknown_paths[i][0] = '\0';
+            }
+            done = true;
+            break;
+        }
+    }
+    if (unknown && !done && free_slot >= 0) {
+        strncpy(s_unknown_paths[free_slot], rel_path, PREF_UNKNOWN_PATH_MAX - 1);
+        s_unknown_paths[free_slot][PREF_UNKNOWN_PATH_MAX - 1] = '\0';
+    }
+    portEXIT_CRITICAL(&s_unknown_mux);
+}
+
+bool pref_cfg_fs_rev_unknown(const char *rel_path)
+{
+    bool found = false;
+    if (!rel_path) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_unknown_mux);
+    for (int i = 0; i < PREF_UNKNOWN_MAX; i++) {
+        if (s_unknown_paths[i][0] != '\0' && strcmp(s_unknown_paths[i], rel_path) == 0) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_unknown_mux);
+    return found;
+}
+
+void pref_cfg_fs_clear_rev_unknown_for_test(void)
+{
+    portENTER_CRITICAL(&s_unknown_mux);
+    memset(s_unknown_paths, 0, sizeof(s_unknown_paths));
+    portEXIT_CRITICAL(&s_unknown_mux);
+}
+
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev)
 {
     if (!rel_path || !bytes || item_size == 0) {
@@ -303,6 +361,12 @@ esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_
         return ESP_ERR_INVALID_STATE;
     }
     if (!cfg_fs_is_available()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (pref_cfg_fs_rev_unknown(rel_path)) {
+        ESP_LOGE(PREF_FS_TAG, "%s write refused: the cfg file was unreadable at boot, its rev is unknown "
+                              "(a write could be superseded by or overwrite a newer value) -- reboot to retry",
+                 rel_path);
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -395,13 +459,22 @@ static bool resolve_with_file(const char *rel_path, const void *nvs_bytes, size_
     if (rerr != ESP_OK) {
         /* K10-09/10: the file's state is unknown (allocation or I/O failure). It may hold a newer value
          * than the NVS candidate: adopt nothing, write nothing, report failure. */
-        ESP_LOGE(PREF_FS_TAG, "%s unreadable (%s) -- not resolving, file left untouched", rel_path,
+        ESP_LOGE(PREF_FS_TAG, "%s unreadable (%s) -- file left untouched, saves to it refused this boot", rel_path,
                  esp_err_to_name(rerr));
+        unknown_set(rel_path, true);
+        *out_used_file = false;
+        if (nvs_valid) {
+            /* M1: keep the valid NVS copy in RAM (never drop it for defaults). The rev is the NVS rev but
+             * UNKNOWN relative to the file, hence the save refusal above. */
+            memcpy(out_bytes, nvs_bytes, item_size);
+            *out_rev = nvs_rev;
+            return true;
+        }
         memset(out_bytes, 0, item_size);
         *out_rev = 0;
-        *out_used_file = false;
         return false;
     }
+    unknown_set(rel_path, false);
 
     if (!file_valid) {
         // No usable file -- fall back to the NVS candidate, and if it is
@@ -497,6 +570,13 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
     if (item_size > PREF_CFG_FS_MAX_ITEM) {
         file_bytes = (uint8_t *)persist_scratch_alloc(item_size);
         if (!file_bytes) {
+            /* Cannot read the file: same handling as an unreadable file (M1). */
+            unknown_set(rel_path, true);
+            if (nvs_valid) {
+                memcpy(out_bytes, nvs_bytes, item_size);
+                *out_rev = nvs_rev;
+                return true;
+            }
             return false;
         }
     }

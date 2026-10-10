@@ -249,6 +249,16 @@ esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_
 esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
                              const char *what);
 
+// M1 (review 2026-10-10): when pref_cfg_fs_resolve() finds the cfg file present but UNREADABLE (I/O error,
+// allocation failure), it keeps a valid NVS candidate in RAM (returns true with the NVS bytes and rev) instead of
+// dropping it for defaults, and marks the path "rev unknown": the file may hold a higher rev. While marked,
+// pref_cfg_fs_save()/_commit() for that path return ESP_ERR_INVALID_STATE (loudly), so neither an operator edit
+// nor an automatic writer can build on a stale baseline or be superseded by the unread file. A later resolve of
+// the same path that reads cleanly clears the mark. With no valid NVS candidate resolve still returns false
+// (defaults), and saves are refused the same way.
+bool pref_cfg_fs_rev_unknown(const char *rel_path);
+void pref_cfg_fs_clear_rev_unknown_for_test(void);
+
 #ifdef __cplusplus
 }
 #endif
