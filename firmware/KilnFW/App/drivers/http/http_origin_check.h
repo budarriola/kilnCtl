@@ -291,6 +291,21 @@ static inline bool http_captive_location(char *buf, size_t cap, unsigned ip4_nbo
     return true;
 }
 
+// Request-aware wrapper: the absolute SoftAP URL only for a request that arrived on the
+// SoftAP side. A LAN/STA request keeps the relative "/" (the AP IP is unreachable from the
+// LAN). On the AP with no readable netif IP (ip4_nbo 0) it falls back to the well-known
+// default 192.168.4.1. Returns true when the result is absolute.
+static inline bool http_captive_location_for_request(char *buf, size_t cap, bool on_ap, unsigned ip4_nbo) {
+    if (!on_ap) {
+        if (cap >= 2) {
+            buf[0] = '/';
+            buf[1] = '\0';
+        }
+        return false;
+    }
+    return http_captive_location(buf, cap, ip4_nbo != 0 ? ip4_nbo : 0x0104a8c0u);
+}
+
 #ifdef __cplusplus
 }
 #endif

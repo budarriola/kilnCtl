@@ -881,11 +881,18 @@ static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t e
     /* Absolute to the SoftAP IP so the page loads under an IP Host (the F4 Host
      * allow-list refuses captive.apple.com & co. for POST /provision etc.). */
     char loc[32] = "/";
-    esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-    esp_netif_ip_info_t ipi;
-    if (ap != NULL && esp_netif_get_ip_info(ap, &ipi) == ESP_OK) {
-        (void)http_captive_location(loc, sizeof(loc), (unsigned)ipi.ip.addr);
+    const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
+    unsigned ap_ip = 0;
+    if (on_ap) {
+        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        esp_netif_ip_info_t ipi;
+        if (ap != NULL && esp_netif_get_ip_info(ap, &ipi) == ESP_OK) {
+            ap_ip = (unsigned)ipi.ip.addr;
+        } else {
+            ESP_LOGW(TAG, "captive 302: AP netif IP unreadable, falling back to 192.168.4.1");
+        }
     }
+    (void)http_captive_location_for_request(loc, sizeof(loc), on_ap, ap_ip);
     httpd_resp_set_hdr(req, "Location", loc);
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;

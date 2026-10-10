@@ -745,6 +745,9 @@ static void test_host_allowlist(void) {
         char tiny[8];
         TEST_CHECK(!http_captive_location(tiny, sizeof(tiny), 0x0104a8c0u) && strcmp(tiny, "/") == 0, "captive Location small buffer falls back");
         TEST_CHECK(http_captive_location(loc, sizeof(loc), 0xff0a0a0au) && strcmp(loc, "http://10.10.10.255/") == 0, "captive Location multi-digit octets");
+        TEST_CHECK(http_captive_location_for_request(loc, sizeof(loc), true, 0x0104a8c0u) && strcmp(loc, "http://192.168.4.1/") == 0, "captive request on AP is absolute");
+        TEST_CHECK(!http_captive_location_for_request(loc, sizeof(loc), false, 0x0104a8c0u) && strcmp(loc, "/") == 0, "captive request off AP stays relative");
+        TEST_CHECK(http_captive_location_for_request(loc, sizeof(loc), true, 0) && strcmp(loc, "http://192.168.4.1/") == 0, "captive on AP, netif unreadable -> default AP IP");
     }
     /* The attack: matching evil Origin + Host passes the Origin compare, not the Host gate. */
     fake_hdrs_t atk = {"http://rebind.attacker.example", NULL, "rebind.attacker.example"};
