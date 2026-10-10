@@ -182,9 +182,10 @@ BOOT_GUARD_CLEARED_TEXT = "boot_guard cleared and verified"
 #: HTTP statuses the board can ONLY answer before the first esp_ota_write()
 #: touches `app`: Pico busy (409),
 #: recovery_upload_stream()'s length gate / first-chunk RIC_OVERSIZE (413), and
-#: its upload-buffer allocation failure (503). 400/422/500 are each emitted both
+#: its upload-buffer allocation failure (503). 400/422/500/504 are each emitted both
 #: before and after the erase starts ("connection lost mid-image", "image failed
-#: verification", "flash write failed"), so they still carry the erase warning.
+#: verification", "flash write failed", "upload too slow" before the first chunk or
+#: mid-image), so they still carry the erase warning.
 _PRE_ERASE_STATUSES = (409, 413, 503)
 
 

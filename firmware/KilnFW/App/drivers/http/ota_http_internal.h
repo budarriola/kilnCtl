@@ -188,13 +188,12 @@ esp_err_t ota_boot_guard_status_get_handler(httpd_req_t *req); // ota_http_recov
 bool ota_http_any_relay_energized(void);
 
 /* Sends the upload-deadline refusal (503, see OTA_HTTP_UPLOAD_SLOW_CODE). esp_http_server has no 503
- * httpd_err_code_t (httpd_resp_send_err would answer 500), so the status line is set by hand and the
- * connection is closed: the body is only partly consumed. */
+ * httpd_err_code_t (httpd_resp_send_err would answer 500), so httpd_resp_send_custom_err() supplies the
+ * status line. IDF 6.0.2 httpd ignores a handler-set "Connection: close", so the connection is NOT closed
+ * here: the unread rest of the body is protected by the refusal drain plus httpd_req_delete's purge. */
 static inline esp_err_t ota_http_send_upload_too_slow(httpd_req_t *req)
 {
-    httpd_resp_set_status(req, OTA_HTTP_UPLOAD_SLOW_STATUS_LINE);
-    httpd_resp_set_hdr(req, "Connection", "close");
-    return httpd_resp_send(req, "upload too slow", HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send_custom_err(req, OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, "upload too slow");
 }
 
 #endif // OTA_HTTP_INTERNAL_H

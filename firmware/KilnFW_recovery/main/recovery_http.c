@@ -854,7 +854,8 @@ static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want, bool 
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
             if (esp_timer_get_time() - last_progress_us > (int64_t)BODY_STALL_LIMIT_MS * 1000) {
-                *too_slow = true;
+                // No-progress stall = lost connection (400, like recovery_upload.c read_exact);
+                // too_slow is reserved for the overall deadline above (504).
                 break;
             }
             continue;

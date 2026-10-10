@@ -211,3 +211,10 @@ Clean except for the findings listed above.
 - **L6 fixed**: the missing-give wedge in `update_fetch.c` `wr_call` logs whether a finished WR_FINISH may have left an installable stage.
 - **L7 fixed**: the stage-upload recv-failure path uses `update_stage_upload_abort_owned(..., STAGE_SOURCE_UPLOAD)`.
 - Also: `update_fetch` host test now links `ota_http_util.c` plus a `hal_time_now_us` stub (it was not building on dev since e51f9402).
+
+## Follow-up 2026-10-09 (Opus review LOWs of 0744e4bf)
+
+- `ota_http_send_upload_too_slow` uses `httpd_resp_send_custom_err()` (no hand-set `Connection: close`: IDF 6.0.2 httpd ignores it; the unread body is covered by the refusal drain plus `httpd_req_delete` purge). The zones probe-OOM 503 uses it too, keyed on the shared `ZONES_HTTP_ERR_OOM` constant instead of a duplicated literal.
+- `ota_page.html`: stage-specific too-slow text ("any previously staged image was cleared", begin erases the header sector), Pico text says the Pico was not changed.
+- Recovery `read_body_exact`: the 15 s no-progress stall is a lost connection (400); only the overall deadline is 504. Pinned by a source assertion in `check_recovery_upload.ps1`.
+- `mcp_server_recovery._PRE_ERASE_STATUSES` comment lists 504; `ota_http_client` mid-upload message names a board reboot or Wi-Fi drop as other causes.

@@ -366,6 +366,8 @@ esp_err_t zones_get_handler(httpd_req_t *req);
  * GET /api/zones ran low on json_cap headroom; also defined in
  * zones_http_get.c, registered from zones_http_start() alongside get_uri. */
 esp_err_t zones_diag_get_handler(httpd_req_t *req);
+/* *err_reason value for a scratch-allocation failure: the caller answers 503, not 400. */
+#define ZONES_HTTP_ERR_OOM "out of memory"
 bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_count, uint8_t relay_count,
                                   uint8_t timing_profile_count, const zone_cfg_t *current_z, zone_cfg_t *z,
                                   const char **err_reason);

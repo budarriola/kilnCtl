@@ -421,9 +421,9 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply(httpd_req_t *req, char *bo
         if (!zones_http_parse_zone_fields(body, i, tmp.thermo_count, tmp.relay_count, tmp.timing_profile_count,
                                &s_zones.cfg.zones[i], &tmp.zones[i], &err_reason)) {
             /* The cycle-probe allocation failing is a server fault, not a bad request. */
-            if (strcmp(err_reason, "out of memory") == 0) {
-                httpd_resp_set_status(req, "503 Service Unavailable"); /* no 503 httpd_err_code_t exists */
-                (void)httpd_resp_sendstr(req, err_reason);
+            if (strcmp(err_reason, ZONES_HTTP_ERR_OOM) == 0) {
+                /* no 503 httpd_err_code_t exists */
+                (void)httpd_resp_send_custom_err(req, "503 Service Unavailable", err_reason);
             } else {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err_reason);
             }

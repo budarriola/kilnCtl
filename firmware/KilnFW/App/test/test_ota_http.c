@@ -714,6 +714,11 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     }
     return ESP_OK;
 }
+esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg)
+{
+    (void)httpd_resp_set_status(r, status);
+    return httpd_resp_send(r, msg, HTTPD_RESP_USE_STRLEN);
+}
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;

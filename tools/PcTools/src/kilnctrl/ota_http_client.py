@@ -265,7 +265,7 @@ def _push_image(host: str, path: str, endpoint: str,
             log.warning("OTA push: server closed the connection mid-upload: endpoint=%s host=%s sha256=%s detail=%s",
                         endpoint, host, image_sha256, detail)
             raise OtaHttpError(f"{endpoint}: server closed the connection mid-upload "
-                               f"(possibly upload_too_slow or another refusal): {exc.reason}") from exc
+                               f"(possibly upload_too_slow or another refusal; a board reboot or a Wi-Fi drop mid-upload looks the same): {exc.reason}") from exc
         log.warning("OTA push failed (unreachable): endpoint=%s host=%s sha256=%s detail=%s",
                     endpoint, host, image_sha256, detail)
         raise OtaHttpError(f"{endpoint} unreachable: {detail}") from exc

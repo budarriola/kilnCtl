@@ -470,6 +470,11 @@ esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
     snprintf(s_test_last_status, sizeof(s_test_last_status), "%s", status ? status : "");
     return ESP_OK;
 }
+esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg)
+{
+    (void)httpd_resp_set_status(r, status);
+    return httpd_resp_sendstr(r, msg);
+}
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
