@@ -1218,6 +1218,54 @@ static void test_pico_reboot_cause_holds_or_retries(void)
                "while the cause is undecided the pending request is not re-sent");
 }
 
+static void test_reboot_verdict_survives_release_and_resume(void)
+{
+    TEST_SECTION("heat_enable -- firing audit MED-5: an undecided reboot verdict survives pause/resume; "
+                 "resume withholds heat and a late fatal DIAG still holds");
+    const uint8_t WD = SAFETY_LINK_DIAG_BOOT_WATCHDOG;
+    /* (a) pause while undecided, resume before the DIAG: heat withheld, late fatal DIAG holds. */
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    TEST_CHECK(heat_enable_reboot_undecided(), "setup: undecided");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE); /* operator pause */
+    int sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "resume while undecided is withheld");
+    TEST_CHECK(enable_sends() == sends, "MUST GO RED if resume sends REQUEST_ENABLE during an undecided reboot");
+    TEST_CHECK(heat_enable_reboot_undecided(), "the verdict is still pending after resume");
+    heat_enable_note_pico_boot(2u, true, WD, 3000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if the late fatal DIAG is ignored after pause/resume");
+    TEST_CHECK(enable_sends() == sends, "no heat requested");
+
+    /* (b) benign verdict after the withheld resume: reconcile re-requests. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "withheld");
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 3000u);
+    TEST_CHECK(!heat_enable_reboot_hold() && !heat_enable_reboot_undecided(), "benign: decided, no hold");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == sends + 1, "benign verdict: the withheld claim is re-requested");
+
+    /* (c) fatal DIAG arrives while paused (no claim): next acquire starts under a hold. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, WD, 3000u);
+    sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "fatal verdict landed while paused: withheld");
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if a fatal DIAG that arrived while paused is dropped");
+    TEST_CHECK(enable_sends() == sends, "no heat requested");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "the second, deliberate resume proceeds");
+}
+
 static void test_enable_in_flight_under_reboot_hold_queues_release(void)
 {
     TEST_SECTION("heat_enable -- review-2 LOW-1: a fatal-reboot hold set while an enable send is IN FLIGHT "
@@ -1324,6 +1372,7 @@ void run_test_heat_enable(void)
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
     test_pico_reboot_after_tripped_holds();
+    test_reboot_verdict_survives_release_and_resume();
     test_enable_in_flight_under_reboot_hold_queues_release();
     test_watchdog_loop_and_bounded_pause_wiring();
     test_executor_wires_k4_and_reboot_state();

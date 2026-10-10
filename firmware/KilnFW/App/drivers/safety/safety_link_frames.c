@@ -388,9 +388,14 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
     if (have_boot_id) {
         boot_id_was_known = link->pico_boot_id_known;
         boot_id_old = link->pico_boot_id;
-        boot_id_changed = (!link->pico_boot_id_known) || (peer_boot_id != link->pico_boot_id);
+        /* Firing audit 2026-10-10 MED-4: compare against the last boot id EVER seen
+         * (pico_boot_id_ever_seen), not pico_boot_id_known, which a ~1.5 s link blip clears
+         * (safety_reset_stale_peer_info_if_link_down). pico_boot_id itself is never cleared, so a
+         * same-id relink is not a reboot; only a changed id is. */
+        boot_id_changed = (!link->pico_boot_id_ever_seen) || (peer_boot_id != link->pico_boot_id);
         link->pico_boot_id = peer_boot_id;
         link->pico_boot_id_known = true;
+        link->pico_boot_id_ever_seen = true;
         if (boot_id_changed) {
             /* The Pico restarted, so its trip_seq counter restarted at 0 too
              * -- forget ours, or the dedup below mistakes the new boot's

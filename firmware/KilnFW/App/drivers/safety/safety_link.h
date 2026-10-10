@@ -1629,6 +1629,10 @@ typedef struct {
     uint8_t esp_boot_id;
     uint8_t pico_boot_id;
     bool    pico_boot_id_known;
+    /* Firing audit 2026-10-10 MED-4: true once any FW_VERSION boot id was recorded; NEVER cleared on
+     * link-down (pico_boot_id_known is). boot_id_changed compares against this, so a link blip with the
+     * same boot id is not counted as a Pico reboot. Under state_lock. */
+    bool    pico_boot_id_ever_seen;
     /* kilnlink audit 2026-10-09 M1: the last DIAG uptime_ms seen from the
      * Pico, the baseline safety_apply_diag() compares each new DIAG against
      * (safety_pico_uptime_regressed()). A backwards step means the Pico

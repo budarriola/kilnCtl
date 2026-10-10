@@ -96,6 +96,13 @@ typedef struct {
     bool              last_pico_tripped;     /* last fresh DIAG said TRIPPED (T3: the Pico's trip latch
                                               * does not survive a non-watchdog reboot) */
     bool              reboot_was_tripped;    /* the reboot being classified followed a TRIPPED DIAG */
+    /* Firing audit 2026-10-10 MED-5: the reboot VERDICT outlives the claim. reboot_classify_pending is
+     * per-claim (cleared by the last release); these two are per-reboot-seq. verdict_pending: a reboot
+     * was seen and no DIAG of the new boot has arrived yet, claim or not. fatal_latched: that DIAG
+     * arrived while nobody held a claim and reported a fatal cause; the next acquire starts in
+     * reboot_hold. Cleared only by a decisive DIAG, a newer reboot, or init. */
+    bool              reboot_verdict_pending;
+    bool              reboot_fatal_latched;
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -203,6 +210,8 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.reboot_hold = false;
     s_he.last_pico_tripped = false;
     s_he.reboot_was_tripped = false;
+    s_he.reboot_verdict_pending = false;
+    s_he.reboot_fatal_latched = false;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -449,8 +458,28 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
     bool taken = he_lock();
     uint32_t now_epoch = s_he.release_epoch[who];
     bool stale = (now_epoch != epoch);
+    bool withheld = false;
     if (!stale) {
+        bool was_empty = (s_he.held_mask == 0u);
         s_he.held_mask |= bit;
+        if (was_empty) {
+            /* MED-5: a verdict that was pending (or fatal) when the previous claim ended is
+             * re-armed for this one, so resume/start cannot launder an undecided reboot. */
+            if (s_he.reboot_verdict_pending) {
+                s_he.reboot_classify_pending = true;
+                if (s_he.reboot_classify_since_ms == 0u) {
+                    s_he.reboot_classify_since_ms = 1u;
+                }
+            }
+            if (s_he.reboot_fatal_latched) {
+                s_he.reboot_fatal_latched = false;
+                s_he.reboot_hold = true;
+            }
+        }
+        withheld = s_he.reboot_classify_pending || s_he.reboot_hold;
+        if (withheld && !s_he.granted) {
+            s_he.pending = true; /* reconcile re-requests once the verdict is benign */
+        }
     }
     bool already_granted = s_he.granted;
     he_unlock(taken);
@@ -470,6 +499,11 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
         return false;
     }
 
+    if (withheld && !already_granted) {
+        ESP_LOGW(TAG, "heat-enable acquire (%s) WITHHELD: Pico reboot verdict pending or fatal",
+                 who == HEAT_ENABLE_CLAIMANT_PROFILE ? "firing" : "autotune");
+        return false;
+    }
     if (already_granted) {
         /* Nothing to send: the request is standing. This is the branch that
          * keeps a control loop calling acquire() every tick from putting a
@@ -540,6 +574,7 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
         s_he.reboot_was_tripped = false;
+        /* reboot_verdict_pending / reboot_fatal_latched deliberately survive (MED-5). */
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -718,19 +753,30 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         /* The new boot starts a new episode: counters from the old boot say
          * nothing about it (reset-one-side class: the Pico side restarted). */
         he_k4_reset_locked();
+        s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
+        s_he.reboot_fatal_latched = false;   /* a newer boot supersedes an older verdict */
+        s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         if (s_he.held_mask != 0u) {
             s_he.reboot_was_tripped = s_he.last_pico_tripped;
             s_he.reboot_classify_pending = true;
-            s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         }
     }
     if (s_he.held_mask == 0u) {
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
         s_he.reboot_was_tripped = false;
+        if (s_he.reboot_verdict_pending && diag_since_reboot) {
+            const uint8_t fatal_u = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
+                                    SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
+                                    SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
+                                    SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
+            s_he.reboot_verdict_pending = false;
+            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u;
+        }
     } else if (s_he.reboot_classify_pending) {
         if (diag_since_reboot) {
             s_he.reboot_classify_pending = false;
+            s_he.reboot_verdict_pending = false;
             const uint8_t fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
                                   SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                   SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |

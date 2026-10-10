@@ -2037,6 +2037,34 @@ static void test_stale_reset_never_received_is_also_down(void)
 // clearable but actually get re-populated with the NEW peer's identity,
 // which is what lets a subsequent rollback attempt compare against the
 // right baseline instead of a connection that already ended.
+static void test_link_blip_same_boot_id_is_not_a_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- firing audit MED-4: a link blip (known flag cleared) followed by "
+                 "the SAME boot_id is not a Pico reboot; a changed boot_id is");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t msg;
+    uint8_t commit[3] = {1, 2, 3};
+    uint8_t datetime[2] = {4, 5};
+    memset(&msg, 0, sizeof(msg));
+    msg.length = set_fw_version_frame(msg.payload, false, commit, 3, datetime, 2, 42, 1, 0);
+    safety_apply_fw_version(&link, &msg);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+
+    link.ever_received = true;
+    link.cached_tick = 1; /* wraps to "down" */
+    safety_reset_stale_peer_info_if_link_down(&link);
+    TEST_CHECK(link.pico_boot_id_known == false, "setup: blip cleared the known flag");
+    link.cached_tick = 0;
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0,
+               "MUST GO RED if a same-boot_id relink after a blip bumps pico_reboot_seq");
+
+    memset(&msg, 0, sizeof(msg));
+    msg.length = set_fw_version_frame(msg.payload, false, commit, 3, datetime, 2, 43, 1, 0);
+    safety_apply_fw_version(&link, &msg);
+    TEST_CHECK(link.cached.pico_reboot_seq != seq0, "a changed boot_id is still a reboot");
+}
+
 static void test_stale_reset_then_reapply_recovers_after_reconnect(void)
 {
     TEST_SECTION("safety_reset_stale_peer_info_if_link_down + safety_apply_fw_version -- a lost "
@@ -3320,6 +3348,7 @@ int main(void)
     test_stale_reset_slow_poll_one_missed_reply_keeps_boot_id();
     test_stale_reset_never_received_is_also_down();
     test_stale_reset_then_reapply_recovers_after_reconnect();
+    test_link_blip_same_boot_id_is_not_a_reboot();
     test_dispatch_has_a_case_for_every_frame_each_compatible_version_can_send();
     test_frames_gated_above_a_version_are_not_expected_from_that_peer();
     test_update_in_progress_does_not_relax_link_loss_block();
