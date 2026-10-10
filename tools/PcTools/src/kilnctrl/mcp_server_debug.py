@@ -257,8 +257,9 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     elf_path bypasses the check (nothing to compare it against).
 
     Reprogramming the Pico resets it, so it is REFUSED while the ESP reports a
-    running/paused profile or autotune, or that state cannot be read
-    (allow_running=True, exactly True, overrides)."""
+    running/paused profile or autotune. If the ESP state cannot be read
+    (recovery image, bricked, link down) it proceeds with a loud WARNING in
+    the result. allow_running=True (exactly True) overrides a confirmed run."""
     if peer == debug_probe.PEER_ESP:
         return (
             "error: debug_program(peer=\"esp\") is refused -- use flash_firmware(); "
@@ -268,10 +269,13 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
     if confirm is not True:
         return "error: flash write refused without confirm=True -- this writes flash on a live board"
 
+    esp_warnings: list = []
     if allow_running is not True:
-        refusal = _esp_profile_running_refusal("reprogram the Pico under")
+        refusal = _esp_profile_running_refusal("reprogram the Pico under", unreadable_warnings=esp_warnings)
         if refusal is not None:
             return refusal
+    warn_prefix = "".join(w + "
+" for w in esp_warnings)
 
     stale_prefix = ""
     if peer == debug_probe.PEER_PICO and elf_path is None:
@@ -303,8 +307,8 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
             )
             resolved_elf = elf_path or debug_probe._safty_fw_elf()
             note += _archive_flashed_safty_elf(resolved_elf, explicit_elf_path=elf_path)
-        return stale_prefix + f"programmed {peer} OK, reset and running" + note
-    return _openocd_error_message(f"program failed for {peer}", output)
+        return warn_prefix + stale_prefix + f"programmed {peer} OK, reset and running" + note
+    return warn_prefix + _openocd_error_message(f"program failed for {peer}", output)
 
 
 def _reset_marker_line(post_state: "Optional[dict]") -> str:
@@ -328,11 +332,16 @@ def _reset_marker_line(post_state: "Optional[dict]") -> str:
     return f"reset markers: KCTL_RESET_ISSUED seen={issued}; {state_check}; {halted_txt}"
 
 
-def _esp_profile_running_refusal(action: str) -> "Optional[str]":
+def _esp_profile_running_refusal(action: str, unreadable_warnings: "Optional[list]" = None) -> "Optional[str]":
     """Refusal text if the ESP reports a running/paused profile or a live
     autotune run, OR if that state cannot be read (fail closed: an
     unreadable executor is not evidence of idle). allow_running=True
-    (exactly True) overrides, at the callers."""
+    (exactly True) overrides, at the callers.
+
+    If `unreadable_warnings` is a list, an UNREADABLE state (recovery image,
+    bricked, link down) is not a refusal: a WARNING line is appended to the
+    list and the check continues; only a CONFIRMED running profile/autotune
+    refuses (owner decision 2026-10-10, review B1; debug_program pico)."""
     override = "Stop the run first, or pass allow_running=True (exactly True) to override."
     try:
         status = _srv._profiles.get_exec_status(timeout=2.0)
@@ -341,6 +350,11 @@ def _esp_profile_running_refusal(action: str) -> "Optional[str]":
         err = str(exc)
     else:
         err = "no answer"
+    if status is None and unreadable_warnings is not None:
+        unreadable_warnings.append(
+            f"WARNING: the ESP profile executor state could not be read ({err}) -- "
+            "ESP is in recovery, bricked or the link is down; a firing was NOT ruled out.")
+        return None
     if status is None:
         return (f"error: refusing to {action} ESP -- profile executor state could not be read "
                 f"({err}), so a firing cannot be ruled out. {override}")
@@ -352,6 +366,10 @@ def _esp_profile_running_refusal(action: str) -> "Optional[str]":
     try:
         at = _srv._autotune.get_status()
     except Exception as exc:  # noqa: BLE001
+        if unreadable_warnings is not None:
+            unreadable_warnings.append(
+                f"WARNING: the ESP autotune state could not be read ({exc}); proceeding.")
+            return None
         return (f"error: refusing to {action} ESP -- autotune state could not be read ({exc}). "
                 + override)
     if at.state not in (0, 5, 6):

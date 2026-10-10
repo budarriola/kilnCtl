@@ -259,6 +259,13 @@ bool lcd_lock_relock_should_close_keypad(bool keypad_open, bool keypad_is_pendin
 // stands. Never NULL.
 const char *lcd_touch_cal_exit_target(bool has_user_role, const char *wanted);
 
+// The ONE role-free exception to the LCD role-gating rule (owner decision
+// 2026-10-10, review A1/A2): after a successful calibration save the flow goes
+// to "touch_test" whether or not a role is held. touch_test shows no data and
+// is only reached after calibration. Only ui_page_touch_cal.c's save path may
+// call this; lcd_touch_cal_exit_target() never exempts any page name.
+const char *lcd_touch_cal_saved_exit_target(bool has_user_role);
+
 // Home trip strip -> Safety page (LCD review N5, owner decision 2026-10-09):
 // opening the page needs the USER PIN like any non-dashboard page. True when a
 // PIN prompt is required first (no USER role held).

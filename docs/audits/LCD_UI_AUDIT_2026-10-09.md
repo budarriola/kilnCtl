@@ -9,6 +9,11 @@ Owner rules checked against:
 - LCD pages must not scroll; content must fit the panel.
 - Unauthenticated users see dashboards only. Clearing a safety trip from the
   LCD needs an admin login and follows the web clear path.
+- One documented exception (owner decision 2026-10-10, review A1/A2): after a
+  successful calibration save the flow opens `touch_test` with no role held.
+  It is a drawing canvas with Clear/Done, shows no data, and is reached only
+  after calibration (`lcd_touch_cal_saved_exit_target()`). No other caller may
+  open it without a role.
 
 Context that shapes the findings:
 - Pages are built once and cached for the life of the boot (`ui/kiln_ui.h`,

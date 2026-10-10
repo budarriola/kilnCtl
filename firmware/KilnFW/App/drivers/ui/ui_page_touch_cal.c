@@ -193,7 +193,7 @@ static void finish_calibration(void)
      * checked by eye (trace a square, see if the drawn line follows the
      * finger) before trusting every other page's buttons to it. Its own
      * "Done" button goes to "home" from there. */
-    kiln_ui_show(lcd_touch_cal_exit_target(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER), "touch_test"));
+    kiln_ui_show(lcd_touch_cal_saved_exit_target(ui_lcd_lock_has_role(LCD_PIN_ROLE_USER)));
 }
 
 /* The whole point of this page's design: normal LVGL hit-testing needs an

@@ -47,6 +47,36 @@ class RunningGuardsFailClosedTests(unittest.TestCase):
         self.assertEqual(out, "error: refusing")
         g.assert_called_once()
 
+    def test_debug_program_pico_unreadable_esp_proceeds_with_warning(self):
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", side_effect=RuntimeError("link down")), \
+             um.patch.object(m_dbg.stale_check, "check_saftyfw_stale", return_value=um.MagicMock(stale=False)), \
+             um.patch.object(m_dbg.debug_probe, "program", return_value=(True, "ok")) as prog, \
+             um.patch.object(m_dbg, "_archive_flashed_safty_elf", return_value=""):
+            out = m_dbg.debug_program("pico", confirm=True)
+        prog.assert_called_once()
+        self.assertIn("WARNING", out)
+        self.assertIn("could not be read", out)
+        self.assertIn("programmed pico OK", out)
+
+    def test_debug_program_pico_confirmed_running_refused_unreadable_does_not_mask(self):
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(1)), \
+             um.patch.object(m_dbg.debug_probe, "program") as prog:
+            out = m_dbg.debug_program("pico", confirm=True)
+        prog.assert_not_called()
+        self.assertTrue(out.startswith("error: refusing"), out)
+
+    def test_debug_program_pico_confirmed_running_allow_running_overrides(self):
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(1)), \
+             um.patch.object(m_dbg.stale_check, "check_saftyfw_stale", return_value=um.MagicMock(stale=False)), \
+             um.patch.object(m_dbg.debug_probe, "program", return_value=(True, "ok")) as prog, \
+             um.patch.object(m_dbg, "_archive_flashed_safty_elf", return_value=""):
+            m_dbg.debug_program("pico", confirm=True, allow_running=True)
+        prog.assert_called_once()
+
+    def test_other_debug_guards_still_fail_closed_when_unreadable(self):
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", side_effect=RuntimeError("x")):
+            self.assertIn("could not be read", m_dbg._esp_profile_running_refusal("halt"))
+
     def test_wifi_unknown_profile_state_refused(self):
         with um.patch.object(m_wifi._srv._profiles, "get_exec_status", return_value=_exec(9)):
             self.assertIn("refused", m_wifi._wifi_write_refusal(True, "wifi_connect"))
