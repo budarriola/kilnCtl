@@ -177,3 +177,12 @@ void ui_num_pad_show(const ui_num_pad_params_t *params)
     lv_obj_remove_flag(s_modal, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_modal);
 }
+
+void ui_num_pad_close(void)
+{
+    /* Relock/teardown: hide without firing the Done callback, and drop the
+     * callback so nothing can write into a page that is no longer shown. */
+    s_on_done = NULL;
+    s_user_data = NULL;
+    close_modal();
+}

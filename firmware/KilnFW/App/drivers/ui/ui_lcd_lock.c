@@ -8,6 +8,7 @@
 #include "lvgl_port.h"
 #include "ui_confirm.h"
 #include "ui_lcd_keypad.h"
+#include "ui_num_pad.h"
 #include "ui_theme.h"
 
 static const char *TAG = "ui_lcd_lock";
@@ -281,6 +282,8 @@ static void tick_timer_cb(lv_timer_t *t)
         if (had_confirm) {
             ESP_LOGI(TAG, "LCD relock edge: closed open confirm dialog");
         }
+
+        ui_num_pad_close();
 
         if (s_relock_cb) {
             s_relock_cb();

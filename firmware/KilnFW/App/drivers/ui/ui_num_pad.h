@@ -66,6 +66,9 @@ typedef struct {
  * this codebase shows two of these at once. */
 void ui_num_pad_show(const ui_num_pad_params_t *params);
 
+/* Hide the pad without calling on_done (relock edge). Safe if never shown. */
+void ui_num_pad_close(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -115,6 +115,8 @@ void ui_lcd_keypad_force_close(void) { g_keypad_open = false; g_keypad_close_cal
 bool ui_confirm_is_open(void) { return g_confirm_open; }
 void ui_confirm_close_open(void) { g_confirm_open = false; g_confirm_close_calls++; }
 void ui_confirm_show(const ui_confirm_params_t *p) { (void)p; }
+static int g_num_pad_close_calls;
+void ui_num_pad_close(void) { g_num_pad_close_calls++; }
 
 #include "../drivers/ui/ui_lcd_lock.c"
 
@@ -154,7 +156,7 @@ static void fresh(bool enabled, uint32_t timeout_s)
     ui_lcd_lock_init();         /* s_lock locked, last_activity=1000 */
     g_policy.enabled = enabled;
     g_relock_calls = g_action_calls = 0;
-    g_keypad_show_calls = g_keypad_close_calls = g_confirm_close_calls = 0;
+    g_keypad_show_calls = g_keypad_close_calls = g_confirm_close_calls = g_num_pad_close_calls = 0;
     s_was_locked = true;        /* as at boot: no edge on the first tick */
     s_keypad_is_pending_lock_gate = false;
     if (s_prompt_mbox) { g_flags[OBJ_MBOX] |= LV_OBJ_FLAG_HIDDEN; g_flags[OBJ_BACKDROP] |= LV_OBJ_FLAG_HIDDEN; }
@@ -277,6 +279,7 @@ static void test_prompt_and_expiry(void)
     TEST_CHECK(g_relock_calls == 1, "relock callback fires exactly once on the unlocked->locked edge");
     TEST_CHECK(!g_keypad_open && g_keypad_close_calls >= 1, "stranded keypad force-closed");
     TEST_CHECK(!g_confirm_open && g_confirm_close_calls == 1, "open confirm dialog closed on the edge");
+    TEST_CHECK(g_num_pad_close_calls == 1, "number pad closed on the relock edge (audit L1)");
     TEST_CHECK(!prompt_visible(), "prompt closed");
     tick_at(56001 + 61000);
     TEST_CHECK(g_relock_calls == 1, "staying locked does not re-fire the relock callback");
