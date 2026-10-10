@@ -274,8 +274,7 @@ def debug_program(peer: str, elf_path: Optional[str] = None, confirm: bool = Fal
         refusal = _esp_profile_running_refusal("reprogram the Pico under", unreadable_warnings=esp_warnings)
         if refusal is not None:
             return refusal
-    warn_prefix = "".join(w + "
-" for w in esp_warnings)
+    warn_prefix = "".join(w + chr(10) for w in esp_warnings)
 
     stale_prefix = ""
     if peer == debug_probe.PEER_PICO and elf_path is None:
