@@ -149,14 +149,10 @@ esp_err_t unit_pref_set(unit_pref_t pref)
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Live immediately -- the very next LCD redraw tick and the next
-    // GET /api/status both need to see this, whether or not the NVS write
-    // below succeeds (same "in-RAM truth first" reasoning zones_http.c's
-    // zones_config_set_pid()/set_model() use). Assigned INSIDE the save lock
-    // (CFG_STORE_SAVE_RACE audit, MED-3): assigned before it, two racing
-    // setters could leave RAM holding one value and the file the other.
+    // Persist first, publish to RAM only on success (HTTP_INPUT_PARSING_AUDIT L12):
+    // a failed save leaves the live value, and every reader, unchanged. The whole
+    // commit + publish + rev bump is one section under the save lock (MED-3).
     cfg_save_lock_take(&s_save_lock);
-    s_unit_pref = pref;
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 
@@ -166,6 +162,7 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // reads the file back), so a retry reuses the same next rev.
     esp_err_t err = pref_cfg_fs_commit(UNIT_PREF_FILE_PATH, &raw, sizeof(raw), new_rev, "unit preference");
     if (err == ESP_OK) {
+        s_unit_pref = pref;
         s_unit_pref_rev = new_rev;
     }
     cfg_save_lock_give(&s_save_lock);

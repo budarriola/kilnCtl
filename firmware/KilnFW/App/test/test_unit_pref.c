@@ -124,7 +124,9 @@ static void test_set_without_cfg_partition_fails_loud(void)
     simulate_reboot();
     unit_pref_start();
 
+    unit_pref_t before = unit_pref_get();
     TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) != ESP_OK, "set() reports the failed cfg write");
+    TEST_CHECK(unit_pref_get() == before, "failed persist leaves the in-RAM value unchanged (L12)");
 
     hal_kv_handle_t h;
     TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
