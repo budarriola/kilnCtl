@@ -16,11 +16,11 @@ whose functions have no host-test caller. No coverage instrumentation was run.
 | R2-3b | `kiln_io_owner.c` `CMD_SX_RESET`, `CMD_SET_RELAY*` dispatch | Relay shadow clear after expander POR | Needs real `kiln_io_reset_and_reinit` against the fake I2C chip from `test_kiln_io_sx_fake.c`. | Open, campaign R2-A |
 | R2-4 | `link_task.c` SET_PARAM and update commands | ESP-to-Pico command handling | Open from campaign 2; parameter writes reach safety config. | Open, campaign R2-B |
 | R2-5 | `saftyfw_image_identity_record` | Update identity record read/write | OTA/update chain; a wrong record mis-gates an install. | Open, campaign R2-C |
-| R2-6 | `wifi_prov_api` (14 of 36 functions untested) | Wi-Fi credential store/parse | Input parsing plus persistence; overlaps lightly with campaign 10. | Open, campaign R2-D |
+| R2-6 | `wifi_prov_api` (14 of 36 functions untested) | Wi-Fi credential store/parse | Input parsing plus persistence; overlaps lightly with campaign 10. | Closed (test_wifi_prov.c: add/forget/getters/cache/scan bodies), negtested CAUGHT |
 | R2-7 | `dashboard_http` relay POST and `dashboard_http_get_safety_trip` | Manual relay HTTP input and trip report | Heat path via HTTP; campaign 8 covers aux/exec only. | Open, campaign R2-E |
 | R2-8 | `cfg_fs_mount` format state machine | Data-loss gate (auto-format vs defer) | Wrong branch erases user data. Partly overlaps campaign 10. | Open, campaign R2-F |
-| R2-9 | `thermo_owner` slot accessors, `adaptive_tune_model` commit paths | Sensor ownership, tuning persistence | Sensor slot mix-ups feed the control loop. | Open, campaign R2-G |
-| R2-10 | `safety_link_frame` endian helpers, `ui_lcd_lock`, `security_backend_web_auth` | Wire encoding, UI lock, session issue/verify | `security_backend_web_auth.c` exposes only `install`/`start`, so it needs a harness that drives the registered callbacks, not a direct unit test. | Open, campaign R2-H |
+| R2-9 | `thermo_owner` slot accessors, `adaptive_tune_model` commit paths | Sensor ownership, tuning persistence | Sensor slot mix-ups feed the control loop. | Closed (test_thermo_owner.c, 54 checks; test_adaptive_tune_status.c commit_zone failure, persist-failed and writer-race paths), negtested CAUGHT |
+| R2-10 | `safety_link_frame` endian helpers, `ui_lcd_lock`, `security_backend_web_auth` | Wire encoding, UI lock, session issue/verify | `security_backend_web_auth.c` exposes only `install`/`start`, so it needs a harness that drives the registered callbacks, not a direct unit test. | Closed (test_safety_link_endian.c 24 checks; test_ui_lcd_lock.c 58 checks; test_security_backend_web_auth.c 117 checks driving the installed vtable and the captured bootstrap route over the real web_auth_store and session table), negtested CAUGHT |
 
 ## Campaign plan
 
@@ -41,5 +41,7 @@ Each campaign is one agent, one new test file or extension, negtest required.
 - SaftyFW tasks run through `test/stubs/task_harness` (`th_set_delay_hook` scripts per-iteration inputs; `th_abort` ends the loop).
 
 ## Defects found
+
+None from campaigns R2-D, R2-G and R2-H (all new tests passed against unmodified firmware once their own harness errors were fixed). Note: `web_auth_password_check` rejects any password containing "kiln" as common, which the test discovered while choosing fixtures; this is by design. R2-A..F entries:
 
 None. All three new tests passed against unmodified firmware on the first run; each was negtested (CAUGHT): `ct_installed` default flipped to false, `CMD_SX_SET_PULLUP` relay gate removed, mainFault debounce window shortened by one sample.
