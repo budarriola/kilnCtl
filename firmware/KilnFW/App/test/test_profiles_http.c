@@ -3979,6 +3979,31 @@ static unsigned sg_odd_count_0_3(void)
     }
     return n;
 }
+/* Assign-order probe: at gen_begin the RAM slot must still hold what it held at the previous
+ * gen_end (or the pre-op snapshot); a RAM assign before gen_begin makes it differ. */
+static profile_t s_sg_snap[8];
+static unsigned s_sg_early_assign;
+static unsigned s_sg_begins;
+static void sg_snap_all(void)
+{
+    for (uint8_t i = 0; i < 8; i++) {
+        s_sg_snap[i] = s_profiles.profiles[i];
+    }
+}
+static void sg_gen_hook(uint8_t id, bool is_begin)
+{
+    if (id >= 8) {
+        return;
+    }
+    if (is_begin) {
+        s_sg_begins++;
+        if (memcmp(&s_sg_snap[id], &s_profiles.profiles[id], sizeof(profile_t)) != 0) {
+            s_sg_early_assign++;
+        }
+    } else {
+        s_sg_snap[id] = s_profiles.profiles[id];
+    }
+}
 static esp_err_t sg_write_fn(const char *rel_path, const void *data, size_t len)
 {
     s_sg_writes++;
@@ -4020,8 +4045,13 @@ static void test_profile_edit_post_slot_gen(void)
     s_sg_writes = s_sg_odd_writes = 0;
     s_sg_strict = false;
     profiles_cfg_fs_set_write_fn(sg_write_fn);
+    sg_snap_all();
+    s_sg_early_assign = s_sg_begins = 0;
+    profiles_slot_gen_set_hook_for_test(sg_gen_hook);
     esp_err_t r = run_profile_post("id=4&name=SgEdit&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5");
+    profiles_slot_gen_set_hook_for_test(NULL);
     profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "edit: RAM slot unchanged at gen_begin (bracket opens before the assign)");
     TEST_CHECK(r == ESP_OK && strstr(s_resp_capture, "\"ok\":true") != NULL, "edit POST succeeded");
     TEST_CHECK(s_sg_writes >= 1 && s_sg_odd_writes >= 1, "generation odd while the edit persists (gen_begin)");
     TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
@@ -4043,8 +4073,13 @@ static void test_retarget_slot_gen(void)
         s_sg_strict = true;
         /* pass 0: clean commit. pass 1: 2nd write fails, so the revert writes too. */
         profiles_cfg_fs_set_write_fn(pass == 0 ? sg_write_fn : sg_fail2_write_fn);
+        sg_snap_all();
+        s_sg_early_assign = s_sg_begins = 0;
+        profiles_slot_gen_set_hook_for_test(sg_gen_hook);
         bool ok = profiles_retarget_zone_to_aux_commit(RT_ZONE, RT_RELAY, true, &c, err, sizeof(err));
+        profiles_slot_gen_set_hook_for_test(NULL);
         profiles_cfg_fs_reset_write_fn_for_test();
+        TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "retarget: RAM slot unchanged at every gen_begin (bracket opens before the assign)");
         s_sg_strict = false;
         TEST_CHECK(ok == (pass == 0), pass == 0 ? "commit succeeds" : "injected failure fails the commit");
         TEST_CHECK(s_sg_writes >= (pass == 0 ? 2u : 3u), pass == 0 ? "commit wrote slots" : "revert wrote after the failure");
@@ -4074,8 +4109,13 @@ static void test_delete_slot_gen(void)
     uint32_t before = profiles_http_slot_rev(4);
     s_sg_odd_writes = 0;
     profiles_cfg_fs_set_delete_fn(sg_delete_fn);
+    sg_snap_all();
+    s_sg_early_assign = s_sg_begins = 0;
+    profiles_slot_gen_set_hook_for_test(sg_gen_hook);
     TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "delete slot 4");
+    profiles_slot_gen_set_hook_for_test(NULL);
     profiles_cfg_fs_reset_delete_fn_for_test();
+    TEST_CHECK(s_sg_begins >= 1 && s_sg_early_assign == 0, "delete: RAM slot unchanged at gen_begin");
     TEST_CHECK(s_sg_odd_writes >= 1, "generation odd while the erase runs (gen_begin)");
     TEST_CHECK((profiles_http_slot_rev(4) & 1u) == 0u && profiles_http_slot_rev(4) != before,
                "generation even and advanced after the delete (gen_end)");

@@ -94,10 +94,22 @@ void profiles_http_test_set_loaded(bool v)
 
 /* Ordering: both are seq_cst RMWs under the save lock; a reader must acquire-fence between its unlocked
  * copy and the generation recheck (profiles_http_slot_runnable_rev). */
+/* Test seam: called right after each gen_begin/gen_end bump so a host test can check the RAM slot
+ * content at those instants (gen_begin must precede the RAM assign). NULL in production. */
+static profiles_slot_gen_hook_t s_slot_gen_hook;
+
+void profiles_slot_gen_set_hook_for_test(profiles_slot_gen_hook_t fn)
+{
+    s_slot_gen_hook = fn;
+}
+
 void profiles_slot_gen_begin(uint8_t id)
 {
     if (id < PROFILES_MAX_COUNT) {
         atomic_fetch_add(&s_slot_gen[id], 1u);
+        if (s_slot_gen_hook != NULL) {
+            s_slot_gen_hook(id, true);
+        }
     }
 }
 
@@ -105,6 +117,9 @@ void profiles_slot_gen_end(uint8_t id)
 {
     if (id < PROFILES_MAX_COUNT) {
         atomic_fetch_add(&s_slot_gen[id], 1u);
+        if (s_slot_gen_hook != NULL) {
+            s_slot_gen_hook(id, false);
+        }
     }
 }
 

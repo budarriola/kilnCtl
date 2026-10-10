@@ -79,6 +79,9 @@ uint32_t profiles_http_slot_rev(uint8_t id);
  * generation; an odd or changed value refuses a start. */
 void profiles_slot_gen_begin(uint8_t id);
 void profiles_slot_gen_end(uint8_t id);
+/* Host-test seam: fn(id, is_begin) runs right after each bump; pass NULL to clear. */
+typedef void (*profiles_slot_gen_hook_t)(uint8_t id, bool is_begin);
+void profiles_slot_gen_set_hook_for_test(profiles_slot_gen_hook_t fn);
 /* Host-test hook: force the "boot load finished" flag profiles_http_slot_runnable() checks. */
 void profiles_http_test_set_loaded(bool v);
 bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev);
