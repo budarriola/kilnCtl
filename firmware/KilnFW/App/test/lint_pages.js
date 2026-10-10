@@ -22,6 +22,10 @@
 const fs = require('fs'), path = require('path'), vm = require('vm');
 
 const dir = process.argv[2];
+if (typeof dir !== 'string' || dir === '') {
+  console.error('usage: node lint_pages.js <drivers-dir> [extra-page-root ...]');
+  process.exit(2);
+}
 let bad = 0, checked = 0;
 
 /* firmware/KilnFW/App/drivers/ is being split into layer subdirectories

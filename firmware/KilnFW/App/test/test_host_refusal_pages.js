@@ -30,7 +30,15 @@ new Function('window', mt[0])(win);
 assert(win.kcHostRefusalFromText('{"error":"bad_host"}') === t1 && win.kcHostRefusalFromText('Bad password') === null, 'text variant maps JSON refusal only');
 assert(/kcHostRefusalFromText\(text\) \|\| text \|\| 'Login failed/.test(APP), 'login modal uses guidance');
 assert((APP.match(/kcHostRefusalFromText\(text\) \|\| kcForgotStatusMessage\(403/g) || []).length === 2 && /forgotBackToStep1\(window\.kcHostRefusalFromText/.test(APP), 'forgot/reset use guidance');
-assert(/kcHostRefusalFromText[\s\S]{0,40}\|\| text \|\| 'Login failed/.test(rd('login_page.html')) && /\|\| text \|\| 'Could not set password/.test(rd('login_page.html')), 'login page uses guidance');
+const LOGIN = rd('login_page.html');
+assert(!/<script[^>]+src=/.test(LOGIN), 'login page loads no external script, so it must not depend on app.js helpers');
+assert(!/window\.kcHostRefusal/.test(LOGIN), 'login page does not reference the app.js-only helper');
+const lm = LOGIN.match(/function hostRefusalFromText\(text\) \{[\s\S]*?\r?\n\}\r?\n/);
+assert(!!lm, 'found inline hostRefusalFromText in login_page.html');
+const lhr = new Function(lm[0] + '; return hostRefusalFromText;')();
+assert(lhr('{"error":"bad_host"}') === t1 && lhr('{"error":"cross_origin"}') === t1, 'login page helper behaves like app.js (same text)');
+assert(lhr('Bad password') === null && lhr('{"error":"x"}') === null && lhr('null') === null, 'login page helper maps only refusals');
+assert(/hostRefusalFromText\(text\) \|\| text \|\| 'Login failed/.test(LOGIN) && /hostRefusalFromText\(text\) \|\| text \|\| 'Could not set password/.test(LOGIN), 'login page uses the helper');
 assert(/xhr\.status === 403[\s\S]{0,120}kcHostRefusalFromText/.test(rd('ota_page.html')), 'stage XHR uses guidance');
 assert(!/bench/i.test(t1), 'no bench text in the message');
 

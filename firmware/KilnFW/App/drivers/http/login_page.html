@@ -55,6 +55,19 @@
 // the query string is attacker-controllable (anyone can hand a person a
 // crafted /login?return=... link) even though today's only producer
 // (http_auth_http.c) always writes one of its own known route strings.
+// Host/origin refusal guidance. login_page.html does not load app.js, so this is an inline
+// copy of app.js's kcHostRefusalFromText (test_host_refusal_pages.js keeps the two in step
+// and runs this one behaviorally).
+function hostRefusalFromText(text) {
+  try {
+    var b = JSON.parse(text);
+    if (b && (b.error === 'cross_origin' || b.error === 'bad_host')) {
+      return 'The controller refused this request because of the address it was opened ' +
+        'from. Open the controller by its IP address or <name>.local and try again.';
+    }
+  } catch (e) { /* not JSON */ }
+  return null;
+}
 function loginReturnPath() {
   var params = new URLSearchParams(window.location.search);
   var ret = params.get('return');
@@ -107,7 +120,7 @@ function submitLogin(evt) {
       return;
     }
     return resp.text().then(function (text) {
-      errorEl.textContent = (window.kcHostRefusalFromText && window.kcHostRefusalFromText(text)) || text || 'Login failed.';
+      errorEl.textContent = hostRefusalFromText(text) || text || 'Login failed.';
     });
   }).catch(function () {
     errorEl.textContent = 'Network error.';
@@ -148,7 +161,7 @@ function submitBootstrap(evt) {
         window.location.reload();
         return;
       }
-      errorEl.textContent = (window.kcHostRefusalFromText && window.kcHostRefusalFromText(text)) || text || 'Could not set password.';
+      errorEl.textContent = hostRefusalFromText(text) || text || 'Could not set password.';
     });
   }).catch(function () {
     errorEl.textContent = 'Network error.';
