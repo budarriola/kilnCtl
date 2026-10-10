@@ -1372,7 +1372,8 @@ function kcMarkDirty() { kcDirty = true; kcEditSeq++; }
   document.getElementById(id).addEventListener('click', kcMarkDirty);
 });
 window.addEventListener('beforeunload', function (e) {
-  if (!kcDirty || kcSuppressUnload) return undefined;
+  if (kcSuppressUnload) { kcSuppressUnload = false; return undefined; } /* one-shot: the download navigation's own event */
+  if (!kcDirty) return undefined;
   e.preventDefault();
   e.returnValue = '';
   return '';

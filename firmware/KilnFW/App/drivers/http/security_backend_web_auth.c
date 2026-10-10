@@ -401,6 +401,10 @@ static security_err_t web_auth_backend_clear_all_credentials(void)
     ESP_LOGW(TAG, "clear_all_credentials(): administrator and user web passwords, LCD PINs, and any "
                   "enrolled TOTP factor cleared via the authenticated /settings/security route "
                   "(WEB_AUTH_PLAN.md item 12b, docs/TOTP_PASSWORD_RESET_PLAN.md)");
+    // Success path too (REVIEW_WEB4_TESTS C3): live sessions sit on credentials that no longer
+    // exist; ROUTE_TIER_USER routes would otherwise keep honouring them until bootstrap.
+    web_auth_backend_invalidate_sessions_for_role(SECURITY_ROLE_ADMIN);
+    web_auth_backend_invalidate_sessions_for_role(SECURITY_ROLE_USER);
     return SECURITY_OK;
 }
 

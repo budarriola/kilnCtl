@@ -630,6 +630,24 @@ static void test_save_working_bumps_generation(void)
     TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
 }
 
+static void test_save_working_if_gen(void)
+{
+    TEST_SECTION("A1 live_profile_save_working_if_gen -- compare-and-save, reports its own generation");
+    profile_t p = make_test_profile();
+    char err[128];
+    uint32_t g0 = live_profile_generation();
+    uint32_t out = 0;
+    TEST_CHECK(live_profile_save_working_if_gen(&p, true, g0 + 1u, &out, err, sizeof(err)) == LIVE_SAVE_STALE,
+               "stale expected generation is refused");
+    TEST_CHECK(live_profile_generation() == g0, "stale refusal does not bump");
+    TEST_CHECK(live_profile_save_working_if_gen(&p, true, g0, &out, err, sizeof(err)) == LIVE_SAVE_OK,
+               "matching generation saves");
+    TEST_CHECK(out == g0 + 1u && out == live_profile_generation(), "out_gen is the generation of this save");
+    TEST_CHECK(live_profile_save_working_if_gen(&p, false, 12345u, &out, err, sizeof(err)) == LIVE_SAVE_OK,
+               "check_gen=false ignores the expected value");
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
 static void test_clear_is_idempotent(void)
 {
     TEST_SECTION("live_profile_clear -- calling it with nothing pending is not an error");
@@ -1026,6 +1044,7 @@ int main(void)
     test_save_refused_when_cfg_unmounted();
     test_legacy_nvs_migrates_to_cfg();
     lpt_mount_fresh_cfg();
+    test_save_working_if_gen();
     test_clear_is_idempotent(); // run before the fork tests so state starts clean
     test_fork_then_load_working_and_record();
     test_fork_is_idempotent_when_already_pending();

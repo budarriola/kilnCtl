@@ -159,6 +159,33 @@ function boot(file, marker, routes, extraOpts) {
     await r.sandbox.postStepState(1, 'done').catch(() => {});
   }
 
+  /* A5: setup_wizard postStepState must not clear dirty for an edit typed while the save was in flight */
+  {
+    let release = null;
+    const r = boot('setup_wizard_page.html', 'function postStepState(', {
+      '/api/setup/progress': () => new Promise((res) => { release = () => res(jsonResp({ ok: true })); }),
+    });
+    await flush();
+    r.els.stepBody1.fire('input');
+    const p = r.sandbox.postStepState(1, 'done');
+    r.els.stepBody1.fire('input'); // typed during flight
+    release();
+    await p;
+    ok(r.prompts(), 'setup_wizard: edit typed during an in-flight step save keeps the guard armed');
+  }
+
+  /* A5: profiles download suppression is one-shot, a later real leave still prompts */
+  {
+    const r = boot('profiles_page.html', 'function resetEditor', {
+      '/api/profile': () => jsonResp({ ok: true, id: 3 }),
+    }, { groups: { '.pzone-cb': [{ checked: true, value: '0' }] }, selectors: { details: makeEl('details') } });
+    await flush();
+    r.els.pname.fire('input');
+    r.sandbox.kcSuppressUnload = true;
+    ok(!r.prompts(), 'profiles: the download navigation itself does not prompt');
+    ok(r.prompts(), 'profiles: a real leave inside the 1500 ms window still prompts');
+  }
+
   /* ---- M4-M7 / L2-L3: a FAILED save keeps the guard; an edit typed during an in-flight save keeps it too ---- */
   const zonesGet = { thermo_count: 0, relay_count: 0, max_simultaneous_relays: 0, zones: [], timing_profiles: [], relay_names: [], pc_link_abort_silence_ms: 0 };
   const variants = [

@@ -431,6 +431,12 @@ document.getElementById('forkBtn').addEventListener('click', function () {
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('saveMsg');
   var btn = document.getElementById('saveBtn');
+  if (lastGen === null || lastGen === undefined) {
+    // A2: the generation is unknown after Reload/fork/decide until the status fetch lands; an ungated Save
+    // would skip the board's changed-elsewhere check.
+    msg.textContent = 'Still loading the working copy -- try Save again in a moment.';
+    return;
+  }
   var params = ['id=' + btn.dataset.id, 'name=' + encodeURIComponent(btn.dataset.name || ''),
     'zone_mask=' + (btn.dataset.zoneMask || '0')];
   params = params.concat(collectSegmentParams(currentWorking ? currentWorking.segments : []));

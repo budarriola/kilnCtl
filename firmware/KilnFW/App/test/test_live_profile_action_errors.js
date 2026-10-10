@@ -14,11 +14,11 @@ let failed = 0;
 function ok(c, l) { if (c) console.log('PASS: ' + l); else { failed++; console.log('FAIL: ' + l); } }
 
 // resp: {status, json} | {status, html} (body that is not JSON) | 'authcancel'
-async function scenario(btnId, resp, setup, confirmAnswer) {
+async function scenario(btnId, resp, setup, confirmAnswer, noGen) {
   const posts = [];
   const confirms = [];
   const listeners = {};
-  const { els } = runPageScript(HTML, {
+  const { els, sandbox } = runPageScript(HTML, {
     elements: ['themeBtn', 'forkBtn', 'saveBtn', 'reloadBtn', 'saveAsBtn', 'saveAsName', 'overwriteBtn',
       'overwriteConfirm', 'discardBtn', 'segments', 'forkMsg', 'saveMsg', 'decideMsg', 'statusText', 'refusalBanner'],
     extra: {
@@ -42,6 +42,7 @@ async function scenario(btnId, resp, setup, confirmAnswer) {
     },
   });
   await flush(5);
+  if (!noGen) sandbox.lastGen = 1; // A2: Save needs a known generation
   if (setup) setup(els);
   els[btnId].fire('click');
   await flush();
@@ -50,6 +51,8 @@ async function scenario(btnId, resp, setup, confirmAnswer) {
 const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
 
 (async () => {
+  let r0 = await scenario('saveBtn', { status: 200, json: { ok: true } }, null, true, true);
+  ok(r0.posts.length === 0 && /Still loading/.test(txt(r0.els.saveMsg)), 'A2: Save with an unknown generation sends nothing');
   let r = await scenario('saveBtn', { status: 400, json: { ok: false, error: 'segment 2: target 1400 C exceeds zone limit 1300 C' } });
   ok(/segment 2: target 1400 C exceeds zone limit 1300 C/.test(txt(r.els.saveMsg)) && !/Saved\./.test(txt(r.els.saveMsg)),
     'save 400 shows the server bound-violation text verbatim, not "Saved."');

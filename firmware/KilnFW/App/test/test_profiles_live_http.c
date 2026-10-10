@@ -665,6 +665,8 @@ static void test_generation_guard(void)
     api_profile_live_post_handler(&ok1);
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "matching gen edit accepted");
     TEST_CHECK(strstr(s_resp_body, "\"generation\":") != NULL, "edit response returns the new generation");
+    snprintf(want, sizeof(want), "\"generation\":%u", (unsigned)live_profile_generation());
+    TEST_CHECK(strstr(s_resp_body, want) != NULL, "edit response generation is the one its own save produced");
 
     snprintf(q, sizeof(q), "gen=zz");
     httpd_req_t bad = make_req("body=ok");

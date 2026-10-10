@@ -342,7 +342,7 @@ static void test_invalidate_sessions(void)
 
 static void test_clear_all_credentials(void)
 {
-    TEST_SECTION("clear_all_credentials: web + TOTP wiped; half-wipe (web gone, TOTP stuck) tears down live sessions");
+    TEST_SECTION("clear_all_credentials: web + TOTP wiped; success and half-wipe (web gone, TOTP stuck) both tear down live sessions");
     reset_all();
     seed_admin();
     seed_admin_pin();
@@ -353,7 +353,9 @@ static void test_clear_all_credentials(void)
                    !web_auth_store_pin_configured(WEB_AUTH_ROLE_ADMINISTRATOR),
                "store really cleared (admin pw, user pw, admin pin)");
     TEST_CHECK(f_totp_clear_calls == 1 && f_tokens_clear_calls == 1 && f_pending_clear_calls == 1, "TOTP config, reset tokens and pending enrollment each cleared once");
-    TEST_CHECK(f_force_lock_calls == 0, "clean success does not itself invalidate (the credentials are simply gone)");
+    TEST_CHECK(web_auth_table_find_by_token(&s_table, TOK_A) < 0 && web_auth_table_find_by_token(&s_table, TOK_U) < 0,
+               "clean success also destroys BOTH roles' live sessions (consistent with the half-wipe branch)");
+    TEST_CHECK(f_force_lock_calls == 2, "LCD force-locked once per role invalidation on clean success");
 
     reset_all();
     seed_admin();

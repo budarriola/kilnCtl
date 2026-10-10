@@ -1745,11 +1745,12 @@ function gGoto(target) {
  * inside a step body; cleared when a step is (re)rendered from board data
  * (gRenderStepDetail) and when a step's progress save succeeds (postStepState). */
 var kcDirty = false;
+var kcEditSeq = 0; /* bumped by every real edit: a save clears the guard only for edits made before it was sent */
 [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].forEach(function (id) {
   var body = document.getElementById('stepBody' + id);
   if (!body) return;
-  body.addEventListener('input', function () { kcDirty = true; });
-  body.addEventListener('change', function () { kcDirty = true; });
+  body.addEventListener('input', function () { kcDirty = true; kcEditSeq++; });
+  body.addEventListener('change', function () { kcDirty = true; kcEditSeq++; });
 });
 window.addEventListener('beforeunload', function (e) {
   if (!kcDirty) return undefined;
@@ -1763,12 +1764,13 @@ window.addEventListener('beforeunload', function (e) {
 // Reloads readiness+progress afterward so the overview/stepper immediately
 // reflect the board's own merged verdict rather than an optimistic local guess.
 function postStepState(stepId, state, note) {
+  var seqAtSend = kcEditSeq;
   var body = 'step=' + stepId + '&state=' + encodeURIComponent(state) +
     (note ? ('&note=' + encodeURIComponent(note)) : '');
   return fetch('/api/setup/progress', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
-    if (r.ok) kcDirty = false;
+    if (r.ok && kcEditSeq === seqAtSend) kcDirty = false;
     return { ok: r.ok, body: j };
   }); });
 }

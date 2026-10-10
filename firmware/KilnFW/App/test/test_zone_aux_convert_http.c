@@ -236,6 +236,7 @@ static void test_refusals(void)
     f_profile_running = true;
     TEST_CHECK(run("move_zone_to_aux=1&confirm=1") == 409 && UNCHANGED(), "profile running -> 409 mode gate");
     TEST_CHECK(strstr(s_reply, "firing or autotune run is active") != NULL, "409 carries the gate text");
+    TEST_CHECK(strstr(s_reply, "zone config cannot be changed") != NULL, "409 carries the WRITE_ZONES_CONFIG action tail");
     f_profile_running = false; f_autotune_running = true;
     TEST_CHECK(run("move_zone_to_aux=1&confirm=1") == 409 && UNCHANGED(), "autotune running -> 409 mode gate");
     f_autotune_running = false;

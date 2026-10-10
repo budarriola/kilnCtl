@@ -238,12 +238,17 @@ static esp_err_t live_send_working_content(httpd_req_t *req)
  * POST edit / fork response) as query parameter gen=N on POST edit and POST
  * decide. A mismatch means the working copy changed (another tab, the LCD, a
  * discard + re-fork) since that read: 409, nothing written. An ABSENT gen is
- * accepted (compatible with clients that predate this field); the PcTools
- * client and the page always send it. The check runs immediately before the
- * write; a request landing between check and write is not excluded (two
- * httpd workers), the window is the validate-to-save gap only. */
-static bool live_gen_stale(httpd_req_t *req)
+ * accepted (compatible with clients that predate this field): the PcTools
+ * `generation` parameter is optional and the GET ?content=1 carries none, so
+ * a caller that omits gen is ungated. POST edit does the check, the verified
+ * save and the bump atomically (live_profile_save_working_if_gen); decide
+ * still pre-checks only. The generation is RAM-only and restarts at 0 on
+ * reboot. */
+/* Parses gen=N. Returns false when absent (*present=false) or valid; true when malformed. */
+static bool live_gen_parse(httpd_req_t *req, bool *present, uint32_t *out)
 {
+    *present = false;
+    *out = 0;
     char query[48];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
         return false;
@@ -257,7 +262,19 @@ static bool live_gen_stale(httpd_req_t *req)
     if (end == val || *end != '\0') {
         return true; /* malformed gen is never silently ignored */
     }
-    return (uint32_t)g != live_profile_generation();
+    *present = true;
+    *out = (uint32_t)g;
+    return false;
+}
+
+static bool live_gen_stale(httpd_req_t *req)
+{
+    bool present;
+    uint32_t g;
+    if (live_gen_parse(req, &present, &g)) {
+        return true;
+    }
+    return present && g != live_profile_generation();
 }
 
 #define LIVE_GEN_STALE_MSG "working copy changed elsewhere -- reload and re-apply your edit"
@@ -489,14 +506,21 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     }
     heap_caps_free(running);
 
-    if (live_gen_stale(req)) {
+    bool gen_present;
+    uint32_t gen_val;
+    if (live_gen_parse(req, &gen_present, &gen_val)) {
         heap_caps_free(warn_json);
         heap_caps_free(candidate);
         return send_conflict(req, LIVE_GEN_STALE_MSG);
     }
-    bool saved = live_profile_save_working(candidate, err, sizeof(err));
+    uint32_t saved_gen = 0;
+    live_save_result_t sr = live_profile_save_working_if_gen(candidate, gen_present, gen_val, &saved_gen, err, sizeof(err));
     heap_caps_free(candidate);
-    if (!saved) {
+    if (sr == LIVE_SAVE_STALE) {
+        heap_caps_free(warn_json);
+        return send_conflict(req, LIVE_GEN_STALE_MSG);
+    }
+    if (sr != LIVE_SAVE_OK) {
         heap_caps_free(warn_json);
         /* Review fix: this used to be a bare httpd_resp_sendstr(), whose
          * default status is 200 OK -- a failed working-slot write reported
@@ -511,7 +535,7 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
         return send_server_error(req, "out of memory");
     }
     int rn = snprintf(json, resp_cap, "{\"ok\":true,\"generation\":%u,\"warnings\":%s}",
-                      (unsigned)live_profile_generation(), warn_json[0] ? warn_json : "[]");
+                      (unsigned)saved_gen, warn_json[0] ? warn_json : "[]");
     heap_caps_free(warn_json);
     if (rn < 0 || (size_t)rn >= resp_cap) {
         heap_caps_free(json);

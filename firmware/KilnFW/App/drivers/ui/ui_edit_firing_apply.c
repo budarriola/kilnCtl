@@ -211,6 +211,7 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
         return false;
     }
 
+    uint32_t expect_gen = ctx->generation; /* our own fork below bumps it; re-based after a successful fork */
     /* 4. Fork only now, with every check passed -- same inputs as the fork
      *    route (origin name: slot name, or the builtin's code). */
     if (!live_profile_has_pending_for_origin(st.profile_id)) {
@@ -241,18 +242,25 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
             }
             return false;
         }
+        expect_gen = live_profile_generation();
     }
     heap_caps_free(origin);
 
     /* 5. Save -- bumps live_profile_generation(), which the executor polls
      *    (reload_live_profile_if_changed()), exactly as a web save does. */
-    if (!live_profile_save_working(candidate, err, err_cap)) {
+    uint32_t saved_gen = 0;
+    live_save_result_t sr = live_profile_save_working_if_gen(candidate, true, expect_gen, &saved_gen, err, err_cap);
+    if (sr == LIVE_SAVE_STALE) {
+        snprintf(err, err_cap, "edited elsewhere -- reopen to reload");
+        return false;
+    }
+    if (sr != LIVE_SAVE_OK) {
         if (!err[0]) {
             snprintf(err, err_cap, "save failed");
         }
         return false;
     }
-    ctx->generation = live_profile_generation();
+    ctx->generation = saved_gen;
     ctx->running_seg = st.segment_index;
     return true;
 }

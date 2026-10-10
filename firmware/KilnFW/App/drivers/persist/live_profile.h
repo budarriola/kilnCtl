@@ -231,6 +231,13 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
  * generation() polls so a caller (the executor tick, once wired) picks the
  * edit up on the next tick. */
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap);
+
+/* A1: compare-and-save. With check_gen, refuses (LIVE_SAVE_STALE, nothing written) unless the generation still
+ * equals expected_gen; the check, the verified save and the bump are one section under a lock. *out_gen (if
+ * non-NULL) receives the generation produced by this very save. */
+typedef enum { LIVE_SAVE_OK = 0, LIVE_SAVE_STALE, LIVE_SAVE_FAILED } live_save_result_t;
+live_save_result_t live_profile_save_working_if_gen(const profile_t *p, bool check_gen, uint32_t expected_gen,
+                                                    uint32_t *out_gen, char *err, size_t err_cap);
 bool live_profile_load_working(profile_t *out);
 
 /* HIGH (review, 2026-09-19): tri-state so the caller (profile_executor.c's

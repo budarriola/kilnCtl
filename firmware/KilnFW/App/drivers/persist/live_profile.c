@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "cfg_fs_status.h"
+#include "cfg_save_lock.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
@@ -81,6 +82,12 @@ typedef struct {
  * here is exactly the kind of cross-task counter this codebase already uses
  * _Atomic for (see wifi_provision_http.c's s_httpd_open_sockets). */
 static _Atomic uint32_t s_live_profile_generation;
+
+/* A1 (REVIEW_WEB4_TESTS): the web request (profiles_live_http.c) and the LCD task (ui_edit_firing_apply.c) both
+ * write the working copy. This lock makes "generation check + verified save + generation bump" one section
+ * (live_profile_save_working_if_gen) and serialises clear's bump with it. The generation is RAM-only: it restarts
+ * at 0 on reboot, so a client holding a pre-reboot value can match again after that many post-reboot saves. */
+static cfg_save_lock_t s_live_save_lock = CFG_SAVE_LOCK_INIT;
 
 /* ---- pure: record encode/decode ------------------------------------------ */
 
@@ -499,7 +506,7 @@ bool live_profile_load_record(live_edit_record_t *out)
     return live_edit_record_decode(buf, len, out);
 }
 
-bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
+static bool live_profile_save_working_locked(const profile_t *p, char *err, size_t err_cap)
 {
     if (caller_stack_is_external()) {
         if (err) snprintf(err, err_cap, "live_profile: refused -- caller stack is not write-safe here");
@@ -534,6 +541,31 @@ bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
     }
     atomic_fetch_add(&s_live_profile_generation, 1u);
     return true;
+}
+
+bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_save_working_locked(p, err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+live_save_result_t live_profile_save_working_if_gen(const profile_t *p, bool check_gen, uint32_t expected_gen,
+                                                    uint32_t *out_gen, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    live_save_result_t r;
+    if (check_gen && atomic_load(&s_live_profile_generation) != expected_gen) {
+        r = LIVE_SAVE_STALE;
+    } else if (live_profile_save_working_locked(p, err, err_cap)) {
+        if (out_gen) *out_gen = atomic_load(&s_live_profile_generation); /* produced by THIS save, still under the lock */
+        r = LIVE_SAVE_OK;
+    } else {
+        r = LIVE_SAVE_FAILED;
+    }
+    cfg_save_lock_give(&s_live_save_lock);
+    return r;
 }
 
 /* Pass-3 review fix (2026-09-19): internal tri-state core shared by
@@ -783,7 +815,9 @@ bool live_profile_clear(char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "clear could not be verified by read-back");
         return false;
     }
+    cfg_save_lock_take(&s_live_save_lock);
     atomic_fetch_add(&s_live_profile_generation, 1u);
+    cfg_save_lock_give(&s_live_save_lock);
     return true;
 }
 
