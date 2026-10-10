@@ -2024,9 +2024,11 @@ static void test_transient_read_error_is_retried_and_hint(void)
     reset_state();
     TEST_CHECK(fake_kv_script_next_open_status(NVS_NAMESPACE, HAL_IO), "script one open failure");
     saved_nets_blob_t rb;
+    uint64_t t0_ms = hal_time_now_ms();
     TEST_CHECK(nvs_load_saved_nets_from(WIFI_NVS_PARTITION, &rb) == ESP_OK && rb.count == 1 &&
                    strcmp(rb.nets[0].ssid, "home") == 0,
                "load succeeded on retry");
+    TEST_CHECK(hal_time_now_ms() - t0_ms >= 20, "INFO-3: a delay separates the retry from the failed read");
     TEST_CHECK(!s_saved_nets_refused, "transient error did not latch refused");
     TEST_CHECK(wifi_prov_saved_nets_recovery_hint() == NULL, "no hint when healthy");
     b.version = SAVED_NETS_VERSION + 1;
