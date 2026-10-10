@@ -128,7 +128,8 @@ bool config_store_write_volatile(const config_store_record_t *r, const char **wh
     (void)r; g_cfg_writes++; if (why) { *why = "fake"; } return false;
 }
 
-bool current_task_any_current_present(void) { return false; }
+static bool g_any_current_present;
+bool current_task_any_current_present(void) { return g_any_current_present; }
 bool current_task_ct_auto_zero_begin(uint8_t ch) { (void)ch; return false; }
 void current_task_ct_auto_zero_poll(current_task_auto_zero_status_t *o) { memset(o, 0, sizeof(*o)); }
 void current_task_get_power(current_sense_power_t *o) { memset(o, 0, sizeof(*o)); }
@@ -844,6 +845,31 @@ static void scenario_fuzz(void)
            FUZZ_ITERATIONS, actual_grants, g_sends, g_logs, g_cfg_writes);
 }
 
+
+// LOW-1 (REVIEW_SAFTYFW_SINCE_PRE2_2026-10-10): pins CURRENT, deliberately
+// conservative behaviour. The heat-possible probe that gates
+// config_store_write_volatile() counts current_task_any_current_present() as
+// "heat possible". On a fitted-but-uncalibrated CT the op-amp offset floor reads
+// as present, so the probe stays true and a non-tightening volatile install
+// (k_ct_v_per_a, abs_max raise) is refused until the CT is committed while
+// disarmed. If this test fails because the probe was loosened, that is a safety
+// semantics change that needs an owner decision, not a test fix.
+static void scenario_heat_probe_current_floor(void)
+{
+    reset_link_state();
+    uint8_t p[15 + 14 * 12];
+    s_context_lock = (SemaphoreHandle_t)1; /* task init is not run here; the gate needs a lock to read the snapshot */
+    s_degraded_no_context = false;
+    uint8_t n = build_context(p, CONTEXT_FLAG_CONTEXT_VALID, 40, 1);
+    g_any_current_present = false;
+    send_esp(p, n);
+    CHECK(!link_task_heat_possible_probe(), "fresh idle context, no current: heat not possible (baseline)");
+    g_any_current_present = true; /* uncalibrated CT offset floor reads as present */
+    CHECK(link_task_heat_possible_probe(),
+          "current present (e.g. uncalibrated CT offset floor) => heat possible, fail closed (LOW-1, owner decision pending)");
+    g_any_current_present = false;
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -855,6 +881,8 @@ int main(void)
     scenario_resync();
     printf("-> push_context\n");
     scenario_push_context();
+    printf("-> heat_probe_current_floor\n");
+    scenario_heat_probe_current_floor();
     printf("-> trip_seq\n");
     scenario_trip_seq();
     printf("-> unknown_commands\n");
