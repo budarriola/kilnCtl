@@ -137,9 +137,9 @@ convention), since superseded
 by later unrelated edits to the file; the underlying finding -- that
 `json_escape()` is where the negative test was inserted and that the
 restore was byte-exact -- is unchanged, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`dd0478dc` (citation
+blob:firmware/KilnFW/App/drivers/http/dashboard_json.c`b6c94db7` (citation
 refreshed 2026-09-24, again 2026-09-28 after HP-02, again 2026-10-05 after
-spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers)) matched HEAD. Re-run: PASS.
+spare-relay WP-6, again 2026-10-08 after the /api/status ETag helpers, again 2026-10-09)) matched HEAD. Re-run: PASS.
 
 **Verdict: load-bearing.**
 
@@ -198,7 +198,7 @@ superseded) was itself superseded by `93a8716f`'s shared AP-subnet helper/
 HTTP-layer message/confirm-side guard change, unrelated to this check's
 subject (the auth/gate logic the negative test exercises is unchanged);
 the underlying claim still holds, refreshed to
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`089b6c9c` (citation refreshed 2026-10-05)
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`2d872566` (citation refreshed 2026-10-09)
 is the current one (citation refreshed 2026-09-30); see
 check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3

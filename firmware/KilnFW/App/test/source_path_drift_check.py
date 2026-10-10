@@ -103,6 +103,7 @@ BASES = [
     "tools",
     "tools/PcTools",
     "tools/PcTools/tests",
+    "tools/PcTools/scripts",
     "tools/PcTools/src",
     "tools/PcTools/src/kilnctrl",
 ]
