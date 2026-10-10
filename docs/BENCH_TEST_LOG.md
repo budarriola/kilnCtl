@@ -3102,3 +3102,56 @@ Preflight: no unacknowledged crash, link up/armed/no trip, readiness 20 ok / 1 n
 - Step 7 PASS (ESP path only): profile (rule ON while TC<50) running, R4 ON; `profiles_pause` (state=2, no heat) -> R4 stayed ON at 0 s and 20 s after pause. Not the external supply wiring. Note: with the executor paused, zone 0 actual reads 0.0 C (invalid) in exec status while the rule still held R4.
 - Restore: profiles_stop after each run (relays 1-3 off, R4 off), profile 1 deleted after `profiles_get` confirmed name, relay 4 disabled (enabled_mask 0), profile list back to #0 M18C_TEST + 28 built-ins, link up/armed/no trip, uptime 40167 s.
 - Other pending BENCH_TEST_LOG rows: none attempted (all remaining rows are forbidden-action, operator-gated or need newer firmware/flash).
+
+## 2026-10-09 bench agent: dev 8fcd3237 flash and bench queue (main board, 192.168.1.156)
+
+Flashed origin/dev 8fcd3237 on both processors from worktree `C:\wt\benchflash_cccw9z`. Firmware was not changed. A stale tls_spike crash report (dump_id 448121097, crash_uptime 17157 s, re-stamped with the new fw_build) stays unacknowledged per the bench rules. The firmware, `capability_preflight`, `bench_test` and `ota_matrix` all refuse to start while it is stored, so every item that needs a firing or a suite run is BLOCKED. 8838dea7 (the SaftyFW peer-protocol reset defect) is not in this image.
+
+- Flash PASS: ESP commit 8fcd3237, fw_build "Oct  9 2026 20:34:10", running `app`, boot_guard cleared. Pico reports b475e7d7 (the last SaftyFW/CommonFW commit in 8fcd3237), built 2026-10-10 03:25:34Z, boot_id 106, kilnlink v17, config_crc 0xC950.
+- Internal heap PASS against the 8192 B floor: min_free 15799 B on first boot, 11699 B after the maximal backup import, and 15819 B on the current boot. Concerns:
+  - heap_dma min fell to 3911 B after the import (8031 B on the current boot).
+  - largest_free_block low-water was 7936 B at uptime 7 s, below SK-04's 8704 B. dram_watch shows the http_async_job create dropping it from 10752 B.
+  - The boot log prints "BELOW THE 20K DRAM FLOOR dram_free=15819".
+- Kilnlink boot S6a PASS: TRIPPED reason 6 seq 1 at 9578 ms, link compatible at 9918 ms. `clear_trip` mask 0x0020 seq=1 at 11078 ms, sent only after a seq-bearing DIAG.
+- Pico reboot mid-idle PASS: no stale clear, and the Pico re-armed at about 80 s with trip 0. Observability gap: the ESP logged only "break condition on uart1" at 32398 ms. The boot_id-change path (`safety_note_pico_reboot_locked`, safety_link_frames.c around lines 336-370) logs nothing; only the uptime-regress path (line ~1136) does.
+- Pico RELAY_STACK SKIP: this is the recovery image's rec_pico task (recovery_pico.c:48, 6144 B). It only logs during a `recovery_pico_upload` of a slot image, which the owner has gated off.
+- HTTP L5 after the maximal backup import PASS: httpd_worker had 3272/8192 B stack free (39.9%). `check_task_liveness` showed 31/41 ok; backlight_pwm 900/3072 B [LOW].
+- Spare relay step 5 PASS, with a plan/firmware mismatch (the plan says 400, the firmware answers 409):
+  - POST /api/aux_outputs on relay 1 returned 409 "that relay is claimed by a zone relay_mask".
+  - With aux 4 enabled, a zone 2 relay_mask of 0x0C returned 409 "a zone relay_mask claims a relay an aux (spare-relay) output already owns".
+  - Restored: aux 4 disabled, zones_relay_mask 7.
+- ON_OFF step 9 BLOCKED:
+  - Set zone 2 to zone_type 1 and saved profile #2 BENCH_ONOFF9 (900 C/hr to 60 C, DWELL-phase rule BELOW 33 C on zone 2).
+  - `profiles_start` was refused because an unacknowledged crash report is stored.
+  - Restored: profile #2 deleted and zone 2 back to zone_type 0, both read back.
+  - Doc gap: quasi_dwell/effective_dwell are not exposed over HTTP, although ON_OFF_ZONE.md sec 7 says /api/status gains them. Only the device log's "onoff zN DECIDE ... dwell=" lines show them.
+- kiln_config_apply PASS:
+  - Only config id 1 exists, so there was nothing to swap to; re-applied id 1.
+  - apply_status confirmed the apply and the board rebooted (SW reset).
+  - A before/after backup diff shows only kiln_configs[0].is_active false -> true. Zones are identical and the Pico is armed with no trip.
+  - Side effect: active_id went from null to 1, and no route can undo that.
+- GitHub update FAIL:
+  - `update_status`: staged, verified, 1.0.0-pre.1, commit bf9ddea2, source github.
+  - `update_check` failed twice with error=low_heap: free internal 29815 B < FETCH_HEAP_PRECHECK_MIN 30836 B (update_fetch_heap.h:24-27, 65). The header comment puts the idle board at 29647-31123 B, so an idle board is refused most of the time.
+  - `update_stage_release` was not attempted (same fetch path).
+  - OT-G06 via `ota_matrix_start` (job 0083a5fe) was refused at run-level preflight because of the crash report. Nothing was applied.
+- Zone graphic PASS (render only): a node render of zones_page.html's `renderKilnGraphicHtml` against live /api/zones and /api/status showed:
+  - 3 rings and 3 ports, with no fail-closed panel;
+  - labels z0..z2 in order;
+  - 3 "Heater load check is DORMANT" unknown badges, which the plan expects on the bench.
+  - A real-browser look is still not done.
+- Camera PASS: `capture_lcd -Full` sharpness 4.03, crop 6.57.
+  - Panel samples: (580,360) RGB 50,118,186; (300,150) 186,224,251; (850,550) 71,107,98; (450,500) 100,169,234. Bezel (100,100) 12,5,6.
+  - The dashboard shows zone temps 28.3/28.3/28.1, matching `thermo_read`.
+- bench_test web BLOCKED: job 576164c7, run `logs/bench_test/20261010T040027Z_web_benchflash_8fcd3237/` exited 2 with PREFLIGHT FAILED (crash report); all 120 cases NOT_RUN.
+- bench_test lcd BLOCKED: not started, because the same preflight applies.
+- TOTP PASS: `totp_enroll_status` reports enrolled=False, sntp_synced=True.
+- WP5 power-cut SKIP: needs a human to cut power.
+- Other defects seen this session:
+  - `backup_import` cannot restore onto a board whose zones config has a count of 0 and gives a 500 partial write (backup_import.c:990, 1338, 1433, 3619).
+  - `load_config_preset` cannot seed such a board ("no timing_profiles").
+  - The config wipe found before this flash has an unknown origin.
+  - The boot log shows "prof1 file/NVS DIVERGED (file rev 41, NVS rev 40)".
+  - z0 tuning_valid=no after the restore.
+  - relay_cycles read 0 because the v5 backup carries none.
+- Final state: aux outputs disabled, zone 2 zone_type 0, test profile deleted, kiln config 1 active (was null), link up, armed, no trip.
