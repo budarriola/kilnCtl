@@ -58,7 +58,7 @@ now pins as if it were intended.
   (`kiln_io_owner.c` ~380-441) never run through the real owner_task dispatch.
   The four command kinds it does drive (SET_RELAY, SET_RELAY_MASK,
   SET_RELAY_MASK_AUTHORIZED, SX_RESET) are pinned well.
-- **L6 (FIXED in 4bab578a4: tracked-only via git ls-files; real-tree guard message documents that any write counts)** `tools/negtest.ps1:655` (`ae7124b01`). Bare-name resolution for
+- **L6 (FIXED in 44ecaf482: tracked-only via git ls-files; real-tree guard message documents that any write counts)** `tools/negtest.ps1:655` (`ae7124b01`). Bare-name resolution for
   `-Preset check` runs a recursive `Get-ChildItem` over the whole real repo
   root, so untracked files count. In the shared main tree,
   `logs/wt_archive_2026-10-09/` and `logs/wt_archive_2026-10-10/` hold copies of

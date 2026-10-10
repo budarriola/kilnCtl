@@ -263,12 +263,35 @@ exit 0
     $tParent = [datetime]'2026-01-01T10:00:00'
     Assert-True (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(5) }) $tParent) "adopt: a child created after its parent must be adopted"
     Assert-True (-not (Test-ChildAdoptable ([pscustomobject]@{ CreationDate = $tParent.AddSeconds(-3600) }) $tParent)) "adopt: a process older than its reported parent must NOT be adopted"
-    Assert-True ($srcN -match 'Test-ChildAdoptable \$c \$parentCreated') "adopt: Add-Descendants must call Test-ChildAdoptable"
-    Assert-True ($srcN -notmatch 'taskkill\.exe /T /F /PID \$k') "Stop-Tracked must not use taskkill /T"
+    # Behavioral adoption test: run the real Add-Descendants against a fake process table.
+    $mD = [regex]::Match($srcN, '(?s)function Add-Descendants.*?\r?\n\}')
+    Assert-True $mD.Success "Add-Descendants not found in negtest.ps1"
+    . ([scriptblock]::Create($mD.Value))
+    function Get-CimInstance { param($ClassName, $Filter, $ErrorAction) return $script:fakeProcs }
+    function FP($id, $ppid, $created) { [pscustomobject]@{ ProcessId = $id; ParentProcessId = $ppid; CreationDate = $created; Name = "p$id.exe" } }
+    $script:fakeProcs = @((FP 100 1 $tParent), (FP 200 100 $tParent.AddSeconds(5)), (FP 300 100 $tParent.AddSeconds(-3600)), (FP 400 300 $tParent.AddSeconds(10)), (FP 500 200 $tParent.AddSeconds(7)))
+    $trk = @{}; Add-Descendants 100 $trk
+    Assert-True ($trk.ContainsKey(200) -and $trk.ContainsKey(500)) "adopt: real children (and grandchildren) must be tracked"
+    Assert-True (-not $trk.ContainsKey(300)) "adopt: a stale-PPID process older than its parent must NOT be tracked"
+    Assert-True (-not $trk.ContainsKey(400)) "adopt: the walk must not descend through a stale-PPID node"
+    # LOW-2: root already exited -> final scan still walks its direct children via the supplied creation time
+    $script:fakeProcs = @((FP 200 100 $tParent.AddSeconds(5)), (FP 300 100 $tParent.AddSeconds(-3600)))
+    $trk = @{}; Add-Descendants 100 $trk $tParent
+    Assert-True ($trk.ContainsKey(200) -and -not $trk.ContainsKey(300)) "adopt: exited root with a supplied creation time must still adopt its real children only"
+    $trk = @{}; Add-Descendants 100 $trk
+    Assert-True ($trk.Count -eq 0) "adopt: exited root without a creation time must adopt nothing"
+    Remove-Item Function:\Get-CimInstance
+    # LOW-1/3: no taskkill invocation anywhere in negtest.ps1 may use /T (any argument order)
+    $tk = @($srcN -split "`n" | Where-Object { $_ -match 'taskkill' -and $_ -notmatch '^\s*#' -and $_ -match '(?i)\s/T\b' })
+    Assert-True ($tk.Count -eq 0) "negtest.ps1 must not use taskkill /T anywhere: $($tk -join ' | ')"
+    Assert-True ($srcN -match 'QueryInformationJobObject') "negtest.ps1 must enumerate job members instead of walking PPIDs"
     # INFO: KilnFW host-test failure format is an assertion under -RequireAssertion; a build failure is not.
     $mutKiln = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host '  FAIL calc.c:42: expected 3'; exit 1")
     $r = Run-Neg "reqassert_kilnfw" (@('-Command', $testCmd, '-RequireAssertion') + $mutKiln)
     Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "reqassert_kilnfw: '  FAIL file:line:' must count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    $mutKilnExit0 = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host '  FAIL calc.c:42: informational'; exit 0")
+    $r = Run-Neg "reqassert_exit0" (@('-Command', $testCmd, '-RequireAssertion') + $mutKilnExit0)
+    Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_exit0: assertion text with exit 0 must not be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
     $mutBuild = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'BUILD FAILURES (1)'; Write-Host 'calc.c:42: error: expected'; exit 1")
     $r = Run-Neg "reqassert_buildfail" (@('-Command', $testCmd, '-RequireAssertion') + $mutBuild)
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_buildfail: a build failure must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
@@ -279,7 +302,7 @@ exit 0
     $r = Run-Neg "orphan_reaped" @('-Command', $orphCmd, '-File', 'calc.ps1', '-Find', '-gt 10', '-Replace', '-ge 10')
     Start-Sleep -Milliseconds 800
     $surv = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($tok) })
-    foreach ($sv in $surv) { & taskkill.exe /T /F /PID $sv.ProcessId 2>&1 | Out-Null }
+    foreach ($sv in $surv) { & taskkill.exe /F /PID $sv.ProcessId 2>&1 | Out-Null }
     Assert-True ($r.Exit -eq 0 -and $r.Json.mutations[0].verdict -eq 'CAUGHT') "orphan_reaped: run should be CAUGHT (exit $($r.Exit), $($r.Json.mutations[0].verdict))`n$($r.Text)"
     Assert-True ($surv.Count -eq 0) "orphan_reaped: $($surv.Count) detached grandchild process(es) survived the run"
     Assert-True ($src.Contains('$presetExpect = ''RUN FAILURES \(''')) "kilnfw-host preset must default to its failure-summary header"
@@ -424,6 +447,18 @@ exit 0
     }
     $r = Run-Neg "checkname_none" ($ckExit + @('check_nonexistent.ps1') + $mutCk)
     Assert-True ($r.Exit -eq 2 -and $r.Text -match 'no such check') "checkname none: exit $($r.Exit), expected 2 'no such check'"
+    # L6: an UNTRACKED duplicate (e.g. a stray copy under logs/) must not make the name ambiguous ...
+    $dupDir = Join-Path $repo 'logs\x'
+    New-Item -ItemType Directory -Path $dupDir -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $repo 'sub\deep\check_fixture.ps1') -Destination (Join-Path $dupDir 'check_fixture.ps1')
+    $r = Run-Neg "checkname_untracked_dup" ($ckExit + @('check_fixture.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 0 -and $r.Json.verdict -eq 'ALL_CAUGHT') "checkname untracked dup must be ignored: exit $($r.Exit) verdict $($r.Json.verdict)`n$($r.Text)"
+    # ... but a TRACKED duplicate is ambiguous (exit 2)
+    G -C $repo add -f logs/x/check_fixture.ps1
+    $r = Run-Neg "checkname_tracked_dup" ($ckExit + @('check_fixture.ps1') + $mutCk)
+    Assert-True ($r.Exit -eq 2 -and $r.Text -match 'ambiguous check name') "checkname tracked dup: exit $($r.Exit), expected 2 'ambiguous'`n$($r.Text)"
+    G -C $repo rm --cached -q logs/x/check_fixture.ps1
+    Remove-Item -LiteralPath $dupDir -Recurse -Force -ErrorAction SilentlyContinue
     Step "check name resolution"
     }
 }

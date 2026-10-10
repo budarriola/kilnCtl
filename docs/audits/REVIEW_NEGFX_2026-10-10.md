@@ -54,6 +54,8 @@ No HIGH or MEDIUM findings.
 
 ### LOW-1: `Stop-Tree` (`taskkill /T`) on the root and on workers still walks stale parent PIDs
 
+**FIXED:** `Stop-Tree` now kills job members (`QueryInformationJobObject` list) plus the root handle, never `taskkill /T`; `push_verify.ps1` timeout uses `Process.Kill()`.
+
 `tools/negtest.ps1:331` (`Stop-Tree`), which is called at:
 
 - `:479` (timeout)
@@ -85,6 +87,8 @@ object, so PID reuse cannot add a stranger. Where no job exists, walk with the s
 
 ### LOW-2: build children spawned in the last scan window can now escape reaping
 
+**FIXED:** normal exit kills remaining non-spare job members before disarming; final scan gets `$p.StartTime` and no longer returns early.
+
 These lines are involved:
 
 - `tools/negtest.ps1:405`: `if (-not $byId.ContainsKey($rootId)) { return }`
@@ -113,6 +117,8 @@ The root PID cannot be reused while `$p.Handle` is held.
 
 ### LOW-3: the new code is mostly untested; mutations survive
 
+**FIXED:** L6 untracked/tracked-duplicate tests, behavioral `Add-Descendants` test, file-wide `taskkill /T` guard; push_verify retry test not added (optional).
+
 `tools/check_negtest.ps1:258-267` and `:418-426`; `tools/check_push_verify.ps1`.
 
 - **L6 has no test.** Neither a tracked duplicate nor an untracked duplicate is exercised.
@@ -135,12 +141,16 @@ The root PID cannot be reused while `$p.Handle` is held.
 
 ### LOW-4: the audit docs cite pre-rebase SHAs
 
+**FIXED:** citations corrected (`93df083f2`, `44ecaf482`).
+
 `docs/audits/REVIEW_FIREFX3_TOOLFX2_2026-10-10.md` (B-MEDIUM-1 and B-LOW fix lines) cites
 `46afbf427`. `docs/audits/REVIEW_R2ACE_TOOLFX4_2026-10-10.md` (L6) cites `4bab578a4`. Both objects
 exist locally, but no remote branch contains them. The commits that actually landed are
 `93df083f2` and `44ecaf482`. Fix: correct the two citations.
 
 ### INFO
+
+**INFO item 1 FIXED:** under `-RequireAssertion`, CAUGHT also requires a nonzero exit.
 
 - **`-RequireAssertion` CAUGHT does not require a nonzero exit** (`tools/negtest.ps1:559`). Suppose
   a mutated run exits 0 but prints a non-gating `  FAIL x.c:1: ...` line, for example from an

@@ -328,7 +328,6 @@ function Set-Mutation([string]$copy, $mut) {
 
 # ---------------------------------------------------------------- running
 
-function Stop-Tree([int]$id) { & taskkill.exe /T /F /PID $id 2>&1 | Out-Null }
 
 # Win32 Job Object: kill is atomic for every descendant (taskkill /T only kills a
 # snapshot of the tree; a grandchild spawned after the snapshot escapes and keeps
@@ -343,6 +342,22 @@ public static class NegJob {
     [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr retLen);
+    // Live members of the job (JobObjectBasicProcessIdList = 3). Membership is a property of the
+    // process object, so a reused PID or a stale parent PID can never add a stranger.
+    public static int[] Members(IntPtr job) {
+        int max = 4096;
+        int size = 8 + max * IntPtr.Size;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i += 8) Marshal.WriteInt64(buf, i, 0);
+            if (!QueryInformationJobObject(job, 3, buf, size, IntPtr.Zero)) return new int[0];
+            int n = Marshal.ReadInt32(buf, 4);
+            int[] r = new int[n];
+            for (int i = 0; i < n; i++) r[i] = (int)Marshal.ReadIntPtr(buf, 8 + i * IntPtr.Size).ToInt64();
+            return r;
+        } finally { Marshal.FreeHGlobal(buf); }
+    }
     public static IntPtr Create() {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) return IntPtr.Zero;
@@ -374,6 +389,23 @@ public static class NegJob {
 }
 
 $script:SpareNames = @('mspdbsrv.exe', 'vctip.exe', 'conhost.exe', 'ccache.exe')
+# Kill every live member of the job except shared daemons, through a handle (Process.Kill), no taskkill /T.
+function Stop-JobMembers($job) {
+    if ($job -eq [IntPtr]::Zero) { return }
+    foreach ($id in [NegJob]::Members($job)) {
+        if ($id -eq $PID) { continue }
+        try {
+            $mp = [Diagnostics.Process]::GetProcessById($id)
+            if ($script:SpareNames -contains ("$($mp.ProcessName).exe").ToLowerInvariant()) { continue }
+            $mp.Kill()
+        } catch { }
+    }
+}
+# Replacement for `taskkill /T`: job members when a job exists, else just the root (never a PPID walk).
+function Stop-Tree($proc, $job) {
+    if ($job -and $job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }
+    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+}
 function Stop-CopyProcesses([string]$copy) {
     # Belt and braces after the job kill: anything whose command line names the copy.
     $deadline = (Get-Date).AddSeconds(15)
@@ -395,18 +427,20 @@ function Test-ChildAdoptable($child, $parentCreated) {
     if ($null -eq $child.CreationDate -or $null -eq $parentCreated) { return $false }
     return ([datetime]$child.CreationDate -ge [datetime]$parentCreated)
 }
-function Add-Descendants([int]$rootId, $tracked) {
+function Add-Descendants([int]$rootId, $tracked, $rootCreated = $null) {
     $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
     $kids = @{}
     foreach ($q in $all) { if (-not $kids.ContainsKey([int]$q.ParentProcessId)) { $kids[[int]$q.ParentProcessId] = @() }; $kids[[int]$q.ParentProcessId] += $q }
     $stack = New-Object System.Collections.Stack
     $byId = @{}
     foreach ($q in $all) { $byId[[int]$q.ProcessId] = $q }
-    if (-not $byId.ContainsKey($rootId)) { return }
+    # The root may already have exited (final scan): walk its direct children using the creation time
+    # the caller captured while holding the process handle (the PID cannot be reused meanwhile).
+    if (-not $byId.ContainsKey($rootId) -and $null -eq $rootCreated) { return }
     $stack.Push($rootId)
     while ($stack.Count -gt 0) {
         $id = [int]$stack.Pop()
-        $parentCreated = $byId[$id].CreationDate
+        $parentCreated = if ($byId.ContainsKey($id)) { $byId[$id].CreationDate } elseif ($id -eq $rootId) { $rootCreated } else { $null }
         foreach ($c in @($kids[$id])) {
             if (-not $c -or $c.ProcessId -eq $PID) { continue }
             if (-not (Test-ChildAdoptable $c $parentCreated)) { continue }
@@ -469,27 +503,29 @@ exit 0
     $job = [NegJob]::Create()
     if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
     $script:liveChild = $p
+    $script:liveJob = $job
     $tracked = @{}
     $script:liveTracked = $tracked
     $nextScan = 0
     $limitMs = [long]($spec.timeout_min * 60000)
     $timedOut = $false
     while (-not $p.WaitForExit(500)) {
-        if ($sw.ElapsedMilliseconds -ge $nextScan) { try { Add-Descendants $p.Id $tracked } catch { }; $nextScan = $sw.ElapsedMilliseconds + 1500 }
-        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
+        if ($sw.ElapsedMilliseconds -ge $nextScan) { try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }; $nextScan = $sw.ElapsedMilliseconds + 1500 }
+        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p $job; $p.WaitForExit(10000) | Out-Null; break }
     }
-    try { Add-Descendants $p.Id $tracked } catch { }
+    try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }
     if ($timedOut) { Stop-CopyProcesses $copy }
     # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
     # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
     # sessions' builds use. Stragglers are handled by the targeted Stop-CopyProcesses below.
     if ($job -ne [IntPtr]::Zero) {
-        if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { [NegJob]::Disarm($job) | Out-Null }
+        if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { Stop-JobMembers $job; [NegJob]::Disarm($job) | Out-Null }
         [NegJob]::Close($job)
     }
     Stop-Tracked $tracked
     if (-not $timedOut) { Stop-CopyProcesses $copy }
     $script:liveChild = $null
+    $script:liveJob = $null
     $script:liveTracked = $null
     if ($timedOut) { $script:lastTimedOut = $true }
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }
@@ -556,7 +592,8 @@ function Invoke-Chunk($spec) {
                 $verdict = 'TIMEOUT'; $note = "no result within $($spec.timeout_min) min; process tree killed"
             } elseif ($pat) {
                 $lines = Get-MatchLines $r.Text $pat
-                if ($lines.Count -gt 0) { $verdict = 'CAUGHT' }
+                if ($lines.Count -gt 0 -and (-not $RequireAssertion -or $r.Exit -ne 0)) { $verdict = 'CAUGHT' }
+                elseif ($lines.Count -gt 0) { $note = "-RequireAssertion: assertion text matched but the run exited 0 (non-gating output)" }
                 elseif ($r.Exit -ne 0) { $note = "exit $($r.Exit) but the expect pattern never appeared: failed for another reason (compile error?)"; $lines = Get-MatchLines $r.Text $script:FailRegex }
                 else { $note = "exit 0 and no expect-pattern match" }
             } else {
@@ -569,7 +606,7 @@ function Invoke-Chunk($spec) {
     } catch {
         $res.error = "$($_.Exception.Message)"
     } finally {
-        if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+        if ($script:liveChild) { try { Stop-Tree $script:liveChild $script:liveJob } catch { } }
         if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
         if ($script:liveCopy) {
             try { Stop-CopyProcesses $script:liveCopy } catch { }
@@ -901,8 +938,8 @@ try {
     $script:result.error = "$($_.Exception.Message)"
     $exitCode = 2
 } finally {
-    foreach ($wk in $workers) { try { if (-not $wk.P.HasExited) { Stop-Tree $wk.P.Id } } catch { } }
-    if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+    foreach ($wk in $workers) { try { if (-not $wk.P.HasExited) { Stop-Tree $wk.P $null } } catch { } }
+    if ($script:liveChild) { try { Stop-Tree $script:liveChild $script:liveJob } catch { } }
     if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
     if ($script:liveCopy) { Remove-Copy $RepoRoot $script:liveCopy | Out-Null; $script:liveCopy = $null }
     if ($workers.Count -gt 0) { Start-Sleep -Seconds 1; Remove-StaleCopies $CopyRoot }

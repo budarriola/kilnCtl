@@ -92,25 +92,47 @@ if ($Branch -match '^([^/]+)/(.+)$' -and ($remoteList -contains $Matches[1])) {
 $Branch = "refs/remotes/$remote/$branchName"
 
 Write-Host "Fetching $remote $branchName ..."
-# Bounded fetch: run git as a child process, never prompt for credentials, kill the tree on timeout.
+# Bounded fetch: run git as a child process, never prompt for credentials, kill the fetch process on timeout.
 # P1: fetch with an EXPLICIT refspec so refs/remotes/<remote>/<branch> is updated even when the
 # remote's configured fetch refspec does not cover this branch (a plain `git fetch` then exits 0 and
 # leaves the ref stale, which would report LANDED off old data).
 $env:GIT_TERMINAL_PROMPT = "0"
+# Job object: a timed-out fetch is killed with everything it spawned (git-remote-https etc.) by job
+# membership, never `taskkill /T` (which walks parent PIDs that can be stale and hit an unrelated process).
+if (-not ('PvJob' -as [type])) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class PvJob {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr CreateJobObject(IntPtr a, string name);
+    [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
+    [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    public static IntPtr Create() { return CreateJobObject(IntPtr.Zero, null); }
+    public static bool Assign(IntPtr j, IntPtr p) { return AssignProcessToJobObject(j, p); }
+    public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
+    public static void Close(IntPtr j) { CloseHandle(j); }
+}
+"@
+}
+$fetchJob = [PvJob]::Create()
 $outTmp = [IO.Path]::GetTempFileName(); $errTmp = [IO.Path]::GetTempFileName()
 $fetchOk = $false; $fetchMsg = ""
 try {
     $fetchProc = Start-Process -FilePath "git" -NoNewWindow -PassThru -RedirectStandardOutput $outTmp -RedirectStandardError $errTmp `
         -ArgumentList @("-C", "`"$repoRoot`"", "fetch", "--no-tags", $remote, "+refs/heads/${branchName}:refs/remotes/$remote/$branchName")
     $null = $fetchProc.Handle
+    if ($fetchJob -ne [IntPtr]::Zero) { [void][PvJob]::Assign($fetchJob, $fetchProc.Handle) }
     if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
-        & taskkill /PID $fetchProc.Id /T /F *>$null
+        if ($fetchJob -ne [IntPtr]::Zero) { [PvJob]::Kill($fetchJob) }
+        try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }
         $null = $fetchProc.WaitForExit(5000)
         $fetchMsg = "timed out after ${FetchTimeoutSec}s"
     } elseif ($fetchProc.ExitCode -ne 0) {
         $fetchMsg = "failed (exit $($fetchProc.ExitCode))"
     } else { $fetchOk = $true }
 } finally {
+    if ($fetchJob -ne [IntPtr]::Zero) { [PvJob]::Close($fetchJob) }
     foreach ($tf in @($outTmp, $errTmp)) {
         # a killed fetch child can still hold the file for a moment: best-effort retry
         for ($i = 0; $i -lt 5; $i++) { try { [IO.File]::Delete($tf); break } catch { Start-Sleep -Milliseconds 300 } }
