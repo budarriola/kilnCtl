@@ -77,6 +77,30 @@ class RunningGuardsFailClosedTests(unittest.TestCase):
         with um.patch.object(m_dbg._srv._profiles, "get_exec_status", side_effect=RuntimeError("x")):
             self.assertIn("could not be read", m_dbg._esp_profile_running_refusal("halt"))
 
+    def _pico_program(self, exec_state, at_state, **kw):
+        at = um.MagicMock(state=at_state)
+        at.state_name = f"at{at_state}"
+        stale = um.MagicMock(stale=False)
+        with um.patch.object(m_dbg._srv._profiles, "get_exec_status", return_value=_exec(exec_state)),              um.patch.object(m_dbg._srv._autotune, "get_status", return_value=at),              um.patch.object(m_dbg.stale_check, "check_saftyfw_stale", return_value=stale),              um.patch.object(m_dbg, "_archive_flashed_safty_elf", return_value=""),              um.patch.object(m_dbg.debug_probe, "program", return_value=(True, "ok")) as prog:
+            out = m_dbg.debug_program("pico", confirm=True, **kw)
+        return out, prog
+
+    def test_debug_program_pico_refused_during_autotune(self):
+        out, prog = self._pico_program(0, 2)
+        self.assertIn("autotune", out)
+        self.assertIn("refusing", out)
+        prog.assert_not_called()
+
+    def test_debug_program_pico_allow_running_overrides(self):
+        out, prog = self._pico_program(0, 2, allow_running=True)
+        self.assertIn("programmed pico OK", out)
+        prog.assert_called_once()
+
+    def test_debug_program_pico_idle_passes(self):
+        out, prog = self._pico_program(0, 0)
+        self.assertIn("programmed pico OK", out)
+        prog.assert_called_once()
+
     def test_wifi_unknown_profile_state_refused(self):
         with um.patch.object(m_wifi._srv._profiles, "get_exec_status", return_value=_exec(9)):
             self.assertIn("refused", m_wifi._wifi_write_refusal(True, "wifi_connect"))

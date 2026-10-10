@@ -486,6 +486,11 @@ function Invoke-Chunk($spec) {
             $res.baseline = [ordered]@{ passed = $pass; exit = $r.Exit; timed_out = $r.TimedOut; seconds = $r.Seconds; log = $r.Log
                 lines = $(if ($hit.Count) { $hit } elseif (-not $pass) { Get-MatchLines $r.Text $script:FailRegex } else { @() }) }
             if (-not $pass) {
+                # B6: still list every mutation of this chunk (never run), so the report is complete.
+                foreach ($m in $spec.mutations) {
+                    $res.mutations += [ordered]@{ index = $m.index; name = $m.name; verdict = 'BASELINE-FAILED'; exit = $null
+                        note = "not run: baseline failed"; matched = @(); seconds = 0; log = $null }
+                }
                 $why = if ($r.TimedOut) { "timed out" } elseif ($r.Exit -ne 0) { "exit $($r.Exit)" } else { "expect pattern already present" }
                 throw "BASELINE FAILED ($why): the unmutated command does not pass, so no failure can be attributed to a mutation. Log: $($r.Log)"
             }

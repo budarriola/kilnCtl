@@ -297,6 +297,7 @@ try {
     $hostPsExe = (Get-Process -Id $PID).Path
     function Add-HostBuild {
         param([string]$Name, [string]$ExePath, [string]$BuildCmd)
+        $script:allHostNames += $Name
         if (Test-Path $ExePath) { Remove-Item -Force $ExePath }
         $safe = [regex]::Replace($Name, '[^A-Za-z0-9]+', '_')
         $cmdFile = Join-Path $outDir ("job_" + $safe + ".cmd.txt")
@@ -320,6 +321,7 @@ try {
         }
     }
     $exitCodes = @{}
+    $allHostNames = @()
     $buildFailures = @()
     function Complete-HostBuilds {
         Start-HostQueueItems
@@ -648,14 +650,6 @@ try {
     }
     $mainExit = $exitCodes["saftyfw_host_tests.exe"]
     $fuzzExit = $exitCodes["kilnlink_fuzz_payloads.exe"]
-    $halSpiPicoExit = $exitCodes["hal_spi_pico_tests.exe"]
-    $configStoreFlashExit = $exitCodes["config_store_flash_tests.exe"]
-    $blRecoveryExit = $exitCodes["bootloader_recovery_update_tests.exe"]
-    $safetyCoreHostExit = $exitCodes["safety_core_host_tests.exe"]
-    $linkTaskFuzzExit = $exitCodes["link_task_fuzz_tests.exe"]
-    $thermoTaskExit = $exitCodes["thermo_task_tests.exe"]
-    $wdTaskExit = $exitCodes["watchdog_task_tests.exe"]
-    $dtTaskExit = $exitCodes["discrete_task_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -663,17 +657,11 @@ try {
     # code below was already correct (first non-zero wins), but the tail read
     # as a pass regardless. Print one explicit aggregate verdict, naming every
     # executable that failed, so the printed tail always matches the exit code.
-    $results = [ordered]@{
-        "saftyfw_host_tests.exe"       = $mainExit
-        "kilnlink_fuzz_payloads.exe"   = $fuzzExit
-        "hal_spi_pico_tests.exe"       = $halSpiPicoExit
-        "config_store_flash_tests.exe" = $configStoreFlashExit
-        "bootloader_recovery_update_tests.exe" = $blRecoveryExit
-        "safety_core_host_tests.exe"   = $safetyCoreHostExit
-        "link_task_fuzz_tests.exe"     = $linkTaskFuzzExit
-        "thermo_task_tests.exe"        = $thermoTaskExit
-        "watchdog_task_tests.exe"      = $wdTaskExit
-        "discrete_task_tests.exe"      = $dtTaskExit
+    # Derived from every Add-HostBuild registration, so a new executable can
+    # never be silently ignored. A missing entry (never ran) counts as failure.
+    $results = [ordered]@{}
+    foreach ($n in $allHostNames) {
+        $results[$n] = if ($exitCodes.ContainsKey($n)) { $exitCodes[$n] } else { 1 }
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
@@ -683,35 +671,13 @@ try {
         Write-Host "SAFTYFW HOST TESTS: all passed"
     }
 
-    if ($mainExit -ne 0) {
-        exit $mainExit
-    }
     if ($fuzzExit -ne 0) {
         Write-Host "kilnlink_fuzz_payloads.exe failed: rerun with KILNLINK_FUZZ_SEED=<seed printed above> to reproduce."
-        exit $fuzzExit
     }
-    if ($halSpiPicoExit -ne 0) {
-        exit $halSpiPicoExit
+    foreach ($e in $results.GetEnumerator()) {
+        if ($e.Value -ne 0) { exit $e.Value }
     }
-    if ($configStoreFlashExit -ne 0) {
-        exit $configStoreFlashExit
-    }
-    if ($safetyCoreHostExit -ne 0) {
-        exit $safetyCoreHostExit
-    }
-    if ($linkTaskFuzzExit -ne 0) {
-        exit $linkTaskFuzzExit
-    }
-    if ($blRecoveryExit -ne 0) {
-        exit $blRecoveryExit
-    }
-    if ($thermoTaskExit -ne 0) {
-        exit $thermoTaskExit
-    }
-    if ($wdTaskExit -ne 0) {
-        exit $wdTaskExit
-    }
-    exit $dtTaskExit
+    exit 0
 } finally {
     Exit-BuildLock -Lock $buildLock
 }

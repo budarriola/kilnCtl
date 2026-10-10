@@ -221,6 +221,28 @@ static void test_s1(void)
     }
 }
 
+static void test_s5_fault_bit_terms(void)
+{
+    TEST_SECTION("S5 -- each Fault Status bit alone (finite tc_c, tc_valid, no SPI failure) is a bad read");
+    struct { uint8_t bit; const char *name; } cases[] = {
+        { SAFETY_THERMO_FAULT_OPEN, "OPEN" },
+        { SAFETY_THERMO_FAULT_OVUV, "OVUV" },
+        { SAFETY_THERMO_FAULT_TCRANGE, "TCRANGE" },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.fault_bits = cases[i].bit;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_bad_streak == 1, cases[i].name);
+        in.fault_bits = 0;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_bad_streak == 0, "clean read after it resets the streak");
+    }
+}
+
 static void test_s5(void)
 {
     TEST_SECTION("S5 -- safety thermocouple invalid (graduated)");
@@ -4331,6 +4353,7 @@ void run_test_safety_guards(void)
     test_s1();
     test_s1_ceiling_properties();
     test_s5();
+    test_s5_fault_bit_terms();
     test_s5_not_installed();
     test_s7();
     test_s11();

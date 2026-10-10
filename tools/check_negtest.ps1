@@ -267,6 +267,7 @@ exit 0
     $r = Run-Neg "baselinefail_par" @('-Command', ($testCmd + ' -ForceFail'), '-Mutations', $mfb, '-Parallel', '2')
     Assert-True ($r.Exit -eq 2) "baselinefail_par: exit $($r.Exit), expected 2"
     Assert-True (@($r.Json.mutations | Where-Object { $_.verdict -in 'CAUGHT', 'MISSED' }).Count -eq 0) "baselinefail_par: a CAUGHT/MISSED verdict was reported on a failing baseline"
+    Assert-True (@($r.Json.mutations).Count -eq 2) "baselinefail_par: expected both mutations listed on a failing baseline, got $(@($r.Json.mutations).Count)"
     Assert-True ("$($r.Text)" -notmatch '(?m)^CAUGHT\s') "baselinefail_par: printed a CAUGHT line on a failing baseline"
     Step "baseline"
     }

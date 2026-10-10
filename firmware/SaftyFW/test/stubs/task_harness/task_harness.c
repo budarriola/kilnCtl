@@ -1,6 +1,8 @@
 #include "task_harness.h"
 
 #include <setjmp.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "hardware/gpio.h"
@@ -21,10 +23,12 @@ static uint32_t            s_delay_calls;
 static uint32_t            s_wait_calls;
 static int                 s_dummy_task;
 static int                 s_dummy_sem;
+static bool                s_running;
 
 void th_reset(void)
 {
     s_task_fn = NULL;
+    s_running = false;
     s_tick = 0;
     s_pending = 0;
     s_wait_hook = NULL;
@@ -43,14 +47,26 @@ TaskFunction_t th_captured_task_fn(void) { return s_task_fn; }
 void th_run_captured_task(void)
 {
     if (s_task_fn == NULL) {
-        return;
+        fprintf(stderr, "task_harness: th_run_captured_task() with no captured task\n");
+        fflush(stderr);
+        exit(2);
     }
     if (setjmp(s_jmp) == 0) {
+        s_running = true;
         s_task_fn(NULL);
     }
+    s_running = false;
 }
 
-void th_abort(void) { longjmp(s_jmp, 1); }
+void th_abort(void)
+{
+    if (!s_running) {
+        fprintf(stderr, "task_harness: th_abort() outside a th_run_captured_task() run\n");
+        fflush(stderr);
+        exit(2);
+    }
+    longjmp(s_jmp, 1);
+}
 
 void       th_set_tick(TickType_t t) { s_tick = t; }
 TickType_t th_get_tick(void) { return s_tick; }

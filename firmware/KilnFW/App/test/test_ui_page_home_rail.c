@@ -93,6 +93,20 @@ void run_test_ui_page_home_rail(void)
                    "unit_entry_display_round: 100.3 rounds down");
         TEST_CHECK(ui_unit_entry_to_display(100.6f, UNIT_PREF_CELSIUS, UNIT_PREF_KIND_ABSOLUTE) == 101.0f,
                    "unit_entry_display_round: 100.6 rounds up");
+        /* A4: Fahrenheit clamp and rounding. */
+        c = ui_unit_entry_to_celsius(-500.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_ABSOLUTE, 20.0f, 1400.0f);
+        TEST_CHECK(c == 20.0f, "unit_entry_f_lower_clamp: -500 F clamps to the Celsius minimum");
+        c = ui_unit_entry_to_celsius(1.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_RATE, 50.0f, 1000.0f);
+        TEST_CHECK(c == 50.0f, "unit_entry_f_rate_lower_clamp: 1 F/hr clamps to the rate minimum");
+        c = ui_unit_entry_to_celsius(9999.0f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_RATE, 0.0f, 1000.0f);
+        TEST_CHECK(c == 1000.0f, "unit_entry_f_rate_upper_clamp: huge F/hr clamps to the rate maximum");
+        /* 100 C = 212 F exactly; 100.3 C = 212.54 F -> 213; 100.2 C = 212.36 F -> 212. */
+        TEST_CHECK(ui_unit_entry_to_display(100.3f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_ABSOLUTE) == 213.0f,
+                   "unit_entry_f_display_round: 212.54 F rounds up to 213");
+        TEST_CHECK(ui_unit_entry_to_display(100.2f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_ABSOLUTE) == 212.0f,
+                   "unit_entry_f_display_round: 212.36 F rounds down to 212");
+        TEST_CHECK(ui_unit_entry_to_display(100.3f, UNIT_PREF_FAHRENHEIT, UNIT_PREF_KIND_RATE) == 181.0f,
+                   "unit_entry_f_rate_round: 180.54 F/hr rounds up to 181");
     }
 
     TEST_SECTION("ui_page_home_rail: format_kiln_watts");
