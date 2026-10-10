@@ -116,6 +116,7 @@ is expected behavior for a scope-kiln factory reset. The defect is in process an
    already-reviewed dump as a fresh one. Either have factory reset scope kiln/all also erase the
    coredump, or have crash_report cross-check the dump's `app_elf_sha256` and not stamp it with the
    running `fw_build`. (Another agent is already working on the re-stamp.)
+   **DONE (coredump half) FRSHA**: `factory_reset.c` scope kiln and all call `crash_report_clear()` (record ack + coredump erase) on the flash worker; wifi/profiles do not; host-tested in `test_ota_http.c`. The re-stamp cross-check half is the other agent's.
 5. Board recovery (owner or bench agent with write access):
    - The newest backup taken before the wipe is
      `logs/backup_export/kilnctl_backup_20261008T220350Z.json` (2026-10-08 22:03Z).
