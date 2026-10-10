@@ -89,6 +89,7 @@ try {
         (Join-Path $testDir "test_ota_interlock.c"),
         (Join-Path $testDir "test_heat_interlock.c"),
         (Join-Path $testDir "test_heat_enable.c"),
+        (Join-Path $testDir "test_safety_cfg_persist_verdict.c"),
         (Join-Path $testDir "test_thermo_combine.c"),
         (Join-Path $testDir "test_profile_feasibility.c"),
         (Join-Path $testDir "test_profile_plan_curve.c"),

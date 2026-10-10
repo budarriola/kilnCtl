@@ -658,7 +658,11 @@ bool estop_verification_is_verified(void)
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
-    if (out) memset(out, 0, sizeof(*out));
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        /* F3: a persistent commit now needs a DIAG with VOLATILE_DIRTY clear. */
+        out->diag_ever_received = true;
+    }
     return ESP_OK;
 }
 

@@ -32,6 +32,8 @@
 #include <string.h>
 
 #include "esp_err.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "estop_verification.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
@@ -41,6 +43,7 @@
                                     * deliberately excludes. No cycle: that
                                     * header includes only safety_ceiling_
                                     * policy.h/safety_link.h, never this one. */
+#include "safety_cfg_persist_verdict.h"
 #include "safety_cfg_store.h"
 #include "safety_link.h"
 
@@ -175,9 +178,13 @@ static bool param_value_equal(uint8_t type, const kilnlink_param_value_t *a, con
  * -- the caller's own backoff/retry-next-tick contract already covers
  * this, same as safety_cfg_store_maybe_refetch()'s existing non-blocking
  * use. */
+/* F3: how long a blocking caller waits for a post-commit DIAG to clear VOLATILE_DIRTY. */
+#define SAFETY_CFG_PERSIST_WAIT_MS 3000
+#define SAFETY_CFG_PERSIST_POLL_MS 100
+
 static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_pair_t *pairs, int n_pairs,
                                    char *reason_out, size_t reason_cap, safety_ceiling_refusal_class_t *out_class,
-                                   bool nonblocking_refetch)
+                                   bool nonblocking_refetch, bool require_persisted)
 {
     if (out_class) {
         *out_class = SAFETY_CEILING_REFUSAL_OTHER;
@@ -292,6 +299,38 @@ static bool confirm_commit_landed(SafetyLinkClass *link, const safety_cfg_post_p
                          "are discarded after 5 s without a context frame or an ESP reboot before the commit)",
                          name, (unsigned)pairs[i].param_id);
             }
+            return false;
+        }
+    }
+    if (require_persisted) {
+        /* F3 (safety link review 2026-10-09): the read-back above serves the
+         * Pico's RAM record, which matches a prior volatile install even when
+         * the Pico refused the persistent write. Also require DIAG
+         * CONFIG_VOLATILE_DIRTY clear. The DIAG may predate the commit, so a
+         * blocking caller waits briefly for the next one; the poll-task
+         * (nonblocking) caller must not sleep -- it is what delivers DIAG --
+         * and reports unconfirmed, retried on its own backoff. */
+        safety_cfg_persist_verdict_t v = SAFETY_CFG_PERSIST_VERDICT_UNKNOWN;
+        for (int waited = 0;; waited += SAFETY_CFG_PERSIST_POLL_MS) {
+            safety_link_status_t st;
+            memset(&st, 0, sizeof(st));
+            if (safety_link_get_status(link, &st) == ESP_OK) {
+                v = safety_cfg_persist_verdict(st.diag_ever_received, st.diag_flags);
+            }
+            if (v == SAFETY_CFG_PERSIST_VERDICT_PERSISTED || nonblocking_refetch ||
+                waited >= SAFETY_CFG_PERSIST_WAIT_MS) {
+                break;
+            }
+            vTaskDelay(pdMS_TO_TICKS(SAFETY_CFG_PERSIST_POLL_MS));
+        }
+        if (v != SAFETY_CFG_PERSIST_VERDICT_PERSISTED) {
+            snprintf(reason_out, reason_cap,
+                     v == SAFETY_CFG_PERSIST_VERDICT_STILL_DIRTY
+                         ? "the safety processor reads back the submitted values but still reports them "
+                           "UNSAVED (RAM differs from flash; a persistent write is refused while ARMED) "
+                           "-- NOT persisted, will revert on a Pico reboot"
+                         : "the safety processor reads back the submitted values but this board has no "
+                           "DIAG to confirm they reached flash -- treating the write as UNCONFIRMED");
             return false;
         }
     }
@@ -425,7 +464,9 @@ static safety_ceiling_refusal_class_t reject_reason_to_refusal_class(uint8_t rea
  * sends SAFETY_CMD_APPLY_CONFIG_VOLATILE (0x2D) instead of COMMIT_CONFIG --
  * installs into the Pico's live RAM record, never reaches flash. The Pico
  * refuses it (REJECT_ARMED on the wire) only while heat is POSSIBLE and the
- * install changes a trip-relevant field; an idle, de-energized board accepts it. confirm_commit_landed() below needs no changes for this:
+ * install changes a trip-relevant field; an idle, de-energized board accepts it.
+ * confirm_commit_landed() below only requires the DIAG volatile-dirty bit clear for a
+ * PERSISTENT commit (F3); the value comparison needs no changes for this:
  * it only ever forces a live GET_CONFIG_PAGE re-fetch and compares values,
  * which is identical regardless of which command produced the live state.
  * Every existing caller passes false (unchanged behaviour); only kiln_cfg_
@@ -509,7 +550,8 @@ static bool apply_pairs_ex(SafetyLinkClass *link, const safety_cfg_post_pair_t *
          * write landed (see confirm_commit_landed()'s header comment for the
          * full audit trail) -- force a live read-back before this function
          * is allowed to report success. */
-        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch)) {
+        if (!confirm_commit_landed(link, pairs, n_pairs, reason_out, reason_cap, out_class, nonblocking_refetch,
+                                   /*require_persisted=*/!volatile_install)) {
             return false;
         }
         /* Landed for real -- now invalidate a standing E-stop verification if
