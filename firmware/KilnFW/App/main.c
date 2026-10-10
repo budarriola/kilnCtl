@@ -42,6 +42,7 @@
 #include "flash_worker.h"
 #include "kiln_io.h"
 #include "pref_cfg_fs.h"
+#include "cfg_fs.h"
 #include "cfg_fs_mount.h"
 #include "relay_authority.h"
 #include "safety_link.h"

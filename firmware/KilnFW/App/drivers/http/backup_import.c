@@ -3656,9 +3656,8 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const ch
         }
         if (didx >= thermo_count) {
             snprintf(err_msg, err_cap,
-                     "zone %u in the backup is not a configured zone on this board (%u configured); the backup "
-                     "does not carry the zone count (backup version below 7), so set it first (Thermocouples & Zones settings). "
-                     "Nothing was written.",
+                     "zone %u in the backup is not a configured zone on this board (%u configured); set the "
+                     "zone count under Thermocouples & Zones first. Nothing was written.",
                      (unsigned)didx, (unsigned)thermo_count);
             return false;
         }
