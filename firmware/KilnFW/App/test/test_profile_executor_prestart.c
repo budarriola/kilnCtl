@@ -11673,6 +11673,41 @@ static void test_monitor_only_zone_tick_wiring(void)
     reset_test_thermo_readings();
 }
 
+/* Firing review 2026-10-09 item 2: a heater zone's thermal guard runs BEFORE
+ * its relay write, so a tripping reading never produces ON-then-OFF. */
+static bool relay_log_has_on_write(uint8_t mask_bit)
+{
+    for (int k = 0; k < g_aux_write_log_n; k++) {
+        if ((g_aux_write_log[k].mask & mask_bit) && (g_aux_write_log[k].value & mask_bit)) return true;
+    }
+    return false;
+}
+
+static void test_guard_trip_tick_never_writes_relay_on_first(void)
+{
+    TEST_SECTION("firing review item 2: on the tick a zone's guard trips (reading over max_temp_c while PID still "
+                 "wants heat), its relay is never written ON before the guard's OFF");
+    char err[192];
+    monitor_only_tick_setup(false);
+    err[0] = '\0';
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "run starts");
+    g_aux_write_log_n = 0;
+    for (int i = 0; i < 30; i++) monitor_only_one_tick(i, 25.0f);
+    TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "still RUNNING while cold");
+    TEST_CHECK(relay_log_has_on_write(0x02), "sanity: a cold heater zone 1 does get its relay written ON");
+
+    g_stub_max_temp_c[1] = 150.0f;
+    s_exec.zones[1].guard_cfg.max_temp_c = 150.0f; /* operator lowers the ceiling mid-run */
+    g_aux_write_log_n = 0;
+    monitor_only_one_tick(30, 160.0f); /* over the 150 C ceiling, far below the 600 C target: PID still wants heat */
+    TEST_CHECK(s_exec.zones[1].guard_state.reason == THERMAL_GUARD_TRIP_MAX_TEMP, "the over-temperature guard tripped");
+    TEST_CHECK(!relay_log_has_on_write(0x02),
+               "MUST GO RED if the relay is commanded before the guard: no ON write to the tripping zone's relay");
+    profile_executor_halt();
+    memset(g_stub_relay_mask, 0, sizeof(g_stub_relay_mask));
+    reset_test_thermo_readings();
+}
+
 static void run_test_aux_wp3(void)
 {
     test_aux_start_control_run_succeeds();
@@ -11694,6 +11729,7 @@ static void run_test_aux_wp3(void)
     test_aux_off_pending_retried_by_task_loop();
     test_aux_fault_drop_via_task_tick();
     test_monitor_only_zone_tick_wiring();
+    test_guard_trip_tick_never_writes_relay_on_first();
     test_relay_cycles_persist_runs_after_lock_give();
     test_monitor_only_zone_does_not_drive_run_start_baseline();
     test_monitor_only_zone_does_not_drive_warm_start_pick();

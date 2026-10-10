@@ -1564,12 +1564,18 @@ void executor_task_entry(void *arg)
              * known) and applied there instead. Heater zones are
              * unaffected: this call and its position are bit-identical to
              * before this feature existed. */
-            if (!zone_on_off[zi] && !z->monitor_only) {
-                apply_relay(zi, want_relay_on[zi]);
-                if (z->heat_blocked) {
-                    z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
-                }
-                profile_executor_account_relay_starvation(z, dt_s);
+            /* Firing review 2026-10-09 item 2: a heater zone's relay is
+             * written AFTER this tick's thermal_guard_tick(), so a tripping
+             * reading never produces an ON write followed by the guard's OFF.
+             * The guards only need to know whether heat is authority-blocked
+             * this tick, a pure query that apply_relay() repeats for its own
+             * gate (and uses for its edge logging, so z->heat_blocked itself
+             * is still written only there). */
+            bool heater_zone_applies_relay = !zone_on_off[zi] && !z->monitor_only;
+            bool heat_blocked_for_guards = z->heat_blocked;
+            if (heater_zone_applies_relay) {
+                uint32_t blocked_sources_pre = 0;
+                heat_blocked_for_guards = relay_authority_zone_blocked(s_exec.safety, zi, &blocked_sources_pre);
             }
 
             /* Guards 1/2/3/7 all gate their multi-tick accumulation windows
@@ -1652,7 +1658,7 @@ void executor_task_entry(void *arg)
              * corrected note on relay_authority_zone_blocked() not feeding
              * back into that file's duty -- see that file's comment; that
              * file's guard wiring is unchanged by this pass.) */
-            float commanded_duty_for_guards = profile_executor_guard_commanded_duty(z->heat_blocked, z->duty);
+            float commanded_duty_for_guards = profile_executor_guard_commanded_duty(heat_blocked_for_guards, z->duty);
 
             /* Guard 1's "climbing" rise requirement (thermal_guard.c: delta
              * >= rate_cfg * elapsed_min whenever error > progress_band_c) is
@@ -1762,6 +1768,14 @@ void executor_task_entry(void *arg)
                 if (escalate_guard_trip(zi, z->guard_state.reason, z->guard_state.detail)) {
                     run_faulted_this_tick = true;
                 }
+            }
+
+            if (heater_zone_applies_relay && !z->faulted && !run_faulted_this_tick) {
+                apply_relay(zi, want_relay_on[zi]);
+                if (z->heat_blocked) {
+                    z->relay_denied_reason = PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
+                }
+                profile_executor_account_relay_starvation(z, dt_s);
             }
 
             /* docs/ON_OFF_ZONE.md sec 3/4/6/8 -- WIRED. Computes this
