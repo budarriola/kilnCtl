@@ -25,15 +25,15 @@ and four executing tests (items 1-4 below).
 | 9 | `security_page`, `wifi_provision_page`, `ota_page` status-code handlers (31 `.ok/.status` sites): password change, Wi-Fi join, stage/install refusal text; only the OTA poll-auth and update-page cards have tests | UNTESTED |
 | 10 | Mojibake / encoding: no check catches double-encoded UTF-8 in page sources; D6 shipped unnoticed | UNTESTED; suggest a `lint_pages.js` rule |
 
-## Defects found and fixed (ab687431c)
+## Defects found and fixed (8711ebf7d)
 
-- D1 FIXED ab687431c. settings_page.html: sign-in cancel on factory reset, software reset and cfg-fs format now shows "Sign-in cancelled" (the in-progress text is cleared).
-- D2 FIXED ab687431c. "Request sent -- the board may already be rebooting" only for a dropped connection (fetch TypeError); any other failure shows "Request failed: <real error>".
-- D3 FIXED ab687431c. backup_page.html: a 500 from the real import POST says "Restore failed partway -- some settings may have changed"; other refusals stay "Restore refused".
-- D4 FIXED ab687431c. live_profile_page.html: save/fork/decide read the body as text and parse defensively; a non-JSON refusal shows "HTTP <status>: <body>".
-- D5 FIXED ab687431c. Sign-in cancel clears Saving/Forking/Working; "Discard working copy" goes through kcConfirm.
-- D6 FIXED ab687431c. Four double-encoded ellipses replaced with "..."; lint_pages.js now flags U+00E2 U+20AC in any page (test_lint_mojibake.js).
-- D7 PARTLY FIXED ab687431c. live_profile_page.html has a beforeunload guard (dirty after a segment edit, cleared on load/save/decide). settings_page.html has no editable form fields, so there is nothing to guard. FOLLOW-UP: the same guard for profiles_page, setup_wizard_page, safety_config_page, kiln_configs_page, settings_display_page and zones_page (zones_page was left alone because another fixer owns it).
+- D1 FIXED 8711ebf7d. settings_page.html: sign-in cancel on factory reset, software reset and cfg-fs format now shows "Sign-in cancelled" (the in-progress text is cleared).
+- D2 FIXED 8711ebf7d. "Request sent -- the board may already be rebooting" only for a dropped connection (fetch TypeError); any other failure shows "Request failed: <real error>".
+- D3 FIXED 8711ebf7d. backup_page.html: a 500 from the real import POST says "Restore failed partway -- some settings may have changed"; other refusals stay "Restore refused".
+- D4 FIXED 8711ebf7d. live_profile_page.html: save/fork/decide read the body as text and parse defensively; a non-JSON refusal shows "HTTP <status>: <body>".
+- D5 FIXED 8711ebf7d. Sign-in cancel clears Saving/Forking/Working; "Discard working copy" goes through kcConfirm.
+- D6 FIXED 8711ebf7d. Four double-encoded ellipses replaced with "..."; lint_pages.js now flags U+00E2 U+20AC in any page (test_lint_mojibake.js).
+- D7 PARTLY FIXED 8711ebf7d. live_profile_page.html has a beforeunload guard (dirty after a segment edit, cleared on load/save/decide). settings_page.html has no editable form fields, so there is nothing to guard. FOLLOW-UP: the same guard for profiles_page, setup_wizard_page, safety_config_page, kiln_configs_page, settings_display_page and zones_page (zones_page was left alone because another fixer owns it).
 
 All tests now hard-assert these; the KNOWN-DEFECT markers are gone.
 
