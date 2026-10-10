@@ -184,6 +184,10 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # transplanting), so these are listed here purely so the mirror-drift
     # check can confirm this module has not simply never heard of them.
     "kiln_configs", "is_active", "package", "omitted",
+    # BACKUP_FORMAT_VERSION 7 board topology. Handled at top level by the
+    # v7 block in convert() (not per zone); listed here only because the
+    # mirror-drift check's extraction regex sees them as emitted keys.
+    "thermo_count", "relay_count",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.

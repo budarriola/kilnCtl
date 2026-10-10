@@ -148,7 +148,7 @@ The only checks are a successful parse of ip, netmask and gateway, the
 - the address is not 0.0.0.0, 255.255.255.255, 127.x, multicast, or the
   network or broadcast address of its own subnet.
 
-`ip4addr_aton()` also accepts shorthand forms such as `10.1` and `167772161`,
+`ip4addr_aton()` also accepts shorthand forms such as `10.1` and the bare decimal integer 167772161,
 so the stored string may not be the dotted quad the operator meant, although
 the parsed value is used consistently.
 

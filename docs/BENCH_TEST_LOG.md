@@ -3213,7 +3213,7 @@ Task: restore zones config after the suspected untraced factory reset. Pre-wipe 
 
 ## 2026-10-09 bench campaign of origin/dev 0dd056c6 (benchdev worktree) -- BLOCKED by estop_verified
 
-Firmware under test: origin/dev `0dd056c6` plus TWO bench-local, uncommitted build workarounds (findings 1 and 2 in `docs/audits/BENCH_FINDINGS_2026-10-09.md`; dev tip does not build as committed). KilnFW ELF archive key `1a0ec1e32f2f`; SaftyFW identity `e6a0ff34_2026-10-10_04:59:54Z`. Backup taken first: `logs/backup_export/kilnctl_backup_20261010T050050Z.json`. Flash: Pico via `debug_program`, ESP via `flash_firmware(kiln_fw_root=worktree)`, verified running `app`, boot_guard cleared. No trip latched after the dual reflash (S6a did not appear).
+Firmware under test: origin/dev `0dd056c6` plus TWO bench-local, uncommitted build workarounds (findings 1 and 2 in `docs/audits/BENCH_FINDINGS_2026-10-09.md`; dev tip does not build as committed). KilnFW ELF archive file `KilnCtrl-1a0ec1e32f2f.elf` (SHA256-keyed archive entry, not a git commit); SaftyFW identity `e6a0ff34_2026-10-10_04:59:54Z`. Backup taken first: `logs/backup_export/kilnctl_backup_20261010T050050Z.json`. Flash: Pico via `debug_program`, ESP via `flash_firmware(kiln_fw_root=worktree)`, verified running `app`, boot_guard cleared. No trip latched after the dual reflash (S6a did not appear).
 
 | Item | Result |
 |---|---|
