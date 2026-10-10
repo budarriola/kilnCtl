@@ -395,3 +395,35 @@ Not covered: the real FreeRTOS scheduler (critical sections are no-ops), the
 second core affinity, `update_task_erase_slot()`'s between-erase feed call, and
 the RP2040 watchdog scratch-register survival across a real reset (`fake_scratch`
 only).
+
+## Campaign 10 (item 17 part) and campaign 2 extension
+
+`test_uart_bridge_core.c` (new exe `uart_bridge_core_tests`): includes the real
+`uart_bridge.c` and covers `bridge_args_ok`, `bridge_range_ok`,
+`bridge_clamp_auto_period`, the f32/lstring codecs, `bridge_reply_reject`
+(reason truncation to the reply buffer), and the real `link_watchdog_task`
+driven through a longjmp `vTaskDelay`: link-down drop of unowned relays only,
+the 5 s timeout boundary, retry until the drop succeeds then sticky, re-arm
+when the unowned mask changes, danger mode suppresses the drop, no expander
+handle means no write.
+
+`test_link_task_fuzz.c` extended: SET_PARAM refusal through the real RX path
+(tc_type above 7, placement mode above max, wrong wire type, unknown ids, NaN/
+negative/zero/-inf abs_max_temp_c, malformed length/type tag, wrong direction,
+bad CRC; in-range values do stage; never reaches `config_store_write`), and
+UPDATE_BEGIN/DATA/END/ABORT routing (each reaches only its own handler with the
+full payload including the command byte; wrong-direction and bad-CRC frames
+reach none).
+
+Negative tests (baseline PASS): uart_bridge 8 mutations (args_ok strict, range
+hi exclusive, clamp zero, drop result inverted, danger ignores mask, reason
+room, send failure, mask-change re-arm) all CAUGHT after adding the mask-change
+case (the first run MISSED it; the `last_unowned_mask` initial-value mutation
+is equivalent, since `relays_confirmed_off` starts false). link_task: tc_type
+range lifted, abs_max positive check dropped, update END routed to DATA all
+CAUGHT.
+
+Findings: no defect. Not covered: COMMIT_CONFIG/APPLY_CONFIG_VOLATILE paths,
+the other `uart_bridge_*.c` sub-files, `adaptive_tune_model` commit failure,
+`cfg_fs_mount` format-pending.
+
