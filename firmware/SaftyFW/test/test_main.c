@@ -44,6 +44,7 @@ void run_test_current_presence_policy(void);
 void run_test_discrete_pin_policy(void);
 void run_test_commissioning_gate(void);
 void run_test_safety_core_s8_wiring(void);
+void run_test_safety_core_clear_trip_binding(void);
 void run_test_safety_core_polarity_wiring(void);
 void run_test_safety_core_ct_calibration_gate(void);
 void run_test_config_store_ct_channel_fitted(void);
@@ -112,6 +113,7 @@ int main(void)
     run_test_discrete_pin_policy();
     run_test_commissioning_gate();
     run_test_safety_core_s8_wiring();
+    run_test_safety_core_clear_trip_binding();
     run_test_safety_core_polarity_wiring();
     run_test_safety_core_ct_calibration_gate();
     run_test_config_store_ct_channel_fitted();
