@@ -67,6 +67,9 @@ $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/profiles_http.c",
     "firmware/KilnFW/App/drivers/http/zones_http_post.c",
     "firmware/KilnFW/App/drivers/http/zone_aux_convert_http.c",
+    "firmware/KilnFW/App/drivers/http/zones_http_post_parse.c",
+    "firmware/KilnFW/App/drivers/http/wifi_provision_http.c",
+    "firmware/KilnFW/App/drivers/http/kiln_cfg_http.c",
     "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
 )
 $persistRoot = Join-Path $RepoRoot $persistDir
