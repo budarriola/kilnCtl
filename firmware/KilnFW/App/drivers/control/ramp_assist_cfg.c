@@ -154,6 +154,11 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     // ramp-stretch consumer) must see this take effect for the rest of the
     // boot.
     cfg_save_lock_take(&s_save_lock);
+    /* LOW-3 (review 10): refuse BEFORE touching RAM, so a refused save leaves live == stored. */
+    if (relay_authority_reset_in_flight()) {
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     s_ramp_assist_enabled = enabled;
     uint32_t new_rev = s_ramp_assist_rev + 1;
     uint8_t raw = enabled ? 1 : 0;

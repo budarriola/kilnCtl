@@ -33,6 +33,11 @@ static SafetyLinkClass *s_link = NULL;
  * kiln_cfg_swap_apply_impl() / finish_esp_done_impl(), reset when an apply
  * starts and whenever the record is cleared. See kiln_cfg_swap_is_pending(). */
 static volatile int32_t s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
+/* LOW-1 (review 10): true while a rollback left the journal KEPT because the active_id restore failed. Every
+ * boot then re-imports the rollback blob over the live zones, so a zones save in between would be silently
+ * reverted. POST /api/zones refuses while this is set (kiln_cfg_swap_zone_edits_at_risk()). Re-set by each
+ * boot's rollback_ex() that still cannot restore the id; cleared with the journal. */
+static volatile bool s_rollback_id_kept = false;
 
 /* M13 fix -- see kiln_cfg_swap_boot_fault_t's own doc comment
  * (kiln_cfg_swap.h) for scope and rationale. Latched once per boot, never
@@ -104,7 +109,8 @@ void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null)
 #define KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE \
     "swap journal not cleared after rollback; autosave off, next boot retries (edits meanwhile may be lost)"
 #define KILN_CFG_SWAP_ROLLBACK_ID_NOTE \
-    "previous active kiln config id not restored after rollback; journal kept, next boot retries"
+    "previous active kiln config id not restored after rollback; journal kept, next boot retries and re-imports the " \
+    "pre-swap zones, so zone edits saved meanwhile will be LOST"
 
 static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
 {
@@ -228,7 +234,13 @@ static bool clear_pending(void)
         return false;
     }
     s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
+    s_rollback_id_kept = false;
     return true;
+}
+
+bool kiln_cfg_swap_zone_edits_at_risk(void)
+{
+    return s_rollback_id_kept;
 }
 
 static bool persist_marker(kiln_cfg_swap_pending_t *p, kiln_cfg_swap_marker_t marker)
@@ -561,6 +573,7 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
                       "active_id failed: %s -- journal KEPT, autosave suppressed until the next boot "
                       "retries it",
                  sub);
+        s_rollback_id_kept = true;
         if (record_kept) {
             *record_kept = true;
         }
@@ -1126,9 +1139,9 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, c
             } else {
                 /* Rolled back, but the active-id restore failed and the journal is kept: never silent. */
                 latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
-                                 "a kiln-config swap was rolled back on both processors, but saving which "
-                                 "kiln is active failed -- zone edits are not auto-saved until it is retried "
-                                 "at the next boot; heat is not affected");
+                                 "a kiln-config swap was rolled back, but saving which kiln is active "
+                                 "failed -- zone saves are refused until the next boot retries it (a saved "
+                                 "edit would be reverted); heat is not affected");
             }
         } else {
             ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
@@ -1354,9 +1367,9 @@ static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
                 ESP_LOGE(TAG, "boot: interrupted swap rolled back, but restoring the saved active kiln failed -- "
                               "journal kept, autosave suppressed, will retry next boot");
                 latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
-                                 "an interrupted kiln-config swap was rolled back on both processors, but saving "
-                                 "which kiln is active failed -- zone edits are not auto-saved until it is retried "
-                                 "at the next boot; heat is not affected");
+                                 "an interrupted kiln-config swap was rolled back, but saving which kiln is "
+                                 "active failed -- zone saves are refused until the next boot retries it (a "
+                                 "saved edit would be reverted); heat is not affected");
             }
         } else {
             ESP_LOGE(TAG, "boot: interrupted-swap recovery failed: %s -- staying alarmed, will retry", reason);

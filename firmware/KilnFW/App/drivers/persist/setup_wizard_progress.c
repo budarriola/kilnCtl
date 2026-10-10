@@ -626,6 +626,12 @@ esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_s
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* LOW-3 (review 10): refuse before mutating RAM while a factory reset is in flight, so a reset that is
+     * then refused at its re-check (nothing erased, no reboot) leaves live == stored. */
+    if (relay_authority_reset_in_flight()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     /* In-RAM truth first -- live immediately regardless of whether the cfg
      * write below succeeds, same ordering as display_power_cfg_set()/
      * touch_cal_store_save(). */

@@ -766,6 +766,13 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
     }
 }
 
+// LOW-1 (review 10): test-controlled stand-in for kiln_cfg_swap_zone_edits_at_risk().
+static bool s_test_swap_zone_edits_at_risk = false;
+bool kiln_cfg_swap_zone_edits_at_risk(void)
+{
+    return s_test_swap_zone_edits_at_risk;
+}
+
 // ---- safety_link.h -- same reasoning: a small test-controlled stand-in
 // instead of linking the real (hardware-owning) module.
 static bool s_test_safety_link_up = false;
@@ -1731,6 +1738,22 @@ static void test_zones_post_refused_while_async_job_busy(void)
     TEST_CHECK(!s_test_ok_called, "must not report success for a busy-refused submit");
     TEST_CHECK(strstr(s_last_resp_body, "another commissioning operation is running") != NULL,
               "refusal body must carry the busy discriminator marker");
+}
+
+static void test_zones_post_refused_while_rollback_pending(void)
+{
+    TEST_SECTION("zones_post_handler -- LOW-1 (review 10): refuses with 409 naming the pending rollback while a "
+                 "kept swap journal would re-import the pre-swap zones");
+    s_test_swap_zone_edits_at_risk = true;
+    g_probe_interlock_called = 0;
+    s_ceiling_writer_calls = 0;
+    s_test_profile_status.state = PROFILE_EXEC_IDLE;
+    s_test_ok_called = false;
+    run_zones_post("thermo_count=0&relay_count=0&max_simultaneous_relays=2");
+    s_test_swap_zone_edits_at_risk = false;
+    TEST_CHECK(strstr(s_last_resp_body, "rollback is pending") != NULL, "refusal body names the pending rollback");
+    TEST_CHECK(!s_test_ok_called, "must not report success");
+    TEST_CHECK(s_ceiling_writer_calls == 0, "nothing reached the Pico ceiling write");
 }
 
 static void test_zones_post_max_simultaneous_relays_rejects_trailing_garbage(void)
@@ -16968,6 +16991,7 @@ void run_test_zones_http(void)
     test_zones_post_refuses_relay_claimed_by_aux();
     test_zones_post_refuses_lost_update_on_concurrent_generation_bump();
     test_zones_post_refuses_run_started_during_ceiling_raise();
+    test_zones_post_refused_while_rollback_pending();
     test_zones_post_refused_while_async_job_busy();
 }
 

@@ -37,7 +37,10 @@
 //   -> FETCH_HEAP_PRECHECK_MIN          29556 B  (8192 + 17524 + 3840), below the 29647 B idle minimum;
 //      at the idle minimum the post-draw margin over the floor is 29647 - 17524 - 8192 = 3931 B.
 //      (old: 8192 + 18548 + 4096 = 30836 B, above idle.) Estimate, not a measurement: the WP8 gate
-//      (b) bench run must confirm min_free >= 8192 B with scratch 1024.// The slack is deliberately NOT larger: the board idles at 29647-31123 B free
+//      (b) bench run must confirm min_free >= 8192 B with scratch 1024.
+//   Margin: 29556 B sits only 91 B below the 29647 B measured idle minimum (logs/sk04_sampling); a bench
+//   re-measure of the idle minimum is PENDING, so treat the value as provisional.
+// The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
 // idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 16500 = 13147 B,
 // 4955 B above the 8192 B floor.
@@ -72,7 +75,7 @@ extern "C" {
 #define FETCH_HEAP_WORST_DRAW_BYTES (16500u + FETCH_HEAP_SCRATCH_BYTES)
 // Margin for a concurrent httpd request / login KDF / httpd request while the fetch holds its allocations (review 3 LOW-5:
 // the old 1932 B left almost nothing against the 8192 B floor). Admitted free minus the full worst draw
-// (18548 B) must still leave floor + this margin.
+// (17524 B) must still leave floor + this margin.
 #define FETCH_HEAP_SLACK_BYTES 3840u
 #define FETCH_HEAP_PRECHECK_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_WORST_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_LARGEST_BLOCK_MIN 6144u

@@ -234,6 +234,11 @@ kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t 
  * pattern in main_control_bringup.c. */
 bool kiln_cfg_swap_is_pending(void);
 
+/* LOW-1 (review 10): true while a rollback left the journal kept because restoring the previous active_id failed.
+ * Each boot re-imports the pre-swap zones until the id restore succeeds, so a zones save made meanwhile would be
+ * silently reverted: POST /api/zones refuses while this is true. */
+bool kiln_cfg_swap_zone_edits_at_risk(void);
+
 /* M13 ("every fault says what was detected and what to do", ROADMAP.md
  * standing rule): kiln_cfg_swap_boot_recover() (section 4.4's five-case
  * table) used to report every one of its "could not recover, staying

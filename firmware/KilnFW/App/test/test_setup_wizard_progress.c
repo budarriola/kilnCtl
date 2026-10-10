@@ -135,6 +135,21 @@ static void test_save_goes_to_cfg_file_not_nvs(void)
     TEST_CHECK(fv && fr == 1 && !nv && !div, "status: file valid at rev 1, no NVS side, not diverged");
 }
 
+extern bool g_test_reset_in_flight;
+static void test_set_step_refused_in_reset_leaves_ram_unchanged(void)
+{
+    reset();
+    setup_wizard_progress_start();
+    g_test_reset_in_flight = true;
+    esp_err_t err = setup_wizard_progress_set_step(5, SETUP_WIZ_STEP_DONE, "x");
+    g_test_reset_in_flight = false;
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE, "LOW-3: set_step refused while a factory reset is in flight");
+    setup_wizard_step_t st;
+    setup_wizard_progress_get_step(5, &st);
+    TEST_CHECK(st.state == SETUP_WIZ_STEP_PENDING, "LOW-3: RAM unchanged by the refused set_step");
+    TEST_CHECK(st.note[0] == '\0', "LOW-3: note unchanged by the refused set_step");
+}
+
 static void test_save_refused_when_cfg_unmounted(void)
 {
     reset();
@@ -602,6 +617,7 @@ void run_test_setup_wizard_progress(void)
     test_round_trip();
     test_save_goes_to_cfg_file_not_nvs();
     test_save_refused_when_cfg_unmounted();
+    test_set_step_refused_in_reset_leaves_ram_unchanged();
     test_legacy_nvs_record_migrates_into_cfg();
     test_get_all_matches_get_step();
     test_migration_from_v1();

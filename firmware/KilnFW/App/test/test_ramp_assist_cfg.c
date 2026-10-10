@@ -97,6 +97,21 @@ static void simulate_reboot(void)
                                    // hold the expected result before start() runs.
 }
 
+extern bool g_test_reset_in_flight;
+static void test_set_refused_in_reset_leaves_ram_unchanged(void)
+{
+    TEST_SECTION("ramp_assist_cfg_set_enabled: LOW-3 (review 10) reset in flight -> refused BEFORE RAM changes");
+    ra_mount_scratch();
+    simulate_reboot();
+    ramp_assist_cfg_start();
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "precondition: disabled");
+    g_test_reset_in_flight = true;
+    esp_err_t err = ramp_assist_cfg_set_enabled(true);
+    g_test_reset_in_flight = false;
+    TEST_CHECK(err == ESP_ERR_INVALID_STATE, "refused with ESP_ERR_INVALID_STATE");
+    TEST_CHECK(!ramp_assist_cfg_enabled(), "RAM still holds the stored (disabled) value after the refusal");
+}
+
 static void test_default_is_disabled_on_empty_nvs(void)
 {
     fake_kv_reset_all();
@@ -563,6 +578,7 @@ static void test_set_enabled_runs_in_save_section(void)
 void run_test_ramp_assist_cfg(void)
 {
     test_default_is_disabled_on_empty_nvs();
+    test_set_refused_in_reset_leaves_ram_unchanged();
     test_persistence_round_trip();
     test_set_without_cfg_partition_fails_loud();
     test_corrupted_value_falls_back_to_safe_default();

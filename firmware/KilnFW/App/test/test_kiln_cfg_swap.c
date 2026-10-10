@@ -1532,6 +1532,9 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
     TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE,
                "record NOT cleared -- it is the only retry handle for the persisted active_id");
     TEST_CHECK(kiln_cfg_swap_is_pending(), "autosave stays suppressed");
+    TEST_CHECK(kiln_cfg_swap_zone_edits_at_risk(),
+               "LOW-1: a kept rollback journal marks zone edits at risk (POST /api/zones refuses)");
+    TEST_CHECK(strstr(reason, "LOST") != NULL, "LOW-1: the note says saved zone edits will be lost");
 
     TEST_SECTION("MED: boot fallback rollback (PICO_DONE) with id restore failing -- record kept");
     reset_state();
@@ -1545,6 +1548,10 @@ static void test_med_rollback_id_restore_failure_keeps_record(void)
                "boot recovery did not clear the record after an id restore failure");
     TEST_CHECK(kiln_cfg_swap_get_boot_fault_kind() == KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED,
                "kept journal after a failed id restore latches the display-only rollback_active_id_unsaved fault");
+    TEST_CHECK(kiln_cfg_swap_zone_edits_at_risk(), "LOW-1: boot-kept journal keeps zone edits at risk");
+    kiln_cfg_swap_boot_recover(); /* next boot: the id restore now works */
+    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_NONE, "LOW-1: next boot clears the journal");
+    TEST_CHECK(!kiln_cfg_swap_zone_edits_at_risk(), "LOW-1: at-risk flag clears with the journal");
 
     TEST_SECTION("MED: boot ESP_DONE fallback rollback (target unreadable) with id restore failing -- record kept");
     reset_state();
