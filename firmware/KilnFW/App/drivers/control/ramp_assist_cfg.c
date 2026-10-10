@@ -7,7 +7,6 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
-#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "cfg_save_lock.h"
 
 static const char *TAG = "ramp_assist_cfg";
@@ -159,12 +158,7 @@ esp_err_t ramp_assist_cfg_set_enabled(bool enabled)
     uint8_t raw = enabled ? 1 : 0;
 
     // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
-    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
-     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    if (!relay_authority_reset_in_flight()) {
-        err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev, "ramp assist setting");
-    }
+    esp_err_t err = pref_cfg_fs_commit(RAMP_ASSIST_FILE_PATH, &raw, sizeof(raw), new_rev, "ramp assist setting");
     if (err == ESP_OK) {
         s_ramp_assist_rev = new_rev;
     }

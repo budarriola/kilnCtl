@@ -4402,7 +4402,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     ctx->content_len = (size_t)req->content_len;
 
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 8192, backup_import_job, ctx);
+        http_async_job_try_start(req, "http_async_job", 10240, backup_import_job, ctx);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }

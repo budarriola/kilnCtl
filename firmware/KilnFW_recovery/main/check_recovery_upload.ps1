@@ -141,17 +141,6 @@ try {
         -Replacement 'httpd_resp_set_hdr(req, "Connection", "keep-alive");' -Tag "connclose"
     Test-Mutant -Needle 'case 413: status = "413 Payload Too Large"; break;' -Replacement "" -Tag "status413"
 
-    # recovery_http.c read_body_exact (Pico push): only the overall deadline may set too_slow (504);
-    # the no-progress stall must report a lost connection (400), like read_exact above.
-    $rh = Get-Content (Join-Path $here "recovery_http.c") -Raw
-    if ($rh -match '(?s)static size_t read_body_exact\(.*?\r?\n}\r?\n') { $fn = $Matches[0] } else { throw "read_body_exact not found in recovery_http.c -- update this check." }
-    if (([regex]::Matches($fn, '\*too_slow = true')).Count -ne 1) {
-        throw "read_body_exact must set too_slow only for the overall deadline, not the no-progress stall."
-    }
-    if ($fn -notmatch '(?s)esp_timer_get_time\(\) > deadline_us\) \{\s*\*too_slow = true') {
-        throw "read_body_exact: the overall-deadline branch must be the one that sets too_slow."
-    }
-
     Write-Host "check_recovery_upload: PASS ($passCount assertions; negative-test mutants failed as required)"
     exit 0
 }

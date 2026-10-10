@@ -7,7 +7,8 @@
 #include "adaptive_tune_internal.h"
 
 #include <math.h>
-#include <stdlib.h> // malloc/free: adaptive_tune_plan_coupled_locked() observation buffers
+#include <stdlib.h> // free() of the persist_scratch_alloc() observation buffers in adaptive_tune_plan_coupled_locked()
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first heap scratch, released with free()
 #include <string.h>
 #include <time.h>
 
@@ -574,7 +575,7 @@ void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t 
     struct {
         joint_obs_t duty;
         joint_obs_t rise;
-    } *obs = malloc(sizeof(*obs));
+    } *obs = persist_scratch_alloc(sizeof(*obs)); /* PSRAM first; OOM refusal below unchanged */
     if (!obs) {
         adaptive_tune_set_reason(z->coupled_refusal_reason, sizeof(z->coupled_refusal_reason),
                    "out of memory for the coupled solve's observation buffers");

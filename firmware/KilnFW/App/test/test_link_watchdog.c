@@ -216,42 +216,6 @@ static void test_zone_claim_arbitrates_profile_vs_autotune_per_zone(void)
     relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u);
 }
 
-// HTTP audit L37 follow-up (LOW-5): the factory-reset in-flight mark and the sweep claim accessor,
-// against the REAL relay_authority.c counter (the factory_reset/sweep/starter tests use fakes).
-static void test_reset_in_flight_counter_is_a_depth_count(void)
-{
-    TEST_CHECK(!relay_authority_reset_in_flight(), "clean slate: no reset in flight");
-
-    relay_authority_reset_in_flight_begin();
-    TEST_CHECK(relay_authority_reset_in_flight(), "begin sets the mark");
-    relay_authority_reset_in_flight_end();
-    TEST_CHECK(!relay_authority_reset_in_flight(), "a matching end clears it");
-
-    // Two resets (HTTP and UART) at once: the first to finish must not clear the other's mark.
-    relay_authority_reset_in_flight_begin();
-    relay_authority_reset_in_flight_begin();
-    relay_authority_reset_in_flight_end();
-    TEST_CHECK(relay_authority_reset_in_flight(), "depth 2: one end leaves the second reset's mark set");
-    relay_authority_reset_in_flight_end();
-    TEST_CHECK(!relay_authority_reset_in_flight(), "depth 2: the second end clears it");
-
-    // An end with nothing in flight must not wrap the counter (uint8_t) into "in flight".
-    relay_authority_reset_in_flight_end();
-    TEST_CHECK(!relay_authority_reset_in_flight(), "end on zero stays clear (no underflow)");
-    relay_authority_reset_in_flight_begin();
-    relay_authority_reset_in_flight_end();
-    TEST_CHECK(!relay_authority_reset_in_flight(), "after an end on zero, begin/end still pair exactly");
-}
-
-static void test_heat_sweep_active_follows_the_sweep_claim(void)
-{
-    TEST_CHECK(!relay_authority_heat_sweep_active(), "no sweep claim on a clean slate");
-    TEST_CHECK(relay_authority_heat_sweep_claim_begin() == RELAY_HEAT_SWEEP_CLAIM_OK, "sweep claim taken");
-    TEST_CHECK(relay_authority_heat_sweep_active(), "the accessor reports the held sweep claim");
-    relay_authority_heat_sweep_claim_end();
-    TEST_CHECK(!relay_authority_heat_sweep_active(), "released claim reads inactive");
-}
-
 int main(void)
 {
     test_all_unowned_relays_are_in_the_mask();
@@ -264,8 +228,6 @@ int main(void)
     test_never_seen_counts_as_down();
     test_traffic_resets_the_timer();
     test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
-    test_reset_in_flight_counter_is_a_depth_count();
-    test_heat_sweep_active_follows_the_sweep_claim();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

@@ -132,7 +132,9 @@ CONFIG_LV_USE_TJPGD=y
 # this function grows. Not yet reprofiled to find the true peak usage; a
 # future pass could measure it precisely (uxTaskGetStackHighWaterMark) and
 # right-size this rather than carry a guessed margin indefinitely.
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# 2026-10-09: 8192 -> 10240. With l32r+callx long calls resolved the static walk
+# measures app_main at 6384 B (budget is 75% of the stack = 6144 B at 8192).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
 
 # CONFIG_LWIP_MAX_SOCKETS: found the hard way 2026-08-20 auditing this file
 # after wifi_provision_http.c's `config.max_open_sockets = 13` fix (see that

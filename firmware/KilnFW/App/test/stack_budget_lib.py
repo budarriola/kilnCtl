@@ -96,6 +96,52 @@ CALL_RE = re.compile(r"\bcall(?:4|8|12)\t([0-9a-f]+)(?: <([^>]+)>)?")
 CALLX_RE = re.compile(r"\bcallx(?:4|8|12)\b")
 
 
+# ---------------------------------------------------------------------------
+# LONG CALLS (2026-10-09). A `call8 <sym>` reaches only +-512 KB, so every
+# flash call across that distance, and every call into IRAM/ROM, is emitted as
+#     l32r   a8, <literal>  (<target addr> <symbol>)
+#     callx8 a8
+# The walk used to follow only call4/8/12, silently dropping all of these
+# (control_handle_message measured 944 B while really reaching
+# zones_config_set_pid and everything below it). LongCallTracker pairs the two
+# instructions: it remembers which literal each register holds, forgets a
+# register when anything else writes it, and reports the target when a
+# callx4/8/12 uses a register that still holds one. A register left stale
+# across a branch target can only ADD an edge, never hide one (the safe
+# direction for this checker).
+# ---------------------------------------------------------------------------
+L32R_RE = re.compile(r"\tl32r\t(a\d+),\s*[0-9a-f]+(?: <[^>]*>)? \(([0-9a-f]+) <([^>]+)>\)")
+CALLX_REG_RE = re.compile(r"\tcallx(?:4|8|12)\t(a\d+)")
+_INSN_RE = re.compile(r"^[0-9a-f]+:\t[0-9a-f ]+\t(\S+)\s+(a\d+)\b")
+_NON_WRITING = ("s32", "s16", "s8", "ssi", "ssx", "b", "j", "call", "ret", "nop", "memw",
+                "isync", "dsync", "esync", "rsync", "wsr", "wur", "xsr", "ill")
+
+
+class LongCallTracker:
+    """Feed every disassembly line of one function in order via feed(); it
+    returns (target_addr, symbol_name) for a resolved l32r+callx pair, else
+    None. Call reset() at each function boundary."""
+
+    def __init__(self):
+        self.regs = {}
+
+    def reset(self):
+        self.regs = {}
+
+    def feed(self, line):
+        m = L32R_RE.search(line)
+        if m:
+            self.regs[m.group(1)] = (int(m.group(2), 16), m.group(3))
+            return None
+        m = CALLX_REG_RE.search(line)
+        if m:
+            return self.regs.get(m.group(1))
+        m = _INSN_RE.match(line)
+        if m and self.regs and not m.group(1).startswith(_NON_WRITING):
+            self.regs.pop(m.group(2), None)
+        return None
+
+
 # Address of the instruction a disassembly line describes, e.g.
 # "42084dfe:\tb08765        \tcall8 ...". Needed to tell a line that is
 # really part of the current function from a line objdump merely PRINTED
@@ -259,6 +305,7 @@ def parse(objdump, elf):
     sizes = symbol_sizes(objdump, elf)
     frames, calls, names, name_addrs, indirect = {}, {}, {}, {}, {}
     seen_entry = set()
+    lct = LongCallTracker()
     cur = None
     cur_end = None   # first address PAST the current function per the ELF
                      # symbol table; None means "size unknown, unbounded".
@@ -272,6 +319,7 @@ def parse(objdump, elf):
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
             indirect.setdefault(cur, False)
+            lct.reset()
             names[cur] = name
             name_addrs.setdefault(name, []).append(cur)
             continue
@@ -296,7 +344,10 @@ def parse(objdump, elf):
         c = CALL_RE.search(line)
         if c:
             calls[cur].add(int(c.group(1), 16))
-        if CALLX_RE.search(line):
+        lc = lct.feed(line)
+        if lc is not None:
+            calls[cur].add(lc[0])   # resolved long call: an edge, not a dead end
+        elif CALLX_RE.search(line):
             indirect[cur] = True
     return ParsedElf(frames, calls, names, name_addrs, indirect)
 

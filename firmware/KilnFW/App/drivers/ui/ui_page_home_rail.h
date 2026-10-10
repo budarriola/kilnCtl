@@ -57,10 +57,6 @@ bool ui_page_home_rail_pill_on(bool io_ok, bool relay_on);
  * aux_enabled_mask is dashboard_status_t.aux_enabled_mask (bit = relay-1);
  * relay_idx is 0-based. Never NULL; the pointer is static storage. The LCD
  * shows STATE only -- no control is attached to a pill. */
-/* Number of relays the caption table covers; ui_page_home_refresh.c
- * _Static_asserts it against KILN_IO_RELAY_COUNT. */
-#define UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT 4u
-
 const char *ui_page_home_rail_aux_caption(uint8_t aux_enabled_mask, uint32_t relay_idx);
 
 /* Clamps a duty fraction (0.0..1.0, but may arrive out of range from a
@@ -80,10 +76,6 @@ void ui_page_home_rail_format_zone_temp(bool valid, float temp_c, char *out, siz
  * empty string (out[0] = '\0') when `power_valid` is false -- the caller
  * must give the label zero height in that case, never show a fake "0 W". */
 void ui_page_home_rail_format_kiln_watts(bool power_valid, float power_w, char *out, size_t out_cap);
-
-/* True when `next` differs from the label's `current` text (or either is
- * NULL). Lets the rail write a label only on change (L30). */
-bool ui_page_home_rail_text_changed(const char *current, const char *next);
 
 #ifdef __cplusplus
 }

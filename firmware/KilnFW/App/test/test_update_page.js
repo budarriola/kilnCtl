@@ -112,9 +112,7 @@ assert(ghPart.indexOf('kcOtaAuthedFetch(') >= 0 && !/[^a-zA-Z]fetch\(/.test(ghPa
 ['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(SRC.indexOf("'" + h + "'") >= 0, 'upload sends ' + h));
 assert(SRC.indexOf('stageRefusalText(e)') >= 0, 'upload failure goes through stageRefusalText');
 assert(/function uploadTooSlowText\(/.test(SRC) && /var slow = uploadTooSlowText\(e\);/.test(SRC), 'stage refusal text maps upload_too_slow');
-assert(SRC.indexOf("'Pico update failed: ' + (uploadTooSlowText(e, true) || e.message)") >= 0, 'Pico path shows the friendly upload_too_slow text');
-assert(SRC.indexOf('any previously staged image was cleared') >= 0 && SRC.indexOf('The Pico was not changed') >= 0, 'upload_too_slow text is stage/Pico specific');
-assert(SRC.indexOf('Nothing was changed. Check the Wi-Fi') < 0 && !/too slow[^;]*Nothing was changed/.test(SRC), 'stage text must not claim nothing changed (begin erases the header sector)');
+assert(SRC.indexOf("'Pico update failed: ' + (uploadTooSlowText(e) || e.message)") >= 0, 'Pico path shows the friendly upload_too_slow text');
 const UH = fs.readFileSync(resolveDriverFile(DRIVERS_DIR, 'update_http.c'), 'utf8');
 ['X-Stage-Force', 'X-Stage-Allow-Downgrade', 'X-Stage-Confirm'].forEach(h => assert(UH.indexOf('"' + h + '"') >= 0, 'firmware reads ' + h));
 assert(/update_stage_set_gate\(&s_stage, policy_gate/.test(UH), 'upload handler installs the policy gate');

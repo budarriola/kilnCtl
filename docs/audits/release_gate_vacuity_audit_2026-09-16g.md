@@ -198,7 +198,7 @@ superseded) was itself superseded by `93a8716f`'s shared AP-subnet helper/
 HTTP-layer message/confirm-side guard change, unrelated to this check's
 subject (the auth/gate logic the negative test exercises is unchanged);
 the underlying claim still holds, refreshed to
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`0ee41c4a` (citation refreshed 2026-10-09)
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`2d872566` (citation refreshed 2026-10-09)
 is the current one (citation refreshed 2026-09-30); see
 check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3

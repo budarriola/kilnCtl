@@ -2448,17 +2448,6 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
         return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
     }
 
-    /* Factory reset in flight (HTTP audit L37 follow-up, MED-1): same paired shape as the restore
-     * re-read above. factory_reset.c's execute_scope() sets relay_authority's reset mark and THEN reads
-     * relay_authority_heat_sweep_active(); this side published the sweep claim above and THEN reads the
-     * mark. Both under relay_authority's leaf spinlock, so at least one side refuses: a sweep can never
-     * start (and later write zone normals) against storage a reset is erasing. */
-    if (relay_authority_reset_in_flight()) {
-        s_sweep.active = false;
-        relay_authority_heat_sweep_claim_end();
-        return ZONE_SWEEP_REFUSE_FACTORY_RESET;
-    }
-
     /* Single-flight against every other Pico safety-config writer
      * (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap): an http_async_job
      * (ct_auto_zero/bench_preset/backup_import), a kiln config swap, or the
@@ -2498,7 +2487,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
 
     dram_watch_log_task("zone_sweep", "before-create");
     BaseType_t created = dram_watch_task_after(
-        "zone_sweep", xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task));
+        "zone_sweep", xTaskCreate(zone_sweep_task, "zone_sweep", 5120, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task));
     /* Registered unconditionally, success or not, same as recovery_exit/
      * ota_pico_rollback/ota_rollback_reboot (ota_http_*.c) -- stack_margin_
      * register() reads *task_handle_slot fresh at report time, so a creation

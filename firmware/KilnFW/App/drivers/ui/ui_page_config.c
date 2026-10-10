@@ -149,9 +149,12 @@ static void units_toggle_apply(void *user_data)
         unit_pref_get() == UNIT_PREF_FAHRENHEIT ? UNIT_PREF_CELSIUS : UNIT_PREF_FAHRENHEIT;
     esp_err_t err = unit_pref_set(next);
     if (err != ESP_OK) {
-        /* unit_pref_set() persists first and publishes to RAM only on success,
-         * so the live value is unchanged; the repaint below shows the old unit. */
-        ESP_LOGW(TAG, "unit preference not saved -- live value unchanged");
+        /* Live value still took effect (unit_pref_set() updates RAM before
+         * attempting the NVS write) -- only persistence failed, same
+         * "reported but not treated as user-facing failure" convention
+         * dashboard_http.c's unit_pref_post_handler() uses for the same
+         * case. */
+        ESP_LOGW(TAG, "unit preference applied but not persisted -- will not survive a reboot");
     }
     units_cell_set_label();
 }

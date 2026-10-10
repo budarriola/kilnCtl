@@ -8,7 +8,6 @@
 #include "esp_log.h"
 
 #include "MAX31856.h"
-#include "relay_authority.h" /* relay_authority_reset_in_flight() -- zones_config_set_coupling_cell() */
 #include "zone_settings_source_chain.h" /* zones_config_settings_source_import_has_cycle() shares the
                                           * chain-walk algorithm with this file's setters. */
 
@@ -434,11 +433,8 @@ bool zones_config_get_name(uint8_t zone_index, char *out, size_t out_cap)
     if (!out || out_cap == 0 || zone_index >= s_zones.cfg.thermo_count) {
         return false;
     }
-    /* L30: copy under the zones lock so a concurrent rename cannot tear it. */
-    zones_cfg_lock();
     strncpy(out, s_zones.cfg.zones[zone_index].name, out_cap - 1);
     out[out_cap - 1] = '\0';
-    zones_cfg_unlock();
     return true;
 }
 
@@ -902,14 +898,6 @@ bool zones_config_set_coupling_cell_no_save(uint8_t zone_index, uint8_t neighbor
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
-    /* HTTP audit L37 follow-up (MED-2): the autotune coupling persist job and adaptive_tune_model run
-     * on their own tasks and can reach this after a factory reset has set its in-flight mark. Refuse
-     * before touching RAM, so nothing is written back over storage the reset is erasing. This narrows
-     * the window, it does not close it: a call that passes this check just before the mark is set can
-     * still save after the erase. Closing that needs the zones save mutex (zones_config_store.c). */
-    if (relay_authority_reset_in_flight()) {
-        return false;
-    }
     if (!zones_config_set_coupling_cell_no_save(zone_index, neighbor_index, coeff, tau_s, dead_time_s)) {
         return false;
     }

@@ -640,7 +640,7 @@ static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
     }
     s_crash_clear_in_progress = true;
     http_async_job_start_result_t r =
-        http_async_job_try_start(req, "http_async_job", 8192, crash_report_clear_job, NULL);
+        http_async_job_try_start(req, "http_async_job", 10240, crash_report_clear_job, NULL);
     if (r == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }

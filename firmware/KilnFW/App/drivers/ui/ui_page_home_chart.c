@@ -128,11 +128,7 @@ void ui_home_chart_set_y_ticks(int32_t axis_lo, int32_t axis_hi, unit_pref_t uni
     lv_obj_get_content_coords(s_ui_home_chart, &content);
     lv_area_t chart_coords;
     lv_obj_get_coords(s_ui_home_chart, &chart_coords);
-    /* L29: lv_obj_set_pos() is relative to the parent's CONTENT area, so
-     * content-local coordinates start at 0 (adding the pad again put every
-     * label 2 px right/down). pad_top only bounds the top label. */
-    int32_t pad_top = content.y1 - chart_coords.y1;
-    int32_t content_top_local = 0;
+    int32_t content_top_local = content.y1 - chart_coords.y1;
     int32_t height = content.y2 - content.y1;
 
     for (int k = 0; k < UI_PAGE_HOME_Y_TICK_COUNT; k++) {
@@ -152,11 +148,7 @@ void ui_home_chart_set_y_ticks(int32_t axis_lo, int32_t axis_hi, unit_pref_t uni
          * subtracted so the text is vertically centred ON the tick rather
          * than hanging below it. */
         int32_t y_local = content_top_local + (int32_t)lroundf((1.0f - frac) * (float)height);
-        int32_t y_pos = y_local - 5;
-        if (y_pos < -pad_top) {
-            y_pos = -pad_top; /* keep the top label's first pixel row inside the chart */
-        }
-        lv_obj_set_pos(label, 0, y_pos);
+        lv_obj_set_pos(label, 2, y_local - 5);
     }
 }
 
@@ -208,9 +200,8 @@ void ui_home_chart_set_x_ticks(float horizon_s, bool has_span)
     lv_obj_get_content_coords(s_ui_home_chart, &content);
     lv_area_t chart_coords;
     lv_obj_get_coords(s_ui_home_chart, &chart_coords);
-    /* L29: content-local, see ui_home_chart_set_y_ticks(). */
-    int32_t content_left_local = 0;
-    int32_t content_bottom_local = content.y2 - content.y1;
+    int32_t content_left_local = content.x1 - chart_coords.x1;
+    int32_t content_bottom_local = content.y2 - chart_coords.y1;
     int32_t width = content.x2 - content.x1;
     if (width <= 0) {
         for (int k = 0; k < UI_PAGE_HOME_X_TICK_COUNT; k++) {
@@ -282,9 +273,8 @@ void ui_home_chart_set_legend(bool has_span, bool has_actual_multi, bool has_pla
     lv_obj_get_content_coords(s_ui_home_chart, &content);
     lv_area_t chart_coords;
     lv_obj_get_coords(s_ui_home_chart, &chart_coords);
-    /* L29: content-local, see ui_home_chart_set_y_ticks(). */
-    int32_t content_left_local = 0;
-    int32_t content_bottom_local = content.y2 - content.y1;
+    int32_t content_left_local = content.x1 - chart_coords.x1;
+    int32_t content_bottom_local = content.y2 - chart_coords.y1;
     int32_t width = content.x2 - content.x1;
     if (width <= 0) {
         return;

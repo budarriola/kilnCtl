@@ -12,7 +12,6 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
-#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "update_url.h"
 
 static const char *TAG = "update_settings";
@@ -263,12 +262,7 @@ static esp_err_t update_settings_set_locked(const char *repo)
 
     // cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"); s_persist_dirty
     // stays set on failure so an identical retry is not short-circuited above.
-    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
-     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
-    esp_err_t err = ESP_ERR_INVALID_STATE;
-    if (!relay_authority_reset_in_flight()) {
-        err = pref_cfg_fs_commit(UPDATE_SETTINGS_FILE_PATH, &blob, sizeof(blob), new_rev, "update repo");
-    }
+    esp_err_t err = pref_cfg_fs_commit(UPDATE_SETTINGS_FILE_PATH, &blob, sizeof(blob), new_rev, "update repo");
     if (err != ESP_OK) {
         return err;
     }

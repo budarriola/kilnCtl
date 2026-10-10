@@ -1515,48 +1515,6 @@ static void test_low4_low5_rollback_uncleared_journal_reported(void)
     TEST_CHECK(s_active_id == 3, "active_id restored to the previous id");
 }
 
-static void test_med_rollback_id_restore_failure_keeps_record(void)
-{
-    TEST_SECTION("MED: same-boot apply refused, rollback's active_id restore fails -- journal KEPT");
-    reset_state();
-    g_bump_gen_on_push = true; /* generation race => apply rolls back */
-    s_set_active_id_should_fail = true;
-    char reason[KILN_CFG_SWAP_REASON_MAX];
-    reason[0] = '\0';
-    bool diverged = false;
-    bool ok = kiln_cfg_swap_apply(7, false, reason, sizeof(reason), &diverged);
-    g_bump_gen_on_push = false;
-    s_set_active_id_should_fail = false;
-    TEST_CHECK(!ok, "apply refused");
-    TEST_CHECK(strstr(reason, KILN_CFG_SWAP_ROLLBACK_ID_NOTE) != NULL, "reason names the unrestored active id");
-    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE,
-               "record NOT cleared -- it is the only retry handle for the persisted active_id");
-    TEST_CHECK(kiln_cfg_swap_is_pending(), "autosave stays suppressed");
-
-    TEST_SECTION("MED: boot fallback rollback (PICO_DONE) with id restore failing -- record kept");
-    reset_state();
-    kiln_cfg_swap_set_link(&s_fake_link);
-    kiln_cfg_swap_pending_t p = make_pending(KILN_CFG_SWAP_MARKER_PICO_DONE);
-    TEST_CHECK(save_pending(&p), "PICO_DONE record persists");
-    s_set_active_id_should_fail = true;
-    kiln_cfg_swap_boot_recover();
-    s_set_active_id_should_fail = false;
-    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_PICO_DONE,
-               "boot recovery did not clear the record after an id restore failure");
-
-    TEST_SECTION("MED: boot ESP_DONE fallback rollback (target unreadable) with id restore failing -- record kept");
-    reset_state();
-    kiln_cfg_swap_set_link(&s_fake_link);
-    p = make_pending(KILN_CFG_SWAP_MARKER_ESP_DONE);
-    TEST_CHECK(save_pending(&p), "ESP_DONE record persists");
-    s_slot_exists = false; /* target slot cannot be re-read => fallback rollback */
-    s_set_active_id_should_fail = true;
-    kiln_cfg_swap_boot_recover();
-    s_set_active_id_should_fail = false;
-    TEST_CHECK(kiln_cfg_swap_get_marker(NULL, NULL) == KILN_CFG_SWAP_MARKER_ESP_DONE,
-               "ESP_DONE record kept after the fallback's id restore failed");
-}
-
 static void test_low4_apply_reason_names_uncleared_journal(void)
 {
     TEST_SECTION("LOW-4: generation race rollback whose clear fails -- the apply's reason names it");
@@ -1751,7 +1709,6 @@ int main(void)
     test_low6_restore_never_below_zone_raise_pico_open_path();
     test_low6_restore_never_below_zone_raise_rollback_path();
     test_low4_low5_rollback_uncleared_journal_reported();
-    test_med_rollback_id_restore_failure_keeps_record();
     test_low4_apply_reason_names_uncleared_journal();
     test_low4_note_survives_long_message();
     test_low3_esp_done_both_on_r_is_cleared();

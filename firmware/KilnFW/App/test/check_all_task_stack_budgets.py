@@ -605,6 +605,72 @@ def normalised_gate_violations(roots):
 
 
 # ---------------------------------------------------------------------------
+# DECLARED_EDGES (2026-10-09). Call edges the static walk cannot see because
+# the call goes through a function pointer, applied ONLY to a task row that
+# opts in with `declared_edges=True` (today: bx_flash_worker). Format:
+# {caller_name: [callee_name, ...]}; names must resolve uniquely in the ELF.
+#
+# nvs_save -> zones_autosave_job: zones_config_store.c's nvs_save() calls
+# zones_autosave_job through `void (*volatile job)(void *arg)` when it is
+# ALREADY on the flash worker (the volatile pointer defeats inlining and a
+# plain edge). Every other task dispatches that job onto the worker, so the
+# edge only costs stack on the worker. Without it control_handle_message's
+# worker path under-measures by the whole autosave chain (~2 KB).
+# Each entry needs a source-side proof that the edge still exists:
+# DECLARED_EDGE_SOURCE_GUARDS below; the check FAILS if the site is gone.
+# ---------------------------------------------------------------------------
+DECLARED_EDGES = {
+    "nvs_save": ["zones_autosave_job"],
+}
+
+# (caller, callee) -> (source file relative to App/, regex that must match).
+DECLARED_EDGE_SOURCE_GUARDS = {
+    ("nvs_save", "zones_autosave_job"): (
+        os.path.join("drivers", "persist", "zones_config_store.c"),
+        r"uart_bridge_ext_is_on_flash_worker\(\)\s*\)\s*\{\s*"
+        r"void\s*\(\*\s*volatile\s+job\)\s*\(\s*void\s*\*\s*arg\s*\)\s*=\s*zones_autosave_job\s*;"),
+}
+
+
+def declared_edge_violations(read=None):
+    """Errors for every DECLARED_EDGES entry whose source site is gone (or
+    that has no guard at all). `read` is injectable for tests."""
+    read = read or _read
+    errs = []
+    for caller, callees in DECLARED_EDGES.items():
+        for callee in callees:
+            guard = DECLARED_EDGE_SOURCE_GUARDS.get((caller, callee))
+            if guard is None:
+                errs.append(f"DECLARED_EDGES {caller}->{callee} has no DECLARED_EDGE_SOURCE_GUARDS entry")
+                continue
+            rel, rx = guard
+            try:
+                text = read(rel)
+            except OSError as e:
+                errs.append(f"DECLARED_EDGES {caller}->{callee}: cannot read {rel}: {e}")
+                continue
+            if not re.search(rx, text):
+                errs.append(f"DECLARED_EDGES {caller}->{callee}: the dispatch site "
+                            f"(`void (*volatile job)(void *arg) = {callee};` next to "
+                            f"uart_bridge_ext_is_on_flash_worker()) was not found in {rel} -- the "
+                            "declared edge is stale or the site moved; update DECLARED_EDGES.")
+    return errs
+
+
+def apply_declared_edges(parsed, resolve):
+    """A copy of `parsed` with DECLARED_EDGES added. `resolve(name)` -> addr
+    (raises ValueError when missing/ambiguous)."""
+    import copy
+    view = copy.copy(parsed)
+    view.calls = {k: set(v) for k, v in parsed.calls.items()}
+    for caller, callees in DECLARED_EDGES.items():
+        ca = resolve(caller)
+        for callee in callees:
+            view.calls.setdefault(ca, set()).add(resolve(callee))
+    return view
+
+
+# ---------------------------------------------------------------------------
 # TASKS: one row per stack_margin_register() call site with no dedicated
 # checker of its own. `root` is the task's own C entry function (the first
 # argument to whichever xTaskCreate* family function creates it -- NOT the
@@ -627,7 +693,7 @@ TASKS = [
     dict(name="link_watchdog", root="link_watchdog_task",
          stack=lambda: extract_int_literal("drivers/bridge/uart_bridge.c",
              r'xTaskCreatePinnedToCoreWithCaps\(link_watchdog_task,\s*"link_watchdog",\s*(\d+)')),
-    dict(name="bx_flash_worker", root="bx_worker_task",
+    dict(name="bx_flash_worker", root="bx_worker_task", declared_edges=True,
          stack=lambda: extract_local_macro("drivers/bridge/uart_bridge_ext.c",
              r'#define BX_WORKER_STACK\s+(\d+)',
              r'xTaskCreatePinnedToCore\(bx_worker_task,\s*"bx_flash_worker",\s*BX_WORKER_STACK'),
@@ -919,6 +985,14 @@ TASKS = [
 # is auditable as one block; retighten a value down if a fix legitimately
 # shrinks it, never raise one to paper over a regression.
 CEILING_BYTES = {
+    # 2026-10-09 LONG-CALL RE-BASELINE. stack_budget_lib/the legacy parser now
+    # resolve `l32r aN,<lit>` + `callx8 aN` long calls (all IRAM/ROM and
+    # >512 KB flash calls), which the walk used to drop silently. Every figure
+    # below that this change touched is the new measured total from a fresh
+    # target build; older per-entry notes quoting smaller numbers are history.
+    # The tiny tasks grew most: any ESP_LOG reaches esp_log -> ... ->
+    # pvPortMalloc -> __assert_func through long calls (~1 KB, conservative:
+    # the assert branch aborts, but it runs on the task's own stack).
     # Measured 2026-09-20 against a KilnCtrl.elf freshly built by
     # check_00_kilnfw_target_build.ps1 in a clean worktree, immediately after
     # registering this task (see TASKS["pico_auto_update"]'s own comment for
@@ -931,7 +1005,7 @@ CEILING_BYTES = {
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
     "gpio_probe": 3376,
-    "link_watchdog": 160,
+    "link_watchdog": 1168,
     # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of
     # the enumerated dispatch targets, safety_poll_pico_half_recapture_job --
     # see TASKS["bx_flash_worker"]'s extra_roots comment for why that set is
@@ -947,12 +1021,12 @@ CEILING_BYTES = {
     # declared stack is 10240 B (BX_WORKER_STACK), so honest free is still 6432 B
     # (62.8%) -- the ceiling is a tripwire on growth, not a margin problem, and no
     # stack bytes change. 3840 = measured 3808 + 32 B headroom.
-    "bx_flash_worker": 3840,
-    "info_uart_bridge": 2208,
-    "io_uart_bridge": 2256,
-    "safety_uart_bridge": 2912,
-    "thermo_uart_bridge": 2160,
-    "touch_uart_bridge": 2176,
+    "bx_flash_worker": 6144,
+    "info_uart_bridge": 3200,
+    "io_uart_bridge": 3248,
+    "safety_uart_bridge": 3312,
+    "thermo_uart_bridge": 3152,
+    "touch_uart_bridge": 3168,
     # Measured 2026-09-22 against a KilnCtrl.elf freshly built in worktree
     # C:\wt\swapstack_yrljuq (rebased onto origin/main f5a793ce), superseding
     # the same-day static-locals fix below. Review of that fix
@@ -977,7 +1051,7 @@ CEILING_BYTES = {
     # (set_reason()/latch_boot_fault()) and returns before any state-
     # mutating step if the allocation fails, so a failed allocation can
     # never leave a partial swap.
-    "kiln_cfg_swap": 4656,
+    "kiln_cfg_swap": 5520,
     "autotune_engine": 2944,
     # profile_exec_wdt: this 2496 is a 2026-09-09 baseline capture used as a
     # regression tripwire -- NOT a measured worst case. The task's deep path
@@ -990,11 +1064,11 @@ CEILING_BYTES = {
     # NUMBERS, RECONCILED" comment before quoting any of them as safe.
     # Deliberately NOT raised to reconcile them: that is what this table's
     # own comment above calls papering over a regression.
-    "profile_exec_wdt": 2496,
-    "ota_rollback_reboot": 1216,
+    "profile_exec_wdt": 2688,
+    "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
-    "recovery_boot": 1216,
-    "ota_pico_rollback": 2736,
+    "recovery_boot": 2208,
+    "ota_pico_rollback": 2896,
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
     # WRONG -- it was borrowed from ota_pico_rollback on the assumption the
     # two tasks were a comparable shape, but ota_pico_rollback's OWN resolved
@@ -1038,22 +1112,22 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 4592,
-    "recovery_exit": 80,
+    "http_async_job": 7552,
+    "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
     # _ledc_fade_hw_release 32 = 192 B of the 3072 B stack (84% free). The walk
     # now follows hal_pwm_set_duty into the IDF LEDC driver; the old 112 B only
     # covered task + hal_pwm_set_duty. Real, tiny, stack is ample: ceiling follows.
-    "backlight_pwm": 192,
-    "i2c_owner_ns2009": 144,
-    "i2c_owner_sx1509": 144,
-    "kiln_io_owner": 720,
-    "thermo_owner": 608,
-    "telemetry_log": 2560,
-    "danger_mode": 2112,
-    "safety_owner_evt": 176,
-    "safety_proto_rx": 3584,
+    "backlight_pwm": 1168,
+    "i2c_owner_ns2009": 1584,
+    "i2c_owner_sx1509": 1584,
+    "kiln_io_owner": 1984,
+    "thermo_owner": 1616,
+    "telemetry_log": 3008,
+    "danger_mode": 2256,
+    "safety_owner_evt": 1184,
+    "safety_proto_rx": 4576,
     # 3136 = 3104 (prior baseline) + 32. 2026-09-10: safety_cfg_store_
     # refetch_nonblocking() (safety_cfg_store.c) was made non-static/public
     # (safety_cfg_store.h) so the ceiling-reconcile writer path
@@ -1072,7 +1146,7 @@ CEILING_BYTES = {
     # against a freshly rebuilt KilnCtrl.elf (build_kilnfw, same day) with
     # 4756 B (58.1%) of the 8192 B stack still honestly free -- ordinary,
     # understood growth, not a regression to paper over.
-    "safety_poll": 3136,
+    "safety_poll": 3360,
     # 4880 = 752 (lvgl_port_task's own deepest resolved path) + 4128
     # (ui_home_refresh_cb, the deepest of the extra_roots callbacks -- see
     # TASKS["lvgl"]'s comment), measured 2026-09-09 against KilnCtrl.elf as
@@ -1103,7 +1177,7 @@ CEILING_BYTES = {
     # thin margin here is flagged, not just noted: if a future page or
     # callback measurably deepens this task's real worst case, treat it
     # as a hazard needing review, not a routine ceiling bump.
-    "lvgl": 4880,
+    "lvgl": 7472,
     # 3152 = 3008 (prior baseline, 2026-09-09) + 144, from bfa60679
     # ("Refuse to start a firing on a quarantined zones config, surface it
     # everywhere") closing the ota_rollback_esp() silent-default-PID-gains
@@ -1151,9 +1225,9 @@ CEILING_BYTES = {
     # safety-visibility hazard (the same one CLAUDE.md's boot_guard section
     # already documents as fixed), not a regression to paper over, and not
     # one to design around by shrinking the surfaced fault's own message.
-    "screen_idle": 3504,
-    "uart_owner_evt_task": 176,
-    "uart_proto_rx": 3584,
+    "screen_idle": 3888,
+    "uart_owner_evt_task": 1184,
+    "uart_proto_rx": 4576,
     # Measured 2026-09-24 against a KilnCtrl.elf freshly built by
     # check_00_kilnfw_target_build.ps1 (this pass's own build, worktree
     # C:\wt\sweepstack_dmt6la rebased onto origin/main 4ddad119). Deepest
@@ -1171,7 +1245,7 @@ CEILING_BYTES = {
     # task that reaches into safety_cfg_store's NVS-backed refetch path is
     # thin margin, same class flagged (not bumped) for lvgl above; worth a
     # real hardware high-water-mark measurement before ruling this settled.
-    "zone_sweep": 2896,
+    "zone_sweep": 3888,
     # Measured 2026-09-29 against a KilnCtrl.elf freshly built by build_kilnfw
     # in a clean worktree (C:\wt\stacktbl_4yfec2) minted at origin/main, right
     # after adding this task's TASKS row (5cd11231 registered
@@ -1180,7 +1254,7 @@ CEILING_BYTES = {
     # walk's own measured total, not headroom-padded: 1184 B of the declared
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
-    "wifi_prov_owner": 1184,
+    "wifi_prov_owner": 2944,
 }
 
 
@@ -1273,6 +1347,7 @@ def main():
         for _extra in _extra_roots_spec:
             _tracked_roots.add(_extra[0] if isinstance(_extra, (tuple, list)) else _extra)
     errors.extend(normalised_gate_violations(_tracked_roots))
+    errors.extend(declared_edge_violations())
     for task in TASKS:
         tname = task["name"]
         # KCONFIG-GATED ROWS. A task whose whole body is #if CONFIG_X'd out is
@@ -1359,7 +1434,16 @@ def main():
             errors.append(f"{tname}: could not derive declared stack size from source: {e}")
             continue
 
-        own_total, path_addrs = lib.deepest(root_addr, parsed)
+        walk_parsed = parsed
+        if task.get("declared_edges"):
+            def _resolve_declared(n):
+                return lib.resolve_root(parsed, n, args.elf, addr2line)
+            try:
+                walk_parsed = apply_declared_edges(parsed, _resolve_declared)
+            except ValueError as e:
+                errors.append(f"{tname}: cannot apply DECLARED_EDGES: {e}")
+                continue
+        own_total, path_addrs = lib.deepest(root_addr, walk_parsed)
 
         # Known callback entry points that also run ON this task's own stack
         # (registered with some library that dispatches to them by function
@@ -1391,7 +1475,7 @@ def main():
             except ValueError as e:
                 extra_errors.append(f"{extra_name} ({extra_path}): {e}")
                 continue
-            d, _p = lib.deepest(extra_addr, parsed)
+            d, _p = lib.deepest(extra_addr, walk_parsed)
             if d > extra_total:
                 extra_total = d
                 extra_label = extra_name
@@ -1401,7 +1485,7 @@ def main():
             continue
 
         total = own_total + extra_total
-        indirect = lib.has_unresolved_dispatch(root_addr, parsed)
+        indirect = lib.has_unresolved_dispatch(root_addr, walk_parsed)
         overhead = UNMODELED_OVERHEAD_BYTES
         honest_free = declared - total - overhead
         results.append(dict(task=task, declared=declared, own_total=own_total, total=total,

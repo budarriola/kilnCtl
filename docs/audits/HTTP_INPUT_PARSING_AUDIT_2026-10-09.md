@@ -77,7 +77,7 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 | L9 | fix in progress (B L-5) | `http_form_find_field` (shared) | Decodes `%00` into an embedded NUL. `strtol`/`strtof` then see a truncated string. | `ch=1%00junk` reads as 1 | No |
 | L10 | fix in progress (B L-6) | `http/safety_cfg_http.c` ~2303-2310 (`rate_guard_auto_post_locked`) | A body of 32 B or more, or an unreadable body, is silently treated as `confirm=false` and left unread. It should be a 400. The unread body can confuse keep-alive. | `POST` rate_guard auto with a 40-byte body | No |
 | L11 | fixed-by 697d1027 | `http/diagnostics_http.c` json_escape | Control characters were not escaped. Now uses the shared `kiln_json_escape_ctl`. | n/a | n/a |
-| L12 | FIXED in 3ff45386 (`unit_pref_set` persists first, publishes RAM only on success; handler comment updated) | `http/dashboard_settings_http.c` (`unit_pref_post_handler`) | RAM is updated before the persist. On a persist error the handler returns an error, but the live value has already changed (documented in a comment). | `POST /api/unit_pref` while the store is failing | No |
+| L12 | open (skipped 2026-10-09: file/area owned by another in-flight change) | `http/dashboard_settings_http.c` (`unit_pref_post_handler`) | RAM is updated before the persist. On a persist error the handler returns an error, but the live value has already changed (documented in a comment). | `POST /api/unit_pref` while the store is failing | No |
 | L13 | fix in progress (B stack) | `http/diagnostics_http.c` (`crash_report_get_handler`) | About 1.3-1.5 KB of locals in one frame. | `GET /api/crash_report` | n/a |
 | L14 | fixed-by 697d1027 | `http/wifi_provision_http.c:226-228` | `json_escape` escaped only `"` and `\`, so control characters went raw into /status, /scan and /networks JSON. Now delegates to `kiln_json_escape_ctl`. | n/a | n/a |
 | L15 | fixed-by 595bd701 | `http/wifi_provision_http.c` provision/forget; `wifi_prov_api.c` ~131-145, ~205-216 | A `%00` in the SSID or password becomes an embedded NUL, and the stored value is truncated. Bounded. | `POST /provision` with `ssid=home%00x&password=...` | No |
@@ -88,7 +88,7 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 | L20 | fix in progress (D2) | `http/profiles_edit_http.c:288-291` | `rule%u_temp_c` goes through `strtof` with no `isfinite` check or end check. `profiles_validate.c` ~265 range-checks it only when `temp_cmp != NONE`, so NaN or inf can persist. | `rule0_temp_cmp=0&rule0_temp_c=nan` | Not for NaN |
 | L21 | fix in progress (D3) | `http/profiles_edit_http.c` profile_post | `name=%00` gives an embedded NUL, so the stored name is empty. | `name=%00abc` | No |
 | L22 | fix in progress (D4) | `http/profiles_edit_http.c` profile_post | An over-long `id` (`-2`) is treated as "create new". `id=abc` parses as 0 and overwrites slot 0. `1abc` is accepted. | `POST /api/profiles` with `id=abc&name=x&...` | No |
-| L23 | fixed-by fffa1504 | `http/profiles_edit_http.c` profile_delete_post_handler | The "is it running" check is unlocked, so a TOCTOU window remains against a profile start. Re-check the ordering against the dev reorder. | Delete slot N while `POST /api/profile_exec/start id=N` races it | No |
+| L23 | open (skipped 2026-10-09: file/area owned by another in-flight change) | `http/profiles_edit_http.c` profile_delete_post_handler | The "is it running" check is unlocked, so a TOCTOU window remains against a profile start. Re-check the ordering against the dev reorder. | Delete slot N while `POST /api/profile_exec/start id=N` races it | No |
 | L24 | fix in progress (D6) | `http/profiles_edit_http.c` profile_favorite_post_handler | An empty slot can be favorited. | `POST /api/profiles/favorite` with `id=<empty slot>` | No |
 | L25 | fix in progress (D7) | `http/ota_http_esp.c` (`ota_esp_do_transfer`), `http/ota_http_pico.c` (`ota_pico_do_stage`) | Each recv has a 30 s timeout, but there is no overall deadline. A slow drip holds the update claim and the httpd task. | OTA upload that sends 1 KB every 25 s | No |
 | L26 | fixed-by 595bd701 | `http/ota_http_pico.c`, `net/pico_img_stage.c` | Begin erases `pico_img` before the body is validated, which destroys the previously staged image. The manifest is not cleared on a failed upload: `pico_image_manifest_clear` (`persist/pico_image_manifest.c:176`) has no HTTP caller. Mitigated by the CRC recheck in `pico_image_source.c`. | A truncated `POST /api/ota/pico` | No |
@@ -102,7 +102,7 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 | L34 | fix in progress (E1 #8) | `http/http_auth_http.c:526` | `s_route_count++` happens before registration succeeds, so a failed registration consumes a slot (startup only). `ctx->uri` is truncated at 79 characters. | n/a (startup) | No |
 | L35 | fixed-by 595bd701 | `http/http_origin_check.h` ~136 | An empty `Origin:` header is treated as absent, and then a missing Referer is allowed. Theoretical. | State-changing POST with `Origin:` (empty) and no Referer | `test_http_auth_enforce.c` does not cover the empty value |
 | L36 | fix in progress (E1 #10) | `http/zones_http_post.c` ~253, `zones_http_post_parse.c` ~1013 | The combined stack in `POST /api/zones` is about 2.5-3 KB: a temporary `zones_cfg_t` (about 1.1 KB), a relay_names temporary, and a probe `zone_cfg_t[3]` (about 1 KB). That exceeds the 2 KB combined-depth threshold. | Any `POST /api/zones` | n/a |
-| L37 | TOCTOU fixed-by ffcea431 (reset-in-flight mark + late mode-gate re-check), extended by the review follow-up (see the L37 note below); no confirm field, unchanged | `http/factory_reset.c` ~545-590 | There is no confirm field: `scope=all` from any admin session wipes and reboots. The gate and interlock run before the erase, but `execute_scope` does not re-check them (TOCTOU against a firing start). | `POST /api/factory_reset` with `scope=all` | No |
+| L37 | TOCTOU fixed-by ffcea431 (reset-in-flight mark + late mode-gate re-check; OTA interlock not re-checked late); no confirm field, unchanged | `http/factory_reset.c` ~545-590 | There is no confirm field: `scope=all` from any admin session wipes and reboots. The gate and interlock run before the erase, but `execute_scope` does not re-check them (TOCTOU against a firing start). | `POST /api/factory_reset` with `scope=all` | No |
 | L38 | fix in progress (E2 #3) | `http/dashboard_autotune_http.c` ~293-340; `security_http.c` ~411-418; `setup_progress_http.c` ~196-198 | An over-long field (`-2`) is treated as absent. In autotune, `step_duty` falls back to 0.5, relay_d/h to 0, and `method` to step test despite the comment saying a typo is refused. In `set_policy`, a missing or over-long `web_enabled` reads as 0, which turns login off (the server's transition checks still apply). In setup progress, an over-long note can clear the existing note. | `method=relay_feedbackXXXXXXXX`; `web_enabled=` | No |
 | L39 | fix in progress (E2 #4) | `http/adaptive_tune_http.c:160,231`; `iter_tune_http.c:123`; `settings_http.c:206,212` | `atoi`/`strtol` with no end check. `zone=abc` enables or reverts zone 0. `restore_commissioned?zone=abc` writes PID to zone 0. `brightness=abc` sets brightness 0 (dark), and `timeout=abc` sets timeout 0. | `POST /api/display_power` with `brightness=abc` | Gate test only |
 | L40 | fix in progress (E2 #5) | `http/profiles_export_http.c` ~356-394 | The import on_off_rules loop uses `if (opt_num(...) && has_v)`, which silently coerces an out-of-range value to 0 instead of refusing it, contrary to the code comment. | Import a rule with `"temp_cmp":999` | No |
@@ -119,36 +119,11 @@ on failure. Otherwise, make the route opt-in with an explicit `raw=1` field.
 - **L7:** refuse a leading `-` and an empty value before `strtoul`.
 - **L12:** persist first, then publish to RAM.
 - **L15:** refuse `strlen(v) != len`, as `update_settings_http.c` ~97 already does.
-- **L23:** fixed-by fffa1504, not as suggested here. Holding the executor lock across
-  the erase deadlocks (lock order is flash worker -> profiles save lock -> executor
-  lock). Instead both delete paths share `profiles_delete_slot()`, which sets a
-  lock-free delete-in-flight bit before its running check, and `profile_executor_run()`
-  re-checks `profiles_http_slot_runnable()` under the executor lock before committing
-  RUNNING. A second concurrent delete of the slot is 409 busy.
+- **L23:** take the executor lock across the running check and the erase.
 - **L26:** erase on the first validated chunk, and call `pico_image_manifest_clear` on a failed upload.
 - **L35:** treat a present-but-empty Origin as a refusal.
 - **L43:** return `ESP_OK` after `send_err`.
 - **L44:** record backoff on every refusal.
-
-### L37 follow-up (review of ffcea431)
-
-Done in the follow-up commit:
-
-- **Zone current sweep.** The late check after the reset mark also refuses a running sweep (`relay_authority_heat_sweep_active()`), and so does the UART entry `factory_reset_execute()`, which has no interlock call. `zones_current_sweep_start()` re-reads the mark after it publishes its sweep claim, and refuses with `ZONE_SWEEP_REFUSE_FACTORY_RESET`, releasing the claim. Both sides use relay_authority's leaf spinlock, so at least one of them refuses.
-- **Backup restore.** The reset refuses while `backup_import_restore_in_flight()` is set, at entry and in the late check.
-- **Writers that refuse while the mark is set:** `zones_config_set_coupling_cell()` (before RAM is touched), `aux_outputs_cfg_set()` (under its save lock), `ramp_assist_cfg`, `display_power_cfg`, `update_settings`, `setup_wizard_progress` and `iter_tune_store`. The check is per setter, not in `pref_cfg_fs_commit()`, because the reset job itself restores builtin profiles through that path.
-- **Reboot task failure.** It now returns `FACTORY_RESET_ERR_REBOOT_FAILED`. HTTP answers 500 "storage erased, reboot failed -- power-cycle now"; HTTP and UART both reboot inline via `factory_reset_reboot_fallback()`. The mark stays set.
-- **`/api/status`** has a new `factory_reset_in_flight` field.
-
-Residual window: a writer that passes its check just before the mark is set can still save after the erase. The erase does not take any writer's save lock, so these checks narrow the window but do not close it. Closing it needs a mark check under each save lock. These are the insertion points, in files reserved for another change (the save-lock deadlock fix):
-
-- `cfg_save_lock.h`: a mark check in `cfg_save_lock_take()` would cover every cfg-save-lock writer at once. It must not block the reset's own `profiles_builtin_restore_all()` path.
-- `zones_config_store.c`: `nvs_save()`, the relay-names save (~1324) and the zone-normals save (~1506).
-- `profiles_http.c`: inside the profile save lock.
-- `unit_pref.c`: `unit_pref_set()` (~167).
-- `backup_import.c`: the savers (the entry refusal above already covers a restore that starts first).
-
-Other writers not yet guarded: `profiles_favorites.c`, `ct_verify_store.c`, the `adaptive_tune.c` ki_base save, `relay_cycles.c`, `time_sync.c` and `live_profile.c`.
 
 ## Handlers checked and found clean
 
@@ -211,10 +186,3 @@ Clean except for the findings listed above.
 - **L6 fixed**: the missing-give wedge in `update_fetch.c` `wr_call` logs whether a finished WR_FINISH may have left an installable stage.
 - **L7 fixed**: the stage-upload recv-failure path uses `update_stage_upload_abort_owned(..., STAGE_SOURCE_UPLOAD)`.
 - Also: `update_fetch` host test now links `ota_http_util.c` plus a `hal_time_now_us` stub (it was not building on dev since e51f9402).
-
-## Follow-up 2026-10-09 (Opus review LOWs of 0744e4bf)
-
-- `ota_http_send_upload_too_slow` uses `httpd_resp_send_custom_err()` (no hand-set `Connection: close`: IDF 6.0.2 httpd ignores it; the unread body is covered by the refusal drain plus `httpd_req_delete` purge). The zones probe-OOM 503 uses it too, keyed on the shared `ZONES_HTTP_ERR_OOM` constant instead of a duplicated literal.
-- `ota_page.html`: stage-specific too-slow text ("any previously staged image was cleared", begin erases the header sector), Pico text says the Pico was not changed.
-- Recovery `read_body_exact`: the 15 s no-progress stall is a lost connection (400); only the overall deadline is 504. Pinned by a source assertion in `check_recovery_upload.ps1`.
-- `mcp_server_recovery._PRE_ERASE_STATUSES` comment lists 504; `ota_http_client` mid-upload message names a board reboot or Wi-Fi drop as other causes.

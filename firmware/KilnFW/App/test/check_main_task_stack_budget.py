@@ -239,6 +239,7 @@ def parse(objdump, elf):
     out = result.stdout
     sizes = symbol_sizes(objdump, elf)
     frames, calls, seen_entry, cur = {}, {}, set(), None
+    lct = stack_budget_common.lib.LongCallTracker()
     cur_end = None  # first address PAST the current function per the ELF
                     # symbol table; None means "size unknown, unbounded".
     for line in out.splitlines():
@@ -250,6 +251,7 @@ def parse(objdump, elf):
             cur_end = (addr + size) if size else None
             frames.setdefault(cur, 0)
             calls.setdefault(cur, set())
+            lct.reset()
             continue
         if cur is None:
             continue
@@ -272,6 +274,9 @@ def parse(objdump, elf):
         c = CALL_RE.search(line)
         if c:
             calls[cur].add(c.group(1))
+        lc = lct.feed(line)
+        if lc is not None and "+" not in lc[1]:
+            calls[cur].add(lc[1])   # resolved l32r+callx long call
     return frames, calls
 
 

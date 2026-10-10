@@ -17,7 +17,6 @@
 #include "kiln_io.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
-#include "relay_authority.h" /* relay_authority_reset_in_flight() -- aux_outputs_cfg_set() */
 
 static const char *TAG = "aux_outputs_cfg";
 
@@ -329,13 +328,6 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     uint32_t new_rev = s_rev + 1;
     ao_unlock(s_lock);
     if (quarantined) {
-        cfg_save_lock_give(&s_set_lock);
-        return ESP_ERR_INVALID_STATE;
-    }
-    /* HTTP audit L37 follow-up (MED-2): no save while a factory reset is in flight -- the file would be
-     * written back over storage the reset is erasing. Checked under s_set_lock, just before the commit.
-     * Narrows the window only (the erase does not take s_set_lock). */
-    if (relay_authority_reset_in_flight()) {
         cfg_save_lock_give(&s_set_lock);
         return ESP_ERR_INVALID_STATE;
     }

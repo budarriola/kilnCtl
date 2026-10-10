@@ -80,7 +80,8 @@ CONFIGURED_STACK_BYTES = 4096  # must match uart_log_bridge_start()'s xTaskCreat
 # task's own frame). Retighten to the new worst case if it legitimately
 # moves; do not raise it to paper over a regression without checking the
 # code that deepened it.
-CEILING_BYTES = 1200
+# 2026-10-09: long calls (l32r+callx) now followed: measured 2080 B (was 1200 B), 984 B honest headroom of 4096.
+CEILING_BYTES = 2080
 
 # See "UNMODELED_OVERHEAD_BYTES" in this module's docstring: derived from a
 # real live-vs-static pair (1080 B free / 4096 B live, pre-fix 1984 B

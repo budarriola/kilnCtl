@@ -92,7 +92,6 @@ esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len);
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len);
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg);
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status);
-esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg);
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len);
 /* Added 2026-08-21 for zones_http.c's host test (test_zones_http.c) -- that
  * file's zones_post_handler() calls this on success. Declared here only;

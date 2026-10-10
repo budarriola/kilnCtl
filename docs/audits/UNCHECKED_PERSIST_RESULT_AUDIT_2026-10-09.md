@@ -296,19 +296,6 @@ below were negative-tested with `tools/negtest.ps1` (eight mutations, each CAUGH
   boot"), placed first so a long message truncates instead of the note
   (`test_low4_note_survives_long_message`). Tests: `test_low4_low5_rollback_uncleared_journal_reported`,
   `test_low4_apply_reason_names_uncleared_journal`.
-  Correction (Opus review of 106dcc3d): "retried at next boot" overstated it.
-  A failed clear is not self-healing: edits made before the next boot can latch
-  ESP_DONE_UNCONFIRMED (ESP_DONE) or be re-imported over (PICO_DONE). The
-  comment and note text now say so.
-- **MED (rollback cleared the journal after a failed active_id restore).**
-  `rollback()` now keeps the record when `kiln_cfg_store_set_active_id_raw(previous)`
-  fails (reason `KILN_CFG_SWAP_ROLLBACK_ID_NOTE`) and reports it via the
-  `record_kept` out-param of `rollback_ex()`; both boot callers (PICO_OPEN/PICO_DONE
-  recovery and the ESP_DONE target-unreadable fallback) skip their own clear when
-  it is set. A leftover PICO_* record is harmless (boot re-applies R); a leftover
-  ESP_DONE goes to the LOW-3 branch, which retries the id first. Test:
-  `test_med_rollback_id_restore_failure_keeps_record` (same-boot second apply,
-  boot PICO_DONE fallback, boot ESP_DONE fallback).
 - **LOW-5 (rollback's active_id write unlocked).** Now under
   `kiln_cfg_store_lock()`, taken only after the Pico round trips and the
   reconcile return.

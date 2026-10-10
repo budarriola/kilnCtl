@@ -432,6 +432,11 @@ Two paths through `adaptive_tune_run_end` were over the ceiling:
    function records a refusal reason and returns.
 
 On a fresh target build of the fixed tree, `executor_task_entry` measures 1712 B, which passes.
-The ceiling was not raised.
+**Correction, 2026-10-09:** the 1712 B figure was wrong. The static analyser followed only `call8`
+and silently dropped every `l32r aN,<lit>` + `callx8 aN` long call (all IRAM/ROM and >512 KB flash calls).
+With those resolved, `executor_task_entry` measures 3360 B, and 3936 B when the `nvs_save` ->
+`zones_autosave_job` volatile-pointer edge is included. 3936 B + 1220 B unmodeled overhead = 5156 B,
+which still fits the 6144 B stack, so the stack was not bumped. The executor ceiling is now 3360 B
+(re-baselined, not a regression of this fix).
 
 The finding-5 fix and the test seam are in 9cc5ed06.

@@ -56,15 +56,6 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
  * header for it. */
 bool profiles_http_delete(uint8_t id);
 
-/* Run-start re-check for profile_executor_run() (HTTP input parsing audit L23).
- * Called with s_exec.lock held, so it is lock-free on purpose: an atomic load
- * and a RAM bitmap read, never the profiles save lock (save lock ->
- * s_exec.lock is the established order, cfg_save_lock.h) and never the flash
- * worker. False when a delete of user slot `id` is in flight, or the slot was
- * deleted after the caller copied it with profiles_http_get(). Builtin ids are
- * always runnable (they cannot be deleted). */
-bool profiles_http_slot_runnable(uint8_t id);
-
 /* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
  *
  * Rewrites every stored profile's on/off rules with zone_index == `zone` to

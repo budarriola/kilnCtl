@@ -1875,9 +1875,6 @@ typedef enum {
      * here when another of those already holds it (it would otherwise
      * interleave staged writes with the sweep's own). */
     ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY,
-    /* A factory reset is in flight (relay_authority_reset_in_flight()): read after the sweep claim is
-     * published, so the reset's late check and this start cannot both proceed. */
-    ZONE_SWEEP_REFUSE_FACTORY_RESET,
 } zone_sweep_refusal_t;
 
 /* Human-readable reason for a zone_sweep_refusal_t -- used by the HTTP

@@ -622,7 +622,7 @@ document.getElementById('picoUpdateBtn').addEventListener('click', function () {
   }).catch(function (e) {
     if (e && e.__kcHandled) return;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
-    msg.textContent = 'Pico update failed: ' + (uploadTooSlowText(e, true) || e.message);
+    msg.textContent = 'Pico update failed: ' + (uploadTooSlowText(e) || e.message);
   });
 });
 
@@ -710,16 +710,11 @@ function loadStageStatus() {
 /* 409 from the downgrade gate: {"error","reason","needs_typed_confirm"}. Say why, and how to override. */
 /* 503 upload_too_slow (stage: JSON body; Pico/ESP push: plain "upload too slow"): the overall upload
  * deadline passed. Shared by the stage card and the Pico card. Returns null when e is something else. */
-var UPLOAD_TOO_SLOW_TAIL = 'Check the Wi-Fi signal, move closer or use a wired path, and upload again.';
-/* Stage: begin erases the stage header sector before the body is read, so a previously staged image is gone.
- * Pico push: refused before any Pico flash write, so the Pico is unchanged. */
-var UPLOAD_TOO_SLOW_STAGE_TEXT = 'The upload was too slow and the board gave up (overall deadline). ' +
-  'No new image was staged; any previously staged image was cleared. ' + UPLOAD_TOO_SLOW_TAIL;
-var UPLOAD_TOO_SLOW_PICO_TEXT = 'The upload was too slow and the board gave up (overall deadline). ' +
-  'The Pico was not changed. ' + UPLOAD_TOO_SLOW_TAIL;
-function uploadTooSlowText(e, pico) {
+var UPLOAD_TOO_SLOW_TEXT = 'The upload was too slow and the board gave up (overall deadline). Nothing was changed. ' +
+  'Check the Wi-Fi signal, move closer or use a wired path, and upload again.';
+function uploadTooSlowText(e) {
   var m = (e && e.message) || '';
-  if (m.indexOf('upload_too_slow') >= 0 || m.indexOf('upload too slow') >= 0) return pico ? UPLOAD_TOO_SLOW_PICO_TEXT : UPLOAD_TOO_SLOW_STAGE_TEXT;
+  if (m.indexOf('upload_too_slow') >= 0 || m.indexOf('upload too slow') >= 0) return UPLOAD_TOO_SLOW_TEXT;
   return null;
 }
 function stageRefusalText(e) {

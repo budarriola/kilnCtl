@@ -146,7 +146,10 @@ STACK_BYTES = 6144
 # side-effect announce-burst/boot-clear branches that used to make this
 # 2784 B. Lowered deliberately, with the cause stated, per "do not raise a
 # ceiling quietly" -- the same rule applies to lowering one.
-CEILING_BYTES = 1936
+# 2026-10-09: long calls (l32r+callx) now followed: measured 3360 B (was 1936 B). With the nvs_save -> zones_autosave_job
+# edge (a volatile function pointer the static walk cannot follow; see check_all_task_stack_budgets.py DECLARED_EDGES) the
+# prototype resolver gives 3936 B; 3936 + 1220 overhead = 5156 B of 6144 B, so no stack bump is needed.
+CEILING_BYTES = 3360
 
 # See "UNMODELED_OVERHEAD_BYTES" above -- this task's own live-measured figure,
 # not the httpd checker's 1800 B placeholder.

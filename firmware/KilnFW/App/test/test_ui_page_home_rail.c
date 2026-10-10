@@ -33,16 +33,6 @@ void run_test_ui_page_home_rail(void)
         TEST_CHECK(ui_page_home_rail_aux_caption(0x0F, 0) != NULL, "never NULL");
     }
 
-    TEST_SECTION("ui_page_home_rail: text_changed (write-on-change, L30)");
-    {
-        TEST_CHECK(ui_page_home_rail_text_changed("Zone 1", "Zone 1") == false, "same text: no write");
-        TEST_CHECK(ui_page_home_rail_text_changed("Zone 1", "Zone 2") == true, "different text: write");
-        TEST_CHECK(ui_page_home_rail_text_changed("", "x") == true, "empty to text: write");
-        TEST_CHECK(ui_page_home_rail_text_changed(NULL, "x") == true, "NULL current: write");
-        TEST_CHECK(ui_page_home_rail_text_changed("x", NULL) == true, "NULL next: write");
-        TEST_CHECK(UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT == 4u, "caption table covers 4 relays");
-    }
-
     TEST_SECTION("ui_page_home_rail: duty_pct");
     {
         TEST_CHECK(ui_page_home_rail_duty_pct(0.0f) == 0, "0.0 -> 0");

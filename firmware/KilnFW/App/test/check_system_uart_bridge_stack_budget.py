@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import check_main_task_stack_budget as base  # noqa: E402
 
 ROOT = "system_bridge_task"
-CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
+CONFIGURED_STACK_BYTES = 4096  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
 
 # Measured 2026-09-08 against KilnCtrl.elf as built that day -- see this
 # module's docstring for the "TODO.md section 13" unresized-stack context.
@@ -73,7 +73,8 @@ CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xT
 # the deepest reachable path (still through the cfg_fs_confirm_format_device
 # chain -- see this module's docstring; that chain is off-limits cfg_fs*
 # code and was not touched) from 2192 B to 1936 B. Retightened to match.
-CEILING_BYTES = 1936
+# 2026-10-09: long calls (l32r+callx) now followed: measured 3136 B (was 1936 B); stack raised 3072 -> 4096.
+CEILING_BYTES = 3136
 
 UNMODELED_OVERHEAD_BYTES = 300
 

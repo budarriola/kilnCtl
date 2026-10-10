@@ -74,9 +74,9 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
     }
 
     if (unit_pref_set(pref) != ESP_OK) {
-        /* unit_pref_set() persists first and publishes to RAM only on success,
-         * so the live value is unchanged. No NVS fallback: an error, never ok. */
-        ESP_LOGW(DASH_TAG, "unit preference not saved -- live value unchanged");
+        /* Live value took effect (unit_pref_set() updates RAM first) but the
+         * cfg save failed. With no NVS fallback that is an error, never ok. */
+        ESP_LOGW(DASH_TAG, "unit preference applied but not persisted -- will not survive a reboot");
         return cfg_fs_http_persist_failed(req);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");

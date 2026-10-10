@@ -31,7 +31,6 @@
                                 * execute_scope_job() below */
 #include "profiles_builtin.h"
 #include "relay_authority.h" /* relay_authority_heat_run_active() -- system_mode_gate below */
-#include "backup_restore_state.h" /* backup_import_restore_in_flight() -- reset_other_writer_refuses() */
 #include "system_mode_gate.h" /* SYS_ACTION_FACTORY_RESET -- owner decision Q3, 2026-09-25 */
 #include "system_mode_gate_http.h" /* system_mode_gate_http_send_refusal() */
 #include "wifi_provision_http.h"
@@ -420,37 +419,6 @@ static void execute_scope_job(void *arg)
     ctx->err = first_err;
 }
 
-void factory_reset_reboot_fallback(void)
-{
-    /* Same short delay reboot_task() uses, so a reply the caller already queued has a chance to leave
-     * first. Called on the caller's own task: no allocation, nothing touches flash. */
-    vTaskDelay(pdMS_TO_TICKS(500));
-    ESP_LOGE(TAG, "factory_reset: rebooting inline (the reboot task could not be created)");
-    hal_wdt_reboot(); /* never returns on the real backend; the host fake returns (fake_wdt.c) */
-}
-
-/* The two other storage writers a reset must not run under, beyond the firing/autotune run facts the
- * system mode gate covers (HTTP audit L37 follow-up, MED-1/MED-2):
- *  - the zone current sweep holds the sweep heat claim and writes zone normals when it finishes. Its
- *    start publishes that claim, THEN reads relay_authority_reset_in_flight() and refuses (releasing the
- *    claim); this side sets the mark, THEN reads relay_authority_heat_sweep_active(). Same leaf
- *    spinlock, so at least one side refuses.
- *  - a backup restore (backup_import_restore_in_flight()) is mid-way through writing every store.
- * Returns true with reason filled (when given) if either is active. */
-static bool reset_other_writer_refuses(char *reason, size_t reason_cap)
-{
-    const char *why = NULL;
-    if (relay_authority_heat_sweep_active()) {
-        why = "refused -- a zone current sweep is running; stop it or wait for it to finish";
-    } else if (backup_import_restore_in_flight()) {
-        why = "refused -- a backup restore is in progress; wait for it to finish";
-    }
-    if (why != NULL && reason != NULL && reason_cap > 0) {
-        snprintf(reason, reason_cap, "%s", why);
-    }
-    return why != NULL;
-}
-
 /* Late system-mode-gate look, taken AFTER relay_authority_reset_in_flight_begin(): the entry checks in
  * reset_post_handler()/factory_reset_execute() run before the body read and the flash-worker dispatch,
  * so a firing or autotune could start in between and have its storage erased under it. The starters
@@ -464,19 +432,14 @@ static bool reset_mode_gate_refuses(char *mode_reason, size_t mode_reason_cap)
     char reason[SYSTEM_MODE_GATE_REASON_MAX];
     reason[0] = '\0';
     bool refused = system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, reason, sizeof(reason));
-    if (refused) {
-        if (mode_reason && mode_reason_cap > 0) {
-            snprintf(mode_reason, mode_reason_cap, "%s", reason);
-        }
-        return true;
+    if (refused && mode_reason && mode_reason_cap > 0) {
+        snprintf(mode_reason, mode_reason_cap, "%s", reason);
     }
-    return reset_other_writer_refuses(mode_reason, mode_reason_cap);
+    return refused;
 }
 
 /* Returns FACTORY_RESET_ERR_MODE_GATE_REFUSED (mode_reason filled, nothing erased, reset mark cleared)
- * if a firing, autotune run or zone current sweep holds a heat claim, or a backup restore is in flight,
- * once the reset mark is set. Returns FACTORY_RESET_ERR_REBOOT_FAILED if the erase ran but the reboot
- * task could not be created: the caller must report that and call factory_reset_reboot_fallback(). */
+ * if a firing or autotune run holds the heat claim once the reset mark is set. */
 static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, size_t mode_reason_cap)
 {
     execute_scope_job_ctx_t ctx = { .scope = scope, .err = ESP_FAIL };
@@ -487,7 +450,7 @@ static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, si
     relay_authority_reset_in_flight_begin();
     if (reset_mode_gate_refuses(mode_reason, mode_reason_cap)) {
         relay_authority_reset_in_flight_end();
-        ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a run, sweep or restore started meanwhile");
+        ESP_LOGW(TAG, "factory_reset: refused at dispatch -- a firing or autotune run started meanwhile");
         return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
     }
 
@@ -518,10 +481,8 @@ static esp_err_t execute_scope(const reset_scope_t *scope, char *mode_reason, si
          * against just-erased storage and rewrite pre-reset data. Fail loud. */
         ESP_LOGE(TAG, "factory_reset: could not create the reboot task -- reset NOT complete");
         /* The reset mark deliberately stays set: storage is already erased, so no run may start
-         * against it before the reboot. A distinct error (not ESP_ERR_NO_MEM, which the erase itself
-         * could also return) so both callers can say "storage erased, reboot failed" and then reboot
-         * inline via factory_reset_reboot_fallback() after sending their reply. */
-        return FACTORY_RESET_ERR_REBOOT_FAILED;
+         * against it before the reboot the operator now has to do by hand. */
+        return ESP_ERR_NO_MEM;
     }
     return ctx.err;
 }
@@ -550,13 +511,6 @@ esp_err_t factory_reset_execute(factory_reset_scope_t scope)
         mode_reason[0] = '\0';
         if (system_mode_gate_check(SYS_ACTION_FACTORY_RESET, &mode_snap, mode_reason, sizeof(mode_reason))) {
             ESP_LOGW(TAG, "factory_reset_execute: refused by system mode gate: %s", mode_reason);
-            return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
-        }
-        /* The HTTP entry refuses a running sweep through ota_http_check_interlocks(); this UART entry
-         * has no interlock call, so it checks the sweep (and a restore) itself. execute_scope()'s late
-         * check repeats this after the mark is set. */
-        if (reset_other_writer_refuses(mode_reason, sizeof(mode_reason))) {
-            ESP_LOGW(TAG, "factory_reset_execute: %s", mode_reason);
             return FACTORY_RESET_ERR_MODE_GATE_REFUSED;
         }
     }
@@ -673,26 +627,16 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     esp_err_t first_err = execute_scope(scope, late_reason, sizeof(late_reason));
 
     if (first_err == FACTORY_RESET_ERR_MODE_GATE_REFUSED) {
-        /* A run, sweep or restore started after the entry check above; nothing was erased. */
+        /* A run started after the entry check above; nothing was erased. */
         ESP_LOGW(TAG, "factory_reset from %s: refused by system mode gate at dispatch: %s", ip, late_reason);
         return system_mode_gate_http_send_refusal(req, late_reason);
-    }
-    if (first_err == FACTORY_RESET_ERR_REBOOT_FAILED) {
-        /* The erase ran but the reboot task could not be created. RAM still holds pre-reset state that
-         * would be written back over the erased storage, so reboot inline after the reply leaves. */
-        ESP_LOGE(TAG, "factory_reset from %s: storage erased, reboot task failed -- rebooting inline", ip);
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_sendstr(req, "storage erased, reboot failed -- power-cycle now");
-        factory_reset_reboot_fallback();
-        return ESP_OK;
     }
     if (first_err != ESP_OK) {
         /* Best-effort is not good enough here: an operator who asked for a
          * wipe and silently got a partial one (e.g. "all" that only erased
          * two of three partitions) needs to know, not just see a reboot and
-         * assume it worked. The reboot is scheduled only once the erase was
-         * dispatched: a flash-worker dispatch failure returns here with
-         * nothing erased and no reboot scheduled. */
+         * assume it worked. execute_scope() already scheduled the reboot
+         * regardless. */
         char msg[64];
         snprintf(msg, sizeof(msg), "erase failed for one or more partitions: %s", esp_err_to_name(first_err));
         httpd_resp_set_status(req, "500 Internal Server Error");

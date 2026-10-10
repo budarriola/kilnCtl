@@ -273,12 +273,6 @@ relay_heat_sweep_claim_result_t relay_authority_heat_sweep_claim_begin(void);
  * never held it. */
 void relay_authority_heat_sweep_claim_end(void);
 
-/* True while the zone current sweep holds its exclusive claim. Leaf read under s_heat_claim_mux.
- * factory_reset.c's late check after relay_authority_reset_in_flight_begin() reads this, and the sweep
- * start reads relay_authority_reset_in_flight() after publishing its claim, so a sweep and a factory
- * reset cannot both proceed (paired-mark shape, see the reset-in-flight comment below). */
-bool relay_authority_heat_sweep_active(void);
-
 /* True/false for whether profile_executor / autotune_engine currently hold
  * the shared heat claim (RUNNING or PAUSED for profile -- claim_end() is
  * only called from a terminal transition, see profile_executor_status.c's

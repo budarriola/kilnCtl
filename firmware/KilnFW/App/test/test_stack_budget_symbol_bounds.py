@@ -124,5 +124,113 @@ class NoPhantomEdgePastSymbolEndTest(unittest.TestCase):
         self.assertEqual(parsed.calls.get(0x10, set()), set())
 
 
+# -- Long calls (l32r literal + callx) and DECLARED_EDGES ---------------
+# 2026-10-09: a call8 reaches +-512 KB only; every farther flash call, and
+# every call into IRAM/ROM, is `l32r aN,<literal> (<addr> <sym>)` + `callx8 aN`.
+# Both parsers used to drop those edges. Synthetic snippets, no ELF needed.
+
+LONGCALL_T = (
+    "00000010 g     F .flash.text\t00000040 caller_fn\n"
+    "00000200 g     F .flash.text\t00000004 far_fn\n"
+    "00000300 g     F .flash.text\t00000004 other_fn\n"
+)
+
+LONGCALL_D = """
+Disassembly of section .flash.text:
+
+00000010 <caller_fn>:
+10:\t006136        \tentry\ta1, 32
+13:\tc90c81        \tl32r\ta8, 00000004 <caller_fn-0xc> (00000200 <far_fn>)
+16:\t0008e0        \tcallx8\ta8
+19:\tc90c81        \tl32r\ta9, 00000008 <caller_fn-0x8> (00000300 <other_fn>)
+1c:\t001982        \tmovi\ta9, 1
+1f:\t0009e0        \tcallx8\ta9
+22:\tc90c81        \tl32r\ta10, 0000000c <caller_fn-0x4> (3fc9a8a0 <some_data>)
+25:\t000ae0        \tcallx8\ta11
+28:\tf01d          \tretw.n
+
+00000200 <far_fn>:
+200:\t006236        \tentry\ta1, 48
+203:\tf01d          \tretw.n
+
+00000300 <other_fn>:
+300:\t006236        \tentry\ta1, 64
+303:\tf01d          \tretw.n
+"""
+
+
+def _longcall_run(cmd, capture_output=True, text=True, check=False):
+    return mock.Mock(returncode=0, stderr="",
+                     stdout=LONGCALL_T if "-t" in cmd else LONGCALL_D)
+
+
+class LongCallTrackerTest(unittest.TestCase):
+    def test_pairs_l32r_with_callx(self):
+        t = addr_keyed.LongCallTracker()
+        self.assertIsNone(t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <far_fn>)"))
+        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), (0x200, "far_fn"))
+
+    def test_redefinition_drops_the_literal(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta9, 00000004 <x> (00000300 <other_fn>)")
+        t.feed("1c:\t001982        \tmovi\ta9, 1")
+        self.assertIsNone(t.feed("1f:\t0009e0        \tcallx8\ta9"))
+
+    def test_store_does_not_drop_the_literal(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <far_fn>)")
+        t.feed("14:\t0008e0        \ts32i\ta8, a1, 4")
+        self.assertEqual(t.feed("16:\t0008e0        \tcallx8\ta8"), (0x200, "far_fn"))
+
+    def test_reset_clears_state(self):
+        t = addr_keyed.LongCallTracker()
+        t.feed("13:\tc90c81        \tl32r\ta8, 00000004 <x> (00000200 <far_fn>)")
+        t.reset()
+        self.assertIsNone(t.feed("16:\t0008e0        \tcallx8\ta8"))
+
+
+class LongCallParseTest(unittest.TestCase):
+    def test_addr_keyed_parser_resolves_long_call(self):
+        with mock.patch.object(addr_keyed.subprocess, "run", side_effect=_longcall_run), \
+                mock.patch("os.path.getsize", return_value=len(LONGCALL_D)):
+            parsed = addr_keyed.parse("objdump", "fake.elf")
+        self.assertEqual(parsed.calls[0x10], {0x200}, "l32r+callx8 edge to far_fn must exist; the "
+                         "movi-clobbered a9 and the unpaired callx8 a11 must not add edges")
+        total, _ = addr_keyed.deepest(0x10, parsed)
+        self.assertEqual(total, 32 + 48)
+        self.assertTrue(parsed.indirect[0x10], "the unresolved callx8 a11 is still indirect")
+
+    def test_legacy_parser_resolves_long_call(self):
+        with mock.patch.object(legacy.subprocess, "run", side_effect=_longcall_run), \
+                mock.patch("os.path.getsize", return_value=len(LONGCALL_D)):
+            frames, calls = legacy.parse("objdump", "fake.elf")
+        self.assertEqual(calls["caller_fn"], {"far_fn"})
+        self.assertEqual(legacy.deepest("caller_fn", frames, calls)[0], 32 + 48)
+
+
+class DeclaredEdgesTest(unittest.TestCase):
+    SITE = ("        if (uart_bridge_ext_is_on_flash_worker()) {\n"
+            "            void (*volatile job)(void *arg) = zones_autosave_job;\n"
+            "            job((void *)xTaskGetCurrentTaskHandle());\n")
+
+    def test_present_site_passes(self):
+        import check_all_task_stack_budgets as c
+        self.assertEqual(c.declared_edge_violations(read=lambda rel: self.SITE), [])
+
+    def test_missing_site_fails(self):
+        import check_all_task_stack_budgets as c
+        errs = c.declared_edge_violations(read=lambda rel: "zones_autosave_job(arg);\n")
+        self.assertEqual(len(errs), 1)
+        self.assertIn("nvs_save->zones_autosave_job", errs[0])
+
+    def test_declared_edge_is_added_to_the_view_only(self):
+        import check_all_task_stack_budgets as c
+        parsed = addr_keyed.ParsedElf({1: 8, 2: 16}, {1: set(), 2: set()}, {1: "nvs_save", 2: "zones_autosave_job"},
+                                      {"nvs_save": [1], "zones_autosave_job": [2]}, {1: True, 2: False})
+        view = c.apply_declared_edges(parsed, lambda n: parsed.name_addrs[n][0])
+        self.assertEqual(addr_keyed.deepest(1, view)[0], 24)
+        self.assertEqual(addr_keyed.deepest(1, parsed)[0], 8, "the shared parse must stay untouched")
+
+
 if __name__ == "__main__":
     unittest.main()

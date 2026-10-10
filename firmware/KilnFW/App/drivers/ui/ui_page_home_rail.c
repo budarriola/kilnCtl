@@ -11,8 +11,8 @@ bool ui_page_home_rail_pill_on(bool io_ok, bool relay_on)
 
 const char *ui_page_home_rail_aux_caption(uint8_t aux_enabled_mask, uint32_t relay_idx)
 {
-    static const char *const k_caption[UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT] = {"A1", "A2", "A3", "A4"};
-    if (relay_idx >= UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT || !(aux_enabled_mask & (1u << relay_idx))) {
+    static const char *const k_caption[4] = {"A1", "A2", "A3", "A4"};
+    if (relay_idx >= 4u || !(aux_enabled_mask & (1u << relay_idx))) {
         return "";
     }
     return k_caption[relay_idx];
@@ -53,12 +53,4 @@ void ui_page_home_rail_format_kiln_watts(bool power_valid, float power_w, char *
         return;
     }
     snprintf(out, out_cap, "%.0f W", (double)power_w);
-}
-
-bool ui_page_home_rail_text_changed(const char *current, const char *next)
-{
-    if (current == NULL || next == NULL) {
-        return true;
-    }
-    return strcmp(current, next) != 0;
 }

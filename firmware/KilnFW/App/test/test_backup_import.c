@@ -88,12 +88,6 @@ static bool s_test_autotune_running_for_mode_gate = false;
 // before and after.
 bool backup_import_restore_in_flight(void);
 static bool s_test_restore_flag_seen_set_at_heat_read = false;
-// relay_authority.h's factory reset in flight mark (HTTP audit L37 follow-up, MED-2): the guarded
-// persistence setters linked into this executable (aux_outputs_cfg_set(), ramp_assist_cfg, display_power,
-// update_settings, setup_wizard_progress, iter_tune_store, zones_config_set_coupling_cell()) refuse
-// while it is set. Defaults clear; test_aux_outputs_store.c's refusal test sets it.
-bool g_test_reset_in_flight = false;
-bool relay_authority_reset_in_flight(void) { return g_test_reset_in_flight; }
 void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
 {
     if (backup_import_restore_in_flight()) s_test_restore_flag_seen_set_at_heat_read = true;
