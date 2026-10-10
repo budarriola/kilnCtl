@@ -20,6 +20,23 @@ the shadow was zeroed (HIGH), and an ON write that lands just before the bus
 dies (MED). The re-init is also now reachable from tasks other than the owner
 with no lock (MED).
 
+## Fix status (2026-10-10)
+
+All findings fixed in `bcf448e71` (stack-budget re-pin in `fbf6e1070`), on origin/dev:
+
+- HIGH-1: a failed init/re-init after the relay pins became outputs returns them to inputs (coil de-energised); the shadow is only claimed 0 once that verifies, otherwise it is re-derived from the chip or `relay_state_unknown` is raised.
+- MED-1: `relay_state_unknown` (`KILN_IO_FLAG_RELAY_UNKNOWN` 0x04 in `kiln_io_read` flags) refuses ON writes and is asserted as a fault by the profile executor watchdog.
+- MED-2: `kiln_io` lock around every public entry; the fail-safe all-off waits a bounded 2000 ms, then does an unlocked OFF write and leaves `relay_state_unknown` raised.
+- MED-3: a dead-bus all-off no longer runs the reset/re-init cycle when the chip is unreadable.
+- LOW-1: re-init restores user IO, pull-ups, D/C and ~RESET.
+- LOW-2: documented. A failed re-init stays not-initialised (fail-safe); recovery is `kiln_io_reset_and_reinit` via `CMD_SX_RESET`, no automatic retry by design.
+- LOW-3: documented in the code. The verify path is the real backstop for an unnoticed POR. Known remaining gap: an ON claimed against undriven pins when external pull-ups match.
+- LOW-4: relay pins that read as inputs after a failed write are repaired through a re-init.
+- LOW-5, NIT-1: `CMD_SX_RESET` goes through `kiln_io_reset_and_reinit`, notes the off-tracker and uses a hard reset when the reset GPIO is wired.
+- NIT-2: assertions are unconditional.
+
+Not fixed here: `check_safety_call_results_checked` flags two `profile_executor_relay_io.c` calls and `check_all_task_stack_budgets` flags `http_async_job`; both are on dev independent of this change.
+
 ## Findings
 
 ### HIGH-1: failed re-init read-back leaves the shadow at 0 while a relay pin is an energised output
