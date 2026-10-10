@@ -313,3 +313,34 @@ case the version reset exists for. Owner call.
   `4ff79bc8c`. The baseline passed. All three mutations listed in LOW-8 were
   MISSED.
 - No target build, no `run_all_checks.ps1`, no bench access.
+
+## Fix batch 2 status (2026-10-10, worktree slfix2)
+
+Commits: `34b2d75a1` (LOW-6, LOW-7), `6dd30572d` (MED-3, LOW-4, LOW-5, LOW-8-3),
+`7c5a6abb0` (MED-1 conservative, MED-2, MED-4, LOW-1..3, LOW-8-1/2), plus the
+Opus-review follow-up commit (see git log).
+
+- MED-1 FIXED (conservative part): a Pico reboot whose new-boot DIAG carries a fatal
+  boot_reason bit (WATCHDOG, BROWNOUT, STACK_OVERFLOW, MALLOC_FAILED, ASSERT_FAILED)
+  withdraws the grant and holds the firing paused (`pause_reason` `pico_fatal_reboot` in
+  `/api/profile_exec`) with K4 open. There is no timeout fallback: an undecided cause
+  withholds heat, and a late fatal DIAG still holds. OPEN OWNER DECISION: whether a benign
+  reboot (POWERON/unknown) may silently restore heat mid-firing; `heat_enable.c` carries
+  a TODO and keeps the F1 re-request for now.
+- MED-2 FIXED: an unconfirmed grant pauses with `heat_grant_unconfirmed`.
+- MED-3 FIXED. MED-4 FIXED: `profile_exec_wdt` stack 4096 to 6144; static walk 2736 B,
+  ceiling re-pinned 2720 to 2736 (static walk, not a live high-water mark; a bench
+  reading is still owed). `safety_core` unchanged at 2208.
+- LOW-1..3 FIXED (per-episode reset, WARN timed). LOW-4 FIXED (5 s DIAG wait).
+- LOW-5 FIXED: log reworded; the swap fallback uses the blocking variant; the
+  non-blocking caller no longer claims an ARMED refusal. The reconcile backoff is
+  unchanged beyond that.
+- LOW-6 FIXED: real seqlock; the trip seq is bumped inside the odd window (review follow-up).
+- LOW-7, LOW-8 FIXED: all four mutations plus LOW-7 proven CAUGHT with `tools\negtest.ps1`
+  (kilnfw-host: LOW-8-1, 8-2a, 8-2b, 8-3; saftyfw-host: LOW-7).
+- LOW-10 CORRECTED: `5abfe307d` touched only `check_all_task_stack_budgets.py`; the
+  `safety_core: 2208` ceiling is from `163980001`.
+- NOT DONE by instruction: F6, LOW-9.
+- Opus review leftovers (LOW, not fixed): status-read failure feeds reboot seq 0 (nuisance
+  pause); autotune is not paused on a reboot hold; a pre-commit DIAG with DIRTY clear reads
+  as PERSISTED (F3 limitation); the MED-3 clear skips the read-back-failed case.
