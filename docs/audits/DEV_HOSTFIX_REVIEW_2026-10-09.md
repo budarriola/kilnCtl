@@ -61,6 +61,8 @@ header values, and the send happens in the same frame).
 
 **FIXED in ea9aea5a.**
 
+Negtest of ea9aea5a (2026-10-09, `-Preset kilnfw-host`, baseline PASS): moving `profiles_slot_gen_begin` after the RAM assign in the edit path, `retarget_commit` and the delete path are all **CAUGHT** (test_profiles_http.c:4054, 4082, 4118/4119).
+
 `firmware/KilnFW/App/test/test_profiles_http.c:3982` (`sg_write_fn`) and the
 header comment above it. The relevant source is `profiles_http.c:2435-2436`,
 `profiles_edit_http.c:715-716`, `profiles_http.c:2366-2367`.
