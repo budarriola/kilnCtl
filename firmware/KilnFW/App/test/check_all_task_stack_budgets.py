@@ -1092,7 +1092,8 @@ CEILING_BYTES = {
     # re-request mid-firing is still the honest confirmation.
     # 2026-10-10 firing-path fixes: +16 B (2752 B measured) for the bounded watchdog pause
     # and the guard 9 pending-verdict merge. Honest free at 6144 B stays above 3000 B.
-    "profile_exec_wdt": 2752,
+    # 2026-10-10 review R2ACE I7: +64 B margin over the 2752 B measurement (6144 B stack).
+    "profile_exec_wdt": 2816,
     "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,

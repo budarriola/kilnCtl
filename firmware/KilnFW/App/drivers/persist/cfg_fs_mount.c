@@ -75,7 +75,7 @@ bool uart_bridge_ext_flash_worker_started(void);
 #define CFG_FS_SCAN_CHUNK_BYTES 4096
 
 static bool s_format_confirmation_pending = false;
-static char s_format_pending_reason[96] = { 0 };
+static char s_format_pending_reason[160] = { 0 };
 
 bool cfg_fs_mount_format_confirmation_pending(void)
 {
@@ -484,9 +484,9 @@ esp_err_t cfg_fs_mount_device(void)
              * confirmation, or a format/re-register failure). */
             return auto_fmt_err;
         }
-        /* Auto-formatted and freshly registered -- fall through to the
-         * normal cfg_fs_init() finish below, same as a clean first-try
-         * mount. */
+        /* Not reached today: maybe_auto_format_and_remount() never returns
+         * ESP_OK (a deferred format finishes later), so a successful finish
+         * happens only on the first-try register path below. */
     }
 
     return finish_mount_after_register();

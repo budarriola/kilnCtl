@@ -459,12 +459,10 @@ static void test_register_fail_content_found(void)
     build_superblock_block(s_flash, true);
     TEST_CHECK(cfg_fs_mount_device() == ESP_ERR_INVALID_STATE, "corrupt superblock returns the original error");
     TEST_CHECK(cfg_fs_mount_format_confirmation_pending(), "corrupt superblock: confirmation pending too");
-    char want[96];
-    snprintf(want, sizeof(want), "%s",
-             "LittleFS superblock signature found but its commit failed CRC/version validation (corrupt filesystem)");
+    const char *want =
+        "LittleFS superblock signature found but its commit failed CRC/version validation (corrupt filesystem)";
     TEST_CHECK(strcmp(cfg_fs_mount_format_pending_reason(), want) == 0,
-               "corrupt superblock reason is the gate text truncated to the 96-byte buffer, NUL-terminated");
-    TEST_CHECK(strlen(cfg_fs_mount_format_pending_reason()) == 95, "truncated reason is exactly 95 chars + NUL");
+               "corrupt superblock reason is the full gate text, not truncated");
     TEST_CHECK(!cfg_fs_mount_format_ever_started(), "corrupt superblock: no format");
 
     // Only the second metadata block holds the superblock.

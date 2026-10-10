@@ -6,6 +6,7 @@
 // renamed, so the fake is not copied). Every relay assertion reads the fake
 // chip's own registers and relay_off_tracker, not just the module's view.
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 #define main sx_fake_unused_main
 #include "test_kiln_io_sx_fake.c"
@@ -36,8 +37,12 @@ static BaseType_t test_recv_or_exit(QueueHandle_t q, void *out, TickType_t t)
 #include "on_off_trigger_decide.h"
 static bool s_danger = false;
 bool danger_mode_active(void) { return s_danger; }
+static bool s_updating = false;
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
-{ (void)reason_out; (void)reason_cap; return false; }
+{
+    if (s_updating && reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
+    return s_updating;
+}
 static bool s_safety_blocked = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
@@ -48,9 +53,11 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 static uint8_t s_owned_mask = 0;
 bool relay_authority_manual_blocked_by_owner(uint8_t relay_index)
 { return (s_owned_mask & (1u << (relay_index - 1u))) != 0; }
-bool crash_report_has_unacknowledged(void) { return false; }
+static bool s_crash_unack = false;
+bool crash_report_has_unacknowledged(void) { return s_crash_unack; }
+static bool s_profile_running = false;
 void relay_authority_heat_run_active(bool *profile, bool *autotune)
-{ if (profile) *profile = false; if (autotune) *autotune = false; }
+{ if (profile) *profile = s_profile_running; if (autotune) *autotune = false; }
 bool backup_import_restore_in_flight(void) { return false; }
 
 static int s_dummy;
@@ -94,6 +101,7 @@ static owner_result_t d_reset(bool hard)
 static void fresh(void)
 {
     s_danger = false; s_safety_blocked = false; s_owned_mask = 0;
+    s_updating = false; s_crash_unack = false; s_profile_running = false;
     relay_off_tracker_reset_all();
     setup_ready();
 }
@@ -207,12 +215,52 @@ static void test_sx_reset_dispatch(void)
     F.fail_forever = 0;
 }
 
+static void test_relay_on_refusal_branches(void)
+{
+    TEST_SECTION("relay-ON refusal branches (UPDATING / CRASH_UNACK / RUNNING) through owner_task");
+    fresh();
+    s_updating = true;
+    owner_result_t r = d_relay(1, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_UPDATING && chip_relays_logical() == 0, "update in progress -> ERR_UPDATING, chip untouched");
+    r = d_mask(CMD_SET_RELAY_MASK, 0x03, 0x03);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_UPDATING && chip_relays_logical() == 0, "mask ON during update -> ERR_UPDATING");
+    r = d_relay(1, false);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_OK, "relay OFF is never update-gated");
+
+    fresh();
+    s_crash_unack = true;
+    r = d_relay(2, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK && chip_relays_logical() == 0, "unacked crash -> ERR_CRASH_UNACK");
+    r = d_mask(CMD_SET_RELAY_MASK, 0x04, 0x04);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_CRASH_UNACK && chip_relays_logical() == 0, "mask ON with unacked crash -> ERR_CRASH_UNACK");
+
+    fresh();
+    s_profile_running = true;
+    r = d_relay(3, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_RUNNING && chip_relays_logical() == 0, "firing active -> ERR_RUNNING");
+    r = d_mask(CMD_SET_RELAY_MASK, 0x08, 0x08);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_RUNNING && chip_relays_logical() == 0, "mask ON during firing -> ERR_RUNNING");
+    s_danger = true;
+    r = d_relay(3, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_RUNNING && chip_relays_logical() == 0, "danger mode does not bypass the firing gate");
+    s_danger = false;
+
+    fresh();
+    s_updating = true; s_crash_unack = true; s_profile_running = true;
+    r = d_relay(1, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_UPDATING, "update refusal reported before crash/firing");
+    s_safety_blocked = true;
+    r = d_relay(1, true);
+    TEST_CHECK(r.relay_result == KILN_IO_OWNER_RELAY_ERR_SAFETY, "safety fault reported first");
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1;
     test_set_relay_dispatch();
     test_set_relay_mask_dispatch();
     test_sx_reset_dispatch();
+    test_relay_on_refusal_branches();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;
 }

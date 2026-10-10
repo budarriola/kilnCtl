@@ -43,6 +43,7 @@ static int g_rr_calls;
 static uint8_t g_rr_last_relay;
 static bool g_rr_last_on;
 static bool g_rr_last_src_non_null;
+static uint32_t *g_rr_last_src_ptr;
 
 kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay(uint8_t relay, bool on, uint32_t *out_safety_sources)
 {
@@ -50,7 +51,12 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay(uint8_t relay, bool
     g_rr_last_relay = relay;
     g_rr_last_on = on;
     g_rr_last_src_non_null = out_safety_sources != NULL;
-    if (out_safety_sources && g_rr_result == KILN_IO_OWNER_RELAY_ERR_SAFETY) {
+    g_rr_last_src_ptr = out_safety_sources;
+    /* The owner writes the mask for every result that has one (SAFETY and
+     * OWNED here); dashboard_set_relay() must hand it the caller's own
+     * pointer and neither clobber nor replace what the owner wrote. */
+    if (out_safety_sources && (g_rr_result == KILN_IO_OWNER_RELAY_ERR_SAFETY ||
+                               g_rr_result == KILN_IO_OWNER_RELAY_ERR_OWNED)) {
         *out_safety_sources = g_rr_sources;
     }
     return g_rr_result;
@@ -214,17 +220,22 @@ static void scenario_relay(void)
     TEST_ASSERT(dashboard_set_relay(2, false, NULL) == DASHBOARD_RELAY_ERR_IO_FAIL, "unknown owner result -> IO_FAIL");
     TEST_ASSERT(!g_rr_last_on, "off request passed through as off");
 
-    // SAFETY passes the fault-source bitmask through, other results leave it.
+    // dashboard_set_relay() forwards the caller's exact out_safety_sources
+    // pointer to the owner and leaves whatever the owner wrote in place.
     g_rr_result = KILN_IO_OWNER_RELAY_ERR_SAFETY;
     g_rr_sources = 0x25u;
     src = 0;
+    g_rr_last_src_ptr = NULL;
     TEST_ASSERT(dashboard_set_relay(4, true, &src) == DASHBOARD_RELAY_ERR_SAFETY, "SAFETY with sources");
-    TEST_ASSERT(src == 0x25u, "SAFETY: sources passed through, got 0x%X", (unsigned)src);
-    TEST_ASSERT(g_rr_last_src_non_null, "sources pointer forwarded to owner");
+    TEST_ASSERT(g_rr_last_src_ptr == &src, "SAFETY: caller's exact sources pointer forwarded to owner");
+    TEST_ASSERT(src == 0x25u, "SAFETY: owner-written sources survive, got 0x%X", (unsigned)src);
     g_rr_result = KILN_IO_OWNER_RELAY_ERR_OWNED;
-    src = 0x77u;
+    g_rr_sources = 0x77u;
+    src = 0;
+    g_rr_last_src_ptr = NULL;
     TEST_ASSERT(dashboard_set_relay(4, true, &src) == DASHBOARD_RELAY_ERR_OWNED, "OWNED with sources ptr");
-    TEST_ASSERT(src == 0x77u, "OWNED leaves sources untouched");
+    TEST_ASSERT(g_rr_last_src_ptr == &src, "OWNED: caller's exact sources pointer forwarded to owner");
+    TEST_ASSERT(src == 0x77u, "OWNED: owner-written sources not clobbered, got 0x%X", (unsigned)src);
 }
 
 static void scenario_safety_trip(void)

@@ -1024,10 +1024,10 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
      * budgeted for here. */
     STATUS_APPEND(",\"touch_cal_supported\":\"%s\"", "self_calibrating");
     /* Mirrors the cfg_fs ask-first refusal branch: both fields, with the
-     * longest reason cfg_fs_mount.c can hold (s_format_pending_reason[96] ->
-     * 95 chars). Worst case is an admin/auth-off caller, who sees the reason. */
+     * longest reason cfg_fs_mount.c can hold (s_format_pending_reason[160] ->
+     * 159 chars). Worst case is an admin/auth-off caller, who sees the reason. */
     {
-        char why[96];
+        char why[160];
         memset(why, 'r', sizeof(why) - 1);
         why[sizeof(why) - 1] = '\0';
         STATUS_APPEND(",\"cfg_fs_format_pending\":true");

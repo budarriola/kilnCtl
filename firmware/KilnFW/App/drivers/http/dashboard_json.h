@@ -181,7 +181,10 @@
  * 5376 -> 5504 (+128, same step convention as every prior bump here) rather
  * than shaving margin to the bone. Measured headroom at this size, per
  * test_dashboard_json.c's fill_worst_case_zone()-driven render: 201B. */
-#define DASHBOARD_JSON_STATUS_BUF_SIZE 5760
+/* 2026-10-10: 5760 -> 5888 (+128). cfg_fs_mount.c's format-pending reason
+ * buffer grew 96 -> 160 B (review R2ACE L1: the gate text was truncated), so
+ * cfg_fs_format_reason can be 64 B longer. PSRAM-allocated. */
+#define DASHBOARD_JSON_STATUS_BUF_SIZE 5888
 
 /* Spare-relay WP-6: /api/status's `"aux":[...]` block, one object per ENABLED
  * aux output (an empty array when none): `{"relay":N,"on":b,"source":"s"}`,

@@ -1038,6 +1038,25 @@ static void scenario_commit_config(void)
     CHECK(s_tc_type_reapply_pending && s_tc_type_reapply_pending_value == 4,
           "heat unsafe: retry armed for tc_type 4 (pending=%d value=%u)", (int)s_tc_type_reapply_pending,
           (unsigned)s_tc_type_reapply_pending_value);
+
+    // 4b. Accepted with tc_type change while heat IS provably safe (fresh idle
+    //     context, no current): immediate reapply, nothing armed.
+    commit_reset();
+    s_context_lock = (SemaphoreHandle_t)1;
+    s_degraded_no_context = false;
+    g_any_current_present = false;
+    {
+        uint8_t cp[15 + 14 * 12];
+        uint8_t cn = build_context(cp, CONTEXT_FLAG_CONTEXT_VALID, 40, 1);
+        send_esp(cp, cn);
+    }
+    stage_u8(0x0105u, 4);
+    g_cur_tc = 0;
+    g_wex_ret = true;
+    send_cmd1(KILNLINK_COMMIT_CONFIG_CMD);
+    CHECK(g_wex_heat_safe == 1, "fresh idle context: heat provably safe");
+    CHECK(g_tc_reapply == 1, "heat safe: immediate reapply requested once, got %d", g_tc_reapply);
+    CHECK(!s_tc_type_reapply_pending, "heat safe: no retry armed");
     CHECK(g_reload_cal == 1, "still reloads cal, got %d", g_reload_cal);
     CHECK(link_staging_count(&s_staging) == 0, "staging reset after accepted write");
 
@@ -1103,8 +1122,9 @@ static void scenario_apply_config_volatile(void)
     send_cmd1(KILNLINK_APPLY_CONFIG_VOLATILE_CMD);
     CHECK(g_reload_cal == 1, "volatile tc change reloads cal");
     CHECK(link_staging_count(&s_staging) == 0, "volatile tc change resets staging");
-    CHECK((g_tc_reapply == 1) != (s_tc_type_reapply_pending && s_tc_type_reapply_pending_value == 6),
-          "tc change: exactly one of immediate reapply (%d) or armed retry (%d)", g_tc_reapply, (int)s_tc_type_reapply_pending);
+    CHECK(g_tc_reapply == 1 && !s_tc_type_reapply_pending,
+          "tc change: volatile path reapplies immediately, never arms the commit retry (reapply=%d pending=%d)",
+          g_tc_reapply, (int)s_tc_type_reapply_pending);
 
     // 5. Malformed frame ignored.
     commit_reset();

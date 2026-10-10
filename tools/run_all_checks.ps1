@@ -201,6 +201,8 @@ $checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
     Where-Object {
         $_.FullName -notmatch '\\build\\' -and
         $_.FullName -notmatch '\\node_modules\\' -and
+        # Untracked run archives (logs\wt_archive_*) hold stale copies of check_*.ps1.
+        $_.FullName.Substring($repoRoot.Length) -notmatch '^\\logs\\' -and
         # Any dotted directory: .venv, .git, and -- the one that actually bit
         # here -- .claude\worktrees\, which holds leftover per-agent copies of
         # the whole tree. Without this the first run of this script found 24

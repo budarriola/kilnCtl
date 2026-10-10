@@ -6,8 +6,9 @@
 // shipped record was never read by any test. Covered: every field's exact
 // value, the byte layout the ESP-side scanner depends on, the round trip
 // through the real CommonFW saftyfw_image_identity_find() inside a larger
-// buffer, and that single-byte corruption of the shipped bytes is rejected by
-// the same scanner (so a damaged record reads as absent, never as a wrong id).
+// buffer, and that single-byte corruption of a GUARDED byte (magic, version,
+// length, trailer) is rejected by the same scanner. The record has no CRC, so a
+// flipped commit/config byte is NOT detected and would read as a different id.
 #include <stdio.h>
 #include <string.h>
 

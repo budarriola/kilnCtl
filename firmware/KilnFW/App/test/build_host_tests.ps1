@@ -3557,7 +3557,7 @@ try {
     # 90 -> 91: test_ui_lcd_lock.c (round 2, R2-10)
     # 91 -> 92: test_security_backend_web_auth.c (round 2, R2-10)
     # 92 -> 93: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
-    # 93 -> 94: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
+    # 93 -> 94: added test_dashboard_http_relay.c (round 2, R2-A)
     # 94 -> 95: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
     # 95 -> 98: test_cfg_fs_format_http.c, test_setup_progress_http.c, test_dashboard_settings_http.c (round 3)
     $totalExpected = 98
