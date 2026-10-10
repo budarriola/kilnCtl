@@ -2467,6 +2467,16 @@ try {
 
     Invoke-HostTestExe -Name "danger_mode" -ExePath $exeDm -BuildCmd $cmdDm
 
+    # ---- test_ct_leak_alarm_service.c: own executable (round 2, R2-1) ----
+    # #includes ct_leak_alarm_service.c + ct_leak_alarm.c directly with fakes.
+    $exeCls = Join-Path $outDir "kilnctl_host_tests_ct_leak_alarm_service.exe"
+    $clsObjDir = Join-Path $outDir "cls"
+    New-Item -ItemType Directory -Force -Path $clsObjDir | Out-Null
+    $cmdCls = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$clsObjDir\\`" /Fe:`"$exeCls`" `"$(Join-Path $testDir 'test_ct_leak_alarm_service.c')`""
+
+    Invoke-HostTestExe -Name "ct_leak_alarm_service" -ExePath $exeCls -BuildCmd $cmdCls
+
     # ---- test_web_auth_store.c: its own 43rd, separate executable ----------
     # docs/WEB_AUTH_PLAN.md sections 2/3/11 -- the credential storage
     # foundation. Own executable (not joined into the combined $sources
@@ -3389,7 +3399,8 @@ try {
     # 81 -> 82: test_ota_http_refusals.c (campaign 9b)
     # 82 -> 83: test_update_http_refusals.c (campaign 9c)
     # 83 -> 84: test_uart_bridge_core.c (campaign 10)
-    $totalExpected = 84
+    # 84 -> 85: test_ct_leak_alarm_service.c (round 2, R2-1)
+    $totalExpected = 85
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"

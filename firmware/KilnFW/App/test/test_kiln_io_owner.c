@@ -24,6 +24,9 @@
 // predicates call) is the genuine board mapping from settings.h, not a
 // hand-copied constant that could silently drift from it.
 //
+// NOTE (round 2, R2-3): owner_task() dispatch for the SX_* gates IS now covered
+// below via a shadowed xQueueReceive over the ring stub; the paragraph that
+// follows predates that. SET_RELAY / CMD_SX_RESET stay uncovered.
 // What this suite deliberately does NOT cover: owner_task()'s actual command
 // dispatch (the switch statement wiring these predicates to
 // KILN_IO_OWNER_SX_REFUSED_RELAY) or CMD_SX_RESET's relay_shadow-clearing.
@@ -64,7 +67,23 @@ int g_stub_queue_send_calls = 0;
 unsigned char g_stub_last_queue_item[256];
 
 #include "fake_time.h"
+#include <setjmp.h>
+
+// Dispatch harness: owner_task() loops forever on xQueueReceive(). Shadow it so an
+// empty ring longjmps out; the ring stub (queue.h) really delivers queued commands.
+static jmp_buf s_task_exit;
+static int g_sx_calls;
+static BaseType_t test_recv_or_exit(QueueHandle_t q, void *out, TickType_t t)
+{
+    BaseType_t r = xQueueReceive(q, out, t);
+    if (r != pdTRUE) {
+        longjmp(s_task_exit, 1);
+    }
+    return r;
+}
+#define xQueueReceive(q, o, t) test_recv_or_exit((q), (o), (t))
 #include "../drivers/owners/kiln_io_owner.c"
+#undef xQueueReceive
 
 // ---- link-time stub bodies -------------------------------------------------
 // None of these is reachable from sx_mask_touches_relay()/
@@ -75,23 +94,23 @@ unsigned char g_stub_last_queue_item[256];
 
 esp_err_t SX1509_write_reg(SX1509Class *e, uint8_t reg, uint8_t value)
 {
-    (void)e; (void)reg; (void)value; return ESP_OK;
+    g_sx_calls++; (void)e; (void)reg; (void)value; return ESP_OK;
 }
 esp_err_t SX1509_read_regs(SX1509Class *e, uint8_t reg, uint8_t *out, size_t len)
 {
     (void)e; (void)reg; if (out && len) memset(out, 0, len); return ESP_OK;
 }
-esp_err_t SX1509_set_dir(SX1509Class *e, uint16_t dir_mask) { (void)e; (void)dir_mask; return ESP_OK; }
-esp_err_t SX1509_set_pullup(SX1509Class *e, uint16_t mask) { (void)e; (void)mask; return ESP_OK; }
+esp_err_t SX1509_set_dir(SX1509Class *e, uint16_t dir_mask) { g_sx_calls++; (void)e; (void)dir_mask; return ESP_OK; }
+esp_err_t SX1509_set_pullup(SX1509Class *e, uint16_t mask) { g_sx_calls++; (void)e; (void)mask; return ESP_OK; }
 esp_err_t SX1509_set_pulldown(SX1509Class *e, uint16_t mask) { (void)e; (void)mask; return ESP_OK; }
-esp_err_t SX1509_set_open_drain(SX1509Class *e, uint16_t mask) { (void)e; (void)mask; return ESP_OK; }
+esp_err_t SX1509_set_open_drain(SX1509Class *e, uint16_t mask) { g_sx_calls++; (void)e; (void)mask; return ESP_OK; }
 esp_err_t SX1509_set_debounce(SX1509Class *e, uint16_t enable_mask, uint8_t config)
 {
     (void)e; (void)enable_mask; (void)config; return ESP_OK;
 }
 esp_err_t SX1509_set_interrupt(SX1509Class *e, uint16_t mask, uint32_t sense)
 {
-    (void)e; (void)mask; (void)sense; return ESP_OK;
+    g_sx_calls++; (void)e; (void)mask; (void)sense; return ESP_OK;
 }
 esp_err_t SX1509_get_interrupt_source(SX1509Class *e, uint16_t *out_mask, bool clear)
 {
@@ -113,7 +132,7 @@ esp_err_t SX1509_read_pin(SX1509Class *e, uint8_t pin, bool *out_level)
 }
 esp_err_t SX1509_led_driver(SX1509Class *e, uint8_t pin, bool enable, uint8_t intensity)
 {
-    (void)e; (void)pin; (void)enable; (void)intensity; return ESP_OK;
+    g_sx_calls++; (void)e; (void)pin; (void)enable; (void)intensity; return ESP_OK;
 }
 esp_err_t SX1509_reset(SX1509Class *e, bool hard) { (void)e; (void)hard; return ESP_OK; }
 uint16_t SX1509_get_shadow(const SX1509Class *e) { (void)e; return 0; }
@@ -593,6 +612,99 @@ static void test_relays_off_ms_saturates_below_the_relay_on_sentinel(void)
     TEST_CHECK(kiln_io_relays_off_ms(NULL) == UINT32_MAX, "NULL io reads the sentinel");
 }
 
+// -----------------------------------------------------------------------------
+// owner_task() dispatch end to end (HOST_TEST_COVERAGE_GAPS round 2, R2-3).
+// Pushes a real owner_cmd_t into the delivering ring queue, runs the REAL
+// owner_task() until the ring is empty, and reads the module-owned result slot.
+// -----------------------------------------------------------------------------
+static kiln_io_t s_dispatch_io;
+static int s_dispatch_dummy;
+
+static owner_result_t dispatch(owner_cmd_t c)
+{
+    g_sx_calls = 0;
+    s_dispatch_io.exp = (SX1509Class *)&s_dispatch_dummy;
+    s_io = &s_dispatch_io;
+    s_cmd_queue = (QueueHandle_t)&s_dispatch_dummy;
+    s_slot_lock = xSemaphoreCreateMutex();
+    s_slots[0].sem = xSemaphoreCreateBinary();
+    s_slot_refcount[0] = 2; /* client + owner halves held, so the owner does not recycle the slot */
+    memset(&s_slots[0].result, 0, sizeof(s_slots[0].result));
+    c.slot = 0;
+    g_stub_queue_ring_enabled = 1;
+    g_stub_queue_ring_capacity = 4;
+    g_stub_queue_ring_head = 0;
+    g_stub_queue_ring_count = 1;
+    memcpy(g_stub_queue_ring[0], &c, sizeof(c));
+    g_stub_queue_ring_item_len[0] = sizeof(c);
+    if (setjmp(s_task_exit) == 0) {
+        owner_task(NULL);
+    }
+    g_stub_queue_ring_enabled = 0;
+    return s_slots[0].result;
+}
+
+static void test_owner_task_dispatch_refuses_relay_pin_reconfig(void)
+{
+    TEST_SECTION("owner_task() dispatch -- SX reconfig of a relay pin is refused before the expander");
+    s_stub_danger_mode = false; s_stub_safety_blocked = false; s_stub_updating = false;
+    s_stub_crash_unacked = false; s_stub_profile_running = false;
+    owner_cmd_t c;
+    owner_result_t r;
+
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_DIR; c.args.sx_mask16.mask = 0x0001u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "SET_DIR on relay pin refused, expander untouched");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_DIR; c.args.sx_mask16.mask = 0x0010u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "SET_DIR on non-relay pin reaches the expander");
+
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_PULLUP; c.args.sx_mask16.mask = 0x8002u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "SET_PULLUP with a relay bit refused");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_OPENDRAIN; c.args.sx_mask16.mask = 0x0008u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "SET_OPENDRAIN on Relay4 refused");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_INT_MASK; c.args.sx_set_int_mask.mask = 0x0004u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "SET_INT_MASK on Relay3 refused");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_SET_INT_MASK; c.args.sx_set_int_mask.mask = 0x0100u;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "SET_INT_MASK on non-relay pin allowed");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_LED_DRIVER; c.args.sx_led_driver.pin = 2; c.args.sx_led_driver.enable = true;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "LED_DRIVER on relay pin refused");
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_LED_DRIVER; c.args.sx_led_driver.pin = 12;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "LED_DRIVER on non-relay pin allowed");
+}
+
+static void test_owner_task_dispatch_write_reg_relay_on_gate(void)
+{
+    TEST_SECTION("owner_task() dispatch -- SX_WRITE_REG that sets a relay bit goes through relay_on_blocked()");
+    s_stub_danger_mode = false; s_stub_updating = false; s_stub_crash_unacked = false;
+    owner_cmd_t c;
+    memset(&c, 0, sizeof(c)); c.type = CMD_SX_WRITE_REG; c.args.sx_write_reg.reg = SX1509_REG_DATA_A; c.args.sx_write_reg.value = 0x01;
+
+    s_stub_safety_blocked = true; s_stub_safety_sources = 0x04u;
+    owner_result_t r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_REFUSED_RELAY && g_sx_calls == 0, "safety fault: relay-bit RegData write refused");
+    TEST_CHECK(r.safety_sources == 0x04u, "refusal carries the safety source mask");
+
+    s_stub_safety_blocked = false;
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "no gate active: write reaches the expander");
+
+    s_stub_safety_blocked = true;
+    c.args.sx_write_reg.value = 0x00; /* clearing relay bits is never gated */
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "clearing relay bits passes even with a safety fault");
+    c.args.sx_write_reg.reg = 0x20; c.args.sx_write_reg.value = 0xFF; /* not RegData */
+    r = dispatch(c);
+    TEST_CHECK(r.sx_result == KILN_IO_OWNER_SX_OK && g_sx_calls == 1, "non-RegData write is not a relay write");
+    s_stub_safety_blocked = false; s_stub_safety_sources = 0;
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
@@ -613,6 +725,8 @@ int main(void)
     test_relay_on_blocked_danger_mode_does_not_bypass_mode_gate();
     test_relay_off_writes_pass_through_while_running();
     test_relays_off_ms_saturates_below_the_relay_on_sentinel();
+    test_owner_task_dispatch_refuses_relay_pin_reconfig();
+    test_owner_task_dispatch_write_reg_relay_on_gate();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

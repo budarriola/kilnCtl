@@ -619,6 +619,28 @@ try {
         "/Fo:`"$wdTaskObjDir\\`" /Fe:`"$wdTaskExe`" $wdTaskSourceArgs"
     Add-HostBuild -Name "watchdog_task_tests.exe" -ExePath $wdTaskExe -BuildCmd $wdTaskCmd
 
+    # Round 2 R2-2 -- the REAL discrete_task.c (E-stop S7 / mainFault S6a
+    # sampling loop: polarity -> debounce -> published flags -> check-in).
+    # SEPARATE exe (task harness must not leak), own main().
+    $dtTaskExe = Join-Path $outDir "discrete_task_tests.exe"
+    $dtTaskObjDir = Join-Path $outDir "discrete_task_obj"
+    New-Item -ItemType Directory -Force -Path $dtTaskObjDir | Out-Null
+    $dtTaskSources = @(
+        (Join-Path $testDir "test_discrete_task_loop.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\discrete_task.c"),
+        (Join-Path $srcDir "discrete_pin_policy.c"),
+        (Join-Path $srcDir "debounce_policy.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $dtTaskSourceArgs = ($dtTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $dtTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$dtTaskObjDir\\`" /Fe:`"$dtTaskExe`" $dtTaskSourceArgs"
+    Add-HostBuild -Name "discrete_task_tests.exe" -ExePath $dtTaskExe -BuildCmd $dtTaskCmd
+
     Complete-HostBuilds
     if ($buildFailures.Count -gt 0) {
         Write-Host "SAFTYFW HOST TESTS: BUILD FAILED -- $($buildFailures -join ', ')"
@@ -633,6 +655,7 @@ try {
     $linkTaskFuzzExit = $exitCodes["link_task_fuzz_tests.exe"]
     $thermoTaskExit = $exitCodes["thermo_task_tests.exe"]
     $wdTaskExit = $exitCodes["watchdog_task_tests.exe"]
+    $dtTaskExit = $exitCodes["discrete_task_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -650,6 +673,7 @@ try {
         "link_task_fuzz_tests.exe"     = $linkTaskFuzzExit
         "thermo_task_tests.exe"        = $thermoTaskExit
         "watchdog_task_tests.exe"      = $wdTaskExit
+        "discrete_task_tests.exe"      = $dtTaskExit
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
@@ -684,7 +708,10 @@ try {
     if ($thermoTaskExit -ne 0) {
         exit $thermoTaskExit
     }
-    exit $wdTaskExit
+    if ($wdTaskExit -ne 0) {
+        exit $wdTaskExit
+    }
+    exit $dtTaskExit
 } finally {
     Exit-BuildLock -Lock $buildLock
 }
