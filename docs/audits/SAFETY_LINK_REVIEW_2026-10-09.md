@@ -32,6 +32,8 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F1 (MED): the heat grant is sent once; a Pico reboot, a lost frame or a Pico refusal loses it silently
 
+**FIXED in d6f107682 (2026-10-09):** heat_enable.c now compares the grant with the Pico-reported K4 each watchdog tick, re-requests with 3/6/12/24 s backoff (max 4), and reads not-granted plus retry-pending when K4 stays open.
+
 **ESP side**
 
 - `send_enable()` (`heat_enable.c:270-277`) sets `s_he.granted = true` as soon as `safety_link_request_enable()` returns `ESP_OK`.
@@ -70,6 +72,8 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F2 (LOW-MED): an ESP reboot mid-firing leaves K4 energized with no owner
 
+**FIXED in 3a1f6b6be (2026-10-09):** a new ESP session whose first context lacks HEAT_OWNER_ACTIVE drops the inherited grant (de-energise, never a trip).
+
 **Pico side**
 
 - The Pico's grant is RAM state in `relay_owner`. Nothing de-energizes it when the ESP session changes.
@@ -93,6 +97,8 @@ Every finding below was confirmed by reading both ends of the exchange.
 **Fix directions:** send one `REQUEST_ENABLE(false)` when the ESP link comes up, before any claim, or have the Pico drop the grant when a fresh context arrives with `HEAT_OWNER_ACTIVE` clear.
 
 ### F3 (LOW-MED): a refused persistent commit can be read back as landed
+
+**FIXED in b69575892 (2026-10-09):** persistent commit read-back also requires DIAG volatile-dirty clear (waits up to 3 s; non-blocking caller reports unconfirmed).
 
 **ESP side**
 
@@ -120,6 +126,8 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F4 (LOW): the 256th trip in one Pico boot is never announced
 
+**FIXED in 3f3008447 (2026-10-09):** trip seq wraps 255 -> 1 via link_frame_next_trip_seq().
+
 - `s_trip_seq` is a `uint8_t` that wraps (`safety_core.c:566-573`; the comment calls this an "acceptable, undocumented edge").
 - At the 256th trip it reads 0, `safety_core_get_trip_event()` returns false, and `link_task_poll_trip_event()` (`link_task.c:3297`) sends no `TRIP_EVENT` burst at all.
 - So the event is suppressed, not just given a duplicate number.
@@ -128,12 +136,16 @@ Every finding below was confirmed by reading both ends of the exchange.
 
 ### F5 (LOW, informational): trip-event fields are published without a barrier
 
+**FIXED in 12ead6672 (2026-10-09):** HAL_DMB() release before the seq bump and acquire after the seq read.
+
 - `safety_core.c` latches the trip fields (reason, uptime, tc, threshold) and then `s_trip_seq++` as plain non-volatile statics, with no `__dmb()`.
 - `link_task` reads them lock-free, and on the RP2040 it can run on the other core (`SAFTYFW_CORE_LINK_PATH`).
 - The documented "seq is written last, so never torn" ordering is therefore something the compiler may legally reorder, and it holds only by codegen accident.
 - The consequence would be one `TRIP_EVENT` with a stale reason or temperature, corrected by the next DIAG. Marking the fields `volatile`, or adding a release/acquire pair, would make the ordering real.
 
 ### F6 (LOW): CLEAR_TRIP binding carries no boot identity
+
+**DEFERRED (owner):** a boot-identity bind needs a CLEAR_TRIP wire change (a protocol 17 -> 18 bump on KilnFW, SaftyFW and CommonFW with frame/decide tests on both sides), too large for this batch. LOW, needs a stale frame on a point-to-point link.
 
 - The bound token is `0x100 | seq` (`link_frame.c:263+`, `safety_guards.c:283`).
 - The ESP forgets its cached `diag_trip_seq` on a Pico `boot_id` change (`safety_link_frames.c:275-281`, robustness L1).
