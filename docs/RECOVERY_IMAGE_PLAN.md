@@ -170,6 +170,10 @@ recovery instead; the bootloader already falls back to factory for an invalid ap
 short body, recv timeouts, an `esp_ota_end` failure leaving the boot target alone) and
 `check_recovery_hold.ps1`.
 
+## Expected S6b latch
+
+Any stay in the recovery image leaves the Pico with no safety link, so it latches S6b (link dead) and drops K4. This is expected, not a defect. After exit, confirm the link is up and that the cause was the recovery dwell, then clear it (owner decision 2026-10-02: clear without asking when the cause is the recovery image).
+
 ## Open risks
 
 - Pico bootloader frame set vs the relay: CHECKED 2026-10-07 by source comparison, no mismatch

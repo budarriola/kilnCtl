@@ -58,6 +58,7 @@
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
 #include "stage_header.h"
+#include "recovery_http_policy.h"
 
 static const char *TAG = "recovery_http";
 
@@ -199,6 +200,20 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL; // body unread: close the socket rather than drain it
     }
 
+    // R2-I1: clear the counter BEFORE `app` is overwritten (same order as
+    // recovery_apply and /api/recovery/exit): a failed clear refuses with `app`
+    // untouched, body unread, rather than leaving a new image unselectable. A
+    // count at or above the threshold would bounce the new app straight back to
+    // recovery. (A rejected upload leaves the cleared counter cleared, which is
+    // harmless: this image is already running.)
+    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL; // body unread: close the socket rather than drain it
+    }
+
     recovery_upload_cfg_t cfg = {
         .max_len = target->size,
         .validate = recovery_upload_validate_esp,
@@ -216,19 +231,6 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
     if (r != RECOVERY_UPLOAD_OK) {
         // Sends the error then returns ESP_FAIL so httpd closes the socket.
         return recovery_upload_send_error(req, http_status, msg);
-    }
-
-    // Clear the counter BEFORE selecting the new image (same order as
-    // /api/recovery/exit): a failed clear refuses with no set_boot and no
-    // reboot, since a count at or above the threshold would bounce the new app
-    // straight back to recovery. `app` already holds the verified image, so a
-    // later /api/recovery/exit can select it once the clear works.
-    char bg_msg[96];
-    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
-        httpd_resp_set_status(req, "500 Internal Server Error");
-        httpd_resp_set_hdr(req, "Connection", "close");
-        httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
-        return ESP_FAIL;
     }
 
     esp_err_t err = recovery_boot_partition_set_and_verify(target);
@@ -706,7 +708,7 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
         return refuse_while_applying(req);
     }
     char bg_msg[96];
-    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
@@ -734,7 +736,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     // fails the exit (500) with nothing changed, instead of booting the app
     // into a counter that walks the board straight back into recovery.
     char bg_msg[96];
-    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
@@ -754,6 +756,38 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
+}
+
+// Erases the app's legacy wifi_cfg copy in the DEFAULT `nvs` partition, which
+// wifi_prov_migrate_from_default_partition() re-adopts once saved_nets is gone.
+// Returns 0 when it is gone or unreachable (namespace absent, or the default
+// partition never initialised so the app cannot read it either), else an
+// esp_err_t. The namespace holds only the legacy Wi-Fi keys.
+static int erase_legacy_default_wifi(void)
+{
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
+        ESP_LOGW(TAG, "wifi_reset: default nvs unavailable, legacy copy not erased");
+        return 0;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return 0;
+    }
+    if (err != ESP_OK) {
+        return (int)err;
+    }
+    nvs_close(h);
+    err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return (int)err;
+    }
+    err = nvs_erase_all(h);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return (int)err;
 }
 
 // POST /api/recovery/wifi_reset -- forget the HOME network credentials
@@ -788,6 +822,12 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
     }
     err = nvs_commit(h);
     nvs_close(h);
+    int legacy_rc = erase_legacy_default_wifi();
+    if (!rhp_wifi_reset_ok(erase_failed, (int)err, legacy_rc) && erase_failed == 0 && err == ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "Wi-Fi settings cleared, but the legacy copy in the default NVS partition could not be erased",
+                               HTTPD_RESP_USE_STRLEN);
+    }
     if (erase_failed > 0) {
         char fmsg[96];
         snprintf(fmsg, sizeof(fmsg), "Wi-Fi settings erase failed for %u key(s), first: %s",

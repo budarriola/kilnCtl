@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "recovery_wifi_policy.h"
+#include "recovery_http_policy.h"
 
 static int g_pass, g_fail;
 
@@ -133,14 +134,75 @@ static void test_wifi_source_order(const char *path)
     free(src);
 }
 
+// Body of the function whose definition starts with `sig`, up to the next
+// line-start "}" (all handlers here are top-level, closing brace at column 0).
+static char *fn_body(const char *src, const char *sig)
+{
+    const char *a = strstr(src, sig);
+    if (!a) {
+        return NULL;
+    }
+    const char *e = strstr(a, "\n}");
+    if (!e) {
+        return NULL;
+    }
+    size_t n = (size_t)(e - a);
+    char *b = (char *)malloc(n + 1);
+    memcpy(b, a, n);
+    b[n] = 0;
+    return b;
+}
+
+static void test_http(const char *path)
+{
+    CHECK(rhp_wifi_reset_ok(0, 0, 0), "wifi reset ok when everything succeeded");
+    CHECK(!rhp_wifi_reset_ok(1, 0, 0), "wifi reset not ok on key erase failure");
+    CHECK(!rhp_wifi_reset_ok(0, -1, 0), "wifi reset not ok on commit failure");
+    CHECK(!rhp_wifi_reset_ok(0, 0, 0x105), "wifi reset not ok when legacy erase failed");
+
+    char *src = slurp(path);
+    CHECK(src != NULL, "recovery_http.c readable");
+    if (!src) {
+        return;
+    }
+    strip_comments(src);
+    // R2-L1: exit and boot_guard_reset treat a failed kiln_nvs as not applicable.
+    const char *sigs[] = {"esp_err_t recovery_exit_post(", "esp_err_t boot_guard_reset_post("};
+    for (int i = 0; i < 2; i++) {
+        char *b = fn_body(src, sigs[i]);
+        CHECK(b != NULL, "boot_guard route handler found");
+        if (b) {
+            CHECK(strstr(b, "boot_guard_clear_or_na(") != NULL, "route uses boot_guard_clear_or_na()");
+            CHECK(strstr(b, " clear_boot_guard(") == NULL && strstr(b, "!clear_boot_guard(") == NULL,
+                  "route does not call plain clear_boot_guard()");
+            free(b);
+        }
+    }
+    // R2-L2: the Wi-Fi reset also erases the legacy default-partition copy and
+    // reports success only through rhp_wifi_reset_ok().
+    char *w = fn_body(src, "esp_err_t wifi_reset_post(");
+    CHECK(w != NULL, "wifi_reset_post found");
+    if (w) {
+        CHECK(strstr(w, "erase_legacy_default_wifi()") != NULL, "wifi reset erases the legacy default-partition copy");
+        CHECK(strstr(w, "rhp_wifi_reset_ok(") != NULL, "wifi reset gated by rhp_wifi_reset_ok()");
+        free(w);
+    }
+    char *l = fn_body(src, "static int erase_legacy_default_wifi(");
+    CHECK(l != NULL && strstr(l, "nvs_erase_all(") != NULL && strstr(l, "nvs_open(WIFI_NVS_NAMESPACE") != NULL,
+          "legacy erase opens the default partition's wifi_cfg and erases it");
+    free(l);
+    free(src);
+}
+
 int main(int argc, char **argv)
 {
     test_policy();
-    if (argc < 2) {
-        fprintf(stderr, "usage: %s <recovery_wifi.c>\n", argv[0]);
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s <recovery_wifi.c> <recovery_http.c>\n", argv[0]);
         return 2;
     }
     test_wifi_source_order(argv[1]);
+    test_http(argv[2]);
     printf("RESULT pass=%d fail=%d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

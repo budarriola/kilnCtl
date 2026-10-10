@@ -133,9 +133,11 @@ int main(void)
         rec[4] = 6;
         CHECK(ric_boot_guard_decode(rec, 12, &count) == 0, "boot_guard bad crc rejected");
         rec[4] = 5;
-        rec[0] = 2;
+        rec[0] = 2; // valid CRC for version 2, so only the version check can reject
+        rec[8] = 0x26; rec[9] = 0x28; rec[10] = 0xD9; rec[11] = 0x10;
         CHECK(ric_boot_guard_decode(rec, 12, &count) == 0, "boot_guard wrong version rejected");
         rec[0] = 1;
+        rec[8] = 0xC5; rec[9] = 0x2F; rec[10] = 0x56; rec[11] = 0x9E;
         CHECK(ric_boot_guard_decode(rec, 11, &count) == 0, "boot_guard short rejected");
         CHECK(ric_boot_guard_decode(rec, 13, &count) == 0, "boot_guard long rejected");
     }

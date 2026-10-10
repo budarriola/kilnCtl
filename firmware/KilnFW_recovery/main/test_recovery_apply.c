@@ -156,6 +156,7 @@ typedef struct {
     // Counters.
     unsigned mut_ops, writes, reads, violations, bad_ranges;
     unsigned stage_erases, set_boots, verifies, aborts;
+    unsigned app_erases, app_erase_max, yields; // erase-ahead granularity (R2-I4)
 } fl_t;
 
 static uint8_t g_image[IMG_LEN];
@@ -227,9 +228,17 @@ static int cb_app_read(void *c, uint32_t off, void *buf, size_t len)
     memcpy(buf, f->app + off, len);
     return 0;
 }
+static void cb_yield(void *c)
+{
+    ((fl_t *)c)->yields++;
+}
 static int cb_app_erase(void *c, uint32_t off, uint32_t len)
 {
     fl_t *f = c;
+    f->app_erases++;
+    if (len > f->app_erase_max) {
+        f->app_erase_max = len;
+    }
     return do_erase(f, f->app, APP_SIZE, off, len);
 }
 static int cb_app_write(void *c, uint32_t off, const void *buf, size_t len)
@@ -332,6 +341,7 @@ static void io_init(recovery_apply_io_t *io, fl_t *f)
     io->ctx = f;
     io->stage_size = STAGE_SIZE;
     io->app_size = APP_SIZE;
+    io->yield = cb_yield;
     io->stage_read = cb_stage_read;
     io->stage_erase = cb_stage_erase;
     io->app_read = cb_app_read;
@@ -486,6 +496,10 @@ static void test_happy(void)
     CHECK(p.total_bytes == IMG_LEN && p.done_bytes == IMG_LEN && p.app_modified, "happy: progress counters");
     CHECK(f->violations == 0 && f->bad_ranges == 0 && !f->sha_open, "happy: clean NOR use, no open hash");
     CHECK(f->verifies == 1, "happy: full-image verify ran once");
+    // R2-I4: app is erased just ahead of the copy in 64 KiB blocks with yields
+    // between, never as one blocking whole-partition erase.
+    CHECK(f->app_erases == 2 && f->app_erase_max == 65536u, "happy: app erased in two 64 KiB blocks, not one whole-partition erase");
+    CHECK(f->yields >= 1, "happy: yields between blocks");
     CHECK(f->app[IMG_LEN] == 0xFF && f->app[APP_SIZE - 1] == 0xFF, "happy: erased tail beyond the image");
     // Idempotence: a second apply finds nothing staged.
     recovery_apply_progress_t p2;
