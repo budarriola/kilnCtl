@@ -1024,7 +1024,7 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6160,  # 2026-10-09: re-measured on dev tip (was 6144); ample headroom of 10240 B
+    "bx_flash_worker": 6240,  # 2026-10-10: re-measured on dev tip (was 6160): profiles_handle_message chain 5424 -> 5504 B after the profiles save-lock/rev-floor edits; honest free 3700 B (36.1% of 10240 B)
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3312,
@@ -1131,7 +1131,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7632,  # 2026-10-09: re-measured on dev tip (was 7552); honest free well above 20%
+    "http_async_job": 7712,  # 2026-10-10: re-measured on dev tip (was 7632): backup_import_job chain 5632 -> 5712 B after the pass-1 parse/K10 edits in backup_import.c; honest free 2228 B (21.8%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
