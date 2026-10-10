@@ -22,9 +22,9 @@ Owner rules checked against:
 
 | ID | Severity | Area | Short |
 |----|----------|------|-------|
-| L1 | LOW | relock | `ui_num_pad` survives the relock edge, stays over the home dashboard |
-| L2 | LOW | live edit | generation check runs before fork and flash reads, not just before the save; post-save re-read adopts a foreign generation |
-| L3 | LOW | role gating | Config hub cells still have no per-cell gate (N1 defence in depth not done) |
+| L1 | LOW (FIXED, lcdfx commit) | relock | `ui_num_pad` survives the relock edge, stays over the home dashboard |
+| L2 | LOW (FIXED, lcdfx commit) | live edit | generation check runs before fork and flash reads, not just before the save; post-save re-read adopts a foreign generation |
+| L3 | LOW (FIXED, lcdfx commit) | role gating | Config hub cells still have no per-cell gate (N1 defence in depth not done) |
 | I1 | INFO | live edit | no `cfg_fs` mounted pre-check (web answers 503); fails cleanly inside `live_profile` |
 | I2 | INFO | auth reset | gesture confirm does not re-check E-stop / firing / heat at confirm time |
 | I3 | INFO | stack | N7 still unproven; two more callbacks put `READINESS_GATE_MSG_CAP` buffers on the LVGL stack |
@@ -33,7 +33,9 @@ No HIGH or MED findings. No write action reachable without its role.
 
 ## Findings
 
-### L1 (LOW) -- number pad not closed on relock
+### L1 (LOW, FIXED) -- number pad not closed on relock
+
+Fixed: `ui_num_pad_close()` (no Done callback) called on the relock edge; host test in `test_ui_lcd_lock.c`.
 
 `ui_num_pad.c:72` parents the pad to `lv_layer_top()`; the public API is only
 `ui_num_pad_show()` (`ui_num_pad.c:138`), and `close_modal()` (`:24`) is
@@ -54,7 +56,9 @@ Impact is dashboard obscured plus a stale RAM edit, hence LOW.
 Fix direction: add `ui_num_pad_close()` (or `ui_num_pad_force_close()`) and
 call it on the relock edge beside `ui_confirm_close_open()`.
 
-### L2 (LOW) -- LCD live-edit generation check window
+### L2 (LOW, FIXED) -- LCD live-edit generation check window
+
+Fixed: `live_profile_save_working_if_gen()` compares and writes under live_profile's save lock; LCD apply and `profiles_live_http.c` (when `gen=` is sent) use it; test in `test_live_profile.c`.
 
 `ui_edit_firing_apply.c:168` compares `live_profile_generation()` against the
 generation captured when the page opened (`:140`), then validates (`:179`),
@@ -73,7 +77,9 @@ lock across check and write. Lost update of one live edit, no safety effect
 Fix direction: a compare-and-save in `live_profile` (save takes the expected
 generation and refuses under its own lock), used by both callers.
 
-### L3 (LOW) -- Config hub cells rely on the Menu gate
+### L3 (LOW, FIXED) -- Config hub cells rely on the Menu gate
+
+Fixed: each of the five cells runs through `ui_lcd_lock_run_gated(..., LCD_PIN_ROLE_USER, ...)` in `ui_page_config.c`. No host test (LVGL page, not host-compilable).
 
 `ui_page_config.c` cells for Temperature (`:70`), Network (`:76`),
 Diagnostics (`:101`), Safety (`:107`) and Profiles (`:118`) navigate without
@@ -158,7 +164,7 @@ that exercises Start from profile detail and the builder pads.
 
 | ID | Status |
 |----|--------|
-| N1 | Fixed for touch_cal exit (`cc62edf2f`, `7cc343260`); per-cell defence in depth open as L3 |
+| N1 | Fixed for touch_cal exit (`cc62edf2f`, `7cc343260`); per-cell defence in depth fixed as L3 |
 | N2-N5, N8 | Fixed in `cc62edf2f`, verified |
 | N6 | Kept by owner (LCD reads stay USER) |
 | N7 | Open, INFO (I3) |
