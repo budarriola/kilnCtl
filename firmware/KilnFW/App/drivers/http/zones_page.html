@@ -2652,17 +2652,18 @@ document.getElementById('thermoCount').addEventListener('change', renderZones);
 document.getElementById('relayCount').addEventListener('change', renderZones);
 
 /* Optional model/tuning fields: a blank value ("z0_driftperiod=") is "present" and used to fail the
-   firmware's range parse with a misleading 400, so a blank optional field is left out of the POST;
-   zones_http_post_parse.c treats an omitted (and, as the firmware is changing it, a blank) field as
-   "keep the stored value". The 8 guard thresholds are different on the page: a blank there is
-   refused client-side (blankGuardKeys), never silently submitted, so a typo or a cleared field is
-   shown to the operator instead of being dropped. */
-var ZONE_GUARD_BLANK_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
+   firmware's range parse with a misleading 400, so a blank optional field is left out of the POST.
+   An omitted field is NOT generally "keep the stored value" (zones_post_apply_body starts from a
+   memset tmp); only the guard thresholds and xzone are keep-stored on omit AND blank in
+   zones_http_post_parse.c. The 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
+   refused client-side when blank (blankGuardKeys), never dropped, so a cleared field is shown to
+   the operator and can never silently disable a thermal guard. */
+var ZONE_GUARD_BLANK_RE = /^z\d+_(xzone|wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
 function blankGuardKeys(params) {
   return params.filter(function (p) { return ZONE_GUARD_BLANK_RE.test(p); })
     .map(function (p) { return p.slice(0, p.indexOf('=')); });
 }
-var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|xzone|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
 }

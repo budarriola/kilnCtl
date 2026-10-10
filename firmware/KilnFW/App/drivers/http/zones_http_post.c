@@ -767,6 +767,8 @@ static ZONES_POST_NOINLINE esp_err_t zones_post_apply_body(httpd_req_t *req, cha
      * contract: true after either a real successful load OR a fresh valid
      * save. */
     s_zones_config_valid = true;
+    /* Review 11 LOW-3: a trusted config is live; a stale load-fault banner must not outlive it. */
+    zones_config_load_fault_clear();
     s_config_generation++;
     zones_cfg_unlock();
     /* RELAY_LIFE_BUDGET.md, "on every successful save": this

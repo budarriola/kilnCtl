@@ -580,6 +580,8 @@ typedef struct {
     uint8_t on_disk_version;   /* the blob's own claimed version byte */
     uint8_t fw_version;        /* ZONES_CFG_VERSION at the moment this was captured */
     char reason[96];           /* zones_config_json_decode_blob()'s own *err_reason, copied */
+    bool file_rejected;        /* the fault is a rejected zones.json (reason starts "cfg file: "), not an NVS blob */
+    bool bad_copy_failed;      /* file_rejected, and no zones.json.bad copy of the rejected bytes exists (review 11 LOW-2) */
 } zones_cfg_load_fault_t;
 
 /* Returns the latched fault (see the type's own comment above). Always
@@ -587,6 +589,10 @@ typedef struct {
  * zeroed with occurred==false and the return value is false. Cheap RAM read,
  * safe from any task including the LVGL/httpd stacks. */
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out);
+
+/* Clears the latched load fault. Called after a successful POST /api/zones committed a trusted
+ * config (review 11 LOW-3), and when a legacy copy is adopted after the latch. */
+void zones_config_load_fault_clear(void);
 
 /* M13 ("every fault says what was detected and what to do", ROADMAP.md,
  * standing rule): the single-migration-step hazard fix (2026-09-16,

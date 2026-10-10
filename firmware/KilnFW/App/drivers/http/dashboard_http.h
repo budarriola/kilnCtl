@@ -158,6 +158,8 @@ typedef struct {
     uint8_t  zones_config_load_fault_on_disk_version;
     uint8_t  zones_config_load_fault_fw_version;
     char     zones_config_load_fault_reason[96];
+    bool     zones_config_load_fault_file_rejected; /* fault is a rejected zones.json (not a version/NVS-blob fault) */
+    bool     zones_config_load_fault_bad_copy_failed; /* file_rejected and no zones.json.bad copy exists */
 
     /* M13 fix (2026-09-16): see zones_cfg_migration_persist_fault_t's own
      * doc comment (zones_config_accessors.h). Orthogonal to

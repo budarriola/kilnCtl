@@ -2078,9 +2078,15 @@ function renderZonesConfigLoadFault(data) {
     detail = 'Stored zone config is version ' + onDisk + '; this firmware only understands up to version ' +
       fwVer + ' -- likely an OTA rollback past a config schema bump.';
     remedy = 'Reflash the matching (or newer) firmware to restore the tuned config.';
+  } else if (data.zones_config_load_fault_file_rejected) {
+    // A rejected zones.json (bad CRC, too short, failed validation): NOT a version problem, so no version
+    // number and no "reflash" advice.
+    detail = 'The stored zone config file was rejected as damaged or invalid (' + reason + ').';
+    remedy = 'Reconfigure and save zones on the zones page (the damaged file is kept as zones.json.bad' +
+      (data.zones_config_load_fault_bad_copy_failed ? ', but that backup copy could NOT be written' : '') + ').';
   } else {
     detail = 'Stored zone config is version ' + onDisk + ' and this firmware (version ' + fwVer +
-      ') cannot migrate it forward: ' + window.kcEscapeHtml(reason) + '.';
+      ') cannot migrate it forward: ' + reason + '.';
     remedy = 'Reflash the firmware version that saved this config, or reconfigure zones from scratch.';
   }
   el.innerHTML = '<div class="banner safety-trip">' +

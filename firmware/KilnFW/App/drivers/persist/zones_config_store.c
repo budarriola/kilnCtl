@@ -98,6 +98,11 @@ void zones_config_load_fault_reset_for_test(void)
     memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
 }
 
+void zones_config_load_fault_clear(void)
+{
+    memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
+}
+
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out)
 {
     if (out) {
@@ -430,6 +435,14 @@ void migrate_from_default_partition(void)
     if (err != ESP_OK || !found_in_default) {
         return; /* nothing to migrate */
     }
+    /* Review 11 MED-1: a zones.json from NEWER firmware (latched by nvs_load) must not be
+     * overwritten by an older legacy copy, nor a rejected file with no .bad copy. */
+    if (s_zones_cfg_load_fault.occurred &&
+        (s_zones_cfg_load_fault.kind == ZONES_CFG_LOAD_FAULT_NEWER || s_zones_cfg_load_fault.bad_copy_failed)) {
+        ESP_LOGE(ZONES_HTTP_TAG, "legacy default-partition zones_cfg NOT migrated: it would overwrite a rejected "
+                      "zones.json that is newer or has no %s copy", ZONES_CFG_BAD_FILE_PATH);
+        return;
+    }
     if (!valid_in_default) {
         /* found_in_default is true for two different reasons now (see FIX 1
          * in nvs_load_from()): a refused newer-than-firmware blob, or a
@@ -455,6 +468,8 @@ void migrate_from_default_partition(void)
      * successfully migrated -- so this is always something ready to run a
      * kiln against, never a corrupt or refused blob (both return above). */
     s_zones_config_valid = valid_in_default;
+    /* A legacy copy was adopted: no longer 'no trustworthy copy' (review 11 MED-2). */
+    zones_config_load_fault_clear();
     /* RELAY_LIFE_BUDGET.md, "on load": this IS a load into
      * s_zones.cfg, same as nvs_load()'s own -- a board migrating forward
      * from the default partition must not run with relay_cycles.c still
@@ -612,20 +627,39 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
                                                     &used_file, &file_on_disk_version);
     zones_cfg_fs_reject_t file_reject;
     bool file_rejected = zones_config_cfg_fs_get_last_reject(&file_reject);
-    if (file_rejected && !s_zones_cfg_load_fault.occurred) {
+    /* Review 11 MED-2: latch only when NO trustworthy copy was adopted. A rejected file that fell back
+     * to a trustworthy NVS copy is a logged warning, not a firing-refusing fault. (A later legacy
+     * migration that adopts a copy clears the latch again.) */
+    if (file_rejected && !trustworthy && !s_zones_cfg_load_fault.occurred) {
         zones_cfg_load_fault_latch(file_reject.newer ? ZONES_CFG_LOAD_FAULT_NEWER : ZONES_CFG_LOAD_FAULT_UNREADABLE,
                                    file_reject.on_disk_version, file_reject.reason);
+        s_zones_cfg_load_fault.file_rejected = true;
+        s_zones_cfg_load_fault.bad_copy_failed = !file_reject.preserved;
+    } else if (file_rejected && trustworthy) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zones config: cfg file %s REJECTED (%s) but a trustworthy %s copy was adopted; "
+                      "rejected file kept as %s: %s",
+                 ZONES_CFG_FILE_PATH, file_reject.reason, used_file ? "file" : "NVS", ZONES_CFG_BAD_FILE_PATH,
+                 file_reject.preserved ? "yes" : "NO (copy failed)");
+    }
+    if (!trustworthy && nvs_valid && file_rejected && file_reject.newer) {
+        /* The NVS copy was valid but deliberately NOT adopted over a newer-version file. */
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_valid) {
+            *out_valid = false;
+        }
     }
     if (!trustworthy && !used_file && file_on_disk_version != ZONES_CFG_RESOLVE_OOM_VERSION) {
-        /* Audit (c) fix 4: name the path in the boot log -- this boot runs on a zeroed config. */
+        /* Audit (c) fix 4: name the path in the boot log. No copy adopted YET: a legacy default-partition
+         * copy may still be adopted later this boot (migrate_from_default_partition). */
         if (file_rejected) {
-            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s REJECTED (%s), NVS blob %s -- running "
-                          "on a zeroed config; the rejected file is kept as %s",
-                     ZONES_CFG_FILE_PATH, file_reject.reason, nvs_valid ? "usable" : "absent/invalid",
+            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s REJECTED (%s), NVS blob %s -- no "
+                          "trustworthy copy adopted (config zeroed unless a legacy copy is adopted later this "
+                          "boot); the rejected file is kept as %s",
+                     ZONES_CFG_FILE_PATH, file_reject.reason, nvs_valid ? "usable but not adopted" : "absent/invalid",
                      ZONES_CFG_BAD_FILE_PATH);
         } else {
             ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s %s and NVS blob absent/invalid -- "
-                          "running on a zeroed config",
+                          "no trustworthy copy adopted",
                      ZONES_CFG_FILE_PATH,
                      cfg_fs_is_available() ? "missing/unreadable" : "unavailable (cfg not mounted)");
         }

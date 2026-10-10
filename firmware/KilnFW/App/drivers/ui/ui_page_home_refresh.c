@@ -294,10 +294,18 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                     snprintf(fault_buf, sizeof(fault_buf),
                              "CONFIG QUARANTINED -- v%u newer than fw v%u, reflash",
                              (unsigned)fault.on_disk_version, (unsigned)fault.fw_version);
+                } else if (fault.file_rejected) {
+                    /* Damaged/invalid zones.json: not a version problem, so no "vN" and no reflash advice. */
+                    snprintf(fault_buf, sizeof(fault_buf), "CONFIG FILE REJECTED -- reconfigure zones");
                 } else {
                     snprintf(fault_buf, sizeof(fault_buf),
                              "CONFIG QUARANTINED -- v%u unreadable, reflash matching fw",
                              (unsigned)fault.on_disk_version);
+                }
+                if (kiln_cfg_swap_get_boot_fault_kind() != KILN_CFG_SWAP_BOOT_FAULT_NONE) {
+                    /* Do not hide the kiln-config swap fault behind this banner. */
+                    size_t fl = strlen(fault_buf);
+                    snprintf(fault_buf + fl, sizeof(fault_buf) - fl, " | +CFG SWAP FAULT");
                 }
                 lv_label_set_text(s_ui_home_trip_strip, fault_buf);
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);

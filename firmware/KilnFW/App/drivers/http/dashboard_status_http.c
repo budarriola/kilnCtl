@@ -499,6 +499,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
                (unsigned)ds->zones_config_load_fault_on_disk_version);
         APPEND(",\"zones_config_load_fault_fw_version\":%u", (unsigned)ds->zones_config_load_fault_fw_version);
         APPEND(",\"zones_config_load_fault_reason\":\"%s\"", reason_esc);
+        APPEND(",\"zones_config_load_fault_file_rejected\":%s", ds->zones_config_load_fault_file_rejected ? "true" : "false");
+        APPEND(",\"zones_config_load_fault_bad_copy_failed\":%s", ds->zones_config_load_fault_bad_copy_failed ? "true" : "false");
+
     }
 
     /* M13 fix -- bug found during the 2026-09-16 wider sweep: this JSON

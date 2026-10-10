@@ -53,6 +53,8 @@ assert(!!g1 && !!g2, 'found blankGuardKeys');
 const bg = new Function(g1[0] + g2[0] + '; return blankGuardKeys;')();
 assert(bg(['z0_driftperiod=', 'z1_runawaymargin= ', 'z0_kp=', 'z0_k=', 'z0_debounce=5']).join(',') === 'z0_driftperiod,z1_runawaymargin',
   'blank guard thresholds detected, other blanks and set values not');
+assert(bg(['z0_xzone=', 'z1_xzone=5']).join(',') === 'z0_xzone', 'blank xzone (guard 8) refused client-side, set xzone kept');
+assert(!/ZONE_OPTIONAL_KEY_RE[^\n]*xzone/.test(ZONES), 'xzone is not in the optional-drop regex');
 assert(/blankGuardKeys\(params\);\s*if \(blankGuards\.length\) \{[\s\S]*?return;\s*\}\s*msg\.textContent = 'Saving/.test(ZONES), 'blank guard field refuses before the POST');
 assert(!/omit-PRESERVES each one/.test(ZONES), 'wrong omit-PRESERVES comment gone');
 

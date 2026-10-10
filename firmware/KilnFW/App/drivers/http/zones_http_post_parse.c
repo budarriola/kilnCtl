@@ -612,8 +612,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_wrong_dir_window_s out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_wrong_dir_window_s = current_z->guard_wrong_dir_window_s; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_wrong_dir_window_s = current_z->guard_wrong_dir_window_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_wrongdirrate", i);
@@ -624,8 +624,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_wrong_dir_rate_c_per_min = current_z->guard_wrong_dir_rate_c_per_min; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_wrong_dir_rate_c_per_min = current_z->guard_wrong_dir_rate_c_per_min; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_offsettle", i);
@@ -636,8 +636,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_off_settle_s out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_off_settle_s = current_z->guard_off_settle_s; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_off_settle_s = current_z->guard_off_settle_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_runawayrate", i);
@@ -648,8 +648,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_runaway_rate_c_per_min out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_runaway_rate_c_per_min = current_z->guard_runaway_rate_c_per_min; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_runaway_rate_c_per_min = current_z->guard_runaway_rate_c_per_min; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_runawaymargin", i);
@@ -660,8 +660,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_runaway_margin_c out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_runaway_margin_c = current_z->guard_runaway_margin_c; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_runaway_margin_c = current_z->guard_runaway_margin_c; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_driftperiod", i);
@@ -672,8 +672,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_drift_period_s out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_drift_period_s = current_z->guard_drift_period_s; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_drift_period_s = current_z->guard_drift_period_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_debounce", i);
@@ -684,8 +684,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_sensor_fault_debounce_ticks = current_z->guard_sensor_fault_debounce_ticks; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_sensor_fault_debounce_ticks = current_z->guard_sensor_fault_debounce_ticks; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_frozenwindow", i);
@@ -696,23 +696,20 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone guard_frozen_window_s out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->guard_frozen_window_s = current_z->guard_frozen_window_s; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->guard_frozen_window_s = current_z->guard_frozen_window_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     /* The nine v8 overrides that used to be parsed inline here now live on
      * the timing profile this zone points at -- see z%u_timingprofile above
      * and zones_config_json_parse_timing_profile_fields() (tp%u_progressduty..tp%u_ramplock),
      * parsed once per PROFILE rather than once per zone. */
-    /* Guard 8. OPTIONAL, unlike every field above: a submission that omits
-     * it means "leave the guard disabled" (z is zero-initialized by the
-     * caller), so older clients -- the MCP/pc_tools path and the test
-     * harnesses that post the original 14 fields -- keep working unchanged
-     * instead of being rejected by a field they've never heard of. Such a
-     * client does clear a previously saved threshold, which is the same
-     * whole-page-submit semantics every other field already has. Present
-     * but malformed is still an error. 1000C is a sanity bound only; a real
-     * threshold comes from a measured cross-gain matrix. */
+    /* Guard 8. A submission that omits this field, or leaves it blank, keeps
+     * the STORED threshold (owner decision: a thermal guard is never disabled
+     * by omission; an explicit 0 is the only way to write 0). Older clients
+     * (MCP/pc_tools, test harnesses) that post only the original 14 fields
+     * therefore keep working AND no longer clear a saved threshold. Present
+     * but malformed is still an error. 1000C is a sanity bound only. */
     snprintf(key, sizeof(key), "z%u_xzone", i);
     {
         char probe[16];
@@ -721,8 +718,8 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
                 *err_reason = "zone cross_zone_max_delta_c out of range";
                 return false;
             }
-        } else if (zones_http_field_blank(body, key)) {
-            z->cross_zone_max_delta_c = current_z->cross_zone_max_delta_c; /* blank keeps the stored value; never a default/disable */
+        } else { /* blank OR missing */
+            z->cross_zone_max_delta_c = current_z->cross_zone_max_delta_c; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     /* The identified plant model (TODO.md 6A.4 -> 6A.2's feedforward).

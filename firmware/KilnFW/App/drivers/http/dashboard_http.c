@@ -475,6 +475,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->zones_config_load_fault_fw_version = load_fault.fw_version;
     snprintf(out->zones_config_load_fault_reason, sizeof(out->zones_config_load_fault_reason), "%s",
              load_fault.reason);
+    out->zones_config_load_fault_file_rejected = out->zones_config_load_fault && load_fault.file_rejected;
+    out->zones_config_load_fault_bad_copy_failed = out->zones_config_load_fault && load_fault.bad_copy_failed;
 
     /* M13 fix (2026-09-16): the single-migration-step write-back's own
      * verified-persist failure -- distinct from zones_config_load_fault

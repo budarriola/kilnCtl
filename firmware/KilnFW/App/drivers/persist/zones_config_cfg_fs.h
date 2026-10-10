@@ -75,6 +75,7 @@ typedef struct {
     bool occurred;
     bool newer;              /* ZONES_DECODE_NEWER, else corrupt/too short */
     uint8_t on_disk_version; /* blob version byte (0 when the file was too short) */
+    bool preserved;          /* a zones.json.bad copy of the rejected bytes exists (written now or identical already) */
     char reason[96];
 } zones_cfg_fs_reject_t;
 

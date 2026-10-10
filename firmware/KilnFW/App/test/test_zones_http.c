@@ -1958,7 +1958,7 @@ static void test_zones_post_blank_guard_fields_and_pc_link(void)
 {
     static const char *const keys[] = {"wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate",
                                        "runawaymargin", "driftperiod", "debounce", "frozenwindow", "xzone"};
-    TEST_SECTION("zones_post_handler -- blank guard fields/xzone keep the stored value; omitted is still 0; garbage is 400");
+    TEST_SECTION("zones_post_handler -- blank guard fields/xzone keep the stored value; omitted keeps it too; garbage is 400");
     for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
         char body[1600];
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=", keys[k]);
@@ -1975,7 +1975,7 @@ static void test_zones_post_blank_guard_fields_and_pc_link(void)
             if (f == k) {
                 TEST_CHECK(*fields[f] == 9.0f, "blank guard/xzone preserves the stored value (never default/disable)");
             } else {
-                TEST_CHECK(*fields[f] == 0.0f, "omitted guard/xzone keeps whole-page-submit 0");
+                TEST_CHECK(*fields[f] == 9.0f, "omitted guard/xzone keeps the stored value (review 11 MED-3: never disables a guard)");
             }
         }
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
