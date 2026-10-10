@@ -1259,7 +1259,7 @@ try {
             # no-ESP-IDF-dependency objects in; relay_authority_heat_run_active()
             # itself is faked in test_ota_http.c, same convention as its other
             # profile_executor/autotune_engine fakes.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
     # WEB_AUTH_PLAN.md section 2b: ota_http.c now calls
     # http_auth_policy_web_enabled() (http_auth_policy_iface.c) directly, and
@@ -1422,7 +1422,7 @@ try {
             "/Fo:`"$kioObjDir\\`" /Fe:`"$exe11`" " +
             "`"$(Join-Path $testDir 'test_kiln_io_owner.c')`" `"$(Join-Path $driversDir 'owners/kiln_io.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/spi/owner_slot_pool.c')`" `"$(Join-Path $driversDir 'common/stack_margin.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_time.c')`" `"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             # kiln_io_owner.c's relay writes feed relay_off_tracker (on/off min_off_s hold).
             "`"$(Join-Path $driversDir 'control/relay_off_tracker.c')`""
     # docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25 (Q1):
@@ -1832,7 +1832,7 @@ try {
     New-Item -ItemType Directory -Force -Path $kcfgObjDir | Out-Null
     $cmd24kcfg = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$kcfgObjDir\\`" /Fe:`"$exe24kcfg`" `"$(Join-Path $testDir 'test_kiln_cfg_http.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "kiln_cfg_http" -ExePath $exe24kcfg -BuildCmd $cmd24kcfg
@@ -1865,7 +1865,7 @@ try {
     New-Item -ItemType Directory -Force -Path $atGateObjDir | Out-Null
     $cmdAtGate = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$atGateObjDir\\`" /Fe:`"$exeAtGate`" `"$(Join-Path $testDir 'test_adaptive_tune_http_gate.c')`" " +
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_available.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "adaptive_tune_http_gate" -ExePath $exeAtGate -BuildCmd $cmdAtGate
@@ -3015,7 +3015,7 @@ try {
             # handler() now calls system_mode_gate_check()/system_mode_gate_
             # http_send_refusal() -- link both real, pure, leaf modules,
             # same as $cmd50/$cmd4's own fix.
-            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" " +
+            "`"$(Join-Path $driversDir 'safety/system_mode_gate.c')`" `"$(Join-Path $driversDir 'http/ota_image_crc.c')`" `"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $testDir 'test_stub_cfg_fs_status_deps.c')`" " +
             "`"$(Join-Path $driversDir 'http/system_mode_gate_http.c')`""
 
     Invoke-HostTestExe -Name "iter_tune_http" -ExePath $exeIth -BuildCmd $cmdIth
@@ -3297,15 +3297,11 @@ try {
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
     # 74 -> 75: added test_uart_bridge_thermo_gate.c (review 12 Part B)
-<<<<<<< HEAD
     # 75 -> 77: test_danger_mode.c (campaign 6) plus one exe an earlier landing did not count (origin/dev built 76 vs expected 75)
     # 77 -> 78: test_diagnostics_http.c (campaign 9)
     # 78 -> 80: test_aux_outputs_http_handlers.c, test_dashboard_exec_http_handlers.c (campaign 8)
-    $totalExpected = 80
-=======
-    # 75 -> 76: added test_persist_campaign10.c (campaign 10)
-    $totalExpected = 76
->>>>>>> 3c9a3b1da (tests: campaign 10 persist host test (backup_json, touch_cal_store, pref_cfg_fs, ct_verify_store))
+    # 80 -> 81: test_persist_campaign10.c (campaign 10)
+    $totalExpected = 81
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
