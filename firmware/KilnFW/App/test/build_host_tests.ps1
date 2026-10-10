@@ -3193,10 +3193,11 @@ try {
     # 69 -> 70: added test_http_body_recv.c (looped httpd_req_recv helper).
     # 70 -> 71: added test_update_fetch.c (real update_fetch.c/update_http.c over fakes).
     # 71 -> 72: added test_http_form.c (strict form parse helpers).
+    # 73 -> 74: added test_kiln_io_sx_fake.c (campaign 7).
     # 72 -> 73: added test_uart_bridge_ext_worker.c's own Invoke-HostTestExe
     # (flash-worker save-section reservation, recursive lock, posted slot).
     Complete-HostTestQueue
-    $totalExpected = 73
+    $totalExpected = 74
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
