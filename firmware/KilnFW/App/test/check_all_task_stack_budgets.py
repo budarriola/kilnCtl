@@ -977,6 +977,13 @@ TASKS = [
          # do.
          stack=lambda: extract_int_literal("drivers/net/wifi_prov.c",
              r'xTaskCreatePinnedToCore\(owner_task,\s*"wifi_prov_owner",\s*(\d+)')),
+    dict(name="dns_hijack", root="dns_hijack_task",
+         # Registered for stack-margin reporting by the Wi-Fi batch (864ef649c,
+         # WIFI_REVIEW LOW-6) after a stale "self-deletes" exemption; the task is
+         # a long-lived UDP recvfrom/sendto loop (PSRAM stack, no NVS/flash).
+         stack=lambda: extract_local_macro("drivers/net/wifi_prov_link.c",
+             r'#define DNS_HIJACK_STACK_BYTES\s+(\d+)',
+             r'xTaskCreatePinnedToCoreWithCaps\(dns_hijack_task,\s*"dns_hijack",\s*DNS_HIJACK_STACK_BYTES')),
 ]
 
 # Measured 2026-09-09 against KilnCtrl.elf as built that day (the run that
@@ -1279,6 +1286,10 @@ CEILING_BYTES = {
     # 4096 B (heap-allocated via xTaskCreatePinnedToCore, so this task costs
     # zero .dram0.bss), already net of UNMODELED_OVERHEAD_BYTES.
     "wifi_prov_owner": 2944,
+    # Measured 2026-10-10 (--dump-ceilings) against a KilnCtrl.elf built from origin/dev
+    # (checkbuild_f02b65d3b5); declared stack raised 3072 -> 4096 B (PSRAM, 0 B DRAM) because 2960+300 B overran 3072. Now 836 B honest free; was 112 B under
+    # the declared stack -- recvfrom/sendto lwip internals; do not raise without measuring.
+    "dns_hijack": 2960,
 }
 
 

@@ -209,7 +209,8 @@ foreach ($field in $fields) {
     # directly on "out-><field>" (age_ms, link_up, fault_asserted,
     # trip_event_age_ms) after the whole-struct copy -- so the search is
     # restricted to those two spellings.
-    $assigned = ($scanText -match "cached\s*\.\s*$escaped\s*=") -or
+    # Compound producers (`cached.f++`, `cached.f += n`) count too; `==` does not.
+    $assigned = ($scanText -match "cached\s*\.\s*$escaped\s*(=(?!=)|\+\+|--|[-+|&^]=)") -or
                 ($scanText -match "cached\s*\.\s*$escaped\s*\[") -or
                 ($scanText -match "\bout\s*->\s*$escaped\s*=") -or
                 ($scanText -match "\bout\s*->\s*$escaped\s*\[")

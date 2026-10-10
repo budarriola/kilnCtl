@@ -1300,6 +1300,11 @@ static void dns_hijack_task(void *arg)
 
 static TaskHandle_t s_dns_task_handle;
 
+/* Raised 3072 -> 4096 2026-10-10: check_all_task_stack_budgets measured the static
+ * walk at 2960 B, so 3072 B left -188 B once the 300 B overhead allowance counts.
+ * PSRAM stack: 0 B DRAM impact. Single source for create + stack_margin_register. */
+#define DNS_HIJACK_STACK_BYTES 4096
+
 void start_dns_hijack_task(void)
 {
     /* 2026-08-22: PSRAM stack. dns_hijack_task only does a UDP
@@ -1307,12 +1312,12 @@ void start_dns_hijack_task(void)
      * NVS/flash access, no direct SPI/I2C/UART hardware ownership. Unlike
      * wifi_prov's own owner_task (elsewhere in this split), this one never
      * calls esp_wifi_set_config()/nvs_save_*(). */
-    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(dns_hijack_task, "dns_hijack", 3072, NULL, 4, &s_dns_task_handle,
+    BaseType_t created = xTaskCreatePinnedToCoreWithCaps(dns_hijack_task, "dns_hijack", DNS_HIJACK_STACK_BYTES, NULL, 4, &s_dns_task_handle,
                                                          tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (created != pdPASS) {
         ESP_LOGW(WIFI_PROV_TAG, "xTaskCreatePinnedToCoreWithCaps(dns_hijack) failed -- no captive-portal DNS redirect");
         startup_fault_note(STARTUP_FAULT_DNS_HIJACK);
         return;
     }
-    stack_margin_register("dns_hijack", &s_dns_task_handle, 3072);
+    stack_margin_register("dns_hijack", &s_dns_task_handle, DNS_HIJACK_STACK_BYTES);
 }
