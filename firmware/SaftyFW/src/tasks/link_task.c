@@ -292,10 +292,10 @@ static volatile bool s_degraded_no_context = false;
 // state as a peer that predates ANNOUNCE_VERSION entirely, see
 // link_frame_pack_status()'s own doc comment (link_frame.h) for why "unknown"
 // and "known old" must behave identically here.
-static volatile uint16_t s_peer_protocol_version = 0;
-// ESP boot_id the version above was announced under (kilnlink_announce_t.boot_id).
-static volatile bool s_peer_version_boot_id_known = false;
-static volatile uint8_t s_peer_version_boot_id = 0;
+// .version is the cached protocol version; .boot_id/.known the ESP boot_id it was
+// announced under (kilnlink_announce_t.boot_id). Updated only through the pure
+// link_peer_announce_*() helpers in link_staging.c (host-tested).
+static link_peer_announce_t s_peer_announce = {false, 0u, 0u};
 
 static uint16_t s_msg_index = 0;
 static uint8_t s_boot_id = 0;
@@ -886,18 +886,18 @@ static void link_task_send_status(void)
     // link_frame_pack_status()'s own doc comment (link_frame.h) for the full
     // skew-safety argument. Only ever true once this boot has positively
     // received an ANNOUNCE_VERSION naming a peer protocol_version >=
-    // LINK_FRAME_STATUS_V2_MIN_PROTOCOL; s_peer_protocol_version's own
+    // LINK_FRAME_STATUS_V2_MIN_PROTOCOL; s_peer_announce.version's own
     // "0 == unknown" default makes "never announced" and "announced, but
     // old" collapse to the same safe (false) outcome here without a separate
     // check.
-    bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_protocol_version);
+    bool peer_supports_status_v2 = link_frame_status_v2_supported(s_peer_announce.version);
     uint8_t tx_dropped_sat = link_frame_saturate_tx_dropped(uart_owner_get_tx_dropped());
     // Same gate, one protocol version higher -- see link_frame_status_v3_
     // supported()'s own doc comment (link_frame.h) for why this must never
     // be true unless peer_supports_status_v2 is also true (numerically
     // guaranteed by LINK_FRAME_STATUS_V3_MIN_PROTOCOL > _V2_MIN_PROTOCOL, but
     // link_frame_pack_status() itself does not trust that ordering blindly).
-    bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_protocol_version);
+    bool peer_supports_status_v3 = link_frame_status_v3_supported(s_peer_announce.version);
     // LINK_FLAG2_TC_CONFIG_REASSERTED (2026-09-23) -- sticky for the rest of
     // this boot once thermo_task.c has ever re-asserted the MAX31856's
     // config against a live-readback mismatch. See link_frame.h's own
@@ -1196,7 +1196,7 @@ static void link_task_send_diag(void)
         // kilnlink audit 2026-10-09 M4: the 31-byte form, only to a peer
         // that announced it understands it (link_frame_trip_seq_supported());
         // before ANNOUNCE and for a protocol 16 peer the frame stays 30 bytes.
-        .has_trip_seq = link_frame_trip_seq_supported(s_peer_protocol_version),
+        .has_trip_seq = link_frame_trip_seq_supported(s_peer_announce.version),
         .trip_seq = diag_trip_seq,
     };
     uint8_t payload[KILNLINK_DIAG_LEN_V2];
@@ -1383,14 +1383,11 @@ static void link_task_handle_push_context(const kilnlink_frame_t *frame)
         s_context_boot_id_known &&
         (xTaskGetTickCount() - s_last_context_rx_tick) >= pdMS_TO_TICKS(LINK_TASK_CONTEXT_MAX_AGE_MS);
     uint16_t staged_before = (uint16_t)link_staging_count(&s_staging);
-    uint16_t peer_version = s_peer_protocol_version;
     // A boot_id change also forgets the peer protocol version (see
     // link_staging_apply_context_session()): a rolled-back ESP that lost its
     // announce burst must not be sent the previous boot's frame formats.
-    if (link_staging_apply_context_session(&s_staging, &peer_version, s_context_boot_id_known,
-                                           s_last_context_boot_id, snap.boot_id, context_gap,
-                                           s_peer_version_boot_id_known, s_peer_version_boot_id)) {
-        s_peer_protocol_version = peer_version;
+    if (link_staging_apply_context_session(&s_staging, &s_peer_announce, s_context_boot_id_known,
+                                           s_last_context_boot_id, snap.boot_id, context_gap)) {
         if (staged_before > 0u) {
             char discard_msg[64];
             snprintf(discard_msg, sizeof(discard_msg),
@@ -1461,9 +1458,7 @@ static void link_task_handle_announce_version(const kilnlink_frame_t *frame)
     // is deliberately a narrower, additive-feature-specific question than
     // "are we fully compatible" (see link_frame_pack_status()'s doc comment,
     // link_frame.h).
-    s_peer_protocol_version = eval.peer_protocol_version;
-    s_peer_version_boot_id = msg.boot_id;
-    s_peer_version_boot_id_known = true;
+    link_peer_announce_record(&s_peer_announce, msg.boot_id, eval.peer_protocol_version);
 
     // LINK_PROTOCOL.md section 4, "What each side does about a mismatch":
     // the Pico enters DEGRADED_NO_CONTEXT and does NOT latch a trip. This is
@@ -1593,7 +1588,7 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     // host-tested extraction of the two refusal checks documented above --
     // this function only acts on its verdict now.
     link_clear_trip_decision_t decision = link_frame_decide_clear_trip(
-        trip_reason, msg.trip_mask, msg.has_trip_seq, s_peer_protocol_version);
+        trip_reason, msg.trip_mask, msg.has_trip_seq, s_peer_announce.version);
 
     // A switch with no default, deliberately. This was an if-chain that tested
     // the two refusal values it knew about and let everything else fall
@@ -2248,13 +2243,13 @@ static void link_task_handle_rollback(const kilnlink_frame_t *frame)
 // acceptance -- update_task_request_rollback() does not return in that
 // case; see kilnlink_rollback_result.h's own "ASYMMETRIC BY DESIGN"
 // comment). Gated by link_frame_rollback_result_supported() on this boot's
-// cached s_peer_protocol_version, the EXACT same skew-safety discipline
+// cached s_peer_announce.version, the EXACT same skew-safety discipline
 // link_task_send_status() already applies to its own V2 (24-byte) frame --
 // an ESP that has not positively announced protocol_version >= 9 never
 // receives a frame its dispatch switch has no case for.
 static void link_task_send_rollback_result(uint8_t reason_code)
 {
-    if (!link_frame_rollback_result_supported(s_peer_protocol_version)) {
+    if (!link_frame_rollback_result_supported(s_peer_announce.version)) {
         // Peer never announced (0, the safe default) or announced an old
         // version -- stay silent, same as this frame not existing at all
         // for that peer. The refusal is still fully recorded in THIS boot's
@@ -3422,8 +3417,7 @@ bool link_task_start(void)
         s_boot_id = (uint8_t)(r ^ (r >> 8) ^ (r >> 16) ^ (r >> 24));
     }
     s_degraded_no_context = false;
-    s_peer_version_boot_id_known = false;
-    s_peer_protocol_version = 0; // unknown until this boot's own ANNOUNCE_VERSION arrives
+    link_peer_announce_clear(&s_peer_announce); // version 0 = unknown until this boot's own ANNOUNCE_VERSION arrives
     s_msg_index = 0;
     s_rx_assembly_len = 0;
     s_rx_collecting = false;

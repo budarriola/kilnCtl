@@ -112,7 +112,7 @@ static void scan_link_task(void)
     TEST_CHECK(clear != NULL, "link_task_handle_clear_trip found");
     if (clear) {
         TEST_CHECK(body_has(clear, len, "link_frame_decide_clear_trip(", NULL) &&
-                       body_has(clear, len, "msg.has_trip_seq, s_peer_protocol_version)", NULL),
+                       body_has(clear, len, "msg.has_trip_seq, s_peer_announce.version)", NULL),
                    "wire decision sees whether the frame was bound and the peer's version");
         TEST_CHECK(body_has(clear, len, "safety_core_request_clear_trip(msg.has_trip_seq, msg.trip_seq)", NULL),
                    "queued request carries the decoded binding and seq");
@@ -129,7 +129,7 @@ static void scan_link_task(void)
                    "send_diag reads the trip state");
         TEST_CHECK(seq_read && state_read && seq_read < state_read,
                    "trip seq read BEFORE the trip state (a tear binds to an older seq, refused as stale)");
-        TEST_CHECK(body_has(diag, len, ".has_trip_seq = link_frame_trip_seq_supported(s_peer_protocol_version)", NULL),
+        TEST_CHECK(body_has(diag, len, ".has_trip_seq = link_frame_trip_seq_supported(s_peer_announce.version)", NULL),
                    "byte30 only sent to a peer that announced protocol >= 17");
     }
     free(text);

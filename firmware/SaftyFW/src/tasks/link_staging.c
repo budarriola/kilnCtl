@@ -136,18 +136,35 @@ bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t
     return (boot_id != prev_boot_id) || context_gap;
 }
 
-bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
+void link_peer_announce_clear(link_peer_announce_t *peer)
+{
+    if (peer != NULL) {
+        peer->known = false;
+        peer->boot_id = 0u;
+        peer->version = 0u;
+    }
+}
+
+void link_peer_announce_record(link_peer_announce_t *peer, uint8_t announce_boot_id,
+                               uint16_t version)
+{
+    if (peer != NULL) {
+        peer->version = version;
+        peer->boot_id = announce_boot_id;
+        peer->known = true;
+    }
+}
+
+bool link_staging_apply_context_session(link_staging_t *st, link_peer_announce_t *peer,
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
-                                        bool context_gap, bool announced_known,
-                                        uint8_t announced_boot_id)
+                                        bool context_gap)
 {
     if (!link_staging_new_esp_session(prev_known, prev_boot_id, boot_id, context_gap)) {
         return false;
     }
     link_staging_reset(st);
-    if (boot_id != prev_boot_id && peer_protocol_version != NULL &&
-        (!announced_known || announced_boot_id != boot_id)) {
-        *peer_protocol_version = 0u;
+    if (boot_id != prev_boot_id && peer != NULL && (!peer->known || peer->boot_id != boot_id)) {
+        peer->version = 0u;
     }
     return true;
 }

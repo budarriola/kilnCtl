@@ -84,6 +84,22 @@ bool link_staging_drop_id(link_staging_t *st, uint16_t param_id);
 bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
                                   bool context_gap);
 
+// The peer's last ANNOUNCE_VERSION: its protocol version plus the ESP boot_id it
+// was announced under. Grouped in one struct (not loose bool/uint8_t arguments)
+// so the announced boot_id cannot be swapped for the context's boot_id at the
+// call site. version 0 = unknown.
+typedef struct {
+    bool known;
+    uint8_t boot_id;
+    uint16_t version;
+} link_peer_announce_t;
+
+// Pico (re)start: forget everything announced.
+void link_peer_announce_clear(link_peer_announce_t *peer);
+// ANNOUNCE_VERSION received: record version and the boot_id it carries.
+void link_peer_announce_record(link_peer_announce_t *peer, uint8_t announce_boot_id,
+                               uint16_t version);
+
 // What link_task.c's push_context does on every PUSH_CONTEXT (pure, so the
 // trigger is host-tested rather than only read in the FreeRTOS file): on a
 // new ESP session, discard the staged edits; on a boot_id CHANGE additionally
@@ -95,15 +111,14 @@ bool link_staging_new_esp_session(bool prev_known, uint8_t prev_boot_id, uint8_t
 // accepting an unbound (3-byte) CLEAR_TRIP -- the same state as a fresh Pico
 // boot before any announce, and the ESP's next ANNOUNCE_VERSION restores it.
 // The version is forgotten only when boot_id differs from the boot_id the
-// version was ANNOUNCED under (announced_known/announced_boot_id): the ESP
+// version was ANNOUNCED under (peer->known/peer->boot_id): the ESP
 // sends ANNOUNCE_VERSION before its first PUSH_CONTEXT, so an announce for
 // this very boot_id is current and must be kept.
 // A plain context gap with the same boot_id does NOT clear the version: the
 // same ESP image is still talking, only silent. Returns true on a new session.
-bool link_staging_apply_context_session(link_staging_t *st, uint16_t *peer_protocol_version,
+bool link_staging_apply_context_session(link_staging_t *st, link_peer_announce_t *peer,
                                         bool prev_known, uint8_t prev_boot_id, uint8_t boot_id,
-                                        bool context_gap, bool announced_known,
-                                        uint8_t announced_boot_id);
+                                        bool context_gap);
 
 #ifdef __cplusplus
 }

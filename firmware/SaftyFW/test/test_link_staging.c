@@ -253,52 +253,74 @@ static void test_new_esp_session(void)
                "the new session's COMMIT does not carry the abandoned staged value");
 }
 
+static link_peer_announce_t mk_peer(bool known, uint8_t boot_id, uint16_t version)
+{
+    link_peer_announce_t p;
+    link_peer_announce_clear(&p);
+    if (known) {
+        link_peer_announce_record(&p, boot_id, version);
+    }
+    return p;
+}
+
 static void test_apply_context_session(void)
 {
     TEST_SECTION("push_context trigger: staging reset on new session, peer version on boot_id change");
     config_store_record_t committed;
     config_store_default(&committed);
-    uint16_t pv = 16u;
+    link_peer_announce_t pa = mk_peer(false, 0u, 0u);
+    pa.version = 16u;
 
     link_staging_reset(&s_st);
     TEST_CHECK(stage(&committed, mk_f32(0x0104u, 1300.0f)), "stage an edit");
-    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, false, false, 0u),
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x11u, false),
                "same boot_id, no gap: no new session");
-    TEST_CHECK(link_staging_count(&s_st) == 1u && pv == 16u, "staging and version untouched");
+    TEST_CHECK(link_staging_count(&s_st) == 1u && pa.version == 16u, "staging and version untouched");
 
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x11u, true, false, 0u),
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x11u, true),
                ">5 s gap, same boot_id: new session");
     TEST_CHECK(link_staging_count(&s_st) == 0u, "gap discards staging");
-    TEST_CHECK(pv == 16u, "gap alone keeps the peer protocol version");
+    TEST_CHECK(pa.version == 16u, "gap alone keeps the peer protocol version");
 
     TEST_CHECK(stage(&committed, mk_f32(0x0104u, 1300.0f)), "stage again");
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, false, 0u),
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x22u, false),
                "boot_id change: new session");
     TEST_CHECK(link_staging_count(&s_st) == 0u, "boot_id change discards staging");
-    TEST_CHECK(pv == 0u, "boot_id change resets peer protocol version to unknown");
+    TEST_CHECK(pa.version == 0u, "boot_id change resets peer protocol version to unknown");
 
-    pv = 17u;
-    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pv, false, 0u, 0x33u, true, false, 0u),
+    pa.version = 17u;
+    TEST_CHECK(!link_staging_apply_context_session(&s_st, &pa, false, 0u, 0x33u, true),
                "first context after Pico boot: nothing reset");
-    TEST_CHECK(pv == 17u, "first context keeps the version");
+    TEST_CHECK(pa.version == 17u, "first context keeps the version");
 }
 
 static void test_apply_context_session_announce_order(void)
 {
     TEST_SECTION("announce/context ordering: version kept only for the announced boot_id");
-    uint16_t pv = 17u;
     link_staging_reset(&s_st);
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, true, 0x22u),
+    // Drives the same record helper link_task.c's ANNOUNCE handler calls.
+    link_peer_announce_t pa = mk_peer(false, 0u, 0u);
+    link_peer_announce_record(&pa, 0x22u, 17u);
+    TEST_CHECK(pa.known && pa.boot_id == 0x22u && pa.version == 17u,
+               "record stores the ANNOUNCE's own boot_id and version");
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x22u, false),
                "announce B then context B after context A: new session");
-    TEST_CHECK(pv == 17u, "announced boot_id matches context: version kept");
-    pv = 17u;
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, true, 0x11u),
+    TEST_CHECK(pa.version == 17u, "announced boot_id matches context: version kept");
+
+    pa = mk_peer(true, 0x11u, 17u);
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x22u, false),
                "announce A then context B: new session");
-    TEST_CHECK(pv == 0u, "announced boot_id differs: version forgotten");
-    pv = 17u;
-    TEST_CHECK(link_staging_apply_context_session(&s_st, &pv, true, 0x11u, 0x22u, false, false, 0u),
+    TEST_CHECK(pa.version == 0u, "announced boot_id differs: version forgotten");
+
+    pa = mk_peer(false, 0u, 0u);
+    pa.version = 17u;
+    TEST_CHECK(link_staging_apply_context_session(&s_st, &pa, true, 0x11u, 0x22u, false),
                "no announce known, context B");
-    TEST_CHECK(pv == 0u, "no announce this boot: version forgotten");
+    TEST_CHECK(pa.version == 0u, "no announce this boot: version forgotten");
+
+    link_peer_announce_record(&pa, 0x33u, 16u);
+    link_peer_announce_clear(&pa);
+    TEST_CHECK(!pa.known && pa.version == 0u && pa.boot_id == 0u, "clear forgets the announce");
 }
 
 void run_test_link_staging(void)
