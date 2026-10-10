@@ -37,6 +37,7 @@
 #define KILNCTL_CRASH_REPORT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -153,6 +154,11 @@ typedef struct {
     char     dump_elf_sha[CRASH_REPORT_ELF_SHA_MAX]; // coredump's own app ELF sha256 hex prefix
                                   // ("" if the dump carried none) -- find_crash_elf() prefers it.
 } crash_report_record_t;
+
+// v3 stored size (review 14 MED-1): v4 only appended image_match + dump_elf_sha, so a v3 blob
+// is the first N bytes of the v4 struct, N = offsetof(image_match) rounded up to the 4-byte
+// struct alignment (v3's own sizeof). crash_report.c migrates such a blob on load.
+#define CRASH_REPORT_V3_SIZE ((offsetof(crash_report_record_t, image_match) + 3u) & ~(size_t)3u)
 
 // Pure: compares the coredump's app ELF sha256 hex string (as in
 // esp_core_dump_summary_t.app_elf_sha256, possibly truncated) with the running

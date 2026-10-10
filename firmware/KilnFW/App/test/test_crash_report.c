@@ -540,6 +540,100 @@ static void test_image_match_and_stale_stamping(void)
     TEST_CHECK(record_valid(&rec), "v4 record seals and validates");
 }
 
+// ---------------------------------------------------------------------------
+// Review 14 MED-1: a v3 record from the previous firmware survives the upgrade
+// ---------------------------------------------------------------------------
+
+// Frozen v3 blob: the v4 layout minus image_match/dump_elf_sha, 208 bytes, CRC
+// over those bytes with crc32 zeroed (what the v3 firmware's compute_crc() did
+// over its own 208-byte struct). Built here byte-wise, independent of
+// migrate_v3().
+static size_t make_frozen_v3_blob(uint8_t *blob, uint8_t acknowledged)
+{
+    crash_report_record_t rec = make_sample_record();
+    rec.acknowledged = acknowledged;
+    copy_str(rec.fw_build, sizeof(rec.fw_build), "Oct 01 2026 09:00:00");
+    memset(blob, 0, 228);
+    memcpy(blob, &rec, 208);
+    blob[0] = 3u; // v3 version byte
+    uint32_t zero = 0;
+    memcpy(blob + offsetof(crash_report_record_t, crc32), &zero, 4);
+    uint32_t crc = esp_crc32_le(0, blob, 208);
+    memcpy(blob + offsetof(crash_report_record_t, crc32), &crc, 4);
+    return 208u;
+}
+
+static void put_raw_blob(const uint8_t *blob, size_t len)
+{
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, KILN_NVS_PARTITION) == HAL_OK, "raw fixture opens");
+    TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_CRASH, blob, len) == HAL_OK, "raw fixture writes");
+    TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "raw fixture commits");
+    hal_kv_close(&h);
+}
+
+static void test_v3_record_migrates_and_stays_unacknowledged(void)
+{
+    TEST_SECTION("load()/crash_report_init -- a v3 record (previous firmware) is migrated, not dropped: "
+                 "an unacknowledged crash stays unacknowledged across the upgrade (review 14 MED-1)");
+    reset_all();
+    fake_sysinfo_reset_all();
+    fake_sysinfo_set_coredump_present(true); // the dump is still in its partition
+    uint8_t blob[228];
+    size_t len = make_frozen_v3_blob(blob, 0u);
+    TEST_CHECK(len == CRASH_REPORT_V3_SIZE, "fixture length is the v3 stored size");
+    put_raw_blob(blob, len);
+
+    crash_report_record_t out;
+    TEST_CHECK(crash_report_get(&out), "v3 blob loads as a record");
+    TEST_CHECK(out.version == CRASH_REPORT_RECORD_VERSION, "migrated to the current version");
+    TEST_CHECK(out.acknowledged == 0u && out.dump_id == 0xAABBCCDDu && out.exc_cause == 9u,
+               "v3 fields (ack bit, dump_id, cause) kept");
+    TEST_CHECK(strcmp(out.fw_build, "Oct 01 2026 09:00:00") == 0, "v3 fw_build kept");
+    TEST_CHECK(out.image_match == CRASH_REPORT_IMAGE_UNKNOWN && out.dump_elf_sha[0] == '\0',
+               "image identity UNKNOWN, never MATCH");
+    TEST_CHECK(record_valid(&out), "migrated record is sealed under v4");
+
+    crash_report_init(); // SW-reset boot after the OTA; get_summary stub fails after the cache refresh
+    TEST_CHECK(crash_report_has_unacknowledged(), "the unacknowledged flag survives init on the upgrade boot");
+
+    TEST_CHECK(crash_report_acknowledge(), "a migrated record can be acknowledged");
+    TEST_CHECK(crash_report_get(&out) && out.acknowledged == 1u && record_valid(&out), "ack persisted as v4");
+    TEST_CHECK(!crash_report_has_unacknowledged(), "cache cleared by ack");
+
+    // an acknowledged v3 record stays acknowledged
+    reset_all();
+    len = make_frozen_v3_blob(blob, 1u);
+    put_raw_blob(blob, len);
+    TEST_CHECK(crash_report_get(&out) && out.acknowledged == 1u, "acknowledged v3 stays acknowledged");
+
+    // corrupted v3 blob is rejected
+    reset_all();
+    len = make_frozen_v3_blob(blob, 0u);
+    blob[offsetof(crash_report_record_t, exc_cause)] ^= 1u;
+    put_raw_blob(blob, len);
+    TEST_CHECK(!crash_report_get(&out), "v3 blob with a bad CRC is no record");
+
+    // an odd length with a v3 version byte is not migrated
+    reset_all();
+    len = make_frozen_v3_blob(blob, 0u);
+    put_raw_blob(blob, len - 4u);
+    TEST_CHECK(!crash_report_get(&out), "wrong-length blob is no record");
+    fake_sysinfo_reset_all();
+}
+
+static void test_capture_verdict_retries_own_image_dump(void)
+{
+    TEST_SECTION("capture_verdict -- a dump from the running image is retried on a non-panic boot "
+                 "(review 14 LOW-1); a foreign/unprovable one is not");
+    TEST_CHECK(capture_verdict(HAL_RESET_PANIC, CRASH_REPORT_IMAGE_UNKNOWN) == CAPTURE_FRESH, "panic: fresh");
+    TEST_CHECK(capture_verdict(HAL_RESET_PANIC, CRASH_REPORT_IMAGE_MISMATCH) == CAPTURE_FRESH, "panic+foreign: fresh (stamped foreign later)");
+    TEST_CHECK(capture_verdict(HAL_RESET_SW, CRASH_REPORT_IMAGE_MATCH) == CAPTURE_LATE, "sw reset + own image: late capture");
+    TEST_CHECK(capture_verdict(HAL_RESET_POWERON, CRASH_REPORT_IMAGE_MATCH) == CAPTURE_LATE, "poweron + own image: late capture");
+    TEST_CHECK(capture_verdict(HAL_RESET_SW, CRASH_REPORT_IMAGE_UNKNOWN) == CAPTURE_SKIP, "sw reset + unprovable: skip");
+    TEST_CHECK(capture_verdict(HAL_RESET_SW, CRASH_REPORT_IMAGE_MISMATCH) == CAPTURE_SKIP, "sw reset + foreign: skip");
+}
+
 static void test_clear_reflag_survives_ack_write_failure(void)
 {
     TEST_SECTION("crash_report_clear -- LOW fix (review_crash_report_relay_gate_61765de7_2026-09-15): "

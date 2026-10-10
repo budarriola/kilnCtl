@@ -1698,8 +1698,9 @@ def find_elf_by_sha_prefix(sha_prefix: str) -> tuple[Optional[str], str]:
     hits = []
     for path in list_all_kiln_elf_paths() + list_recovery_elf_paths():
         key = os.path.basename(path).rsplit("-", 1)[-1][:-4]  # <prefix>-<key12>.elf
-        n = min(len(p), len(key))
-        if key[:n] == p[:n]:
+        # The key must be at least as long as the prefix: a shorter or empty
+        # key (stray file name) must never match by truncating the compare.
+        if len(key) >= len(p) and key.startswith(p):
             hits.append(path)
     if len(hits) == 1:
         return hits[0], f"found {hits[0]} (matches the coredump's own app ELF sha256 prefix {p})"

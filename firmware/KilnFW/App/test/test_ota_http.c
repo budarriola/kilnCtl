@@ -283,9 +283,22 @@ esp_err_t kiln_scope_cfg_files_delete(int *out_deleted)
 // scope wiring (kiln/all yes, wifi/profiles never) is pinned.
 static int g_crash_report_clear_calls = 0;
 static esp_err_t g_crash_report_clear_result = ESP_OK;
+// Review 14 LOW-7: on the real backend hal_kv_erase_partition() de-initializes
+// kiln_nvs, so crash_report_clear() must run BEFORE the partition erase. The test seeds a
+// sentinel key in kiln_nvs; the stub reports whether it was still there when called.
+static bool g_crash_report_clear_saw_sentinel = false;
 esp_err_t crash_report_clear(void)
 {
     g_crash_report_clear_calls++;
+    {
+        hal_kv_handle_t h;
+        uint8_t b = 0;
+        size_t n = sizeof(b);
+        if (hal_kv_open(&h, "ordtest", HAL_KV_MODE_READ_ONLY, "kiln_nvs") == HAL_OK) {
+            g_crash_report_clear_saw_sentinel = (hal_kv_get_blob(&h, "sentinel", &b, &n) == HAL_OK);
+            hal_kv_close(&h);
+        }
+    }
     return g_crash_report_clear_result;
 }
 
@@ -1800,8 +1813,20 @@ static void test_credential_survives_factory_reset_all_scope(void)
     g_stub_profiles_discard_calls = 0;
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
+    g_crash_report_clear_saw_sentinel = false;
+    {
+        hal_kv_handle_t h;
+        uint8_t one = 1;
+        TEST_CHECK(hal_kv_open(&h, "ordtest", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK, "setup: sentinel handle");
+        TEST_CHECK(hal_kv_set_blob(&h, "sentinel", &one, 1) == HAL_OK && hal_kv_commit(&h) == HAL_OK, "setup: sentinel written");
+        hal_kv_close(&h);
+    }
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
               "factory_reset_execute(ALL) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 1, "the all scope clears the crash report/coredump exactly once (review 14 LOW-7)");
+    TEST_CHECK(g_crash_report_clear_saw_sentinel,
+               "crash_report_clear() ran BEFORE the kiln_nvs partition erase (the erase de-initializes it on the real backend)");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0 && g_profiles_scope_cfg_delete_calls == 0,
               "ALL formats cfg instead of deleting per-scope mirrors");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,

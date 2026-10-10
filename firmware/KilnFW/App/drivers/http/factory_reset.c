@@ -288,6 +288,24 @@ static void execute_scope_job(void *arg)
         }
     }
 
+    /* clear_crash_report: runs on the flash worker, and BEFORE the partition
+     * erase loop below (review 14 LOW-7): hal_kv_erase_partition() de-initializes
+     * kiln_nvs on the real backend, so a crash_report_clear() after it fails its
+     * hal_kv_open() ("not initialized") and logs a misleading warning for every
+     * kiln/all reset. Run first, the record erase works and the partition erase
+     * then removes whatever is left; crash_report_clear()
+     * detects that and does its flash work inline. A failure FAILS the reset
+     * like the cfg mirror deletes above. */
+    if (scope->clear_crash_report) {
+        esp_err_t cerr = crash_report_clear();
+        if (cerr != ESP_OK) {
+            ESP_LOGE(TAG, "crash_report_clear() failed during factory reset: %s", esp_err_to_name(cerr));
+            if (first_err == ESP_OK) {
+                first_err = cerr;
+            }
+        }
+    }
+
     for (size_t i = 0; scope->partitions[i] != NULL; i++) {
         const char *part = scope->partitions[i];
         hal_status_t st = hal_kv_erase_partition(part);
@@ -427,19 +445,6 @@ static void execute_scope_job(void *arg)
         ESP_LOGW(TAG, "profiles factory reset: %d cfg file(s) deleted", n);
         if (perr != ESP_OK && first_err == ESP_OK) {
             first_err = perr;
-        }
-    }
-
-    /* clear_crash_report: runs on the flash worker; crash_report_clear()
-     * detects that and does its flash work inline. A failure FAILS the reset
-     * like the cfg mirror deletes above. */
-    if (scope->clear_crash_report) {
-        esp_err_t cerr = crash_report_clear();
-        if (cerr != ESP_OK) {
-            ESP_LOGE(TAG, "crash_report_clear() failed during factory reset: %s", esp_err_to_name(cerr));
-            if (first_err == ESP_OK) {
-                first_err = cerr;
-            }
         }
     }
 

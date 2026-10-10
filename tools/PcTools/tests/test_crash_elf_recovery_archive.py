@@ -93,6 +93,33 @@ class RecoveryArchiveTest(unittest.TestCase):
         self.assertTrue(out.startswith("error"))
         self.assertIn("NOT a substitute", out)
 
+    def test_sha_prefix_rejects_short_and_non_hex(self):
+        self._put_elf(b"recovery-elf-F")
+        for bad in ("abc", "", None, "zzzzzz", "12345g", "abcde"):
+            path, why = elf_archive.find_elf_by_sha_prefix(bad)
+            self.assertIsNone(path, bad)
+            self.assertIn("too short/not hex", why)
+
+    def test_sha_prefix_six_chars_accepted(self):
+        elf = self._put_elf(b"recovery-elf-G")
+        path, _ = elf_archive.find_elf_by_sha_prefix(_sha(b"recovery-elf-G")[:6].upper())
+        self.assertEqual(path, elf)
+
+    def test_sha_prefix_ambiguous(self):
+        a = os.path.join(self.rec, "recovery-abcdef000001.elf")
+        b = os.path.join(self.rec, "recovery-abcdef000002.elf")
+        for x in (a, b):
+            open(x, "wb").close()
+        path, why = elf_archive.find_elf_by_sha_prefix("abcdef")
+        self.assertIsNone(path)
+        self.assertIn("2 archived ELFs share", why)
+
+    def test_sha_prefix_short_archive_key_does_not_match(self):
+        # key "abcdef" is shorter than the 9-char prefix: must not match by truncation
+        open(os.path.join(self.rec, "recovery-abcdef.elf"), "wb").close()
+        path, _ = elf_archive.find_elf_by_sha_prefix("abcdef123")
+        self.assertIsNone(path)
+
     def test_find_crash_elf_prefers_stale_dump_sha_from_board(self):
         elf = self._put_elf(b"recovery-elf-E")
         rec = {"present": True, "stale_image": True, "dump_elf_sha": _sha(b"recovery-elf-E")[:9]}

@@ -89,6 +89,7 @@ NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
  * crash_report_record_t's layout changes, alongside bumping
  * CRASH_REPORT_RECORD_VERSION. */
 typedef char crash_report_record_t_size_check[(sizeof(crash_report_record_t) == 228) ? 1 : -1];
+typedef char crash_report_v3_size_check[(CRASH_REPORT_V3_SIZE == 208) ? 1 : -1];
 
 /* ---------------------------------------------------------------------------
  * Uptime beacon (v3, ROADMAP.md follow-up) -- RTC memory, NOT NVS. Same
@@ -176,6 +177,33 @@ static void seal_crc(crash_report_record_t *rec)
     rec->crc32 = compute_crc(rec);
 }
 
+/* v3 -> v4 migration (review 14 MED-1). v4 only APPENDED image_match and
+ * dump_elf_sha to v3, so a v3 blob is a byte prefix of the v4 struct: v3's
+ * stored length is the offset of image_match rounded up to the struct's
+ * 4-byte alignment, and its CRC is esp_crc32_le over those bytes with crc32
+ * zeroed. `rec` holds the raw v3 bytes (the rest zeroed by the caller). On
+ * success rec is a sealed v4 record: acknowledged bit and every v3 field kept,
+ * image_match UNKNOWN (never MATCH: v3 never recorded the dump's identity),
+ * dump_elf_sha empty. Returns false (rec unusable) on a version/CRC failure. */
+static bool migrate_v3(crash_report_record_t *rec, size_t len)
+{
+    if (len != CRASH_REPORT_V3_SIZE || rec->version != 3u) {
+        return false;
+    }
+    uint8_t tmp[CRASH_REPORT_V3_SIZE];
+    memcpy(tmp, rec, sizeof(tmp));
+    memset(tmp + offsetof(crash_report_record_t, crc32), 0, sizeof(rec->crc32));
+    if (esp_crc32_le(0, tmp, sizeof(tmp)) != rec->crc32) {
+        return false;
+    }
+    memset(((uint8_t *)rec) + CRASH_REPORT_V3_SIZE, 0, sizeof(*rec) - CRASH_REPORT_V3_SIZE);
+    rec->version = CRASH_REPORT_RECORD_VERSION;
+    rec->image_match = CRASH_REPORT_IMAGE_UNKNOWN;
+    rec->dump_elf_sha[0] = '\0';
+    seal_crc(rec);
+    return true;
+}
+
 /* espcoredump stores exc_pc as esp_cpu_process_stack_pc(raw_pc), which is
  * `raw_pc - 3` (components/xtensa/include/esp_cpu_utils.h). A raw PC of 0
  * therefore lands in the record as 0 - 3 == 0xfffffffd. That is not a code
@@ -246,6 +274,21 @@ static bool reset_reason_can_produce_coredump(hal_reset_reason_t rr)
 {
     return rr == HAL_RESET_PANIC || rr == HAL_RESET_INT_WDT || rr == HAL_RESET_TASK_WDT ||
            rr == HAL_RESET_WDT;
+}
+
+typedef enum { CAPTURE_SKIP = 0, CAPTURE_FRESH, CAPTURE_LATE } capture_verdict_t;
+
+/* Capture decision for a coredump with no matching record. FRESH: this boot
+ * can have just produced it (panic/watchdog reset). LATE (review 14 LOW-1):
+ * not a panic boot, but the dump's own ELF sha equals the running image's, so
+ * it is that image's own crash whose capture failed on the panic boot. SKIP
+ * otherwise (stale/foreign/unprovable dump). Pure, host-tested. */
+static capture_verdict_t capture_verdict(hal_reset_reason_t rr, uint8_t image_match)
+{
+    if (reset_reason_can_produce_coredump(rr)) {
+        return CAPTURE_FRESH;
+    }
+    return image_match == CRASH_REPORT_IMAGE_MATCH ? CAPTURE_LATE : CAPTURE_SKIP;
 }
 
 /* Applies the image-match verdict to a freshly filled record: a foreign dump
@@ -437,10 +480,22 @@ static bool load(crash_report_record_t *out)
         return false;
     }
     crash_report_record_t rec;
+    memset(&rec, 0, sizeof(rec));
     size_t len = sizeof(rec);
     err = hal_kv_get_blob(&h, NVS_KEY_CRASH, &rec, &len);
     hal_kv_close(&h);
 
+    if (err == HAL_OK && len == CRASH_REPORT_V3_SIZE) {
+        /* MED-1 (review 14): a record written by the previous (v3) firmware.
+         * Migrate it instead of discarding it, or an unacknowledged crash
+         * would silently vanish on the upgrade boot (and the reset-reason
+         * gate in crash_report_init() would then refuse to recapture it). */
+        if (!migrate_v3(&rec, len)) {
+            ESP_LOGW(TAG, "stored v3 crash record failed its CRC check -- treating as no record");
+            return false;
+        }
+        len = sizeof(rec);
+    }
     if (err != HAL_OK || len != sizeof(rec)) {
         return false;
     }
@@ -543,15 +598,29 @@ void crash_report_init(void)
     }
 
     hal_reset_reason_t rr = hal_sysinfo_reset_reason();
-    if (!reset_reason_can_produce_coredump(rr)) {
+    const esp_app_desc_t *desc = esp_app_get_description();
+    const char *dump_sha = (const char *)summary.app_elf_sha256;
+    const uint8_t match = crash_report_image_match(dump_sha, desc ? desc->app_elf_sha256 : NULL);
+    const capture_verdict_t verdict = capture_verdict(rr, match);
+    if (verdict == CAPTURE_SKIP) {
         /* A coredump is present but THIS boot was not a panic/watchdog reset,
-         * and no record for it exists (NVS lost, or first boot after a
-         * reflash). It is an old dump: do not mint a new crash event from it
-         * (it would be attributed to the running image). It stays in the
-         * partition for espcoredump.py until the next crash overwrites it. */
-        ESP_LOGW(TAG, "coredump present but this boot's reset reason is not panic/watchdog -- "
-                      "old dump, no crash record captured");
+         * the dump is not provably from the running image, and no record for
+         * it exists (NVS lost, or first boot after a reflash). It is an old
+         * dump: do not mint a new crash event from it (it would be attributed
+         * to the running image). It stays in the partition for espcoredump.py
+         * until the next crash overwrites it. */
+        ESP_LOGW(TAG, "coredump present but this boot's reset reason is not panic/watchdog and the "
+                      "dump is not from the running image -- old dump, no crash record captured");
         return;
+    }
+    if (verdict == CAPTURE_LATE) {
+        /* LOW-1 (review 14): the panic boot could not write its record (NVS
+         * init or persist failed) and every later boot has a non-panic reset
+         * reason. The dump's own ELF sha equals the running image's and its
+         * dump_id was never captured, so retry now -- but this boot's reset
+         * reason says nothing about that crash. */
+        ESP_LOGW(TAG, "coredump from the running image has no crash record -- late capture "
+                      "(earlier capture must have failed)");
     }
     const char *rr_name;
     switch (rr) {
@@ -571,16 +640,17 @@ void crash_report_init(void)
 
     crash_report_record_t rec;
     memset(&rec, 0, sizeof(rec));
-    fill_from_summary(&rec, &summary, rr_name);
+    fill_from_summary(&rec, &summary, verdict == CAPTURE_LATE ? "UNKNOWN" : rr_name);
     rec.dump_id = dump_id;
 
     hal_sysinfo_build_info_t build_info;
     hal_sysinfo_get_build_info(&build_info);
     fill_v3_fields(&rec, &boot_beacon, &build_info);
-    {
-        const esp_app_desc_t *desc = esp_app_get_description();
-        const char *dump_sha = (const char *)summary.app_elf_sha256;
-        apply_image_match(&rec, crash_report_image_match(dump_sha, desc ? desc->app_elf_sha256 : NULL), dump_sha);
+    apply_image_match(&rec, match, dump_sha);
+    if (verdict == CAPTURE_LATE) {
+        /* this boot's uptime beacon is not that crash's either */
+        rec.crash_uptime_s = 0u;
+        rec.crash_uptime_known = 0u;
     }
 
     seal_crc(&rec);
