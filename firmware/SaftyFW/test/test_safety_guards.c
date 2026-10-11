@@ -3413,7 +3413,58 @@ static void test_try_clear(void)
         TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F2 sanity: S8 tripped");
         in.dt_s = 0.1f;
         for (int i = 0; i < 100; i++) safety_guards_tick(&s, &cfg, &in); /* 10 s plateau at 60 C */
-        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (fresh rate ~0)");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in),
+                   "MED-1: no grant from a partial post window alone (frozen trip window still refuses)");
+        for (int i = 0; i < 510; i++) safety_guards_tick(&s, &cfg, &in); /* total 61 s: one full window */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (full window rate ~0)");
+    }
+    /* MED-1: noisy still-fast rise (+12 C/min for ~5.1 s, then -0.15 C noise) must refuse. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "MED-1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 51; i++) { in.tc_c += 0.02f; safety_guards_tick(&s, &cfg, &in); }
+        in.tc_c -= 0.15f;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "MED-1: noisy fast rise at ~5 s must refuse the clear");
+    }
+    /* LOW-1: past 60 s post-trip, the last-full-post-window branch decides. */
+    for (int fast = 0; fast < 2; fast++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        /* 62 s: fast = +30 C/min (0.005 C/tick), plateau otherwise. Ends just after a window rolled. */
+        for (int i = 0; i < 620; i++) { if (fast) in.tc_c += 0.005f; safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s8_post_rate_valid, "LOW-1 sanity: a full post window completed");
+        if (fast) {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: still-fast last full window refuses");
+        } else {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "LOW-1: plateau last full window grants");
+        }
     }
     /* F2: still rising fast after the trip -> still refused. */
     {

@@ -199,17 +199,24 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
         if (!in->tc_valid) { /* review saftyfx6 F4: unknown reading refuses */
             return true;
         }
-        /* Review saftyfx6 F2: prefer a FRESH post-trip measurement (advanced by
-         * safety_guards_tick()'s tripped branch) so a plateau or a settled
-         * offset converges to rate ~0 and the clear is granted, while a
-         * reading that is still rising fast keeps refusing. Before any post-trip
-         * time has accumulated, fall back to the frozen tripping window. */
-        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
-            float m = state->s8_post_elapsed_s / 60.0f;
-            return ((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min;
-        }
+        /* Review saftyfx6 F2 + saftyfx7 MED-1: a grant is decided only from a
+         * COMPLETED full post-trip window (s8_post_rate_valid), never from a
+         * partial one alone -- a few seconds of TC noise can fake a plateau on
+         * a kiln still rising fast. Until the first full window completes the
+         * frozen tripping window decides (refuses while it exceeds the limit).
+         * Once a full window exists, refuse if EITHER the last full rate OR the
+         * partial window now accumulating (>= S8_POST_MIN_S) is over the limit. */
         if (state->s8_post_rate_valid) {
-            return state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min;
+            if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {
+                return true;
+            }
+            if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+                float m = state->s8_post_elapsed_s / 60.0f;
+                if (((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min) {
+                    return true;
+                }
+            }
+            return false;
         }
         if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
             float elapsed_min = state->s8_window_elapsed_s / 60.0f;
