@@ -812,6 +812,9 @@ static esp_err_t nvs_partition_init(const char *partition)
  * old byte instead comes back as a successful blob read of length 1. Both
  * are handled so the migration path is exercised the same way on host as
  * it will behave on target. */
+/* Largest used-bitmap blob accepted as a newer-firmware "longer" shape (review LOW-2). */
+#define USED_BITMAP_LONGER_MAX_BYTES 64u
+
 static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
 {
     size_t len = 0;
@@ -830,9 +833,23 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
     }
+    if (err == HAL_OK && len > sizeof(*out) && len <= USED_BITMAP_LONGER_MAX_BYTES) {
+        /* Review LOW-2: a longer bitmap is newer firmware with more slots -- use our first 16 bytes; the tail is
+         * preserved verbatim by used_bitmap_save() (same policy as the rev array). */
+        uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
+        size_t bl = len;
+        hal_status_t gerr = hal_kv_get_blob(h, NVS_KEY_USED, big, &bl);
+        if (gerr != HAL_OK || bl != len) {
+            return HAL_IO;
+        }
+        memcpy(out, big, sizeof(*out));
+        return HAL_OK;
+    }
     if (err == HAL_OK && len != 1) {
-        /* A blob exists but is neither the 16-byte shape nor a legacy single byte: corrupt. Falling through to
-         * the u8 read would answer NOT_FOUND (type mismatch) and read as "no bitmap yet" -- silent slot loss. */
+        /* A blob exists but is neither the 16-byte shape, a longer newer-firmware shape, nor a legacy single byte:
+         * corrupt. Falling through to the u8 read would answer a type mismatch (NOT_FOUND on target and in the
+         * typed fake) and read as "no bitmap yet" -- silent slot loss. Callers repair via
+         * used_bitmap_load_or_rebuild(). */
         return HAL_IO;
     }
     /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
@@ -864,7 +881,41 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
                       "DRAM_PSRAM_PLAN.md section 7.2.");
         return HAL_NOT_READY;
     }
+    /* Review LOW-2: a longer newer-firmware bitmap is rewritten at its FULL length, tail verbatim. */
+    size_t cur_len = 0;
+    if (hal_kv_get_blob(h, NVS_KEY_USED, NULL, &cur_len) == HAL_OK && cur_len > sizeof(*bm) &&
+        cur_len <= USED_BITMAP_LONGER_MAX_BYTES) {
+        uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
+        size_t bl = cur_len;
+        if (hal_kv_get_blob(h, NVS_KEY_USED, big, &bl) == HAL_OK && bl == cur_len) {
+            memcpy(big, bm, sizeof(*bm));
+            return hal_kv_set_blob(h, NVS_KEY_USED, big, cur_len);
+        }
+        return HAL_IO;
+    }
     return hal_kv_set_blob(h, NVS_KEY_USED, bm, sizeof(*bm));
+}
+
+/* Review LOW-2: a wrong-size used-bitmap blob must not be a permanent save/delete outage. Rebuilds the bitmap
+ * from the "profN" slot keys actually present (the bitmap is only an index of them); the next used_bitmap_save()
+ * overwrites the bad blob with a 16-byte one. Any other load error is passed through unchanged. */
+static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    hal_status_t err = used_bitmap_load(h, out);
+    if (err != HAL_IO) {
+        return err;
+    }
+    ESP_LOGW(PROFILES_TAG, "used bitmap blob has an unusable size -- rebuilding it from the profN slot keys");
+    memset(out, 0, sizeof(*out));
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        char key[8];
+        profile_nvs_key(id, key, sizeof(key));
+        size_t klen = 0;
+        if (hal_kv_get_blob(h, key, NULL, &klen) == HAL_OK) {
+            profiles_slot_bitmap_set(out, id);
+        }
+    }
+    return HAL_OK;
 }
 
 /* Loads NVS_NAMESPACE/NVS_KEY_USED + "profN" out of `partition` into *out,
@@ -1353,7 +1404,7 @@ static esp_err_t retire_legacy_slot_blob(uint8_t id)
      * (bit set, key present), so the next boot retries. */
     profiles_slot_bitmap_t nvs_used;
     memset(&nvs_used, 0, sizeof(nvs_used));
-    kv_err = used_bitmap_load(&h, &nvs_used);
+    kv_err = used_bitmap_load_or_rebuild(&h, &nvs_used);
     if (kv_err == HAL_NOT_FOUND) {
         kv_err = HAL_OK;
     } else if (kv_err == HAL_OK) {
@@ -1499,7 +1550,7 @@ esp_err_t nvs_erase_slot_locked(uint8_t id)
     s_profile_rev[id] = new_rev;
     profiles_slot_bitmap_t nvs_used;
     memset(&nvs_used, 0, sizeof(nvs_used));
-    kv_err = used_bitmap_load(&h, &nvs_used);
+    kv_err = used_bitmap_load_or_rebuild(&h, &nvs_used);
     if (kv_err == HAL_NOT_FOUND) {
         memset(&nvs_used, 0, sizeof(nvs_used));
         kv_err = HAL_OK;

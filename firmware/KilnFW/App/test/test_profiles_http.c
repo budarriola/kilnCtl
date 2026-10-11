@@ -1904,6 +1904,75 @@ static void test_nvs_erase_slot_refuses_when_rev_array_unreadable(void)
     TEST_CHECK(blen == sizeof(junk), "rev blob not overwritten");
 }
 
+static void test_nvs_erase_slot_repairs_wrong_size_used_bitmap(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2: a wrong-size used-bitmap blob is rebuilt, not a permanent outage");
+    pcfg_reset_all();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, NVS_KEY_USED, junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete succeeds despite the junk-size bitmap");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == sizeof(profiles_slot_bitmap_t),
+               "the bad blob was overwritten with a 16-byte bitmap");
+    nvs_close(h);
+}
+
+static void test_nvs_erase_slot_keeps_longer_used_bitmap_tail(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2: a longer newer-firmware used bitmap keeps its tail");
+    pcfg_reset_all();
+    s_profiles.profiles[3] = make_stored_profile();
+    profiles_slot_bitmap_from_u32(&s_profiles.used_bitmap, 0x08);
+    TEST_CHECK(nvs_save_slot(3) == ESP_OK, "save slot 3");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t longer[24];
+    memset(longer, 0, sizeof(longer));
+    longer[0] = 0x08; /* slot 3 used */
+    for (int i = 16; i < 24; i++) {
+        longer[i] = (uint8_t)(0xA0 + i);
+    }
+    nvs_set_blob(h, NVS_KEY_USED, longer, sizeof(longer));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete succeeds with a longer bitmap");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == sizeof(longer),
+               "rewritten at its full original length");
+    TEST_CHECK(blen == sizeof(longer) && memcmp(back + 16, longer + 16, 8) == 0, "tail preserved verbatim");
+    TEST_CHECK((back[0] & 0x08) == 0, "slot 3's bit cleared in the head");
+    nvs_close(h);
+}
+
+static void test_favorites_wrong_size_blob_is_an_error(void)
+{
+    TEST_SECTION("profiles_favorites_start -- review LOW-3: a wrong-size favorites blob is not 'nothing favorited'");
+    pcfg_reset_all();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start() reports the unusable blob");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)profiles_favorites_start();
+}
+
 static void test_nvs_erase_slot_propagates_firing_stats_error(void)
 {
     TEST_SECTION("nvs_erase_slot -- firing_stats_erase failure is propagated");
@@ -5696,6 +5765,9 @@ void run_test_profiles_http(void)
     test_pcfg_unknown_floors_flag_file_backed_slots_too();
     test_pcfg_corrupt_nvs_blob_keeps_live_file();
     test_nvs_erase_slot_refuses_when_rev_array_unreadable();
+    test_nvs_erase_slot_repairs_wrong_size_used_bitmap();
+    test_nvs_erase_slot_keeps_longer_used_bitmap_tail();
+    test_favorites_wrong_size_blob_is_an_error();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();

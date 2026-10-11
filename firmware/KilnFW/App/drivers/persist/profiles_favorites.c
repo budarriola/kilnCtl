@@ -98,10 +98,12 @@ static bool fav_locate(uint8_t id, bool *out_is_user, uint32_t *out_builtin_bit)
  * profiles_slot_bitmap_t blob OR a pre-task-6 board's old single uint32_t
  * (word[0] only). Same two-branch dispatch as profiles_http.c's
  * used_bitmap_load() and for the same reason: the real ESP-IDF NVS backend
- * enforces on-flash key type (a blob read against a U32-typed key fails
- * with HAL_INVALID_ARG), while the host fake backend answers a size
- * mismatch instead. A missing key entirely is explicitly not an error -- it
- * means nothing has ever been favorited, the shipped default. */
+ * enforces on-flash key type (a blob read against a U32-typed key ends in
+ * HAL_NOT_FOUND, as does the typed host fake), so NOT_FOUND from the blob
+ * probe falls through to the legacy u32 read. A missing key entirely is
+ * explicitly not an error -- it means nothing has ever been favorited, the
+ * shipped default. A blob of any OTHER size is corrupt (review LOW-3): it
+ * returns HAL_IO rather than reading as "nothing favorited". */
 static hal_status_t favorites_load_user_mask(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
 {
     size_t len = 0;
@@ -115,6 +117,9 @@ static hal_status_t favorites_load_user_mask(hal_kv_handle_t *h, profiles_slot_b
     uint32_t legacy = 0;
     hal_status_t legacy_err = hal_kv_get_u32(h, NVS_KEY_FAV_USER, &legacy);
     if (legacy_err == HAL_NOT_FOUND) {
+        if (err == HAL_OK) {
+            return HAL_IO; /* a blob exists at a wrong size: not "absent" */
+        }
         return HAL_OK;
     }
     if (legacy_err != HAL_OK) {

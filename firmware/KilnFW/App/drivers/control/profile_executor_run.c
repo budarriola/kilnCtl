@@ -1437,13 +1437,11 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     /* LD-01 follow-up (REVIEW_LD01_WWFIX LOW-4): the start gate near the top of this function ran before
      * validation and plan work; a link drop since then would otherwise commit RUNNING with heat pending.
      * Recheck right before the commit, unwinding the claims exactly like the refusal above. */
-    if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "a firing cannot start")) {
+    if (relay_authority_start_blocked(s_exec.safety, err_msg, err_cap, "a firing cannot start")) {
+        /* Review INFO-5: err_msg now names the actual closed gate (link, fault, ...), as the door check does. */
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
         run_refuse_unlock(done_snap);
-        if (err_msg) {
-            snprintf(err_msg, err_cap, "safety link went down while the firing was starting -- start it again");
-        }
         ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: start gate closed meanwhile",
                  (unsigned)profile_id);
         return false;

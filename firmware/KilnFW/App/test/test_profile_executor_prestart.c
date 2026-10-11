@@ -2994,7 +2994,7 @@ static void test_run_refuses_when_link_drops_before_commit(void)
     g_stub_force_link_up = saved_force;
     TEST_CHECK(calls >= 2, "the gate ran a second time before commit");
     TEST_CHECK(!ok, "start refused when the link drops before commit");
-    TEST_CHECK(strstr(err, "safety link went down while the firing was starting") != NULL, "refusal names the cause");
+    TEST_CHECK(strstr(err, "safety link is down or not yet confirmed up") != NULL, "refusal names the actual cause");
     TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "run did not enter RUNNING");
     TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request");
 }
@@ -13565,6 +13565,28 @@ static void test_zone_off_pending_retry_ownership_edges(void)
     TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_mask == 0x04 && s_exec.zone_off_pending_mask == 0,
                "MED-1: the retry later opens it and clears the bit");
     memset(&s_exec, 0, sizeof(s_exec));
+
+    /* Review LOW-1: a pending OFF must not outlive a later successful io_seg_start write, nor a leave-on end. */
+    {
+        profile_segment_t seg;
+        memset(&seg, 0, sizeof(seg));
+        seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+        seg.io_target = PROFILE_IO_TARGET_RELAY_BASE + 2; /* 0x04 */
+        seg.io_state = 1;
+        seg.io_leave_on_at_end = 1;
+        seg.dwell_min = 5;
+        s_exec.io = (kiln_io_t *)0x1;
+        s_exec.state = PROFILE_EXEC_RUNNING;
+        s_exec.zone_off_pending_mask = 0x04;
+        io_seg_start(0, &seg);
+        TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) == 0,
+                   "LOW-1: successful io_seg_start write clears the stale pending OFF bit");
+        s_exec.zone_off_pending_mask = 0x04; /* e.g. set again by a failed OFF of an earlier segment */
+        io_seg_finish(0, true);
+        TEST_CHECK((s_exec.zone_off_pending_mask & 0x04) == 0,
+                   "LOW-1: leave_on_at_end finish clears the pending OFF bit");
+        memset(&s_exec, 0, sizeof(s_exec));
+    }
 
     /* LOW-4: a failed superseded-mask force-off is recorded as pending. */
     s_exec.io = (kiln_io_t *)0x1;

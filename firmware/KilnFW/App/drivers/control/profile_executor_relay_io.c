@@ -1167,6 +1167,10 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg)
             if (err != ESP_OK) {
                 ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
                          idx + 1, r->target, esp_err_to_name(err));
+            } else {
+                /* Review LOW-1: a successful write supersedes an earlier failed OFF recorded by io_seg_finish();
+                 * left set, zone_off_pending_retry() would later turn a leave_on_at_end relay OFF. */
+                s_exec.zone_off_pending_mask &= (uint8_t)~bit;
             }
         }
     } else if (s_exec.io) {
@@ -1211,6 +1215,10 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
 
     if (r->is_relay) {
         uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        if (leave_on) {
+            /* Review LOW-1: the owner's explicit leave-ON wins over any stale pending OFF. */
+            s_exec.zone_off_pending_mask &= (uint8_t)~bit;
+        }
         if (!leave_on && s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, 0);
             if (err != ESP_OK) {
