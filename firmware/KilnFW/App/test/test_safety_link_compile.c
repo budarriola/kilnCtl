@@ -1231,7 +1231,8 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
                "LOW-2: outage spanning the wrap (-600 s .. +300 s) is not a reboot");
     TEST_CHECK(safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 1500u),
                "a reboot across the wrap is still caught");
-    TEST_CHECK(safety_pico_uptime_behind_expected(1000u, 0x80000000u, 1000u), "elapsed >= 2^31 ms: in doubt, count a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(1000u, 0x90000000u, 1000u + 0x90000000u),
+               "elapsed >= 2^31 ms: modular difference meaningless, in doubt count a reboot");
 
     s_stub_relay_cycles_safety_edge_calls = 0;
     SafetyLinkClass link = make_link();
