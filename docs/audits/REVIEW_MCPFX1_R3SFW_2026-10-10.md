@@ -118,6 +118,8 @@ mcpfx1's own tests mocked the gate, but these two older callers were not updated
 
 ### LOW-4: stale docstrings
 
+**Status: FIXED (already, 6d5599f1e/mcpfx3; verified mcpfx4): both docstrings are current.**
+
 **Where:**
 - `pico_gpio_probe.py:36-44` still says "No 'refuse while ARMED' gate" and that there is "nothing here to query yet". Both are now false (`_armed_refusal` uses `pico_armed_state`).
 - The `write_memory` docstring does not describe the always-resume behaviour or the `KCTL_*` markers.

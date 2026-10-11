@@ -331,7 +331,7 @@ def _wait_job(host: str, wait_s: float) -> "tuple[Optional[dict], Optional[str]]
         if not last.get("busy"):
             return last, None
         if time.monotonic() >= deadline:
-            return last, "still running when the wait ended"
+            return last, f"still running after {wait_s:g}s (wait_s is clamped to {_MAX_WAIT_S:g}s)"
         time.sleep(_POLL_S)
 
 
@@ -382,7 +382,7 @@ def update_stage_release(confirm: bool = False, allow_prerelease: bool = False, 
     Without ``confirm=True`` (exactly) this is a DRY RUN: it reads the fetch and
     stage status and the repo, shows the query it would send, and sends nothing.
     With confirm: refuses while any job or stage operation is in flight, then
-    starts the download and polls up to ``wait_s``. The board decides policy
+    starts the download and polls up to ``wait_s`` (clamped to 200 s so the call stays under the MCP client's 300 s abort; the UNKNOWN text names the clamped value). The board decides policy
     (a downgrade needs ``allow_downgrade=True`` AND ``confirm_downgrade`` equal
     to the release tag; the same version needs ``force``; a pre-release needs
     ``allow_prerelease``, which also makes the board pick from the releases list

@@ -292,8 +292,6 @@ class BackupImportTransportWordingTest(_Base):
         self.assertIn("MAY HAVE COMMITTED", result)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class StaleStoresNoteTest(_Base):
@@ -321,3 +319,43 @@ class StaleStoresNoteTest(_Base):
         self.assertEqual(msi._stale_stores_note({"stale_or_unknown_stores": []}, "x"), "")
         self.assertEqual(msi._stale_stores_note([], "x"), "")
         self.assertIn("a.bin", msi._stale_stores_note({"stale_or_unknown_stores": ["a.bin"]}, "x"))
+
+
+class ReadbackContentTest(unittest.TestCase):
+    """mcpfx2 M2: the post-import read-back compares content per profile id and zone index."""
+
+    WANT = {"zones": [{"index": 0, "pid_kp": 1.5, "max_temp_c": 1200.0}],
+            "profiles": [{"id": 3, "name": "a", "zone_mask": 1, "segments": [{"zone": 0, "target": 100.0}]}]}
+
+    def _problem(self, got):
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            return msi._backup_import_readback_problem("h", json.dumps(self.WANT), "ready")
+
+    def test_identical_is_ok(self):
+        self.assertIsNone(self._problem(json.loads(json.dumps(self.WANT))))
+
+    def test_float_print_rounding_tolerated(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["pid_kp"] = 1.5000000001
+        self.assertIsNone(self._problem(got))
+
+    def test_zone_gain_not_written_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["pid_kp"] = 9.0
+        self.assertIn("pid_kp", self._problem(got))
+
+    def test_profile_body_not_written_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["segments"][0]["target"] = 50.0
+        self.assertIn("target", self._problem(got))
+        got["profiles"][0]["name"] = "b"
+        self.assertIn("profiles[id=3]", self._problem(got))
+
+    def test_profile_missing_by_id_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["id"] = 4
+        self.assertIn("missing", self._problem(got))
+
+
+if __name__ == "__main__":
+    unittest.main()

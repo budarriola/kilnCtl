@@ -41,9 +41,10 @@ def _preflight_task_liveness(reason_out: Optional[list] = None):
     get_stack_margin() path as the standalone check_task_liveness tool.
     Returns None (not checked) if the link/UART query fails, e.g. no board
     connected on this host, rather than treating "could not check" as
-    "confirmed absent" -- an operator running preflight for a board
-    reachable only over Wi-Fi HTTP without a live serial link should not be
-    refused over a check this preflight cannot perform.
+    "confirmed absent". Since mcpfx2 that None is NOT a pass: the caller
+    records the reason as an undetermined read and the run is refused unless
+    allow_undetermined=True, so a Wi-Fi-only host with no serial link is
+    refused on task liveness ("stack-margin read failed").
 
     If `reason_out` (a list) is given, the reason a None return was "could not
     read" is appended to it, so the caller can refuse on it (a read failure is

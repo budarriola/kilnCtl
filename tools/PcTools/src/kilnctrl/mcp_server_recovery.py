@@ -562,9 +562,14 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
       upload reply lost (timeout/reset)        -> keeps polling so the relay
                          is not abandoned, then UNKNOWN (or FAILED if the
                          relay is idle, i.e. it never started)
+    `wait_s` is clamped to 240 s and measured from the start of the call (the
+    MCP client aborts a call after 300 s of silence). The relay aborts the
+    upload if nobody polls for 90 s, so after an UNKNOWN call recovery_status
+    within 90 s.
     "done" with bytes_sent short of the image is re-read up to DONE_REREADS
     times first (publish_done() updates the two fields non-atomically).
     """
+    t_start = _monotonic()
     if confirm is not True:
         return _refuse_unconfirmed("recovery_pico_upload (reflashes the safety processor)")
     if slot not in (None, "A", "B"):
@@ -612,7 +617,9 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
     # running: clamp the poll under that, and report UNKNOWN (never ok) if the
     # relay is still going; read recovery_status / the pico status to continue.
     wait_s = min(max(0.0, float(wait_s)), 240.0)
-    deadline = _monotonic() + wait_s
+    # Measured from the START of the call (preflight GETs and a lost 60 s POST count), so the whole
+    # call, lost polls included, stays under the client's 300 s abort.
+    deadline = t_start + wait_s
     while True:
         _sleep(1.0)
         try:
@@ -622,7 +629,10 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
             lost += 1
             if lost >= 5:
                 return (f"UNKNOWN: lost contact with the board while the relay was running ({exc}); "
-                        f"last status: {_fmt_pico(last) or 'none'} -- NOT success, re-check by hand")
+                        f"last status: {_fmt_pico(last) or 'none'} -- NOT success, re-check by hand; call recovery_status within 90 s")
+            if _monotonic() >= deadline:
+                return (f"UNKNOWN: relay status unreadable at the {wait_s:g}s limit ({exc}) -- NOT success; "
+                        f"call recovery_status within 90 s or the relay aborts the upload")
             continue
         phase = last.get("phase")
         if phase == "idle" and last.get("busy") is False:
@@ -637,7 +647,7 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
             break
         if _monotonic() >= deadline:
             return (f"UNKNOWN: relay still running after {wait_s:g}s ({_fmt_pico(last)}) -- NOT success; "
-                    f"poll recovery_status")
+                    f"call recovery_status within 90 s or the relay aborts the upload (no poller for 90 s)")
     prefix = f"crc32={crc:08x} slot={slot or 'auto'} (host={resolved})"
     if lost_reply:
         return (f"UNKNOWN: the upload reply was lost ({lost_reply}); the relay then reported phase={phase!r}, "

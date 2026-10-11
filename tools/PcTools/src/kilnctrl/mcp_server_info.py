@@ -1051,10 +1051,41 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     return "\n".join(lines)
 
 
+def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
+    """First field where `got` differs from `want` (None if equal). Every key in `want` is compared (a key the
+    board's re-export lacks is a difference); floats compare within the firmware's %.9g print rounding."""
+    if isinstance(want, dict):
+        if not isinstance(got, dict):
+            return f"{path}: expected an object, board has {type(got).__name__}"
+        for k, v in want.items():
+            if k not in got:
+                return f"{path}.{k}: in the backup but absent from the re-export"
+            d = _first_content_diff(v, got[k], f"{path}.{k}")
+            if d:
+                return d
+        return None
+    if isinstance(want, list):
+        if not isinstance(got, list) or len(got) != len(want):
+            return f"{path}: backup has {len(want)} entries, board has {len(got) if isinstance(got, list) else got!r}"
+        for i, (a, b) in enumerate(zip(want, got)):
+            d = _first_content_diff(a, b, f"{path}[{i}]")
+            if d:
+                return d
+        return None
+    if isinstance(want, float) or isinstance(got, float):
+        if (isinstance(want, (int, float)) and isinstance(got, (int, float)) and not isinstance(want, bool)
+                and abs(want - got) <= 1e-6 + 1e-5 * abs(want)):
+            return None
+        return f"{path}: backup {want!r}, board {got!r}"
+    if want != got:
+        return f"{path}: backup {want!r}, board {got!r}"
+    return None
+
+
 def _backup_import_readback_problem(host: str, body_text: str, after_readiness: str) -> Optional[str]:
     """None when the post-import read-back agrees with the backup, else why not.
     Checks: readiness readable, and a fresh GET /api/backup/export holds at least
-    the backup's profiles and exactly its zones count (spot check, not a diff)."""
+    the backup's profiles and exactly its zones count (count, then per-profile-id / per-zone-index content)."""
     from . import backup_export_http_client
 
     if "could not read GET /api/readiness" in after_readiness:
@@ -1079,6 +1110,18 @@ def _backup_import_readback_problem(host: str, body_text: str, after_readiness: 
             return f"re-export has no {key} list"
         if (len(g) != len(w)) if exact else (len(g) < len(w)):
             return f"{key}: backup has {len(w)} entries, board now has {len(g)}"
+        ident = "index" if key == "zones" else "id"
+        by_id = {e.get(ident): e for e in g if isinstance(e, dict)}
+        for i, entry in enumerate(w):
+            if not isinstance(entry, dict):
+                continue
+            eid = entry.get(ident, i)
+            other = by_id.get(eid) if ident in entry else (g[i] if i < len(g) else None)
+            if other is None:
+                return f"{key}[{ident}={eid}]: in the backup but missing from the board's re-export"
+            diff = _first_content_diff(entry, other, f"{key}[{ident}={eid}]")
+            if diff:
+                return diff
     return None
 
 

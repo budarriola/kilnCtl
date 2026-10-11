@@ -291,7 +291,7 @@ def thermo_write_reg(channel: int, reg: int, value: int, confirm: bool = False) 
             return (f"FAILED - channel {channel} reg 0x{reg:02X}: write acknowledged but the read-back "
                     "returned no value; state UNVERIFIED")
         if got[0] != value:
-            return (f"warning - channel {channel} reg 0x{reg:02X} written but read back "
+            return (f"FAILED - channel {channel} reg 0x{reg:02X} written but read back "
                     f"0x{got[0]:02X}, wanted 0x{value:02X}")
         return f"ok - channel {channel} reg 0x{reg:02X} written"
     detail = f": {result.reason}" if result.reason else ""

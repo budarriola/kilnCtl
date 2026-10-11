@@ -29,6 +29,8 @@ echo was found.
 
 ### H1. `wifi_set_ap_identity` reports FAILED after every real AP password change
 
+**Status: FIXED (mcpfx4): presence-only compare, marker fake, mismatch test.**
+
 - Where: `tools/PcTools/src/kilnctrl/mcp_server_wifi.py:304`
   (`if ap_password is not None and got_pw != ap_password`).
 - Firmware: `firmware/KilnFW/App/drivers/bridge/uart_bridge_ext_wifi.c:57-59`.
@@ -56,6 +58,8 @@ echo was found.
 
 ### M1. Env password fallback overrides "leave unset to keep unchanged"
 
+**Status: FIXED (mcpfx4): explicit password_from_env / ap_password_from_env flags; env never implicit.**
+
 - Where: `mcp_server_wifi.py:290-291` (`if ap_password is None: ap_password =
   os.environ.get(WIFI_AP_PASSWORD_ENV) or None`) and `:223-224` (same for
   `wifi_add_network` with `KILNCTL_WIFI_PASSWORD`).
@@ -78,6 +82,8 @@ echo was found.
 
 ### M2. backup_import read-back passes when the import wrote nothing
 
+**Status: FIXED (mcpfx4): per profile id and zone index content comparison with float tolerance.**
+
 - Where: `mcp_server_info.py:1051-1080` (`_backup_import_readback_problem`).
 - What it checks: readiness readable; re-export `zones` count equal; re-export
   `profiles` count at least the backup's.
@@ -98,6 +104,8 @@ echo was found.
   migrated values), list those fields explicitly in the comparator.
 
 ### M3. Wi-Fi and debug_reset tests query the real bench board (and the xdist flake)
+
+**Status: FIXED (mcpfx4): autouse conftest `_idle_shared_link_stub` (idle executor/autotune, raising link send).**
 
 - Where: `tests/test_wifi_write_gates.py:58-62` patches `_srv._wifi` and
   `_srv._profiles` only. `_wifi_write_refusal` (`mcp_server_wifi.py:84-90`)
@@ -133,6 +141,8 @@ echo was found.
 
 ### L1. Undetermined preflight reads now hard-refuse in callers with no override
 
+**Status: FIXED (mcpfx4): docstring and refusal text (401 case) updated; no-override paths documented in MCP_SERVERS.md.**
+
 - Where: `capability_preflight.py:301-330` (`undetermined_reads`, `ok`).
   Callers that cannot pass `allow_undetermined`: `bench_test/runner.py:339`,
   `bench_test/cases_heat.py:114`, `bench_test/cases_ota.py:176`,
@@ -159,6 +169,8 @@ echo was found.
 
 ### L2. recovery_pico_upload can exceed the 300 s client abort; UNKNOWN text omits the 90 s window
 
+**Status: FIXED (mcpfx4): deadline from call start, checked on lost polls; 90 s text.**
+
 - Where: `mcp_server_recovery.py:541,614,623-626,638-640`.
 - Scenario: the POST reply is lost after its 60 s timeout
   (`recovery_post_client.py:145`). Preflight GETs take up to 6 s each
@@ -178,6 +190,8 @@ echo was found.
 
 ### L3. update_stage_release docstring omits its 200 s clamp
 
+**Status: FIXED (mcpfx4): clamp in docstring and UNKNOWN text.**
+
 - Where: `mcp_server_update.py:314,323,385`.
 - The clamp is correct: the worst case is about 16 + 30 + 200 + 16 s, under
   300 s. But the docstring says "polls up to wait_s", and a caller passing
@@ -186,6 +200,8 @@ echo was found.
 
 ### L4. Thermo register write mismatch is still "warning -"
 
+**Status: FIXED (mcpfx4): mismatch returns FAILED.**
+
 - Where: `mcp_server_thermo.py:294`. An exception or empty read-back is now
   FAILED, but a value that reads back different from what was written still
   returns `warning - ...`, which a caller matching on `FAILED`/`ok` treats as
@@ -193,6 +209,8 @@ echo was found.
 - Fix: return `FAILED -` on mismatch, the same as the other read-back tools.
 
 ### L5. profile_save_bench_aux_rule compares derived fields of other profiles
+
+**Status: FIXED (mcpfx4): only stored fields compared.**
 
 - Where: `mcp_server_aux.py:~586-670` (`if after_full != before_full`, :667).
 - `/api/profile?id=` detail includes `feasibility`, `exceeds_ceiling`,

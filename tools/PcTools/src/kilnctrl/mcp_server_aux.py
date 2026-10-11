@@ -544,6 +544,19 @@ def _rule_matches(rule: dict, want: dict) -> "list[str]":
     return bad
 
 
+def _stored_profile_fields(detail: object) -> object:
+    """The STORED fields of a GET /api/profile?id= detail (name, zone_mask, segments, on/off rules). The
+    derived fields (feasibility, exceeds_ceiling, ceiling_note, per-segment feasibility) depend on the zone limits,
+    so a concurrent limit change must not read as another profile having changed (mcpfx2 L5)."""
+    if not isinstance(detail, dict):
+        return detail
+    segs = detail.get("segments")
+    if isinstance(segs, list):
+        segs = [{k: v for k, v in sg.items() if k != "feasibility"} if isinstance(sg, dict) else sg for sg in segs]
+    return {"name": detail.get("name"), "zone_mask": detail.get("zone_mask"), "segments": segs,
+            "on_off_rules": detail.get("on_off_rules")}
+
+
 @_core._tool()
 def profile_save_bench_aux_rule(
     target_c: float,
@@ -695,7 +708,7 @@ def profile_save_bench_aux_rule(
         except ahc.AuxHttpError as exc:
             bad.append(f"other profile {oid} could not be re-read ({exc})")
             continue
-        if after_full != before_full:
+        if _stored_profile_fields(after_full) != _stored_profile_fields(before_full):
             bad.append(f"other profile {oid} ('{others_before[oid].get('name')}') content changed")
     if set(after_user) - set(others_before) - {pid}:
         bad.append("an unexpected extra profile appeared")

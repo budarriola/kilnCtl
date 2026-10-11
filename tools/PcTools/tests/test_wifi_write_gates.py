@@ -53,7 +53,7 @@ class _Fake:
     ap_pw = "oldpassword"
 
     def get_status(self):
-        return types.SimpleNamespace(mode_name=self.mode, ap_ssid=self.ap_ssid, ap_password=self.ap_pw)
+        return types.SimpleNamespace(mode_name=self.mode, ap_ssid=self.ap_ssid, ap_password="[set]" if self.ap_pw else "")
 
 
 class WifiGateTests(unittest.TestCase):
@@ -165,13 +165,40 @@ class WifiGateTests(unittest.TestCase):
         f = _Fake()
         f.add_network = lambda s, p: (seen.append(p), f.nets.append(s), _res(True))[2]
         with self._srv(f), um.patch.dict(os.environ, {"KILNCTL_WIFI_PASSWORD": "envpw123"}):
-            out = w.wifi_add_network("a", confirm=True)
+            out = w.wifi_add_network("a", confirm=True, password_from_env=True)
         self.assertEqual(seen, ["envpw123"])
         self.assertNotIn("envpw123", out)
         f2 = _Fake()
         with self._srv(f2), um.patch.dict(os.environ, {"KILNCTL_WIFI_AP_PASSWORD": "apenv1234"}):
-            self.assertTrue(w.wifi_set_ap_identity(confirm=True).startswith("ok"))
+            self.assertTrue(w.wifi_set_ap_identity(confirm=True, ap_password_from_env=True).startswith("ok"))
         self.assertEqual(f2.ap_pw, "apenv1234")
+
+    def test_env_never_implicit(self):
+        f = _Fake()
+        env = {"KILNCTL_WIFI_AP_PASSWORD": "apenv1234", "KILNCTL_WIFI_PASSWORD": "envpw123"}
+        with self._srv(f), um.patch.dict(os.environ, env):
+            self.assertTrue(w.wifi_set_ap_identity("kiln2", confirm=True).startswith("ok"))
+            self.assertEqual(f.ap_pw, "oldpassword")
+            seen = []
+            f.add_network = lambda s, p: (seen.append(p), f.nets.append(s), _res(True))[2]
+            w.wifi_add_network("open", confirm=True)
+        self.assertEqual(seen, [""])
+
+    def test_env_flag_unset_or_both_refused(self):
+        f = _Fake()
+        with self._srv(f), um.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("unset", w.wifi_set_ap_identity(confirm=True, ap_password_from_env=True))
+            self.assertIn("unset", w.wifi_add_network("a", confirm=True, password_from_env=True))
+            self.assertIn("not both", w.wifi_add_network("a", "p", confirm=True, password_from_env=True))
+        self.assertEqual(f.calls, [])
+
+    def test_ap_password_marker_mismatch_fails(self):
+        f = _Fake()
+        f.set_ap_identity = lambda s, p: _res(True)  # ok but marker stays set / empty
+        f.ap_pw = ""
+        with self._srv(f):
+            out = w.wifi_set_ap_identity(None, "newpass123", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
 
     def test_status_explicit_host_untrusted(self):
         st = types.SimpleNamespace(ap_password="", mode_name="home", state_name="x", sta_connected=False,

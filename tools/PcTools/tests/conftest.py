@@ -217,3 +217,35 @@ def _flash_firmware_idle_board(request, monkeypatch):
         from kilnctrl import mcp_server_flash as mf
         monkeypatch.setattr(mf, "_recovery_board_state_refusals",
                             lambda host, allow_link_down=False: ([], [], []))
+
+
+@pytest.fixture(autouse=True)
+def _idle_shared_link_stub(monkeypatch):
+    """Keep unit tests off the real bench board (review mcpfx2 M3).
+
+    ``mcp_server`` builds its clients on the shared link hub, so with the
+    kilnctrl MCP server running a test that reaches the executor/autotune
+    gates sends real queries to the bench ESP (and flakes under xdist). By
+    default every executor/autotune/pico-armed read answers "idle" from a fake
+    and any raw ``_link.send`` raises. A test needing another state patches
+    the client itself (``um.patch.multiple(_srv, _profiles=..., ...)``); that
+    runs after this fixture and takes precedence.
+    """
+    try:
+        from types import SimpleNamespace
+        from kilnctrl import mcp_server as srv
+    except Exception:
+        return
+
+    def _boom(*_a, **_k):
+        raise OSError("tests must not touch the real link (conftest _idle_shared_link_stub)")
+
+    idle_exec = SimpleNamespace(state=0, state_name="IDLE")
+    idle_at = SimpleNamespace(state=0, state_name="IDLE")
+    for obj, name, fn in (
+        (getattr(srv, "_profiles", None), "get_exec_status", lambda *a, **k: idle_exec),
+        (getattr(srv, "_autotune", None), "get_status", lambda *a, **k: idle_at),
+        (getattr(srv, "_link", None), "send", _boom),
+    ):
+        if obj is not None:
+            monkeypatch.setattr(obj, name, fn, raising=False)

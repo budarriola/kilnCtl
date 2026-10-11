@@ -234,13 +234,13 @@ class UiRunScriptPresetErrorTests(unittest.TestCase):
 
 
 class Low10MiscTests(unittest.TestCase):
-    def test_thermo_write_reg_readback_mismatch_warns(self):
+    def test_thermo_write_reg_readback_mismatch_fails(self):
         back = um.Mock(values=[0x55])
         with um.patch(RUN_GATE, return_value=None), \
              um.patch.object(mcp_server._thermo, "write_reg", return_value=um.Mock(ok=True, reason="")), \
              um.patch.object(mcp_server._thermo, "read_reg", return_value=back):
             out = mcp_server.thermo_write_reg(0, 1, 0xAA, confirm=True)
-        self.assertTrue(out.startswith("warning"), out)
+        self.assertTrue(out.startswith("FAILED"), out)
         self.assertIn("0x55", out)
 
     def test_thermo_write_reg_readback_match_ok(self):

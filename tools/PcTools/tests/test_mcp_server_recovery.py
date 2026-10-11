@@ -469,6 +469,15 @@ class PicoUploadTest(_Base):
         self.assertLessEqual(clock[0], 300.0)
         self.assertIn("240", out)
 
+    def test_lost_polls_cannot_outlast_deadline(self):
+        # Lost status polls used to `continue` before the deadline check; with a
+        # deadline measured from the call start they end UNKNOWN at wait_s.
+        board = FakeBoard(pico=[_pico(), _unreachable()], post_reply=self.started)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=3)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("3s limit", out)
+        self.assertIn("within 90 s", out)
+
     def test_outcome_unknown_is_never_success(self):
         board = self._board(_pico(phase="outcome_unknown", busy=False, bytes_sent=len(self.IMAGE),
                                    total_bytes=len(self.IMAGE),

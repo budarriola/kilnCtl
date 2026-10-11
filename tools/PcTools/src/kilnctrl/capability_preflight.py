@@ -457,7 +457,8 @@ class PreflightReport:
         elif self.undetermined_reads and not self.allow_undetermined:
             lines.append(
                 "  RESULT: safety state could not be determined -- do not start this run. "
-                "Fix the read (admin login, board health) or pass allow_undetermined=True once reviewed."
+                "Fix the read (a 401 means no admin session: set KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD and log in; "
+                "otherwise board health) or pass allow_undetermined=True once reviewed."
             )
         elif task_liveness_blocks:
             lines.append(

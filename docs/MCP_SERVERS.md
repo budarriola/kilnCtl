@@ -1029,8 +1029,13 @@ after-change stall has not been measured on the bench.
 ## Wi-Fi secrets and fail-closed reads (2026-10-10)
 
 `wifi_add_network` and `wifi_set_ap_identity` read the password from
-`KILNCTL_WIFI_PASSWORD` / `KILNCTL_WIFI_AP_PASSWORD` when the argument is
-omitted (preferred; the argument still works). `wifi_set_ap_identity` needs
+`KILNCTL_WIFI_PASSWORD` / `KILNCTL_WIFI_AP_PASSWORD` ONLY when called with
+`password_from_env=True` / `ap_password_from_env=True` (refused when the variable
+is unset, or when the plain argument is also given); the environment is never
+consulted implicitly, so an SSID-only AP rename leaves the AP password unchanged
+and an open network is saved without a password. The AP password is verified by
+presence only (the firmware reports a "[set]"/"" marker, never the value).
+`wifi_set_ap_identity` needs
 `confirm=True`, refuses mid-run and verifies by read-back. `capability_preflight`
 treats an unreadable crash report, readiness or task-liveness as "could not
-determine" and refuses unless `allow_undetermined=True`.
+determine" and refuses unless `allow_undetermined=True` (a 401 means no admin session; a Wi-Fi-only host with no serial link is refused on task liveness; `bench_test_run` and `run_queue` have no override).

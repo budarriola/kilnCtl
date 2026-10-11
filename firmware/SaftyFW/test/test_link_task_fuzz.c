@@ -200,7 +200,8 @@ static uint8_t g_reboot_code;
 bool update_task_reboot_allowed(const char **why, uint8_t *code) { *why = "fake"; *code = g_reboot_code; return g_reboot_allowed; }
 void update_task_reboot_now(void) { g_reboots++; }
 static uint8_t g_rb_code;
-bool update_task_request_rollback(const char **why, uint8_t *code) { *why = "fake"; *code = g_rb_code; return false; }
+static bool g_rb_accept;
+bool update_task_request_rollback(const char **why, uint8_t *code) { *why = "fake"; *code = g_rb_code; return g_rb_accept; }
 
 // --- harness ---------------------------------------------------------------------
 
@@ -1199,6 +1200,7 @@ static void scenario_set_ct_cal(void)
     CHECK(!g_cw_rec.ct_cal[0].calibrated, "other channel must stay uncalibrated");
     CHECK(link_staging_count(&s_staging) == 0u, "accepted SET_CT_CAL must drop the superseded staged gain, count=%u",
           (unsigned)link_staging_count(&s_staging));
+    g_cw_ret = false; // LOW-5: do not leak the accepting fake into later scenarios (scenario_fuzz)
 }
 
 static void send_ceiling(float v)
@@ -1276,6 +1278,7 @@ static bool last_tx_result(uint8_t cmd, uint8_t *accepted, uint8_t *reason)
 static void scenario_reboot_rollback(void)
 {
     uint8_t acc = 0xEE, rsn = 0xEE;
+    const uint16_t saved_announce_version = s_peer_announce.version; // LOW-7: restore, do not force 0
 
     // REBOOT refused (e.g. armed): reply says refused + reason, chip is NOT reset.
     commit_reset();
@@ -1318,7 +1321,14 @@ static void scenario_reboot_rollback(void)
     send_cmd1(KILNLINK_ROLLBACK_CMD);
     CHECK(g_sends == 1 && last_tx_result(KILNLINK_ROLLBACK_RESULT_CMD, &acc, &rsn), "supported peer must get result");
     CHECK(acc == 0 && rsn == KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID, "rollback reply acc=%u rsn=%u", acc, rsn);
-    s_peer_announce.version = 0;
+
+    // LOW-7: accepted path sends NO result frame (the real call would not return; the fake does).
+    g_rb_accept = true;
+    g_sends = 0;
+    send_cmd1(KILNLINK_ROLLBACK_CMD);
+    CHECK(g_sends == 0, "accepted ROLLBACK must not send a refusal result, sent %d", g_sends);
+    g_rb_accept = false;
+    s_peer_announce.version = saved_announce_version;
 }
 
 int main(void)

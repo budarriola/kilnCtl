@@ -186,7 +186,8 @@ def wifi_scan() -> str:
 
 @_core._tool()
 def wifi_add_network(
-    ssid: Optional[str] = None, password: Optional[str] = None, confirm: bool = False, allow_running: bool = False
+    ssid: Optional[str] = None, password: Optional[str] = None, confirm: bool = False, allow_running: bool = False,
+    password_from_env: bool = False,
 ) -> str:
     """Save a network and immediately attempt to join it -- this is the
     one-step way to connect the board to a specific scanned network; no
@@ -207,10 +208,11 @@ def wifi_add_network(
     Requires confirm=True (exactly) and refuses while a profile is running or
     paused (allow_running=True overrides): joining can drop the link. After a
     success the saved list is read back; an unreadable read-back is FAILED, not
-    ok. Passwords are never echoed. PREFERRED: leave `password` unset and put
-    it in the KILNCTL_WIFI_PASSWORD environment variable (a `password`
-    argument still works for compatibility but travels in the MCP client
-    transcript; the argument wins when both are given).
+    ok. Passwords are never echoed. PREFERRED: pass password_from_env=True
+    to take it from the KILNCTL_WIFI_PASSWORD environment variable (refused if
+    unset; a `password` argument still works but travels in the MCP client
+    transcript; giving both is an error). With neither, an open network is
+    saved -- the environment is never consulted implicitly.
     """
     refusal = _wifi_write_refusal(confirm, "wifi_add_network", allow_running)
     if refusal is not None:
@@ -220,8 +222,12 @@ def wifi_add_network(
         if saved is None:
             return "error: no ssid given and no saved credentials found (set Wi-Fi up once via the GUI first)"
         ssid, password = saved["ssid"], saved["password"]
-    if password is None:
+    if password_from_env:
+        if password is not None:
+            return "error: give either password or password_from_env=True, not both"
         password = os.environ.get(WIFI_PASSWORD_ENV) or None
+        if password is None:
+            return f"error: password_from_env=True but {WIFI_PASSWORD_ENV} is unset or empty"
     try:
         result = _srv._wifi.add_network(ssid, password or "")
     except WifiUartQueryError as exc:
@@ -270,25 +276,31 @@ def wifi_set_mode(mode: str, confirm: bool = False, allow_running: bool = False)
 @_core._tool()
 def wifi_set_ap_identity(
     ap_ssid: Optional[str] = None, ap_password: Optional[str] = None, confirm: bool = False,
-    allow_running: bool = False,
+    allow_running: bool = False, ap_password_from_env: bool = False,
 ) -> str:
     """Rename the board's own provisioning AP and/or change its password.
     Leave either argument unset (None) to keep it unchanged.
 
     Requires confirm=True (exactly) and refuses while a profile or autotune is
     running/unreadable (allow_running=True overrides). The new identity is read
-    back over the link (SSID compared; password compared without being
-    printed); a mismatch or unreadable read-back is FAILED. The AP password is
-    never echoed. PREFERRED: leave `ap_password` unset and put it in the
-    KILNCTL_WIFI_AP_PASSWORD environment variable (the argument still works
-    for compatibility but travels in the MCP client transcript; the argument
-    wins when both are given).
+    back over the link (SSID compared; the firmware only reports a
+    "[set]"/"" marker for the password, so only its presence is verified, never
+    the value); a mismatch or unreadable read-back is FAILED. The AP password is
+    never echoed. PREFERRED: pass ap_password_from_env=True to take it from the
+    KILNCTL_WIFI_AP_PASSWORD environment variable (refused if unset; the
+    ap_password argument still works but travels in the MCP client
+    transcript; giving both is an error). With neither, the password is left
+    unchanged -- the environment is never consulted implicitly.
     """
     refusal = _wifi_write_refusal(confirm, "wifi_set_ap_identity", allow_running)
     if refusal is not None:
         return refusal
-    if ap_password is None:
+    if ap_password_from_env:
+        if ap_password is not None:
+            return "error: give either ap_password or ap_password_from_env=True, not both"
         ap_password = os.environ.get(WIFI_AP_PASSWORD_ENV) or None
+        if ap_password is None:
+            return f"error: ap_password_from_env=True but {WIFI_AP_PASSWORD_ENV} is unset or empty"
     try:
         result = _srv._wifi.set_ap_identity(ap_ssid, ap_password)
     except WifiUartQueryError as exc:
@@ -301,9 +313,11 @@ def wifi_set_ap_identity(
             return "FAILED - board reported ok but the AP identity could not be read back; state UNVERIFIED"
         if ap_ssid is not None and got_ssid != ap_ssid:
             return f"FAILED - board reported ok but AP SSID reads back as {got_ssid!r}, wanted {ap_ssid!r}"
-        if ap_password is not None and got_pw != ap_password:
-            return "FAILED - board reported ok but the AP password does not read back as the requested value"
-        return "ok - AP identity updated (read back)"
+        if ap_password is not None and bool(got_pw) != bool(ap_password):
+            return ("FAILED - board reported ok but the AP password presence marker reads "
+                    f"{'set' if got_pw else 'empty'}, wanted {'set' if ap_password else 'empty'}")
+        pw_note = "; password presence verified, value cannot be read back" if ap_password is not None else ""
+        return f"ok - AP identity updated (read back{pw_note})"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not update AP identity{detail}"
 

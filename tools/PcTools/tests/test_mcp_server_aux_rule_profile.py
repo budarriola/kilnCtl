@@ -195,5 +195,24 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         self.assertTrue(r.startswith("refused"), r)
 
 
+class StoredFieldsTest(unittest.TestCase):
+    """mcpfx2 L5: derived feasibility fields never count as another profile changing."""
+
+    BASE = {"name": "p", "zone_mask": 1, "segments": [{"target_c": 100.0, "feasibility": "ok"}],
+            "on_off_rules": [], "feasibility": "ok", "exceeds_ceiling": False, "ceiling_note": ""}
+
+    def test_derived_fields_ignored(self):
+        other = copy.deepcopy(self.BASE)
+        other["feasibility"] = "infeasible"
+        other["exceeds_ceiling"] = True
+        other["segments"][0]["feasibility"] = "bad"
+        self.assertEqual(ma._stored_profile_fields(self.BASE), ma._stored_profile_fields(other))
+
+    def test_stored_fields_still_compared(self):
+        other = copy.deepcopy(self.BASE)
+        other["segments"][0]["target_c"] = 200.0
+        self.assertNotEqual(ma._stored_profile_fields(self.BASE), ma._stored_profile_fields(other))
+
+
 if __name__ == "__main__":
     unittest.main()
