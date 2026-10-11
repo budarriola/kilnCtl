@@ -100,7 +100,7 @@ typedef struct {
      * per-claim (cleared by the last release); these two are per-reboot-seq. verdict_pending: a reboot
      * was seen and no DIAG of the new boot has arrived yet, claim or not. fatal_latched: that DIAG
      * arrived while nobody held a claim and reported a fatal cause; the next acquire starts in
-     * reboot_hold. Cleared only by a decisive DIAG, a newer reboot, or init. */
+     * reboot_hold. Cleared only when an acquire consumes it, or by init (never by a newer reboot). */
     bool              reboot_verdict_pending;
     bool              reboot_fatal_latched;
     bool              warned_pending; /* throttles the reconcile-retry warning */
@@ -762,7 +762,9 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         s_he.reboot_was_tripped = (s_he.reboot_verdict_pending && s_he.reboot_was_tripped) ||
                                   s_he.last_pico_tripped;
         s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
-        s_he.reboot_fatal_latched = false;   /* a newer boot supersedes an older verdict */
+        /* Firing audit 2 MED-1: an unconsumed fatal_latched is NOT downgraded by a newer reboot (a
+         * double count of one reboot, or a fatal reboot followed by a benign one, must not erase it);
+         * only an acquire consumes it (heat_enable_acquire) or init clears it. */
         s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         if (s_he.held_mask != 0u) {
             s_he.reboot_classify_pending = true;
@@ -777,7 +779,8 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                                     SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
                                     SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
             s_he.reboot_verdict_pending = false;
-            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped;
+            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
+                                          s_he.reboot_fatal_latched;
             s_he.reboot_was_tripped = false;
         }
     } else if (s_he.reboot_classify_pending) {

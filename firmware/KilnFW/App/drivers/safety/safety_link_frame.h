@@ -39,15 +39,17 @@ void safety_put_u32_le(uint8_t *out, uint32_t value);
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                       uint16_t peer_protocol, uint16_t peer_min_compatible);
 
-/* kilnlink audit 2026-10-09 M1: true when the Pico's DIAG uptime_ms stepped
- * BACKWARDS from prev_ms to now_ms, i.e. the Pico rebooted. The 8-bit
- * FW_VERSION boot_id alone collides 1 time in 256, so the ESP uses this as a
- * second, independent reboot signal. The one exception is the 32-bit
- * millisecond wrap (~49.7 days): prev within SAFETY_PICO_UPTIME_WRAP_BAND_MS
- * of UINT32_MAX and now within the same band of 0 reads as a wrap, not a
- * reboot. Equal values are not a regression (a duplicated frame). Pure. */
-#define SAFETY_PICO_UPTIME_WRAP_BAND_MS 120000u
-bool safety_pico_uptime_regressed(uint32_t prev_ms, uint32_t now_ms);
+/* kilnlink audit 2026-10-09 M1 / firing audit 2 LOW-1,2: true when the Pico's DIAG uptime_ms is BEHIND
+ * where the previous DIAG says it should be, i.e. the Pico rebooted. The 8-bit FW_VERSION boot_id alone
+ * collides 1 time in 256, so the ESP uses this as a second, independent reboot signal.
+ * expected = baseline_ms + esp_elapsed_ms (the ESP's own clock since the baseline DIAG); the signed
+ * modular difference now - expected must not be below -(2 s + 200 ppm of the elapsed time). A Pico that
+ * kept running is on schedule however long the outage was, so a reboot is caught whenever the old boot
+ * was older than the tolerance, and the 49.7-day wrap needs no special band. Fail-safe direction: an
+ * elapsed time too large for a meaningful modular difference (>= 2^31 ms) counts as a reboot. Pure. */
+#define SAFETY_PICO_UPTIME_TOL_BASE_MS 2000u
+#define SAFETY_PICO_UPTIME_TOL_PPM_DIV 5000u /* elapsed / 5000 = 200 ppm */
+bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elapsed_ms, uint32_t now_ms);
 
 /* Parses as much of a Pico FW_VERSION (0x0B) frame as is present, per
  * LINK_PROTOCOL.md sec 4's "read bytes 1-4 first" floor rule: protocol/

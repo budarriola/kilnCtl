@@ -1216,12 +1216,22 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     TEST_SECTION("safety_apply_diag -- a DIAG uptime_ms regression is a Pico reboot even when "
                  "the 8-bit boot_id repeats (kilnlink audit 2026-10-09 M1)");
 
-    TEST_CHECK(safety_pico_uptime_regressed(5000u, 4000u), "backwards step regresses");
-    TEST_CHECK(!safety_pico_uptime_regressed(5000u, 5000u), "equal (duplicate frame) does not");
-    TEST_CHECK(!safety_pico_uptime_regressed(5000u, 6000u), "forward step does not");
-    TEST_CHECK(!safety_pico_uptime_regressed(UINT32_MAX - 1000u, 500u), "32-bit wrap does not");
-    TEST_CHECK(safety_pico_uptime_regressed(UINT32_MAX - 1000u, 300000u),
-               "a far jump back from near the wrap point is still a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(600000u, 0u, 1500u), "backwards step regresses");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 5000u), "equal (duplicate frame) does not");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 6000u), "forward step does not");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 4000u), "small step back inside the 2 s tolerance does not");
+    TEST_CHECK(safety_pico_uptime_behind_expected(5000u, 0u, 2999u), "step back past the tolerance is a reboot");
+    // LOW-1: a long outage on a Pico that kept running is on schedule; a repeat-id reboot whose new uptime
+    // already passed the OLD baseline is still behind the EXPECTED uptime.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 300000u, 900100u), "kept running over a long outage: not a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(20000u, 300000u, 310000u),
+               "LOW-1: new uptime (310 s) passed the old baseline (20 s) but is behind baseline+elapsed (320 s)");
+    // LOW-2: the 49.7-day wrap, with the outage straddling it by more than the old 120 s band.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 300000u - 1u),
+               "LOW-2: outage spanning the wrap (-600 s .. +300 s) is not a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 1500u),
+               "a reboot across the wrap is still caught");
+    TEST_CHECK(safety_pico_uptime_behind_expected(1000u, 0x80000000u, 1000u), "elapsed >= 2^31 ms: in doubt, count a reboot");
 
     s_stub_relay_cycles_safety_edge_calls = 0;
     SafetyLinkClass link = make_link();
@@ -1261,6 +1271,10 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.reannounce_pending == false,
                "the new boot's rising uptime is not a second reboot");
 
+    // The FW_VERSION of the rebooted boot (same id 42) arrived: the uptime-noted flag is consumed.
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
     // A boot_id change clears the baseline, so the first DIAG of that boot never
     // double-counts against the previous boot's uptime.
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43,
@@ -2956,6 +2970,8 @@ static void m4_apply_diag(SafetyLinkClass *link, size_t len, uint8_t trip_seq, b
     diag.payload[4] = (uint8_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u)); /* trip_mask LE */
     diag.payload[5] = 0u;
     diag.payload[30] = trip_seq;
+    /* A real Pico's uptime advances with wall time; the expected-uptime test compares against the ESP clock. */
+    safety_put_u32_le(&diag.payload[6], 100000u + (uint32_t)s_fake_tick_count);
     diag.length = (uint16_t)len;
     TEST_CHECK(safety_apply_diag(link, &diag) == expect_ok,
                expect_ok ? "M4: DIAG frame of this length decodes"
@@ -3054,6 +3070,9 @@ static void test_diag_reannounce_is_bounded(void)
     // SAFTY-LOW-2: after the burst the re-announce continues, slowly and boundedly, while the Pico
     // still sends 30-byte DIAGs (one lost ANNOUNCE must not last until the next reboot).
     uint32_t slow_base = link.diag_reannounce_last_ms;
+    if (slow_base < (uint32_t)s_fake_tick_count) {
+        slow_base = (uint32_t)s_fake_tick_count; // the ESP clock never runs backwards (uptime baseline)
+    }
     owed = 0;
     for (unsigned i = 1; i <= 40u; i++) {
         s_fake_tick_count = slow_base + i * 2100u; // 84 s of 30-byte DIAGs
@@ -3152,6 +3171,89 @@ static void diag_with_reason(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t 
     msg.payload[10] = reason;
     msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
+static void fw_version_with_boot_id(SafetyLinkClass *link, uint8_t boot_id)
+{
+    uart_proto_message_t fw;
+    memset(&fw, 0, sizeof(fw));
+    fw.length = set_fw_version_frame(fw.payload, false, NULL, 0, NULL, 0, boot_id, 0, 0);
+    safety_apply_fw_version(link, &fw);
+}
+
+static void test_reboot_counted_once_diag_before_fw_version(void)
+{
+    TEST_SECTION("firing audit 2 MED-1 (P1) -- a reboot across a link-down whose FW_VERSION burst was "
+                 "lost: the new boot's DIAG lands first, the FW_VERSION second; ONE reboot, ONE seq bump");
+    SafetyLinkClass link = make_link();
+    link.ever_received = true;
+    link.cached_tick = 0;
+    fw_version_with_boot_id(&link, 42u);
+    apply_diag_uptime(&link, 600000u);
+    uint32_t s0 = link.cached.pico_reboot_seq;
+    link.cached_tick = 1; /* link down */
+    safety_reset_stale_peer_info_if_link_down(&link);
+    apply_diag_uptime(&link, 1500u); /* new boot, DIAG first */
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u && link.reboot_noted_by_uptime, "DIAG path counted the reboot");
+    fw_version_with_boot_id(&link, 43u); /* its FW_VERSION, new boot_id */
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "MUST GO RED if the FW_VERSION counts the same reboot again");
+    TEST_CHECK(link.cached.diag_since_reboot == true, "new boot's DIAG stays valid (not re-marked old-boot)");
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "baseline kept");
+    TEST_CHECK(link.pico_boot_id == 43u && !link.reboot_noted_by_uptime, "new id recorded, flag consumed");
+    apply_diag_uptime(&link, 3500u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "no further count");
+    // A later, genuine boot_id change (flag clear) counts normally.
+    fw_version_with_boot_id(&link, 44u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "an independent boot_id change still counts");
+
+    // Normal order (FW_VERSION first, then DIAG) counts once too.
+    SafetyLinkClass n = make_link();
+    fw_version_with_boot_id(&n, 42u);
+    apply_diag_uptime(&n, 600000u);
+    uint32_t n0 = n.cached.pico_reboot_seq;
+    fw_version_with_boot_id(&n, 43u);
+    apply_diag_uptime(&n, 900u);
+    TEST_CHECK(n.cached.pico_reboot_seq == n0 + 1u, "FW_VERSION-first order counts the reboot once");
+
+    // The flag does not survive a link-down: in doubt, count.
+    SafetyLinkClass d = make_link();
+    d.ever_received = true;
+    d.cached_tick = 0;
+    fw_version_with_boot_id(&d, 42u);
+    apply_diag_uptime(&d, 600000u);
+    apply_diag_uptime(&d, 1500u);
+    TEST_CHECK(d.reboot_noted_by_uptime, "setup: flag set");
+    d.cached_tick = 1;
+    safety_reset_stale_peer_info_if_link_down(&d);
+    TEST_CHECK(!d.reboot_noted_by_uptime, "link-down clears the flag");
+}
+
+static void test_long_outage_repeat_boot_id_reboot_detected(void)
+{
+    TEST_SECTION("firing audit 2 LOW-1/LOW-2 -- DIAG uptime is compared with baseline + ESP elapsed time");
+    TickType_t saved = s_fake_tick_count;
+    // Kept running over a 300 s outage: no reboot.
+    SafetyLinkClass a = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&a, 20000u);
+    s_fake_tick_count = 301000;
+    apply_diag_uptime(&a, 320000u);
+    TEST_CHECK(a.pico_reboot_by_uptime_count == 0u, "kept running across a long outage is not a reboot");
+    // Rebooted during the outage, new uptime already past the old baseline.
+    SafetyLinkClass b = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&b, 20000u);
+    s_fake_tick_count = 301000;
+    apply_diag_uptime(&b, 310000u);
+    TEST_CHECK(b.pico_reboot_by_uptime_count == 1u, "MUST GO RED if uptime >= old baseline hides the reboot (LOW-1)");
+    // Outage spanning the 32-bit wrap by more than the old 120 s band.
+    SafetyLinkClass w = make_link();
+    s_fake_tick_count = 1000;
+    apply_diag_uptime(&w, UINT32_MAX - 600000u);
+    s_fake_tick_count = 901000;
+    apply_diag_uptime(&w, 300000u - 1u);
+    TEST_CHECK(w.pico_reboot_by_uptime_count == 0u, "wrap-spanning outage is not a reboot (LOW-2)");
+    s_fake_tick_count = saved;
 }
 
 static void test_low4_link_down_invalidates_uptime_baseline(void)
@@ -3409,6 +3511,8 @@ int main(void)
     test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
     test_diag_reannounce_is_bounded();
     test_low4_link_down_invalidates_uptime_baseline();
+    test_reboot_counted_once_diag_before_fw_version();
+    test_long_outage_repeat_boot_id_reboot_detected();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
     run_golden_payload_tests();

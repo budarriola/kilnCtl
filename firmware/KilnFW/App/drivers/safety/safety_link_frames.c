@@ -415,11 +415,19 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * cached trip DATA: a trip reported just before the reboot is
              * still the most recent thing that actually happened, and
              * blanking it would erase evidence rather than refresh it. */
-            safety_note_pico_reboot_locked(link);
-            /* The new boot's uptime baseline is not known yet; the next
-             * DIAG seeds it (kilnlink audit 2026-10-09 M1). */
-            link->pico_uptime_baseline_known = false;
+            if (link->reboot_noted_by_uptime && link->pico_uptime_baseline_known) {
+                /* Firing audit 2 MED-1: the DIAG uptime path already counted THIS reboot (the new boot's
+                 * first DIAG beat its lost FW_VERSION). A second bump would reset heat_enable's verdict
+                 * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
+                 * baseline and diag_since_reboot as the uptime path left them. */
+            } else {
+                safety_note_pico_reboot_locked(link);
+                /* The new boot's uptime baseline is not known yet; the next
+                 * DIAG seeds it (kilnlink audit 2026-10-09 M1). */
+                link->pico_uptime_baseline_known = false;
+            }
         }
+        link->reboot_noted_by_uptime = false;
     }
     /* TODO.md owner-report item 5: only overwrite the cached build/config
      * identity once a frame actually reached that far -- a truncated reply
@@ -1104,13 +1112,18 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * the 8-bit FW_VERSION boot_id (which repeats 1 boot in 256). */
     bool pico_reboot_by_uptime = false;
     uint32_t pico_uptime_prev_ms = link->pico_uptime_baseline_ms;
+    uint32_t esp_now_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
     if (link->pico_uptime_baseline_known &&
-        safety_pico_uptime_regressed(link->pico_uptime_baseline_ms, link->cached.diag_uptime_ms)) {
+        safety_pico_uptime_behind_expected(link->pico_uptime_baseline_ms,
+                                           (uint32_t)(esp_now_ms - link->pico_uptime_baseline_esp_ms),
+                                           link->cached.diag_uptime_ms)) {
         safety_note_pico_reboot_locked(link);
         link->pico_reboot_by_uptime_count++;
+        link->reboot_noted_by_uptime = true;
         pico_reboot_by_uptime = true;
     }
     link->pico_uptime_baseline_ms = link->cached.diag_uptime_ms;
+    link->pico_uptime_baseline_esp_ms = esp_now_ms;
     link->pico_uptime_baseline_known = true;
     link->cached.diag_boot_reason = p[10];
     link->cached.diag_context_age_100ms = p[11];

@@ -1642,7 +1642,14 @@ typedef struct {
      * a link-down with a repeated boot_id is caught only by this); cleared on a boot_id change,
      * since the new boot's baseline is not yet known. Under state_lock. */
     uint32_t pico_uptime_baseline_ms;
+    uint32_t pico_uptime_baseline_esp_ms; /* ESP tick (ms) when the baseline DIAG was applied */
     bool     pico_uptime_baseline_known;
+    /* Firing audit 2 MED-1: the uptime path already counted this boot's reboot (seq+1) and no FW_VERSION
+     * has accounted for it yet. A FW_VERSION boot_id change that arrives while this is set records the
+     * new id but does NOT count the same reboot a second time (a second bump would reset heat_enable's
+     * verdict inputs and erase the T3 lost-trip latch). Cleared by any FW_VERSION and on link-down
+     * (when in doubt, count). Under state_lock. */
+    bool     reboot_noted_by_uptime;
     /* Count of Pico reboots detected ONLY by the uptime regression (boot_id
      * unchanged at that point) -- evidence the second signal does work. */
     uint32_t pico_reboot_by_uptime_count;

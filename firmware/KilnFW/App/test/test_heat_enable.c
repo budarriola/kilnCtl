@@ -1197,6 +1197,39 @@ static void test_pico_reboot_after_tripped_holds(void)
     TEST_CHECK(heat_enable_reboot_hold(), "F8: release/re-acquire with the reboot unresolved keeps the trip snapshot");
 }
 
+static void test_reboot_fatal_latch_survives_newer_seq(void)
+{
+    TEST_SECTION("heat_enable -- firing audit 2 MED-1/LOW-3: an unconsumed fatal verdict is never "
+                 "downgraded by a newer reboot seq (double count of one reboot)");
+    /* verdict without a claim: fatal cause latches, benign cause does not */
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "fatal cause while claim-less latches: next acquire holds");
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(!heat_enable_reboot_hold(), "benign cause while claim-less: next acquire does not hold");
+
+    /* P2: lost trip latched, then the SAME reboot counted again (seq+2) after the executor refreshed
+     * last_pico_tripped from the new boot's GRACE DIAG: the latch must survive. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u); /* DIAG first: T3 latch */
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, 2100u);
+    heat_enable_note_pico_boot(3u, false, 0u, 2200u);                           /* FW_VERSION double count */
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 4200u); /* benign DIAG */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if a newer seq erases the unconsumed T3 lost-trip latch");
+}
+
 static void test_pico_reboot_cause_holds_or_retries(void)
 {
     TEST_SECTION("heat_enable -- MED-1: a fatal-cause Pico reboot is never silently re-requested");
@@ -1455,6 +1488,7 @@ void run_test_heat_enable(void)
     test_k4_timer_and_episode_restart();
     test_pico_reboot_cause_holds_or_retries();
     test_pico_reboot_after_tripped_holds();
+    test_reboot_fatal_latch_survives_newer_seq();
     test_enable_in_flight_under_classify_pending_queues_release();
     test_reboot_verdict_survives_release_and_resume();
     test_enable_in_flight_under_reboot_hold_queues_release();

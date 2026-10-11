@@ -314,8 +314,11 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
         /* Firing audit 2 MED-1: the DIAG uptime baseline is deliberately KEPT across a link-down. A real
          * Pico reboot almost always spans a link-down, and the 8-bit boot_id repeats 1 boot in 256, so the
          * first DIAG after relink must still be able to flag an uptime regression. A long outage in which
-         * the Pico kept running only advances uptime (no regression); the 49.7-day wrap is handled by
-         * safety_pico_uptime_regressed()'s wrap band, and any residual false positive pauses (fail-safe). */
+         * the Pico kept running is on schedule against baseline + ESP elapsed time
+         * (safety_pico_uptime_behind_expected(), wrap-safe), so a long outage is not a reboot, while a
+         * reboot whose old boot was older than ~2 s is caught however long the outage. A false positive is
+         * a spurious reboot count (nuisance hold/pause when the last boot cause or DIAG was fatal). */
+        link->reboot_noted_by_uptime = false; /* in doubt, count: a later boot_id change counts again */
         link->diag_reannounce_count = 0u;
         link->diag_reannounce_last_ms = 0u;
     }
