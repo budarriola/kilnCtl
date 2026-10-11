@@ -1973,6 +1973,91 @@ static void test_favorites_wrong_size_blob_is_an_error(void)
     (void)profiles_favorites_start();
 }
 
+static void set_used_blob(const void *b, size_t n)
+{
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, NVS_KEY_USED, b, n);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+static void test_used_bitmap_rebuild_keeps_present_slot_bit(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a test gap: a rebuild keeps the bit of a slot whose key is present");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1); /* legacy profN keys: the rebuild indexes these */
+    stage_legacy_slot(5, &src, 1);
+    {
+        nvs_handle_t kh;
+        nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &kh);
+        char k[8];
+        uint8_t blob[8] = {1};
+        profile_nvs_key(3, k, sizeof(k));
+        nvs_set_blob(kh, k, blob, sizeof(blob));
+        profile_nvs_key(5, k, sizeof(k));
+        nvs_set_blob(kh, k, blob, sizeof(blob));
+        nvs_commit(kh);
+        nvs_close(kh);
+    }
+    s_profiles.profiles[3] = src;
+    s_profiles.profiles[5] = src;
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite junk bitmap");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == 16, "16-byte bitmap");
+    nvs_close(h);
+    TEST_CHECK((back[0] & 0x20) != 0, "slot 5 (key present) keeps its bit");
+    TEST_CHECK((back[0] & 0x08) == 0, "slot 3 cleared");
+}
+
+static void test_used_bitmap_boot_load_longer_and_junk_length(void)
+{
+    TEST_SECTION("nvs_load_all_from -- review LOW-2b: a 24-byte used blob loads; an 18-byte one is refused");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(4, &src, 1);
+    uint8_t longer[24] = {0};
+    longer[0] = 0x10;
+    set_used_blob(longer, sizeof(longer));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    profiles_state_t out;
+    bool any_found = false;
+    esp_err_t e = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(e == ESP_OK && profiles_slot_bitmap_test(&out.used_bitmap, 4), "24-byte bitmap loads at boot, slot 4 used");
+    uint8_t junk20[18] = {0};
+    junk20[0] = 0x10;
+    set_used_blob(junk20, sizeof(junk20));
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(&out, 0, sizeof(out));
+    e = nvs_load_all_from(PROFILES_NVS_PARTITION, &out, &any_found);
+    TEST_CHECK(e != ESP_OK || !profiles_slot_bitmap_test(&out.used_bitmap, 4), "18-byte (non word multiple) bitmap is refused");
+}
+
+static void test_favorites_set_refuses_while_user_mask_unresolved(void)
+{
+    TEST_SECTION("profiles_favorites_set -- review LOW-3a: refuses after a failed load with no cfg file");
+    pcfg_reset_all();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable blob");
+    TEST_CHECK(profiles_favorites_set(2, true) != ESP_OK, "set refused while the user mask is unresolved");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)profiles_favorites_start();
+}
+
 static void test_nvs_erase_slot_propagates_firing_stats_error(void)
 {
     TEST_SECTION("nvs_erase_slot -- firing_stats_erase failure is propagated");
@@ -5799,6 +5884,9 @@ void run_test_profiles_http(void)
     test_nvs_erase_slot_repairs_wrong_size_used_bitmap();
     test_nvs_erase_slot_keeps_longer_used_bitmap_tail();
     test_favorites_wrong_size_blob_is_an_error();
+    test_used_bitmap_rebuild_keeps_present_slot_bit();
+    test_used_bitmap_boot_load_longer_and_junk_length();
+    test_favorites_set_refuses_while_user_mask_unresolved();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();

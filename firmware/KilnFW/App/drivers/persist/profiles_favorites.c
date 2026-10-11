@@ -190,6 +190,24 @@ static hal_status_t favorites_read_nvs(profiles_slot_bitmap_t *user, uint32_t *b
 /* Set when RAM was changed but the write failed (audit L1): a retry that finds
  * "no change" against RAM must still write. Guarded by s_save_lock. */
 static bool s_fav_dirty = false;
+/* Set when the user mask could not be resolved at start (failed NVS load, no cfg file): profiles_favorites_set()
+ * refuses rather than writing a rev-1 file from empty RAM (review LOW-3a). Guarded by s_save_lock. */
+static bool s_fav_user_unresolved = false;
+
+/* Loads only the builtin mask (its own u32 key), independent of the user mask. */
+static void favorites_read_builtin_only(uint32_t *builtin)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_init_partition(PROFILES_NVS_PARTITION) != HAL_OK ||
+        hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, PROFILES_NVS_PARTITION) != HAL_OK) {
+        return;
+    }
+    uint32_t v = 0;
+    if (hal_kv_get_u32(&h, NVS_KEY_FAV_BUILTIN, &v) == HAL_OK) {
+        *builtin = v;
+    }
+    hal_kv_close(&h);
+}
 
 esp_err_t profiles_favorites_start(void)
 {
@@ -197,6 +215,7 @@ esp_err_t profiles_favorites_start(void)
     s_fav_builtin = 0;
     s_fav_rev = 0;
     s_fav_dirty = false;
+    s_fav_user_unresolved = false;
 
     /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
      * rev; otherwise the legacy NVS copy stands and, when cfg is mounted, is
@@ -218,6 +237,8 @@ esp_err_t profiles_favorites_start(void)
             ESP_LOGI(TAG, "no favorites saved yet");
             return ESP_OK;
         }
+        s_fav_user_unresolved = true;
+        favorites_read_builtin_only(&s_fav_builtin);
         return hal_status_to_esp_err(nerr);
     }
     s_fav_user = resolved.user;
@@ -256,6 +277,10 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
 
     cfg_save_lock_take(&s_save_lock);
     if (cfg_save_lock_reset_refused()) { /* factory reset in flight: nothing may persist, RAM stays as is */
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_fav_user_unresolved) { /* LOW-3a: never write a file from an unresolved (empty) user mask */
         cfg_save_lock_give(&s_save_lock);
         return ESP_ERR_INVALID_STATE;
     }

@@ -815,8 +815,9 @@ static esp_err_t nvs_partition_init(const char *partition)
 /* Largest used-bitmap blob accepted as a newer-firmware "longer" shape (review LOW-2). */
 #define USED_BITMAP_LONGER_MAX_BYTES 64u
 
-static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+static hal_status_t used_bitmap_load_ex(hal_kv_handle_t *h, profiles_slot_bitmap_t *out, bool *wrong_size)
 {
+    *wrong_size = false;
     size_t len = 0;
     hal_status_t err = hal_kv_get_blob(h, NVS_KEY_USED, NULL, &len);
     if (err == HAL_NOT_FOUND) {
@@ -833,14 +834,14 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
     }
-    if (err == HAL_OK && len > sizeof(*out) && len <= USED_BITMAP_LONGER_MAX_BYTES) {
+    if (err == HAL_OK && len > sizeof(*out) && len <= USED_BITMAP_LONGER_MAX_BYTES && (len % sizeof(uint32_t)) == 0) {
         /* Review LOW-2: a longer bitmap is newer firmware with more slots -- use our first 16 bytes; the tail is
          * preserved verbatim by used_bitmap_save() (same policy as the rev array). */
         uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
         size_t bl = len;
         hal_status_t gerr = hal_kv_get_blob(h, NVS_KEY_USED, big, &bl);
         if (gerr != HAL_OK || bl != len) {
-            return HAL_IO;
+            return gerr != HAL_OK ? gerr : HAL_IO;
         }
         memcpy(out, big, sizeof(*out));
         return HAL_OK;
@@ -849,7 +850,9 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
         /* A blob exists but is neither the 16-byte shape, a longer newer-firmware shape, nor a legacy single byte:
          * corrupt. Falling through to the u8 read would answer a type mismatch (NOT_FOUND on target and in the
          * typed fake) and read as "no bitmap yet" -- silent slot loss. Callers repair via
-         * used_bitmap_load_or_rebuild(). */
+         * used_bitmap_load_or_rebuild(). A longer blob must be a whole number of words (LOW-2b) and at most
+         * USED_BITMAP_LONGER_MAX_BYTES (a deliberate limit). */
+        *wrong_size = true;
         return HAL_IO;
     }
     /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
@@ -863,6 +866,12 @@ static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t 
     }
     profiles_slot_bitmap_from_u32(out, legacy);
     return HAL_OK;
+}
+
+static hal_status_t used_bitmap_load(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
+{
+    bool ws = false;
+    return used_bitmap_load_ex(h, out, &ws);
 }
 
 /* Forward declaration: both of today's callers (nvs_save_slot(),
@@ -901,20 +910,27 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
  * overwrites the bad blob with a 16-byte one. Any other load error is passed through unchanged. */
 static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slot_bitmap_t *out)
 {
-    hal_status_t err = used_bitmap_load(h, out);
-    if (err != HAL_IO) {
-        return err;
+    bool wrong_size = false;
+    hal_status_t err = used_bitmap_load_ex(h, out, &wrong_size);
+    if (err != HAL_IO || !wrong_size) {
+        return err; /* a genuine read error is NOT a reason to rebuild (review LOW-2a) */
     }
     ESP_LOGW(PROFILES_TAG, "used bitmap blob has an unusable size -- rebuilding it from the profN slot keys");
-    memset(out, 0, sizeof(*out));
+    /* A rebuild drops a dangling bit (bit set, key absent): that finishes a delete, unlike the boot path. */
+    profiles_slot_bitmap_t rebuilt;
+    memset(&rebuilt, 0, sizeof(rebuilt));
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
         char key[8];
         profile_nvs_key(id, key, sizeof(key));
         size_t klen = 0;
-        if (hal_kv_get_blob(h, key, NULL, &klen) == HAL_OK) {
-            profiles_slot_bitmap_set(out, id);
+        hal_status_t perr = hal_kv_get_blob(h, key, NULL, &klen);
+        if (perr == HAL_OK) {
+            profiles_slot_bitmap_set(&rebuilt, id);
+        } else if (perr != HAL_NOT_FOUND) {
+            return perr; /* cannot tell present from absent: fail closed, drop no bit, save nothing */
         }
     }
+    *out = rebuilt;
     return HAL_OK;
 }
 
