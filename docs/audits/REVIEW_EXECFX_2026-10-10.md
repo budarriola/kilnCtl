@@ -15,6 +15,8 @@ negtest table).
 
 ### MED-A: a warm-start relay/IO replay before a late refusal leaves a relay ON and owned by PROFILE, and the restore deletes the record of it
 
+**Status: FIXED 2026-10-10: the warm-start replay now runs after the last refusal check (after LD-01); a refused start never energizes or claims the relay.**
+
 - Replay: `profile_executor_run.c:1219` calls `io_seg_start()` for each skipped
   RELAY_IO segment. In `profile_executor_relay_io.c:1106-1110`, `io_seg_start()`
   does three things:
@@ -73,6 +75,8 @@ negtest table).
 
 ### LOW-B: lazily allocated history buffer leaks on a refused start
 
+**Status: FIXED 2026-10-10: a refused start keeps the history buffer and the live `last_tick_tick`.**
+
 - `history_buf_ensure_alloc()` (`profile_executor_run.c:50-56`) allocates
   `s_exec.history` from PSRAM once and never frees it.
 - If the DONE snapshot has `history == NULL` and this start allocates the
@@ -84,6 +88,8 @@ negtest table).
   `last_tick_tick` is kept, or allocate only after the commit point.
 
 ### LOW-C: the snapshot falls back to internal RAM without checking the 8 KB floor
+
+**Status: FIXED 2026-10-10: the DONE snapshot is PSRAM only; if PSRAM fails the start is refused.**
 
 - At `profile_executor_run.c:692-693`, if PSRAM fails, the code takes
   `sizeof(s_exec)` (0xcf8 = 3320 B per the KilnCtrl.map of the bench build)
@@ -99,6 +105,8 @@ negtest table).
   before falling back.
 
 ### LOW-D: the stale check runs outside the kiln_io lock (TOCTOU)
+
+**Status: FIXED 2026-10-10: `kiln_io_set_relay_mask_if_epoch()` compares the epoch under the kiln_io lock; the owner handler uses it.**
 
 - `kiln_io_owner.c:472` compares `cmd.off_epoch` with the current epoch, then
   `:480` calls `kiln_io_set_relay_mask()`, which takes the kiln_io lock.
@@ -118,6 +126,8 @@ negtest table).
   an unlocked-fallback all-off still invalidates.
 
 ### LOW-E: the epoch is stamped at post time, after the caller's gate decision
+
+**Status: FIXED 2026-10-10: callers sample the epoch before their gate decision and call `kiln_io_owner_command_set_relay_mask_authorized_since()`.**
 
 - `kiln_io_owner.c:771` samples the epoch inside
   `kiln_io_owner_command_set_relay_mask_authorized()`.
@@ -218,3 +228,13 @@ Test gaps this table shows:
   `kiln_io_owner_command_set_relay_mask_authorized()`.
 - No test covers the unlocked-fallback bump, a stale OFF-only command
   returning OK, or keeping `last_tick_tick` live across a restore.
+
+**Status: ALL FIXED 2026-10-10.** Tests added: a table-driven restore test over all 11
+refusal sites (the backup-restore hook opens only after the heat claim so it
+exercises the late site) plus a separate test for the cap on/off, cap aux and
+no on/off rule refusals; a `last_tick_tick` and history-buffer preservation test;
+a post-through-the-real-function epoch stamp test; a stale OFF-only command test
+(returns OK, never INVALID_STATE); an epoch-bump-on-failed-all-off test; and a
+caller-samples-epoch-before-gate test. Re-run of the same mutations plus the new
+LOW-D and LOW-E ones through `tools/negtest.ps1`: 20 of 20 CAUGHT (including every
+mutation the original review recorded as MISSED), real tree unchanged.
