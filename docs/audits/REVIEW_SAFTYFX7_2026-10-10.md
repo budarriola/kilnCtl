@@ -165,3 +165,8 @@ These runs used `-ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD
 | K4: claimed resolve uses the live flag, not the snapshot | CAUGHT |
 | K5: snapshot taken only under a claim | CAUGHT |
 | K6: claim-less resolve keeps `reboot_was_tripped` | MISSED (I-1, harmless) |
+
+## Fix status
+
+- MED-1, LOW-1, LOW-2: fixed in a2218f7ba/a988bb86e (pre-rebase SHAs; see the landed commit on origin/dev). The S8 clear is decided only from a completed full post-trip window; until then the frozen trip window refuses; afterwards it refuses if EITHER the last full rate or the partial window (>= 5 s) is over the limit. Negtests (partial shortcut restored, last-full check disabled, EITHER -> newest-only) all CAUGHT.
+- I-5: not done (heat_enable.c is in the rebootdet agent's area).
