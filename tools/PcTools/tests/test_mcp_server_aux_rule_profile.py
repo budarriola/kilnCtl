@@ -117,6 +117,20 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         self.assertTrue(r.startswith("FAILED"), r)
         self.assertIn("content changed", r)
 
+    def test_other_profile_derived_field_change_is_not_a_failure(self):
+        # A concurrent zone-limit change flips derived feasibility fields on another profile; not a content change.
+        board = FakeBoard({0: _user_profile("MY_BISQUE")})
+        orig = board.post_profile
+
+        def post(*a, **k):
+            r = orig(*a, **k)
+            board.profiles[0]["feasibility"] = "infeasible"
+            board.profiles[0]["segments"][0]["feasibility"] = "bad"
+            return r
+        board.post_profile = post
+        r = self._run(board)
+        self.assertTrue(r.startswith("ok"), r)
+
     def test_reuses_only_its_own_named_slot(self):
         board = FakeBoard({0: _user_profile("MY_BISQUE"), 1: _user_profile(NAME)})
         r = self._run(board, temp_cmp="above")
