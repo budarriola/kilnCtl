@@ -11,13 +11,13 @@ rare or fails safe.
 
 | ID | Grade | Area | Summary |
 |----|-------|------|---------|
-| R1 | LOW | push_verify.ps1 T1 | The creation-time filter is anchored to git's start time, not to each parent's start time, so a reused PID deeper in the tree can pull in an unrelated orphan |
-| R2 | LOW | push_verify.ps1 T1 | PID-only kill after the snapshot, and killing leaves first makes parents exit on their own, which widens the PID-reuse window |
-| R3 | LOW | check_push_verify.ps1 T1 | The no-job case cannot tell whether the hook took effect: if the hook is ignored, the job path runs and the case still passes |
-| R4 | LOW | test_bench_test_start_jobs.py T4 | The synchronous gate's parameter tuple and its dry-run exemption are covered only in part |
+| R1 | LOW | push_verify.ps1 T1 | The creation-time filter is anchored to git's start time, not to each parent's start time, so a reused PID deeper in the tree can pull in an unrelated orphan (FIXED in f767abd94) |
+| R2 | LOW | push_verify.ps1 T1 | PID-only kill after the snapshot, and killing leaves first makes parents exit on their own, which widens the PID-reuse window (FIXED in f767abd94) |
+| R3 | LOW | check_push_verify.ps1 T1 | The no-job case cannot tell whether the hook took effect: if the hook is ignored, the job path runs and the case still passes (FIXED in f767abd94) |
+| R4 | LOW | test_bench_test_start_jobs.py T4 | The synchronous gate's parameter tuple and its dry-run exemption are covered only in part (FIXED in f767abd94) |
 | I1 | INFO | push_verify.ps1 | The fallback is close to unreachable in practice |
-| I2 | INFO | push_verify.ps1 | Survivor check covers only git-remote-http |
-| I3 | INFO | mcp_server_bench_test.py | Docstring now partly stale |
+| I2 | INFO | push_verify.ps1 | Survivor check covers only git-remote-http (FIXED in f767abd94) |
+| I3 | INFO | mcp_server_bench_test.py | Docstring now partly stale (FIXED in f767abd94) |
 
 ## Findings
 
@@ -131,8 +131,8 @@ accurate. I5 and I6 are test-layout changes, and the suites pass.
 |----------|--------|---------|
 | A_one_level_walk (`$frontier = @()`) | check_push_verify | CAUGHT |
 | B_no_walk_at_all (kill loop never runs) | check_push_verify | CAUGHT |
-| C_hook_ignored (env hook removed) | check_push_verify | MISSED (R3) |
-| D_drop_corrupt_from_tuple | test_bench_test_start_jobs | MISSED (R4, fails safe) |
-| E_dry_run_refused | test_bench_test_start_jobs | MISSED (R4) |
+| C_hook_ignored (env hook removed) | check_push_verify | MISSED (R3), CAUGHT after f767abd94 |
+| D_drop_corrupt_from_tuple | test_bench_test_start_jobs | MISSED (R4, fails safe), CAUGHT after f767abd94 |
+| E_dry_run_refused | test_bench_test_start_jobs | MISSED (R4), CAUGHT after f767abd94 |
 | F_truthy_confirm (`not confirm`) | test_bench_test_start_jobs | CAUGHT |
 | G_refuse_confirmed_too | test_bench_test_start_jobs | CAUGHT |
