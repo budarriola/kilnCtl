@@ -203,16 +203,12 @@ class GateTest(unittest.TestCase):
         self.assertEqual(C._case_ax_c01(_ctx(srv, aux_confirm=1)).verdict, Verdict.SKIP)
 
     def test_env_opt_in(self):
-        old = os.environ.get(C.CONFIRM_ENV)
-        os.environ[C.CONFIRM_ENV] = "1"
-        try:
+        import unittest.mock as um
+        with um.patch.dict(os.environ, {C.CONFIRM_ENV: "1"}):
             self.assertTrue(C._confirmed({}))
-        finally:
-            if old is None:
-                del os.environ[C.CONFIRM_ENV]
-            else:
-                os.environ[C.CONFIRM_ENV] = old
-        self.assertFalse(C._confirmed({}))
+        with um.patch.dict(os.environ):  # hermetic: never depends on the caller's environment
+            os.environ.pop(C.CONFIRM_ENV, None)
+            self.assertFalse(C._confirmed({}))
 
     def test_heat_needs_allow_heat(self):
         srv = FakeSrv()
@@ -249,6 +245,7 @@ class ConfigureAndConflictTest(unittest.TestCase):
         import unittest.mock as um
         from kilnctrl import zones_http_client as zhc
         srv = FakeSrv()
+        srv.r4e = True
         with um.patch.object(zhc, "get_zones", side_effect=zhc.ZonesHttpError("down")),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             self.assertEqual(C._case_ax_c03(_ctx(srv)).verdict, Verdict.SKIP)
         self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (409, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- disable that aux output first"))).verdict, Verdict.PASS)
@@ -559,7 +556,9 @@ class Finding5RestoreTest(unittest.TestCase):
 class Finding6C03Test(unittest.TestCase):
     def test_accepted_write_restored_and_taints(self):
         restored = []
-        ctx = _ctx(FakeSrv(), aux_zone_mask_post_fn=lambda: (200, {}),
+        srv0 = FakeSrv()
+        srv0.r4e = True
+        ctx = _ctx(srv0, aux_zone_mask_post_fn=lambda: (200, {}),
                    aux_zone_mask_restore_fn=lambda: restored.append(1) or True)
         r = C._case_ax_c03(ctx)
         self.assertEqual(r.verdict, Verdict.FAIL)
@@ -568,7 +567,9 @@ class Finding6C03Test(unittest.TestCase):
 
     def test_refused_does_not_restore(self):
         restored = []
-        ctx = _ctx(FakeSrv(), aux_zone_mask_post_fn=lambda: (409, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- disable that aux output first"),
+        srv0 = FakeSrv()
+        srv0.r4e = True
+        ctx = _ctx(srv0, aux_zone_mask_post_fn=lambda: (409, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- disable that aux output first"),
                    aux_zone_mask_restore_fn=lambda: restored.append(1) or True)
         self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.PASS)
         self.assertEqual(restored, [])
@@ -675,8 +676,14 @@ class C03DefaultWriterTest(unittest.TestCase):
                 calls.append((zone, relay_mask, confirm))
                 return answers.pop(0)
 
-        ctx = {"srv": Srv(), "aux_confirm": True, "sleep_fn": lambda s: None}
-        with um.patch.object(zhc, "get_zones", return_value={"zones": [{"index": 0, "relay_mask": 1}]}),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            def _zone_collateral_diff(self, *a):
+                return []
+
+        srv = Srv()
+        srv.r4e = True
+        ctx = {"srv": srv, "aux_confirm": True, "sleep_fn": lambda s: None}
+        snap = {"zones": [{"index": 0, "relay_mask": 1}]}
+        with um.patch.object(zhc, "get_zones", return_value=snap),                 um.patch.object(zhc, "build_post_body", return_value="B"),                 um.patch.object(zhc, "post_zones", side_effect=lambda h, b: calls.append("restore") or "ok"),                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             return C._case_ax_c03(ctx), calls, ctx
 
     def test_firmware_409_passes_and_posts_relay4_bit(self):
@@ -686,9 +693,9 @@ class C03DefaultWriterTest(unittest.TestCase):
         self.assertEqual(calls, [(0, 0b1001, True)])
 
     def test_accepted_write_fails_restores_and_taints(self):
-        res, calls, ctx = self._run(["ok - zone 0: relay_mask=9", "ok - zone 0: relay_mask=1"])
+        res, calls, ctx = self._run(["ok - zone 0: relay_mask=9"])
         self.assertEqual(res.verdict, Verdict.FAIL)
-        self.assertEqual(calls[-1], (0, 1, True))
+        self.assertEqual(calls[-1], "restore")
         self.assertTrue(ctx["_tainted"])
         self.assertIn("restore ok", res.reason)
 
@@ -703,19 +710,98 @@ class C03DefaultWriterTest(unittest.TestCase):
 
     def test_409_wrong_reason_fails(self):
         res, _c, _ = self._run(["refused by firmware (HTTP 409): a firing is active"])
-        self.assertEqual(res.verdict, Verdict.FAIL)
+        self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
 
     def test_possibly_applied_results_taint_and_restore(self):
         for msg in ("FAILED: POST /api/zones returned ok, but read-back does not confirm it landed",
                     "FAILED: zone 0's relay_mask landed correctly, but other field(s) changed",
                     "error: POST /api/zones returned ok, but the confirming re-fetch of GET failed"):
-            res, calls, ctx = self._run([msg, "ok - zone 0: relay_mask=1"])
+            res, calls, ctx = self._run([msg])
             self.assertEqual(res.verdict, Verdict.INCONCLUSIVE, msg)
             self.assertTrue(ctx["_tainted"], msg)
-            self.assertEqual(calls[-1], (0, 1, True), msg)
+            self.assertEqual(calls[-1], "restore", msg)
 
     def test_pre_post_refusal_does_not_taint_or_restore(self):
         res, calls, ctx = self._run(["refused: system_mode_gate refused this write (HTTP 409): x"])
         self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
         self.assertNotIn("_tainted", ctx)
         self.assertEqual(len(calls), 1)
+
+
+class AuxC03ReviewLowTest(unittest.TestCase):
+    OWNER = AUX_OWNER = ("a zone relay_mask claims a relay an aux (spare-relay) output already owns -- "
+                         "disable that aux output first")
+
+    def _ctx(self, post, restore=None, enabled=True):
+        srv = FakeSrv()
+        srv.r4e = enabled
+        extra = {"aux_zone_mask_restore_fn": restore} if restore else {}
+        return _ctx(srv, aux_zone_mask_post_fn=post, **extra)
+
+    def test_pre_aux_409s_are_inconclusive(self):
+        for body in ("a backup restore or configuration change is in progress -- retry when it finishes",
+                     "a kiln-config rollback is pending (saving the active kiln failed); reboot",
+                     "a profile is running", "firing or autotune run is active"):
+            ctx = self._ctx(lambda b=body: (409, f"refused by firmware (HTTP 409): {b} (host=h)"))
+            self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.INCONCLUSIVE, body)
+            self.assertNotIn("_tainted", ctx)
+
+    def test_post_aux_409s_fail(self):
+        for key in ("safety_ceiling_raise_failed", "zones_config_changed_concurrently", "zones_config_undecided"):
+            ctx = self._ctx(lambda k=key: (409, '{"ok":false,"error":"%s"}' % k))
+            self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.FAIL, key)
+
+    def test_aux_word_elsewhere_or_host_is_not_pass(self):
+        r = C._case_ax_c03(self._ctx(lambda: (409, "refused by firmware (HTTP 409): other aux problem (host=aux1)")))
+        self.assertNotEqual(r.verdict, Verdict.PASS)
+        r = C._case_ax_c03(self._ctx(lambda: (409, f"refused by firmware (HTTP 409): busy (host=already owns aux)")))
+        self.assertNotEqual(r.verdict, Verdict.PASS)
+        r = C._case_ax_c03(self._ctx(lambda: (409, f"refused by firmware (HTTP 409): {self.AUX_OWNER} (host=h)")))
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_2xx_nonok_body_is_possibly_applied(self):
+        calls = []
+        ctx = self._ctx(lambda: (None, "refused: POST /api/zones refused: {\"ok\":true} (host=h)"),
+                        lambda: calls.append(1) or True)
+        r = C._case_ax_c03(ctx)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(calls, [1])
+        self.assertTrue(ctx["_tainted"])
+
+    def test_failed_restore_retried_in_teardown_and_loud(self):
+        n = []
+        ctx = self._ctx(lambda: (200, {}), lambda: n.append(1) and False)
+        r = C._case_ax_c03(ctx)
+        self.assertIn("NOT confirmed", r.reason)
+        self.assertTrue(ctx["_tainted"])
+        with self.assertRaises(RuntimeError):
+            for h in ctx["teardown_hooks"]:
+                h(ctx)
+        self.assertEqual(len(n), 2)
+
+    def test_failed_restore_recovers_in_teardown(self):
+        results = iter([False, True])
+        ctx = self._ctx(lambda: (200, {}), lambda: next(results))
+        C._case_ax_c03(ctx)
+        for h in ctx["teardown_hooks"]:
+            h(ctx)
+
+    def test_relay4_not_aux_means_no_write(self):
+        posted = []
+        ctx = self._ctx(lambda: posted.append(1) or (409, self.AUX_OWNER), enabled=False)
+        self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(posted, [])
+
+    def test_default_restore_reposts_whole_snapshot(self):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        snap = {"zones": [{"index": 0, "relay_mask": 1}]}
+        posted = []
+        srv = FakeSrv()
+        srv.r4e = True
+        srv.control_set_zone_relay_mask = lambda **k: "ok - zone 0: relay_mask=9"
+        srv._zone_collateral_diff = lambda b, a, z, c: []
+        ctx = {"srv": srv, "aux_confirm": True, "sleep_fn": lambda s: None}
+        with um.patch.object(zhc, "get_zones", return_value=snap),                 um.patch.object(zhc, "build_post_body", return_value="BODY"),                 um.patch.object(zhc, "post_zones", side_effect=lambda h, b: posted.append(b) or "ok"),                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            C._case_ax_c03(ctx)
+        self.assertEqual(posted, ["BODY"])
