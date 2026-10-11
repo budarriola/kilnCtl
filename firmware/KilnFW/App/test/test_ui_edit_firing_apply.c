@@ -57,8 +57,14 @@ bool profiles_builtin_id_valid(uint8_t id)
 {
     return g_fake_builtin_on && id == PROFILE_BUILTIN_ID_BASE;
 }
+static void (*g_fake_builtin_entry_hook)(void) = NULL; /* one-shot: runs between has_pending_for_origin() and the fork */
 const builtin_profile_t *profiles_builtin_entry(uint8_t id)
 {
+    if (g_fake_builtin_entry_hook) {
+        void (*h)(void) = g_fake_builtin_entry_hook;
+        g_fake_builtin_entry_hook = NULL;
+        h();
+    }
     return profiles_builtin_id_valid(id) ? &g_fake_builtin : NULL;
 }
 bool profiles_builtin_get(uint8_t id, profile_t *out)
@@ -415,6 +421,57 @@ static void test_apply_stale_generation_refused(void)
                "late: web edit survives, LCD edit not written");
 }
 
+static void web_fork_builtin_and_save(void)
+{
+    char err[128];
+    live_edit_record_t rec;
+    profile_t tmp;
+    profile_t edited = g_fake_builtin_profile;
+    edited.segments[2].target_c = 777.0f;
+    live_profile_fork(PROFILE_BUILTIN_ID_BASE, true, "C6TEST", &g_fake_builtin_profile, &tmp, &rec, err, sizeof(err));
+    live_profile_save_working(&edited, err, sizeof(err));
+}
+
+static void test_fork_reuse_path_leaves_out_gen_alone(void)
+{
+    TEST_SECTION("edit_firing_apply / live_profile_fork_gen -- a web fork landing between the pending check and "
+                 "the LCD fork: *out_gen stays untouched and Apply refuses stale, web edit survives (REVIEW_WEBFX6 LOW-2)");
+    char err[128];
+
+    /* (a) direct: the already-pending path must not write *out_gen. */
+    reset_world();
+    g_fake_builtin_on = true;
+    g_fake_builtin_profile = make_profile("Cone 6 long title");
+    web_fork_builtin_and_save();
+    profile_t out;
+    live_edit_record_t rec;
+    uint32_t gen = 0xDEADBEEFu;
+    bool forked = true;
+    TEST_CHECK(live_profile_fork_gen(PROFILE_BUILTIN_ID_BASE, true, "C6TEST", &g_fake_builtin_profile, &out, &rec, &gen,
+                                      &forked, err, sizeof(err)),
+               "reuse path succeeds");
+    TEST_CHECK(!forked, "reuse path reports did_fork=false");
+    TEST_CHECK(gen == 0xDEADBEEFu, "reuse path leaves *out_gen untouched");
+
+    /* (b) through Apply, interleaved. */
+    reset_world();
+    g_fake_builtin_on = true;
+    g_fake_builtin_profile = make_profile("Cone 6 long title");
+    g_fake_live_status.profile_id = PROFILE_BUILTIN_ID_BASE;
+    g_fake_live_status.segment_index = 0;
+    profile_t w;
+    edit_firing_ctx_t ctx;
+    TEST_CHECK(edit_firing_load(&w, &ctx), "load builtin");
+    TEST_CHECK(edit_firing_step(&w, 1, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1), "edit");
+    g_fake_builtin_entry_hook = web_fork_builtin_and_save;
+    TEST_CHECK(!edit_firing_apply(&w, &ctx, err, sizeof(err)), "apply refused when a web fork+save raced the LCD fork");
+    TEST_CHECK(strstr(err, "edited elsewhere") != NULL, "refused as edited elsewhere");
+    g_fake_builtin_entry_hook = NULL;
+    profile_t after;
+    TEST_CHECK(live_profile_load_working(&after) && after.segments[2].target_c == 777.0f,
+               "web edit survives, LCD edit not written");
+}
+
 static void test_apply_builtin_origin(void)
 {
     TEST_SECTION("edit_firing_apply -- builtin origin forks with the builtin's code as its name");
@@ -575,6 +632,7 @@ int main(void)
     test_apply_success_forks_then_saves();
     test_apply_refusals_write_nothing();
     test_apply_stale_generation_refused();
+    test_fork_reuse_path_leaves_out_gen_alone();
     test_apply_builtin_origin();
     test_apply_stale_foreign_origin_record_never_borrowed();
     test_poll();

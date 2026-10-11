@@ -1974,13 +1974,15 @@ var SAFETY_LINK_STALE_MS = 1500;
 // here, so cause/remedy text cannot drift from the LCD's. safetyTripWords()/
 // SAFETY_TRIP_WORDS above are kept only as an old-firmware fallback for a
 // board that hasn't picked up the new fields yet.
-var clearTripMsg = { text: '', until: 0 };
+var clearTripMsg = { text: '', until: 0, reason: null };
 function renderSafetyTrip(data) {
   var el = document.getElementById('safetyTripBanner');
   var tripped = data.diag_ever_received && data.diag_state === SAFETY_LINK_DIAG_STATE_TRIPPED &&
                 typeof data.diag_age_ms === 'number' && data.diag_age_ms < SAFETY_LINK_STALE_MS;
-  if (!tripped) { el.innerHTML = ''; return; }
+  if (!tripped) { clearTripMsg = { text: '', until: 0, reason: null }; el.innerHTML = ''; return; }
   var reason = data.diag_trip_reason;
+  // A refusal belongs to the trip it answered: a different trip reason drops it.
+  if (clearTripMsg.reason !== reason) clearTripMsg = { text: '', until: 0, reason: null };
   var ineffective = reason === 10;
   var isMainFault = reason === 6; // S6a -- the safety processor sees one bit, ESP knows the source
   var words = data.diag_trip_reason_words || safetyTripWords(reason);
@@ -2045,7 +2047,7 @@ function renderSafetyTrip(data) {
       // L-2: keep the refusal in clearTripMsg so the next poll's re-render shows it
       // again instead of erasing it; one row, replaced (not appended) per click.
       function showClearTripMsg(text) {
-        clearTripMsg = { text: text, until: Date.now() + 30000 };
+        clearTripMsg = { text: text, until: Date.now() + 30000, reason: reason };
         var row = document.getElementById('clearTripMsg');
         if (!row) {
           btn.insertAdjacentHTML('afterend', '<div class="row fault" id="clearTripMsg"></div>');
@@ -2058,8 +2060,13 @@ function renderSafetyTrip(data) {
           return r.text().then(function (t) {
             var j = null;
             try { j = JSON.parse(t); } catch (e) { j = null; }
-            if (j && j.ok === false && j.error) showClearTripMsg(String(j.error));
+            if (j && j.ok === false && (j.reason || j.error)) showClearTripMsg(String(j.reason || j.error));
             else if (!r.ok) showClearTripMsg('Clear Trip was refused (HTTP ' + r.status + '): ' + (t || '').slice(0, 120));
+            else {
+              clearTripMsg = { text: '', until: 0, reason: null };
+              var old = document.getElementById('clearTripMsg');
+              if (old && old.remove) old.remove();
+            }
           });
         })
         .catch(function (err) {

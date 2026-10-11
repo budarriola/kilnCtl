@@ -800,9 +800,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * because this run's first tick already believed generation 0.
      *
      * MEDIUM-2 (review): seeding straight from live_profile_generation() is
-     * wrong on a warm-start resume across a reboot, because that counter is
-     * RAM-only and resets to 0 while a pending working copy on disk does
-     * not (live_profile_generation()'s own doc comment, corrected). If this
+     * wrong after a reboot, because that counter is RAM-only (live_profile_start()
+     * seeds it randomly, not 0) while a pending working copy on disk
+     * survives (live_profile_generation()'s own doc comment, corrected). If this
      * exact profile_id already has a pending live edit, force this run's
      * baseline to NOT match the current generation, so the very first tick's
      * reload_live_profile_if_changed() poll sees a "change" and picks the

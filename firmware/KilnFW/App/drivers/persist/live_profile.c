@@ -87,7 +87,7 @@ static _Atomic uint32_t s_live_profile_generation;
 /* A1 (REVIEW_WEB4_TESTS): the web request (profiles_live_http.c) and the LCD task (ui_edit_firing_apply.c) both
  * write the working copy. This lock makes "generation check + verified save + generation bump" one section
  * (live_profile_save_working_if_gen) and serialises clear's bump with it. The generation is RAM-only: it restarts
- * at 0 on reboot, so a client holding a pre-reboot value can match again after that many post-reboot saves. */
+ * from a random seed on reboot (live_profile_start), so a client holding a pre-reboot value almost never matches. */
 static cfg_save_lock_t s_live_save_lock = CFG_SAVE_LOCK_INIT;
 
 /* ---- pure: record encode/decode ------------------------------------------ */
@@ -750,11 +750,7 @@ bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char
             return false;
         }
         if (out_record) *out_record = existing;
-        if (out_gen) {
-            cfg_save_lock_take(&s_live_save_lock);
-            *out_gen = atomic_load(&s_live_profile_generation);
-            cfg_save_lock_give(&s_live_save_lock);
-        }
+        /* out_gen deliberately untouched (see live_profile.h): the caller keeps the generation it holds. */
         return true;
     }
 

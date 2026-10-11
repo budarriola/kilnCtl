@@ -640,9 +640,9 @@ function checkRamp(input) {
 // Ramp/dwell fields -- unchanged from before this pass, just factored out so
 // segmentRow() can pick between this and ioFieldsHtml() by kind.
 function rampFieldsHtml(seg) {
-  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
-    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
-    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>';
+  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (Number(seg.target_c) || 0) + '"></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (Number(seg.ramp_c_per_hr) || 0) + '"></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (Number(seg.dwell_min) || 0) + '"></div>';
 }
 
 // Builds the <option>s for the relay/IO target <select>. `selected` is the
@@ -690,7 +690,7 @@ function ioFieldsHtml(seg) {
       '<option value="1"' + (state ? ' selected' : '') + '>Turn ON</option>' +
       '<option value="0"' + (!state ? ' selected' : '') + '>Turn OFF</option>' +
     '</select></div>' +
-    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
+    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (Number(seg.dwell_min) || 0) + '"></div>' +
     '<div><label>Timing</label><select class="io-blocking">' +
       '<option value="1"' + (blocking ? ' selected' : '') + '>Blocking -- profile waits here, runs BEFORE the next segment</option>' +
       '<option value="0"' + (!blocking ? ' selected' : '') + '>Non-blocking -- runs WITH (alongside) the next segment</option>' +

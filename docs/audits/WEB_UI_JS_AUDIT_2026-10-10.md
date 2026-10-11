@@ -160,7 +160,7 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-1 Firing controls give no feedback when they fail
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - **STOP FIRING**, `app.js:1966-1974`:
   `fetch('/api/profile_exec/stop',{method:'POST'}).then(()=>btn.disabled=false).catch(()=>btn.disabled=false)`.
@@ -179,7 +179,7 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-2 Clear Trip refusal messages disappear or never appear
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `main_page.html:2039-2049`:
 
@@ -193,7 +193,7 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-3 zones current sweep: Abort and the status poll
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - **Abort**, `zones_page.html:2591`: `fetch('/api/zones/current_sweep/abort', {method:'POST'});`
   has no `.then` or `.catch`. A failure becomes an unhandled rejection with no feedback, on the
@@ -208,7 +208,7 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-4 zones autotune Start swallows failures
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `zones_page.html:4304-4310`: `.then(r=>r.json()).then(j=>{ if(!j.ok) ...'Start failed: '+j.error }).catch(function(){})`.
 
@@ -223,7 +223,7 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-5 Wizard step 8 hides a running sweep
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `setup_wizard_page.html:1140` hard-codes `Not running.`. The status is only fetched after
 Start or Abort (1205-1214), never when the step renders, and leaving the step clears the poll.
@@ -235,7 +235,7 @@ is running.
 
 ### L-6 Diagnostics crash-report buttons
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `diagnostics_page.html:1000` (Acknowledge) and `:1004` (Clear):
 `fetch('/api/crash_report/clear',{method:'POST'}).then(pollCrash);`
@@ -247,7 +247,7 @@ is running.
 
 ### L-7 Diagnostics watchdog toggle trusts any JSON body
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `diagnostics_page.html:846-851`: `.then(r=>r.json()).then(result=>renderWatchdogCfg(!!result.panic_disabled)).catch(function(){})`.
 There is no `r.ok` check. A refused POST whose JSON lacks `panic_disabled` renders the panic
@@ -255,7 +255,7 @@ watchdog as enabled while it may still be disabled, which is the unsafe directio
 
 ### L-8 Live profile edit can be sent without `gen`
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `live_profile_page.html:313-315`: `genQuery()` returns `''` when `lastGen` is null.
 - `lastGen` becomes null in these cases:
@@ -272,7 +272,7 @@ watchdog as enabled while it may still be disabled, which is the unsafe directio
 
 ### L-9 `kcUnit.set` is optimistic and never corrected
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `app.js:1473-1484` updates `cached`, fires `kcunitchange`, then posts `/api/unit_pref`. The
   POST is ADMIN tier (`route_tier_table.h:250`). Only a rejected promise is handled, and only
@@ -288,7 +288,7 @@ watchdog as enabled while it may still be disabled, which is the unsafe directio
 
 ### L-10 safety_page escapes twice
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `safety_page.html:309-311` and `:388-390` call `row('Cause', window.kcEscapeHtml(st.trip_reason_cause))`,
 but `row()` (429-433) already escapes its value. Trip words containing an apostrophe, such as
@@ -299,7 +299,7 @@ That is on the card an operator reads during a trip. Display bug, not a security
 
 ### L-11 Wizard step 11 gives false security information
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `setup_wizard_page.html:1435-1437` says: "the OTA/factory-reset/system-reset routes still require
 the AP password either way".
@@ -311,7 +311,7 @@ deciding whether to turn login on.
 
 ### L-12 Wizard step 11 silently drops a typed password
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `setup_wizard_page.html:1468`: `if (username && password)`.
 
@@ -323,7 +323,7 @@ deciding whether to turn login on.
 
 ### L-13 Recovery page has unconfirmed destructive actions
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `KilnFW_recovery/main/recovery_page.html`:
 
@@ -334,7 +334,7 @@ deciding whether to turn login on.
 
 ### L-14 Swallowed failures in kiln_configs and the OTA GitHub Cancel
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `kiln_configs_page.html:259-265`: `kcPost` has no `.catch`. Neither do its callers (save 451,
   overwrite 464, clone 475, rename 489, delete 502). A network error or a cancelled sign-in is
@@ -344,7 +344,7 @@ deciding whether to turn login on.
 
 ### L-15 Exports done as navigations to auth-gated routes
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `backup_page.html:113`: `<a href="/api/backup/export" download=...>` is an ADMIN route that
   bypasses the fetch wrapper, so there is no login modal. On a missing or expired session,
@@ -359,7 +359,7 @@ deciding whether to turn login on.
 
 ### L-16 Wizard step 7 ceiling check passes when the zones read fails
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `setup_wizard_page.html`, step 7 save, about line 2940: `fetchJsonOr('/api/zones', null)`.
 
@@ -373,7 +373,7 @@ deciding whether to turn login on.
 
 ### L-17 settings_display re-posts all fields
 
-**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+**FIXED (webfx6, e36279885).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `settings_display_page.html:199-207`: Save posts all four fields from the form, so it
   overwrites a change made since load from the LCD or another tab.
@@ -460,4 +460,4 @@ deciding whether to turn login on.
 
 ## webfx6 status
 
-L-1..L-17 fixed in b51ab9455. INFO: I-1 (main PID popup, live_profile Number()) and I-5 (non-JSON reply handling) fixed. Not done: I-1 zones_page s.state/s.rule (unclear whether output is innerHTML), I-2, I-3, I-4, I-6.
+L-1..L-17 fixed in e36279885. INFO: I-1 (main PID popup, live_profile Number()) and I-5 (non-JSON reply handling) fixed. Not done: I-1 zones_page s.state/s.rule (unclear whether output is innerHTML), I-2, I-3, I-4, I-6.
