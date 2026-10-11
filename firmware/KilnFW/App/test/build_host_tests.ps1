@@ -1531,6 +1531,7 @@ try {
     New-Item -ItemType Directory -Force -Path $dshObjDir | Out-Null
     $cmdDsh = "cl /I`"$(Join-Path $testDir 'stubs_dashboard_http_relay')`" /I`"$(Join-Path $testDir 'stubs_dashboard_status')`" @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$dshObjDir\\`" /Fe:`"$exeDsh`" `"$(Join-Path $testDir 'test_dashboard_settings_http.c')`""
+    $cmdDsh += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # no real cfg_fs.c in this exe (cfg_fs_degraded_*)
     Invoke-HostTestExe -Name "dashboard_settings_http" -ExePath $exeDsh -BuildCmd $cmdDsh
 
     # ---- test_kiln_io_owner_sx_dispatch.c: owner_task() relay/SX_RESET dispatch over the fake chip (R2-A)
@@ -1947,6 +1948,7 @@ try {
     New-Item -ItemType Directory -Force -Path $sphObjDir | Out-Null
     $cmdSph = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$sphObjDir\\`" /Fe:`"$exeSph`" `"$(Join-Path $testDir 'test_setup_progress_http.c')`""
+    $cmdSph += " `"$(Join-Path $testDir 'test_stub_cfg_fs_degraded.c')`"" # no real cfg_fs.c in this exe (cfg_fs_degraded_*)
     Invoke-HostTestExe -Name "setup_progress_http" -ExePath $exeSph -BuildCmd $cmdSph
 
     # ---- test_diagnostics_http.c: its own separate executable ------------------
