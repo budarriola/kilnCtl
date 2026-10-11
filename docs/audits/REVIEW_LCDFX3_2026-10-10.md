@@ -197,4 +197,4 @@ Fix: write `TrimEnd('\')`.
 
 ## Fix status (lcdfx4)
 
-LOW-1, LOW-2, LOW-3 and INFO-7 are fixed (commit recorded in git log: "Checks: source-bytes fails on git errors..."); INFO-2 temp sweep added. All reviewer mutations M1-M3 plus an ungated-callback case and git-failure/empty-list cases are CAUGHT by tools/negtest.ps1. LOW-4 is owned by another fixer.
+LOW-1, LOW-2, LOW-3 and INFO-7 are fixed (commit 70e79815f, "Checks: source-bytes fails on git errors..."); INFO-2 temp sweep added. All reviewer mutations M1-M3 plus an ungated-callback case and git-failure/empty-list cases are CAUGHT by tools/negtest.ps1. LOW-4 is owned by another fixer.
