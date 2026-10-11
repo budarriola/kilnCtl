@@ -229,6 +229,7 @@ static void test_all_off_command_notes_tracker_only_on_ok(void)
     owner_result_t r = dispatch(c);
     g_test_stub_semaphore_fail_nth = 0;
     TEST_CHECK(r.err == KILN_IO_ERR_UNSERIALISED_OFF, "unserialised all-off reports 0x10C");
+    fake_time_advance_ms(1000u); /* held_s is 0 at the instant of a note; advance so a wrong note shows */
     TEST_CHECK(relay_off_tracker_held_s(0x01) == 0.0f, "0x10C is not noted as OFF in the tracker");
 
     fresh();
