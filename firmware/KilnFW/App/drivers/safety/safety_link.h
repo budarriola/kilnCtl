@@ -161,6 +161,8 @@
 #include "kilnlink/kilnlink_frame.h"
 #include "kilnlink/kilnlink_ct_auto_zero_status.h"
 #include "kilnlink/kilnlink_stack_margin.h"
+#include "kilnlink/kilnlink_test_trip.h"
+#include "kilnlink/kilnlink_test_trip_result.h"
 #include "kilnlink/kilnlink_config_page.h"
 #include "kilnlink/kilnlink_param_value.h"
 #include "kilnlink/kilnlink_frame_a_offsets.h" /* KILNLINK_FRAME_A_* -- single source of truth for
@@ -306,6 +308,12 @@ extern "C" {
  * diag() accepts both lengths and safety_link_send_clear_trip() echoes the
  * seq back (4-byte CLEAR_TRIP) only when the cached DIAG carried it. */
 #define SAFETY_LINK_DIAG_FRAME_LEN_V2 31u
+/* KILNLINK_PROTOCOL_VERSION 17 -> 18 (docs/TEST_TRIP_PLAN.md sec 2.2): the
+ * 32-byte form, KILNLINK_DIAG_LEN_V3, adds byte31 = pico_boot_id. Only a
+ * protocol 18 Pico that has learned this ESP is >= 18 sends it; it is what
+ * lets CLEAR_TRIP be bound to the Pico boot (F6) and TEST_TRIP name the boot
+ * it was authorised against. */
+#define SAFETY_LINK_DIAG_FRAME_LEN_V3 32u
 
 /* DIAG flags byte (offset 25), kilnlink_diag.h's kilnlink_diag_flag_t
  * mirrored here for the same reason SAFETY_CMD_POWER/DIAG are hand-parsed
@@ -1049,6 +1057,12 @@ typedef struct {
      * legacy unbound 3-byte clear. ESP-internal only: not on the PC wire. */
     bool     diag_trip_seq_known;
     uint8_t  diag_trip_seq;
+    /* Protocol 18: the Pico boot_id the most recent DIAG carried (byte31 of
+     * the 32-byte form). Known only after a 32-byte DIAG; forgotten on a 30/31
+     * byte DIAG and on a detected Pico reboot (safety_note_pico_reboot_locked)
+     * so a CLEAR_TRIP/TEST_TRIP never names a boot the Pico has left. */
+    bool     diag_boot_id_known;
+    uint8_t  diag_boot_id;
 
     /* SAFETY_CMD_TRIP_EVENT (Frame D) -- the most recent trip event the Pico
      * has pushed, cached until a newer one replaces it. Deliberately never
@@ -1269,6 +1283,7 @@ typedef struct {
     uint32_t cmd_ct_auto_zero_status_count;       /* KILNLINK_CT_AUTO_ZERO_STATUS_CMD (0x28) */
     uint32_t cmd_reboot_result_count;             /* KILNLINK_REBOOT_RESULT_CMD (0x2A) */
     uint32_t cmd_stack_margin_count;              /* KILNLINK_STACK_MARGIN_CMD (0x2C) */
+    uint32_t cmd_test_trip_result_count;          /* KILNLINK_TEST_TRIP_RESULT_CMD (0x2F), reply to TEST_TRIP (0x2E) */
     uint32_t cmd_param_count;                     /* KILNLINK_PARAM_CMD (0x1E), reply to SAFETY_CMD_GET_PARAM (0x23) */
 
     /* 2026-08-23, size-window follow-up: the histogram above proves WHICH
@@ -1299,6 +1314,7 @@ typedef struct {
     uint8_t last_reboot_result_len;
     uint8_t last_stack_margin_len;
     uint8_t last_param_len;
+    uint8_t last_test_trip_result_len;
 
     /* HW_ABSTRACTION.md "Still open", 2026-09-06: on-board ESP<->Pico link
      * reply latency, measured in safety_exchange() (safety_link_inbox.c)
@@ -1535,6 +1551,14 @@ typedef struct {
     uart_proto_message_t stashed_param;
     bool                 has_stashed_param;
     TickType_t           stashed_param_tick;
+
+    /* KILNLINK_TEST_TRIP_RESULT_CMD (0x2F) -- the reply to TEST_TRIP (0x2E,
+     * KILNLINK_PROTOCOL_VERSION 18). Same "always stashed, one caller
+     * (safety_link_send_test_trip()), serialized by xact_lock" pattern as
+     * stashed_stack_margin; the caller matches request_id after taking it. */
+    uart_proto_message_t stashed_test_trip_result;
+    bool                 has_stashed_test_trip_result;
+    TickType_t           stashed_test_trip_result_tick;
 
     safety_link_stats_t stats;
     /* Running sum backing stats.link_reply_us_mean -- kept outside
@@ -2743,6 +2767,38 @@ esp_err_t safety_link_get_ct_cal(SafetyLinkClass *link, uint8_t *out, size_t out
  * reading), ESP_FAIL if a reply arrived but failed to decode, ESP_OK on
  * success. */
 esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_margin_t *out);
+
+/* SAFETY_CMD TEST_TRIP (0x2E) / TEST_TRIP_RESULT (0x2F reply), KILNLINK_
+ * PROTOCOL_VERSION 18 -- docs/TEST_TRIP_PLAN.md sec 5.1. Asks the Pico to
+ * latch SAFETY_TRIP_TEST (reason 4, mask 0x0008). It can only ever CAUSE a
+ * trip. Same xact_lock / stale-stash-clear / looped-drain shape as
+ * safety_link_get_stack_margin().
+ *
+ * Local refusals, nothing is sent (*out_outcome says which):
+ *   no/stale DIAG (> SAFETY_LINK_STALE_MS)         -> ESP_ERR_INVALID_STATE, LOCAL_STALE
+ *   cached DIAG not the 32-byte form (Pico < 18)   -> ESP_ERR_NOT_SUPPORTED, LOCAL_PEER_TOO_OLD
+ *   cached DIAG already TRIPPED                    -> ESP_ERR_INVALID_STATE, LOCAL_ALREADY_TRIPPED
+ * No reply within SAFETY_LINK_REPLY_TIMEOUT_MS      -> ESP_ERR_TIMEOUT, NO_REPLY
+ * A decoded reply echoing our request_id            -> ESP_OK, the wire outcome.
+ * The Pico boot_id sent is the cached DIAG's (never FW_VERSION's), so a Pico
+ * that rebooted since that DIAG refuses with REFUSED_BOOT_ID. */
+typedef enum {
+    SAFETY_LINK_TEST_TRIP_ACCEPTED = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED,
+    SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED,
+    SAFETY_LINK_TEST_TRIP_REFUSED_BOOT_ID = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BOOT_ID,
+    SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_PEER_VERSION,
+    SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT,
+    SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_UPDATING,
+    SAFETY_LINK_TEST_TRIP_REFUSED_BAD_FRAME = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BAD_FRAME,
+    SAFETY_LINK_TEST_TRIP_DUPLICATE = KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE,
+    SAFETY_LINK_TEST_TRIP_LOCAL_STALE = 100,
+    SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD = 101,
+    SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED = 102,
+    SAFETY_LINK_TEST_TRIP_NO_REPLY = 103,
+} safety_link_test_trip_outcome_t;
+
+esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_trip_outcome_t *out_outcome,
+                                      uint8_t *out_trip_seq);
 
 /* SAFETY_CMD_GET_PARAM (0x23) / SAFETY_CMD_PARAM (0x1E reply -- kilnlink_
  * param.h's KILNLINK_PARAM_CMD), KILNLINK_PROTOCOL_VERSION 7 -- docs/

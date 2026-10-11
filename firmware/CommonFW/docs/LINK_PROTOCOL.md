@@ -536,7 +536,10 @@ the ESP is >= 17 (learned from the ESP's ANNOUNCE), not on the ESP knowing the
 Pico is; while the gate blocks, the ESP re-sends its ANNOUNCE
 (`reannounce_pending`) so the Pico moves to the 31-byte DIAG.
 
-Both lengths decode on both sides, so `KILNLINK_MIN_COMPATIBLE` stays 7. The
+The old and new lengths are each accepted only by a peer that knows them (the exact length
+sets are {30,31} before protocol 17 and {30,31,32} DIAG / {3,4,5} CLEAR_TRIP from 18); what keeps
+`KILNLINK_MIN_COMPATIBLE` at 7 is that each longer form is only sent to a peer that announced the
+version that introduced it. The
 PC wire is unchanged: `safety_clear_trip` still sends no mask or seq, and the
 ESP fills both from its own cached DIAG.
 
@@ -845,8 +848,14 @@ request-triggered (only an 18 ESP sends `0x2E`), so it needs no peer-version
 gate, like `REBOOT_RESULT`.
 
 **Version 18 compatibility.** Both new frames and both extended lengths are
-additive. An old peer ignores an unknown opcode, and DIAG/CLEAR_TRIP decode all
-lengths, so `KILNLINK_MIN_COMPATIBLE` stays 7. Fallback for a clear from a peer
+additive on the wire, but an old peer does NOT tolerate the new lengths: a 17 peer
+rejects the 32-byte DIAG and the 5-byte CLEAR_TRIP (exact length sets) and drops
+the unknown opcodes 0x2E/0x2F. `KILNLINK_MIN_COMPATIBLE` stays 7 because every
+new length and opcode is sent only to a peer that announced >= 18. Note that
+trip_mask bit 3 is `SAFETY_TRIP_TEST` while warn_mask bit 3 is S4: the two masks
+do not share a bit-to-guard table. A peer that announces 18 but predates the
+TEST_TRIP handler (a WP1-only image) never answers 0x2E; the ESP reports that as
+a timeout ("peer did not answer; it may predate TEST_TRIP"), never as success. Fallback for a clear from a peer
 of unknown version (owner decision 2026-10-10): refused until `ANNOUNCE_VERSION`
 arrives; after 30 s with no ANNOUNCE the legacy form is accepted. These are Pico
 behaviours (WP2), not codec behaviour.

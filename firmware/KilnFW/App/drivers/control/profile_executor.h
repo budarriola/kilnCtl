@@ -188,6 +188,7 @@ static inline const char *profile_executor_safety_trip_words(uint8_t reason)
     case 1:  return "chamber over absolute temperature limit (S1)";
     case 2:  return "chamber over setpoint for too long (S2)";
     case 3:  return "relay/contactor stuck on, no heat commanded (S3)";
+    case 4:  return "safety test trip requested by administrator (TEST)";
     case 5:  return "safety thermocouple reading invalid (S5)";
     case 6:  return "main controller (ESP) reported a fault (S6a)";
     case 7:  return "safety link to main controller went silent (S6b)";

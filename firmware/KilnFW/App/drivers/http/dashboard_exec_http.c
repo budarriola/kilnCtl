@@ -16,6 +16,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "boot_guard.h"
 #include "danger_mode.h"
 #include "dashboard_json.h"
 #include "http_form.h"
@@ -915,5 +916,98 @@ esp_err_t safety_clear_trip_post_handler(httpd_req_t *req)
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"send failed\"}");
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
+/* POST /api/safety/test_trip (ROUTE_TIER_ADMIN), docs/TEST_TRIP_PLAN.md sec 5.2.
+ * Asks the Pico to latch SAFETY_TRIP_TEST (reason 4, mask 1<<(4-1)). It can
+ * only ever CAUSE a trip: nothing here clears, masks or blinds one. Body must
+ * carry confirm=1. Deliberately NOT mode-gated (a test trip during a firing is
+ * the point of the test and a trip is the safe direction); the CSRF guard in
+ * the route table still applies. The Pico enforces the 10 s rate limit; the
+ * outcome it reports is mapped to a status here, never folded into a generic
+ * error. */
+#define TEST_TRIP_REASON 4u
+
+static esp_err_t test_trip_reply(httpd_req_t *req, const char *status, const char *json)
+{
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+esp_err_t safety_test_trip_post_handler(httpd_req_t *req)
+{
+    char body[33] = {0};
+    if (req->content_len > 0 && req->content_len <= 32) {
+        size_t received = 0;
+        while (received < (size_t)req->content_len) {
+            int ret = httpd_req_recv(req, body + received, req->content_len - received);
+            if (ret <= 0) {
+                body[0] = '\0';
+                break;
+            }
+            received += (size_t)ret;
+        }
+        body[received < sizeof(body) ? received : sizeof(body) - 1u] = '\0';
+    }
+    char confirm[4] = {0};
+    bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 &&
+                     strcmp(confirm, "1") == 0;
+    if (!confirmed) {
+        return test_trip_reply(req, "400 Bad Request", "{\"ok\":false,\"error\":\"confirm_required\"}");
+    }
+    if (boot_guard_is_recovery_mode()) {
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"recovery_mode\"}");
+    }
+    if (!s_dash.safety) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "safety link not wired up");
+        return ESP_OK;
+    }
+
+    safety_link_test_trip_outcome_t outcome = SAFETY_LINK_TEST_TRIP_NO_REPLY;
+    uint8_t trip_seq = 0u;
+    esp_err_t err = safety_link_send_test_trip(s_dash.safety, &outcome, &trip_seq);
+
+    char json[160];
+    if (err == ESP_ERR_NOT_SUPPORTED || outcome == SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD ||
+        (err == ESP_OK && outcome == SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION)) {
+        bool known = false;
+        uint16_t peer = 0u;
+        (void)safety_link_get_peer_version_status(s_dash.safety, &known, NULL, &peer, NULL);
+        snprintf(json, sizeof(json), "{\"ok\":false,\"outcome\":\"pico_protocol_too_old\",\"pico_protocol\":%u}",
+                 (unsigned)(known ? peer : 0u));
+        return test_trip_reply(req, "501 Not Implemented", json);
+    }
+    if (err == ESP_ERR_TIMEOUT || outcome == SAFETY_LINK_TEST_TRIP_NO_REPLY ||
+        outcome == SAFETY_LINK_TEST_TRIP_LOCAL_STALE) {
+        const char *name = (outcome == SAFETY_LINK_TEST_TRIP_LOCAL_STALE) ? "link_stale" : "no_reply";
+        snprintf(json, sizeof(json),
+                 "{\"ok\":false,\"outcome\":\"%s\",\"detail\":\"check GET /api/safety status\"}", name);
+        return test_trip_reply(req, "503 Service Unavailable", json);
+    }
+    if (outcome == SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED ||
+        (err == ESP_OK && outcome == SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED)) {
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"already_tripped\"}");
+    }
+    if (err != ESP_OK) {
+        return test_trip_reply(req, "500 Internal Server Error", "{\"ok\":false,\"error\":\"send failed\"}");
+    }
+    switch (outcome) {
+    case SAFETY_LINK_TEST_TRIP_ACCEPTED:
+        snprintf(json, sizeof(json),
+                 "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"trip_reason\":%u,\"trip_mask\":%u}",
+                 (unsigned)trip_seq, TEST_TRIP_REASON, (unsigned)(1u << (TEST_TRIP_REASON - 1u)));
+        return test_trip_reply(req, "200 OK", json);
+    case SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"rate_limited\"}");
+    case SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"updating\"}");
+    case SAFETY_LINK_TEST_TRIP_REFUSED_BOOT_ID:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"boot_id_changed\"}");
+    case SAFETY_LINK_TEST_TRIP_DUPLICATE:
+        return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"duplicate\"}");
+    default:
+        return test_trip_reply(req, "502 Bad Gateway", "{\"ok\":false,\"outcome\":\"bad_frame\"}");
+    }
 }
 

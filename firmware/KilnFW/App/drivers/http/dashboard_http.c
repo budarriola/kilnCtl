@@ -851,6 +851,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
+    static const httpd_uri_t safety_test_trip_uri = {
+        .uri = "/api/safety/test_trip", .method = HTTP_POST, .handler = safety_test_trip_post_handler,
+    };
     static const httpd_uri_t safety_log_level_uri = {
         .uri = "/api/safety/log_level", .method = HTTP_POST, .handler = safety_log_level_post_handler,
     };
@@ -922,6 +925,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = kiln_http_register(server, &safety_clear_trip_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/clear_trip) failed: %s", esp_err_to_name(err));
+    }
+    err = kiln_http_register(server, &safety_test_trip_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/test_trip) failed: %s", esp_err_to_name(err));
     }
     err = kiln_http_register(server, &safety_log_level_uri);
     if (err != ESP_OK) {

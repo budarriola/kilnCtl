@@ -292,6 +292,7 @@ static const route_tier_entry_t kRouteTierTable[] = {
 
     /* Safety and calibration */
     ROUTE_TIER("/api/safety/clear_trip", HTTP_POST, ROUTE_TIER_ADMIN),
+    ROUTE_TIER("/api/safety/test_trip", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning", HTTP_POST, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning", HTTP_GET, ROUTE_TIER_ADMIN),
     ROUTE_TIER("/api/safety/commissioning/bench_preset", HTTP_POST, ROUTE_TIER_ADMIN),

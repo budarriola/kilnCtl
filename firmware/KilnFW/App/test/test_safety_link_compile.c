@@ -410,6 +410,8 @@ static uart_proto_message_t s_stub_broadcast_leading_msg;
 static unsigned s_stub_broadcast_count = 0;
 static uint8_t s_stub_broadcast_cmd[STUB_BROADCAST_LOG_MAX];
 static uint8_t s_stub_broadcast_last_payload[64];
+static bool s_stub_patch_request_id;
+static uint8_t s_stub_request_id_delta;
 static size_t s_stub_broadcast_last_len = 0;
 esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device_t dst_device,
                                         uint8_t dst_task, uint8_t src_task,
@@ -436,6 +438,10 @@ esp_err_t uart_protocol_send_broadcast(uart_protocol_t *proto, uart_proto_device
       s_fake_inbox_auto_push_armed = true;
   }
   if (s_stub_broadcast_reply_push) {
+      if (s_stub_patch_request_id && length == KILNLINK_TEST_TRIP_LEN) {
+          /* TEST_TRIP_RESULT reply: byte1 = the request_id just sent (+ delta). */
+          s_stub_broadcast_reply_msg.payload[1] = (uint8_t)(payload[2] + s_stub_request_id_delta);
+      }
       fake_time_advance_us(s_stub_broadcast_advance_us);
       fake_inbox_push(&s_stub_broadcast_reply_msg);
   }
@@ -2199,6 +2205,8 @@ static const struct kilnlink_compat_frame s_compat_frames[] = {
      "12->13: new Pico -> ESP frame, SAFETY_CMD_STACK_MARGIN (0x2C), reply to "
      "SAFETY_CMD_GET_STACK_MARGIN (0x2B) -- KILNLINK_MIN_COMPATIBLE NOT raised "
      "alongside this bump, a pre-13 Pico simply never sends 0x2C"},
+    {"TEST_TRIP_RESULT (0x2F)", KILNLINK_TEST_TRIP_RESULT_CMD, 18,
+     "17->18: new Pico -> ESP frame, reply to TEST_TRIP (0x2E); KILNLINK_MIN_COMPATIBLE NOT raised"},
 };
 #define COMPAT_FRAME_COUNT (sizeof(s_compat_frames) / sizeof(s_compat_frames[0]))
 
@@ -3012,8 +3020,8 @@ static void test_m4_clear_trip_echoes_diag_trip_seq(void)
     TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
                "after a 30-byte DIAG the clear is the 3-byte legacy form");
 
-    // Neither 29 nor 32 bytes is a DIAG; the cache keeps the last good one.
-    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2 + 1u, 0x11u, false);
+    // Neither 29 nor 33 bytes is a DIAG; the cache keeps the last good one.
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V3 + 1u, 0x11u, false);
     m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN - 1u, 0x11u, false);
     TEST_CHECK(link.cached.diag_trip_seq_known == false,
                "rejected DIAG frames do not touch the cached trip_seq");
@@ -3046,6 +3054,118 @@ static void test_low1_pico_reboot_forgets_cached_diag_trip_seq(void)
     TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear still sends");
     TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN,
                "the clear is the unbound form, never the stale seq-1 bound form");
+}
+
+// TEST_TRIP WP3 (docs/TEST_TRIP_PLAN.md sec 2.2): 32-byte DIAG, V3 CLEAR_TRIP, TEST_TRIP.
+static void v3_apply_diag(SafetyLinkClass *link, uint8_t state, uint8_t trip_seq, uint8_t boot_id)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    set_diag_frame(diag.payload, state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 4u : 0u, state);
+    diag.payload[4] = state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 0x08u : 0u;
+    diag.payload[30] = trip_seq;
+    diag.payload[31] = boot_id;
+    diag.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &diag) == true, "32-byte DIAG decodes");
+}
+
+static void test_v3_diag_caches_boot_id_and_clear_is_bound(void)
+{
+    TEST_SECTION("protocol 18 -- 32-byte DIAG caches pico_boot_id; CLEAR_TRIP is the 5-byte "
+                 "bound form only then; 30/31-byte DIAG forgets it; Pico reboot forgets it");
+    SafetyLinkClass link = boot_clear_test_setup();
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 0x2Bu, 0x5Au);
+    TEST_CHECK(link.cached.diag_boot_id_known && link.cached.diag_boot_id == 0x5Au, "boot id cached");
+    TEST_CHECK(link.cached.diag_trip_seq_known && link.cached.diag_trip_seq == 0x2Bu, "trip_seq cached");
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V3,
+               "clear is the 5-byte V3 form");
+    TEST_CHECK(s_stub_broadcast_last_payload[3] == 0x2Bu && s_stub_broadcast_last_payload[4] == 0x5Au,
+               "V3 clear carries trip_seq then pico_boot_id");
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 0x2Bu, true);
+    TEST_CHECK(link.cached.diag_boot_id_known == false, "31-byte DIAG forgets the boot id");
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN_V2, "31-byte DIAG gives the 4-byte clear");
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN, 0x2Bu, true);
+    TEST_CHECK(safety_link_send_clear_trip(&link) == ESP_OK, "clear sends");
+    TEST_CHECK(s_stub_broadcast_last_len == KILNLINK_CLEAR_TRIP_LEN, "30-byte DIAG gives the 3-byte clear");
+
+    low_fw_version(&link, 42u, 18u);
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    low_fw_version(&link, 43u, 18u); // boot_id change = Pico reboot
+    TEST_CHECK(link.cached.diag_boot_id_known == false && link.cached.diag_boot_id == 0u,
+               "Pico reboot clears the cached boot id");
+}
+
+static void tt_set_reply(uint8_t outcome, uint8_t trip_seq)
+{
+    memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
+    s_stub_broadcast_reply_msg.payload[0] = KILNLINK_TEST_TRIP_RESULT_CMD;
+    s_stub_broadcast_reply_msg.payload[2] = outcome;
+    s_stub_broadcast_reply_msg.payload[3] = trip_seq;
+    s_stub_broadcast_reply_msg.length = KILNLINK_TEST_TRIP_RESULT_LEN;
+    s_stub_broadcast_reply_push = true;
+    s_stub_broadcast_advance_us = 500;
+    s_stub_patch_request_id = true;
+    s_stub_request_id_delta = 0u;
+}
+
+static void test_send_test_trip(void)
+{
+    TEST_SECTION("safety_link_send_test_trip -- local refusals send nothing; happy path maps "
+                 "outcome+trip_seq; request_id mismatch and silence are timeouts");
+    safety_link_test_trip_outcome_t oc;
+    uint8_t seq;
+    SafetyLinkClass link = boot_clear_test_setup();
+    fake_inbox_reset();
+    fake_time_reset_all();
+
+    unsigned base = s_stub_broadcast_count;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_STALE, "no DIAG -> LOCAL_STALE");
+    TEST_CHECK(s_stub_broadcast_count == base, "stale sends nothing");
+
+    m4_apply_diag(&link, SAFETY_LINK_DIAG_FRAME_LEN_V2, 1u, true);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_NOT_SUPPORTED &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD, "no boot id -> LOCAL_PEER_TOO_OLD");
+    TEST_CHECK(s_stub_broadcast_count == base, "too-old sends nothing");
+
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_TRIPPED, 1u, 0x5Au);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_INVALID_STATE &&
+                   oc == SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED, "tripped -> LOCAL_ALREADY_TRIPPED");
+    TEST_CHECK(s_stub_broadcast_count == base, "tripped sends nothing");
+
+    v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_ARMED, 1u, 0x5Au);
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 9u);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK, "accepted call returns ESP_OK");
+    TEST_CHECK(oc == SAFETY_LINK_TEST_TRIP_ACCEPTED && seq == 9u, "outcome ACCEPTED, trip_seq 9");
+    TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_TEST_TRIP_LEN &&
+                   s_stub_broadcast_last_payload[0] == KILNLINK_TEST_TRIP_CMD &&
+                   s_stub_broadcast_last_payload[1] == 0x5Au &&
+                   s_stub_broadcast_last_payload[3] == KILNLINK_TEST_TRIP_MAGIC,
+               "request names the cached boot id and carries the magic");
+
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT, 0u);
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK &&
+                   oc == SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, "rate-limit outcome passed through");
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_fake_inbox_advance_time_on_empty = true;
+    tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 9u);
+    s_stub_request_id_delta = 1u;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_TIMEOUT &&
+                   oc == SAFETY_LINK_TEST_TRIP_NO_REPLY, "request_id mismatch -> timeout, not ACCEPTED");
+
+    fake_inbox_reset();
+    fake_time_reset_all();
+    s_stub_patch_request_id = false;
+    s_stub_broadcast_reply_push = false;
+    s_fake_inbox_advance_time_on_empty = true;
+    TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_ERR_TIMEOUT, "no reply -> timeout");
+    fake_inbox_reset();
 }
 
 static void test_diag_reannounce_is_bounded(void)
@@ -3511,6 +3631,8 @@ int main(void)
     test_low1_pico_reboot_forgets_cached_diag_trip_seq();
     test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
     test_diag_reannounce_is_bounded();
+    test_v3_diag_caches_boot_id_and_clear_is_bound();
+    test_send_test_trip();
     test_low4_link_down_invalidates_uptime_baseline();
     test_reboot_counted_once_diag_before_fw_version();
     test_long_outage_repeat_boot_id_reboot_detected();

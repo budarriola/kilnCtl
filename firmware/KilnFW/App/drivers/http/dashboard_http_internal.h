@@ -25,7 +25,8 @@
  *                                 /api/history.csv; POST
  *                                 /api/profile_exec/{start,stop,pause,
  *                                 resume,ack_last_run}, POST
- *                                 /api/safety/clear_trip
+ *                                 /api/safety/clear_trip,
+ *                                 /api/safety/test_trip
  *   dashboard_autotune_http.c -- GET /api/autotune, /api/autotune/matrix,
  *                                 /api/autotune/trace.csv; POST
  *                                 /api/autotune/{start,abort,accept}
@@ -91,6 +92,7 @@ esp_err_t profile_exec_pause_post_handler(httpd_req_t *req);
 esp_err_t profile_exec_resume_post_handler(httpd_req_t *req);
 esp_err_t profile_exec_ack_last_run_post_handler(httpd_req_t *req);
 esp_err_t safety_clear_trip_post_handler(httpd_req_t *req);
+esp_err_t safety_test_trip_post_handler(httpd_req_t *req);
 
 /* ---- dashboard_autotune_http.c -------------------------------------------- */
 esp_err_t autotune_status_get_handler(httpd_req_t *req);

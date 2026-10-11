@@ -61,6 +61,8 @@
 #include "kilnlink/kilnlink_set_param.h"
 #include "kilnlink/kilnlink_version.h"
 #include "kilnlink/kilnlink_stack_margin.h"
+#include "kilnlink/kilnlink_test_trip.h"
+#include "kilnlink/kilnlink_test_trip_result.h"
 #include "kilnlink/kilnlink_get_stack_margin.h"
 
 /* 2026-09-15 (Opus review F3): removed a dead zones_config_accessors.h
@@ -121,6 +123,10 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
      * both describe the one DIAG frame. */
     bool trip_seq_known = link->cached.diag_trip_seq_known;
     uint8_t trip_seq = link->cached.diag_trip_seq;
+    /* Protocol 18 (F6): bind the clear to the Pico boot only when the SAME
+     * cached DIAG carried pico_boot_id (32-byte form). */
+    bool boot_id_known = link->cached.diag_boot_id_known;
+    uint8_t boot_id = link->cached.diag_boot_id;
     uint8_t diag_state = link->cached.diag_state;
     uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
     safety_unlock(link);
@@ -145,8 +151,10 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
         .trip_mask = trip_mask,
         .has_trip_seq = trip_seq_known,
         .trip_seq = trip_seq,
+        .has_boot_id = boot_id_known && trip_seq_known,
+        .pico_boot_id = boot_id,
     };
-    uint8_t payload[KILNLINK_CLEAR_TRIP_LEN_V2];
+    uint8_t payload[KILNLINK_CLEAR_TRIP_LEN_V3];
     kilnlink_clear_trip_status_t status = KILNLINK_CLEAR_TRIP_OK;
     size_t len = kilnlink_clear_trip_encode(&msg, payload, sizeof(payload), &status);
     if (len == 0) {
@@ -154,7 +162,10 @@ esp_err_t safety_link_send_clear_trip(SafetyLinkClass *link)
         return ESP_FAIL;
     }
 
-    if (trip_seq_known) {
+    if (msg.has_boot_id) {
+        ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X trip_seq=%u boot_id=%u", trip_mask,
+                 (unsigned)trip_seq, (unsigned)boot_id);
+    } else if (trip_seq_known) {
         ESP_LOGI(TAG, "clear_trip: sending, trip_mask=0x%04X trip_seq=%u", trip_mask,
                  (unsigned)trip_seq);
     } else {
@@ -993,6 +1004,138 @@ esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_mar
         return ESP_FAIL;
     }
 
+    return ESP_OK;
+}
+
+/* TEST_TRIP (0x2E) / TEST_TRIP_RESULT (0x2F) -- contract in safety_link.h. */
+static uint8_t s_test_trip_request_id; /* guarded by xact_lock; wraps, dedup key only */
+
+esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_trip_outcome_t *out_outcome,
+                                      uint8_t *out_trip_seq)
+{
+    safety_link_test_trip_outcome_t local_outcome = SAFETY_LINK_TEST_TRIP_NO_REPLY;
+    uint8_t local_seq = 0u;
+    if (!out_outcome) {
+        out_outcome = &local_outcome;
+    }
+    if (!out_trip_seq) {
+        out_trip_seq = &local_seq;
+    }
+    *out_outcome = SAFETY_LINK_TEST_TRIP_NO_REPLY;
+    *out_trip_seq = 0u;
+    if (!link) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    bool diag_known = link->cached.diag_ever_received;
+    bool boot_id_known = link->cached.diag_boot_id_known;
+    uint8_t boot_id = link->cached.diag_boot_id;
+    uint8_t diag_state = link->cached.diag_state;
+    uint32_t diag_age_ms = diag_known ? safety_elapsed_ms(link->cached_tick) : 0;
+    safety_unlock(link);
+
+    if (!diag_known || diag_age_ms > SAFETY_LINK_STALE_MS) {
+        ESP_LOGW(TAG, "test_trip: refused locally, no fresh DIAG (known=%d age=%" PRIu32 "ms)",
+                 (int)diag_known, diag_age_ms);
+        *out_outcome = SAFETY_LINK_TEST_TRIP_LOCAL_STALE;
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!boot_id_known) {
+        ESP_LOGW(TAG, "test_trip: refused locally, cached DIAG has no pico_boot_id (Pico older than protocol 18)");
+        *out_outcome = SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD;
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        ESP_LOGW(TAG, "test_trip: refused locally, the safety processor is already tripped");
+        *out_outcome = SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED;
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGE(TAG, "test_trip: timed out waiting for the safety link transaction lock");
+        return ESP_ERR_TIMEOUT;
+    }
+    uint8_t request_id = ++s_test_trip_request_id;
+
+    kilnlink_test_trip_t req = { .pico_boot_id = boot_id, .request_id = request_id,
+                                 .magic = KILNLINK_TEST_TRIP_MAGIC };
+    uint8_t request[KILNLINK_TEST_TRIP_LEN];
+    kilnlink_test_trip_status_t req_status = KILNLINK_TEST_TRIP_OK;
+    size_t req_len = kilnlink_test_trip_encode(&req, request, sizeof(request), &req_status);
+    if (req_len == 0) {
+        ESP_LOGE(TAG, "test_trip: encode failed (status=%d)", (int)req_status);
+        xSemaphoreGive(link->xact_lock);
+        return ESP_FAIL;
+    }
+
+    uart_proto_message_t stale;
+    (void)safety_take_stashed_test_trip_result(link, &stale);
+    (void)safety_drain_inbox(link, 0);
+    if (safety_lock(link)) {
+        link->stats.frames_sent++;
+        safety_unlock(link);
+    }
+
+    esp_err_t err = uart_protocol_send_broadcast(&link->proto, UART_PROTO_DEVICE_SAFETY,
+                                                  UART_TASK_ID_SAFETY, UART_TASK_ID_SAFETY,
+                                                  request, req_len);
+    if (err != ESP_OK) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        xSemaphoreGive(link->xact_lock);
+        return err;
+    }
+
+    /* Looped drain across the whole budget, same reasoning as
+     * safety_link_get_stack_margin(): periodic STATUS/DIAG pushes share the
+     * inbox, so one wait_ms call can end early. A reply whose request_id is
+     * not ours (a late answer to an older request) is dropped and we keep
+     * waiting. */
+    kilnlink_test_trip_result_t result = {0};
+    bool matched = false;
+    int64_t wait_started_us = (int64_t)hal_time_now_us();
+    for (;;) {
+        int64_t elapsed_ms = ((int64_t)hal_time_now_us() - wait_started_us) / 1000;
+        int32_t remaining_ms = (int32_t)SAFETY_LINK_REPLY_TIMEOUT_MS - (int32_t)elapsed_ms;
+        if (remaining_ms < 0) {
+            remaining_ms = 0;
+        }
+        if (remaining_ms < (int32_t)portTICK_PERIOD_MS) {
+            remaining_ms = 0;
+        }
+        (void)safety_drain_inbox(link, (uint32_t)remaining_ms);
+        uart_proto_message_t reply;
+        if (safety_take_stashed_test_trip_result(link, &reply) &&
+            kilnlink_test_trip_result_decode(reply.payload, reply.length, &result) ==
+                KILNLINK_TEST_TRIP_RESULT_OK &&
+            result.request_id == request_id) {
+            matched = true;
+        }
+        if (matched || remaining_ms == 0) {
+            break;
+        }
+    }
+    xSemaphoreGive(link->xact_lock);
+
+    if (!matched) {
+        if (safety_lock(link)) {
+            link->stats.timeouts++;
+            safety_unlock(link);
+        }
+        ESP_LOGW(TAG, "test_trip: no matching TEST_TRIP_RESULT within %ums",
+                 (unsigned)SAFETY_LINK_REPLY_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+    *out_outcome = (safety_link_test_trip_outcome_t)result.outcome;
+    *out_trip_seq = result.trip_seq;
+    ESP_LOGI(TAG, "test_trip: outcome=%u trip_seq=%u", (unsigned)result.outcome, (unsigned)result.trip_seq);
     return ESP_OK;
 }
 

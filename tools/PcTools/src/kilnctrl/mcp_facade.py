@@ -157,6 +157,7 @@ KEYWORDS = {
     "safety_get_status": ("rp2040", "guard", "trip", "interlock", "estop",
                           "doing", "state", "overview", "processor"),
     "safety_clear_trip": ("reset", "latch", "unlatch"),
+    "safety_test_trip": ("test trip", "simulate", "inject", "exercise", "drill"),
     "safety_get_link_stats": ("uart", "isolated", "frames", "dropped"),
     "safety_get_diag": ("rp2040", "pico", "diag", "boot reason", "reset reason",
                         "watchdog", "brownout", "power-on", "reboot", "guard state",

@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, safety_log_level_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, dashboard_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, safety_log_level_http_client, safety_test_trip_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -368,6 +368,70 @@ def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
     head = "STILL LATCHED -- " if still else ""
     return (f"{head}{sent}{nothing}\nread-back: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
             f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if still else 'cleared'})")
+
+_TEST_TRIP_REASON = 4  # SAFETY_TRIP_TEST
+
+
+@_core._tool()
+def safety_test_trip(confirm: bool = False, host: Optional[str] = None) -> str:
+    """Ask the safety processor to latch a TEST trip (reason 4, SAFETY_TRIP_TEST).
+
+    Exercises the trip path end to end (POST /api/safety/test_trip, ADMIN tier,
+    kilnlink TEST_TRIP). It can only CAUSE a trip: this tool never clears one.
+    Clear it afterwards with safety_clear_trip() when ready. The Pico enforces a
+    10 s rate limit. Refuses unless confirm is exactly True, and refuses if the
+    safety processor is already tripped. Afterwards re-reads GET_DIAG and checks
+    trip_reason == 4 and trip_mask == 1 << (4 - 1). Reports trip_seq.
+
+    A Pico that predates TEST_TRIP answers 501 (protocol too old) or never
+    answers (503 no_reply: "peer did not answer; it may predate TEST_TRIP").
+    """
+    if confirm is not True:
+        return ("refused: safety_test_trip latches a real safety trip; pass confirm=True exactly. "
+                "Nothing was sent.")
+    try:
+        before = _srv._safety.get_diag()
+    except SafetyQueryError as exc:
+        return f"refused: could not read GET_DIAG before the test trip ({exc}) -- state UNKNOWN, nothing sent"
+    if not before.ever_received:
+        return "refused: no DIAG received yet (safety link not up); nothing sent"
+    if before.trip_reason or before.trip_mask:
+        return (f"refused: safety processor is already tripped (trip_reason={before.trip_reason} "
+                f"trip_mask=0x{before.trip_mask:04X}); nothing sent")
+    from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import
+
+    resolved = _ota_resolve_host(host)
+    try:
+        status, body = safety_test_trip_http_client.post_test_trip(resolved)
+    except safety_test_trip_http_client.SafetyTestTripHttpError as exc:
+        return f"error: test trip POST failed (host={resolved}): {exc} -- state UNKNOWN, check safety_get_status()"
+    outcome = body.get("outcome") or body.get("error") or "unknown"
+    if status != 200 or not body.get("ok"):
+        if outcome == "no_reply":
+            return (f"NOT CONFIRMED -- HTTP {status} no_reply: peer did not answer; it may predate TEST_TRIP "
+                    f"(or the link is down). Check safety_get_status().")
+        if outcome == "pico_protocol_too_old":
+            return (f"refused -- HTTP {status} pico_protocol_too_old (pico_protocol="
+                    f"{body.get('pico_protocol')}): the safety processor predates TEST_TRIP; nothing latched")
+        return f"refused -- HTTP {status} {outcome}: {body}; no test trip latched by this call"
+    trip_seq = body.get("trip_seq")
+    expected = devices.safety_trip_mask_for_reason(_TEST_TRIP_REASON)
+    deadline = time.monotonic() + _CLEAR_TRIP_READBACK_WINDOW_S
+    while True:
+        try:
+            after = _srv._safety.get_diag()
+        except SafetyQueryError as exc:
+            return (f"UNVERIFIED -- board accepted (trip_seq={trip_seq}) but read-back failed ({exc}); "
+                    f"check safety_get_status()")
+        if after.trip_reason == _TEST_TRIP_REASON or time.monotonic() >= deadline:
+            break
+        time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
+    if after.trip_reason != _TEST_TRIP_REASON or after.trip_mask != expected:
+        return (f"FAILED VERIFY -- board accepted (trip_seq={trip_seq}) but read-back shows "
+                f"trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X}, expected reason "
+                f"{_TEST_TRIP_REASON} mask 0x{expected:04X}")
+    return (f"ok - test trip latched: trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X} "
+            f"trip_seq={trip_seq} (host={resolved}). Not cleared; use safety_clear_trip().")
 
 
 @_core._tool()

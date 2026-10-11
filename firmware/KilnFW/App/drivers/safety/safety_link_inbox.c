@@ -236,6 +236,10 @@ static void safety_count_cmd_byte(SafetyLinkClass *link, uint8_t cmd, uint8_t le
         link->stats.cmd_stack_margin_count++;
         link->stats.last_stack_margin_len = len;
         break;
+    case KILNLINK_TEST_TRIP_RESULT_CMD:
+        link->stats.cmd_test_trip_result_count++;
+        link->stats.last_test_trip_result_len = len;
+        break;
     case KILNLINK_PARAM_CMD:
         link->stats.cmd_param_count++;
         link->stats.last_param_len = len;
@@ -423,6 +427,16 @@ bool safety_drain_inbox_ex(SafetyLinkClass *link, uint32_t wait_ms, bool want_st
                     link->stashed_stack_margin = msg;
                     link->has_stashed_stack_margin = true;
                     link->stashed_stack_margin_tick = xTaskGetTickCount();
+                    safety_unlock(link);
+                }
+                break;
+            case KILNLINK_TEST_TRIP_RESULT_CMD: /* 0x2F -- the reply to TEST_TRIP (0x2E). ALWAYS
+                                                 * stashed: one caller (safety_link_send_test_trip()),
+                                                 * serialized by xact_lock, which matches request_id. */
+                if (msg.length == KILNLINK_TEST_TRIP_RESULT_LEN && safety_lock(link)) {
+                    link->stashed_test_trip_result = msg;
+                    link->has_stashed_test_trip_result = true;
+                    link->stashed_test_trip_result_tick = xTaskGetTickCount();
                     safety_unlock(link);
                 }
                 break;
@@ -652,6 +666,27 @@ bool safety_take_stashed_reboot_result(SafetyLinkClass *link, uart_proto_message
             } else {
                 *out = link->stashed_reboot_result;
                 link->has_stashed_reboot_result = false;
+                took = true;
+            }
+        }
+        safety_unlock(link);
+    }
+    return took;
+}
+
+/* Takes the stashed TEST_TRIP_RESULT frame, same age-ceiling/take-once
+ * contract as safety_take_stashed_stack_margin() below. Consumed only by
+ * safety_link_send_test_trip(). */
+bool safety_take_stashed_test_trip_result(SafetyLinkClass *link, uart_proto_message_t *out)
+{
+    bool took = false;
+    if (safety_lock(link)) {
+        if (link->has_stashed_test_trip_result) {
+            if (safety_elapsed_ms(link->stashed_test_trip_result_tick) > SAFETY_STASHED_PAGE_MAX_AGE_MS) {
+                link->has_stashed_test_trip_result = false;
+            } else {
+                *out = link->stashed_test_trip_result;
+                link->has_stashed_test_trip_result = false;
                 took = true;
             }
         }

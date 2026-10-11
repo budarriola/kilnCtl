@@ -56,6 +56,32 @@ bool profile_executor_pause(void) { f_pause_calls++; return f_pause_result; }
 bool profile_executor_resume(void) { f_resume_calls++; return f_resume_result; }
 bool run_state_acknowledge(void) { f_ack_calls++; return f_ack_result; }
 
+/* ---- TEST_TRIP link fakes ---- */
+static int f_tt_calls;
+static esp_err_t f_tt_err;
+static safety_link_test_trip_outcome_t f_tt_outcome;
+static uint8_t f_tt_seq;
+static bool f_tt_recovery;
+static bool f_tt_peer_known;
+static uint16_t f_tt_peer;
+esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_trip_outcome_t *out_outcome,
+                                     uint8_t *out_trip_seq)
+{
+    (void)link;
+    f_tt_calls++;
+    *out_outcome = f_tt_outcome;
+    *out_trip_seq = f_tt_seq;
+    return f_tt_err;
+}
+bool boot_guard_is_recovery_mode(void) { return f_tt_recovery; }
+esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *known, bool *a, uint16_t *proto, uint16_t *b)
+{
+    (void)link; (void)a; (void)b;
+    *known = f_tt_peer_known;
+    *proto = f_tt_peer;
+    return ESP_OK;
+}
+
 static bool f_danger;
 bool danger_mode_active(void) { return f_danger; }
 bool danger_mode_blocks_start(void) { return f_danger; }
@@ -241,8 +267,60 @@ static void test_stop_pause_resume(void)
     TEST_CHECK(post_ok(profile_exec_stop_post_handler, "") == 200 && f_halt_calls == 2, "stop is never gated");
 }
 
+static int tt_post(const char *body, esp_err_t err, safety_link_test_trip_outcome_t outcome, uint8_t seq)
+{
+    static int dummy_link;
+    s_dash.safety = (SafetyLinkClass *)&dummy_link;
+    f_tt_calls = 0;
+    f_tt_err = err;
+    f_tt_outcome = outcome;
+    f_tt_seq = seq;
+    return post_ok(safety_test_trip_post_handler, body);
+}
+
+static void test_safety_test_trip(void)
+{
+    TEST_SECTION("POST /api/safety/test_trip: confirm gate, recovery refusal, outcome-to-status mapping");
+    reset();
+    f_tt_recovery = false;
+    f_tt_peer_known = true;
+    f_tt_peer = 17u;
+    TEST_CHECK(tt_post("", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 400 && f_tt_calls == 0,
+               "no confirm -> 400, link never asked");
+    TEST_CHECK(tt_post("confirm=0", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 400 && f_tt_calls == 0,
+               "confirm=0 -> 400, link never asked");
+    f_tt_recovery = true;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 409 && f_tt_calls == 0 &&
+                   strstr(s_reply, "recovery_mode") != NULL, "recovery mode -> 409, link never asked");
+    f_tt_recovery = false;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 && f_tt_calls == 1 &&
+                   strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"trip_reason\":4") != NULL &&
+                   strstr(s_reply, "\"trip_mask\":8") != NULL, "accepted -> 200 with seq, reason 4, mask 8");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, 0) == 409 &&
+                   strstr(s_reply, "rate_limited") != NULL, "rate limit -> 409");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED, 0) == 409 &&
+                   strstr(s_reply, "already_tripped") != NULL, "Pico already tripped -> 409");
+    TEST_CHECK(tt_post("confirm=1", ESP_ERR_INVALID_STATE, SAFETY_LINK_TEST_TRIP_LOCAL_ALREADY_TRIPPED, 0) == 409 &&
+                   strstr(s_reply, "already_tripped") != NULL, "local already tripped -> 409");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_BOOT_ID, 0) == 409 &&
+                   strstr(s_reply, "boot_id_changed") != NULL, "boot id changed -> 409");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING, 0) == 409 &&
+                   strstr(s_reply, "updating") != NULL, "updating -> 409");
+    TEST_CHECK(tt_post("confirm=1", ESP_ERR_NOT_SUPPORTED, SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD, 0) == 501 &&
+                   strstr(s_reply, "pico_protocol_too_old") != NULL && strstr(s_reply, "\"pico_protocol\":17") != NULL,
+               "old Pico (local) -> 501 naming its protocol");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION, 0) == 501,
+               "old Pico (Pico refused) -> 501");
+    TEST_CHECK(tt_post("confirm=1", ESP_ERR_TIMEOUT, SAFETY_LINK_TEST_TRIP_NO_REPLY, 0) == 503 &&
+                   strstr(s_reply, "no_reply") != NULL, "no reply -> 503");
+    TEST_CHECK(tt_post("confirm=1", ESP_ERR_INVALID_STATE, SAFETY_LINK_TEST_TRIP_LOCAL_STALE, 0) == 503 &&
+                   strstr(s_reply, "link_stale") != NULL, "stale link -> 503");
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_BAD_FRAME, 0) == 502, "bad frame -> 502");
+}
+
 int main(void)
 {
+    test_safety_test_trip();
     test_start_gates();
     test_start_body();
     test_stop_pause_resume();

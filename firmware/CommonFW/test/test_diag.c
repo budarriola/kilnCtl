@@ -408,7 +408,14 @@ static void test_vector_boot_id(void)
     kilnlink_diag_status_t status;
     size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
     CHECK(n == 32, "V3 vector length");
-    CHECK(buf[0] == 0x08 && buf[30] == 0x01 && buf[31] == 0x02, "V3 vector cmd and tail bytes");
+    uint8_t expected[KILNLINK_DIAG_LEN_V3] = {0};
+    expected[0] = 0x08;
+    expected[1] = 0x04;
+    expected[4] = 0x08;
+    expected[30] = 0x01;
+    expected[31] = 0x02;
+    CHECK(n == sizeof(expected) && memcmp(buf, expected, sizeof(expected)) == 0,
+          "V3 vector matches all 32 expected bytes");
 }
 
 static void test_encode_boot_id_buffer_too_small(void)

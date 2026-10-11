@@ -892,6 +892,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         uint8_t reason = worst_of_all_reasons(safety_trip_words_short, &wlen);
         STATUS_APPEND(",\"trip_reason\":%u", 255u);
         STATUS_APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(reason));
+        STATUS_APPEND(",\"trip_is_test\":%s", "false");
         {
             /* Real safety_trip_words_cause_numbered(), pathological float
              * magnitude on every numbered field it can carry (this header's

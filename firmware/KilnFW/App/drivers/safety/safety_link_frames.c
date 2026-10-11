@@ -286,6 +286,12 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
      * wrongly accepted). */
     link->cached.diag_trip_seq_known = false;
     link->cached.diag_trip_seq = 0u;
+    /* Protocol 18 (TEST_TRIP_PLAN F6): the cached DIAG pico_boot_id is the
+     * third half of the same pair. A CLEAR_TRIP/TEST_TRIP built from the OLD
+     * boot's id would be refused by the new boot (fail-safe), but forget it
+     * anyway so nothing even tries; the next 32-byte DIAG re-establishes it. */
+    link->cached.diag_boot_id_known = false;
+    link->cached.diag_boot_id = 0u;
     /* The new boot's peer-version knowledge is a fresh question: fresh re-announce budget. */
     link->diag_reannounce_count = 0u;
     link->diag_reannounce_last_ms = 0u;
@@ -317,7 +323,10 @@ static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
  * period, so 2-4 s apart in practice. */
 static void safety_diag_reannounce_consider_locked(SafetyLinkClass *link, uint32_t now_ms)
 {
-    if (link->cached.diag_trip_seq_known) {
+    /* Protocol 18: a Pico >= 18 that has learned our version sends the 32-byte DIAG; a 31-byte one
+     * from it means our ANNOUNCE was lost, same as a 30-byte one from a >= 17 Pico. */
+    if (link->cached.diag_trip_seq_known &&
+        !(link->peer_version_known && link->peer_protocol_version >= 18u && !link->cached.diag_boot_id_known)) {
         link->diag_reannounce_count = 0u;
         return;
     }
@@ -1089,7 +1098,8 @@ void safety_link_mark_boot_clean(void)
 
 bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
 {
-    if ((msg->length != SAFETY_LINK_DIAG_FRAME_LEN && msg->length != SAFETY_LINK_DIAG_FRAME_LEN_V2) ||
+    if ((msg->length != SAFETY_LINK_DIAG_FRAME_LEN && msg->length != SAFETY_LINK_DIAG_FRAME_LEN_V2 &&
+         msg->length != SAFETY_LINK_DIAG_FRAME_LEN_V3) ||
         msg->payload[0] != SAFETY_CMD_DIAG) {
         if (safety_lock(link)) {
             link->stats.frame_errors++;
@@ -1137,8 +1147,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip
      * occurrence; a 30-byte frame forgets any earlier seq so a later clear
      * never echoes one this DIAG did not confirm. */
-    link->cached.diag_trip_seq_known = (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V2);
+    link->cached.diag_trip_seq_known = (msg->length >= SAFETY_LINK_DIAG_FRAME_LEN_V2);
     link->cached.diag_trip_seq = link->cached.diag_trip_seq_known ? p[30] : 0u;
+    /* Protocol 18: only the 32-byte form names the Pico boot. */
+    link->cached.diag_boot_id_known = (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V3);
+    link->cached.diag_boot_id = link->cached.diag_boot_id_known ? p[31] : 0u;
     link->cached.diag_ever_received = true;
     safety_diag_reannounce_consider_locked(
         link, (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS));
@@ -1183,8 +1196,9 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
                     * without spending an attempt (the branch below re-announces so
                     * the Pico moves to 31-byte DIAGs). Never weakens the Pico's
                     * refusal. */
-                   !(link->peer_version_known && link->peer_protocol_version >= 17u &&
-                     !link->cached.diag_trip_seq_known) &&
+                   !(link->peer_version_known &&
+                     ((link->peer_protocol_version >= 17u && !link->cached.diag_trip_seq_known) ||
+                      (link->peer_protocol_version >= 18u && !link->cached.diag_boot_id_known))) &&
                    link->cached.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
                    link->cached.diag_trip_reason == SAFETY_LINK_TRIP_REASON_MAIN_FAULT) {
             want_boot_clear = true;
