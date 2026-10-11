@@ -11,6 +11,13 @@ Range: `68e3b4966..81bbbfd02` on origin/dev:
 The task gave the range as `bc09d681c..81bbbfd02`, but that excludes the main
 fix commit itself, so this review covers its parent onward.
 
+## Fix status (confx, 2026-10-10)
+
+All findings fixed: HIGH-1 (conftest stubs `_wifi.get_status` with `WifiUartQueryError`; idle status is a real
+`ProfileExecStatus`; `test_env_opt_in` hermetic; sweep passes an ota arg to reach the `bench_test_run` gate and
+exempts the `bench_test_start` job twin), MED-1 (`_IMPORT_ONLY_KEYS` in `mcp_server_info.py`), LOW-1 (id-less
+profiles matched by content), LOW-2, LOW-3, LOW-4 (new tests kill the three mutations). SHA in the landing report.
+
 ## Verdict
 
 The production-code fixes are correct: H1, M1, M2 (with the caveats below),

@@ -99,7 +99,7 @@ class _Base(unittest.TestCase):
     candidates = None
 
     def run_tool(self, fn, board, **kw):
-        clock = {"t": 0.0}
+        clock = self.clock = {"t": 0.0}
         cands = self.candidates or [HOST]
 
         def fake_sleep(s):
@@ -468,6 +468,21 @@ class PicoUploadTest(_Base):
         self.assertTrue(out.startswith("UNKNOWN"), out)
         self.assertLessEqual(clock[0], 300.0)
         self.assertIn("240", out)
+
+    def test_deadline_counts_from_call_start_not_poll_start(self):
+        # A slow preflight/POST (100 s here) counts against wait_s: with wait_s=120 the call must end
+        # near t=120, not at 100 + 120.
+        board = FakeBoard(pico=[_pico(), _pico(phase="sending", busy=True, bytes_sent=1,
+                                               total_bytes=len(self.IMAGE))], post_reply=self.started)
+        real_post = board.post
+
+        def slow_post(*a, **k):
+            self.clock["t"] += 100.0
+            return real_post(*a, **k)
+        board.post = slow_post
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=120)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertLessEqual(self.clock["t"], 125.0)
 
     def test_lost_polls_cannot_outlast_deadline(self):
         # Lost status polls used to `continue` before the deadline check; with a

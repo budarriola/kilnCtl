@@ -217,6 +217,9 @@ def wifi_add_network(
     refusal = _wifi_write_refusal(confirm, "wifi_add_network", allow_running)
     if refusal is not None:
         return refusal
+    if ssid is None and password_from_env:
+        return ("error: password_from_env=True needs an explicit ssid; with ssid omitted the saved "
+                "network's own password is used")
     if ssid is None:
         saved = wifi_credentials.load()
         if saved is None:

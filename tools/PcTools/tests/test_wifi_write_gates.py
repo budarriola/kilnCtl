@@ -121,6 +121,13 @@ class WifiGateTests(unittest.TestCase):
         with self._srv(f):
             self.assertIn("FAILED", w.wifi_forget("a", confirm=True))
 
+    def test_saved_network_path_rejects_password_from_env_clearly(self):
+        f = _Fake()
+        with self._srv(f):
+            out = w.wifi_add_network(None, None, confirm=True, password_from_env=True)
+        self.assertIn("explicit ssid", out)
+        self.assertNotIn("not both", out)
+
     def test_add_unreadable_readback_fails(self):
         f = _Fake()
         f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))

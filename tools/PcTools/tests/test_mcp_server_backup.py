@@ -351,6 +351,35 @@ class ReadbackContentTest(unittest.TestCase):
         got["profiles"][0]["name"] = "b"
         self.assertIn("profiles[id=3]", self._problem(got))
 
+    def test_absent_key_in_reexport_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        del got["zones"][0]["max_temp_c"]
+        self.assertIn("absent from the re-export", self._problem(got))
+
+    def test_list_length_difference_detected(self):
+        got = json.loads(json.dumps(self.WANT))
+        got["profiles"][0]["segments"].append({"zone": 1, "target": 5.0})
+        self.assertIn("entries", self._problem(got))
+        got["profiles"][0]["segments"] = []
+        self.assertIn("entries", self._problem(got))
+
+    def test_legacy_import_only_zone_keys_not_demanded(self):
+        want = json.loads(json.dumps(self.WANT))
+        want["zones"][0].update(coupling_coeff=0.1, coupling_neighbor_zone=1)
+        got = json.loads(json.dumps(self.WANT))
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
+    def test_idless_profile_matched_by_content_not_position(self):
+        want = {"profiles": [{"name": "n", "zone_mask": 1, "segments": []}]}
+        got = {"profiles": [{"id": 1, "name": "other", "zone_mask": 1, "segments": []},
+                            {"id": 2, "name": "n", "zone_mask": 1, "segments": []}]}
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+        got["profiles"][1]["name"] = "zzz"
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNotNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
     def test_profile_missing_by_id_detected(self):
         got = json.loads(json.dumps(self.WANT))
         got["profiles"][0]["id"] = 4

@@ -1051,6 +1051,13 @@ def backup_export(out_path: Optional[str] = None, host: Optional[str] = None) ->
     return "\n".join(lines)
 
 
+# Keys backup_import.c accepts (legacy format <=3 zone tuning entries, ~line 1763-1810: the
+# coupling_coeff/coupling_neighbor_zone pair maps onto one coupling-matrix cell) but backup_export.c
+# never emits. A re-export cannot contain them, so the compare must not demand them. A key-set diff of
+# the two files found these two are the only import-only keys; add to this list only with a citation.
+_IMPORT_ONLY_KEYS = frozenset({"coupling_coeff", "coupling_neighbor_zone"})
+
+
 def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
     """First field where `got` differs from `want` (None if equal). Every key in `want` is compared (a key the
     board's re-export lacks is a difference); floats compare within the firmware's %.9g print rounding."""
@@ -1058,6 +1065,8 @@ def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
         if not isinstance(got, dict):
             return f"{path}: expected an object, board has {type(got).__name__}"
         for k, v in want.items():
+            if k in _IMPORT_ONLY_KEYS:
+                continue
             if k not in got:
                 return f"{path}.{k}: in the backup but absent from the re-export"
             d = _first_content_diff(v, got[k], f"{path}.{k}")
@@ -1116,7 +1125,15 @@ def _backup_import_readback_problem(host: str, body_text: str, after_readiness: 
             if not isinstance(entry, dict):
                 continue
             eid = entry.get(ident, i)
-            other = by_id.get(eid) if ident in entry else (g[i] if i < len(g) else None)
+            if ident in entry:
+                other = by_id.get(eid)
+            else:
+                # No id: the firmware puts it in the first free slot, so position is not meaningful.
+                # Accept any re-exported entry that matches it completely; else diff against position.
+                other = next((e for e in g if isinstance(e, dict)
+                              and _first_content_diff({k: v for k, v in entry.items()}, e, "") is None), None)
+                if other is None:
+                    other = g[i] if i < len(g) else None
             if other is None:
                 return f"{key}[{ident}={eid}]: in the backup but missing from the board's re-export"
             diff = _first_content_diff(entry, other, f"{key}[{ident}={eid}]")

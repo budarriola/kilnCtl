@@ -226,25 +226,35 @@ def _idle_shared_link_stub(monkeypatch):
     ``mcp_server`` builds its clients on the shared link hub, so with the
     kilnctrl MCP server running a test that reaches the executor/autotune
     gates sends real queries to the bench ESP (and flakes under xdist). By
-    default every executor/autotune/pico-armed read answers "idle" from a fake
-    and any raw ``_link.send`` raises. A test needing another state patches
+    default every executor/autotune read answers "idle" from a fake, the Wi-Fi
+    status query fails like a link with no reply (WifiUartQueryError, so host
+    resolution falls back to the default), and any raw ``_link.send`` raises. A test needing another state patches
     the client itself (``um.patch.multiple(_srv, _profiles=..., ...)``); that
     runs after this fixture and takes precedence.
     """
     try:
-        from types import SimpleNamespace
         from kilnctrl import mcp_server as srv
+        from kilnctrl.devices_profiles import ProfileExecStatus
+        from kilnctrl.wifi_uart import WifiUartQueryError
+        from types import SimpleNamespace
     except Exception:
         return
+
+    def _no_reply(*_a, **_k):
+        raise WifiUartQueryError("no reply (conftest _idle_shared_link_stub)")
 
     def _boom(*_a, **_k):
         raise OSError("tests must not touch the real link (conftest _idle_shared_link_stub)")
 
-    idle_exec = SimpleNamespace(state=0, state_name="IDLE")
+    idle_exec = ProfileExecStatus(
+        state=0, profile_id=0, name="", zone_mask=0, segment_index=0, segment_count=0,
+        dwelling=False, target_c=0.0, segment_elapsed_s=0, dwell_remaining_s=0,
+        ramp_lock_held=False, ramp_lock_lagging_mask=0, fault_guard=0, zones=[])
     idle_at = SimpleNamespace(state=0, state_name="IDLE")
     for obj, name, fn in (
         (getattr(srv, "_profiles", None), "get_exec_status", lambda *a, **k: idle_exec),
         (getattr(srv, "_autotune", None), "get_status", lambda *a, **k: idle_at),
+        (getattr(srv, "_wifi", None), "get_status", _no_reply),
         (getattr(srv, "_link", None), "send", _boom),
     ):
         if obj is not None:

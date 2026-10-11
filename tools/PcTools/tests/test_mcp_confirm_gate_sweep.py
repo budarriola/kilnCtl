@@ -60,10 +60,15 @@ ARG_OVERRIDES = {
     "safety_set_tc_type": {"tc_type_name": "k"},
     "ui_run_script": {"apply_preset": True, "name": "home_start_stop_zone0_lcd"},
     "safety_set_fault_out": {"assert_fault": False},
+    # bench_test_run/start gate confirm only when an ota_*/update_* argument is given (a valid suite
+    # is checked first), so pass one to reach the gate.
+    "bench_test_run": {"suite": "smoke", "ota_image_path": "x.bin"},
 }
 # flash_firmware validates build outputs before its gate and is covered by
 # test_flash_firmware_confirm_gate.py with a real fake build tree.
-RUNTIME_EXEMPT = {"flash_firmware"}
+# bench_test_start is the background twin of bench_test_run: it hands `confirm` to the job thread, and the
+# refusal arrives in the job's FAILED report (test_bench_test_start_jobs.test_ota_images_without_confirm_refuse_before_runner).
+RUNTIME_EXEMPT = {"flash_firmware", "bench_test_start"}
 
 
 def _dummy_args(fn, gate, bad):
@@ -153,5 +158,7 @@ def _gate_checked_exactly(fn, gate) -> bool:
 
 @pytest.mark.parametrize("fn,gate", _tools())
 def test_gate_is_an_exact_true_test_not_truthiness(fn, gate):
+    if fn.__name__ in RUNTIME_EXEMPT:
+        pytest.skip("covered elsewhere (see RUNTIME_EXEMPT)")
     assert _gate_checked_exactly(fn, gate), (
         f"{fn.__module__}.{fn.__name__} does not test {gate!r} with 'is True'/'is not True'")
