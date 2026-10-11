@@ -288,3 +288,8 @@ KilnFW, `tools\negtest.ps1 -Preset kilnfw-host -Mutations`, base 96e4d56d9, base
 The KilnFW run ended with negtest's "REAL TREE CHANGED" error only because this audit
 doc was written into the reviewing worktree during the run; every mutation verdict was
 recorded before that check, and the copy was removed.
+
+## Fix status (2026-10-10, sfx7)
+
+F1, F2, F3, F4, F5, F6 (log text only; the pause reason string `pico_fatal_reboot` is unchanged, a distinct reason needs a protocol-visible change), F7, F8 and I4 are fixed in the sfx7 batch (commits on origin/dev, see the landing report).
+F2 design: `safety_guards_tick()`'s tripped branch measures a fresh post-trip S8 rate; the clear check uses it (frozen-window fallback only before any post-trip time). F4 documented: S1/S8 clear on a bad TC is refused (the operator clears once a valid reading returns); no documented recovery path needs a blind clear. All negtests CAUGHT.
