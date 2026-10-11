@@ -34,6 +34,10 @@ ran; the copies were removed and no other file changed.
 | LOW | 7 |
 | INFO | 8 |
 
+## Fix status
+
+M1, M2, L1-L7 fixed in the toolfx7 commit (see git log subject "Tools review 3 fixes"); each pytest fix negtested CAUGHT (M1, L1, L5, L6); L3/L7 covered by check_negtest.ps1 group A2; L4 by check_push_verify.ps1 (bounded Run-PV).
+
 ## MED
 
 ### M1. `bench_test_run(suite="ota")` with image paths bypasses `ota_matrix_run`'s confirm gate and run-level preflight
