@@ -574,8 +574,8 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         he_k4_reset_locked();
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
-        s_he.reboot_was_tripped = false;
-        /* reboot_verdict_pending / reboot_fatal_latched deliberately survive (MED-5). */
+        /* reboot_verdict_pending / reboot_fatal_latched / reboot_was_tripped deliberately
+         * survive (MED-5, review saftyfx6 F8). */
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -746,6 +746,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     bool taken = he_lock();
     bool log_hold = false;
     bool log_benign = false;
+    bool log_lost_trip = false;
     if (!s_he.reboot_seq_known) {
         s_he.reboot_seq_known = true;
         s_he.seen_reboot_seq = reboot_seq;
@@ -754,25 +755,30 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
         /* The new boot starts a new episode: counters from the old boot say
          * nothing about it (reset-one-side class: the Pico side restarted). */
         he_k4_reset_locked();
+        /* Review saftyfx6 F3/F8: snapshot the TRIPPED state on EVERY reboot, claim or not, and
+         * OR it into a still-unresolved earlier snapshot (a second reboot before the first
+         * boot's DIAG, with an INIT-substituted last_pico_tripped, must not erase it). Cleared
+         * only when a verdict resolves, never by a claim release. */
+        s_he.reboot_was_tripped = (s_he.reboot_verdict_pending && s_he.reboot_was_tripped) ||
+                                  s_he.last_pico_tripped;
         s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
         s_he.reboot_fatal_latched = false;   /* a newer boot supersedes an older verdict */
         s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
         if (s_he.held_mask != 0u) {
-            s_he.reboot_was_tripped = s_he.last_pico_tripped;
             s_he.reboot_classify_pending = true;
         }
     }
     if (s_he.held_mask == 0u) {
         s_he.reboot_classify_pending = false;
         s_he.reboot_hold = false;
-        s_he.reboot_was_tripped = false;
         if (s_he.reboot_verdict_pending && diag_since_reboot) {
             const uint8_t fatal_u = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
                                     SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
                                     SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
                                     SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
             s_he.reboot_verdict_pending = false;
-            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u;
+            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped;
+            s_he.reboot_was_tripped = false;
         }
     } else if (s_he.reboot_classify_pending) {
         if (diag_since_reboot) {
@@ -786,8 +792,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
              * and does not survive a non-watchdog reset, so a reboot that followed a
              * TRIPPED DIAG is treated as fatal whatever its boot reason says: the
              * latched trip was lost, not cleared by an operator. Withholds heat only. */
-            if ((boot_reason & fatal) != 0u || s_he.reboot_was_tripped) {
+            bool lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal) == 0u;
+            s_he.reboot_was_tripped = false;
+            if ((boot_reason & fatal) != 0u || lost_trip) {
                 s_he.reboot_hold = true;
+                log_lost_trip = lost_trip;
                 /* Withdraw any queued or standing re-request. K4 stays open. */
                 if (s_he.granted || s_he.pending) {
                     /* A false reboot detection must not leave the Pico grant standing:
@@ -808,7 +817,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * condition and the operator resumes or stops. */
     }
     he_unlock(taken);
-    if (log_hold) {
+    if (log_hold && log_lost_trip) {
+        ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x) during a "
+                      "heat claim -- NOT re-requesting heat; K4 stays open until an operator resumes",
+                 (unsigned)boot_reason);
+    } else if (log_hold) {
         ESP_LOGE(TAG, "Pico rebooted with a fatal cause (boot_reason 0x%02x) during a heat claim -- "
                       "NOT re-requesting heat; K4 stays open until an operator resumes",
                  (unsigned)boot_reason);

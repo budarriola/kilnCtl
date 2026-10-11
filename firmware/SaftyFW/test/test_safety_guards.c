@@ -3395,6 +3395,91 @@ static void test_try_clear(void)
         TEST_CHECK(!s.is_tripped, "T1: S8 cleared");
     }
 
+    /* F2: S8 clear is bounded -- a plateau after the trip converges to rate 0. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F2 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 100; i++) safety_guards_tick(&s, &cfg, &in); /* 10 s plateau at 60 C */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (fresh rate ~0)");
+    }
+    /* F2: still rising fast after the trip -> still refused. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F2 sanity: S8 tripped");
+        in.dt_s = 1.0f;
+        for (int i = 0; i < 10; i++) { in.tc_c += 0.5f; safety_guards_tick(&s, &cfg, &in); } /* 30 C/min */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear refused while still rising fast");
+    }
+    /* F4: S1 and S8 clears refused on an unknown (bad) TC read. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t over = base_input();
+        over.tc_c = 1400.0f;
+        for (int i = 0; i < 3; i++) safety_guards_tick(&s, &cfg, &over);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVERTEMP, "F4 sanity: S1 tripped");
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F4: S1 clear refused on a bad TC read");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F4 sanity: S8 tripped");
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F4: S8 clear refused on a bad TC read");
+    }
+    /* F1: S12 clear refused with a hot CJ even when the TC read is bad. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_c = 90.0f;
+        bad.dt_s = 61.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &bad) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "F1 sanity: S12 tripped");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F1: S12 clear refused with hot CJ and bad TC");
+    }
+
     /* T4: S12 still runs on a bad TC read when the cold junction is valid. */
     {
         safety_guard_state_t s;

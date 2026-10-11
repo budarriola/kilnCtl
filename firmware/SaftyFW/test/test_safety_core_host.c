@@ -720,6 +720,21 @@ static void test_failed_cfg_read_keeps_last_good_guard_cfg(void)
     TEST_CHECK(trip_reason() == SAFETY_TRIP_OVERTEMP, "T2: reason is S1");
 }
 
+static void test_failed_cfg_read_keeps_tc_not_installed_declared(void)
+{
+    TEST_SECTION("F7: a failed config read keeps the declared-not-installed flag (S5 stays WARN)");
+    world_reset_keep_clock();
+    W.cfg.safety_tc_installed = 0;
+    core_start();
+    steps(3); // good read: declared not installed
+    W.cfg_read_ok = false; // default record would say installed (flag flips)
+    W.thermo.valid = false;
+    W.thermo.spi_failed = true;
+    W.thermo.tc_c = NAN;
+    steps(1000);
+    TEST_CHECK(!is_tripped(), "F7: declared-not-installed survives a failed config read (no S5 trip)");
+}
+
 static void test_s1_uncommissioned_never_trips(void)
 {
     TEST_SECTION("Campaign 1: S1 with abs_max_temp_c unconfigured -- no trip, ARMED forced off");
@@ -1096,6 +1111,7 @@ int main(void)
     test_s1_overtemp();
     test_s1_uncommissioned_never_trips();
     test_failed_cfg_read_keeps_last_good_guard_cfg();
+    test_failed_cfg_read_keeps_tc_not_installed_declared();
     test_s5_stale_thermo();
     test_s5_spi_fault_and_not_installed();
     test_s6a_main_fault();

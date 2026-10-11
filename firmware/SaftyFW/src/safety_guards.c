@@ -97,6 +97,8 @@ void safety_guards_clear(safety_guard_state_t *state)
     safety_guards_reset(state);
 }
 
+#define S8_POST_MIN_S 5.0f
+
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
     state->is_tripped = true;
@@ -185,13 +187,31 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
     case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
                                 * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
                                 * this level; refusing here never loosens the guard). */
-        return cfg->abs_max_temp_c > 0.0f && in->tc_valid && in->tc_c > cfg->abs_max_temp_c;
+        /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
+        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || in->tc_c > cfg->abs_max_temp_c);
     case SAFETY_TRIP_RATE: { /* S8 -- the window that tripped (baseline + elapsed are still in
                               * `state`, this runs before safety_guards_clear()) measured
                               * against the CURRENT reading still exceeds the rate. A cooled
                               * kiln gives a smaller or negative delta and the clear is granted. */
-        if (cfg->max_rate_c_per_min > 0.0f && in->tc_valid && state->s8_window_active &&
-            state->s8_window_elapsed_s > 0.0f) {
+        if (cfg->max_rate_c_per_min <= 0.0f) {
+            return false;
+        }
+        if (!in->tc_valid) { /* review saftyfx6 F4: unknown reading refuses */
+            return true;
+        }
+        /* Review saftyfx6 F2: prefer a FRESH post-trip measurement (advanced by
+         * safety_guards_tick()'s tripped branch) so a plateau or a settled
+         * offset converges to rate ~0 and the clear is granted, while a
+         * reading that is still rising fast keeps refusing. Before any post-trip
+         * time has accumulated, fall back to the frozen tripping window. */
+        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+            float m = state->s8_post_elapsed_s / 60.0f;
+            return ((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min;
+        }
+        if (state->s8_post_rate_valid) {
+            return state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min;
+        }
+        if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
             float elapsed_min = state->s8_window_elapsed_s / 60.0f;
             return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
         }
@@ -242,8 +262,9 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
         /* F4: an unknown cold junction (NaN / cj_invalid) means the
          * enclosure condition cannot be shown to have cleared -> still
          * immediate, so the clear is refused. */
+        /* Review saftyfx6 F1: no tc_valid term; T4 lets S12 trip on a bad TC read. */
         return in->cj_invalid || isnan(in->cj_c) ||
-               (in->tc_valid && in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT));
+               (in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT));
     case SAFETY_TRIP_BORROWED_STALE: /* S13 -- channel still not producing fresh samples */
         return (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE ||
                 cfg->tc_source == SAFETY_TC_SOURCE_BOTH) &&
@@ -400,6 +421,26 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->ct_guards_disabled = in->current_sensing_disabled;
 
     if (state->is_tripped) {
+        /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
+         * clear refusal in guard_condition_still_immediate() is bounded in time.
+         * Only used by the clear check; never touches the trip path. */
+        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid) {
+            if (!state->s8_post_active) {
+                state->s8_post_active = true;
+                state->s8_post_start_c = in->tc_c;
+                state->s8_post_elapsed_s = 0.0f;
+            } else {
+                state->s8_post_elapsed_s += in->dt_s;
+                float win = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+                if (state->s8_post_elapsed_s >= win) {
+                    state->s8_post_last_rate_c_per_min =
+                        (in->tc_c - state->s8_post_start_c) / (state->s8_post_elapsed_s / 60.0f);
+                    state->s8_post_rate_valid = true;
+                    state->s8_post_start_c = in->tc_c;
+                    state->s8_post_elapsed_s = 0.0f;
+                }
+            }
+        }
         /* --- S9: trip ineffective / contactor welded -------------------------
          * The one guard that must keep evaluating after a trip -- everything
          * else stops mattering once K4 should be open, but "did it actually

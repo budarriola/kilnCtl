@@ -1360,7 +1360,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .tc_valid = thermo.valid && thermo_fresh,
         .tc_c = thermo.tc_c,
         .cj_c = thermo.cj_c,
-        .cj_invalid = !thermo.cj_valid,
+        .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
         .fault_bits = thermo.fault_bits,
         .spi_failed = thermo.spi_failed,
         .safety_tc_not_installed_declared = safety_tc_not_installed_declared,

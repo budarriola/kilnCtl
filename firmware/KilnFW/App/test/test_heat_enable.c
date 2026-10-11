@@ -1140,6 +1140,50 @@ static void test_pico_reboot_after_tripped_holds(void)
     heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, true, 1500u); /* trip cleared */
     heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
     TEST_CHECK(!heat_enable_reboot_hold(), "a POWERON reboot after the trip was cleared stays benign");
+
+    /* I4: the executor watchdog feeds INIT while no DIAG of the new boot has arrived; the
+     * snapshot (not the live flag) must still carry the trip into the verdict. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_INIT, false, 2100u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2200u);
+    TEST_CHECK(heat_enable_reboot_hold(), "I4: INIT tick between reboot and DIAG does not lose the trip snapshot");
+
+    /* F3: a second reboot before the first boot's DIAG keeps the snapshot. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_INIT, false, 2100u);
+    heat_enable_note_pico_boot(3u, false, 0u, 2200u);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2300u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F3: double reboot before any DIAG still holds (trip lost)");
+
+    /* F8: TRIPPED, release, reboot with no claim, POWERON DIAG, then acquire -> hold. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: lost trip across a claim-less reboot holds on the next acquire");
+
+    /* F8 caveat: reboot while no claim, DIAG arrives after the next acquire. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: DIAG after the re-acquire still holds");
 }
 
 static void test_pico_reboot_cause_holds_or_retries(void)
