@@ -2478,7 +2478,7 @@ static bool rvfx_slot0_file_valid(void)
 static void test_rvfx_rollback_keeps_unexamined_file(void)
 {
     TEST_SECTION("misc8fx MED-1: a refused SAVE_AS (rev floor unknown) must not delete the slot's unexamined file");
-    rvfx_prepare_free_slot0_with_file(5);
+    rvfx_prepare_free_slot0_with_file(1);
     s_profile_rev_unknown[0] = true;
     profile_t p = make_stored_profile();
     uint8_t out_id = 0xFF, warn = 0;
