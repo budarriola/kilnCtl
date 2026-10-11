@@ -280,3 +280,7 @@ Probe runs (test-side edits only, never landed):
 | proposed F4 test fix + R5 / + R7 | pass | guards back each other up (MED-1) |
 | proposed F1 lock-depth sentinel alone | passes | |
 | proposed F1 lock-depth sentinel + R2 | CAUGHT | |
+
+## Fix status
+
+MED-1, LOW-1, LOW-3 and the 0x10C static assert (NIT) are fixed in e88985d37 and d62cb2ee1 (R2, R6, R15 negtest CAUGHT; R5 and R7 stay MISSED by design). LOW-4 was already fixed on dev (the K7 doc cites 235e4e3c4). LOW-2 is not fixed: the full fix spans profile_executor.c plus main_bridges_bringup.c, main_boot_early.c and main_network_http.c (explicit holder registration), so it is left open.
