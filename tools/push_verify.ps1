@@ -157,14 +157,7 @@ try {
                 $walk = Get-PvDescendantOrder -Snap $snap -RootId ([int]$fetchProc.Id) -RootCreated $rootCreated
                 $order = New-Object System.Collections.ArrayList; $keep = @{}
                 foreach ($w in $walk) { [void]$order.Add($w.Id); $keep[$w.Id] = $w.Created }
-                $handles = @{}
-                foreach ($id in $order) {
-                    try {
-                        $ph = [System.Diagnostics.Process]::GetProcessById($id)
-                        $null = $ph.Handle
-                        if (Test-PvStartMatch -Actual $ph.StartTime -Expected $keep[$id]) { $handles[$id] = $ph } else { $ph.Dispose() }
-                    } catch { }
-                }
+                $handles = Open-PvTargets -Ids ([int[]]@($order)) -Created $keep
                 # discovered parent-first (breadth-first); kill in reverse so leaves go first
                 for ($i = $order.Count - 1; $i -ge 0; $i--) {
                     if ($handles.ContainsKey($order[$i])) { try { $handles[$order[$i]].Kill() } catch { } }

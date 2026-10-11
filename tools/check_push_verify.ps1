@@ -41,10 +41,11 @@ function Commit([string]$repo, [string]$f, [string]$msg) {
 # R1: per-parent creation filter, tested on a synthetic snapshot (no process needed).
 $t0 = [datetime]'2026-01-01T10:00:00'
 function P($id, $ppid, $sec) { [pscustomobject]@{ ProcessId = $id; ParentProcessId = $ppid; CreationDate = $t0.AddSeconds($sec) } }
-$snapR1 = @((P 10 1 0), (P 11 10 1), (P 12 11 2), (P 13 11 -50), (P 14 12 -40), (P 15 10 0.0005), (P 16 10 -0.0005))
+$snapR1 = @((P 18 12 1.5), (P 10 1 0), (P 11 10 1), (P 12 11 2), (P 13 11 -50), (P 14 12 -40), (P 15 10 0.0005), (P 16 10 -0.0005))
 $w = @(Get-PvDescendantOrder -Snap $snapR1 -RootId 10 -RootCreated $t0 | ForEach-Object { $_.Id })
 Assert (($w -contains 11) -and ($w -contains 12)) "R1: genuine chain kept"
 Assert (-not ($w -contains 13)) "R1: child older than its parent (reused PID) dropped"
+Assert (-not ($w -contains 18)) "R1: grandchild newer than the root but older than its own parent dropped"
 Assert (-not ($w -contains 14)) "R1: grandchild older than its own parent dropped even though newer than the root"
 Assert (($w -contains 15) -and ($w -contains 16)) "R1: root slack is about 1 ms (a child within 1 ms before the root start is kept)"
 Assert ($w.IndexOf(11) -lt $w.IndexOf(12)) "R1: parent-first order"
@@ -52,6 +53,11 @@ $snapR1b = @((P 10 1 0), (P 17 10 -0.5))
 Assert ((Get-PvDescendantOrder -Snap $snapR1b -RootId 10 -RootCreated $t0).Count -eq 0) "R1: child 0.5 s older than the root dropped (no 1 s slack)"
 Assert (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(30)) "R2: StartTime within tolerance of the snapshot matches"
 Assert (-not (Test-PvStartMatch -Actual $t0.AddMinutes(5) -Expected $t0)) "R2: a reused PID (later StartTime) is skipped, not killed"
+$me = Get-Process -Id $PID
+$hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
+Assert ($hm.ContainsKey($PID)) "R2: a live process whose StartTime matches the snapshot is opened"
+$hx = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime.AddMinutes(-30) }
+Assert (-not $hx.ContainsKey($PID)) "R2: a live process whose StartTime differs from the snapshot (reused PID) is skipped"
 try {
     git init --bare -b dev $origin *>$null
     git clone $origin $work *>$null

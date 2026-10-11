@@ -28,3 +28,18 @@ function Test-PvStartMatch {
     param([datetime]$Actual, [datetime]$Expected)
     return ([Math]::Abs(($Actual - $Expected).TotalMilliseconds) -le 100)
 }
+
+# R2: open a handle per target BEFORE any kill (an open handle blocks PID reuse) and keep only those whose
+# StartTime matches the snapshot's CreationDate. $Created maps pid -> CreationDate. Returns pid -> Process.
+function Open-PvTargets {
+    param([int[]]$Ids, $Created)
+    $handles = @{}
+    foreach ($id in $Ids) {
+        try {
+            $ph = [System.Diagnostics.Process]::GetProcessById($id)
+            $null = $ph.Handle
+            if (Test-PvStartMatch -Actual $ph.StartTime -Expected $Created[$id]) { $handles[$id] = $ph } else { $ph.Dispose() }
+        } catch { }
+    }
+    return $handles
+}
