@@ -540,9 +540,9 @@ static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p,
                  * REFUSED outcome (still false: the ESP side is still on the target, the journal is kept and
                  * boot recovery retries the rollback) instead of "ROLLBACK FAILED", which reads as the previous
                  * config being rejected. */
-                /* %s, not %.40s: the full ZONES_IMPORT_REASON_RUN_CLAIMED text (57 chars) must not be cut
-                 * mid-word (review SL3 A5); prefix + sub must fit the caller's wrapper inside KILN_CFG_SWAP_REASON_MAX (200); the test asserts it. */
-                /* Literal (not sub): the compiler can then prove the full text fits, so no truncation is possible. */
+                /* Literal (not sub): the full ZONES_IMPORT_REASON_RUN_CLAIMED text (57 chars) must not be cut
+                 * mid-word (review SL3 A5), and the compiler can then prove prefix + text fit the caller's wrapper
+                 * inside KILN_CFG_SWAP_REASON_MAX (200); the test asserts the full text. */
                 snprintf(reason_out, reason_cap,
                          "ROLLBACK REFUSED, previous config valid (retried at run end or boot): " ZONES_IMPORT_REASON_RUN_CLAIMED);
                 return false;

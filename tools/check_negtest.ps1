@@ -296,13 +296,10 @@ exit 0
     $r = Run-Neg "reqassert_buildfail" (@('-Command', $testCmd, '-RequireAssertion') + $mutBuild)
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_buildfail: a build failure must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
     # toolfx7 L3: Stop-JobMembers kills job stragglers, spares the SpareNames, never touches a non-member.
-    $mT = [regex]::Match($srcN, '(?s)Add-Type -TypeDefinition @"?
-(.*?)?
-"@')
+    $mT = [regex]::Match($srcN, '(?s)Add-Type -TypeDefinition @"' + "`r?`n" + '(.*?)' + "`r?`n" + '"@')
     Assert-True $mT.Success "NegJob Add-Type block not found in negtest.ps1"
     if (-not ('NegJob' -as [type])) { Add-Type -TypeDefinition $mT.Groups[1].Value }
-    $mS = [regex]::Match($srcN, '(?s)function Stop-JobMembers.*??
-\}')
+    $mS = [regex]::Match($srcN, '(?s)function Stop-JobMembers.*?' + "`r?`n" + '\}')
     Assert-True $mS.Success "Stop-JobMembers not found in negtest.ps1"
     . ([scriptblock]::Create($mS.Value))
     $script:SpareNames = @('ping.exe')

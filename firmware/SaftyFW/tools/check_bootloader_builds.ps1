@@ -47,7 +47,7 @@ $buildDir = Join-Path $bootloaderDir "build"
 
 try {
 # Key the lock by the RESOLVED build dir: the tree is per-worktree
-# (<worktree>irmware\SaftyFWootloaderuild), so only runs sharing one
+# (<worktree>\firmware\SaftyFW\bootloader\build), so only runs sharing one
 # tree need to serialize. A fixed name made every worktree on the machine
 # queue on one mutex and time out after 900 s under parallel load.
 $resolvedBuildDir = [System.IO.Path]::GetFullPath($buildDir).TrimEnd('').ToLowerInvariant()
