@@ -449,13 +449,13 @@ def _default_zone_mask_fns(ctx: dict):
     srv = _srv(ctx)
     try:
         host = _resolve_host(ctx.get("host"))
-        zones = zhc.get_zones(host).get("zones") or []
+        snapshot = zhc.get_zones(host)  # whole-page baseline (the one GET): the restore puts back EVERY field
+        zones = snapshot.get("zones") or []
         z = next(z for z in zones if "index" in z and isinstance(z.get("relay_mask"), int))
     except Exception:  # noqa: BLE001
         return None
     zone, orig = z["index"], z["relay_mask"]
     bad = orig | (1 << (AUX_RELAY - 1))
-    snapshot = zhc.get_zones(host)  # whole-page baseline: the restore puts back EVERY field
 
     def post():
         out = str(srv.control_set_zone_relay_mask(zone=zone, relay_mask=bad, confirm=True))
@@ -468,7 +468,8 @@ def _default_zone_mask_fns(ctx: dict):
         """Re-POST the pre-write GET snapshot (relay_mask and any collateral field the first write
         changed), then confirm by re-fetch that nothing differs from that snapshot."""
         try:
-            zhc.post_zones(host, zhc.build_post_body(snapshot, {}))
+            # omit-preserved fields stay out of the body so the firmware keeps them bit-exact (MED-1)
+            zhc.post_zones(host, zhc.strip_omit_preserved(zhc.build_post_body(snapshot, {})))
             after = zhc.get_zones(host)
             return not _zone_collateral_diff(snapshot, after, zone, set())
         except Exception:  # noqa: BLE001
@@ -481,6 +482,10 @@ AUX_OWNER_TEXT = ("a zone relay_mask claims a relay an aux (spare-relay) output 
                   "disable that aux output first")  # zones_http_post.c:663
 #: 409 error keys zones_http_post.c sends AFTER the aux check (the guard let the mask through).
 POST_AUX_409_KEYS = ("safety_ceiling_raise_failed", "zones_config_changed_concurrently", "zones_config_undecided")
+#: Body texts zones_http_post.c sends AFTER the commit (cfg_fs_http_persist_failed_for): the mask is
+#: already live in RAM. A bare "out of memory" is also sent before the check, so it is not listed.
+POST_COMMIT_SAVE_FAIL_TEXTS = ("store_unreadable_at_boot", "could not be saved to flash",
+                               "settings storage (cfg) not mounted")
 POSSIBLY_APPLIED_PREFIX = "refused: POST /api/zones refused:"
 
 
@@ -530,6 +535,19 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
         ctx.setdefault("aux_zone_mask_restore_fn", pair[1])
     status, body = fn()
     text = str(body)
+    if any(t in text for t in POST_COMMIT_SAVE_FAIL_TEXTS):
+        # Committed to RAM, then the save failed: the guard let the mask through. Taint, restore, FAIL.
+        ctx["_tainted"] = True
+        rfn = ctx.get("aux_zone_mask_restore_fn")
+        restored = _try_restore(rfn)
+        if not restored and rfn is not None:
+            ctx["_c03_restore_fn"] = rfn
+            ctx.setdefault("teardown_hooks", [])
+            if c03_teardown_hook not in ctx["teardown_hooks"]:
+                ctx["teardown_hooks"].append(c03_teardown_hook)
+        return CaseResult(Verdict.FAIL, reason="firmware accepted the mask past the aux check, then the save failed: "
+                          f"{_fw_detail(text)[:100]}; original mask restore {'ok' if restored else 'NOT confirmed'} "
+                          "-- run tainted", observed={"status": status, "restored": restored})
     if status == 409:
         detail = _fw_detail(text)
         # PASS only on the owner text itself (zones_http_post.c:663), matched against the response

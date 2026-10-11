@@ -798,6 +798,99 @@ class AuxC03ReviewLowTest(unittest.TestCase):
         srv.r4e = True
         srv.control_set_zone_relay_mask = lambda **k: "ok - zone 0: relay_mask=9"
         ctx = {"srv": srv, "aux_confirm": True, "sleep_fn": lambda s: None}
-        with um.patch.object(zhc, "get_zones", return_value=snap),                 um.patch.object(zhc, "build_post_body", return_value="BODY"),                 um.patch.object(zhc, "post_zones", side_effect=lambda h, b: posted.append(b) or "ok"),                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+        with um.patch.object(zhc, "get_zones", return_value=snap),                 um.patch.object(zhc, "build_post_body", return_value="a=BODY"),                 um.patch.object(zhc, "post_zones", side_effect=lambda h, b: posted.append(b) or "ok"),                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             C._case_ax_c03(ctx)
-        self.assertEqual(posted, ["BODY"])
+        self.assertEqual(posted, ["a=BODY"])
+
+
+class AuxC03ReviewFx3Test(unittest.TestCase):
+    OWNER = AuxC03ReviewLowTest.OWNER
+
+    def _ctx(self, post, restore=None, enabled=True):
+        srv = FakeSrv()
+        srv.r4e = enabled
+        extra = {"aux_zone_mask_restore_fn": restore} if restore else {}
+        return _ctx(srv, aux_zone_mask_post_fn=post, **extra)
+
+    def test_post_commit_save_failures_fail_taint_restore(self):
+        for status, body in ((409, 'refused by firmware (HTTP 409): {"ok":false,"error":"store_unreadable_at_boot"}'),
+                             (None, 'error: POST /api/zones failed (HTTP 500): {"ok":false,"error":"could not be saved to flash"}'),
+                             (None, 'error: POST /api/zones failed (HTTP 503): settings storage (cfg) not mounted - x')):
+            calls = []
+            ctx = self._ctx(lambda s=status, b=body: (s, b), lambda: calls.append(1) or True)
+            r = C._case_ax_c03(ctx)
+            self.assertEqual(r.verdict, Verdict.FAIL, body)
+            self.assertTrue(ctx["_tainted"])
+            self.assertEqual(calls, [1])
+
+    def test_bare_oom_stays_inconclusive(self):
+        ctx = self._ctx(lambda: (None, "error: POST /api/zones failed (HTTP 500): out of memory"))
+        self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.INCONCLUSIVE)
+
+    def test_conflicted_precondition_no_write(self):
+        posted = []
+        ctx = self._ctx(lambda: posted.append(1) or (409, self.OWNER))
+        orig = C._aux_state
+        C._aux_state = lambda c: {"relays": {C.AUX_RELAY: {"enabled": True, "conflicted": True}}}
+        try:
+            r = C._case_ax_c03(ctx)
+        finally:
+            C._aux_state = orig
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(posted, [])
+
+    def test_exact_vs_prefix_match(self):
+        ctx = self._ctx(lambda: (409, f"refused by firmware (HTTP 409): {self.OWNER} (extra) (host=h)"))
+        self.assertNotEqual(C._case_ax_c03(ctx).verdict, Verdict.PASS)
+        ctx = self._ctx(lambda: (409, f"refused by firmware (HTTP 409): {self.OWNER}"))
+        self.assertNotEqual(C._case_ax_c03(ctx).verdict, Verdict.FAIL)
+
+    def test_teardown_idempotent(self):
+        n = []
+        ctx = {"_c03_restore_fn": lambda: n.append(1) or True}
+        C.c03_teardown_hook(ctx)
+        C.c03_teardown_hook(ctx)
+        self.assertEqual(n, [1])
+
+    def _pair(self, snap, posted):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        with um.patch.object(zhc, "get_zones", return_value=snap), \
+                um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            return C._default_zone_mask_fns({"srv": FakeSrv()})
+
+    def test_restore_recheck_with_differing_get_is_false(self):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        snap = {"zones": [{"index": 0, "relay_mask": 1}]}
+        after = {"zones": [{"index": 0, "relay_mask": 9}]}
+        pair = self._pair(snap, [])
+        with um.patch.object(zhc, "get_zones", return_value=after), \
+                um.patch.object(zhc, "post_zones", return_value="ok"), \
+                um.patch.object(zhc, "build_post_body", return_value="a=1"):
+            self.assertFalse(pair[1]())
+
+    def test_restore_ok_and_body_has_no_omit_preserved_keys(self):
+        import unittest.mock as um
+        import urllib.parse
+        from kilnctrl import zones_http_client as zhc
+        snap = {"zones": [{"index": 0, "relay_mask": 1}]}
+        posted = []
+        pair = self._pair(snap, posted)
+        body = "z0_relay_mask=1&z0_tau=812.4&z0_deadtime=3.0&z0_hystc=0.500&z0_coupling_c1=2&z0_kp=1.5"
+        with um.patch.object(zhc, "get_zones", return_value=snap), \
+                um.patch.object(zhc, "post_zones", side_effect=lambda h, b: posted.append(b) or "ok"), \
+                um.patch.object(zhc, "build_post_body", return_value=body):
+            self.assertTrue(pair[1]())
+        keys = [k for k, _ in urllib.parse.parse_qsl(posted[-1], keep_blank_values=True)]
+        self.assertEqual(keys, ["z0_relay_mask", "z0_kp"])
+
+    def test_single_snapshot_get(self):
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        n = []
+        snap = {"zones": [{"index": 0, "relay_mask": 1}]}
+        with um.patch.object(zhc, "get_zones", side_effect=lambda h: n.append(1) or snap), \
+                um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
+            self.assertIsNotNone(C._default_zone_mask_fns({"srv": FakeSrv()}))
+        self.assertEqual(len(n), 1)
