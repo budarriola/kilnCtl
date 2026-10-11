@@ -87,7 +87,7 @@ own assertion.
 
 ## LOW
 
-### LOW-1: two new tests leave executor or stub state behind
+### LOW-1: two new tests leave executor or stub state behind (FIXED in 4133ceb99)
 
 - `test_done_start_psram_alloc_failure_refuses_without_internal_fallback`
   leaves `s_exec.state == PROFILE_EXEC_DONE` and a fresh `s_exec.lock`
@@ -105,7 +105,7 @@ own assertion.
 
 ## INFO
 
-- **INFO-1: the tick path has no gate in front of `io_seg_start()`.**
+- **INFO-1 (FIXED in 4133ceb99: a gate was needed, link fault sources can rise mid-run; io_seg_start_since now checks relay_authority_on_blocked, test + negtest CAUGHT): the tick path has no gate in front of `io_seg_start()`.**
   `apply_relay()`, `aux_apply_relay()` and autotune each check relay_authority
   between their sample and their post. The tick's relay-IO ON
   (`profile_executor.c:1049`) checks no relay_authority source, and the owner's
