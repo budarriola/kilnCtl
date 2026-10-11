@@ -137,14 +137,28 @@ try {
     $null = $fetchProc.Handle
     # Assign result is checked: if the job cannot hold the process, a timeout falls back to killing git directly.
     $jobAssigned = $false
-    if ($fetchJob -ne [IntPtr]::Zero) { $jobAssigned = [PvJob]::Assign($fetchJob, $fetchProc.Handle) }
+    if ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1') { $jobAssigned = [PvJob]::Assign($fetchJob, $fetchProc.Handle) }  # env hook: check_push_verify forces the no-job fallback
     if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
         if ($jobAssigned) { [PvJob]::Kill($fetchJob) }
         else {
-            # no job membership: kill git's direct children (git-remote-*) by parent pid, then git itself
+            # no job membership: walk ALL descendants (git -> git-remote-http -> helpers) from one
+            # Win32_Process snapshot, keeping only processes created at/after git started (a reused PID's
+            # unrelated children are older), kill leaves first, then git itself.
             try {
-                Get-CimInstance Win32_Process -Filter "ParentProcessId=$($fetchProc.Id)" -ErrorAction SilentlyContinue |
-                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { } }
+                $gitStart = $fetchProc.StartTime
+                $snap = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+                $keep = @{}; $order = New-Object System.Collections.ArrayList; $frontier = @($fetchProc.Id)
+                while ($frontier.Count -gt 0) {
+                    $next = @()
+                    foreach ($pp in $frontier) {
+                        foreach ($c in ($snap | Where-Object { $_.ParentProcessId -eq $pp -and -not $keep.ContainsKey([int]$_.ProcessId) })) {
+                            if ($c.CreationDate -and $c.CreationDate -ge $gitStart.AddSeconds(-1)) { $keep[[int]$c.ProcessId] = $true; [void]$order.Add([int]$c.ProcessId); $next += [int]$c.ProcessId }
+                        }
+                    }
+                    $frontier = $next
+                }
+                # discovered parent-first (breadth-first); kill in reverse so leaves go first
+                for ($i = $order.Count - 1; $i -ge 0; $i--) { try { Stop-Process -Id $order[$i] -Force -ErrorAction Stop } catch { } }
             } catch { }
         }
         try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }

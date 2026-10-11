@@ -105,10 +105,6 @@ class PicoGpioArmedGateTest(unittest.TestCase):
         self.assertTrue(r.startswith("refused"), r)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class WriteWrapperAndHaltErrTest(unittest.TestCase):
     """toolfx7 (REVIEW_TOOLS3 M2, L5)."""
 
@@ -130,3 +126,7 @@ class WriteWrapperAndHaltErrTest(unittest.TestCase):
             ok, out = debug_probe.write_memory("pico", 0x40014004, 5, 32)
         self.assertTrue(ok)
         self.assertIn("KCTL_HALT_ERR", out.split("WARNING:")[1])
+
+
+if __name__ == "__main__":
+    unittest.main()

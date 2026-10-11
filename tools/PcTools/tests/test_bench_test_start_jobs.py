@@ -166,8 +166,20 @@ class BenchTestStartTest(_Base):
         self.assertIn("refused", out)
         out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin", confirm="yes")
         self.assertIn("refused", out)
-        out = self.finish(BT.bench_test_start(suite="ota", update_wrong_repo="o/w"))
+        out = BT.bench_test_start(suite="ota", update_wrong_repo="o/w")
         self.assertIn("refused", out)
+        self.assertEqual(_FakeRunner.instances, [])
+
+    def test_start_unconfirmed_ota_refused_synchronously_and_creates_no_job(self):
+        # toolfx8 T4: the refusal comes back at once, not as a FAILED job report.
+        for kw in ({"ota_image_path": "C:/img/a.bin"}, {"update_wrong_repo": "o/w"},
+                   {"ota_pico_image_commit": "abc"}):
+            for bad in (False, "yes", 1, None):
+                with mock.patch.object(build_jobs, "start_job") as sj:
+                    out = BT.bench_test_start(suite="ota", confirm=bad, **kw)  # type: ignore[arg-type]
+                self.assertTrue(out.startswith("error: refused"), out)
+                self.assertNotIn("STARTED", out)
+                sj.assert_not_called()
         self.assertEqual(_FakeRunner.instances, [])
 
     def test_ota_images_preflight_refusal_blocks_runner(self):

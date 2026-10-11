@@ -221,7 +221,8 @@ class SetAuxManualTest(_Base):
         def fake_gai(host, *a, **k):
             calls.append(host)
             return [(socket.AF_INET, 0, 0, "", ("10.0.0.5", 0))]
-        with unittest.mock.patch.object(socket, "getaddrinfo", side_effect=fake_gai),              unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
+        with unittest.mock.patch.object(socket, "getaddrinfo", side_effect=fake_gai), \
+             unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
             r, post = self._run(_snap({4: {"enabled": True}}), True, relay=4, on=True, confirm=True,
                                 host="kiln.local:8080")
         self.assertTrue(r.startswith("ok"), r)
@@ -231,7 +232,8 @@ class SetAuxManualTest(_Base):
     def test_name_with_a_second_record_refuses(self):
         import socket
         recs = [(socket.AF_INET, 0, 0, "", ("10.0.0.5", 0)), (socket.AF_INET, 0, 0, "", ("10.0.0.99", 0))]
-        with unittest.mock.patch.object(socket, "getaddrinfo", return_value=recs),              unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
+        with unittest.mock.patch.object(socket, "getaddrinfo", return_value=recs), \
+             unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
             r, post = self._run(_snap({4: {"enabled": True}}), True, relay=4, on=True, confirm=True,
                                 host="kiln.local")
         self.assertTrue(r.startswith("refused"), r)

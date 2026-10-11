@@ -1809,10 +1809,13 @@ def judge_stop(
     # such record, so the firmware answers "no previous-run record to
     # acknowledge": the card is already clear, which is the outcome HP-05
     # wants. Any other refusal is a real failure.
-    # The refusal text is identical for "no boot record", "already
-    # acknowledged" and a run_state lock failure, so it proves nothing alone:
-    # `card_clear` is the read-back of GET /api/profile_exec `last_run.present`
-    # == false after the ack, and the "already clear" acceptance needs it.
+    # The refusal text is identical for "no boot record" and "already
+    # acknowledged", so it proves nothing alone: `card_clear` is the read-back
+    # of GET /api/profile_exec `last_run.present` == false after the ack, and
+    # the "already clear" acceptance needs it. This catches a stale or
+    # unacknowledged record only: a run_state lock failure also reports
+    # present:false (run_state_get_boot_record() returns false when
+    # ensure_lock() fails), so HP-05 cannot detect that case.
     already_clear = (not acked) and "no previous-run record" in (ack_reason or "")
     if already_clear and card_clear is None:
         return CaseResult(

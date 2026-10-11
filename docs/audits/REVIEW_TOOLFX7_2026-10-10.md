@@ -157,3 +157,11 @@ check preset, `tools\check_negtest.ps1` (baseline PASS 271 s):
 | l3_injob_recheck_removed | L3 | MISSED (I2, race-only) |
 | l7_clear_after_close | L7 | CAUGHT |
 | l2_assignfailed_flag_dropped | L2 | MISSED (T2) |
+
+## Fix status (toolfx8)
+
+T1 fixed (descendant walk with creation-time filter; `PUSH_VERIFY_TEST_NO_JOB=1`
+test hook; new no-job case in `check_push_verify.ps1`). T2 fixed by removing the
+dead `assignFailed` code and its grep. T3 fixed (comment only). T4 fixed
+(`bench_test_start` refuses synchronously; test added). I5 and I6 fixed.
+T5 belongs to lcdfx3. I3, I4, I7 left open.

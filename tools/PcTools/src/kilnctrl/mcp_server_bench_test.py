@@ -24,6 +24,10 @@ from .bench_test import report as bt_report
 from .bench_test.runner import RUNNER_LOG_NAME, BenchTestRunner
 
 
+_OTA_CONFIRM_REFUSAL = ("error: refused -- ota_*/update_*_repo image arguments can flash, roll back "
+                         "or reset the safety link; pass confirm=True (or use ota_matrix_run)")
+
+
 @_core._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
                     allow_heat: bool = True, lcd_stop_heat: bool = False,
@@ -138,8 +142,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
             ctx[key] = value
     if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
         if confirm is not True:
-            return ("error: refused -- ota_*/update_*_repo image arguments can flash, roll back "
-                    "or reset the safety link; pass confirm=True (or use ota_matrix_run)")
+            return _OTA_CONFIRM_REFUSAL
         from . import mcp_server_ota_matrix as _otam  # local import: avoids a circular import
         refusal = _otam._run_level_preflight({}, resolved_host)
         if refusal is not None:
@@ -291,6 +294,14 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     watchdog. Poll with `bench_test_job_status(job_id, wait_s=100)`; the run
     keeps going if you stop polling. A server restart loses a run that was
     still going (check logs/bench_test/<run>/runner.log)."""
+    # An unconfirmed OTA/update run is refused here, synchronously, before any job exists
+    # (same as ota_matrix_start); bench_test_run re-checks inside the job.
+    if not dry_run and confirm is not True and any(
+            v is not None for v in (ota_image_path, ota_corrupt_image_path, ota_truncated_image_path,
+                                    ota_wrong_build_image_path, ota_image_build, ota_pico_image_path,
+                                    ota_pico_image_commit, ota_pico_corrupt_image_path,
+                                    update_downgrade_repo, update_wrong_repo)):
+        return _OTA_CONFIRM_REFUSAL
     started = time.time()
     job_id = build_jobs.start_job(
         f"bench_test:{suite}",

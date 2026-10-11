@@ -509,10 +509,8 @@ exit 0
     # 4b (documented residual gap): the child is created by Start-Process and assigned to the job AFTER
     # it starts, so a grandchild spawned in that window escapes the job. Stop-CopyProcesses (command-line
     # match on the copy path) is the backstop; a suspended-create + resume needs CreateProcess P/Invoke.
-    $assignFailed = $false
     $job = [NegJob]::Create()
-    if ($job -eq [IntPtr]::Zero) { $assignFailed = $true }
-    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { $assignFailed = $true; Write-Line "negtest: could not assign child to job object; job kill is a no-op, falling back to killing the tracked descendants + command-line matches" Yellow } }
+    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; job kill is a no-op, Stop-Tracked + command-line matches remain the backstop" Yellow } }
     $script:liveChild = $p
     $script:liveJob = $job
     $tracked = @{}
@@ -525,7 +523,7 @@ exit 0
         if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p $job; $p.WaitForExit(10000) | Out-Null; break }
     }
     try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }
-    if ($timedOut) { if ($assignFailed) { Stop-Tracked $tracked }; Stop-CopyProcesses $copy }
+    if ($timedOut) { Stop-CopyProcesses $copy }
     # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
     # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
     # sessions' builds use. Stragglers are handled by the targeted Stop-CopyProcesses below.
