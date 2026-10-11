@@ -46,6 +46,7 @@ import re
 
 from kilnctrl.zones_http_client import (
     _TOP_FIELD_FORM_KEY,
+    _TOP_POST_ONLY_FORM_KEYS,
     _TOP_READONLY_OR_STRUCTURAL_KEYS,
     _ZONE_COUPLING_CELL_RE,
     _ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE,
@@ -178,7 +179,7 @@ def zones_field_table_checks() -> None:
     fw_post_keys = _extract_post_top_level_keys(post_text, _ZONES_POST_C_PATH)
 
     client_get_keys = set(_TOP_FIELD_FORM_KEY) | set(_TOP_READONLY_OR_STRUCTURAL_KEYS)
-    client_post_keys = set(_TOP_FIELD_FORM_KEY)
+    client_post_keys = set(_TOP_FIELD_FORM_KEY) | set(_TOP_POST_ONLY_FORM_KEYS)
 
     # Sanity check on the extractor itself: it should have found a
     # non-trivial number of keys, not silently matched nothing because a

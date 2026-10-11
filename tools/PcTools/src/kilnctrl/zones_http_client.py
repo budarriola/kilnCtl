@@ -669,6 +669,10 @@ _TOP_FIELD_FORM_KEY = {
     # apply -- to every zone, not silently dropped.
 }
 _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays"}
+#: Top-level POST-only control fields: the firmware's POST handler reads them but GET never emits them
+#: (so they are not in _TOP_FIELD_FORM_KEY, which GET echoes). build_post_body() sets
+#: expected_generation from GET's "generation" (WEB_UI_JS_AUDIT M-1).
+_TOP_POST_ONLY_FORM_KEYS = {"expected_generation"}
 #: Top-level keys GET emits that this module deliberately never echoes back:
 #: relay_names/timing_profiles/zones are handled by their own dedicated
 #: logic below (not this scalar map), and the rest are read-only telemetry
