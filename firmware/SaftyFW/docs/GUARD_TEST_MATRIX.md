@@ -15,6 +15,12 @@ are wiring.
 
 ---
 
+## 0. Admin test trip and F6 (kilnlink 18)
+
+Host tests: `test/test_test_trip.c` (every TEST_TRIP outcome and order, rate limit and wrap, F6 clear decisions, link_task/safety_core wiring scan) and `test_admin_test_trip()` in `test/test_safety_guards.c` (latch, real guard wins, request while tripped, clear hold to `trip_verify_s`, relay never open keeps the clear refused). Negtested to CAUGHT 2026-10-10: boot_id compare, already-tripped, rate limit, magic, unknown-peer refusal, clear boot_id binding, DIAG V3 gate, end-of-tick latch, TEST clear hold. Bench cases SP-12..14 and HP-09 are WP4/WP5.
+
+---
+
 ## 1. Write the nuisance tests first
 
 This is not a stylistic preference. `SAFETY_MODEL.md` §2's whole argument is

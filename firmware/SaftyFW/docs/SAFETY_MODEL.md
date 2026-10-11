@@ -984,6 +984,8 @@ The rules governing it are short and absolute:
 latched — it is advisory and the Pico's interlocks always win, which
 `firmware/KilnFW/docs/SAFETY_LINK.md` already documents and the ESP already handles.
 
+**Admin test trip (kilnlink 18).** `TEST_TRIP` (0x2E) latches `SAFETY_TRIP_TEST` (4, mask 0x0008) through the real latch path so the trip chain can be exercised unattended. It can only cause a trip: it never clears, masks or blinds one, a real guard firing the same tick keeps the reason, it is refused while already tripped or updating, limited to one per 10 s, and the resulting trip cannot be cleared before `trip_verify_s` has passed with K4 reported open. `CLEAR_TRIP` is bound to the Pico boot_id (F6): see ARCHITECTURE section 9.
+
 **Clearing requires a deliberate operator act**: `SAFETY_CMD_CLEAR_TRIP` (0x0A)
 over the link. **Correction, 2026-08-27 audit:** an earlier version of this
 section additionally claimed "an E-stop assert-then-release cycle (a physical

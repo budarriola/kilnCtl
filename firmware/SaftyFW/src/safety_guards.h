@@ -84,8 +84,9 @@ extern "C" {
 /* Verbatim from ARCHITECTURE.md section 9. Do not renumber -- once this
  * ships, a trip code is a wire value that ends up in logs and screenshots,
  * and renumbering it later silently reinterprets every historical record.
- * 4 and 11 are reserved gaps (S4 and S10 are WARN-only, never produce a
- * trip code) and are kept here so the enum stays byte-for-byte the one the
+ * 11 is a reserved gap (S10 is WARN-only, never produces a trip code). 4 is
+ * SAFETY_TRIP_TEST (admin test trip); S4 is WARN-only and has no trip code of
+ * its own. Both are kept here so the enum stays byte-for-byte the one the
  * doc defines, even though this phase only ever assigns five of these
  * values. */
 typedef enum {
@@ -903,9 +904,10 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
 //
 // Bit numbering: for every guard that already has a safety_trip_t code, the
 // bit is (that code - 1), i.e. the exact same numbering link_frame_trip_mask_
-// for_reason() uses for trip_mask -- S4/S10's codes are reserved gaps (4 and
-// 11) specifically so a WARN-only guard has a slot here without colliding
-// with any TRIP guard's bit. S14 and S15 (both added after safety_trip_t was
+// for_reason() uses for trip_mask -- S4/S10's slots (4 and 11) were reserved so a
+// WARN-only guard has a bit here without colliding with any TRIP guard's bit.
+// NOTE bit 3 (0x0008) means S4 in warn_mask but TEST (SAFETY_TRIP_TEST) in
+// trip_mask: the two masks are different fields, read each with its own table. S14 and S15 (both added after safety_trip_t was
 // written, CT_COMMISSIONING_PLAN.md) were never given a reserved trip code at
 // all -- codes 15/16 went to CONFIG_CORRUPT/SELF_TEST, unrelated future
 // guards -- so they take bits 14/15 directly: both bits have been 0 on every
