@@ -2414,6 +2414,59 @@ static void test_save_ex_rollback_unlinks_written_file(void)
     TEST_CHECK(!valid, "rolled-back slot's file is gone (would resurrect at next boot)");
 }
 
+static void rvfx_prepare_free_slot0_with_file(uint32_t file_rev)
+{
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    memset(&s_profiles, 0, sizeof(s_profiles));
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    memset(s_profile_rev, 0, sizeof(s_profile_rev));
+    profile_t old = make_stored_profile();
+    profiles_cfg_fs_save(0, &old, file_rev);
+}
+
+static bool rvfx_slot0_file_valid(void)
+{
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(0, &loaded, &rev, &valid);
+    return valid;
+}
+
+static void test_rvfx_rollback_keeps_unexamined_file(void)
+{
+    TEST_SECTION("misc8fx MED-1: a refused SAVE_AS (rev floor unknown) must not delete the slot's unexamined file");
+    rvfx_prepare_free_slot0_with_file(5);
+    s_profile_rev_unknown[0] = true;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    TEST_CHECK(ok && !persisted && out_id == 0, "save landed on slot 0 and was refused");
+    TEST_CHECK(rvfx_slot0_file_valid(), "slot 0's unexamined file survived the rollback");
+    s_profile_rev_unknown[0] = false;
+}
+
+static void test_rvfx_rollback_keeps_file_with_other_rev(void)
+{
+    TEST_SECTION("misc8fx LOW-1: a failed write before the rename keeps an existing file (rev differs from the attempt)");
+    rvfx_prepare_free_slot0_with_file(5);
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id == 0, "save refused on slot 0");
+    TEST_CHECK(rvfx_slot0_file_valid(), "pre-existing file (rev 5 != attempted rev 1) survived");
+}
+
 static void test_save_ex_fresh_slot_rolled_back_in_lock(void)
 {
     TEST_SECTION("fwlow16 LOW-1: failed persist of a fresh slot rolls back inside save_ex; overwrite stays applied");
@@ -5842,6 +5895,8 @@ void run_test_profiles_http(void)
     test_profiles_delete_start_race_l23();
     test_profiles_slot_gen_seqlock();
     test_save_ex_rollback_unlinks_written_file();
+    test_rvfx_rollback_keeps_unexamined_file();
+    test_rvfx_rollback_keeps_file_with_other_rev();
     test_save_ex_fresh_slot_rolled_back_in_lock();
     test_profile_edit_post_slot_gen();
     test_profile_post_expected_rev();
