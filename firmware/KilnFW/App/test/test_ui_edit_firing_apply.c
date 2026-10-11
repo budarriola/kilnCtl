@@ -395,7 +395,9 @@ static void test_apply_stale_generation_refused(void)
     TEST_CHECK(edit_firing_step(&w, 1, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1), "edit");
     profile_t web_saved;
     TEST_CHECK(live_profile_load_working(&web_saved), "web working readable");
+    g_fake_validate_calls = 0;
     TEST_CHECK(!edit_firing_apply(&w, &ctx, err, sizeof(err)), "early: apply refused");
+    TEST_CHECK(g_fake_validate_calls == 0, "early: refused before the validator ran (early check, not the late one)");
     TEST_CHECK(strstr(err, "edited elsewhere") != NULL, "early: refused as edited elsewhere");
     profile_t after;
     TEST_CHECK(live_profile_load_working(&after) && memcmp(&after, &web_saved, sizeof(after)) == 0,
