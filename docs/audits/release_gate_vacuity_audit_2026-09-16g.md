@@ -160,7 +160,7 @@ blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 convention), since superseded by a later unrelated edit; line 505 still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
 targeted, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`d7833aa6`
+blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`917a0485`
 (citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de and 8c287553; the heat_enable_release() call this test targets is unchanged))
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as
@@ -198,7 +198,7 @@ superseded) was itself superseded by `93a8716f`'s shared AP-subnet helper/
 HTTP-layer message/confirm-side guard change, unrelated to this check's
 subject (the auth/gate logic the negative test exercises is unchanged);
 the underlying claim still holds, refreshed to
-blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`52e2860d` (citation refreshed 2026-10-09)
+blob:firmware/KilnFW/App/drivers/http/wifi_provision_http.c`c5ae34d9` (citation refreshed 2026-10-09)
 is the current one (citation refreshed 2026-09-30); see
 check_doc_hash_citations.ps1). Re-run at that time:
 PASS, with an informational note (not a defect) that headroom was thin — 3
