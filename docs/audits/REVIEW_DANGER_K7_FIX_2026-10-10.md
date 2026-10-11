@@ -227,7 +227,7 @@ after).
 
 ## Fix status
 
-F1, F3, F4, F5 and the N1/N4/N8 test gaps are fixed in b0035aa13 (danger_mode.c, kiln_io.c/.h,
+F1, F3, F4, F5 and the N1/N4/N8 test gaps are fixed in 235e4e3c4 (danger_mode.c, kiln_io.c/.h,
 profile_executor.c/_relay_io.c/_internal.h; tests in test_danger_mode.c, test_kiln_io_sx_fake.c,
 test_kiln_io_owner.c, test_profile_executor_prestart.c). F1: the rollback retries its lock take
 until it succeeds and restores the deadline. F3: the unserialised all-off returns
