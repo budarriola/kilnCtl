@@ -2145,7 +2145,6 @@ static bool guard9_prelock_check(uint32_t *since_ms_out)
      * directly from this task (chip access is locked inside
      * sx1509_write_port_locked); it is not serialised through the owner task. */
     if (s_exec.safety) {
-        pe_app_note_foreign_before_assert();
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
     }
     if (s_exec.io) {
@@ -2202,14 +2201,13 @@ bool pe_app_owner_relay_unknown(void)
     return s_relay_unknown_fault_asserted;
 }
 
-/* Call BEFORE this module asserts APP: if the link already shows APP and no tracked executor owner
- * accounts for it, someone else holds it -- remember that so we never release it. */
-void pe_app_note_foreign_before_assert(void)
+/* LOW-2 (c)/(a): holders other than this module register explicitly (the boot safe-state
+ * latches in main.c / main_control_bringup.c). The executor no longer infers a foreign holder
+ * from the link bit: that inference raced a halt (false foreign, sticky until reboot) and
+ * missed holders that asserted while the executor already held APP. Sticky for the boot by
+ * design: it fails safe (APP stays held, relay ON refused). */
+void profile_executor_note_external_app_hold(void)
 {
-    if (!s_exec.safety) return;
-    if ((safety_link_get_fault_sources(s_exec.safety) & SAFETY_FAULT_SRC_APP) == 0u) return;
-    if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) != 0u) return;
-    if (s_relay_unknown_fault_asserted || s_guard9_bookkeeping_pending) return;
     pe_app_owner_foreign = true;
 }
 
@@ -2221,12 +2219,14 @@ static void relay_unknown_prelock_check(void)
         ESP_LOGE(PE_TAG, "relay state unknown -- forcing relays off and holding the app fault source");
         (void)kiln_io_all_relays_off(s_exec.io);
     }
-    if (kiln_io_relay_state_unknown(s_exec.io) && !s_relay_unknown_fault_asserted) {
+    if (kiln_io_relay_state_unknown(s_exec.io)) {
+        /* LOW-2 (b): a level, not an edge. Publish the owner flag first, then assert APP on
+         * EVERY pass while unknown: a locked halt that read the flag as false and deasserted
+         * after our assert is repaired by the next pass. The assert is idempotent. */
+        s_relay_unknown_fault_asserted = true;
         if (s_exec.safety) {
-            pe_app_note_foreign_before_assert();
             safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
         }
-        s_relay_unknown_fault_asserted = true;
     }
 }
 

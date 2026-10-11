@@ -2478,13 +2478,14 @@ static void test_relay_state_unknown_is_a_fault(void)
                    g_last_fault_source_assert,
                "unknown state: SAFETY_FAULT_SRC_APP asserted (fault, not OFF)");
     relay_unknown_prelock_check();
-    TEST_CHECK(g_set_fault_source_calls == 1, "still unknown: asserted once, not every pass");
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert,
+               "still unknown: LOW-2 level hold -- APP re-asserted every pass (idempotent)");
     relay_unknown_release_locked();
-    TEST_CHECK(g_set_fault_source_calls == 1, "still unknown: hold not released");
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert, "still unknown: hold not released");
 
     g_kiln_io_relay_unknown = false;
     relay_unknown_release_locked();
-    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
+    TEST_CHECK(g_set_fault_source_calls == 3 && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP &&
                    !g_last_fault_source_assert,
                "cleared by a verified read/all-off: hold released");
 
@@ -2529,9 +2530,10 @@ static void test_app_fault_source_is_owner_tracked(void)
     s_exec.io = (kiln_io_t *)0x1;
     s_exec.safety = (SafetyLinkClass *)0x1;
     g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP; /* asserted by main_kiln_enter_safe_state() */
+    profile_executor_note_external_app_hold();        /* ... which registers itself (LOW-2) */
     g_kiln_io_relay_unknown = true;
     relay_unknown_prelock_check();
-    TEST_CHECK(pe_app_owner_foreign, "pre-existing APP on the link is recorded as a foreign holder");
+    TEST_CHECK(pe_app_owner_foreign, "a registered boot latch is a foreign holder");
     g_kiln_io_relay_unknown = false;
     g_set_fault_source_calls = 0;
     relay_unknown_release_locked();
@@ -2539,6 +2541,58 @@ static void test_app_fault_source_is_owner_tracked(void)
     s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
     clear_this_runs_faults();
     TEST_CHECK(g_set_fault_source_calls == 0, "halt never clears the boot safe-state latch either");
+    pe_app_owner_foreign = false;
+    s_exec.io = NULL;
+}
+
+// LOW-2 (REVIEW_DK7FIX_2026-10-10): explicit holder registration + level relay-unknown assert.
+static void test_app_holder_races_low2(void)
+{
+    TEST_SECTION("LOW-2 -- (a) no inferred foreign holder, (b) relay-unknown re-asserted every pass, (c) boot latch registered while executor holds APP");
+    /* (a) link shows APP, global is 0 (a halt cleared it between the two reads): nothing is inferred. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    g_stub_link_fault_sources = SAFETY_FAULT_SRC_APP;
+    s_exec.global_fault_source = 0;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(!pe_app_owner_foreign, "(a) lock-free check never invents a foreign holder");
+    g_kiln_io_relay_unknown = false;
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 1 && !g_last_fault_source_assert,
+               "(a) APP is released once the last real holder lets go (no outage until reboot)");
+
+    /* (b) a locked halt dropped the APP bit while relay state is still unknown: the next pass re-asserts. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    TEST_CHECK(s_relay_unknown_fault_asserted, "(b) first pass raised the hold");
+    g_set_fault_source_calls = 0;
+    g_last_fault_source_assert = false;
+    relay_unknown_prelock_check(); /* flag already true: edge-triggered code would do nothing */
+    TEST_CHECK(g_set_fault_source_calls == 1 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "(b) every pass while unknown re-asserts APP");
+    g_kiln_io_relay_unknown = false;
+    relay_unknown_release_locked();
+
+    /* (c) executor already holds APP (global claim); a boot latch registers afterwards: release keeps the bit. */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    guard9_assert_stale_tick_fault();
+    profile_executor_note_external_app_hold();
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "(c) executor release never clears a latch registered after it asserted");
     pe_app_owner_foreign = false;
     s_exec.io = NULL;
 }
@@ -2729,6 +2783,29 @@ static void reset_io_seg_test_state(void)
     g_last_io_write_level = false;
     g_relay_claim_calls = 0;
     g_relay_release_calls = 0;
+}
+
+static void test_io_seg_start_on_gated_by_relay_authority(void)
+{
+    TEST_SECTION("EXECTEST INFO-1 -- a RELAY_IO segment's ON is refused (driven OFF) while relay_authority blocks");
+    reset_io_seg_test_state();
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2;
+    seg.io_state = 1;
+    seg.dwell_min = 5;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &seg);
+    s_test_relay_authority_blocked = false;
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0,
+               "blocked: the segment's relay is commanded OFF, never ON");
+    reset_io_seg_test_state();
+    io_seg_start(0, &seg);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0,
+               "not blocked: the same segment still commands ON");
+    io_seg_finish(0, false);
 }
 
 static void test_io_seg_finish_default_forces_off_on_done(void)
@@ -11123,6 +11200,11 @@ static void test_done_start_psram_alloc_failure_refuses_without_internal_fallbac
     TEST_CHECK(strstr(err, "out of memory") != NULL, "the refusal says why");
     med2_check_done_untouched("state stays DONE after the PSRAM refusal");
     TEST_CHECK(g_relay_claim_calls == 0, "no relay ownership grabbed");
+    /* review LOW-1: do not leave the finished run or the fresh mutex behind for the next test */
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_exec.lock = NULL;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
 }
 
 static void test_aux_apply_relay_failed_write_is_not_a_transition(void)
@@ -12609,6 +12691,7 @@ void run_test_profile_executor_prestart(void)
     test_guard9_fires_while_another_task_holds_exec_lock();
     test_relay_state_unknown_is_a_fault();
     test_app_fault_source_is_owner_tracked();
+    test_app_holder_races_low2();
     test_watchdog_pass_wires_relay_unknown_and_orders_release();
     test_guard9_watchdog_source_order();
     test_guard9_pending_verdict_survives_lock_timeout();
@@ -12621,6 +12704,7 @@ void run_test_profile_executor_prestart(void)
     test_profile_zones_have_ceiling_ignores_inactive_zones();
     test_profile_zones_have_ceiling_ignores_off_zones_in_mask();
     test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
+    test_io_seg_start_on_gated_by_relay_authority();
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();

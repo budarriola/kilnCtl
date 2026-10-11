@@ -1332,7 +1332,6 @@ void guard9_assert_stale_tick_fault(void);
 /* K7 review F5: per-owner tracking for the shared SAFETY_FAULT_SRC_APP link bit (profile_executor.c). */
 extern bool pe_app_owner_foreign;
 bool pe_app_owner_relay_unknown(void);
-void pe_app_note_foreign_before_assert(void);
 void clear_this_runs_faults(void);
 /* Run-START counterpart to clear_this_runs_faults() (run-HALT): releases
  * relay_authority's per-zone latch for every zone this NEW run activates,

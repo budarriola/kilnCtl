@@ -545,6 +545,10 @@ void profile_executor_halt(void);
  * (leaves fault_reason as whatever a prior fault already set, or empty). */
 void profile_executor_fault_halt(const char *reason);
 
+/* Register a non-executor holder of SAFETY_FAULT_SRC_APP (boot safe-state latch). The executor
+ * then never releases the bit. Sticky for the boot; call BEFORE asserting the bit. */
+void profile_executor_note_external_app_hold(void);
+
 /* Pause/resume: pause drops every active zone's relays and freezes the
  * shared ramp/dwell schedule; resume picks up exactly where it left off.
  * Both return false (no state change) if the executor isn't in a state

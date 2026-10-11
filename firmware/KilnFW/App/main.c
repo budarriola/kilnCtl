@@ -42,6 +42,7 @@
 #include "flash_worker.h"
 #include "kiln_io.h"
 #include "pref_cfg_fs.h"
+#include "profile_executor.h"
 #include "cfg_fs.h"
 #include "hal_kv.h"
 #include <string.h>
@@ -178,6 +179,7 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
     }
 
     if (safety_ok) {
+        if ((fault_sources & SAFETY_FAULT_SRC_APP) != 0u) profile_executor_note_external_app_hold();
         esp_err_t err = safety_link_set_fault_source(safety, fault_sources, true);
         if (err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "could not assert the isolated fault line: %s", esp_err_to_name(err));

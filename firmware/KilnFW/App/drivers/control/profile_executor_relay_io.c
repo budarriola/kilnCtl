@@ -1168,8 +1168,20 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
          * below can always account for it even if the write itself fails. */
         s_exec.claimed_relay_mask |= bit;
         relay_authority_claim_mask(bit, RELAY_OWNER_PROFILE);
+        /* Review EXECTEST INFO-1: a relay_authority source (safety link down, PC link, APP latch...)
+         * can rise mid-run WITHOUT faulting the executor (the watchdog aborts only after sustained
+         * silence), and this write is AUTHORIZED (ungated by the owner). Gate the ON here the way
+         * apply_relay()/aux_apply_relay() do: drive OFF instead, and say so. Not retried: a dropped
+         * ON stays dropped for the run (never close a relay after a fault was seen). */
+        bool drive_on = r->state_on;
+        uint32_t blocked_sources = 0;
+        if (drive_on && relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
+            ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X -- commanded OFF",
+                     idx + 1, r->target, (unsigned)blocked_sources);
+            drive_on = false;
+        }
         if (s_exec.io) {
-            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, r->state_on ? bit : 0, off_epoch_since);
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, drive_on ? bit : 0, off_epoch_since);
             if (err != ESP_OK) {
                 ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
                          idx + 1, r->target, esp_err_to_name(err));
@@ -1505,7 +1517,6 @@ bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *de
 void guard9_assert_stale_tick_fault(void)
 {
     if (s_exec.safety) {
-        pe_app_note_foreign_before_assert();
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, true);
     }
     s_exec.global_fault_source |= SAFETY_FAULT_SRC_APP;

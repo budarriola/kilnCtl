@@ -757,6 +757,9 @@ static void test_hook_all_off_while_waiting(void) { (void)kiln_io_all_relays_off
 static void test_epoch_compared_under_lock(void)
 {
     TEST_SECTION("LOW-D -- the epoch is compared while the kiln_io lock is held (an all-off arriving while the owner waits for the lock makes the ON stale)");
+    bool saved_initialized = s_dispatch_io.initialized;
+    SX1509Class *saved_exp = s_dispatch_io.exp;
+    BaseType_t saved_take_default = g_test_stub_semaphore_take_default;
     s_dispatch_io.initialized = true;
     s_dispatch_io.exp = (SX1509Class *)&s_dispatch_dummy;
     s_dispatch_io.io_lock = xSemaphoreCreateMutex();
@@ -772,6 +775,9 @@ static void test_epoch_compared_under_lock(void)
     TEST_CHECK(g_sx_masked_writes == 0 || g_sx_last_masked_value == 0, "the stale ON drove no relay pin high");
     s_dispatch_io.io_lock = NULL;
     g_sx_dir_shadow = 0xFFFFu;
+    g_test_stub_semaphore_take_default = saved_take_default;
+    s_dispatch_io.initialized = saved_initialized;
+    s_dispatch_io.exp = saved_exp;
 }
 
 static void test_epoch_stamp_and_stale_semantics(void)

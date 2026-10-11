@@ -105,6 +105,7 @@ void main_control_bringup(main_boot_ctx_t *ctx)
     } else if (ctx->boot_fault_sources != 0) {
         /* First moment the accumulated bring-up failures can actually reach
          * the safety processor. */
+        if ((ctx->boot_fault_sources & SAFETY_FAULT_SRC_APP) != 0u) profile_executor_note_external_app_hold();
         esp_err_t err = safety_link_set_fault_source(&ctx->safety, ctx->boot_fault_sources, true);
         if (err != ESP_OK) {
             ESP_LOGE(MAIN_TAG, "could not assert boot fault sources 0x%02X: %s",

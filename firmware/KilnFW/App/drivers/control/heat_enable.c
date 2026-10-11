@@ -747,6 +747,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
     bool log_hold = false;
     bool log_benign = false;
     bool log_lost_trip = false;
+    bool log_claimless_lost_trip = false;
     if (!s_he.reboot_seq_known) {
         s_he.reboot_seq_known = true;
         s_he.seen_reboot_seq = reboot_seq;
@@ -779,6 +780,7 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
                                     SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
                                     SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
             s_he.reboot_verdict_pending = false;
+            log_claimless_lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal_u) == 0u;
             s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
                                           s_he.reboot_fatal_latched;
             s_he.reboot_was_tripped = false;
@@ -820,6 +822,11 @@ void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uin
          * condition and the operator resumes or stops. */
     }
     he_unlock(taken);
+    if (log_claimless_lost_trip) {
+        ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x), no heat claim held "
+                      "-- latching the reboot fatal; heat stays withheld until an operator clears it",
+                 (unsigned)boot_reason);
+    }
     if (log_hold && log_lost_trip) {
         ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x) during a "
                       "heat claim -- NOT re-requesting heat; K4 stays open until an operator resumes",
