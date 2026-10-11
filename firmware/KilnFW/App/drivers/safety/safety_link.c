@@ -311,10 +311,11 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;
-        /* kilnlink review LOW-4: the DIAG uptime baseline must not survive an outage (one spanning the
-         * 49.7-day wrap would read as a reboot). Kept on the SAME condition as pico_boot_id_known so the
-         * two reboot signals reset together. */
-        link->pico_uptime_baseline_known = false;
+        /* Firing audit 2 MED-1: the DIAG uptime baseline is deliberately KEPT across a link-down. A real
+         * Pico reboot almost always spans a link-down, and the 8-bit boot_id repeats 1 boot in 256, so the
+         * first DIAG after relink must still be able to flag an uptime regression. A long outage in which
+         * the Pico kept running only advances uptime (no regression); the 49.7-day wrap is handled by
+         * safety_pico_uptime_regressed()'s wrap band, and any residual false positive pauses (fail-safe). */
         link->diag_reannounce_count = 0u;
         link->diag_reannounce_last_ms = 0u;
     }

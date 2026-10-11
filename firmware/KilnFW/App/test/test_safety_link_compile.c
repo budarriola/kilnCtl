@@ -3143,23 +3143,56 @@ static void test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer(void)
                "peer < 17: 30-byte DIAG still gets the legacy clear");
 }
 
+static void diag_with_reason(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t reason)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.payload[10] = reason;
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
 static void test_low4_link_down_invalidates_uptime_baseline(void)
 {
-    TEST_SECTION("LOW-4 -- link-down clears the DIAG uptime baseline; the first DIAG after "
-                 "recovery re-seeds it instead of reading as a reboot");
+    TEST_SECTION("firing audit 2 MED-1 -- link-down KEEPS the DIAG uptime baseline; a same-boot_id "
+                 "reboot across the outage is detected, a plain blip/long outage is not");
+    /* genuine blip / long outage, same id, uptime advanced: not a reboot */
     SafetyLinkClass link = make_link();
     link.ever_received = true;
-    link.cached_tick = 0; // reads as link UP (see stale-reset tests above)
-    apply_diag_uptime(&link, UINT32_MAX - 1000u);
-    TEST_CHECK(link.pico_uptime_baseline_known, "setup: baseline known");
+    link.cached_tick = 0;
+    apply_diag_uptime(&link, 600000u);
+    link.cached_tick = 1; /* link down */
     safety_reset_stale_peer_info_if_link_down(&link);
-    TEST_CHECK(link.pico_uptime_baseline_known == true, "up tick leaves the baseline alone");
-    link.cached_tick = 1; // wraps to a huge elapsed -> link down
-    safety_reset_stale_peer_info_if_link_down(&link);
-    TEST_CHECK(link.pico_uptime_baseline_known == false, "down tick invalidates the baseline");
-    apply_diag_uptime(&link, 300000u); // would regress against the old baseline
-    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "post-outage DIAG seeds, not a reboot");
-    TEST_CHECK(link.pico_uptime_baseline_known == true, "baseline re-seeded");
+    TEST_CHECK(link.pico_uptime_baseline_known == true, "MUST GO RED if link-down clears the baseline");
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 900000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u && link.cached.pico_reboot_seq == seq0,
+               "uptime advanced across the outage is not a reboot");
+    /* wrap across the outage is still not a reboot */
+    SafetyLinkClass w = make_link();
+    w.ever_received = true;
+    w.cached_tick = 0;
+    apply_diag_uptime(&w, UINT32_MAX - 1000u);
+    w.cached_tick = 1;
+    safety_reset_stale_peer_info_if_link_down(&w);
+    apply_diag_uptime(&w, 500u);
+    TEST_CHECK(w.pico_reboot_by_uptime_count == 0u, "32-bit wrap across an outage is not a reboot");
+    /* same-id reboot across link-down, benign (reason 1) and fatal (reason 2) causes */
+    for (uint8_t reason = 1u; reason <= 2u; reason++) {
+        SafetyLinkClass r = make_link();
+        r.ever_received = true;
+        r.cached_tick = 0;
+        apply_diag_uptime(&r, 600000u);
+        uint32_t s0 = r.cached.pico_reboot_seq;
+        r.cached_tick = 1;
+        safety_reset_stale_peer_info_if_link_down(&r);
+        diag_with_reason(&r, 1500u, reason);
+        TEST_CHECK(r.pico_reboot_by_uptime_count == 1u && r.cached.pico_reboot_seq == s0 + 1u,
+                   "same-id reboot after link-down detected on the first DIAG");
+        TEST_CHECK(r.cached.diag_boot_reason == reason, "boot cause of the new boot is cached for classification");
+    }
 }
 
 static void test_boot_clear_refused_then_retried_succeeds(void)

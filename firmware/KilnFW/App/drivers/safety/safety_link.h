@@ -1638,8 +1638,8 @@ typedef struct {
      * (safety_pico_uptime_regressed()). A backwards step means the Pico
      * rebooted even when its 8-bit boot_id happened to repeat, and runs the
      * same safety_note_pico_reboot_locked() bookkeeping a boot_id change
-     * does. Cleared on link-down (review LOW-4: an outage may span the
-     * 49.7-day wrap; safety_reset_stale_peer_info_if_link_down()) and on a boot_id change,
+     * does. KEPT across link-down (firing audit 2 MED-1: a reboot that spans
+     * a link-down with a repeated boot_id is caught only by this); cleared on a boot_id change,
      * since the new boot's baseline is not yet known. Under state_lock. */
     uint32_t pico_uptime_baseline_ms;
     bool     pico_uptime_baseline_known;
