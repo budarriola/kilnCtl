@@ -126,3 +126,9 @@ Base 7878879eb. The baseline passed, the real tree was unchanged, and every copy
 - `drop_rollback_delete`: removes the new `profiles_cfg_fs_delete()` line. CAUGHT at
   test_profiles_http.c:2329 (the LOW-1 test `test_save_ex_rollback_unlinks_written_file`), so the
   fix's own test is not vacuous.
+
+## Fix status
+
+- MED-1 FIXED in ebdff64ee (test hardened in 5f687382b): the SAVE_AS rollback deletes the file only if the slot is not rev-unknown and the file read back has rev == attempted rev. Demo test is now permanent (`test_rvfx_rollback_keeps_unexamined_file`, `test_rvfx_rollback_keeps_file_with_other_rev`). Negtested: rollback-unconditional-delete, rollback-ignores-unknown CAUGHT.
+- LOW-1 FIXED in ebdff64ee: same read-back check covers a free slot holding an undecodable file (invalid file is never deleted).
+- LOW-2 FIXED in ebdff64ee: literal `%2B` cases for `level=` and `step=`. Negtested: dropping the digit check in dashboard_settings_http.c and setup_progress_http.c CAUGHT.

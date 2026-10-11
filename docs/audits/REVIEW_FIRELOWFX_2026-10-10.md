@@ -221,3 +221,10 @@ from zeroed RAM.
 `relay_authority_start_blocked`, so the refusal text is the gate's own text
 ("safety link is down or not yet confirmed up") rather than a second,
 divergent copy. The test expectation was updated to match. No behavior change.
+
+## Fix status
+
+- LOW-2a FIXED in a118a9df1 (tests in ce83e1ee3): rebuild only on a distinct wrong-size result; any probe status other than NOT_FOUND fails closed. Negtested: rebuild-on-any-io, probe-error-as-absent CAUGHT.
+- LOW-2b FIXED in a118a9df1: longer blob requires len % 4 == 0. Negtested: no-mod4 CAUGHT.
+- LOW-3a FIXED in a118a9df1: builtin mask still loaded; `profiles_favorites_set` returns ESP_ERR_INVALID_STATE while the user mask is unresolved. Negtested: fav-set-no-refuse CAUGHT.
+- INFO-2f test gaps closed: present-slot bit kept through rebuild, 24-byte boot load, 18-byte junk refused, read error does not rebuild.
