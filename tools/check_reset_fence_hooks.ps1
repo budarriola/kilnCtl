@@ -8,7 +8,8 @@
 #   cfg_fs_mount_set_write_refuse_hook(relay_authority_reset_refuses_writer)   cfg_fs_mount.c final worker check
 #   cfg_fs_set_write_refuse_hook(relay_authority_reset_refuses_writer)         cfg_fs_write_atomic()
 #   hal_kv_set_write_refuse_hook(kiln_nvs_reset_refuses_write)                 every kiln_nvs hal_kv write
-# and kiln_nvs_reset_refuses_write() must itself consult relay_authority_reset_refuses_writer() (so the
+# and kiln_nvs_reset_refuses_write() must itself consult relay_authority_reset_refuses_kiln_nvs_writer()
+# (ea86f4d43: the same reset-in-flight predicate, true only when the reset erases kiln_nvs; so the
 # reset job's own task stays exempt).
 #
 # This check fails when main.c stops making any of those four calls (comments are stripped first, so a
@@ -52,9 +53,9 @@ foreach ($r in $required) {
 }
 
 # The kiln_nvs predicate must keep consulting the shared reset predicate (and be a real function definition).
-$predPat = 'static\s+bool\s+kiln_nvs_reset_refuses_write\s*\([^)]*\)\s*\{[^}]*relay_authority_reset_refuses_writer\s*\(\s*\)[^}]*\}'
+$predPat = 'static\s+bool\s+kiln_nvs_reset_refuses_write\s*\([^)]*\)\s*\{[^}]*relay_authority_reset_refuses_kiln_nvs_writer\s*\(\s*\)[^}]*\}'
 if ($stripped -notmatch $predPat) {
-    Write-Host "FAIL: kiln_nvs_reset_refuses_write() is missing or no longer calls relay_authority_reset_refuses_writer()"
+    Write-Host "FAIL: kiln_nvs_reset_refuses_write() is missing or no longer calls relay_authority_reset_refuses_kiln_nvs_writer()"
     $fail++
 }
 

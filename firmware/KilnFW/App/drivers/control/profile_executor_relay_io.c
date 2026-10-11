@@ -647,7 +647,8 @@ void force_all_relays_off(void)
                 s_exec.zones[zi].relay_commanded_on = false;
                 s_exec.zones[zi].duty = 0.0f;
                 if (m != 0) {
-                    if (kiln_io_owner_command_set_relay_mask_authorized(m, 0) == ESP_OK) {
+                    esp_err_t off_err = kiln_io_owner_command_set_relay_mask_authorized(m, 0);
+                    if (off_err == ESP_OK) {
                         relay_off_tracker_note_write(m, 0);
                     } else {
                         s_exec.zone_off_pending_mask |= m;

@@ -183,6 +183,11 @@ $allowlistPaths = @(
     # integrity, or a plain accessor/stub computing nothing) than the link's
     # CRC16-CCITT-FALSE, not a from-scratch reimplementation of it.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\boot_guard.c"),
+    # test_cfg_fs_mount_state.c ref_crc(): littlefs on-flash CRC32 (nibble table,
+    # polynomial 0xedb88320), deliberately an INDEPENDENT reference so the test can
+    # forge littlefs superblock/commit blocks byte-for-byte. Nothing to do with the
+    # link's CRC16-CCITT-FALSE framing; sharing it would defeat its purpose.
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_cfg_fs_mount_state.c"),
     # docs/PICO_AUTO_UPDATE.md pico_update_attempts.c -- same class as
     # boot_guard.c immediately above: a standalone table-less CRC32 (IEEE
     # 802.3/zlib polynomial) over this module's OWN NVS record, deliberately

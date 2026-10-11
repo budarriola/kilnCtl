@@ -18,9 +18,11 @@ if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
 $gateFile = (Resolve-Path (Join-Path $PSScriptRoot "build_gate.ps1")).Path
 $bad = @()
 $seen = 0
+# Deliberate-misuse fixtures: this test nests/leaks Enter-KilnBuildGate on purpose to prove build_gate.ps1 behaviour.
+$deliberateMisuse = @('check_build_gate_reentrant.ps1')
 $innerBad = 'Start-Sleep|Enter-BuildLock|vcvarsall|Import-KilnVcvarsEnv|Enter-KilnBuildGate|&\s*\$\w*[Ee]xe\b|&\s*["''][^"'']*\.exe["'']'
 $files = Get-ChildItem -LiteralPath $Root -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -notmatch '[\/](\.git|node_modules|\.venv|build[^\/]*)[\/]' -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' }
+    Where-Object { $_.FullName -notmatch '[\/](\.git|node_modules|\.venv|build[^\/]*)[\/]' -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' -and $_.Name -notin $deliberateMisuse }
 foreach ($f in $files) {
     $lines = @(Get-Content -LiteralPath $f.FullName)
     $code = @()

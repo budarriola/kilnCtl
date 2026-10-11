@@ -36,13 +36,13 @@ $slotName = Get-KilnBuildGateMutexName -SlotIndex 0 -Lane light
 # Keep this in step with Complete-CheckResult in run_all_checks.ps1.
 $busyPattern = 'build gate: timed out after \d+s waiting for a (heavy|light)-lane build slot'
 
-$work = Join-Path $env:TEMP "check_build_gate_reentrant_$PID"
-New-Item -ItemType Directory -Force -Path $work | Out-Null
+$tmpWork = Join-Path $env:TEMP "check_build_gate_reentrant_$PID"
+New-Item -ItemType Directory -Force -Path $tmpWork | Out-Null
 
 # Child helper: mode "probe" exits 0 if the named mutex is FREE (acquired and
 # released at once), 1 if held. Mode "hold" takes it, sleeps, releases.
 # Mode "probe_after" sleeps first, then probes.
-$child = Join-Path $work "child.ps1"
+$child = Join-Path $tmpWork "child.ps1"
 Set-Content -Path $child -Encoding ascii -Value @'
 param([string]$Mode, [string]$Name, [int]$Seconds = 0)
 $m = New-Object System.Threading.Mutex($false, $Name)
@@ -139,7 +139,7 @@ catch {
     Write-Host "  FAIL: unexpected error: $err"
 }
 finally {
-    Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $tmpWork -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $env:KILNCTL_BUILD_GATE_DIR -ErrorAction SilentlyContinue
 }
 
