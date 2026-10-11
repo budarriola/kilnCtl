@@ -166,6 +166,12 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     (void)mask; (void)value;
     return ESP_OK;
 }
+uint32_t kiln_io_relay_off_epoch(void) { return 0; }
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value, uint32_t since_epoch)
+{
+    (void)since_epoch;
+    return kiln_io_owner_command_set_relay_mask_authorized(mask, value);
+}
 
 static int s_heat_zone_claim_begin_calls;
 static bool s_test_update_claim_after_heat_claim = false; /* MED-1 (review 3) */

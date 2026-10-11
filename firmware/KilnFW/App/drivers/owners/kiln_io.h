@@ -203,6 +203,12 @@ uint32_t kiln_io_relay_off_epoch(void);
  * result means "retry the locked all-off"; callers must not record an OFF on it. */
 #define KILN_IO_ERR_UNSERIALISED_OFF 0x10C /* == ESP_ERR_NOT_FINISHED */
 
+/* LOW-D: like kiln_io_set_relay_mask(), but compares since_epoch with the all-off epoch while
+ * HOLDING the kiln_io lock. If an all-off ran since since_epoch, value is forced to 0 and
+ * *out_stale (may be NULL) is set. */
+esp_err_t kiln_io_set_relay_mask_if_epoch(kiln_io_t *io, uint8_t mask, uint8_t value,
+                                          uint32_t since_epoch, bool *out_stale);
+
 /* Re-runs bring-up after the expander was reset/POR'd (K7-03): reset (the hard
  * ~RESET pulse when the GPIO is wired, else soft -- K7 NIT-1), relays latched
  * OFF, relay pins back to outputs, verified by chip read-back. Marks the board

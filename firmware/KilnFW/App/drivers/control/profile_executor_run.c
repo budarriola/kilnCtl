@@ -213,8 +213,10 @@ static void run_refuse_unlock(s_exec_state_t *done_snap)
 {
     if (done_snap != NULL) {
         TickType_t live_tick = s_exec.last_tick_tick;
+        history_slot_t *live_history = s_exec.history; /* LOW-B: keep a buffer this start allocated */
         memcpy(&s_exec, done_snap, sizeof(s_exec));
         s_exec.last_tick_tick = live_tick;
+        if (live_history != NULL) s_exec.history = live_history;
         heap_caps_free(done_snap);
     }
     xSemaphoreGive(s_exec.lock);
@@ -690,7 +692,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
     if (s_exec.state == PROFILE_EXEC_DONE) {
         done_snap = heap_caps_malloc(sizeof(s_exec), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (done_snap == NULL) done_snap = heap_caps_malloc(sizeof(s_exec), MALLOC_CAP_8BIT);
+        /* LOW-C: PSRAM only. An internal-RAM fallback could breach the 8 KB internal heap floor. */
         if (done_snap == NULL) {
             xSemaphoreGive(s_exec.lock);
             if (err_msg) snprintf(err_msg, err_cap, "out of memory preparing the start -- try again");
@@ -1179,6 +1181,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * overridden) when the plan actually warm-started -- the "not
      * warm-started" branch leaves every one of those exactly as the
      * pre-feature code already set them, byte-for-byte. */
+    uint8_t warm_replay_end = 0;
     {
         profile_warm_start_plan_t plan = profile_executor_plan_warm_start(&p, warm_start_coolest_c);
         if (plan.warm_started) {
@@ -1196,39 +1199,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                      s_exec.warm_start_reason, (int)plan.entry_dwelling, (double)plan.entry_target_c,
                      (unsigned long)plan.entry_segment_elapsed_s);
 
-            /* Q1 owner decision: replay every skipped RELAY_IO segment's
-             * on/off command, in profile order, before the first ramp tick
-             * -- reusing io_seg_start() gets both the hardware write and the
-             * relay_authority claim/claimed_relay_mask registration this
-             * needs "for free", identical to how a segment reached normally
-             * would be started. The one deliberate difference: forcing
-             * `blocking = true` afterward makes io_segs_tick() (which skips
-             * any segment with blocking == true) leave this segment alone
-             * for the rest of the run -- its own hold/dwell_min timer is
-             * NOT replayed (that schedule position is already past), only
-             * the command is. It is retired the same way a real blocking
-             * segment's command is: by the end-of-run sweep
-             * (io_segs_force_all_off(), honoring leave_on_at_end only on the
-             * clean DONE path, same as always) -- exactly the registration
-             * this decision requires so a replayed relay is never left
-             * energized with nothing owning it. */
-            for (uint8_t i = 0; i < plan.entry_segment_index && i < p.segment_count; i++) {
-                if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
-                    continue;
-                }
-                io_seg_start(i, &p.segments[i]);
-                s_exec.io_segs[i].blocking = true;
-                if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
-                    s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
-                }
-                ESP_LOGI(PE_TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
-                              "was NOT restarted, it stays as commanded until the run ends",
-                         i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
-                         s_exec.io_segs[i].is_relay
-                             ? s_exec.io_segs[i].target
-                             : (uint8_t)(s_exec.io_segs[i].target - PROFILE_IO_TARGET_IO_BASE + 1u),
-                         s_exec.io_segs[i].state_on ? "ON" : "OFF");
-            }
+            warm_replay_end = plan.entry_segment_index; /* replayed after the last refusal, below */
         }
     }
 
@@ -1469,13 +1440,50 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "a firing cannot start")) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap, "safety link went down while the firing was starting -- start it again");
         }
         ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: start gate closed meanwhile",
                  (unsigned)profile_id);
         return false;
+    }
+
+    if (warm_replay_end > 0) {
+        /* MED-A: runs after the LAST refusal so a refused start never leaves a replayed relay ON.
+         * Q1 owner decision: replay every skipped RELAY_IO segment's
+         * on/off command, in profile order, before the first ramp tick
+         * -- reusing io_seg_start() gets both the hardware write and the
+         * relay_authority claim/claimed_relay_mask registration this
+         * needs "for free", identical to how a segment reached normally
+         * would be started. The one deliberate difference: forcing
+         * `blocking = true` afterward makes io_segs_tick() (which skips
+         * any segment with blocking == true) leave this segment alone
+         * for the rest of the run -- its own hold/dwell_min timer is
+         * NOT replayed (that schedule position is already past), only
+         * the command is. It is retired the same way a real blocking
+         * segment's command is: by the end-of-run sweep
+         * (io_segs_force_all_off(), honoring leave_on_at_end only on the
+         * clean DONE path, same as always) -- exactly the registration
+         * this decision requires so a replayed relay is never left
+         * energized with nothing owning it. */
+        for (uint8_t i = 0; i < warm_replay_end && i < p.segment_count; i++) {
+            if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
+                continue;
+            }
+            io_seg_start(i, &p.segments[i]);
+            s_exec.io_segs[i].blocking = true;
+            if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
+                s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
+            }
+            ESP_LOGI(PE_TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
+                          "was NOT restarted, it stays as commanded until the run ends",
+                     i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
+                     s_exec.io_segs[i].is_relay
+                         ? s_exec.io_segs[i].target
+                         : (uint8_t)(s_exec.io_segs[i].target - PROFILE_IO_TARGET_IO_BASE + 1u),
+                     s_exec.io_segs[i].state_on ? "ON" : "OFF");
+        }
     }
 
     /* relay_authority's own per-zone latch is a SEPARATE module, not touched

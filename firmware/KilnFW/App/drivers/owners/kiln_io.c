@@ -821,6 +821,21 @@ esp_err_t kiln_io_set_relay_mask(kiln_io_t *io, uint8_t mask, uint8_t value)
     return err;
 }
 
+esp_err_t kiln_io_set_relay_mask_if_epoch(kiln_io_t *io, uint8_t mask, uint8_t value,
+                                          uint32_t since_epoch, bool *out_stale)
+{
+    if (out_stale) *out_stale = false;
+    if (!io) return ESP_ERR_INVALID_ARG;
+    if (!kiln_io_lock(io, KILN_IO_LOCK_WAIT_MS)) return ESP_ERR_TIMEOUT;
+    if (since_epoch != s_relay_off_epoch) {
+        value = 0; /* a fail-safe all-off ran since the caller decided: never close a relay for it */
+        if (out_stale) *out_stale = true;
+    }
+    esp_err_t err = kiln_io_set_relay_mask_locked(io, mask, value);
+    kiln_io_unlock(io);
+    return err;
+}
+
 esp_err_t kiln_io_set_io(kiln_io_t *io, uint8_t index, bool level)
 {
     if (!io) return ESP_ERR_INVALID_ARG;

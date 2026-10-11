@@ -104,6 +104,7 @@ void autotune_apply_relay(bool want_on)
      * the bench: 293 relay samples over 12 s of stepping, every one open, with
      * relay_cycles unmoved. profile_executor.c's autotune_apply_relay() already logs
      * both of these; this one did not. */
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the gate decision */
     if (want_on) {
         uint32_t sources = 0;
         if (relay_authority_zone_blocked(s_at.safety, s_at.zone_index, &sources)) {
@@ -117,7 +118,7 @@ void autotune_apply_relay(bool want_on)
         /* AUTHORIZED, not the manual gate -- see kiln_io_owner.h's top
          * comment and profile_executor.c's autotune_apply_relay() for the identical
          * reasoning (2026-08-19, TODO.md 10.14 Phase 1). */
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             ESP_LOGW(AT_TAG, "autotune zone %u relay write failed: %s -- relay state is unknown and "
                           "the trace cannot be trusted",

@@ -753,6 +753,51 @@ static void test_owner_task_sx_reset_notes_off_tracker(void)
     TEST_CHECK(relay_off_tracker_held_s(0x0Fu) > 0.0f, "N8: off-tracker records all relays OFF after a successful SX_RESET");
 }
 
+static void test_epoch_stamp_and_stale_semantics(void)
+{
+    TEST_SECTION("LOW-E/LOW-D -- post stamps the live epoch; stale OFF-only is not INVALID_STATE; epoch bumps on a failed all-off");
+    s_dispatch_io.initialized = true;
+    g_sx_dir_shadow = 0;
+
+    /* The real post function stamps the current epoch (the queued item is captured by the queue stub). */
+    s_cmd_queue = (QueueHandle_t)&s_dispatch_dummy;
+    g_stub_queue_item_size = sizeof(owner_cmd_t);
+    memset(g_stub_last_queue_item, 0xEE, sizeof(g_stub_last_queue_item));
+    uint32_t e0 = kiln_io_relay_off_epoch();
+    (void)kiln_io_owner_command_set_relay_mask_authorized(0x01u, 0x01u);
+    owner_cmd_t posted;
+    memcpy(&posted, g_stub_last_queue_item, sizeof(posted));
+    TEST_CHECK(posted.type == CMD_SET_RELAY_MASK_AUTHORIZED && posted.off_epoch == e0,
+               "post stamped off_epoch with the current epoch");
+    (void)kiln_io_owner_command_set_relay_mask_authorized_since(0x01u, 0x01u, e0 + 7u);
+    memcpy(&posted, g_stub_last_queue_item, sizeof(posted));
+    TEST_CHECK(posted.off_epoch == e0 + 7u, "_since post carries the caller's epoch, not a post-time sample");
+
+    /* The epoch bumps even when the locked all-off fails (invalid io). */
+    uint32_t before = kiln_io_relay_off_epoch();
+    esp_err_t e = kiln_io_all_relays_off(NULL);
+    TEST_CHECK(e != ESP_OK, "all-off on a NULL io fails");
+    TEST_CHECK(kiln_io_relay_off_epoch() == before + 1u, "epoch bumped although the all-off failed");
+
+    /* A stale OFF-only command never reports INVALID_STATE. */
+    owner_cmd_t c;
+    memset(&c, 0, sizeof(c));
+    c.type = CMD_SET_RELAY_MASK_AUTHORIZED;
+    c.args.set_relay_mask.mask = 0x01u;
+    c.args.set_relay_mask.value = 0x00u;
+    c.off_epoch = before; /* stale */
+    owner_result_t r = dispatch(c);
+    TEST_CHECK(r.err == ESP_OK, "stale OFF-only command succeeds, never INVALID_STATE");
+
+    /* LOW-D: the helper compares under the lock. */
+    bool stale = false;
+    g_sx_masked_writes = 0;
+    e = kiln_io_set_relay_mask_if_epoch(&s_dispatch_io, 0x01u, 0x01u, before, &stale);
+    TEST_CHECK(stale, "helper reports a stale ON");
+    TEST_CHECK(g_sx_masked_writes == 0 || g_sx_last_masked_value == 0, "stale ON drove no relay pin high");
+    g_sx_dir_shadow = 0xFFFFu;
+}
+
 int main(void)
 {
     g_test_stub_semaphore_take_default = 1; /* kiln_io_lock() must really be taken (K7 MED-2) */
@@ -777,6 +822,7 @@ int main(void)
     test_owner_task_dispatch_write_reg_relay_on_gate();
     test_authorized_on_queued_before_all_off_is_dropped();
     test_owner_task_sx_reset_notes_off_tracker();
+    test_epoch_stamp_and_stale_semantics();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

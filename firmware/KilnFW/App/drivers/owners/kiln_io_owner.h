@@ -227,6 +227,11 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, 
  * unchanged. */
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value);
 
+/* LOW-E: same, but the caller sampled kiln_io_relay_off_epoch() BEFORE its own gate decision
+ * and passes it here. If an all-off ran since, an ON is dropped to OFF (ESP_ERR_INVALID_STATE). */
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value,
+                                                                 uint32_t since_epoch);
+
 /* ---- Digital IO (IO_1..IO_7) ---- */
 esp_err_t kiln_io_owner_command_set_io(uint8_t index, bool level);
 esp_err_t kiln_io_owner_command_set_io_dir(uint8_t index, bool input, bool pullup);

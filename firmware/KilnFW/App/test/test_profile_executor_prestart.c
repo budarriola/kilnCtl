@@ -286,6 +286,17 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     }
     return g_relay_write_fail ? ESP_FAIL : ESP_OK;
 }
+/* LOW-E: tests bump g_fake_off_epoch to model an all-off between a caller's gate decision and its post. */
+static uint32_t g_fake_off_epoch = 0;
+uint32_t kiln_io_relay_off_epoch(void) { return g_fake_off_epoch; }
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value, uint32_t since_epoch)
+{
+    if (since_epoch != g_fake_off_epoch && value != 0) {
+        (void)kiln_io_owner_command_set_relay_mask_authorized(mask, 0);
+        return ESP_ERR_INVALID_STATE;
+    }
+    return kiln_io_owner_command_set_relay_mask_authorized(mask, value);
+}
 
 /* Spare-relay WP-3: controllable aux store. The executor's aux evaluator and
  * run-start re-check read it; profiles_http.c (real object in the store-link
@@ -336,10 +347,12 @@ ota_interlock_result_t ota_http_check_interlocks(bool ack_no_safety_processor, c
 static int g_heat_zone_claim_begin_calls;
 /* MED-1 (review 3): models an update claim taken AFTER the early check: blocks only once the heat claim has been published. */
 static bool s_test_update_claim_after_heat_claim = false;
+static void s_test_tick_bump_on_update_refusal(void);
 bool ota_http_heat_blocked_by_update(char *reason_out, size_t reason_cap)
 {
     if (reason_out && reason_cap) reason_out[0] = '\0';
     if (s_test_update_claim_after_heat_claim && g_heat_zone_claim_begin_calls > 0) {
+        s_test_tick_bump_on_update_refusal();
         if (reason_out && reason_cap) snprintf(reason_out, reason_cap, "update in progress");
         return true;
     }
@@ -3252,6 +3265,11 @@ static void test_run_refuses_when_factory_reset_in_flight(void)
 // MED-2 (FIRING_PATH_AUDIT_2026-10-10): a start refused from DONE must leave the finished run, its
 // fs_persisted flag and its zone accumulators exactly as they were (the next DONE tick would otherwise
 // persist a firing-stats record for the refused profile and feed adaptive tune a fabricated clean run).
+static bool s_test_bump_tick = false;
+static void s_test_tick_bump_on_update_refusal(void)
+{
+    if (s_test_bump_tick) s_exec.last_tick_tick = 0x7777;
+}
 static void med2_arrange_done(void)
 {
     reset_relay_claim_test_state();
@@ -3306,6 +3324,64 @@ static void test_run_refused_from_done_leaves_done_state_untouched(void)
     TEST_CHECK(!ok, "no-heating-zone start refuses");
     med2_check_done_untouched("state stays DONE after the no-heating-zone refusal");
 
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+// MED-A / MED-2 table: every late refusal site, from DONE and from a warm start with a skipped RELAY_IO ON.
+typedef struct {
+    const char *name;
+    void (*arm)(bool on);
+} refuse_site_t;
+static void site_reset(bool on) { s_test_reset_in_flight = on; }
+static void site_restore(bool on) { s_test_restore_in_flight = on; }
+static void site_danger(bool on) { s_test_danger_mode_active = on; }
+static void site_danger_commit(bool on) { s_test_danger_opens_after_heat_claim = on; }
+static void site_update_claim(bool on) { s_test_update_claim_after_heat_claim = on; }
+static void site_zones_gen(bool on) { s_test_zones_gen_bump_after_heat_claim = on; }
+static void site_heat_claim(bool on) { s_test_heat_zone_claim_refused = on; }
+static void site_zone_claim(bool on) { s_test_zone_claim_refused = on; }
+static void site_sweep(bool on) { s_test_sweep_active = on; }
+static void site_no_heat_zone(bool on) { g_stub_control_mode[0] = on ? ZONE_CONTROL_MODE_OFF : ZONE_CONTROL_MODE_PID; }
+static void site_link(bool on) { g_stub_link_mode = on ? 5 : 0; }
+static const refuse_site_t k_refuse_sites[] = {
+    { "factory reset", site_reset },       { "restore", site_restore },
+    { "danger early", site_danger },       { "danger at commit", site_danger_commit },
+    { "update claim", site_update_claim }, { "zones generation", site_zones_gen },
+    { "heat claim", site_heat_claim },     { "zone claim", site_zone_claim },
+    { "sweep active", site_sweep },        { "no heating zone", site_no_heat_zone },
+    { "LD-01 link", site_link },
+};
+static void test_med2_restore_at_every_refusal_site(void)
+{
+    for (size_t i = 0; i < sizeof(k_refuse_sites) / sizeof(k_refuse_sites[0]); i++) {
+        TEST_SECTION("MED-2 table -- refusal from DONE leaves the finished run untouched");
+        printf("  site: %s\n", k_refuse_sites[i].name);
+        med2_arrange_done();
+        k_refuse_sites[i].arm(true);
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        k_refuse_sites[i].arm(false);
+        TEST_CHECK(!ok, "site refuses the start");
+        med2_check_done_untouched(k_refuse_sites[i].name);
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+}
+static void test_refused_start_preserves_last_tick_and_history(void)
+{
+    TEST_SECTION("MED-2/LOW-B -- refusal keeps the live last_tick_tick (written by the control task after the snapshot)");
+    med2_arrange_done();
+    s_exec.last_tick_tick = 0x1111;
+    s_test_bump_tick = true;
+    s_test_update_claim_after_heat_claim = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_update_claim_after_heat_claim = false;
+    s_test_bump_tick = false;
+    TEST_CHECK(!ok, "refused");
+    TEST_CHECK(s_exec.last_tick_tick == 0x7777, "live last_tick_tick survives the snapshot restore");
     s_exec.state = PROFILE_EXEC_IDLE;
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
@@ -4107,6 +4183,32 @@ static void test_warm_start_mid_ramp_entry_never_below_current(void)
     profile_executor_halt();
 }
 
+static void test_med_a_refused_warm_start_leaves_relay_off_and_unclaimed(void)
+{
+    for (size_t i = 0; i < sizeof(k_refuse_sites) / sizeof(k_refuse_sites[0]); i++) {
+        TEST_SECTION("MED-A -- refused warm start with a skipped RELAY_IO ON never energizes or claims the relay");
+        printf("  site: %s\n", k_refuse_sites[i].name);
+        profile_t p;
+        memset(&p, 0, sizeof(p));
+        p.zone_mask = 0x01;
+        p.segment_count = 3;
+        p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+        p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+        p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+        warm_start_test_setup(&p, 300.0f);
+        g_relay_write_calls = 0;
+        g_last_relay_write_value = 0;
+        k_refuse_sites[i].arm(true);
+        char err[128] = {0};
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        k_refuse_sites[i].arm(false);
+        TEST_CHECK(!ok, "site refuses the warm start");
+        TEST_CHECK(g_last_relay_write_value != 0x01, "no ON write for the skipped segment reached hardware");
+        TEST_CHECK(!s_exec.io_segs[0].active, "replayed segment not registered");
+        TEST_CHECK(s_exec.claimed_relay_mask == 0, "no PROFILE relay claim left behind");
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+}
 // Test 3 (mandatory coverage item 3): a skipped RELAY_IO segment's command
 // is replayed, and the replayed segment is still registered for the
 // end-of-run sweep so it cannot be left energized with nothing owning it
@@ -12406,6 +12508,9 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_when_zones_config_changes_during_start();
     test_run_refuses_when_factory_reset_in_flight();
     test_run_refused_from_done_leaves_done_state_untouched();
+    test_med2_restore_at_every_refusal_site();
+    test_med_a_refused_warm_start_leaves_relay_off_and_unclaimed();
+    test_refused_start_preserves_last_tick_and_history();
     test_run_refuses_when_danger_mode_opens_at_commit();
     test_run_refuses_on_off_zone_without_any_rule();
     test_run_refuses_at_atomic_zone_claim_gate();

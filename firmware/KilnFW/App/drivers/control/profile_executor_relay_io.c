@@ -132,6 +132,7 @@ void apply_relay(uint8_t zi, bool want_on)
      * genuinely blocked zone now reads heat_blocked=true on EVERY tick,
      * want_on or not, so profile_executor_guard_commanded_duty() sees a
      * true contiguous zero again. */
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the gate decision */
     uint32_t sources = 0;
     bool blocked = relay_authority_zone_blocked(s_exec.safety, zi, &sources);
     bool edge = (blocked != s_exec.zones[zi].heat_blocked) ||
@@ -165,7 +166,7 @@ void apply_relay(uint8_t zi, bool want_on)
          * applied this run's own gate; kiln_io_owner just serializes the
          * actual write against uart_bridge.c/dashboard_set_relay() (2026-08-19,
          * TODO.md 10.14 Phase 1). */
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             ESP_LOGW(PE_TAG, "kiln_io_owner_command_set_relay_mask_authorized failed: %s -- relay "
                           "state for zone %u is unknown",
@@ -678,6 +679,7 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
      * reasoning as apply_relay(): a failed OFF write must stay nameable. */
     s_exec.claimed_relay_mask |= mask;
 
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E */
     uint32_t sources = 0;
     if (want_on && relay_authority_on_blocked(s_exec.safety, &sources)) {
         ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X", (unsigned)aux_idx + 1u,
@@ -687,7 +689,7 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
     static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
     bool write_ok = true; /* no io bound (host/sim) counts as ok: nothing can fail */
     if (s_exec.io) {
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             write_ok = false;
             if (!(s_write_fail_logged_mask & mask)) {
@@ -1141,6 +1143,7 @@ bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
  * ownership claim below exists to prevent for the blocking/relay case. */
 void io_seg_start(uint8_t idx, const profile_segment_t *seg)
 {
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the start decision */
     io_seg_runtime_t *r = &s_exec.io_segs[idx];
     memset(r, 0, sizeof(*r));
     r->active = true;
@@ -1160,7 +1163,7 @@ void io_seg_start(uint8_t idx, const profile_segment_t *seg)
         s_exec.claimed_relay_mask |= bit;
         relay_authority_claim_mask(bit, RELAY_OWNER_PROFILE);
         if (s_exec.io) {
-            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(bit, r->state_on ? bit : 0);
+            esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, r->state_on ? bit : 0, off_epoch_since);
             if (err != ESP_OK) {
                 ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u write failed: %s -- state is unknown",
                          idx + 1, r->target, esp_err_to_name(err));
