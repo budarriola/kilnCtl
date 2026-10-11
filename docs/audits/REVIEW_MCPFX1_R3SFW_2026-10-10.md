@@ -136,6 +136,8 @@ The tests really drive the handlers: `test_link_task_fuzz.c:27` does `#include "
 
 ### LOW-5: `g_cw_ret` leaks `true` into scenario_fuzz
 
+Status: FIXED (mcpfx4): g_cw_ret reset at the end of scenario_set_ct_cal.
+
 **Where:** `test_link_task_fuzz.c:127`, `:1164`, `:1321`.
 
 **Scenario:** before `9ae6f3586`, the fake `config_store_write` always returned false. It now returns `g_cw_ret`, which `scenario_set_ct_cal` leaves `true`. `scenario_fuzz` therefore exercises the write-success path (reloads, staging drops). This is an unintended order dependence: reordering the scenarios silently changes what the fuzz covers.
@@ -151,6 +153,8 @@ The tests really drive the handlers: `test_link_task_fuzz.c:27` does `#include "
 **Fix:** add edge-value accepted/refused pairs.
 
 ### LOW-7: ROLLBACK accepted path untested; announce version not restored
+
+Status: FIXED (mcpfx4): accepted-rollback case asserts no send; announce version saved and restored. LOW-6 (edge-value positive controls) remains OPEN.
 
 **Where:** `test_link_task_fuzz.c:1278-1291`.
 
