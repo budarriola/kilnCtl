@@ -40,6 +40,8 @@ None.
 
 ### MED-1: a real Pico reboot that spans a link-down is detected only by the 8-bit boot_id (rebootfx MED-4 interaction)
 
+**FIXED (option a)**: `safety_reset_stale_peer_info_if_link_down()` no longer clears `pico_uptime_baseline_known`, so the first DIAG after relink flags an uptime regression (wrap band and a long outage with advancing uptime stay non-reboots). Tests: `test_low4_link_down_invalidates_uptime_baseline` (same-id reboot after link-down, benign and fatal boot reason; blip; wrap). Negtest CAUGHT. F6 (bind link to boot_id) untouched.
+
 Files: `safety_link_frames.c:396`, `safety_link.c:300-320` (`safety_reset_stale_peer_info_if_link_down()`) and
 `safety_link_frames.c` ~1108 (DIAG uptime regression).
 
