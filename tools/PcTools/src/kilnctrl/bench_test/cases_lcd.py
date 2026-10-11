@@ -3413,6 +3413,47 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             if pre_names is not None and "Cancel" not in pre_names:
                                 state["keypad_closed_before_entry"] = True
                             wrong_pin = None  # skip entry -- leave wrong_pin_refused at None (INCONCLUSIVE)
+                    if wrong_pin and right_pin and pin_cfg.get("unverified"):
+                        # Sweepfx2 LOW-1: the board PIN was set outside this run, so the
+                        # env PIN is unproven. Try the RIGHT PIN first and stop after one
+                        # failure (a wrong-then-right order costs two ladder failures and
+                        # the right PIN can land inside the 5 s lockout window the wrong
+                        # PIN just opened).
+                        pre_entry = ui.enter_pin_verified(right_pin)
+                        state["unverified_right_first_entry"] = _entry_result_summary(pre_entry)
+                        pre_ok = (pre_entry is not None and not pre_entry.get("entry_incomplete")
+                                  and _entry_all_clicked_ok(pre_entry))
+                        if not pre_ok:
+                            wrong_pin = None  # nothing typed reliably: INCONCLUSIVE, no 2nd attempt
+                        else:
+                            pnames, _, _, _, pstable = _wait_stable_names(
+                                ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+                            state["unverified_right_first_names"] = sorted(pnames) if pnames is not None else None
+                            if not pstable or pnames is None:
+                                wrong_pin = None
+                            elif "OK" not in pnames and "Cancel" in pnames:
+                                # A configured PIN with at least USER role unlocked Start.
+                                pin_cfg["unverified"] = False
+                                state["pin_unlock_verified"] = True
+                                state["pin_unlock_role"] = "USER or higher (Start is USER-gated)"
+                                # Back to a fresh keypad for the wrong-then-right checks.
+                                state["unverified_re_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
+                                reclick = ui.click_by_name("Start")
+                                rp = _wait_for_keypad_raise(ui) if reclick.get("result") == "ok" else None
+                                if not (rp and rp["raised_ever"] and not rp["closed_after_raise"]):
+                                    state["unverified_reraise_failed"] = True
+                                    wrong_pin = None
+                                else:
+                                    rn, _, _, _, rs = _wait_stable_names(ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+                                    if not (rs and rn is not None and _KEYPAD_DIGIT_NAMES <= rn and "OK" in rn):
+                                        wrong_pin = None
+                            else:
+                                # Keypad still open: right PIN refused (or locked out).
+                                state["unverified_right_first_refused"] = True
+                                if any("try again in" in str(n).lower() for n in pnames):
+                                    state["pin_lockout"] = True
+                                pin_cfg["bad"] = True
+                                wrong_pin = None
                     if wrong_pin:
                         # enter_pin_verified() (2026-09-30, LCD-19), not the
                         # older enter_pin(): confirms each digit's tap was
@@ -3761,15 +3802,28 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
-            if (ctx.get("_lcd_pin") or {}).get("unverified"):
-                # The board's PIN was set outside this run. The right-PIN
-                # unlock above is the verification: if it did not succeed,
-                # the PIN may differ from the env var, which is not a FAIL.
+            if state.get("pin_unlock_verified"):
+                result.observed["pin_unverified"] = False
+            if state.get("unverified_right_first_refused"):
+                # Right PIN tried first and refused: one failure only, nothing else judged.
+                result.observed["pin_unverified"] = True
+                if state.get("pin_lockout"):
+                    why = "the keypad reports a PIN lockout; PIN lock not verified (retry after the lockout)"
+                else:
+                    why = ("the configured PIN was refused (it may differ from the env var); "
+                           "PIN lock not verified")
+                result = CaseResult(Verdict.INCONCLUSIVE, reason="pre-existing PIN: " + why,
+                                    observed=result.observed)
+            elif (ctx.get("_lcd_pin") or {}).get("unverified"):
+                # Still unproven (unlock not attempted or ambiguous). Downgrade ONLY the one
+                # shape the override exists for: keypad raised, wrong PIN refused, and just
+                # the right-PIN step failed. Never mask "no keypad" or "any PIN accepted".
                 result.observed["pin_unverified"] = right_pin_started is not True
-                if right_pin_started is not True:
+                if (keypad_raised is True and wrong_pin_refused is True
+                        and right_pin_started is False and result.verdict != Verdict.PASS):
                     result = CaseResult(
                         Verdict.INCONCLUSIVE,
-                        reason="pre-existing admin PIN could not be unlocked with the configured PIN "
+                        reason="pre-existing PIN could not be unlocked with the configured PIN "
                                "(it may differ from the env var); PIN lock not verified",
                         observed=result.observed)
     finally:
@@ -5276,7 +5330,10 @@ def _lcd25_pin(ctx: dict) -> "Optional[str]":
     """The admin PIN from ctx / the environment, never written anywhere. LCD-25 does not
     seed or change a PIN (unlike LCD-19)."""
     from . import cases_web_rw as _web  # local import: avoids a module-load cycle
-    pin = (ctx.get("_lcd_pin") or {}).get("right_pin") or ctx.get("lcd_admin_pin") \
+    cfg = ctx.get("_lcd_pin") or {}
+    if cfg.get("bad"):
+        return None  # LCD-19 saw this PIN refused; reuse would add a lockout-ladder failure
+    pin = cfg.get("right_pin") or ctx.get("lcd_admin_pin") \
         or os.environ.get(_web._LCD_PIN_ENV)
     return pin if pin and _web._lcd_pin_well_formed(pin) else None
 
