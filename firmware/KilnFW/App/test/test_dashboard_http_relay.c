@@ -105,6 +105,7 @@ esp_err_t profile_exec_status_get_handler(httpd_req_t *req) { (void)req; return 
 esp_err_t profile_exec_stop_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t profile_plan_get_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t safety_clear_trip_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
+esp_err_t safety_test_trip_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t safety_log_level_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 esp_err_t unit_pref_post_handler(httpd_req_t *req) { (void)req; return ESP_OK; }
 bool MAX31856_bus_spi_wedged(const MAX31856BusClass *bus) { (void)bus; return false; }
