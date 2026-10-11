@@ -1603,9 +1603,11 @@ static void reset_readiness_facts_to_ready(void)
 // calls from it. Defaults false (no restore in progress), same "default
 // describes nothing wrong" convention as s_test_readiness_facts above.
 static bool s_test_restore_in_flight = false;
+/* MED-2 table: a restore that opens only AFTER the heat claim is published (the late recheck). */
+static bool s_test_restore_opens_after_heat_claim = false;
 bool backup_import_restore_in_flight(void)
 {
-    return s_test_restore_in_flight;
+    return s_test_restore_in_flight || (s_test_restore_opens_after_heat_claim && g_heat_zone_claim_begin_calls > 0);
 }
 
 static bool s_test_danger_mode_active = false;
@@ -3336,7 +3338,7 @@ typedef struct {
     void (*arm)(bool on);
 } refuse_site_t;
 static void site_reset(bool on) { s_test_reset_in_flight = on; }
-static void site_restore(bool on) { s_test_restore_in_flight = on; }
+static void site_restore(bool on) { s_test_restore_opens_after_heat_claim = on; }
 static void site_danger(bool on) { s_test_danger_mode_active = on; }
 static void site_danger_commit(bool on) { s_test_danger_opens_after_heat_claim = on; }
 static void site_update_claim(bool on) { s_test_update_claim_after_heat_claim = on; }
@@ -10867,6 +10869,44 @@ static void aux_test_setup(const profile_t *p)
     g_stub_aux[0].enabled = true;
 }
 
+/* MED-2: the pre-claim cap / no-rule refusals also restore the DONE snapshot. Each case arms its own profile. */
+static void med2_done_fields_after_setup(void)
+{
+    s_exec.state = PROFILE_EXEC_DONE;
+    s_exec.profile_id = 7;
+    s_exec.profile.zone_mask = 0x02;
+    s_exec.fs_persisted = true;
+    s_exec.total_elapsed_s = 1234.0f;
+    s_exec.zones[1].active = true;
+    s_exec.zones[0].active = false;
+    s_exec.run_started_unix_s = 1700000000u;
+}
+static void test_med2_restore_at_cap_and_no_rule_sites(void)
+{
+    char err[256] = {0};
+    for (int c = 0; c < 3; c++) {
+        TEST_SECTION("MED-2 -- cap / no-on-off-rule refusal from DONE leaves the finished run untouched");
+        profile_t p = aux_test_profile();
+        if (c == 0) { /* on/off zone count alone meets the cap */
+            p.on_off_rules[0].zone_index = 0;
+        } else if (c == 2) { /* on/off zone, no rule for it */
+            p.on_off_rule_count = 0;
+        }
+        aux_test_setup(&p);
+        if (c == 0) { g_stub_zone_is_on_off[0] = true; g_stub_max_simultaneous_relays = 1; }
+        if (c == 1) { g_stub_max_simultaneous_relays = 1; }
+        if (c == 2) { g_stub_zone_is_on_off[0] = true; g_stub_max_simultaneous_relays = 0; }
+        med2_done_fields_after_setup();
+        err[0] = '\0';
+        bool ok = profile_executor_run(0, err, sizeof(err));
+        TEST_CHECK(!ok, "case refuses the start");
+        med2_check_done_untouched(c == 0 ? "cap on/off" : c == 1 ? "cap aux" : "no on/off rule");
+        g_stub_zone_is_on_off[0] = false;
+        g_stub_max_simultaneous_relays = 0;
+        s_exec.state = PROFILE_EXEC_IDLE;
+    }
+}
+
 /* Starts a run on the standard profile; returns run()'s result. */
 static bool aux_test_start_run(char *err, size_t cap)
 {
@@ -12272,6 +12312,7 @@ static void run_test_aux_wp3(void)
     test_aux_failed_off_write_is_retried();
     test_aux_sweep_does_not_flag_a_driven_aux();
     test_aux_start_refused_when_cap_unsatisfiable();
+    test_med2_restore_at_cap_and_no_rule_sites();
     test_aux_relay_io_refusal_is_logged();
     test_aux_contact_cycles_are_counted();
     test_aux_on_time_and_switch_count();
