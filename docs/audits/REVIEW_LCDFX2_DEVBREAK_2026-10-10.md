@@ -57,6 +57,8 @@ written as a raw byte" damage in four files:
 | `firmware/SaftyFW/tools/check_bootloader_builds.ps1:50` | `\f`, `\b` in a path comment written as FF and BS | Comment only, unreadable. |
 | `firmware/SaftyFW/tools/check_isolation.ps1:36` | `\b` in a regex comment written as BS | Comment only. |
 
+**Fixed (lcdfx3):** `tools/check_source_bytes.ps1` added (scans the bytes git would commit via a private index copy refreshed with `git add -u`; refuses NUL, control bytes, lone CR, CRLF outside .ps1, `i/-text` text files); the four files were repaired (the whole-tree scan found no others; `test_recovery_health.c` is also LF throughout now). Negtested: NUL, CRLF, lone CR, control byte all CAUGHT.
+
 Recommendation: add `tools/check_source_bytes.ps1`, marked `# checkcache: ok`.
 For every tracked text source (`*.c *.h *.ps1 *.py *.js *.html *.css *.cmake
 CMakeLists.txt *.json *.csv`, excluding submodules and `.kicad_*`) it reads the
@@ -104,6 +106,8 @@ a clean cancel instead, the relock hooks could also clear the gate context.
 
 ### LOW-2: the relock-close hooks have no test or check
 
+**Fixed (lcdfx3):** `check_lcd_admin_gates.ps1` now requires both `*_relock_close()` calls inside `handle_lcd_relock_to_home`; deleting either is CAUGHT.
+
 No host test compiles `kiln_ui.c`, `ui_page_network.c` or
 `ui_page_network_manage.c`. Outside `kiln_ui.c` itself, no check or test
 references `*_relock_close`. Deleting either call from
@@ -126,6 +130,8 @@ comments included. Negtest (preset `check`, `tools\check_lcd_admin_gates.ps1`):
 | C1: network cell role USER -> ADMIN | CAUGHT (`FAIL: L3 hub network USER gate`) |
 | C2: safety cell calls `safety_open_apply(NULL)` directly, gate call left in a `/* */` comment | **MISSED** |
 | C3: profiles cell `kiln_ui_show("profile_picker"); return;` before the gate | **MISSED** |
+
+**Fixed (lcdfx3):** the text rules now blank `//` and `/* */` comments before matching (C2 CAUGHT), a new rule refuses a `kiln_ui_show`/`*_open(` ahead of the `run_gated` call in a USER-gated hub nav callback (C3 CAUGHT), and the failure wording names the role (USER or admin).
 
 Classed INFO-level hardening, not a new LOW. The regex style is the
 established pattern for the ADMIN rules too, and C2/C3 are deliberate bypasses
@@ -204,7 +210,7 @@ seed in `live_profile_start()`.
   the output bytes are identical, and GCC can now size it at compile time.
   `test_kiln_cfg_swap.c:785-788` (REFUSED, not FAILED, full reason text)
   passes. Negtest M5 (drop the macro from the literal) is CAUGHT at `:788`.
-- **INFO-3:** the comment directly above (`kiln_cfg_swap.c:543-544`, "%s, not
+- **INFO-3 (fixed, lcdfx3):** the comment directly above (`kiln_cfg_swap.c:543-544`, "%s, not
   %.40s ... prefix + sub must fit") now describes the old form. The new
   one-line comment explains the change, but the older comment could be
   trimmed.

@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 195.
+Gate rows: 197.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 183 |
+| NEGATIVE-TESTED | 185 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -162,7 +162,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_iter_tune_write_surface.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both; check returned to PASS on restore |
 | `tools/check_kiln_auth_config_isolation.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added identifier `web_auth` (a first try with web_auth_zz is GREEN by design, word-boundary match) | RED; check returned to PASS on restore; 10-08 hardening: header leak `#define LCD_AUTH_LEAK lcd_auth` in backup_http.h PASSED (scan was *.c only), now *.c and *.h, negtest CAUGHT |
 | `tools/check_kiln_scope_cfg_mirrors.ps1` | NEGATIVE-TESTED | 10-07 | scope-list vs cfg-mirror drift in kiln_scope_cfg_files.c, unit_pref.[ch], kiln_package.c, cfg_fs.c | each RED, names the item; restored |
-| `tools/check_lcd_admin_gates.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `Admin PIN to switch relay` -> `Pin to switch relay` in ui_page_temperature.c | CAUGHT (exit 1, `FAIL: L3 relay: ... lacks an admin gate`); negtest copy removed, real tree unchanged |
+| `tools/check_lcd_admin_gates.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `Admin PIN to switch relay` -> `Pin to switch relay` in ui_page_temperature.c | CAUGHT (exit 1, `FAIL: L3 relay: ... lacks an admin gate`); negtest copy removed, real tree unchanged. 2026-10-10 (comment stripping + relock and hub pre-gate rules): deleting either `*_relock_close` call, a gate call left in a comment (C2) and a `kiln_ui_show` before the gate (C3) all CAUGHT |
 | `tools/check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-02 | nav ungated in ui_page_home_actions.c | RED; restored |
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_mcp_facade_coverage.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] uncovered @_srv._tool() negtest function added to mcp_server_io.py; the documented plant_sim_compare example found stale ; [09-16f] ramp_assist_set_enabled KEYWORDS entry removed (replaces the stale documented example) | [09-16e] RED naming the tool; hand-restored; docstring example fixed in 09-16f ; [09-16f] RED naming the tool; hand-restored; PASS |
@@ -198,6 +198,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_safety_trip_mask_docs.ps1` | NEGATIVE-TESTED | 09-16e | wrong, non-negated S6a trip_mask sentence added to CLAUDE.md | RED; hand-restored; PASS |
 | `tools/check_safety_trip_words_sync.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | safety_page.html: S4 warn word text changed in the JS mirror | RED; check returned to PASS on restore |
 | `tools/check_skip_fast_classification.ps1` | NEGATIVE-TESTED | 10-02 | SKIP-FAST literal matched by run_all_checks.ps1 broken | RED, dummy SKIP-FAST counted as a plain skip; restored |
+| `tools/check_source_bytes.ps1` | NEGATIVE-TESTED | 2026-10-10 | `tools/negtest.ps1 -Command` (injects a marker-replaced byte, then runs the check): NUL, CRLF line in a `-text` .c, lone CR, BS control byte in kiln_ui.c | all four CAUGHT (exit 1, `FAIL: ...: NUL/crlf/lone CR/control byte@line`); baseline PASS; real tree unchanged, copy removed |
 | `tools/check_stack_margin_baseline.ps1` | REVIEWED, NOT MUTATED | 09-18 | screen A: Python check signals failure as return 1 with sys.exit(main()) | failure path present; no mutation |
 | `tools/check_stack_margin_registration.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] create-vs-register sub-check only: unrecognized xTaskCreatePinnedToCore added in kiln_io_owner.c ; [09-16f] four remaining sub-checks: required name renamed, duplicate registration added, cap lowered 48 to 20, stack_margin.h included from a HAL backend | [09-16e] RED; hand-restored; other four sub-checks tested in 09-16f ; [09-16f] all four RED; each hand-restored; PASS ; [a62d5c42] recovery-image task coverage added (-RecoveryDir, test_stack_margin_registration_recovery.py); [10-09] recovery section: appended `xTaskCreate(rec_audit_fn, "rec_audit", ...)` to firmware/KilnFW_recovery/main/recovery_hold.c (no uxTaskGetStackHighWaterMark in file) | [10-09] RED: `RECOVERY STACK-MARGIN CHECK FAILED: rec_audit (in recovery_hold.c): xTaskCreate*() with no uxTaskGetStackHighWaterMark() reporting...`; hand-restored; PASS (5 call sites) |
 | `tools/check_stack_task_table_consistency.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | removed backlight_pwm from $requiredNames; added ghost CEILING_BYTES entry (two mutations) | RED both; check returned to PASS on restore |
