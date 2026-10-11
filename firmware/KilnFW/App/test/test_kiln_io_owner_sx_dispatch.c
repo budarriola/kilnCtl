@@ -215,6 +215,30 @@ static void test_sx_reset_dispatch(void)
     F.fail_forever = 0;
 }
 
+/* K7 review LOW-3: the owner's CMD_ALL_RELAYS_OFF notes OFF in the tracker only on ESP_OK; the
+ * unserialised fail-safe path (lock timeout) returns 0x10C and must not be recorded as a verified OFF. */
+static void test_all_off_command_notes_tracker_only_on_ok(void)
+{
+    TEST_SECTION("CMD_ALL_RELAYS_OFF: tracker noted on ESP_OK, not on the 0x10C unserialised result (K7 LOW-3)");
+    fresh();
+    (void)d_relay(1, true);
+    TEST_CHECK(relay_off_tracker_held_s(0x01) == 0.0f, "precondition: relay 1 ON in tracker");
+    owner_cmd_t c; memset(&c, 0, sizeof(c));
+    c.type = CMD_ALL_RELAYS_OFF;
+    g_test_stub_semaphore_fail_nth = 1; /* the kiln_io lock take inside the all-off times out */
+    owner_result_t r = dispatch(c);
+    g_test_stub_semaphore_fail_nth = 0;
+    TEST_CHECK(r.err == KILN_IO_ERR_UNSERIALISED_OFF, "unserialised all-off reports 0x10C");
+    TEST_CHECK(relay_off_tracker_held_s(0x01) == 0.0f, "0x10C is not noted as OFF in the tracker");
+
+    fresh();
+    (void)d_relay(1, true);
+    r = dispatch(c);
+    TEST_CHECK(r.err == ESP_OK, "locked all-off ok");
+    fake_time_advance_ms(1000u);
+    TEST_CHECK(relay_off_tracker_held_s(0x01) == 1.0f, "ESP_OK all-off is noted in the tracker");
+}
+
 static void test_relay_on_refusal_branches(void)
 {
     TEST_SECTION("relay-ON refusal branches (UPDATING / CRASH_UNACK / RUNNING) through owner_task");
@@ -260,6 +284,7 @@ int main(void)
     test_set_relay_dispatch();
     test_set_relay_mask_dispatch();
     test_sx_reset_dispatch();
+    test_all_off_command_notes_tracker_only_on_ok();
     test_relay_on_refusal_branches();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

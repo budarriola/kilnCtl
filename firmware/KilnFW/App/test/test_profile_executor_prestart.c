@@ -2576,12 +2576,18 @@ static void test_watchdog_pass_wires_relay_unknown_and_orders_release(void)
     g_last_fault_source_assert = true;
     int deasserts = 0;
     g_fault_source_deassert_count = 0;
+    BaseType_t saved_take_f4 = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE; /* default pdFALSE would skip the locked half */
     g_task_delay_budget = 1;
     if (setjmp(g_task_delay_jmp) == 0) {
         watchdog_task_entry(NULL);
     }
     g_task_delay_budget = -1;
     deasserts = g_fault_source_deassert_count;
+    g_test_stub_semaphore_take_default = saved_take_f4;
+    TEST_CHECK(!s_guard9_bookkeeping_pending && (s_exec.global_fault_source & SAFETY_FAULT_SRC_APP),
+               "F4 sanity: locked half ran");
+    TEST_CHECK(!s_relay_unknown_fault_asserted, "F4 sanity: relay-unknown hold released");
     TEST_CHECK(deasserts == 0, "F4: guard 9 firing in the same pass as a relay-unknown release never drops APP");
     s_exec.global_fault_source = 0;
     s_exec.io = NULL;

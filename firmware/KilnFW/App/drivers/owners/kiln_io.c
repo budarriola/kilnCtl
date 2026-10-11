@@ -11,6 +11,10 @@
 #include "hal_time.h" /* CT_COMMISSIONING_PLAN.md step 2 -- relays_all_off_since_us, kiln_io_relays_off_ms() */
 #include "settings.h"
 
+#ifdef ESP_ERR_NOT_FINISHED /* host stubs do not define it; the target build pins the literal */
+_Static_assert(KILN_IO_ERR_UNSERIALISED_OFF == ESP_ERR_NOT_FINISHED, "kiln_io.h hard-codes ESP_ERR_NOT_FINISHED");
+#endif
+
 static const char *TAG = "kiln_io";
 
 #define KILN_BIT(n) ((uint16_t)(1u << (n)))

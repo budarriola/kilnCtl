@@ -336,8 +336,11 @@ static void test_refusal_rollback_survives_lock_timeout(void)
     danger_mode_stop("test");
     s_heat_profile_claim = true;
     g_test_stub_semaphore_fail_nth = 2; /* take #1 (publish) ok, take #2 (first rollback try) times out */
+    g_test_stub_lock_depth = 1; /* sentinel: an unheld give would drop this to 0 */
     CHECK(!danger_mode_request_start());
     g_test_stub_semaphore_fail_nth = 0;
+    CHECK(g_test_stub_lock_depth == 1); /* every give matched a successful take */
+    g_test_stub_lock_depth = 0;
     CHECK(!s_dm.window_open); /* window must not stay open under the firing */
     CHECK(!danger_mode_active());
     s_heat_profile_claim = false;
