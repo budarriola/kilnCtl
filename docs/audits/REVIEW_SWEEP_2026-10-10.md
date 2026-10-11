@@ -62,6 +62,8 @@ nibble-table CRC-32 that builds a valid LittleFS superblock image, so it is not 
 The check still flags it, and there is no allowlist entry. Every full suite run on dev will
 show this check red until it is resolved.
 
+**Fixed in `3c0c365cb`**: by-path allowlist entry with a reason in `check_link_impl_isolation.ps1`.
+
 Suggested fix: add a by-path allowlist entry with a reason in
 `firmware/SaftyFW/tools/check_link_impl_isolation.ps1`, next to the `test_link_task_fuzz.c`
 entry (line ~351). Reason: "LittleFS metadata CRC used to forge a superblock in a host

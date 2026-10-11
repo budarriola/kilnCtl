@@ -1012,7 +1012,7 @@ CEILING_BYTES = {
     # stack size just because a checker was newly wired up.
     "pico_auto_update": 3104,
     "gpio_probe": 3376,
-    "link_watchdog": 1168,
+    "link_watchdog": 1200,  # 2026-10-10: re-measured 1200 B (was 1168 B); honest free 1572 B of 3072 B, stack unchanged
     # 3792 = 48 (bx_worker_task's own dispatch loop) + 3744 (the deepest of
     # the enumerated dispatch targets, safety_poll_pico_half_recapture_job --
     # see TASKS["bx_flash_worker"]'s extra_roots comment for why that set is
@@ -1031,7 +1031,7 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6320,  # 2026-10-10: re-measured 6272 B (was 6240 B); declared stack 10240 B, honest free 3668 B (35.8%), so only the regression ceiling moves
+    "bx_flash_worker": 6336,  # 2026-10-10: re-measured 6336 B (was 6320 B, 6272 B before); declared stack 10240 B, honest free 3604 B (35.2%), so only the regression ceiling moves
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3312,
@@ -1156,7 +1156,7 @@ CEILING_BYTES = {
     # relays_to_inputs -> resync -> SX1509 write chain -> ESP_LOG -> __assert_func
     # (288 B). Measured on a target build; 1636 B (39.9%) of the 4096 B stack stays
     # free, so the stack is not raised (internal RAM floor, owner 2026-10-01).
-    "kiln_io_owner": 2160,
+    "kiln_io_owner": 2208,  # 2026-10-10: re-measured 2208 B (was 2160 B); honest free 1588 B of 4096 B, stack unchanged
     "thermo_owner": 1616,
     "telemetry_log": 3008,
     "danger_mode": 2256,

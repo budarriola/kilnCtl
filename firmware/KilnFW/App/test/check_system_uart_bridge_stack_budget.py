@@ -76,7 +76,8 @@ CONFIGURED_STACK_BYTES = 4096  # must match uart_bridge_start_system_task()'s xT
 # 2026-10-09: long calls (l32r+callx) now followed: measured 3136 B (was 1936 B); stack raised 3072 -> 4096.
 # 2026-10-10: 3136 -> 3152 B (+16 B in a frame on the factory_reset_execute/execute_scope chain after the
 # persist K10 fixes touched factory_reset.c); honest headroom 644 B of 4096 B, above the 256 B floor, so no stack bump.
-CEILING_BYTES = 3152
+# 2026-10-10: 3152 -> 3216 B re-measured; honest headroom still 580 B of 4096 B after the 300 B allowance.
+CEILING_BYTES = 3216
 
 UNMODELED_OVERHEAD_BYTES = 300
 
