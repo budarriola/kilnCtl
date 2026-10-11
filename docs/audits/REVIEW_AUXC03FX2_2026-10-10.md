@@ -52,7 +52,7 @@ The 409 texts were checked against `firmware/KilnFW/App/drivers/http/zones_http_
 
 ## Findings
 
-### MED-1: the restore re-posts rounded GET prints of omit-preserved fields for every zone
+### MED-1: [FIXED in auxc03fx3] the restore re-posts rounded GET prints of omit-preserved fields for every zone
 
 `_default_zone_mask_fns.restore()` (`cases_aux.py:470`) posts `zhc.build_post_body(snapshot, {})` with no
 `strip_omit_preserved`. `build_post_body` encodes these fields from GET's print, for every zone:
@@ -82,7 +82,7 @@ restore overwrites the stored values with rounded ones.
   `test_default_restore_reposts_whole_snapshot`) and assert that no posted key matches
   `zhc.ZONE_OMIT_PRESERVED_KEY_RE`.
 
-### LOW-1: post-commit save failures are not classified as "guard let it through"
+### LOW-1: [FIXED in auxc03fx3] post-commit save failures are not classified as "guard let it through"
 
 After the commit, `nvs_save` or `relay_names_save` can fail. `cfg_fs_http_persist_failed_for`
 (`zones_http_post.c:895`) then answers in one of three ways, and in every case the new mask is already LIVE in
@@ -111,7 +111,7 @@ How AX-C03 handles each:
   - Map the body texts `could not be saved to flash` and the cfg-unmounted 503 text to FAIL.
   - Leave a bare `out of memory` as INCONCLUSIVE, since it is sent both before and after the check.
 
-### LOW-2: the second snapshot GET is outside the try
+### LOW-2: [FIXED in auxc03fx3] the second snapshot GET is outside the try
 
 At `cases_aux.py:457`, `snapshot = zhc.get_zones(host)` is a second GET taken outside the `try` that guards the
 first one.
@@ -121,7 +121,7 @@ first one.
 - **Fix:** keep the first `get_zones` result as the snapshot (one GET, no window between "pick zone" and
   "baseline"), or move the second GET inside the `try` so the case returns None and SKIPs.
 
-### LOW-3: tests do not pin four of the fixed behaviours
+### LOW-3: [FIXED in auxc03fx3] tests do not pin four of the fixed behaviours
 
 The negtest MISSED M1, M2, M4, M5 and M7. Each MISSED mutation is a review fix that can regress unnoticed.
 
