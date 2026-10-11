@@ -142,23 +142,44 @@ try {
         if ($jobAssigned) { [PvJob]::Kill($fetchJob) }
         else {
             # no job membership: walk ALL descendants (git -> git-remote-http -> helpers) from one
-            # Win32_Process snapshot, keeping only processes created at/after git started (a reused PID's
-            # unrelated children are older), kill leaves first, then git itself.
+            # Win32_Process snapshot. A child is kept only if it was created at/after ITS OWN parent
+            # (a reused PID's older children fail that test at every depth; the root gets ~1 ms slack for
+            # clock rounding). Before any kill, open a Process handle per target (an open handle blocks PID
+            # reuse) and skip any whose StartTime differs from the snapshot's CreationDate; kill through the
+            # handle, leaves first, then git itself.
+            Write-Host "push_verify: no job membership; killing the fetch process tree by snapshot (handle-checked)."
             try {
-                $gitStart = $fetchProc.StartTime
                 $snap = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-                $keep = @{}; $order = New-Object System.Collections.ArrayList; $frontier = @($fetchProc.Id)
+                $rootCreated = $fetchProc.StartTime
+                $rootSnap = $snap | Where-Object { [int]$_.ProcessId -eq $fetchProc.Id } | Select-Object -First 1
+                if ($rootSnap -and $rootSnap.CreationDate) { $rootCreated = $rootSnap.CreationDate }
+                $created = @{ ([int]$fetchProc.Id) = $rootCreated.AddMilliseconds(-1) }
+                $keep = @{}; $order = New-Object System.Collections.ArrayList; $frontier = @([int]$fetchProc.Id)
                 while ($frontier.Count -gt 0) {
                     $next = @()
                     foreach ($pp in $frontier) {
                         foreach ($c in ($snap | Where-Object { $_.ParentProcessId -eq $pp -and -not $keep.ContainsKey([int]$_.ProcessId) })) {
-                            if ($c.CreationDate -and $c.CreationDate -ge $gitStart.AddSeconds(-1)) { $keep[[int]$c.ProcessId] = $true; [void]$order.Add([int]$c.ProcessId); $next += [int]$c.ProcessId }
+                            $cid = [int]$c.ProcessId
+                            if ($cid -ne $fetchProc.Id -and $c.CreationDate -and $c.CreationDate -ge $created[$pp]) {
+                                $keep[$cid] = $c.CreationDate; $created[$cid] = $c.CreationDate; [void]$order.Add($cid); $next += $cid
+                            }
                         }
                     }
                     $frontier = $next
                 }
+                $handles = @{}
+                foreach ($id in $order) {
+                    try {
+                        $ph = [System.Diagnostics.Process]::GetProcessById($id)
+                        $null = $ph.Handle
+                        if ([Math]::Abs(($ph.StartTime - $keep[$id]).TotalMilliseconds) -le 100) { $handles[$id] = $ph } else { $ph.Dispose() }
+                    } catch { }
+                }
                 # discovered parent-first (breadth-first); kill in reverse so leaves go first
-                for ($i = $order.Count - 1; $i -ge 0; $i--) { try { Stop-Process -Id $order[$i] -Force -ErrorAction Stop } catch { } }
+                for ($i = $order.Count - 1; $i -ge 0; $i--) {
+                    if ($handles.ContainsKey($order[$i])) { try { $handles[$order[$i]].Kill() } catch { } }
+                }
+                foreach ($h in $handles.Values) { try { $h.Dispose() } catch { } }
             } catch { }
         }
         try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }

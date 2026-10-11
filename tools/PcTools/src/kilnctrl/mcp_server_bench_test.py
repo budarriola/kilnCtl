@@ -289,7 +289,10 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     docstring): the job runs that very tool function, so the board lock,
     preflight and every opt-in flag (`allow_heat`, `lcd_stop_heat`,
     `lcd_edit_heat`, `ota_allow_heat`, `allow_flash`) apply unchanged, and a
-    refusal (`error: refused -- ...`) comes back as the job's FAILED report.
+    board-side refusal (`error: refused -- ...`) comes back as the job's FAILED
+    report. The exception: an unconfirmed (`confirm` not exactly True)
+    non-dry-run with any ota_*/update_*_repo image argument is refused
+    synchronously, before any job exists.
     Use this for any suite that can outlast the MCP client's 300 s idle
     watchdog. Poll with `bench_test_job_status(job_id, wait_s=100)`; the run
     keeps going if you stop polling. A server restart loses a run that was

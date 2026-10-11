@@ -99,14 +99,15 @@ try {
         $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2")
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
         Start-Sleep -Milliseconds 500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" })
+        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
         Assert ($left.Count -eq 0) "no git process for the hung fetch survives the timeout"
+        # I2: survivors are matched by the URL (git-remote-http) OR this run's unique scratch dir (wrapper git and inner git carry it in -C).
         # toolfx8 T1: force the no-job fallback (test hook) and require the whole tree, grandchild included, to die.
         $env:PUSH_VERIFY_TEST_NO_JOB = "1"
         try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
-        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "no-job fallback: hung fetch -> UNKNOWN"
+        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
         Start-Sleep -Milliseconds 500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" })
+        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
         Assert ($left.Count -eq 0) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
     } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null

@@ -172,8 +172,11 @@ class BenchTestStartTest(_Base):
 
     def test_start_unconfirmed_ota_refused_synchronously_and_creates_no_job(self):
         # toolfx8 T4: the refusal comes back at once, not as a FAILED job report.
-        for kw in ({"ota_image_path": "C:/img/a.bin"}, {"update_wrong_repo": "o/w"},
-                   {"ota_pico_image_commit": "abc"}):
+        for kw in ({"ota_image_path": "C:/img/a.bin"}, {"ota_corrupt_image_path": "C:/img/b.bin"},
+                   {"ota_truncated_image_path": "C:/img/t.bin"}, {"ota_wrong_build_image_path": "C:/img/w.bin"},
+                   {"ota_image_build": "2026-10-10"}, {"ota_pico_image_path": "C:/img/p.bin"},
+                   {"ota_pico_image_commit": "abc"}, {"ota_pico_corrupt_image_path": "C:/img/pc.bin"},
+                   {"update_downgrade_repo": "o/old"}, {"update_wrong_repo": "o/w"}):
             for bad in (False, "yes", 1, None):
                 with mock.patch.object(build_jobs, "start_job") as sj:
                     out = BT.bench_test_start(suite="ota", confirm=bad, **kw)  # type: ignore[arg-type]
@@ -181,6 +184,12 @@ class BenchTestStartTest(_Base):
                 self.assertNotIn("STARTED", out)
                 sj.assert_not_called()
         self.assertEqual(_FakeRunner.instances, [])
+
+    def test_start_dry_run_with_image_args_is_not_refused(self):
+        out = BT.bench_test_start(suite="ota", dry_run=True, ota_image_path="C:/img/a.bin",
+                                  update_wrong_repo="o/w")
+        self.assertIn("STARTED", out)
+        self.finish(out)
 
     def test_ota_images_preflight_refusal_blocks_runner(self):
         with mock.patch.object(M, "_run_level_preflight", return_value="safety is ARMED"):
