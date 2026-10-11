@@ -426,10 +426,12 @@ bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 // below and the guard-scenario tests for why this needed to become
 // controllable rather than a bare `return false;`.
 static bool s_test_relay_authority_zone_blocked = false;
+static bool s_test_bump_epoch_in_gate = false;
 static uint32_t s_test_relay_authority_zone_blocked_sources = 0;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
+    if (s_test_bump_epoch_in_gate) g_fake_off_epoch++; /* an all-off lands during the gate decision */
     if (out_sources) *out_sources = s_test_relay_authority_zone_blocked ? s_test_relay_authority_zone_blocked_sources : 0;
     return s_test_relay_authority_zone_blocked;
 }
@@ -3382,6 +3384,7 @@ static void test_refused_start_preserves_last_tick_and_history(void)
     s_test_bump_tick = false;
     TEST_CHECK(!ok, "refused");
     TEST_CHECK(s_exec.last_tick_tick == 0x7777, "live last_tick_tick survives the snapshot restore");
+    TEST_CHECK(s_exec.history != NULL, "LOW-B: the history buffer this start allocated is kept, not orphaned by the restore");
     s_exec.state = PROFILE_EXEC_IDLE;
     s_test_profiles_http_get_ok = false;
     s_test_zones_config_valid = false;
@@ -7412,6 +7415,23 @@ static void test_apply_relay_refreshes_heat_blocked_even_on_a_want_on_false_tick
 
     s_test_relay_authority_zone_blocked = false;
     s_test_relay_authority_zone_blocked_sources = 0;
+    g_stub_relay_mask[0] = 0;
+}
+
+static void test_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    memset(&s_exec, 0, sizeof(s_exec));
+    s_exec.zones[0].active = true;
+    s_exec.io = &s_test_kiln_io;
+    g_stub_relay_mask[0] = 0x01u;
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_gate = true;
+    apply_relay(/*zi=*/0, /*want_on=*/true);
+    s_test_bump_epoch_in_gate = false;
+    TEST_CHECK(g_relay_write_calls >= 1, "a write was attempted");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the ON was dropped to OFF (epoch moved since the caller sampled)");
     g_stub_relay_mask[0] = 0;
 }
 
@@ -12509,6 +12529,7 @@ void run_test_profile_executor_prestart(void)
     test_run_refuses_when_factory_reset_in_flight();
     test_run_refused_from_done_leaves_done_state_untouched();
     test_med2_restore_at_every_refusal_site();
+    test_apply_relay_samples_epoch_before_gate();
     test_med_a_refused_warm_start_leaves_relay_off_and_unclaimed();
     test_refused_start_preserves_last_tick_and_history();
     test_run_refuses_when_danger_mode_opens_at_commit();
