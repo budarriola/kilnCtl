@@ -3477,6 +3477,7 @@ static void test_try_clear(void)
         bad.cj_c = 90.0f;
         bad.dt_s = 61.0f;
         TEST_CHECK(safety_guards_tick(&s, &cfg, &bad) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "F1 sanity: S12 tripped");
+        bad.dt_s = 0.1f; /* a retest tick alone cannot re-trip: only the level check refuses */
         TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F1: S12 clear refused with hot CJ and bad TC");
     }
 
