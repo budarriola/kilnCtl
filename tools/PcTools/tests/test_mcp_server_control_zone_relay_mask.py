@@ -55,7 +55,7 @@ class _Base(unittest.TestCase):
 class GateTest(_Base):
     def test_bad_mask_refused_before_io(self):
         with unittest.mock.patch.object(zones_http_client, "get_zones") as g:
-            for bad in (-1, 0x10000, True, "3", 1.0):
+            for bad in (-1, 0x100, 0xFFFF, True, "3", 1.0):
                 self.assertTrue(mc.control_set_zone_relay_mask(zone=0, relay_mask=bad, confirm=True).startswith("refused"))
         g.assert_not_called()
 
@@ -87,6 +87,18 @@ class WriteTest(_Base):
         self.assertIn("ok - zone 0: relay_mask=5", r)
         b.assert_called_once_with(before, {"zones": [{"index": 0, "relay_mask": 5}]})
         p.assert_called_once()
+
+    def test_omit_preserved_fields_are_stripped_from_posted_body(self):
+        before = _snap([_zone(0)])
+        after = copy.deepcopy(before)
+        after["zones"][0]["relay_mask"] = 5
+        body = "z0_relay_mask=5&z0_coupling_c1=7.5&z0_k_dc=2.0&z0_fuzzy_strength=0&z0_pid_kp=1"
+        _r, _b, p = self.run_tool(before, after, build=body, zone=0, relay_mask=5, confirm=True)
+        sent = p.call_args[0][1]
+        self.assertIn("z0_relay_mask=5", sent)
+        self.assertIn("z0_pid_kp=1", sent)
+        self.assertNotIn("coupling_c1", sent)
+        self.assertNotIn("fuzzy_strength", sent)
 
     def test_firmware_400_is_reported_as_refusal(self):
         err = zones_http_client.ZonesHttpError("x", 400, "zone relay_mask references an aux relay")

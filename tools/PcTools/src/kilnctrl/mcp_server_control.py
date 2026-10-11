@@ -1042,12 +1042,12 @@ def control_set_zone_type(
 # modeled directly on control_set_zone_type() above (same GET-merge-POST
 # /api/zones path, confirm gate, mode gate, collateral read-back). Built so the
 # aux bench case AX-C03 (a zone relay_mask containing aux relay 4 must be
-# refused 400) can run, and restore the original mask, with no whole-page
+# refused 409) can run, and restore the original mask, with no whole-page
 # preset write. The firmware owns the validity rules (unconfigured relay,
 # relay claimed by an enabled aux output, overlap); this tool range-checks the
 # integer only and reports a firmware refusal as "refused by firmware (HTTP n)".
 # ---------------------------------------------------------------------------
-ZONE_RELAY_MASK_MAX = 0xFFFF
+ZONE_RELAY_MASK_MAX = 0xFF  # firmware parses the mask as a u8
 
 
 @_core._tool()

@@ -44,6 +44,7 @@ try {
     git init --bare -b main $origin *>$null
     $work = Join-Path $tmp "work"
     git clone $origin $work *>$null
+    Set-Content -LiteralPath (Join-Path (Join-Path $work '.git') 'kilnctl_scratch_repo') -Value 'scratch' -Encoding ascii
     git -C $work checkout -b main *>$null
     CommitFile $work "base.txt" "base" "base"
     git -C $work push origin main *>$null
@@ -94,11 +95,15 @@ try {
     $r = Run @("-Commit", $xg, "-Push", "-PinCheckScript", (PinStub 2))
     Assert ($r.Code -eq 1 -and $r.Out -match 'submodule-pins' -and (Rev main) -eq $mainBefore) "pin check exit 2 refused, main untouched (T-5)"
 
-    Write-Host "case: -PinCheckScript refused when -RepoPath is this repo (L-1)"
+    Write-Host "case: -PinCheckScript refused unless the target is a marked scratch repo (L-1)"
     $own = & powershell -NoProfile -ExecutionPolicy Bypass -File $promote -Commit $xg -PinCheckScript (PinStub 0) 2>&1 | Out-String
     Assert ($LASTEXITCODE -eq 1 -and $own -match 'pin-check-script') "stub refused without a foreign -RepoPath"
+    $unmarked = Join-Path $tmp "unmarked"
+    git clone $origin $unmarked *>$null
+    $um = & powershell -NoProfile -ExecutionPolicy Bypass -File $promote -RepoPath $unmarked -Commit $xg -PinCheckScript (PinStub 0) 2>&1 | Out-String
+    Assert ($LASTEXITCODE -eq 1 -and $um -match 'pin-check-script') "stub refused for a different but unmarked repo"
     $r = Run @("-Commit", $xg, "-Push", "-PinCheckScript", (PinStub 3))
-    Assert ($r.Out -match 'OVERRIDE: submodule_pins=pass\(stub:') "foreign -RepoPath stub is announced as OVERRIDE"
+    Assert ($r.Out -match 'OVERRIDE: submodule pin check replaced by a stub' -and $r.Out -match 'stub pin check exited 3') "marked scratch repo stub is announced as OVERRIDE, exit code reported after it ran"
     git -C $origin update-ref refs/heads/main $mainBefore
     Write-Host "case: second promote lists only new subjects"
     CommitFile $work "c.txt" "c" "dev change C"

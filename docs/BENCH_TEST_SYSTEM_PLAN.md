@@ -319,7 +319,7 @@ case in the same run.
 |---|---|---|---|---|---|
 | AX-C01 | Configure relay 4 as aux | `control_set_aux_output(4, True, tc_zone=0, confirm=True)`, read back `control_get_aux_outputs` | relay 4 ENABLED, tc_zone 0, not CONFLICTED | 5 s | no |
 | AX-C02 | Aux on a zone-owned relay refused | `control_set_aux_output(1, True, ...)` | two sub-checks: MCP precheck refusal, and the firmware's own HTTP 400 via a direct `post_aux_output`; `enabled_mask` unchanged; an accepted write is undone and FAILs | 5 s | no |
-| AX-C03 | Zone relay_mask containing relay 4 refused | injected writer only (`ctx["aux_zone_mask_post_fn"]`, no narrow tool exists) | HTTP 400; SKIP without the writer; an accepted write is restored (`aux_zone_mask_restore_fn`) and taints | 5 s | no |
+| AX-C03 | Zone relay_mask containing relay 4 refused | `control_set_zone_relay_mask` (narrow tool; writer injectable via `ctx["aux_zone_mask_post_fn"]`) | HTTP 409 with the aux-ownership body ("already owns"); any other refusal is not a PASS; SKIP when zones unreadable; an accepted or possibly-applied write is restored (`aux_zone_mask_restore_fn`) and taints | 5 s | no |
 | AX-T01 | Rule toggles relay 4 | `profile_save_bench_aux_rule` (ambient-relative), `profiles_start`, sample relay 4 shadow every 2 s | at least one ON sample; no ON/OFF run shorter than `min_on_s`/`min_off_s`; relay 4 OFF before start; fewer than 2 transitions is INCONCLUSIVE | 150 s | yes |
 | AX-K01 | K4 independence | rule held ON, `profiles_pause`, read shadow, resume | pause returned ok and state PAUSED, then relay 4 still ON (else FAIL as a finding) | 150 s | yes |
 | AX-T02 | Trip drops relay 4 | rule held ON, operator causes the bench trip | relay 4 OFF, trip reason/mask consistent, cleared | 150 s | yes (operator) |

@@ -251,7 +251,7 @@ class ConfigureAndConflictTest(unittest.TestCase):
         srv = FakeSrv()
         with um.patch.object(zhc, "get_zones", side_effect=zhc.ZonesHttpError("down")),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             self.assertEqual(C._case_ax_c03(_ctx(srv)).verdict, Verdict.SKIP)
-        self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (400, {}))).verdict, Verdict.PASS)
+        self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (409, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- disable that aux output first"))).verdict, Verdict.PASS)
         self.assertEqual(C._case_ax_c03(_ctx(srv, aux_zone_mask_post_fn=lambda: (200, {}))).verdict, Verdict.FAIL)
 
 
@@ -568,7 +568,7 @@ class Finding6C03Test(unittest.TestCase):
 
     def test_refused_does_not_restore(self):
         restored = []
-        ctx = _ctx(FakeSrv(), aux_zone_mask_post_fn=lambda: (400, {}),
+        ctx = _ctx(FakeSrv(), aux_zone_mask_post_fn=lambda: (409, "a zone relay_mask claims a relay an aux (spare-relay) output already owns -- disable that aux output first"),
                    aux_zone_mask_restore_fn=lambda: restored.append(1) or True)
         self.assertEqual(C._case_ax_c03(ctx).verdict, Verdict.PASS)
         self.assertEqual(restored, [])
@@ -679,8 +679,9 @@ class C03DefaultWriterTest(unittest.TestCase):
         with um.patch.object(zhc, "get_zones", return_value={"zones": [{"index": 0, "relay_mask": 1}]}),              um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             return C._case_ax_c03(ctx), calls, ctx
 
-    def test_firmware_400_passes_and_posts_relay4_bit(self):
-        res, calls, _ = self._run(["refused by firmware (HTTP 400): claimed by an aux output"])
+    def test_firmware_409_passes_and_posts_relay4_bit(self):
+        res, calls, _ = self._run(["refused by firmware (HTTP 409): a zone relay_mask claims a relay an aux "
+                                   "(spare-relay) output already owns -- disable that aux output first (host=h)"])
         self.assertEqual(res.verdict, Verdict.PASS)
         self.assertEqual(calls, [(0, 0b1001, True)])
 
@@ -694,3 +695,27 @@ class C03DefaultWriterTest(unittest.TestCase):
     def test_precheck_refusal_is_inconclusive_not_pass(self):
         res, _calls, _ = self._run(["refused: a profile is running -- relay_mask is not changed mid-run"])
         self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
+
+    def test_unrelated_400_is_not_pass(self):
+        res, _c, ctx = self._run(["refused by firmware (HTTP 400): zone relay_mask references an unconfigured relay"])
+        self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
+        self.assertNotIn("_tainted", ctx)
+
+    def test_409_wrong_reason_fails(self):
+        res, _c, _ = self._run(["refused by firmware (HTTP 409): a firing is active"])
+        self.assertEqual(res.verdict, Verdict.FAIL)
+
+    def test_possibly_applied_results_taint_and_restore(self):
+        for msg in ("FAILED: POST /api/zones returned ok, but read-back does not confirm it landed",
+                    "FAILED: zone 0's relay_mask landed correctly, but other field(s) changed",
+                    "error: POST /api/zones returned ok, but the confirming re-fetch of GET failed"):
+            res, calls, ctx = self._run([msg, "ok - zone 0: relay_mask=1"])
+            self.assertEqual(res.verdict, Verdict.INCONCLUSIVE, msg)
+            self.assertTrue(ctx["_tainted"], msg)
+            self.assertEqual(calls[-1], (0, 1, True), msg)
+
+    def test_pre_post_refusal_does_not_taint_or_restore(self):
+        res, calls, ctx = self._run(["refused: system_mode_gate refused this write (HTTP 409): x"])
+        self.assertEqual(res.verdict, Verdict.INCONCLUSIVE)
+        self.assertNotIn("_tainted", ctx)
+        self.assertEqual(len(calls), 1)

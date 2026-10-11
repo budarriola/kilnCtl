@@ -42,9 +42,16 @@ function G { $o = & git -C $RepoPath @args; $script:rc = $LASTEXITCODE; return $
 function GOk { & git -C $RepoPath @args 2>$null | Out-Null; return ($LASTEXITCODE -eq 0) }
 $PromoteRe = '^Promote dev ([0-9a-f]{40}):'
 
-$foreignRepo = $false
-if ($RepoPath) { try { $foreignRepo = ((Resolve-Path -LiteralPath $RepoPath).Path.TrimEnd('\') -ine (Split-Path -Parent $scriptRoot).TrimEnd('\')) } catch { $foreignRepo = $true } }
-if ($PinCheckScript -and -not $foreignRepo) { Fail 'pin-check-script' '-PinCheckScript is a test seam: refused unless -RepoPath names a different repository.' }
+# Seam guard by repository identity, not path spelling: the target repo's git common dir must
+# carry the marker file only the test fixtures create (a real clone/worktree never has it).
+$isScratchRepo = $false
+$cd = (& git -C $RepoPath rev-parse --git-common-dir 2>$null)
+if ($LASTEXITCODE -eq 0 -and $cd) {
+    $cd = ($cd | Select-Object -First 1) -replace '/', '\'
+    if (-not [System.IO.Path]::IsPathRooted($cd)) { $cd = Join-Path $RepoPath $cd }
+    $isScratchRepo = Test-Path -LiteralPath (Join-Path $cd 'kilnctl_scratch_repo')
+}
+if ($PinCheckScript -and -not $isScratchRepo) { Fail 'pin-check-script' '-PinCheckScript is a test seam: refused unless -RepoPath is a verified scratch repo (marker file kilnctl_scratch_repo in its git common dir).' }
 if ($Push -and -not $CheckLog) { Fail 'check-log' '-Push requires -CheckLog <path> (a full run_all_checks log of exactly this commit''s tree).' }
 G fetch --quiet origin | Out-Null
 if ($rc -ne 0) { Fail 'fetch' 'git fetch origin failed.' }
@@ -154,9 +161,11 @@ if ($nFail -gt 0) {
     Write-Host "check log: $nFail failure(s), all KNOWN on main (0 NEW)" -ForegroundColor Yellow
 } else { Write-Host "check log OK: full run on tree of $x, 0 failed" -ForegroundColor Green }
 
-if ($PinCheckScript) { Write-Host "OVERRIDE: submodule_pins=pass(stub:$PinCheckScript) -- a stub, not the real pin check" -ForegroundColor Yellow }
+$pinIsStub = [bool]$PinCheckScript
+if ($pinIsStub) { Write-Host "OVERRIDE: submodule pin check replaced by a stub ($PinCheckScript) -- not the real pin check" -ForegroundColor Yellow }
 if (-not $PinCheckScript) { $PinCheckScript = Join-Path $scriptRoot 'check_submodule_pins_pushed.ps1' }
 & powershell -NoProfile -ExecutionPolicy Bypass -File $PinCheckScript -RepoPath $RepoPath -Commit $m
+if ($pinIsStub) { Write-Host "OVERRIDE: stub pin check exited $LASTEXITCODE" -ForegroundColor Yellow }
 if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 3) { Fail 'submodule-pins' "submodule pin check refused (exit $LASTEXITCODE): a pin is not on its remote or the check errored; push the submodule commit first." }
 if ($LASTEXITCODE -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $LASTEXITCODE); not a PASS" -ForegroundColor Yellow }
 G push origin "${m}:refs/heads/main" | Out-Null

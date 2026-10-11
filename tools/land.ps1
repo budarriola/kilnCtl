@@ -192,6 +192,9 @@ if (-not $isLinked -and -not $AllowStandaloneClone) {
 if (($PinCheckScript -or $ChecksScript) -and -not $AllowStandaloneClone) {
     Finish 1 "-PinCheckScript / -ChecksScript are test seams: refused unless -AllowStandaloneClone is given"
 }
+if (($PinCheckScript -or $ChecksScript) -and -not (Test-Path -LiteralPath (Join-Path $commonDir 'kilnctl_scratch_repo'))) {
+    Finish 1 "-PinCheckScript / -ChecksScript are test seams: refused unless the target repository is a verified scratch repo (marker file kilnctl_scratch_repo in its git common dir, created only by the test fixtures)"
+}
 if ($PinCheckScript) { $script:pinOverride = $PinCheckScript }
 if ($ChecksScript) { $script:checksOverride = $ChecksScript }
 $mainRoot = if ($isLinked) { Split-Path -Parent $commonDir } else { $top }

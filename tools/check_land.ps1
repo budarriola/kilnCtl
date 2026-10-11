@@ -31,6 +31,7 @@ function Commit-File([string]$dir, [string]$name, [string]$text, [string]$msg) {
 function New-Clone([string]$name) {
     $d = Join-Path $tmp $name
     git clone $origin $d *>$null
+    Set-Content -LiteralPath (Join-Path (Join-Path $d '.git') 'kilnctl_scratch_repo') -Value 'scratch' -Encoding ascii
     return $d
 }
 function OriginHead { (git -C $origin rev-parse dev).Trim() }
@@ -314,6 +315,18 @@ try {
         try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land $flag $okStub 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
         Assert ($code -eq 1 -and $out -match 'test seams') "$flag refused outside -AllowStandaloneClone"
         Assert ((OriginHead) -eq $before) "$flag refusal pushed nothing"
+    }
+
+    Write-Host "case: seams refused in a repo without the scratch marker even with -AllowStandaloneClone"
+    $unmarked = Join-Path $tmp "c_unmarked"
+    git clone $origin $unmarked *>$null
+    Commit-File $unmarked "um.txt" "x" "um"
+    $before = OriginHead
+    foreach ($flag in @("-PinCheckScript", "-ChecksScript")) {
+        Push-Location $unmarked
+        try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -AllowStandaloneClone $flag $okStub 2>&1 | Out-String; $code = $LASTEXITCODE } finally { Pop-Location }
+        Assert ($code -eq 1 -and $out -match 'scratch repo') "$flag refused in an unmarked repo"
+        Assert ((OriginHead) -eq $before) "$flag unmarked refusal pushed nothing"
     }
 
     Write-Host "case: pin check retry skip is keyed on the gitlinks (L-2)"

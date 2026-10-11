@@ -469,11 +469,11 @@ def _default_zone_mask_fns(ctx: dict):
 
 
 def _case_ax_c03(ctx: dict) -> CaseResult:
-    """Plan step 5b: a zone relay_mask containing relay 4 is refused (400).
+    """Plan step 5b: a zone relay_mask containing relay 4 is refused (409,
+    aux-ownership text).
     Uses the narrow control_set_zone_relay_mask tool on the first zone; the write can be
     injected via ``ctx["aux_zone_mask_post_fn"]() -> (status, body)``. An accepted write is
-    undone (the original mask is restored) and always taints the run. A status other than
-    400/2xx (tool precheck refusal, transport error) is INCONCLUSIVE, never PASS."""
+    undone (the original mask is restored) and always taints the run. Any other outcome is never PASS."""
     skip = _gate(ctx, heat=False)
     if skip:
         return skip
@@ -485,22 +485,36 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
         fn = pair[0]
         ctx.setdefault("aux_zone_mask_restore_fn", pair[1])
     status, body = fn()
-    if status == 400:
-        return CaseResult(Verdict.PASS, observed={"status": status})
-    restored = None
-    if status is not None and 200 <= status < 300:
-        ctx["_tainted"] = True
-        rfn = ctx.get("aux_zone_mask_restore_fn")
-        try:
-            restored = bool(rfn()) if rfn is not None else False
-        except Exception:  # noqa: BLE001
-            restored = False
-    else:
-        return CaseResult(Verdict.INCONCLUSIVE, reason=f"no firmware verdict (status {status}): {str(body)[:120]}",
+    text = str(body)
+    if status == 409:
+        # zones_http_post.c: "a zone relay_mask claims a relay an aux (spare-relay) output
+        # already owns -- disable that aux output first". Any other 409 (mode gate, ...) or
+        # 4xx (e.g. 400 "unconfigured relay") is a refusal for a different reason.
+        if "already owns" in text or "aux" in text.lower():
+            return CaseResult(Verdict.PASS, observed={"status": status})
+        return CaseResult(Verdict.FAIL, reason=f"firmware answered 409 but not the aux-ownership refusal: {text[:120]}",
                           observed={"status": status})
-    return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 400"
-                      + ("" if restored is None else f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
-                         " -- run tainted"), observed={"status": status, "restored": restored})
+    if status is not None and 400 <= status < 500:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"refused for an unrelated reason (HTTP {status}), "
+                          f"expected 409 aux-owned: {text[:120]}", observed={"status": status})
+    pre_post = status is None and (text.startswith(("refused:", "DRY RUN", "error: GET", "error: could not build")))
+    if pre_post:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"no firmware verdict (status {status}): {text[:120]}",
+                          observed={"status": status})
+    # Accepted (2xx) or possibly applied (FAILED read-back/collateral, re-fetch failed,
+    # transport error after the POST): taint and try to put the original mask back.
+    ctx["_tainted"] = True
+    rfn = ctx.get("aux_zone_mask_restore_fn")
+    try:
+        restored = bool(rfn()) if rfn is not None else False
+    except Exception:  # noqa: BLE001
+        restored = False
+    note = f"; original mask restore {'ok' if restored else 'NOT confirmed'} -- run tainted"
+    if status is not None and 200 <= status < 300:
+        return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 409"
+                          + note, observed={"status": status, "restored": restored})
+    return CaseResult(Verdict.INCONCLUSIVE, reason=f"write possibly applied, outcome unverified: {text[:100]}" + note,
+                      observed={"status": status, "restored": restored})
 
 
 def _case_ax_t01(ctx: dict) -> CaseResult:

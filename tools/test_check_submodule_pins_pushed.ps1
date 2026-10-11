@@ -123,6 +123,12 @@ try {
     SshCase 'plink-gets-dash-batch' "`"$rootFwd/fakebin/plink`" -P 22" '' '' '-batch' 'BatchMode'
     SshCase 'unknown-wrapper-untouched' "`"$rootFwd/fakebin/wrap`" -x" '' '' '-x' 'BatchMode|-batch'
     SshCase 'transient-tls-reset-is-skip' "`"$rootFwd/fakebin/ssh`"" '' '' $null $null 3 'schannel: failed to receive handshake: Connection was reset'
+    SshCase 'schannel-handshake-alone-is-skip' "`"$rootFwd/fakebin/ssh`"" '' '' $null $null 3 'schannel: failed to receive handshake, SSL/TLS connection failed'
+    SshCase 'schannel-sec-e-alone-is-skip' "`"$rootFwd/fakebin/ssh`"" '' '' $null $null 3 'schannel: SEC_E_UNTRUSTED_ROOT (0x80090325)'
+    # a certificate-trust failure with a REACHABLE origin must FAIL (origin answers), never pass/skip
+    G -C $sup3 remote add origin "$rp/remote"
+    SshCase 'schannel-cert-failure-with-reachable-origin-fails' "`"$rootFwd/fakebin/ssh`"" '' '' $null $null 1 'schannel: SEC_E_UNTRUSTED_ROOT (0x80090325)'
+    G -C $sup3 remote remove origin
     # S-6: no-arg run (default RepoPath) under -File must not crash at param binding (exit 2 = script error)
     Push-Location (Join-Path $PSScriptRoot '..')
     $env:KILNCTL_SUBPIN_TIMEOUT_SEC = '5'
