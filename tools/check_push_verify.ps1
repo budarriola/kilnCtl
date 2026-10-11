@@ -5,6 +5,7 @@
 $ErrorActionPreference = "Continue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $script:fails = 0
+. (Join-Path $here "lib_push_verify_walk.ps1")
 function Assert([bool]$c, [string]$w) { if ($c) { Write-Host "  ok: $w" } else { Write-Host "  FAIL: $w" -ForegroundColor Red; $script:fails++ } }
 $env:GIT_AUTHOR_NAME = "t"; $env:GIT_AUTHOR_EMAIL = "t@example.invalid"
 $env:GIT_COMMITTER_NAME = "t"; $env:GIT_COMMITTER_EMAIL = "t@example.invalid"
@@ -37,6 +38,18 @@ function Commit([string]$repo, [string]$f, [string]$msg) {
     git -C $repo add $f *>$null; git -C $repo commit -m $msg *>$null
     return (git -C $repo rev-parse HEAD).Trim()
 }
+# R1: per-parent creation filter, tested on a synthetic snapshot (no process needed).
+$t0 = [datetime]'2026-01-01T10:00:00'
+function P($id, $ppid, $sec) { [pscustomobject]@{ ProcessId = $id; ParentProcessId = $ppid; CreationDate = $t0.AddSeconds($sec) } }
+$snapR1 = @((P 10 1 0), (P 11 10 1), (P 12 11 2), (P 13 11 -50), (P 14 12 -40), (P 15 10 0.0005), (P 16 10 -0.0005))
+$w = @(Get-PvDescendantOrder -Snap $snapR1 -RootId 10 -RootCreated $t0 | ForEach-Object { $_.Id })
+Assert (($w -contains 11) -and ($w -contains 12)) "R1: genuine chain kept"
+Assert (-not ($w -contains 13)) "R1: child older than its parent (reused PID) dropped"
+Assert (-not ($w -contains 14)) "R1: grandchild older than its own parent dropped even though newer than the root"
+Assert (($w -contains 15) -and ($w -contains 16)) "R1: root slack is about 1 ms (a child within 1 ms before the root start is kept)"
+Assert ($w.IndexOf(11) -lt $w.IndexOf(12)) "R1: parent-first order"
+$snapR1b = @((P 10 1 0), (P 17 10 -0.5))
+Assert ((Get-PvDescendantOrder -Snap $snapR1b -RootId 10 -RootCreated $t0).Count -eq 0) "R1: child 0.5 s older than the root dropped (no 1 s slack)"
 try {
     git init --bare -b dev $origin *>$null
     git clone $origin $work *>$null
@@ -98,7 +111,7 @@ try {
         git -C $work remote set-url origin "http://127.0.0.1:$port/x.git" *>$null
         $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2")
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 2500
         $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
         Assert ($left.Count -eq 0) "no git process for the hung fetch survives the timeout"
         # I2: survivors are matched by the URL (git-remote-http) OR this run's unique scratch dir (wrapper git and inner git carry it in -C).
@@ -106,7 +119,7 @@ try {
         $env:PUSH_VERIFY_TEST_NO_JOB = "1"
         try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 2500
         $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
         Assert ($left.Count -eq 0) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
     } finally { $lis.Stop() }

@@ -57,6 +57,7 @@ param(
 # treated as terminating errors under PS 5.1 even on exit code 0. Every
 # call below is checked via $LASTEXITCODE explicitly.
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot "lib_push_verify_walk.ps1")
 
 function Get-RepoRoot {
     $top = git rev-parse --show-toplevel 2>$null
@@ -153,20 +154,9 @@ try {
                 $rootCreated = $fetchProc.StartTime
                 $rootSnap = $snap | Where-Object { [int]$_.ProcessId -eq $fetchProc.Id } | Select-Object -First 1
                 if ($rootSnap -and $rootSnap.CreationDate) { $rootCreated = $rootSnap.CreationDate }
-                $created = @{ ([int]$fetchProc.Id) = $rootCreated.AddMilliseconds(-1) }
-                $keep = @{}; $order = New-Object System.Collections.ArrayList; $frontier = @([int]$fetchProc.Id)
-                while ($frontier.Count -gt 0) {
-                    $next = @()
-                    foreach ($pp in $frontier) {
-                        foreach ($c in ($snap | Where-Object { $_.ParentProcessId -eq $pp -and -not $keep.ContainsKey([int]$_.ProcessId) })) {
-                            $cid = [int]$c.ProcessId
-                            if ($cid -ne $fetchProc.Id -and $c.CreationDate -and $c.CreationDate -ge $created[$pp]) {
-                                $keep[$cid] = $c.CreationDate; $created[$cid] = $c.CreationDate; [void]$order.Add($cid); $next += $cid
-                            }
-                        }
-                    }
-                    $frontier = $next
-                }
+                $walk = Get-PvDescendantOrder -Snap $snap -RootId ([int]$fetchProc.Id) -RootCreated $rootCreated
+                $order = New-Object System.Collections.ArrayList; $keep = @{}
+                foreach ($w in $walk) { [void]$order.Add($w.Id); $keep[$w.Id] = $w.Created }
                 $handles = @{}
                 foreach ($id in $order) {
                     try {
