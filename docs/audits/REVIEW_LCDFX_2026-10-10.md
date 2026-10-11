@@ -32,7 +32,7 @@ Cancel would leave stale. Ordering at the edge (prompt, keypad unless pending
 lock gate, `ui_confirm_close_open()`, num pad, relock callback to home) is
 sound.
 
-### LOW-1: page-local modals survive relock on cached page screens
+### LOW-1: page-local modals survive relock on cached page screens -- FIXED (lcdfx2)
 
 - `ui_page_network.c:729` builds the AP edit modal on the page screen
   (`lv_obj_create(scr)`), prefilled with the AP SSID and the clear AP password
@@ -92,7 +92,7 @@ Entry paths checked for a bypass:
 
 No bypass found. Rules (a)-(d) hold.
 
-### LOW-2: L3 has no test or check
+### LOW-2: L3 has no test or check -- FIXED (lcdfx2)
 
 Reverting any of the five `LCD_PIN_ROLE_USER` gates passes every existing
 test and check: `check_lcd_admin_gates.ps1` and `check_lcd_home_nav_gated.ps1`
@@ -130,7 +130,7 @@ returns OK/STALE/FAILED.
 
 Covered on both paths, with one residual window:
 
-### LOW-3: LCD re-bases its expected generation from an unlocked read after fork
+### LOW-3: LCD re-bases its expected generation from an unlocked read after fork -- FIXED (lcdfx2)
 
 `ui_edit_firing_apply.c:214` starts with `expect_gen = ctx->generation`, then
 after a successful fork does `expect_gen = live_profile_generation();`
@@ -150,7 +150,7 @@ LOW. Fix: have `live_profile_fork()` report the generation its own save
 produced (or whether it actually forked); keep `ctx->generation` on the
 idempotent path and use the returned value otherwise, never a fresh read.
 
-### LOW-4: the LCD stale-generation guard has no test
+### LOW-4: the LCD stale-generation guard has no test -- FIXED (lcdfx2)
 
 Negtest (below) shows that changing `ui_edit_firing_apply.c:252` to
 `check_gen=false`, or replacing the early check at `:168` with `if (0)`,
