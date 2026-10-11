@@ -368,7 +368,7 @@ void ui_page_network_manage_relock_close(void)
         return;
     }
     connect_modal_close();
-    s_connect_ssid[0] = ' ';
+    s_connect_ssid[0] = '\0';
 }
 
 static void connect_cancel_cb(lv_event_t *e)
