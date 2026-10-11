@@ -214,3 +214,10 @@ Suggested fix:
 |---|---|
 | N1: partial-window check in the full-window branch made dead (`if (0 && ...)`) | MISSED (LOW-2) |
 | P1: probe test. 12 °C/min rise, one +2.5 °C valid outlier on the sample that closes post window 1, clear just after the window 2 roll, asserts refusal | CAUGHT at `test_safety_guards.c:3499`, so the clear is granted (LOW-1). Its sanity checks (tripped, two rolls) passed. |
+
+## Fix status
+
+- LOW-1: fixed. A grant needs two consecutive full post windows at or under the limit; one full window alone refuses. Probe P1 is now a permanent test.
+- LOW-2: fixed (test added, matrix row cites the real tests).
+- LOW-3: fixed by latching the post window at trip time, clamped to [60, 600] s. No commissioning bound was added for param 0x0205 (clamp only; the trip-side window still follows the unbounded `rate_window_s`).
+- I-1: fixed in REVIEW_SAFTYFX7. I-2: BOM stripped; `check_source_bytes` not extended.

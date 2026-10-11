@@ -98,6 +98,8 @@ void safety_guards_clear(safety_guard_state_t *state)
 }
 
 #define S8_POST_MIN_S 5.0f
+#define S8_POST_WIN_MIN_S 60.0f
+#define S8_POST_WIN_MAX_S 600.0f
 
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
@@ -200,14 +202,21 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
             return true;
         }
         /* Review saftyfx6 F2 + saftyfx7 MED-1: a grant is decided only from a
-         * COMPLETED full post-trip window (s8_post_rate_valid), never from a
+         * COMPLETED full post-trip window (s8_post_windows_done), never from a
          * partial one alone -- a few seconds of TC noise can fake a plateau on
          * a kiln still rising fast. Until the first full window completes the
          * frozen tripping window decides (refuses while it exceeds the limit).
          * Once a full window exists, refuse if EITHER the last full rate OR the
          * partial window now accumulating (>= S8_POST_MIN_S) is over the limit. */
-        if (state->s8_post_rate_valid) {
-            if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {
+        if (state->s8_post_windows_done == 1u) {
+            /* review s8clrfx LOW-1: a grant needs TWO consecutive full post
+             * windows at or under the limit (mirrors the trip streak), so one
+             * outlier anchor cannot grant. After only one, refuse. */
+            return true;
+        }
+        if (state->s8_post_windows_done >= 2u) {
+            if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min ||
+                state->s8_post_prev_rate_c_per_min > cfg->max_rate_c_per_min) {
                 return true;
             }
             if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
@@ -436,13 +445,21 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                 state->s8_post_active = true;
                 state->s8_post_start_c = in->tc_c;
                 state->s8_post_elapsed_s = 0.0f;
+                /* review s8clrfx LOW-3: latch + clamp the post window at trip time
+                 * so a mid-trip rate_window_s change cannot shorten or stick it. */
+                float lw = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+                state->s8_post_win_s = lw < S8_POST_WIN_MIN_S ? S8_POST_WIN_MIN_S
+                                       : (lw > S8_POST_WIN_MAX_S ? S8_POST_WIN_MAX_S : lw);
             } else {
                 state->s8_post_elapsed_s += in->dt_s;
-                float win = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+                float win = state->s8_post_win_s;
                 if (state->s8_post_elapsed_s >= win) {
+                    state->s8_post_prev_rate_c_per_min = state->s8_post_last_rate_c_per_min;
+                    if (state->s8_post_windows_done < 2u) {
+                        state->s8_post_windows_done++;
+                    }
                     state->s8_post_last_rate_c_per_min =
                         (in->tc_c - state->s8_post_start_c) / (state->s8_post_elapsed_s / 60.0f);
-                    state->s8_post_rate_valid = true;
                     state->s8_post_start_c = in->tc_c;
                     state->s8_post_elapsed_s = 0.0f;
                 }

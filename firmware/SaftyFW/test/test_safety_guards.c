@@ -1,4 +1,4 @@
-﻿// Host tests for safety_guards.c. TODO.md Phase 4.
+// Host tests for safety_guards.c. TODO.md Phase 4.
 //
 // ARCHITECTURE.md section 10: "the cases worth writing first are the
 // *nuisance* cases, not the trip cases" -- each guard's section below leads
@@ -3416,7 +3416,9 @@ static void test_try_clear(void)
         TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in),
                    "MED-1: no grant from a partial post window alone (frozen trip window still refuses)");
         for (int i = 0; i < 510; i++) safety_guards_tick(&s, &cfg, &in); /* total 61 s: one full window */
-        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (full window rate ~0)");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "s8clrfx LOW-1: one full post window alone never grants");
+        for (int i = 0; i < 600; i++) safety_guards_tick(&s, &cfg, &in); /* total 121 s: two full windows */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (two full windows ~0)");
     }
     /* MED-1: noisy still-fast rise (+12 C/min for ~5.1 s, then -0.15 C noise) must refuse. */
     {
@@ -3458,8 +3460,8 @@ static void test_try_clear(void)
         TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-1 sanity: S8 tripped");
         in.dt_s = 0.1f;
         /* 62 s: fast = +30 C/min (0.05 C/tick), plateau otherwise. Ends just after a window rolled. */
-        for (int i = 0; i < 620; i++) { if (fast) in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); }
-        TEST_CHECK(s.s8_post_rate_valid, "LOW-1 sanity: a full post window completed");
+        for (int i = 0; i < 1220; i++) { if (fast) in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-1 sanity: two full post windows completed");
         if (fast) {
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: still-fast last full window refuses");
             /* plateau for 6 s: partial window now reads ~0, but the last full window was fast -> EITHER refuses */
@@ -3467,6 +3469,108 @@ static void test_try_clear(void)
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "MED-1: last full window fast refuses even when the partial window is flat");
         } else {
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "LOW-1: plateau last full window grants");
+        }
+    }
+    /* s8clrfx LOW-1 probe P1: 12 C/min rise, one +2.5 C outlier on the sample that
+     * closes post window 1 -> window 2 reads ~9.5 C/min, but window 1 (14.5) still refuses. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "P1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        float trend = in.tc_c;
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 1u; i++) {
+            trend += 0.02f;
+            safety_guard_state_t probe = s;
+            in.tc_c = trend + 2.5f;
+            safety_guards_tick(&probe, &cfg, &in);
+            if (probe.s8_post_windows_done == 1u) { s = probe; break; } /* outlier closes window 1 */
+            in.tc_c = trend;
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_windows_done == 1u, "P1 sanity: window 1 closed on the outlier");
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 2u; i++) {
+            trend += 0.02f;
+            in.tc_c = trend;
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_windows_done == 2u, "P1 sanity: two post windows rolled");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "P1: one outlier sample must not grant a clear on a fast rise");
+    }
+    /* s8clrfx LOW-2: flat full windows, then a fast rise >= 6 s -> partial window refuses. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-2 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 1220; i++) safety_guards_tick(&s, &cfg, &in); /* two flat windows */
+        TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-2 sanity: two flat windows done");
+        for (int i = 0; i < 70; i++) { in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); } /* 30 C/min for 7 s */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-2: fast partial window refuses despite flat full windows");
+    }
+    /* s8clrfx LOW-3: post window latched at trip and clamped to [60,600]; mid-trip cfg change ignored. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-3 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        safety_guards_tick(&s, &cfg, &in); /* latches the post window */
+        cfg.rate_window_s = 2.0f;          /* mid-trip change must not shorten it */
+        for (int i = 0; i < 100; i++) safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s8_post_windows_done == 0u, "LOW-3: short mid-trip rate_window_s does not shorten the latched window");
+        TEST_CHECK(s.s8_post_win_s >= 59.9f && s.s8_post_win_s <= 60.1f, "LOW-3: window latched at 60 s");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 30000.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 30000.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40000.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 80000.0f;
+        if (safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE) {
+            in.dt_s = 0.1f;
+            safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(s.s8_post_win_s <= 600.1f, "LOW-3: huge rate_window_s clamped to 600 s");
         }
     }
     /* F2: still rising fast after the trip -> still refused. */

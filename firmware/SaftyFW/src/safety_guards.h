@@ -677,7 +677,9 @@ typedef struct {
     uint8_t s8_over_rate_streak;
     /* Post-trip fresh rate measurement for the S8 clear check (review saftyfx6 F2). */
     bool    s8_post_active;
-    bool    s8_post_rate_valid;
+    uint8_t s8_post_windows_done; /* 0,1,2 (saturating): completed full post windows */
+    float   s8_post_win_s;        /* post window length latched+clamped at trip */
+    float   s8_post_prev_rate_c_per_min;
     float   s8_post_start_c;
     float   s8_post_elapsed_s;
     float   s8_post_last_rate_c_per_min;
