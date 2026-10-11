@@ -2039,6 +2039,44 @@ static void test_used_bitmap_boot_load_longer_and_junk_length(void)
     TEST_CHECK(e != ESP_OK || !profiles_slot_bitmap_test(&out.used_bitmap, 4), "18-byte (non word multiple) bitmap is refused");
 }
 
+static size_t used_blob_len(void)
+{
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t b[64];
+    size_t n = sizeof(b);
+    esp_err_t e = nvs_get_blob(h, NVS_KEY_USED, b, &n);
+    nvs_close(h);
+    return e == ESP_OK ? n : (size_t)-1;
+}
+
+static void test_used_bitmap_genuine_read_error_does_not_rebuild(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a: a genuine read error on the bitmap is not rebuilt over");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    TEST_CHECK(fake_kv_script_corrupt_key(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_KEY_USED), "corrupt used key");
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase fails instead of rebuilding from a transient error");
+    TEST_CHECK(used_blob_len() == (size_t)-1, "the unreadable bitmap was not overwritten");
+}
+
+static void test_used_bitmap_rebuild_fails_closed_on_probe_error(void)
+{
+    TEST_SECTION("nvs_erase_slot -- review LOW-2a: a profN probe error during rebuild saves nothing");
+    pcfg_reset_all();
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    stage_legacy_slot(5, &src, 1);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(fake_kv_script_corrupt_key(PROFILES_NVS_PARTITION, NVS_NAMESPACE, "prof5"), "corrupt prof5");
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase fails closed");
+    TEST_CHECK(used_blob_len() == sizeof(junk), "no bitmap was saved");
+}
+
 static void test_favorites_set_refuses_while_user_mask_unresolved(void)
 {
     TEST_SECTION("profiles_favorites_set -- review LOW-3a: refuses after a failed load with no cfg file");
@@ -5941,6 +5979,8 @@ void run_test_profiles_http(void)
     test_favorites_wrong_size_blob_is_an_error();
     test_used_bitmap_rebuild_keeps_present_slot_bit();
     test_used_bitmap_boot_load_longer_and_junk_length();
+    test_used_bitmap_genuine_read_error_does_not_rebuild();
+    test_used_bitmap_rebuild_fails_closed_on_probe_error();
     test_favorites_set_refuses_while_user_mask_unresolved();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
