@@ -12,22 +12,37 @@ if (-not $UiDir) { $UiDir = Join-Path $PSScriptRoot "..\firmware\KilnFW\App\driv
 $UiDir = (Resolve-Path $UiDir).Path
 
 $admin = 'LCD_PIN_ROLE_ADMIN'
+# REVIEW_LCDFX5 LOW-5: every rule is matched against ONE named function's body (brace-matched), never the
+# whole file, so a gate moved into a dead function no longer satisfies it. Fields: file, function, regex
+# that must match the body, label, and optionally an apply identifier whose non-definition occurrences in
+# the file must equal the expected count (a direct, ungated call of the apply adds an occurrence).
+# To change a gated call site: edit its row here (function / apply name / count) in the same change.
+function GateRx([string]$prompt, [string]$role, [string]$apply) { 'ui_lcd_lock_run_gated\("' + $prompt + '",\s*' + $role + ',\s*' + $apply + ',' }
 $rules = @(
-    @('ui_page_network_manage.c', 'run_gated\("Admin PIN to [a-z ]+",\s*LCD_PIN_ROLE_ADMIN, connect_submit_apply', 'L1 connect/add'),
-    @('ui_page_network_manage.c', ('run_gated\("Admin PIN to forget network",\s*' + $admin), 'L1 forget'),
-    @('ui_page_network.c', ('run_gated\("Admin PIN to change Wi-Fi mode",\s*' + $admin), 'L1 mode'),
-    @('ui_page_network.c', ('run_gated\("Admin PIN to change AP identity",\s*' + $admin), 'L1 AP identity'),
-    @('ui_page_network.c', ('has_role\(' + $admin + '\)'), 'L6 AP password/QR mask'),
-    @('ui_page_profile_builder_review.c', ('run_gated\("Admin PIN to save profile",\s*' + $admin), 'L2 save'),
-    @('ui_page_live_decide.c', ('run_gated\("Admin PIN to keep/discard edit",\s*' + $admin), 'L2 decide'),
-    @('ui_page_temperature.c', ('run_gated\("Admin PIN to switch relay",\s*' + $admin), 'L3 relay'),
-    @('ui_page_config.c', ('run_gated\("Admin PIN to change units",\s*' + $admin), 'L11 units'),
-    @('ui_page_config.c', ('run_gated\("Admin PIN to recalibrate touch",\s*' + $admin), 'L11 touch cal nav'),
-    @('ui_page_touch_cal.c', ('has_role\(' + $admin + '\)'), 'L11 touch cal save'),
-    @('ui_page_profile_picker.c', ('has_role\(' + $admin + '\)'), 'L11 profile delete'),
-    @('ui_page_edit_firing.c', ('run_gated\("Enter admin PIN to apply edit",\s*' + $admin), 'L11 live-edit apply'),
-    @('ui_page_diagnostics.c', ('has_role\(' + $admin + '\)'), 'L11 crash ack')
+    @('ui_page_network_manage.c', 'connect_submit_cb', (GateRx 'Admin PIN to add network' $admin 'connect_submit_apply'), 'L1 connect/add', 'connect_submit_apply', 1),
+    @('ui_page_network_manage.c', 'scan_row_clicked_cb', (GateRx 'Admin PIN to add network' $admin 'scan_row_open_apply'), 'L1 scan row', 'scan_row_open_apply', 1),
+    @('ui_page_network_manage.c', 'forget_confirm_yes_cb', (GateRx 'Admin PIN to forget network' $admin 'forget_apply'), 'L1 forget', 'forget_apply', 1),
+    @('ui_page_network.c', 'mode_home_btn_cb', (GateRx 'Admin PIN to change Wi-Fi mode' $admin 'mode_change_gated'), 'L1 mode home', $null, 0),
+    @('ui_page_network.c', 'mode_ap_btn_cb', (GateRx 'Admin PIN to change Wi-Fi mode' $admin 'mode_change_gated'), 'L1 mode ap', 'mode_change_gated', 2),
+    @('ui_page_network.c', 'ap_edit_confirm_apply_cb', (GateRx 'Admin PIN to change AP identity' $admin 'ap_edit_apply_gated'), 'L1 AP identity', 'ap_edit_apply_gated', 1),
+    @('ui_page_network.c', 'ap_edit_open_cb', (GateRx 'Admin PIN to edit AP identity' $admin 'ap_edit_open_apply'), 'L6 AP editor open', 'ap_edit_open_apply', 1),
+    @('ui_page_network.c', 'refresh_cb', ('bool show_secret = ui_lcd_lock_has_role\(' + $admin + '\);\s*if\s*\(!show_secret\)'), 'L6 AP password/QR mask', $null, 0),
+    @('ui_page_profile_builder_review.c', 'do_save', (GateRx 'Admin PIN to save profile' $admin 'do_save_apply'), 'L2 save', 'do_save_apply', 1),
+    @('ui_page_live_decide.c', 'run_decision', (GateRx 'Admin PIN to keep/discard edit' $admin 'run_decision_apply'), 'L2 decide', 'run_decision_apply', 1),
+    @('ui_page_temperature.c', 'relay_toggle_cb', (GateRx 'Admin PIN to switch relay' $admin 'relay_toggle_apply'), 'L3 relay', 'relay_toggle_apply', 1),
+    @('ui_page_config.c', 'units_toggle_cb', (GateRx 'Admin PIN to change units' $admin 'units_toggle_apply'), 'L11 units', 'units_toggle_apply', 1),
+    @('ui_page_config.c', 'units_toggle_apply', ('^\s*\(void\)\s*user_data\s*;\s*if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*return;\s*\}'), 'L11 units apply re-check', $null, 0),
+    @('ui_page_config.c', 'touch_cal_nav_cb', (GateRx 'Admin PIN to recalibrate touch' $admin 'touch_cal_open_apply'), 'L11 touch cal nav', 'touch_cal_open_apply', 1),
+    @('ui_page_touch_cal.c', 'finish_calibration', ('if\s*\(touch_cal_store_is_calibrated\(\)\s*&&\s*!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{[^{}]*\breturn\s*;\s*\}[\s\S]*touch_cal_store_save\('), 'L11 touch cal save', $null, 0),
+    @('ui_page_profile_picker.c', 'delete_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to delete profile' $admin 'delete_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*delete_do\(ud\)\s*;\s*$'), 'L11 profile delete', $null, 0),
+    @('ui_page_profile_picker.c', 'delete_unlocked_cb', ('^\s*if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*delete_do\('), 'L11 profile delete unlocked', $null, 0),
+    @('ui_page_edit_firing.c', 'apply_cb', (GateRx 'Enter admin PIN to apply edit' $admin 'apply_live_gated'), 'L11 live-edit apply', 'apply_live_gated', 1),
+    @('ui_page_edit_firing.c', 'apply_cb', (GateRx 'Enter admin PIN to keep/discard edit' $admin 'open_decide_gated_cb'), 'L11 live-edit decide', 'open_decide_gated_cb', 1),
+    @('ui_page_edit_firing.c', 'apply_live_gated', ('!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*return\s*;'), 'L11 live-edit apply re-check', $null, 0),
+    @('ui_page_diagnostics.c', 'crash_ack_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to acknowledge crash' $admin 'crash_ack_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*crash_ack_do\(\)\s*;\s*$'), 'L11 crash ack', $null, 0),
+    @('ui_page_diagnostics.c', 'crash_ack_unlocked_cb', ('if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*crash_ack_do\(\)'), 'L11 crash ack unlocked', $null, 0)
 )
+
 # Review LCDFX2/DEVBREAK INFO: rules match code only. A gate call left inside a comment must not
 # satisfy a rule, so // and /* */ comments are blanked (newlines kept) before matching. String and
 # char literals are skipped so a "//" inside a string is not taken for a comment.
@@ -57,63 +72,175 @@ function Remove-CComments([string]$s) {
     }
     return $sb.ToString()
 }
-function Get-Code([string]$path) { Remove-CComments ((Get-Content -Raw -Path $path) -replace "`r", '') }
+# REVIEW_LCDFX5 INFO-3: #warning/#error/#pragma/#line text may hold an unbalanced apostrophe that
+# would desynchronise the stripper, so those directive lines are blanked first.
+function Get-Code([string]$path) {
+    $t = (Get-Content -Raw -Path $path) -replace "`r", ''
+    $t = [regex]::Replace($t, '(?m)^[ \t]*#[ \t]*(warning|error|pragma|line)\b[^\n]*', '')
+    Remove-CComments $t
+}
+# Body of the function whose definition ends at the '{' at $open: brace-matched, string/char aware.
+function Get-BraceBody([string]$code, [int]$open) {
+    $depth = 1; $i = $open + 1; $n = $code.Length
+    while ($i -lt $n) {
+        $c = $code[$i]
+        if ($c -eq '"' -or $c -eq "'") {
+            $i++
+            while ($i -lt $n -and $code[$i] -ne $c) { if ($code[$i] -eq '\') { $i++ }; $i++ }
+        } elseif ($c -eq '{') { $depth++ }
+        elseif ($c -eq '}') { $depth--; if ($depth -eq 0) { return $code.Substring($open + 1, $i - $open - 1) } }
+        $i++
+    }
+    return $null
+}
+# Definitions only (a type token at line start, then NAME(...) {), so prototypes and calls never count.
+function Get-FuncDefs([string]$code, [string]$name) {
+    @([regex]::Matches($code, '(?m)^(?:static\s+)?(?:inline\s+)?\w+[\s\*]+' + [regex]::Escape($name) + '\s*\([^;{}]*\)\s*\{'))
+}
+function Get-FuncBody([string]$code, [string]$name) {
+    $defs = Get-FuncDefs $code $name
+    if ($defs.Count -ne 1) { return @{ ok = $false; n = $defs.Count } }
+    $b = Get-BraceBody $code ($defs[0].Index + $defs[0].Length - 1)
+    if ($null -eq $b) { return @{ ok = $false; n = 1 } }
+    return @{ ok = $true; body = $b; n = 1 }
+}
+# Occurrences of an identifier that are not a definition/prototype (not preceded by the word void).
+function Count-Uses([string]$code, [string]$name) { @([regex]::Matches($code, '(?<!void\s+)\b' + [regex]::Escape($name) + '\b')).Count }
 
 $fail = 0
+$codeCache = @{}
+function Get-CachedCode([string]$file) {
+    if (-not $codeCache.ContainsKey($file)) { $codeCache[$file] = Get-Code (Join-Path $UiDir $file) }
+    $codeCache[$file]
+}
+
+# LOW-1: no macro (#define/#undef) anywhere under the App tree may rename a token the regexes trust.
+$trusted = 'ui_lcd_lock_run_gated|ui_lcd_lock_has_role|LCD_PIN_ROLE_\w+|kiln_ui_show|ui_page_safety_open|lcd_safety_strip_needs_pin|touch_cal_store_is_calibrated|lcd_touch_cal_\w*exit_target|\w+_open_apply|trip_strip_gated_open_cb|trip_strip_clicked_cb|' + (($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) } | Select-Object -Unique) -join '|')
+$appRoot = Split-Path (Split-Path $UiDir)
+if (-not (Test-Path (Join-Path $appRoot 'drivers'))) { $appRoot = $UiDir }
+foreach ($f in Get-ChildItem -Path $appRoot -Recurse -Include *.c, *.h -File) {
+    $raw = (Get-Content -Raw -Path $f.FullName) -replace "`r", ''
+    foreach ($mm in [regex]::Matches($raw, '(?m)^[ \t]*#[ \t]*(define|undef)[ \t]+(' + $trusted + ')\b')) {
+        Write-Host "FAIL: L1-macro: $($f.Name) $($mm.Groups[1].Value)s '$($mm.Groups[2].Value)' (a macro can rename the gate tokens this check trusts; rename your macro)"; $fail++
+    }
+}
+
 foreach ($r in $rules) {
     $path = Join-Path $UiDir $r[0]
-    if (-not (Test-Path $path)) { Write-Host "FAIL: $($r[2]): missing $($r[0])"; $fail++; continue }
-    $txt = Get-Code $path
-    $need = if ($r[1] -match 'ROLE_USER') { 'a USER' } else { 'an admin' }
-    if ($txt -notmatch $r[1]) { Write-Host "FAIL: $($r[2]): $($r[0]) lacks $need gate matching /$($r[1])/"; $fail++ }
+    if (-not (Test-Path $path)) { Write-Host "FAIL: $($r[3]): missing $($r[0])"; $fail++; continue }
+    $txt = Get-CachedCode $r[0]
+    $fb = Get-FuncBody $txt $r[1]
+    if (-not $fb.ok) { Write-Host "FAIL: $($r[3]): $($r[0]) has $($fb.n) definitions of $($r[1])() (expected exactly 1; if you renamed it, edit its row in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
+    if ($fb.body -notmatch $r[2]) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) lacks the gate matching /$($r[2])/"; $fail++ }
+    if ($r[4]) {
+        $u = Count-Uses $txt $r[4]
+        if ($u -ne $r[5]) { Write-Host "FAIL: $($r[3]): $($r[4]) is referenced $u time(s) in $($r[0]) outside its definition (expected $($r[5]): only the gated call; an ungated call or registration bypasses the gate)"; $fail++ }
+    }
 }
-# C3 (REVIEW_LCDFX3 LOW-3, REVIEW_LCDFX4 LOW-1..4, INFO-1): every callback registered through
+# C3 (REVIEW_LCDFX3 LOW-3, REVIEW_LCDFX4 LOW-1..4, INFO-1, REVIEW_LCDFX5 LOW-2/INFO-1/2): every callback registered through
 # build_nav_item(grid, "...", cb) in ui_page_config.c is enumerated. Each USER callback's WHOLE body
 # must be exactly one `ui_lcd_lock_run_gated("...", LCD_PIN_ROLE_USER, <page>_open_apply, NULL);`
 # (optionally preceded by (void)e;) -- no comma operator, no arithmetic on the role, no code around it.
 # The per-page rule is checked against that callback's own body. The ADMIN exemption is only
-# touch_cal_nav_cb by name with its body pinned. Every preprocessor conditional is refused in the file,
-# a callback defined twice fails, and any registration form not recognised (cast, non-literal label,
-# array entry, direct lv_obj_add_event_cb) fails loud.
-$cfg = Get-Code (Join-Path $UiDir "ui_page_config.c")
-if ($cfg -match '(?m)^\s*#\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C3: ui_page_config.c contains a preprocessor conditional (dead code can hide an ungated twin)"; $fail++ }
-$navCalls = @([regex]::Matches($cfg, '\bbuild_nav_item\s*\(')).Count - 1   # minus the definition
-$navRe = @([regex]::Matches($cfg, '(?<!void )build_nav_item\(\s*\w+\s*,\s*"[^"]*"\s*,\s*(\w+)\s*\)'))
+# touch_cal_nav_cb by name with its body pinned. Every preprocessor conditional is refused in the file
+# (to add a #if, add a pinned exemption here), a callback defined twice fails, and any registration form
+# not recognised fails loud. The openers are inventoried: each *_open_apply body is pinned, each page
+# opener (kiln_ui_show / ui_page_safety_open) appears only in its own *_open_apply, and each *_open_apply
+# identifier appears exactly twice (definition + its one gated call).
+$cfg = Get-CachedCode "ui_page_config.c"
+if ($cfg -match '(?m)^\s*#\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C3: ui_page_config.c contains a preprocessor conditional (dead code can hide an ungated twin; if one is needed, extend this check)"; $fail++ }
+$navCalls = @([regex]::Matches($cfg, '\bbuild_nav_item\s*\(')).Count - @([regex]::Matches($cfg, '\bbuild_nav_item\s*\(\s*(const\s+)?lv_obj_t')).Count   # minus definition and prototypes
+$navRe = @([regex]::Matches($cfg, '\bbuild_nav_item\(\s*\w+\s*,\s*"[^"]*"\s*,\s*(\w+)\s*\)'))
 if ($navRe.Count -ne $navCalls) { Write-Host "FAIL: C3: $navCalls build_nav_item call(s) but only $($navRe.Count) in a recognised form (cast, non-literal label or array entry?)"; $fail++ }
-foreach ($m in [regex]::Matches($cfg, 'lv_obj_add_event_cb\(\s*\w+\s*,\s*([^,]+),')) {
-    $v = $m.Groups[1].Value.Trim()
-    if ($v -notin 'cb', 'units_toggle_cb') { Write-Host "FAIL: C3: unrecognised lv_obj_add_event_cb registration of '$v' in ui_page_config.c"; $fail++ }
+# Registrars: every lv_obj_add_event_cb must be the recognised row form; other registrars are refused.
+$regTotal = @([regex]::Matches($cfg, '\blv_obj_add_event_cb\s*\(')).Count
+$regOk = 0
+foreach ($m in [regex]::Matches($cfg, '\blv_obj_add_event_cb\(\s*\w+\s*,\s*(\w+)\s*,')) {
+    $v = $m.Groups[1].Value
+    if ($v -in 'cb', 'units_toggle_cb') { $regOk++ } else { Write-Host "FAIL: C3: unrecognised lv_obj_add_event_cb registration of '$v' in ui_page_config.c"; $fail++ }
 }
+if ($regTotal -ne $regOk) { Write-Host "FAIL: C3: $regTotal lv_obj_add_event_cb call(s) in ui_page_config.c but only $regOk in the recognised 'cb'/'units_toggle_cb' form"; $fail++ }
+if ($cfg -match '\b(lv_obj_add_event|lv_timer_create|lv_async_call|lv_anim_set_\w*cb|lv_timer_set_cb)\b') { Write-Host "FAIL: C3: ui_page_config.c uses a callback registrar ($($Matches[1])) other than the pinned lv_obj_add_event_cb forms"; $fail++ }
 $navN = 0; $applies = @{}
 $cbs = @($navRe | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
 foreach ($cb in $cbs) {
-    $defs = @([regex]::Matches($cfg, '\b' + [regex]::Escape($cb) + '\s*\(\s*lv_event_t')).Count
-    if ($defs -ne 1) { Write-Host "FAIL: C3: ui_page_config.c nav callback $cb has $defs definitions (expected exactly 1)"; $fail++; continue }
-    $m = [regex]::Match($cfg, '(?s)static void ' + [regex]::Escape($cb) + '\(lv_event_t \*e\)\s*\{(.*?)\n\}')
-    if (-not $m.Success) { Write-Host "FAIL: C3: ui_page_config.c nav callback $cb not found"; $fail++; continue }
-    $body = $m.Groups[1].Value
-    $um = [regex]::Match($body, '^\s*(\(void\)\s*e\s*;\s*)?ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*(\w+_open_apply),\s*NULL\)\s*;\s*$')
+    $fb = Get-FuncBody $cfg $cb
+    if (-not $fb.ok) { Write-Host "FAIL: C3: ui_page_config.c nav callback $cb has $($fb.n) definitions (expected exactly 1)"; $fail++; continue }
+    $body = $fb.body
+    $um = [regex]::Match($body, '^\s*(\(void\)\s*\w+\s*;\s*)?ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*(\w+_open_apply),\s*NULL\)\s*;\s*$')
     if ($um.Success) { $navN++; $applies[$um.Groups[2].Value] = $cb; continue }
     if ($cb -eq 'touch_cal_nav_cb') {
-        $tc = '^\s*\(void\)\s*e\s*;\s*if\s*\(!touch_cal_store_is_calibrated\(\)\)\s*\{\s*kiln_ui_show\("touch_cal"\)\s*;\s*return\s*;\s*\}\s*ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_ADMIN,\s*touch_cal_open_apply,\s*NULL\)\s*;\s*$'
+        $tc = '^\s*\(void\)\s*\w+\s*;\s*if\s*\(!touch_cal_store_is_calibrated\(\)\)\s*\{\s*kiln_ui_show\("touch_cal"\)\s*;\s*return\s*;\s*\}\s*ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_ADMIN,\s*touch_cal_open_apply,\s*NULL\)\s*;\s*$'
         if ($body -notmatch $tc) { Write-Host "FAIL: C3: touch_cal_nav_cb body is not the pinned shape (ADMIN gate with nothing else)"; $fail++ }
         continue
     }
-    Write-Host "FAIL: C3: ui_page_config.c nav callback $cb is not exactly one USER gate statement (only touch_cal_nav_cb may differ, as pinned)"; $fail++
+    Write-Host "FAIL: C3: ui_page_config.c nav callback $cb is not exactly one USER gate statement (only touch_cal_nav_cb may differ, as pinned; for a new cell edit this check)"; $fail++
 }
-if ($navN -ne 5) { Write-Host "FAIL: C3: expected exactly 5 USER-gated nav callbacks in ui_page_config.c, found $navN"; $fail++ }
-foreach ($ap in 'temperature_open_apply', 'network_open_apply', 'diagnostics_open_apply', 'safety_open_apply', 'profiles_open_apply') {
-    if (-not $applies.ContainsKey($ap)) { Write-Host "FAIL: C3: no USER-gated nav callback body calls $ap"; $fail++ }
+if ($navN -ne 5) { Write-Host "FAIL: C3: expected exactly 5 USER-gated nav callbacks in ui_page_config.c, found $navN (adding a USER cell? bump this count and the page table below)"; $fail++ }
+$pageOf = @{ temperature_open_apply = 'temperature'; network_open_apply = 'network'; diagnostics_open_apply = 'diagnostics'; safety_open_apply = $null; profiles_open_apply = 'profiles'; touch_cal_open_apply = 'touch_cal' }
+foreach ($ap in $pageOf.Keys) {
+    if ($ap -ne 'touch_cal_open_apply' -and -not $applies.ContainsKey($ap)) { Write-Host "FAIL: C3: no USER-gated nav callback body calls $ap"; $fail++ }
+    $fb = Get-FuncBody $cfg $ap
+    if (-not $fb.ok) { Write-Host "FAIL: C3: $ap has $($fb.n) definitions in ui_page_config.c (expected 1)"; $fail++; continue }
+    $page = $pageOf[$ap]
+    $shape = if ($null -eq $page) { '^\s*\(void\)\s*user_data\s*;\s*ui_page_safety_open\(true\)\s*;\s*$' }
+             elseif ($ap -eq 'profiles_open_apply') { '^\s*\(void\)\s*user_data\s*;\s*ui_page_profiles_refresh\(\)\s*;\s*kiln_ui_show\("profiles"\)\s*;\s*$' }
+             else { '^\s*\(void\)\s*user_data\s*;\s*kiln_ui_show\("' + $page + '"\)\s*;\s*$' }
+    if ($fb.body -notmatch $shape) { Write-Host "FAIL: C3: $ap body is not the pinned opener shape /$shape/ (INFO-2: an apply body must only open its page)"; $fail++ }
+    if ((Count-Uses $cfg $ap) -ne 1) { Write-Host "FAIL: C3: $ap is referenced $(Count-Uses $cfg $ap) time(s) outside its definition (expected 1: the gated call; an ungated call or cast registration bypasses the gate)"; $fail++ }
 }
-# LCDFX4 LOW-4: the Home trip strip is the other way into Safety; pin its whole handler.
-$homeSrc = Get-Code (Join-Path $UiDir "ui_page_home.c")
-$hm = [regex]::Match($homeSrc, '(?s)static void trip_strip_clicked_cb\(lv_event_t \*e\)\s*\{(.*?)\n\}')
-$hpin = '^\s*\(void\)\s*e\s*;\s*if\s*\(s_ui_home_trip_strip_is_safety\)\s*\{\s*if\s*\(lcd_safety_strip_needs_pin\(ui_lcd_lock_has_role\(LCD_PIN_ROLE_USER\)\)\)\s*\{\s*ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*trip_strip_gated_open_cb,\s*NULL\)\s*;\s*\}\s*else\s*\{\s*trip_strip_gated_open_cb\(NULL\)\s*;\s*\}\s*\}\s*$'
-if (-not $hm.Success -or $hm.Groups[1].Value -notmatch $hpin) { Write-Host "FAIL: C4: ui_page_home.c trip_strip_clicked_cb is not the pinned PIN-predicate shape"; $fail++ }
+foreach ($pg in 'temperature', 'network', 'diagnostics', 'profiles') {
+    $c = @([regex]::Matches($cfg, 'kiln_ui_show\s*\(\s*"' + $pg + '"')).Count
+    if ($c -ne 1) { Write-Host "FAIL: C3: kiln_ui_show(`"$pg`") appears $c times in ui_page_config.c (expected 1, inside ${pg}_open_apply)"; $fail++ }
+}
+if (@([regex]::Matches($cfg, '\bui_page_safety_open\s*\(')).Count -ne 1) { Write-Host "FAIL: C3: ui_page_safety_open( must appear exactly once in ui_page_config.c (inside safety_open_apply)"; $fail++ }
+if (@([regex]::Matches($cfg, 'kiln_ui_show\s*\(\s*"touch_cal"')).Count -ne 2) { Write-Host "FAIL: C3: kiln_ui_show(`"touch_cal`") must appear exactly twice in ui_page_config.c (touch_cal_open_apply and the pinned uncalibrated branch)"; $fail++ }
+if (@([regex]::Matches($cfg, '\bkiln_ui_show\s*\(')).Count -ne 6) { Write-Host "FAIL: C3: ui_page_config.c has an unexpected kiln_ui_show( call (expected exactly the 6 pinned ones)"; $fail++ }
+
+# LCDFX4 LOW-4 / LCDFX5 LOW-3: the Home trip strip is the other way into Safety; pin its whole handler and the
+# opener's references.
+$homeSrc = Get-CachedCode "ui_page_home.c"
+if ($homeSrc -match '(?m)^\s*#\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C4: ui_page_home.c contains a preprocessor conditional (dead code can hide an ungated twin of trip_strip_clicked_cb)"; $fail++ }
+$hf = Get-FuncBody $homeSrc 'trip_strip_clicked_cb'
+$hpin = '^\s*\(void\)\s*\w+\s*;\s*if\s*\(s_ui_home_trip_strip_is_safety\)\s*\{\s*if\s*\(lcd_safety_strip_needs_pin\(ui_lcd_lock_has_role\(LCD_PIN_ROLE_USER\)\)\)\s*\{\s*ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*trip_strip_gated_open_cb,\s*NULL\)\s*;\s*\}\s*else\s*\{\s*trip_strip_gated_open_cb\(NULL\)\s*;\s*\}\s*\}\s*$'
+# Log statements cannot open a page, so they may be added without editing this check (LCDFX5 INFO-1).
+$hbody = if ($hf.ok) { [regex]::Replace($hf.body, '\bESP_LOG[IWEDV]\s*\([^;]*\)\s*;', '') } else { '' }
+if (-not $hf.ok -or $hbody -notmatch $hpin) { Write-Host "FAIL: C4: ui_page_home.c trip_strip_clicked_cb is not the pinned PIN-predicate shape (exactly one definition; only ESP_LOG* lines may be added)"; $fail++ }
+$gf = Get-FuncBody $homeSrc 'trip_strip_gated_open_cb'
+if (-not $gf.ok -or $gf.body -notmatch '^\s*\(void\)\s*user_data\s*;\s*ui_page_safety_open\(false\)\s*;\s*$') { Write-Host "FAIL: C4: ui_page_home.c trip_strip_gated_open_cb is not the pinned opener shape"; $fail++ }
 if (@([regex]::Matches($homeSrc, '\bui_page_safety_open\s*\(')).Count -ne 1) { Write-Host "FAIL: C4: ui_page_home.c must call ui_page_safety_open( exactly once (inside trip_strip_gated_open_cb)"; $fail++ }
+if ((Count-Uses $homeSrc 'trip_strip_gated_open_cb') -ne 2) { Write-Host "FAIL: C4: trip_strip_gated_open_cb must be referenced exactly twice outside its definition (gated argument + else-branch call), found $(Count-Uses $homeSrc 'trip_strip_gated_open_cb')"; $fail++ }
+if ((Count-Uses $homeSrc 'trip_strip_clicked_cb') -ne 1) { Write-Host "FAIL: C4: trip_strip_clicked_cb must be referenced exactly once outside its definition (the strip registration), found $(Count-Uses $homeSrc 'trip_strip_clicked_cb')"; $fail++ }
+if ($homeSrc -match 'kiln_ui_show\s*\(\s*"(safety|diagnostics|temperature|network|profiles)"') { Write-Host "FAIL: C4: ui_page_home.c must not open $($Matches[1]) via kiln_ui_show (only the pinned PIN-gated trip strip may reach Safety)"; $fail++ }
+
+# LCDFX5 LOW-4: repo-wide inventory of the ways into USER pages across drivers/ui. Allowlist = file:page -> count.
+$userPages = 'safety|diagnostics|temperature|network|profiles'
+$showAllow = @{ 'ui_page_config.c:temperature' = 1; 'ui_page_config.c:network' = 1; 'ui_page_config.c:diagnostics' = 1; 'ui_page_config.c:profiles' = 1
+                'ui_page_profile_builder_review.c:profiles' = 1; 'ui_page_safety.c:safety' = 1 }   # after an ADMIN-gated save
+$safetyOpenAllow = @{ 'ui_page_config.c' = 1; 'ui_page_home.c' = 1; 'ui_page_safety.c' = 1; 'ui_page_safety.h' = 1 }   # safety.c/.h: definition + prototype
+$showNonLiteralFiles = 'ui_topbar.c', 'ui_page_touch_cal.c', 'kiln_ui.c'                       # back-nav / host-tested exit targets / the definition
+$backAllow = @('ui_page_network_manage.c:network', 'ui_page_profile_builder_zones.c:profiles')   # in-flow Back from ADMIN-gated pages
+$backNonLiteralFiles = 'ui_page_profile_detail.c', 'ui_page_profile_picker.c', 'ui_page_safety.c'   # in-flow back targets
+$seen = @{}
+foreach ($f in Get-ChildItem -Path $UiDir -Include *.c, *.h -Recurse -File) {
+    $code = Get-Code $f.FullName; $nm = $f.Name
+    foreach ($mm in [regex]::Matches($code, 'kiln_ui_show\s*\(\s*"(' + $userPages + ')"')) { $k = $nm + ':' + $mm.Groups[1].Value; $seen[$k] = 1 + [int]$seen[$k] }
+    if ($nm -ne 'ui_page_safety.c') {
+        foreach ($mm in [regex]::Matches($code, '\bkiln_ui_show\s*\(\s*(?!")(?!const\b)([^\s)])')) { if ($nm -notin $showNonLiteralFiles) { Write-Host "FAIL: L4: $nm calls kiln_ui_show with a non-literal page (only $($showNonLiteralFiles -join ', ') may)"; $fail++ } }
+    }
+    $so = @([regex]::Matches($code, '\bui_page_safety_open\s*\(')).Count
+    if ($so -ne [int]$safetyOpenAllow[$nm]) { Write-Host "FAIL: L4: $nm has $so ui_page_safety_open( reference(s), allowlist says $([int]$safetyOpenAllow[$nm]) (a new way into Safety needs a gate and an allowlist entry here)"; $fail++ }
+    foreach ($mm in [regex]::Matches($code, '\bback_page\s*=\s*([^;]*?)\s*[,;\n]')) {
+        $v = $mm.Groups[1].Value
+        if ($v -match '"(' + $userPages + ')"' -and (($nm + ':' + $Matches[1]) -notin $backAllow)) { Write-Host "FAIL: L4: $nm sets back_page to USER page $($Matches[1]) (the topbar Back button navigates with no PIN)"; $fail++ }
+        elseif ($v -notmatch '"' -and $v -ne 'NULL' -and $nm -notin $backNonLiteralFiles) { Write-Host "FAIL: L4: $nm sets back_page to non-literal '$v' (only $($backNonLiteralFiles -join ', ') may)"; $fail++ }
+    }
+}
+foreach ($k in $seen.Keys) { if ($seen[$k] -ne [int]$showAllow[$k]) { Write-Host "FAIL: L4: $k opens a USER page $($seen[$k]) time(s), allowlist says $([int]$showAllow[$k]) (add the gate, then an allowlist entry in this check)"; $fail++ } }
+foreach ($k in $showAllow.Keys) { if (-not $seen.ContainsKey($k)) { Write-Host "FAIL: L4: allowlisted opener $k no longer present (update the allowlist)"; $fail++ } }
 
 # L9: lock init must precede the touch-cal early return.
-$kui = Get-Code (Join-Path $UiDir "kiln_ui.c")
+$kui = Get-CachedCode "kiln_ui.c"
 $m = [regex]::Match($kui, "(?m)^\s*ui_lcd_lock_init\(\);")
 $i = if ($m.Success) { $m.Index } else { -1 }
 $j = $kui.IndexOf("lvgl_port_touch_cal_support()")
@@ -131,5 +258,5 @@ else {
     }
 }
 if ($fail) { Write-Host "LCD admin gate check FAILED ($fail)"; exit 1 }
-Write-Host "LCD admin gate check passed: $($rules.Count) gates plus C3/C4 nav-callback and trip-strip shape, L9 init order and relock."
+Write-Host "LCD admin gate check passed: $($rules.Count) per-function gates plus C3/C4 nav-callback and trip-strip shape, L1 macro scan, L4 opener inventory, L9 init order and relock."
 exit 0
