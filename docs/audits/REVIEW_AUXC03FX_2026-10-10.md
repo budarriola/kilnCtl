@@ -52,7 +52,7 @@ Commits reviewed:
 
 None.
 
-### LOW-1: pre-aux-check 409s are reported as FAIL (a false firmware-defect finding)
+### LOW-1: pre-aux-check 409s are reported as FAIL (a false firmware-defect finding) -- FIXED in d7cf4dd0b
 
 `_case_ax_c03` treats any 409 without the aux text as `FAIL "firmware answered 409 but not the
 aux-ownership refusal"`. Three 409s that `zones_post_handler` sends **before** the aux check carry
@@ -69,7 +69,7 @@ zones_config_undecided) do prove the guard let the mask through, so FAIL is righ
 fix is to classify by body: aux text -> PASS; one of the post-check error keys -> FAIL; anything
 else -> INCONCLUSIVE.
 
-### LOW-2: the owner-text match is looser than the firmware text
+### LOW-2: the owner-text match is looser than the firmware text -- FIXED in d7cf4dd0b
 
 `if "already owns" in text or "aux" in text.lower()`: the `"aux"` alternative accepts any 409 body
 that contains "aux". `text` is the whole tool line, including the `(host=...)` suffix, so a host
@@ -79,7 +79,7 @@ all checked), so there is no false PASS now. But the specific text is not pinned
 MISSED. The fix is to match `"already owns"` only, and add a test where a 409 body mentions "aux"
 for another reason and must not PASS.
 
-### LOW-3: a post-2xx outcome is classified as pre-POST (no taint, no restore)
+### LOW-3: a post-2xx outcome is classified as pre-POST (no taint, no restore) -- FIXED in d7cf4dd0b
 
 `control_set_zone_relay_mask` returns `refused: POST /api/zones refused: <body>` when the POST
 answered 2xx with a body other than `ok`. That line starts with `refused:`, so `pre_post` is true
@@ -88,14 +88,14 @@ landed. This is dead today, because the only 2xx is `httpd_resp_sendstr(req, "ok
 would become live if the success body ever changes, e.g. to JSON. The fix is to exclude the
 `refused: POST /api/zones refused:` prefix from `pre_post`.
 
-### LOW-4: the restore covers relay_mask only, and a failed restore is not retried
+### LOW-4: the restore covers relay_mask only, and a failed restore is not retried -- FIXED in d7cf4dd0b
 
 On `FAILED: ... other field(s) changed`, the restore posts the original mask but cannot put back
 the collateral fields the first write changed. A restore that fails or is unconfirmed is attempted
 once, and no teardown hook retries it. Both outcomes taint the run and say "restore NOT
 confirmed", so the leftover change is loud, not silent.
 
-### LOW-5: no precondition check that relay 4 is an enabled aux output
+### LOW-5: no precondition check that relay 4 is an enabled aux output -- FIXED in d7cf4dd0b
 
 AX-C03 does not check that AX-C01's state (relay 4 ENABLED as aux) holds. Two cases break it:
 running AX-C03 alone, or running it after AX-C01 FAILed (which does not taint). In both, the
@@ -103,7 +103,7 @@ firmware correctly accepts the mask, and the case reports FAIL plus taint as if 
 defect. The fix is to read `control_get_aux_outputs` first and return INCONCLUSIVE unless relay 4
 is ENABLED.
 
-### LOW-6: `test_env_opt_in` is environment-dependent and fails on the owner's machine
+### LOW-6: `test_env_opt_in` is environment-dependent and fails on the owner's machine -- FIXED in d7cf4dd0b
 
 `KILNCTL_AUX_BENCH_CONFIRM=1` is set at User scope on this machine. The test's final
 `assertFalse(C._confirmed({}))` runs after it restores the old value `"1"`, so it fails in every
