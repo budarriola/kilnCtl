@@ -11,6 +11,8 @@ findings are LOW or INFO.
 
 ### MED-1: nothing tests the LCD Apply stale-generation refusal (A3)
 
+**FIXED (webfx6, b51ab9455 and the following test commit).**
+
 The A3 fix is `ui_edit_firing_apply.c:252`, which calls
 `live_profile_save_working_if_gen(candidate, true, expect_gen, ...)`; a STALE
 result returns "edited elsewhere -- reopen to reload" (`:253-255`).
@@ -28,6 +30,8 @@ only the positive case. Fix: open ctx, call `live_profile_save_working()` direct
 
 ### LOW-1: the generation is RAM-only, so it can match a stale value again after a reboot (ABA)
 
+**FIXED (webfx6, b51ab9455 and the following test commit).**
+
 `s_live_profile_generation` (`live_profile.c:88`) is a static atomic that restarts at
 0 on every boot. Two clients can hold a generation from before the reboot:
 
@@ -44,6 +48,8 @@ current", so it keeps working.
 
 ### LOW-2: `live_profile_clear()` takes the save lock only for the bump
 
+**FIXED (webfx6, b51ab9455 and the following test commit).**
+
 In `live_profile_clear()` (`live_profile.c:776`), the NVS erase, file removal and
 read-back all run outside `s_live_save_lock`. Only the generation bump at
 `:818-820` is locked. An edit that takes the lock between the file removal and the
@@ -55,6 +61,8 @@ end of a run, so it is unlikely. Fix: hold the lock across the whole clear, or
 re-check for a working file under the lock before the bump.
 
 ### LOW-3: the LCD fork is not atomic with its generation read
+
+**FIXED (webfx6, b51ab9455 and the following test commit).**
 
 When there is no pending record, Apply forks (`ui_edit_firing_apply.c:233`) and then
 reads `expect_gen = live_profile_generation()` (`:245`) in a separate step. Two cases
@@ -72,6 +80,8 @@ while holding the live lock. Alternatively, keep `ctx->generation` when the fork
 reused an existing record.
 
 ### LOW-4: the setup wizard A5 edit-sequence guard is undone on the common path
+
+**FIXED (webfx6, b51ab9455 and the following test commit).**
 
 `kcEditSeq` (`setup_wizard_page.html:1747-1773`) keeps `kcDirty` set when an edit
 lands while a save is in flight. But most call sites do
@@ -92,6 +102,8 @@ edit and LCD Apply only run while it is active, so the two paths cannot both act
 the same record at the same time. Listed for completeness.
 
 ### LOW-6: tooling race in `build_gate.ps1`
+
+**FIXED (webfx6, b51ab9455 and the following test commit).**
 
 The fixer's baseline log shows a non-fatal `Get-Content` PathNotFound at
 `tools/build_gate.ps1:292`, when a slot json disappeared between enumeration and

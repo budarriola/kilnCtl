@@ -43,23 +43,23 @@ or `KilnFW_recovery/`.
 | M-1 | MED (FIXED) | zones Save, safety_config Save and wizard zone steps re-post the whole `/api/zones` page from an old GET; no client generation |
 | M-2 | MED (FIXED) | profile save overwrites slot `id` with no rev check; a deleted-and-reused slot gets clobbered |
 | M-3 | MED (FIXED) | safety_commissioning re-renders every 5 s, wiping unsaved edits; Save all then reports "Committed." |
-| L-1 | LOW | STOP FIRING / Pause / Resume / Ack give no feedback on failure |
-| L-2 | LOW | Clear Trip refusal text erased by the next poll; plain-text refusals show nothing |
-| L-3 | LOW | zones sweep: Abort is fire-and-forget; the status poll dies after one failed fetch |
-| L-4 | LOW | zones autotune Start swallows non-JSON 400s, network errors and 403s |
-| L-5 | LOW | wizard step 8 shows "Not running." while a sweep is energizing relays |
-| L-6 | LOW | diagnostics crash "Clear" (erases coredump) / "Acknowledge" have no confirm and ignore the response |
-| L-7 | LOW | diagnostics watchdog toggle trusts any JSON body, no `r.ok` |
-| L-8 | LOW | live profile save/decide can go out with no `gen`, and firmware accepts an absent gen |
-| L-9 | LOW | `kcUnit.set` is optimistic; a refused unit POST leaves the wrong unit shown until reload |
-| L-10 | LOW | safety_page escapes trip cause/remedy twice (`&#39;` shown) |
-| L-11 | LOW | wizard step 11 text says OTA/factory-reset still need the AP password (retired 2026-09-29) |
-| L-12 | LOW | wizard step 11 silently drops a password typed without a username |
-| L-13 | LOW | recovery page: "Upload and boot" and Pico Abort-while-finishing have no confirm |
-| L-14 | LOW | kiln_configs writes and ota GitHub Cancel swallow network/auth failures |
-| L-15 | LOW | backup and profile export are plain navigations to auth-gated routes |
-| L-16 | LOW | wizard step 7 ceiling check passes when it cannot read `/api/zones` |
-| L-17 | LOW | settings_display Save re-posts all four fields from the load |
+| L-1 | LOW (FIXED) | STOP FIRING / Pause / Resume / Ack give no feedback on failure |
+| L-2 | LOW (FIXED) | Clear Trip refusal text erased by the next poll; plain-text refusals show nothing |
+| L-3 | LOW (FIXED) | zones sweep: Abort is fire-and-forget; the status poll dies after one failed fetch |
+| L-4 | LOW (FIXED) | zones autotune Start swallows non-JSON 400s, network errors and 403s |
+| L-5 | LOW (FIXED) | wizard step 8 shows "Not running." while a sweep is energizing relays |
+| L-6 | LOW (FIXED) | diagnostics crash "Clear" (erases coredump) / "Acknowledge" have no confirm and ignore the response |
+| L-7 | LOW (FIXED) | diagnostics watchdog toggle trusts any JSON body, no `r.ok` |
+| L-8 | LOW (FIXED) | live profile save/decide can go out with no `gen`, and firmware accepts an absent gen |
+| L-9 | LOW (FIXED) | `kcUnit.set` is optimistic; a refused unit POST leaves the wrong unit shown until reload |
+| L-10 | LOW (FIXED) | safety_page escapes trip cause/remedy twice (`&#39;` shown) |
+| L-11 | LOW (FIXED) | wizard step 11 text says OTA/factory-reset still need the AP password (retired 2026-09-29) |
+| L-12 | LOW (FIXED) | wizard step 11 silently drops a password typed without a username |
+| L-13 | LOW (FIXED) | recovery page: "Upload and boot" and Pico Abort-while-finishing have no confirm |
+| L-14 | LOW (FIXED) | kiln_configs writes and ota GitHub Cancel swallow network/auth failures |
+| L-15 | LOW (FIXED) | backup and profile export are plain navigations to auth-gated routes |
+| L-16 | LOW (FIXED) | wizard step 7 ceiling check passes when it cannot read `/api/zones` |
+| L-17 | LOW (FIXED) | settings_display Save re-posts all four fields from the load |
 | I-1..I-6 | INFO | see the end |
 
 ## MED
@@ -160,6 +160,8 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-1 Firing controls give no feedback when they fail
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 - **STOP FIRING**, `app.js:1966-1974`:
   `fetch('/api/profile_exec/stop',{method:'POST'}).then(()=>btn.disabled=false).catch(()=>btn.disabled=false)`.
   - The firmware always answers ok (`dashboard_exec_http.c:832-836`), so a server refusal is not
@@ -177,6 +179,8 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-2 Clear Trip refusal messages disappear or never appear
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `main_page.html:2039-2049`:
 
 - A refusal row is inserted after `#clearTripBtn` inside `#safetyTripBanner`. `renderSafetyTrip()`
@@ -188,6 +192,8 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 - Each refused click while the banner stays up appends another row.
 
 ### L-3 zones current sweep: Abort and the status poll
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - **Abort**, `zones_page.html:2591`: `fetch('/api/zones/current_sweep/abort', {method:'POST'});`
   has no `.then` or `.catch`. A failure becomes an unhandled rejection with no feedback, on the
@@ -202,6 +208,8 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-4 zones autotune Start swallows failures
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `zones_page.html:4304-4310`: `.then(r=>r.json()).then(j=>{ if(!j.ok) ...'Start failed: '+j.error }).catch(function(){})`.
 
 - JSON refusals are shown.
@@ -215,6 +223,8 @@ This is the same idea as the zones page's `zonesFormDirty` / `reloadUnlessDirty`
 
 ### L-5 Wizard step 8 hides a running sweep
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `setup_wizard_page.html:1140` hard-codes `Not running.`. The status is only fetched after
 Start or Abort (1205-1214), never when the step renders, and leaving the step clears the poll.
 After a reload, or after coming back to the step, a sweep that is cycling relays reads
@@ -224,6 +234,8 @@ After a reload, or after coming back to the step, a sweep that is cycling relays
 is running.
 
 ### L-6 Diagnostics crash-report buttons
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `diagnostics_page.html:1000` (Acknowledge) and `:1004` (Clear):
 `fetch('/api/crash_report/clear',{method:'POST'}).then(pollCrash);`
@@ -235,11 +247,15 @@ is running.
 
 ### L-7 Diagnostics watchdog toggle trusts any JSON body
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `diagnostics_page.html:846-851`: `.then(r=>r.json()).then(result=>renderWatchdogCfg(!!result.panic_disabled)).catch(function(){})`.
 There is no `r.ok` check. A refused POST whose JSON lacks `panic_disabled` renders the panic
 watchdog as enabled while it may still be disabled, which is the unsafe direction.
 
 ### L-8 Live profile edit can be sent without `gen`
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `live_profile_page.html:313-315`: `genQuery()` returns `''` when `lastGen` is null.
 - `lastGen` becomes null in these cases:
@@ -256,6 +272,8 @@ watchdog as enabled while it may still be disabled, which is the unsafe directio
 
 ### L-9 `kcUnit.set` is optimistic and never corrected
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 - `app.js:1473-1484` updates `cached`, fires `kcunitchange`, then posts `/api/unit_pref`. The
   POST is ADMIN tier (`route_tier_table.h:250`). Only a rejected promise is handled, and only
   with `console.warn`.
@@ -270,6 +288,8 @@ watchdog as enabled while it may still be disabled, which is the unsafe directio
 
 ### L-10 safety_page escapes twice
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `safety_page.html:309-311` and `:388-390` call `row('Cause', window.kcEscapeHtml(st.trip_reason_cause))`,
 but `row()` (429-433) already escapes its value. Trip words containing an apostrophe, such as
 `safety/safety_trip_words.h:77,252` "the borrowed zone's thermocouple", render as `zone&#39;s`.
@@ -278,6 +298,8 @@ That is on the card an operator reads during a trip. Display bug, not a security
 **Fix.** Drop the inner `kcEscapeHtml` calls.
 
 ### L-11 Wizard step 11 gives false security information
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 `setup_wizard_page.html:1435-1437` says: "the OTA/factory-reset/system-reset routes still require
 the AP password either way".
@@ -289,6 +311,8 @@ deciding whether to turn login on.
 
 ### L-12 Wizard step 11 silently drops a typed password
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `setup_wizard_page.html:1468`: `if (username && password)`.
 
 - A password typed with a blank username is never sent.
@@ -299,6 +323,8 @@ deciding whether to turn login on.
 
 ### L-13 Recovery page has unconfirmed destructive actions
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `KilnFW_recovery/main/recovery_page.html`:
 
 - "Upload and boot" (`:21`, `upload()`) overwrites the application with no `confirm()`. Exit,
@@ -308,6 +334,8 @@ deciding whether to turn login on.
 
 ### L-14 Swallowed failures in kiln_configs and the OTA GitHub Cancel
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 - `kiln_configs_page.html:259-265`: `kcPost` has no `.catch`. Neither do its callers (save 451,
   overwrite 464, clone 475, rename 489, delete 502). A network error or a cancelled sign-in is
   an unhandled rejection with no message.
@@ -315,6 +343,8 @@ deciding whether to turn login on.
   cancel (409, or a 403 origin refusal) gives no feedback.
 
 ### L-15 Exports done as navigations to auth-gated routes
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `backup_page.html:113`: `<a href="/api/backup/export" download=...>` is an ADMIN route that
   bypasses the fetch wrapper, so there is no login modal. On a missing or expired session,
@@ -329,6 +359,8 @@ deciding whether to turn login on.
 
 ### L-16 Wizard step 7 ceiling check passes when the zones read fails
 
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
+
 `setup_wizard_page.html`, step 7 save, about line 2940: `fetchJsonOr('/api/zones', null)`.
 
 - If the read fails, the list of zone maxima is empty.
@@ -340,6 +372,8 @@ deciding whether to turn login on.
 **Fix.** Refuse when `freshZones` is null.
 
 ### L-17 settings_display re-posts all fields
+
+**FIXED (webfx6, b51ab9455).** Page change with a node source/behaviour test in `test_web_ui_js_audit_fixes.js`.
 
 - `settings_display_page.html:199-207`: Save posts all four fields from the form, so it
   overwrites a change made since load from the LCD or another tab.
@@ -422,3 +456,8 @@ deciding whether to turn login on.
   sends the browser to `/`. The bootstrap return path is encoded, and `loginReturnPath` blocks
   open redirects (F6). The F4 host allow-list and the F7 anti-framing headers are present in
   both images.
+
+
+## webfx6 status
+
+L-1..L-17 fixed in b51ab9455. INFO: I-1 (main PID popup, live_profile Number()) and I-5 (non-JSON reply handling) fixed. Not done: I-1 zones_page s.state/s.rule (unclear whether output is innerHTML), I-2, I-3, I-4, I-6.

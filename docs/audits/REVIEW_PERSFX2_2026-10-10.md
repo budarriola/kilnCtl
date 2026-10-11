@@ -130,6 +130,8 @@ Two recovery routes exist but are not mentioned:
 
 ## LOW-3: web pages that show only `.error` now display a raw machine code
 
+**FIXED (webfx6, b51ab9455).** Pages render `reason || error`.
+
 The previous `error` text was human-readable ("could not be saved to flash"). The new 409 puts the machine code `store_unreadable_at_boot` in `error` and the human text in `reason`. `zones_page.html:3032-3064` reads `reason`. These pages render only `.error` and would show the bare code:
 
 - `diagnostics_page.html:797`
