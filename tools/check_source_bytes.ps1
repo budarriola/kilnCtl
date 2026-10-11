@@ -30,16 +30,38 @@ $Repo = (Resolve-Path $Repo).Path
 $textExt = @('.c','.h','.ps1','.py','.js','.mjs','.html','.css','.cmake','.json','.csv','.txt','.ino')
 $crlfOkExt = @('.ps1')
 
+# Sweep leftovers of earlier runs killed before their finally block (REVIEW_LCDFX3 INFO-2).
+Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'srcbytes_*' -ErrorAction SilentlyContinue |
+    Where-Object { $_.LastWriteTime -lt (Get-Date).AddHours(-1) } |
+    ForEach-Object { Remove-Item -Recurse -Force -LiteralPath $_.FullName -ErrorAction SilentlyContinue }
+
+# Run git, capture stdout and stderr, and FAIL on a nonzero exit (REVIEW_LCDFX3 LOW-1/LOW-2): a git
+# failure must never degrade to a PASS over an unrefreshed index or an empty list.
+function Invoke-GitChecked([string[]]$GitArgs) {
+    $errf = Join-Path $tmp "git_err.txt"
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    $out = & git -C $Repo @GitArgs 2>$errf
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $prev
+    if ($code -ne 0) {
+        $msg = if (Test-Path $errf) { (Get-Content -Raw $errf) } else { "" }
+        Write-Host "FAIL: git $($GitArgs -join ' ') exited $code : $msg"
+        Write-Host "source byte check FAILED: cannot read the bytes git would commit (not a pass)"
+        exit 1
+    }
+    return $out
+}
+
 $tmp = Join-Path ([IO.Path]::GetTempPath()) ("srcbytes_" + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tmp | Out-Null
 try {
-    $gitDir = (& git -C $Repo rev-parse --absolute-git-dir) | Select-Object -First 1
+    $gitDir = (Invoke-GitChecked @('rev-parse','--absolute-git-dir')) | Select-Object -First 1
     $idx = Join-Path $tmp "index"
     Copy-Item -LiteralPath (Join-Path $gitDir "index") -Destination $idx
     $env:GIT_INDEX_FILE = $idx
-    $ErrorActionPreference = "Continue"; & git -C $Repo add -u 2>$null | Out-Null; $ErrorActionPreference = "Stop"
-    $stage = & git -C $Repo -c core.quotepath=false ls-files -s
-    $eol = & git -C $Repo -c core.quotepath=false ls-files --eol
+    [void](Invoke-GitChecked @('add','-u'))
+    $stage = Invoke-GitChecked @('-c','core.quotepath=false','ls-files','-s')
+    $eol = Invoke-GitChecked @('-c','core.quotepath=false','ls-files','--eol')
     Remove-Item Env:\GIT_INDEX_FILE
     $files = New-Object System.Collections.Generic.List[object]
     foreach ($e in $stage) {
@@ -52,6 +74,12 @@ try {
         $ext = [IO.Path]::GetExtension($path).ToLowerInvariant()
         if ($textExt -notcontains $ext -and $name -ne 'CMakeLists.txt') { continue }
         $files.Add([pscustomobject]@{ Sha = $meta[1]; Path = $path; Ext = $ext })
+    }
+    # Floor / anchor (LOW-2): an empty or truncated list is a failure, never a vacuous pass.
+    $anchor = $files | Where-Object { $_.Path -eq 'tools/check_source_bytes.ps1' }
+    if ($files.Count -lt 1000 -or -not $anchor) {
+        Write-Host "FAIL: only $($files.Count) tracked text files listed (floor 1000) or anchor tools/check_source_bytes.ps1 missing; wrong -Repo or a git listing failure"
+        exit 1
     }
     $bad = New-Object System.Collections.Generic.List[string]
     # git's own text/binary verdict (index side) for text-typed files.

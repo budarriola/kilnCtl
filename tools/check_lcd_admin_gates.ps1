@@ -72,22 +72,34 @@ foreach ($r in $rules) {
     $need = if ($r[1] -match 'ROLE_USER') { 'a USER' } else { 'an admin' }
     if ($txt -notmatch $r[1]) { Write-Host "FAIL: $($r[2]): $($r[0]) lacks $need gate matching /$($r[1])/"; $fail++ }
 }
-# C3: a Config hub nav callback gated at USER must not open anything before the gate call
-# (a direct kiln_ui_show / *_open( ahead of run_gated bypasses the PIN).
+# C3 (REVIEW_LCDFX3 LOW-3): every callback registered through build_nav_item(grid, "...", cb) in
+# ui_page_config.c is enumerated (a renamed callback cannot drop out). A USER-gated callback must
+# consist of NOTHING but the unconditional gate statement (optionally preceded by (void)e;): any
+# code before it (an open ahead of the gate, an if/else/?/return around it) or after it (a direct
+# *_open_apply(NULL) after the gate) fails. An ADMIN-gated callback (touch cal) is allowed; any
+# other callback fails. `#if 0` is refused outright in the file (a gated #if 0 copy with an ungated
+# #else twin), since the comment-aware matching cannot see preprocessor dead code.
 $cfg = Get-Code (Join-Path $UiDir "ui_page_config.c")
+if ($cfg -match '(?m)^\s*#\s*if\s+0\b') { Write-Host "FAIL: C3: ui_page_config.c contains '#if 0' (dead preprocessor code can hide an ungated twin)"; $fail++ }
 $navN = 0
-foreach ($m in [regex]::Matches($cfg, '(?s)static void (\w+_nav_cb)\(lv_event_t \*e\)\s*\{(.*?)\n\}')) {
-    $body = $m.Groups[2].Value
-    $g = [regex]::Match($body, 'run_gated\([^;]*LCD_PIN_ROLE_USER')
-    if (-not $g.Success) { continue }
-    $navN++
-    $pre = $body.Substring(0, $g.Index)
-    if ($pre -match 'kiln_ui_show\s*\(|_open(_apply)?\s*\(') {
-        Write-Host "FAIL: C3: ui_page_config.c $($m.Groups[1].Value) opens a page before its USER gate"; $fail++
+$cbs = @([regex]::Matches($cfg, 'build_nav_item\(\s*\w+\s*,\s*"[^"]*"\s*,\s*(\w+)\s*\)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+foreach ($cb in $cbs) {
+    $m = [regex]::Match($cfg, '(?s)static void ' + [regex]::Escape($cb) + '\(lv_event_t \*e\)\s*\{(.*?)\n\}')
+    if (-not $m.Success) { Write-Host "FAIL: C3: ui_page_config.c nav callback $cb not found"; $fail++; continue }
+    $body = $m.Groups[1].Value
+    $g = [regex]::Match($body, 'ui_lcd_lock_run_gated\([^;]*;')
+    if ($g.Success -and $g.Value -match 'LCD_PIN_ROLE_USER') {
+        $navN++
+        $pre = $body.Substring(0, $g.Index); $post = $body.Substring($g.Index + $g.Length)
+        if ($pre -notmatch '^\s*(\(void\)\s*e\s*;\s*)?$') { Write-Host "FAIL: C3: ui_page_config.c $cb has code before its USER gate (open ahead of it, or the gate is conditional)"; $fail++ }
+        if ($post -notmatch '^\s*$') { Write-Host "FAIL: C3: ui_page_config.c $cb has code after its USER gate (direct open bypasses the PIN)"; $fail++ }
+    } elseif ($g.Success -and $g.Value -match 'LCD_PIN_ROLE_ADMIN') {
+        continue
+    } else {
+        Write-Host "FAIL: C3: ui_page_config.c nav callback $cb has no USER/ADMIN gate"; $fail++
     }
 }
-if ($navN -lt 5) { Write-Host "FAIL: C3: expected >= 5 USER-gated nav callbacks in ui_page_config.c, found $navN"; $fail++ }
-# L9: lock init must precede the touch-cal early return.
+if ($navN -lt 5) { Write-Host "FAIL: C3: expected >= 5 USER-gated nav callbacks in ui_page_config.c, found $navN"; $fail++ }# L9: lock init must precede the touch-cal early return.
 $kui = Get-Code (Join-Path $UiDir "kiln_ui.c")
 $m = [regex]::Match($kui, "(?m)^\s*ui_lcd_lock_init\(\);")
 $i = if ($m.Success) { $m.Index } else { -1 }

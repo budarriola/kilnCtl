@@ -50,7 +50,7 @@ try {
 # (<worktree>\firmware\SaftyFW\bootloader\build), so only runs sharing one
 # tree need to serialize. A fixed name made every worktree on the machine
 # queue on one mutex and time out after 900 s under parallel load.
-$resolvedBuildDir = [System.IO.Path]::GetFullPath($buildDir).TrimEnd('').ToLowerInvariant()
+$resolvedBuildDir = [System.IO.Path]::GetFullPath($buildDir).TrimEnd('\').ToLowerInvariant()
 $sha = [System.Security.Cryptography.SHA1]::Create()
 $dirHash = -join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($resolvedBuildDir))[0..7] | ForEach-Object { $_.ToString("x2") })
 $buildLock = Enter-BuildLock -Name "saftyfw_bootloader_build_$dirHash"
