@@ -41,6 +41,8 @@ add_library(kilnlink STATIC
     src/kilnlink_trip.c
     src/kilnlink_ceiling.c
     src/kilnlink_clear_trip.c
+    src/kilnlink_test_trip.c
+    src/kilnlink_test_trip_result.c
     src/kilnlink_set_config.c
     src/kilnlink_rollback.c
     src/kilnlink_get_fw_version.c
@@ -222,6 +224,24 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
         target_compile_options(test_clear_trip PRIVATE -Wall -Wextra -Werror)
     endif()
     add_test(NAME test_clear_trip COMMAND test_clear_trip)
+
+    add_executable(test_test_trip test/test_test_trip.c)
+    target_link_libraries(test_test_trip PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_test_trip PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_test_trip PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_test_trip COMMAND test_test_trip)
+
+    add_executable(test_test_trip_result test/test_test_trip_result.c)
+    target_link_libraries(test_test_trip_result PRIVATE kilnlink)
+    if(MSVC)
+        target_compile_options(test_test_trip_result PRIVATE /W4 /WX)
+    else()
+        target_compile_options(test_test_trip_result PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME test_test_trip_result COMMAND test_test_trip_result)
 
     add_executable(test_set_config test/test_set_config.c)
     target_link_libraries(test_set_config PRIVATE kilnlink)

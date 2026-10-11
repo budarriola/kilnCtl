@@ -354,8 +354,25 @@
  *     occurrence latched when safety_core dequeues it. A 3-byte frame from
  *     a 16 peer, or before any ANNOUNCE_VERSION (peer version 0), keeps the
  *     legacy mask-only behaviour, so the boot-time S6a clear and a mixed
- *     pair still work. */
-#define KILNLINK_PROTOCOL_VERSION 17
+ *     pair still work.
+ *
+ * 17 -> 18 (2026-10-10, docs/TEST_TRIP_PLAN.md): the admin-only Pico test
+ * trip, plus audit F6 (bind the clear to the Pico boot_id). New frames:
+ * SAFETY_CMD_TEST_TRIP (0x2E, ESP -> Pico, 4 bytes) and
+ * SAFETY_CMD_TEST_TRIP_RESULT (0x2F, Pico -> ESP, 4 bytes, closed outcome
+ * enum), with the shared trip enum gaining SAFETY_TRIP_TEST = 4 (mask
+ * 0x0008). SAFETY_CMD_DIAG gains a trailing pico_boot_id
+ * (KILNLINK_DIAG_LEN_V3 = 32) and SAFETY_CMD_CLEAR_TRIP a trailing
+ * trip_seq + pico_boot_id (KILNLINK_CLEAR_TRIP_LEN_V3 = 5). Additive and
+ * gated both ways, same shape as 16 -> 17, so KILNLINK_MIN_COMPATIBLE is NOT
+ * raised:
+ *   - the Pico sends the 32-byte DIAG only to a peer that announced >= 18
+ *     (a 17 ESP accepts only 30 and 31);
+ *   - the ESP sends the 5-byte CLEAR_TRIP only when its cached DIAG was the
+ *     32-byte form, and TEST_TRIP only to a Pico known to be >= 18 (an older
+ *     Pico has no 0x2E case; silence is never evidence of success);
+ *   - a 17 ESP never receives 0x2F, which is request-triggered. */
+#define KILNLINK_PROTOCOL_VERSION 18
 
 /* The oldest peer this build will talk to (docs/LINK_PROTOCOL.md section 4,
  * "What 'compatible' means"). Deliberately NOT bumped alongside the 5 -> 6
@@ -419,7 +436,11 @@
  *
  * NOT bumped alongside the 16 -> 17 step either: both new trailing bytes are
  * sent only to a peer known to be >= 17 (see that step's comment), so a 7
- * through 16 peer still sees exactly the frames it already knew. */
+ * through 16 peer still sees exactly the frames it already knew.
+ *
+ * NOT bumped alongside the 17 -> 18 step either: every change is a new frame
+ * or a trailing byte sent only to a peer known to be >= 18, so a 7 through 17
+ * peer still sees exactly the frames it already knew. */
 #define KILNLINK_MIN_COMPATIBLE 7
 
 #endif /* KILNLINK_VERSION_H */

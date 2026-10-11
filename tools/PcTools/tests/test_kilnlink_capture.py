@@ -905,7 +905,7 @@ def test_m4_clear_trip_trip_seq_round_trip():
     assert d_bound == {"trip_mask": 0x0020, "trip_seq": 5}
 
 
-@pytest.mark.parametrize("payload_hex", ["0a20", "0a2000050f"])
+@pytest.mark.parametrize("payload_hex", ["0a20", "0a2000050f11"])
 def test_m4_clear_trip_bad_lengths_rejected(payload_hex):
     name, decoded, err = kc.decode_payload(7, 7, bytes.fromhex(payload_hex))
     assert err is not None and decoded is None
@@ -914,6 +914,48 @@ def test_m4_clear_trip_bad_lengths_rejected(payload_hex):
 def test_m4_diag_32_bytes_rejected():
     from kilnctrl import kilnlink_codec as codec
 
-    too_long = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=1)) + b"\x00"
+    too_long = codec.encode_diag(dict(_M4_DIAG_FIELDS, pico_boot_id=1)) + b"\x00"
     name, decoded, err = kc.decode_payload(7, 7, too_long)
+    assert err is not None and decoded is None
+
+
+# ---------------------------------------------------------------------------
+# KILNLINK_PROTOCOL_VERSION 17 -> 18 (docs/TEST_TRIP_PLAN.md WP1): DIAG V3
+# (32 bytes, byte31 pico_boot_id), CLEAR_TRIP V3 (5 bytes, byte4
+# pico_boot_id), TEST_TRIP 0x2E and TEST_TRIP_RESULT 0x2F. Vectors are frozen
+# and match firmware/CommonFW/test.
+# ---------------------------------------------------------------------------
+
+
+def test_v18_diag_pico_boot_id_round_trip():
+    from kilnctrl import kilnlink_codec as codec
+
+    v3 = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7, pico_boot_id=0x5C))
+    assert len(v3) == 32 and v3[30] == 0xA7 and v3[31] == 0x5C
+    d = kc.decode_payload(7, 7, v3)[1]
+    assert d["trip_seq"] == 0xA7 and d["pico_boot_id"] == 0x5C
+    v2 = codec.encode_diag(dict(_M4_DIAG_FIELDS, trip_seq=0xA7))
+    assert "pico_boot_id" not in kc.decode_payload(7, 7, v2)[1]
+
+
+def test_v18_clear_trip_pico_boot_id_vector():
+    from kilnctrl import kilnlink_codec as codec
+
+    v3 = codec.encode_clear_trip({"trip_mask": 0x0008, "trip_seq": 0x05, "pico_boot_id": 0x11})
+    assert v3 == bytes.fromhex("0a08000511")
+    assert kc.decode_payload(7, 7, v3)[1] == {"trip_mask": 0x0008, "trip_seq": 5, "pico_boot_id": 0x11}
+
+
+def test_v18_test_trip_vectors():
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2e0742a5"))
+    assert err is None and d == {"pico_boot_id": 7, "request_id": 0x42, "magic": 0xA5}
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2f420009"))
+    assert err is None and d == {"request_id": 0x42, "outcome": "ACCEPTED", "trip_seq": 9}
+    name, d, err = kc.decode_payload(7, 7, bytes.fromhex("2f010703"))
+    assert err is None and d["outcome"] == "DUPLICATE"
+
+
+@pytest.mark.parametrize("payload_hex", ["2e0742", "2e0742a500", "2f4200", "2f42000900", "2f420800"])
+def test_v18_test_trip_bad_frames_rejected(payload_hex):
+    name, decoded, err = kc.decode_payload(7, 7, bytes.fromhex(payload_hex))
     assert err is not None and decoded is None

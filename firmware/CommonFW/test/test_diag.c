@@ -174,11 +174,11 @@ static void test_decode_too_short(void)
 
 static void test_decode_too_long(void)
 {
-    uint8_t buf[KILNLINK_DIAG_LEN_V2 + 1] = {0};
+    uint8_t buf[KILNLINK_DIAG_LEN_V3 + 1] = {0};
     buf[0] = KILNLINK_DIAG_CMD;
     kilnlink_diag_t out;
     CHECK(kilnlink_diag_decode(buf, sizeof(buf), &out) == KILNLINK_DIAG_ERR_LENGTH_MISMATCH,
-          "decode() of a 32-byte (one past the trip_seq form) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 33-byte (one past the boot_id form) payload -> ERR_LENGTH_MISMATCH");
 }
 
 /* -- protocol 17 trip_seq form (kilnlink audit 2026-10-09 M4) -------------- */
@@ -354,6 +354,74 @@ static void fail_fast_instead_of_dialog(void)
 #endif
 }
 
+/* -- protocol 18 boot_id form (docs/TEST_TRIP_PLAN.md, F6) ---------------- */
+
+static void test_round_trip_boot_id(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.trip_reason = 4;
+    dg.trip_mask = 0x0008; /* SAFETY_TRIP_TEST */
+    dg.state = KILNLINK_DIAG_STATE_TRIPPED;
+    dg.log_frames_dropped = 0x01020304u;
+    dg.has_boot_id = true;
+    dg.trip_seq = 0xC3;
+    dg.pico_boot_id = 0x5E;
+
+    uint8_t buf[KILNLINK_DIAG_LEN_V3];
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_DIAG_OK && n == KILNLINK_DIAG_LEN_V3, "V3 encode writes exactly 32 bytes");
+    CHECK(buf[30] == 0xC3, "trip_seq at offset 30 in the 32-byte form");
+    CHECK(buf[31] == 0x5E, "pico_boot_id lands at offset 31");
+
+    kilnlink_diag_t d;
+    memset(&d, 0, sizeof(d));
+    CHECK(kilnlink_diag_decode(buf, n, &d) == KILNLINK_DIAG_OK, "decode accepts the 32-byte form");
+    CHECK(d.has_trip_seq && d.has_boot_id, "32-byte frame sets has_trip_seq and has_boot_id");
+    CHECK(d.trip_seq == 0xC3 && d.pico_boot_id == 0x5E, "trip_seq and pico_boot_id round-trip");
+    CHECK(d.log_frames_dropped == 0x01020304u && d.trip_mask == 0x0008, "earlier fields unaffected");
+}
+
+static void test_older_diag_forms_have_no_boot_id(void)
+{
+    uint8_t buf[KILNLINK_DIAG_LEN_V2] = {0};
+    buf[0] = KILNLINK_DIAG_CMD;
+    kilnlink_diag_t d;
+    memset(&d, 0xFF, sizeof(d));
+    CHECK(kilnlink_diag_decode(buf, KILNLINK_DIAG_LEN_V2, &d) == KILNLINK_DIAG_OK, "31-byte form still accepted");
+    CHECK(d.has_trip_seq && !d.has_boot_id && d.pico_boot_id == 0, "31-byte form has no boot_id");
+    memset(&d, 0xFF, sizeof(d));
+    CHECK(kilnlink_diag_decode(buf, KILNLINK_DIAG_LEN, &d) == KILNLINK_DIAG_OK, "30-byte form still accepted");
+    CHECK(!d.has_trip_seq && !d.has_boot_id, "30-byte form has neither");
+}
+
+static void test_vector_boot_id(void)
+{
+    /* All-zero fields except trip_reason/trip_mask/seq/boot_id: pins the tail offsets. */
+    kilnlink_diag_t dg = {0};
+    dg.trip_reason = 4;
+    dg.trip_mask = 0x0008;
+    dg.has_boot_id = true;
+    dg.trip_seq = 0x01;
+    dg.pico_boot_id = 0x02;
+    uint8_t buf[KILNLINK_DIAG_LEN_V3];
+    kilnlink_diag_status_t status;
+    size_t n = kilnlink_diag_encode(&dg, buf, sizeof(buf), &status);
+    CHECK(n == 32, "V3 vector length");
+    CHECK(buf[0] == 0x08 && buf[30] == 0x01 && buf[31] == 0x02, "V3 vector cmd and tail bytes");
+}
+
+static void test_encode_boot_id_buffer_too_small(void)
+{
+    kilnlink_diag_t dg = {0};
+    dg.has_boot_id = true;
+    uint8_t buf[KILNLINK_DIAG_LEN_V2];
+    kilnlink_diag_status_t status;
+    CHECK(kilnlink_diag_encode(&dg, buf, sizeof(buf), &status) == 0 &&
+              status == KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL,
+          "V3 encode into a 31-byte buffer -> ERR_BUFFER_TOO_SMALL");
+}
+
 int main(void)
 {
     fail_fast_instead_of_dialog();
@@ -370,6 +438,11 @@ int main(void)
     test_legacy_decode_has_no_trip_seq();
     test_vector_tripped_with_trip_seq();
     test_encode_trip_seq_buffer_too_small();
+
+    test_round_trip_boot_id();
+    test_older_diag_forms_have_no_boot_id();
+    test_vector_boot_id();
+    test_encode_boot_id_buffer_too_small();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

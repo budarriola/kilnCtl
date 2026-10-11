@@ -93,7 +93,8 @@ typedef enum {
     SAFETY_TRIP_OVERTEMP        = 1,  /* S1  -- implemented */
     SAFETY_TRIP_OVER_SETPOINT   = 2,  /* S2  -- implemented */
     SAFETY_TRIP_LOAD_STUCK_ON   = 3,  /* S3  -- implemented */
-    /* 4 reserved: S4 is WARN-only */
+    SAFETY_TRIP_TEST            = 4,  /* admin-only test trip (SAFETY_CMD_TEST_TRIP 0x2E, docs/TEST_TRIP_PLAN.md);
+                                       * takes the S4 gap, mask 0x0008. S4 itself stays WARN-only. */
     SAFETY_TRIP_SENSOR_INVALID  = 5,  /* S5  -- implemented, after blind_grace_s */
     SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a -- implemented */
     SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b -- implemented */

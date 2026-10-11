@@ -114,11 +114,11 @@ static void test_decode_too_short(void)
 
 static void test_decode_too_long(void)
 {
-    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V2 + 1] = {0};
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V3 + 1] = {0};
     buf[0] = KILNLINK_CLEAR_TRIP_CMD;
     kilnlink_clear_trip_t out;
     CHECK(kilnlink_clear_trip_decode(buf, sizeof(buf), &out) == KILNLINK_CLEAR_TRIP_ERR_LENGTH_MISMATCH,
-          "decode() of a 5-byte (one past the bound form) payload -> ERR_LENGTH_MISMATCH");
+          "decode() of a 6-byte (one past the boot_id form) payload -> ERR_LENGTH_MISMATCH");
 }
 
 /* -- protocol 17 occurrence-bound form (kilnlink audit 2026-10-09 M4) ------ */
@@ -209,6 +209,62 @@ static void test_encode_buffer_too_small(void)
           "encode() with an undersized output buffer -> ERR_BUFFER_TOO_SMALL");
 }
 
+/* -- protocol 18 boot-bound form (docs/TEST_TRIP_PLAN.md, F6) ------------- */
+
+static void test_round_trip_boot_bound(void)
+{
+    kilnlink_clear_trip_t msg = {0};
+    msg.trip_mask = 0x0020;
+    msg.has_boot_id = true;
+    msg.trip_seq = 0xA7;
+    msg.pico_boot_id = 0x3C;
+
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V3];
+    kilnlink_clear_trip_status_t status;
+    size_t n = kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status);
+    CHECK(status == KILNLINK_CLEAR_TRIP_OK && n == 5, "V3 encode writes exactly 5 bytes");
+
+    kilnlink_clear_trip_t d;
+    memset(&d, 0, sizeof(d));
+    CHECK(kilnlink_clear_trip_decode(buf, n, &d) == KILNLINK_CLEAR_TRIP_OK, "decode accepts 5 bytes");
+    CHECK(d.has_trip_seq && d.has_boot_id, "5-byte frame sets has_trip_seq and has_boot_id");
+    CHECK(d.trip_mask == 0x0020 && d.trip_seq == 0xA7 && d.pico_boot_id == 0x3C, "V3 fields round-trip");
+}
+
+static void test_vector_boot_bound(void)
+{
+    static const uint8_t expected[] = {0x0a, 0x08, 0x00, 0x05, 0x11};
+    kilnlink_clear_trip_t msg = {0};
+    msg.trip_mask = 0x0008; /* SAFETY_TRIP_TEST */
+    msg.has_boot_id = true;
+    msg.trip_seq = 5;
+    msg.pico_boot_id = 0x11;
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V3];
+    kilnlink_clear_trip_status_t status;
+    size_t n = kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status);
+    CHECK(n == sizeof(expected) && memcmp(buf, expected, sizeof(expected)) == 0, "V3 frozen vector bytes");
+}
+
+static void test_older_forms_have_no_boot_id(void)
+{
+    static const uint8_t v2[] = {0x0a, 0x20, 0x00, 0x05};
+    kilnlink_clear_trip_t d;
+    memset(&d, 0xFF, sizeof(d));
+    CHECK(kilnlink_clear_trip_decode(v2, sizeof(v2), &d) == KILNLINK_CLEAR_TRIP_OK, "4-byte form still accepted");
+    CHECK(d.has_trip_seq && !d.has_boot_id && d.pico_boot_id == 0, "4-byte form has no boot_id");
+}
+
+static void test_encode_boot_bound_buffer_too_small(void)
+{
+    kilnlink_clear_trip_t msg = {0};
+    msg.has_boot_id = true;
+    uint8_t buf[KILNLINK_CLEAR_TRIP_LEN_V2];
+    kilnlink_clear_trip_status_t status;
+    CHECK(kilnlink_clear_trip_encode(&msg, buf, sizeof(buf), &status) == 0 &&
+              status == KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL,
+          "V3 encode into a 4-byte buffer -> ERR_BUFFER_TOO_SMALL");
+}
+
 int main(void)
 {
     test_round_trip();
@@ -223,6 +279,11 @@ int main(void)
     test_legacy_decode_has_no_seq();
     test_vector_bound_s6a();
     test_encode_bound_buffer_too_small();
+
+    test_round_trip_boot_bound();
+    test_vector_boot_bound();
+    test_older_forms_have_no_boot_id();
+    test_encode_boot_bound_buffer_too_small();
 
     if (g_failures == 0) {
         printf("ALL PASS\n");

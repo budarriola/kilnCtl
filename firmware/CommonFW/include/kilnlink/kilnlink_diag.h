@@ -39,6 +39,14 @@ extern "C" {
  * >= 17, so a 16 ESP (whose decoder rejects any length but 30) never sees
  * it. kilnlink_diag_decode() accepts both lengths; has_trip_seq says which. */
 #define KILNLINK_DIAG_LEN_V2 31u
+/* 31 -> 32, KILNLINK_PROTOCOL_VERSION 17 -> 18 (docs/TEST_TRIP_PLAN.md sec 2.2,
+ * F6): appends pico_boot_id (u8, offset 31), the Pico's own boot_id (the value
+ * its ANNOUNCE_VERSION carries), so the ESP can bind a CLEAR_TRIP and a
+ * TEST_TRIP to the Pico boot it actually saw. The 32-byte form always
+ * includes trip_seq (it is a superset of the 31-byte form). Additive and
+ * peer-gated: the Pico sends it only to a peer that announced >= 18, so a 17
+ * ESP (whose decoder accepts only 30 and 31) never sees it. */
+#define KILNLINK_DIAG_LEN_V3 32u
 
 /* boot_reason byte (offset 10). Bits 3-5 added 2026-09-09 (RP2040
  * fatal-fault diagnosability pass): SaftyFW's watchdog_hw->scratch[5] latch
@@ -154,7 +162,7 @@ typedef enum {
 typedef enum {
     KILNLINK_DIAG_OK = 0,
     KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL, /* output buffer smaller than the encoded length */
-    KILNLINK_DIAG_ERR_LENGTH_MISMATCH,  /* input length is neither KILNLINK_DIAG_LEN nor _LEN_V2 */
+    KILNLINK_DIAG_ERR_LENGTH_MISMATCH,  /* input length is none of KILNLINK_DIAG_LEN, _LEN_V2, _LEN_V3 */
     KILNLINK_DIAG_ERR_WRONG_CMD,        /* byte 0 isn't KILNLINK_DIAG_CMD */
 } kilnlink_diag_status_t;
 
@@ -176,20 +184,25 @@ typedef struct {
                                     * count -- see log_task_log()'s own doc
                                     * comment). Added KILNLINK_PROTOCOL_VERSION
                                     * 15 -> 16. */
-    bool     has_trip_seq;        /* true: 31-byte form, trip_seq on the wire (protocol 17) */
+    bool     has_trip_seq;        /* true: 31- or 32-byte form, trip_seq on the wire (protocol 17) */
     uint8_t  trip_seq;            /* safety_core trip occurrence counter; valid iff has_trip_seq */
+    bool     has_boot_id;         /* true: 32-byte form, pico_boot_id on the wire (protocol 18); implies has_trip_seq */
+    uint8_t  pico_boot_id;        /* the Pico boot_id; valid iff has_boot_id */
 } kilnlink_diag_t;
 
 /* Serializes `dg` (SAFETY_CMD_DIAG payload, byte 0 = 0x08 included) into
- * `out`: KILNLINK_DIAG_LEN_V2 (31) bytes when dg->has_trip_seq, else
+ * `out`: KILNLINK_DIAG_LEN_V3 (32) bytes when dg->has_boot_id (trip_seq is
+ * always written in that form, whatever has_trip_seq says), else
+ * KILNLINK_DIAG_LEN_V2 (31) bytes when dg->has_trip_seq, else
  * KILNLINK_DIAG_LEN (30). Returns that length, or 0 on
  * KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL. */
 size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_cap,
                             kilnlink_diag_status_t *status);
 
 /* Parses a DIAG payload (as extracted from kilnlink_frame_t::payload) into
- * `out`. `len` must be exactly KILNLINK_DIAG_LEN (has_trip_seq = false) or
- * KILNLINK_DIAG_LEN_V2 (has_trip_seq = true) -- this is untrusted input from
+ * `out`. `len` must be exactly KILNLINK_DIAG_LEN (has_trip_seq = false),
+ * KILNLINK_DIAG_LEN_V2 (has_trip_seq = true) or KILNLINK_DIAG_LEN_V3
+ * (has_trip_seq and has_boot_id = true) -- this is untrusted input from
  * another processor across an isolated link (CommonFW/README.md rule 6). */
 kilnlink_diag_status_t kilnlink_diag_decode(const uint8_t *payload, size_t len,
                                             kilnlink_diag_t *out);

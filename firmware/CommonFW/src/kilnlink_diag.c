@@ -16,7 +16,8 @@
  *   24       u8  state
  *   25       u8  flags
  *   26..29   u32 log_frames_dropped -- KILNLINK_PROTOCOL_VERSION 15 -> 16
- *   30       u8  trip_seq -- KILNLINK_DIAG_LEN_V2 only, protocol 16 -> 17
+ *   30       u8  trip_seq -- KILNLINK_DIAG_LEN_V2/_V3 only, protocol 16 -> 17
+ *   31       u8  pico_boot_id -- KILNLINK_DIAG_LEN_V3 only, protocol 17 -> 18
  */
 #define OFF_TRIP_REASON 1u
 #define OFF_WARN_MASK 2u
@@ -31,6 +32,7 @@
 #define OFF_FLAGS 25u
 #define OFF_LOG_DROPPED 26u
 #define OFF_TRIP_SEQ 30u
+#define OFF_BOOT_ID 31u
 
 size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_cap,
                             kilnlink_diag_status_t *status)
@@ -41,7 +43,9 @@ size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_
     }
     *status = KILNLINK_DIAG_OK;
 
-    size_t need = dg->has_trip_seq ? KILNLINK_DIAG_LEN_V2 : KILNLINK_DIAG_LEN;
+    size_t need = dg->has_boot_id   ? KILNLINK_DIAG_LEN_V3
+                : dg->has_trip_seq ? KILNLINK_DIAG_LEN_V2
+                                   : KILNLINK_DIAG_LEN;
     if (out_cap < need) {
         *status = KILNLINK_DIAG_ERR_BUFFER_TOO_SMALL;
         return 0;
@@ -60,8 +64,11 @@ size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_
     out[OFF_STATE] = dg->state;
     out[OFF_FLAGS] = dg->flags;
     kilnlink_put_u32le(out, OFF_LOG_DROPPED, dg->log_frames_dropped);
-    if (dg->has_trip_seq) {
+    if (dg->has_trip_seq || dg->has_boot_id) {
         out[OFF_TRIP_SEQ] = dg->trip_seq;
+    }
+    if (dg->has_boot_id) {
+        out[OFF_BOOT_ID] = dg->pico_boot_id;
     }
 
     return need;
@@ -70,7 +77,7 @@ size_t kilnlink_diag_encode(const kilnlink_diag_t *dg, uint8_t *out, size_t out_
 kilnlink_diag_status_t kilnlink_diag_decode(const uint8_t *payload, size_t len,
                                             kilnlink_diag_t *out)
 {
-    if (len != KILNLINK_DIAG_LEN && len != KILNLINK_DIAG_LEN_V2) {
+    if (len != KILNLINK_DIAG_LEN && len != KILNLINK_DIAG_LEN_V2 && len != KILNLINK_DIAG_LEN_V3) {
         return KILNLINK_DIAG_ERR_LENGTH_MISMATCH;
     }
     if (payload[0] != KILNLINK_DIAG_CMD) {
@@ -89,8 +96,10 @@ kilnlink_diag_status_t kilnlink_diag_decode(const uint8_t *payload, size_t len,
     out->state = payload[OFF_STATE];
     out->flags = payload[OFF_FLAGS];
     out->log_frames_dropped = kilnlink_get_u32le(payload, OFF_LOG_DROPPED);
-    out->has_trip_seq = (len == KILNLINK_DIAG_LEN_V2);
+    out->has_trip_seq = (len >= KILNLINK_DIAG_LEN_V2);
     out->trip_seq = out->has_trip_seq ? payload[OFF_TRIP_SEQ] : 0u;
+    out->has_boot_id = (len == KILNLINK_DIAG_LEN_V3);
+    out->pico_boot_id = out->has_boot_id ? payload[OFF_BOOT_ID] : 0u;
 
     return KILNLINK_DIAG_OK;
 }

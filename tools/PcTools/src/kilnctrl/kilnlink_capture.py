@@ -153,6 +153,8 @@ CMD_NAMES: dict[int, str] = {
     0x2B: "GET_STACK_MARGIN",
     0x2C: "STACK_MARGIN",
     0x2D: "APPLY_CONFIG_VOLATILE",
+    0x2E: "TEST_TRIP",
+    0x2F: "TEST_TRIP_RESULT",
 }
 # Every KILNLINK_*_CMD id defined in firmware/CommonFW/include/kilnlink/ must
 # appear above; tests/test_kilnlink_capture.py parses those headers and fails
@@ -312,8 +314,9 @@ def _decode_diag(payload: bytes) -> dict:
     """LINK_PROTOCOL.md sec 6 Frame B -- mirrors kilnlink_codec.encode_diag."""
     # 31 bytes = protocol 17 form with byte30 trip_seq (kilnlink audit
     # 2026-10-09 M4).
-    if len(payload) not in (30, 31):
-        raise ValueError(f"DIAG (Frame B) must be 30 or 31 bytes, got {len(payload)}")
+    # 32 bytes = protocol 18 form, adds byte31 pico_boot_id.
+    if len(payload) not in (30, 31, 32):
+        raise ValueError(f"DIAG (Frame B) must be 30, 31 or 32 bytes, got {len(payload)}")
     (
         trip_reason,
         warn_mask,
@@ -342,8 +345,10 @@ def _decode_diag(payload: bytes) -> dict:
         "flags": flags,
         "log_frames_dropped": log_frames_dropped,
     }
-    if len(payload) == 31:
+    if len(payload) >= 31:
         out["trip_seq"] = payload[30]
+    if len(payload) == 32:
+        out["pico_boot_id"] = payload[31]
     return out
 
 
@@ -382,13 +387,47 @@ def _decode_ceiling(payload: bytes) -> dict:
 def _decode_clear_trip(payload: bytes) -> dict:
     # 4 bytes = protocol 17 form bound to a trip occurrence (kilnlink audit
     # 2026-10-09 M4).
-    if len(payload) not in (3, 4):
-        raise ValueError(f"CLEAR_TRIP must be 3 or 4 bytes, got {len(payload)}")
+    # 5 bytes = protocol 18 form, adds byte4 pico_boot_id.
+    if len(payload) not in (3, 4, 5):
+        raise ValueError(f"CLEAR_TRIP must be 3, 4 or 5 bytes, got {len(payload)}")
     (trip_mask,) = struct.unpack_from("<H", payload, 1)
     out = {"trip_mask": trip_mask}
-    if len(payload) == 4:
+    if len(payload) >= 4:
         out["trip_seq"] = payload[3]
+    if len(payload) == 5:
+        out["pico_boot_id"] = payload[4]
     return out
+
+
+def _decode_test_trip(payload: bytes) -> dict:
+    if len(payload) != 4:
+        raise ValueError(f"TEST_TRIP must be 4 bytes, got {len(payload)}")
+    return {"pico_boot_id": payload[1], "request_id": payload[2], "magic": payload[3]}
+
+
+_TEST_TRIP_OUTCOMES = (
+    "ACCEPTED",
+    "REFUSED_ALREADY_TRIPPED",
+    "REFUSED_BOOT_ID",
+    "REFUSED_PEER_VERSION",
+    "REFUSED_RATE_LIMIT",
+    "REFUSED_UPDATING",
+    "REFUSED_BAD_FRAME",
+    "DUPLICATE",
+)
+
+
+def _decode_test_trip_result(payload: bytes) -> dict:
+    if len(payload) != 4:
+        raise ValueError(f"TEST_TRIP_RESULT must be 4 bytes, got {len(payload)}")
+    outcome = payload[2]
+    if outcome >= len(_TEST_TRIP_OUTCOMES):
+        raise ValueError(f"TEST_TRIP_RESULT outcome {outcome} outside the closed enum")
+    return {
+        "request_id": payload[1],
+        "outcome": _TEST_TRIP_OUTCOMES[outcome],
+        "trip_seq": payload[3],
+    }
 
 
 def _decode_set_clock(payload: bytes) -> dict:
@@ -577,6 +616,8 @@ _CMD_DECODERS = {
     0x28: _decode_ct_auto_zero_status,
     0x29: lambda p: _decode_bare(p, "REBOOT"),
     0x2A: lambda p: _decode_accepted_reason(p, "REBOOT_RESULT"),
+    0x2E: _decode_test_trip,
+    0x2F: _decode_test_trip_result,
     0x14: _decode_update_status,
 }
 # 0x0B is special-cased below (the bare 1-byte GET_FW_VERSION request shares

@@ -27,6 +27,8 @@ idf_component_register(
          "${KILNLINK_DIR}/src/kilnlink_context.c"
          "${KILNLINK_DIR}/src/kilnlink_announce.c"
          "${KILNLINK_DIR}/src/kilnlink_clear_trip.c"
+         "${KILNLINK_DIR}/src/kilnlink_test_trip.c"
+         "${KILNLINK_DIR}/src/kilnlink_test_trip_result.c"
          "${KILNLINK_DIR}/src/kilnlink_set_config.c"
          "${KILNLINK_DIR}/src/kilnlink_rollback.c"
          "${KILNLINK_DIR}/src/kilnlink_announce_reboot.c"

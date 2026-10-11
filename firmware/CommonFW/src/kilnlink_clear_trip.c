@@ -7,7 +7,8 @@
  *   1..2   u16 trip_mask
  */
 #define OFF_TRIP_MASK 1u
-#define OFF_TRIP_SEQ 3u /* KILNLINK_CLEAR_TRIP_LEN_V2 only (protocol 17) */
+#define OFF_TRIP_SEQ 3u /* KILNLINK_CLEAR_TRIP_LEN_V2/_V3 only (protocol 17) */
+#define OFF_BOOT_ID 4u  /* KILNLINK_CLEAR_TRIP_LEN_V3 only (protocol 18) */
 
 size_t kilnlink_clear_trip_encode(const kilnlink_clear_trip_t *msg, uint8_t *out, size_t out_cap,
                                    kilnlink_clear_trip_status_t *status)
@@ -18,7 +19,9 @@ size_t kilnlink_clear_trip_encode(const kilnlink_clear_trip_t *msg, uint8_t *out
     }
     *status = KILNLINK_CLEAR_TRIP_OK;
 
-    size_t need = msg->has_trip_seq ? KILNLINK_CLEAR_TRIP_LEN_V2 : KILNLINK_CLEAR_TRIP_LEN;
+    size_t need = msg->has_boot_id   ? KILNLINK_CLEAR_TRIP_LEN_V3
+                : msg->has_trip_seq ? KILNLINK_CLEAR_TRIP_LEN_V2
+                                    : KILNLINK_CLEAR_TRIP_LEN;
     if (out_cap < need) {
         *status = KILNLINK_CLEAR_TRIP_ERR_BUFFER_TOO_SMALL;
         return 0;
@@ -26,8 +29,11 @@ size_t kilnlink_clear_trip_encode(const kilnlink_clear_trip_t *msg, uint8_t *out
 
     out[0] = KILNLINK_CLEAR_TRIP_CMD;
     kilnlink_put_u16le(out, OFF_TRIP_MASK, msg->trip_mask);
-    if (msg->has_trip_seq) {
+    if (msg->has_trip_seq || msg->has_boot_id) {
         out[OFF_TRIP_SEQ] = msg->trip_seq;
+    }
+    if (msg->has_boot_id) {
+        out[OFF_BOOT_ID] = msg->pico_boot_id;
     }
 
     return need;
@@ -36,7 +42,8 @@ size_t kilnlink_clear_trip_encode(const kilnlink_clear_trip_t *msg, uint8_t *out
 kilnlink_clear_trip_status_t kilnlink_clear_trip_decode(const uint8_t *payload, size_t len,
                                                          kilnlink_clear_trip_t *out)
 {
-    if (len != KILNLINK_CLEAR_TRIP_LEN && len != KILNLINK_CLEAR_TRIP_LEN_V2) {
+    if (len != KILNLINK_CLEAR_TRIP_LEN && len != KILNLINK_CLEAR_TRIP_LEN_V2 &&
+        len != KILNLINK_CLEAR_TRIP_LEN_V3) {
         return KILNLINK_CLEAR_TRIP_ERR_LENGTH_MISMATCH;
     }
     if (payload[0] != KILNLINK_CLEAR_TRIP_CMD) {
@@ -44,8 +51,10 @@ kilnlink_clear_trip_status_t kilnlink_clear_trip_decode(const uint8_t *payload, 
     }
 
     out->trip_mask = kilnlink_get_u16le(payload, OFF_TRIP_MASK);
-    out->has_trip_seq = (len == KILNLINK_CLEAR_TRIP_LEN_V2);
+    out->has_trip_seq = (len >= KILNLINK_CLEAR_TRIP_LEN_V2);
     out->trip_seq = out->has_trip_seq ? payload[OFF_TRIP_SEQ] : 0u;
+    out->has_boot_id = (len == KILNLINK_CLEAR_TRIP_LEN_V3);
+    out->pico_boot_id = out->has_boot_id ? payload[OFF_BOOT_ID] : 0u;
 
     return KILNLINK_CLEAR_TRIP_OK;
 }

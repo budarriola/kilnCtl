@@ -160,7 +160,9 @@ def encode_announce(f: dict) -> bytes:
 # log_frames_dropped(u32) = 30 bytes. (KILNLINK_PROTOCOL_VERSION 15 -> 16)
 # Optional byte30 trip_seq(u8) = 31 bytes, sent by a protocol 17 Pico to a
 # protocol 17 ESP (kilnlink audit 2026-10-09 M4); emitted here only when the
-# field dict carries "trip_seq".
+# field dict carries "trip_seq". Optional byte31 pico_boot_id(u8) = 32 bytes
+# (protocol 18, docs/TEST_TRIP_PLAN.md): emitted when the dict carries
+# "pico_boot_id"; byte30 is then always written (0 if "trip_seq" is absent).
 
 _DIAG_BOOT = {
     "KILNLINK_DIAG_BOOT_POWERON": 0x01,
@@ -209,8 +211,10 @@ def encode_diag(f: dict) -> bytes:
         _resolve_enum(f["flags"], _DIAG_FLAG),
         f["log_frames_dropped"],
     )
-    if "trip_seq" in f:
-        out += struct.pack("<B", f["trip_seq"])
+    if "trip_seq" in f or "pico_boot_id" in f:
+        out += struct.pack("<B", f.get("trip_seq", 0))
+    if "pico_boot_id" in f:
+        out += struct.pack("<B", f["pico_boot_id"])
     return out
 
 
@@ -360,7 +364,12 @@ def encode_ceiling(f: dict) -> bytes:
 # trip occurrence the clear is bound to, echoed from the last 31-byte DIAG.
 # Emitted only when the field dict carries "trip_seq".
 
+# Optional pico_boot_id(u8) = 5 bytes (protocol 18); the 5-byte form always
+# carries trip_seq (0 if the dict has none).
+
 def encode_clear_trip(f: dict) -> bytes:
+    if "pico_boot_id" in f:
+        return struct.pack("<BHBB", 0x0A, f["trip_mask"], f.get("trip_seq", 0), f["pico_boot_id"])
     if "trip_seq" in f:
         return struct.pack("<BHB", 0x0A, f["trip_mask"], f["trip_seq"])
     return struct.pack("<BH", 0x0A, f["trip_mask"])

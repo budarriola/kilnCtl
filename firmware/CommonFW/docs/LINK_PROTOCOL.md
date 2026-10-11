@@ -495,6 +495,7 @@ so the check had nothing left to guard against. `PROFILE_EXECUTOR_FIRING_CEILING
 | 0 | u8 | `0x0A` |
 | 1..2 | u16 LE | `trip_mask` being acknowledged — must match the current one |
 | 3 | u8 | `trip_seq` (optional, 4-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the trip occurrence being acknowledged, echoed from DIAG byte 30 |
+| 4 | u8 | `pico_boot_id` (optional, 5-byte form, `KILNLINK_PROTOCOL_VERSION` 17 -> 18) — the Pico boot the clear was issued against, echoed from DIAG byte 31. A 5-byte form always carries `trip_seq` too. WP1 defines the wire form only; the Pico does not yet act on it (docs/TEST_TRIP_PLAN.md WP2) |
 
 Refused, with the reason reported in the next diagnostic frame, if the
 tripping condition is still true or if `trip_mask` does not match. Echoing the
@@ -802,6 +803,53 @@ old Pico gets no reply at all, and `safety_link_send_reboot()` reports
 `NO_REPLY` — **never** accepted. See `kilnlink_version.h`'s "12 → 12,
 DELIBERATELY NOT BUMPED" entry for the full argument, including what would
 force a bump if this frame ever became Pico-initiated.
+
+### `SAFETY_CMD_TEST_TRIP` = `0x2E` (ESP → Pico)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x2E` |
+| 1 | u8 | `pico_boot_id` — the Pico boot (DIAG byte 31) the request is bound to |
+| 2 | u8 | `request_id` — echoed in the reply; lets the ESP match a result to its request and lets the Pico recognise a repeat |
+| 3 | u8 | `magic` — must be `0xA5` |
+
+Admin-only deliberate test trip (`docs/TEST_TRIP_PLAN.md`). Added
+`KILNLINK_PROTOCOL_VERSION` 17 -> 18. The codec carries `magic` verbatim: a wrong
+magic still decodes, and the Pico answers it `REFUSED_BAD_FRAME`. Exactly 4
+bytes; any other length is a codec error. `KILNLINK_MIN_COMPATIBLE` stays 7.
+The trip it causes uses `SAFETY_TRIP_TEST = 4` (mask `0x0008`, the S4 gap).
+
+### `SAFETY_CMD_TEST_TRIP_RESULT` = `0x2F` (Pico → ESP)
+
+| Offset | Type | Field |
+|---|---|---|
+| 0 | u8 | `0x2F` |
+| 1 | u8 | `request_id` — echoed from the request |
+| 2 | u8 | `outcome` (closed enum below) |
+| 3 | u8 | `trip_seq` — the latched test trip when `ACCEPTED` (or `DUPLICATE` of an accepted one), else 0 |
+
+| Value | Outcome |
+|---|---|
+| 0 | `ACCEPTED` |
+| 1 | `REFUSED_ALREADY_TRIPPED` |
+| 2 | `REFUSED_BOOT_ID` |
+| 3 | `REFUSED_PEER_VERSION` |
+| 4 | `REFUSED_RATE_LIMIT` (one test trip per 10 s) |
+| 5 | `REFUSED_UPDATING` |
+| 6 | `REFUSED_BAD_FRAME` |
+| 7 | `DUPLICATE` |
+
+The outcome is a closed enum: encode and decode both refuse a value above 7
+(`ERR_BAD_OUTCOME`) rather than aliasing it onto a real outcome. The reply is
+request-triggered (only an 18 ESP sends `0x2E`), so it needs no peer-version
+gate, like `REBOOT_RESULT`.
+
+**Version 18 compatibility.** Both new frames and both extended lengths are
+additive. An old peer ignores an unknown opcode, and DIAG/CLEAR_TRIP decode all
+lengths, so `KILNLINK_MIN_COMPATIBLE` stays 7. Fallback for a clear from a peer
+of unknown version (owner decision 2026-10-10): refused until `ANNOUNCE_VERSION`
+arrives; after 30 s with no ANNOUNCE the legacy form is accepted. These are Pico
+behaviours (WP2), not codec behaviour.
 
 ### `SAFETY_CMD_GET_FW_VERSION` = `0x0B` (ESP → Pico)
 
@@ -1138,6 +1186,7 @@ Everything the 23-byte frame has no room for. A `KilnFW` that has never heard of
 | 25 | u8 | flags: bit0 `sim_context_seen`, bit1 `calibration_missing`, bit2 `estop_unwired_suspect` |
 | 26..29 | u32 LE | `log_frames_dropped` — `log_task.c`'s own drop counter (queue full), added `KILNLINK_PROTOCOL_VERSION` 15 -> 16 |
 | 30 | u8 | `trip_seq` (optional, 31-byte form, `KILNLINK_PROTOCOL_VERSION` 16 -> 17) — the latched trip occurrence; sent only to a peer that announced >= 17. See §4 `CLEAR_TRIP` |
+| 31 | u8 | `pico_boot_id` (optional, 32-byte form, `KILNLINK_PROTOCOL_VERSION` 17 -> 18) — identifies this Pico boot so a test-trip or clear issued against a previous boot can be refused. A 32-byte frame always carries byte 30 (`trip_seq`) as well. Sent only to a peer that announced >= 18 (Pico behaviour: WP2) |
 
 `boot_reason` bit 1 is the one to watch on a bench: a safety processor that is
 silently watchdog-resetting in a loop presents as a working system with an

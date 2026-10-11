@@ -529,7 +529,7 @@ run in parallel; WP4 needs WP3's tool; WP5 runs last and needs the bench.
 
 | WP | Tree | Content | Depends |
 |---|---|---|---|
-| **WP1** CommonFW wire | `firmware/CommonFW` | Version 18 and comments. New `kilnlink_test_trip.h/.c` and `kilnlink_test_trip_result.h/.c`. DIAG V3 (32 B) and CLEAR_TRIP V3 (5 B) codecs. Codec host tests with frozen vectors. PcTools `protocol.py` ids and `kilnlink_codec.py` decode. Recovery image compile check. LINK_PROTOCOL.md sections. | none |
+| **WP1** CommonFW wire (DONE on dev 2026-10-10; WP3 note: `SAFETY_CMD_TEST_TRIP*` defines are not in `uart_task_ids.h`, because adding them forces a `UART_PROTOCOL_VERSION` bump; use `KILNLINK_TEST_TRIP_CMD` / `KILNLINK_TEST_TRIP_RESULT_CMD`) | `firmware/CommonFW` | Version 18 and comments. New `kilnlink_test_trip.h/.c` and `kilnlink_test_trip_result.h/.c`. DIAG V3 (32 B) and CLEAR_TRIP V3 (5 B) codecs. Codec host tests with frozen vectors. PcTools `protocol.py` ids and `kilnlink_codec.py` decode. Recovery image compile check. LINK_PROTOCOL.md sections. | none |
 | **WP2** SaftyFW | `firmware/SaftyFW` | `SAFETY_TRIP_TEST = 4` (or the Q1 outcome). `link_frame_decide_test_trip()`. link_task dispatch, reply burst and dedup. `s_test_trip_queue`, input field, guard evaluation, `guard_condition_still_immediate` case. F6: DIAG V3 emit, the CLEAR_TRIP boot_id decision, the unknown-peer refusal and fallback. Host tests and negtests. GUARD_TEST_MATRIX, ARCHITECTURE sec 9, SAFETY_MODEL. Stack check if link_task/safety_core grow (stack bumps are allowed). | WP1 |
 | **WP3** KilnFW link, HTTP, MCP | `firmware/KilnFW`, `tools/PcTools` | `safety_link_send_test_trip()`. DIAG V3 cache with the boot_id reset on a Pico boot_id change. V3 clear build. Word tables (3 copies) and the sync check. `POST /api/safety/test_trip` and the route-tier row. Web banner badge and `trip_is_test`. LCD words. Executor parity test. `safety_test_trip` MCP tool and tests. CLAUDE.md and MCP_SERVERS.md counts. | WP1 |
 | **WP4** Bench cases | `tools/PcTools/.../bench_test` | AX-T02 conversion; SP-12, SP-13, SP-14, HP-09 with judges; registry and ratchet; fake-board tests; BENCH_TEST_SYSTEM_PLAN rows. | WP3 (tool name and route contract) |
@@ -537,17 +537,17 @@ run in parallel; WP4 needs WP3's tool; WP5 runs last and needs the bench.
 
 ## 12. Open questions (owner)
 
-- **Q1: the reason value.** Recommend **4** (the S4 WARN-only gap, mask
+- **Q1: the reason value. Decided 2026-10-10: 4 (mask 0x0008).** Recommend **4** (the S4 WARN-only gap, mask
   0x0008). The alternatives are 11 (the S10 gap, 0x0400), or 17 with the mask
   widened to u32 on DIAG and CLEAR_TRIP (a breaking change on all three
   trees; not recommended).
-- **Q2: F6's unknown-peer fallback.** Recommend refusing unbound clears while
+- **Q2: F6's unknown-peer fallback. Decided 2026-10-10: refuse until ANNOUNCE, legacy form accepted after 30 s with no ANNOUNCE.** Recommend refusing unbound clears while
   the peer version is unknown, opening the legacy path after 30 s with no
   ANNOUNCE. The alternative is a strict refusal with no fallback, which can
   lock out clears from a pre-17 ESP whose single ANNOUNCE was lost, until one
   side reboots.
-- **Q3: the minimum hold before a test trip clears.** Recommend
+- **Q3: the minimum hold before a test trip clears. Decided 2026-10-10: held until `trip_verify_s` has elapsed.** Recommend
   `trip_verify_s`, so S9's K4-opened check always completes. The alternative
   is no hold, which clears as soon as the clear arrives.
-- **Q4: the rate limit.** Recommend 10 s between accepted test trips on the
+- **Q4: the rate limit. Decided 2026-10-10: one test trip per 10 s.** Recommend 10 s between accepted test trips on the
   Pico. A tighter limit adds no safety, because the command only trips.

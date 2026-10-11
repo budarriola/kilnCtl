@@ -57,6 +57,8 @@
 #include "kilnlink/kilnlink_announce_reboot.h"
 #include "kilnlink/kilnlink_ceiling.h"
 #include "kilnlink/kilnlink_clear_trip.h"
+#include "kilnlink/kilnlink_test_trip.h"
+#include "kilnlink/kilnlink_test_trip_result.h"
 #include "kilnlink/kilnlink_commit_config.h"
 #include "kilnlink/kilnlink_commit_config_rejected.h"
 #include "kilnlink/kilnlink_apply_config_volatile.h"
@@ -151,6 +153,8 @@ typedef struct {
         kilnlink_trip_t trip;
         kilnlink_ceiling_t ceiling;
         kilnlink_clear_trip_t clear_trip;
+        kilnlink_test_trip_t test_trip;
+        kilnlink_test_trip_result_t test_trip_result;
         kilnlink_set_config_t set_config;
         kilnlink_rollback_t rollback;
         kilnlink_get_fw_version_t get_fw_version;
@@ -232,10 +236,12 @@ DECL_ADAPTER(context, KILNLINK_CONTEXT_MAX_LEN + 32);
 DECL_ADAPTER(status, KILNLINK_STATUS_LEN_V2 + 32);
 DECL_ADAPTER(power, KILNLINK_POWER_LEN + 32);
 DECL_ADAPTER(announce, KILNLINK_ANNOUNCE_MAX_LEN + 32);
-DECL_ADAPTER(diag, KILNLINK_DIAG_LEN_V2 + 32);
+DECL_ADAPTER(diag, KILNLINK_DIAG_LEN_V3 + 32);
 DECL_ADAPTER(trip, KILNLINK_TRIP_LEN + 32);
 DECL_ADAPTER(ceiling, KILNLINK_CEILING_LEN + 32);
-DECL_ADAPTER(clear_trip, KILNLINK_CLEAR_TRIP_LEN_V2 + 32);
+DECL_ADAPTER(clear_trip, KILNLINK_CLEAR_TRIP_LEN_V3 + 32);
+DECL_ADAPTER(test_trip, KILNLINK_TEST_TRIP_LEN + 32);
+DECL_ADAPTER(test_trip_result, KILNLINK_TEST_TRIP_RESULT_LEN + 32);
 DECL_ADAPTER(set_config, KILNLINK_SET_CONFIG_LEN + 32);
 DECL_ADAPTER(rollback, KILNLINK_ROLLBACK_LEN + 32);
 DECL_ADAPTER(get_fw_version, KILNLINK_GET_FW_VERSION_LEN + 32);
@@ -319,6 +325,20 @@ static int decode_clear_trip(const uint8_t *p, size_t len)
     arm_canaries(&g_clear_trip);
     int rc = (int)kilnlink_clear_trip_decode(p, len, &g_clear_trip.out.clear_trip);
     check_canaries(&g_clear_trip, "kilnlink_clear_trip_decode", ++g_clear_trip_calls);
+    return rc;
+}
+static int decode_test_trip(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_test_trip);
+    int rc = (int)kilnlink_test_trip_decode(p, len, &g_test_trip.out.test_trip);
+    check_canaries(&g_test_trip, "kilnlink_test_trip_decode", ++g_test_trip_calls);
+    return rc;
+}
+static int decode_test_trip_result(const uint8_t *p, size_t len)
+{
+    arm_canaries(&g_test_trip_result);
+    int rc = (int)kilnlink_test_trip_result_decode(p, len, &g_test_trip_result.out.test_trip_result);
+    check_canaries(&g_test_trip_result, "kilnlink_test_trip_result_decode", ++g_test_trip_result_calls);
     return rc;
 }
 static int decode_set_config(const uint8_t *p, size_t len)
@@ -654,6 +674,24 @@ static size_t build_valid_clear_trip(uint8_t *out, size_t out_cap)
     kilnlink_clear_trip_status_t st;
     return kilnlink_clear_trip_encode(&msg, out, out_cap, &st);
 }
+static size_t build_valid_test_trip(uint8_t *out, size_t out_cap)
+{
+    kilnlink_test_trip_t msg;
+    msg.pico_boot_id = 0x07;
+    msg.request_id = 0x42;
+    msg.magic = KILNLINK_TEST_TRIP_MAGIC;
+    kilnlink_test_trip_status_t st;
+    return kilnlink_test_trip_encode(&msg, out, out_cap, &st);
+}
+static size_t build_valid_test_trip_result(uint8_t *out, size_t out_cap)
+{
+    kilnlink_test_trip_result_t msg;
+    msg.request_id = 0x42;
+    msg.outcome = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+    msg.trip_seq = 0x09;
+    kilnlink_test_trip_result_status_t st;
+    return kilnlink_test_trip_result_encode(&msg, out, out_cap, &st);
+}
 static size_t build_valid_set_config(uint8_t *out, size_t out_cap)
 {
     kilnlink_set_config_t msg;
@@ -875,6 +913,9 @@ static const decoder_case_t k_cases[] = {
     {"kilnlink_ceiling_decode", decode_ceiling, build_valid_ceiling, ceiling_MAX_LEN, 0},
     {"kilnlink_clear_trip_decode", decode_clear_trip, build_valid_clear_trip, clear_trip_MAX_LEN,
      KILNLINK_CLEAR_TRIP_LEN},
+    {"kilnlink_test_trip_decode", decode_test_trip, build_valid_test_trip, test_trip_MAX_LEN, 0},
+    {"kilnlink_test_trip_result_decode", decode_test_trip_result, build_valid_test_trip_result,
+     test_trip_result_MAX_LEN, 0},
     {"kilnlink_set_config_decode", decode_set_config, build_valid_set_config, set_config_MAX_LEN, 0},
     {"kilnlink_rollback_decode", decode_rollback, build_valid_none, rollback_MAX_LEN, 0},
     {"kilnlink_get_fw_version_decode", decode_get_fw_version, build_valid_none, get_fw_version_MAX_LEN, 0},

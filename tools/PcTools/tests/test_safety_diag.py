@@ -178,6 +178,7 @@ class SafetyDiagDescribeTests(unittest.TestCase):
             1: 0x0001,  # S1  SAFETY_TRIP_OVERTEMP
             2: 0x0002,  # S2  SAFETY_TRIP_OVER_SETPOINT
             3: 0x0004,  # S3  SAFETY_TRIP_LOAD_STUCK_ON
+            4: 0x0008,  # SAFETY_TRIP_TEST (docs/TEST_TRIP_PLAN.md; takes the S4 gap)
             5: 0x0010,  # S5  SAFETY_TRIP_SENSOR_INVALID
             6: 0x0020,  # S6a SAFETY_TRIP_MAIN_FAULT  (NOT 0x0040)
             7: 0x0040,  # S6b SAFETY_TRIP_LINK_DEAD
