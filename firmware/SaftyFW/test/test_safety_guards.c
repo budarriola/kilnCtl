@@ -1,4 +1,4 @@
-// Host tests for safety_guards.c. TODO.md Phase 4.
+﻿// Host tests for safety_guards.c. TODO.md Phase 4.
 //
 // ARCHITECTURE.md section 10: "the cases worth writing first are the
 // *nuisance* cases, not the trip cases" -- each guard's section below leads
@@ -3457,11 +3457,14 @@ static void test_try_clear(void)
         in.tc_c = 60.0f;
         TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-1 sanity: S8 tripped");
         in.dt_s = 0.1f;
-        /* 62 s: fast = +30 C/min (0.005 C/tick), plateau otherwise. Ends just after a window rolled. */
-        for (int i = 0; i < 620; i++) { if (fast) in.tc_c += 0.005f; safety_guards_tick(&s, &cfg, &in); }
+        /* 62 s: fast = +30 C/min (0.05 C/tick), plateau otherwise. Ends just after a window rolled. */
+        for (int i = 0; i < 620; i++) { if (fast) in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); }
         TEST_CHECK(s.s8_post_rate_valid, "LOW-1 sanity: a full post window completed");
         if (fast) {
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: still-fast last full window refuses");
+            /* plateau for 6 s: partial window now reads ~0, but the last full window was fast -> EITHER refuses */
+            for (int i = 0; i < 60; i++) safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "MED-1: last full window fast refuses even when the partial window is flat");
         } else {
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "LOW-1: plateau last full window grants");
         }
