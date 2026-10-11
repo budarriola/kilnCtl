@@ -169,4 +169,4 @@ These runs used `-ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD
 ## Fix status
 
 - MED-1, LOW-1, LOW-2: fixed in 055d34833/6e7470c95. The S8 clear is decided only from a completed full post-trip window; until then the frozen trip window refuses; afterwards it refuses if EITHER the last full rate or the partial window (>= 5 s) is over the limit. Negtests (partial shortcut restored, last-full check disabled, EITHER -> newest-only) all CAUGHT.
-- I-5: FIXED in 4133ceb99 (ESP_LOGE on the claim-less lost-trip resolve; not host-tested).
+- I-5: FIXED in 75eee94b2 (ESP_LOGE on the claim-less lost-trip resolve; not host-tested).

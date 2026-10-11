@@ -283,4 +283,4 @@ Probe runs (test-side edits only, never landed):
 
 ## Fix status
 
-MED-1, LOW-1, LOW-3 and the 0x10C static assert (NIT) are fixed in e88985d37 and d62cb2ee1 (R2, R6, R15 negtest CAUGHT; R5 and R7 stay MISSED by design). LOW-4 was already fixed on dev (the K7 doc cites 235e4e3c4). LOW-2 is FIXED in 4133ceb99: boot latches register via profile_executor_note_external_app_hold() (main.c, main_control_bringup.c), no inference left; the relay-unknown assert is level-triggered every watchdog pass; host tests (a)(b)(c) negtest CAUGHT.
+MED-1, LOW-1, LOW-3 and the 0x10C static assert (NIT) are fixed in e88985d37 and d62cb2ee1 (R2, R6, R15 negtest CAUGHT; R5 and R7 stay MISSED by design). LOW-4 was already fixed on dev (the K7 doc cites 235e4e3c4). LOW-2 is FIXED in 75eee94b2: boot latches register via profile_executor_note_external_app_hold() (main.c, main_control_bringup.c), no inference left; the relay-unknown assert is level-triggered every watchdog pass; host tests (a)(b)(c) negtest CAUGHT.
