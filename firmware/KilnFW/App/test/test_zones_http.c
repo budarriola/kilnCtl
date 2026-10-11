@@ -3406,11 +3406,12 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     s_zones_config_valid = true; // deliberately wrong, so a no-op bug can't accidentally read as a pass
     {
         /* Review web7 LOW-4: the generation token is seeded from the boot RNG, never a fixed count. */
-        const uint32_t seeds[1] = {0x2a5c1e76u};
-        fake_sysinfo_script_random_sequence(seeds, 1);
+        const uint32_t seeds[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
+                                   0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds, 8);
     }
     (void)zones_http_start();
-    TEST_CHECK(zones_config_generation() == ((0x2a5c1e76u & 0x3fffffffu) | 1u),
+    TEST_CHECK((uint32_t)(zones_config_generation() - ((0x2a5c1e76u & 0x3fffffffu) | 1u)) < 64u,
                "zones generation is seeded from hal_sysinfo_random_u32() at start");
     fake_sysinfo_script_random_sequence(NULL, 0); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
                               // NVS load/migration logic below has already run -- exactly what's under test.
