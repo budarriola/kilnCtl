@@ -793,10 +793,6 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
                                  NULL, err, err_cap);
 }
 
-    if (out_gen) *out_gen = forked_gen;
-    return true;
-}
-
 static bool live_profile_clear_locked(char *err, size_t err_cap);
 
 /* REVIEW_WEBFX4 LOW-2: the whole clear (erase + read-back + bump) runs under the live save lock, so a concurrent
