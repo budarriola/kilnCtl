@@ -162,7 +162,7 @@ try {
                     try {
                         $ph = [System.Diagnostics.Process]::GetProcessById($id)
                         $null = $ph.Handle
-                        if ([Math]::Abs(($ph.StartTime - $keep[$id]).TotalMilliseconds) -le 100) { $handles[$id] = $ph } else { $ph.Dispose() }
+                        if (Test-PvStartMatch -Actual $ph.StartTime -Expected $keep[$id]) { $handles[$id] = $ph } else { $ph.Dispose() }
                     } catch { }
                 }
                 # discovered parent-first (breadth-first); kill in reverse so leaves go first

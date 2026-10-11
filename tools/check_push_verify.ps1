@@ -50,6 +50,8 @@ Assert (($w -contains 15) -and ($w -contains 16)) "R1: root slack is about 1 ms 
 Assert ($w.IndexOf(11) -lt $w.IndexOf(12)) "R1: parent-first order"
 $snapR1b = @((P 10 1 0), (P 17 10 -0.5))
 Assert ((Get-PvDescendantOrder -Snap $snapR1b -RootId 10 -RootCreated $t0).Count -eq 0) "R1: child 0.5 s older than the root dropped (no 1 s slack)"
+Assert (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(30)) "R2: StartTime within tolerance of the snapshot matches"
+Assert (-not (Test-PvStartMatch -Actual $t0.AddMinutes(5) -Expected $t0)) "R2: a reused PID (later StartTime) is skipped, not killed"
 try {
     git init --bare -b dev $origin *>$null
     git clone $origin $work *>$null
