@@ -29,6 +29,8 @@ weighted toward the confirm and safety gates (`7d27efd10`), the dev-flow git scr
 
 ### LOW-1: `727aa12d9` deletes the REVIEW_WEBFX4 MED-1 regression test its subject claims to add
 
+**FIXED (webfx7): test restored with the 9-argument call; passes in build_host_tests -Only ui_edit_firing_apply.**
+
 `firmware/KilnFW/App/test/test_ui_edit_firing_apply.c`, around line 561 at the parent commit.
 
 The subject reads "web edit inside the check-to-save window is refused (REVIEW_WEBFX4
