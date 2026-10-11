@@ -1372,6 +1372,7 @@ int main(void)
     scenario_commit_config();
     scenario_apply_config_volatile();
     scenario_set_ct_cal();
+    CHECK(!g_cw_ret, "set_ct_cal scenario leaves the accepting config-write fake reset (LOW-5)");
     scenario_ceiling_and_clock();
     scenario_reboot_rollback();
     printf("-> fuzz\n");
