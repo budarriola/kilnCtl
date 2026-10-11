@@ -3573,6 +3573,28 @@ static void test_try_clear(void)
             TEST_CHECK(s.s8_post_win_s <= 600.1f, "LOW-3: huge rate_window_s clamped to 600 s");
         }
     }
+    /* s8clrfx LOW-1: after exactly one full post window a cooled reading still refuses (two needed). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "one-window sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        in.tc_c = 30.0f;
+        for (int i = 0; i < 620 && s.s8_post_windows_done < 1u; i++) safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s8_post_windows_done == 1u, "one-window sanity: exactly one full window");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: a single full post window never grants, even when cooled");
+    }
     /* F2: still rising fast after the trip -> still refused. */
     {
         safety_guard_state_t s;
