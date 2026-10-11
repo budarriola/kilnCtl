@@ -361,6 +361,16 @@ static void connect_modal_close(void)
     lv_textarea_set_text(s_connect_ta, "");
 }
 
+/* Relock hook (kiln_ui.c): see ui_page_network_relock_close(). Safe before the page is built. */
+void ui_page_network_manage_relock_close(void)
+{
+    if (!s_connect_modal) {
+        return;
+    }
+    connect_modal_close();
+    s_connect_ssid[0] = ' ';
+}
+
 static void connect_cancel_cb(lv_event_t *e)
 {
     (void)e;

@@ -88,11 +88,17 @@ bool profiles_http_get(uint8_t id, profile_t *out)
 // g_fake_zone_max_c, naming the segment, as the real HARD mode does.
 static float g_fake_zone_max_c = 1300.0f;
 static int g_fake_validate_calls = 0;
+static void (*g_fake_validate_hook)(void) = NULL; /* runs after the early generation check, before the fork */
 
 bool profiles_validate_candidate(const profile_t *candidate, profile_validate_mode_t mode, char *warnings_json,
                                   size_t warnings_json_cap, char *err_msg, size_t err_cap)
 {
     g_fake_validate_calls++;
+    if (g_fake_validate_hook) {
+        void (*h)(void) = g_fake_validate_hook;
+        g_fake_validate_hook = NULL;
+        h();
+    }
     TEST_CHECK(mode == PROFILE_VALIDATE_HARD, "LCD apply validates in HARD mode, same as the HTTP accept route");
     if (warnings_json && warnings_json_cap) {
         warnings_json[0] = '\0';
@@ -364,6 +370,49 @@ static void test_apply_refusals_write_nothing(void)
     TEST_CHECK(live_profile_load_working(&saved) && saved.segments[2].target_c == 888.0f, "web edit survives");
 }
 
+static void web_fork_and_save(void)
+{
+    char err[128];
+    live_edit_record_t rec;
+    profile_t tmp;
+    profile_t edited = g_fake_slots[2];
+    edited.segments[2].target_c = 777.0f;
+    live_profile_fork(2, false, "Bisque", &g_fake_slots[2], &tmp, &rec, err, sizeof(err));
+    live_profile_save_working(&edited, err, sizeof(err));
+}
+
+static void test_apply_stale_generation_refused(void)
+{
+    TEST_SECTION("edit_firing_apply -- a web save landing after the page opened makes LCD Apply refuse stale");
+    char err[128];
+
+    /* (a) before Apply: caught by the early check. */
+    reset_world();
+    profile_t w;
+    edit_firing_ctx_t ctx;
+    TEST_CHECK(edit_firing_load(&w, &ctx), "load");
+    web_fork_and_save();
+    TEST_CHECK(edit_firing_step(&w, 1, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1), "edit");
+    profile_t web_saved;
+    TEST_CHECK(live_profile_load_working(&web_saved), "web working readable");
+    TEST_CHECK(!edit_firing_apply(&w, &ctx, err, sizeof(err)), "early: apply refused");
+    TEST_CHECK(strstr(err, "edited elsewhere") != NULL, "early: refused as edited elsewhere");
+    profile_t after;
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&after, &web_saved, sizeof(after)) == 0,
+               "early: working profile unchanged");
+
+    /* (b) between the early check and the save: caught only by the compare-and-save. */
+    reset_world();
+    TEST_CHECK(edit_firing_load(&w, &ctx), "load (b)");
+    TEST_CHECK(edit_firing_step(&w, 1, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1), "edit (b)");
+    g_fake_validate_hook = web_fork_and_save;
+    TEST_CHECK(!edit_firing_apply(&w, &ctx, err, sizeof(err)), "late: apply refused");
+    TEST_CHECK(strstr(err, "edited elsewhere") != NULL, "late: refused as edited elsewhere");
+    TEST_CHECK(live_profile_load_working(&after) && after.segments[2].target_c == 777.0f &&
+                   after.segments[1].target_c == 500.0f,
+               "late: web edit survives, LCD edit not written");
+}
+
 static void test_apply_builtin_origin(void)
 {
     TEST_SECTION("edit_firing_apply -- builtin origin forks with the builtin's code as its name");
@@ -523,6 +572,7 @@ int main(void)
     test_load();
     test_apply_success_forks_then_saves();
     test_apply_refusals_write_nothing();
+    test_apply_stale_generation_refused();
     test_apply_builtin_origin();
     test_apply_stale_foreign_origin_record_never_borrowed();
     test_poll();

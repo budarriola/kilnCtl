@@ -26,7 +26,12 @@ $rules = @(
     @('ui_page_touch_cal.c', ('has_role\(' + $admin + '\)'), 'L11 touch cal save'),
     @('ui_page_profile_picker.c', ('has_role\(' + $admin + '\)'), 'L11 profile delete'),
     @('ui_page_edit_firing.c', ('run_gated\("Enter admin PIN to apply edit",\s*' + $admin), 'L11 live-edit apply'),
-    @('ui_page_diagnostics.c', ('has_role\(' + $admin + '\)'), 'L11 crash ack')
+    @('ui_page_diagnostics.c', ('has_role\(' + $admin + '\)'), 'L11 crash ack'),
+    @('ui_page_config.c', 'run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*temperature_open_apply', 'L3 hub temperature USER gate'),
+    @('ui_page_config.c', 'run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*network_open_apply', 'L3 hub network USER gate'),
+    @('ui_page_config.c', 'run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*diagnostics_open_apply', 'L3 hub diagnostics USER gate'),
+    @('ui_page_config.c', 'run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*safety_open_apply', 'L3 hub safety USER gate'),
+    @('ui_page_config.c', 'run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*profiles_open_apply', 'L3 hub profiles USER gate')
 )
 $fail = 0
 foreach ($r in $rules) {

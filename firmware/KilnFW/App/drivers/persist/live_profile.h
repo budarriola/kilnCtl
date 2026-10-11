@@ -225,6 +225,14 @@ bool live_edit_check_window(const profile_t *running, const profile_t *candidate
 bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
                         profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap);
 
+/* Same as live_profile_fork(), additionally reporting whether THIS call forked (*out_forked) and, when it did,
+ * the generation its own save produced (*out_gen, read under the save lock). On the idempotent
+ * "already pending" path *out_forked is false and *out_gen is untouched: the caller keeps the generation it
+ * already holds. Either out pointer may be NULL. */
+bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                           profile_t *out_working, live_edit_record_t *out_record, uint32_t *out_gen,
+                           bool *out_forked, char *err, size_t err_cap);
+
 /* Overwrites the working slot's profile content in place (does not touch the
  * record) -- the accept-time write pass 2's HTTP handler will call after
  * validating a candidate. Bumps the generation counter live_profile_

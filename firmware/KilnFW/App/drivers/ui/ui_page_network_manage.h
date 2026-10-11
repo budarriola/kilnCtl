@@ -40,6 +40,9 @@ extern "C" {
  * kiln_ui_show("network_manage"). */
 lv_obj_t *ui_page_network_manage_build(void);
 
+/* Closes the Wi-Fi connect modal and clears the typed password; called on the LCD relock edge. */
+void ui_page_network_manage_relock_close(void);
+
 #ifdef __cplusplus
 }
 #endif

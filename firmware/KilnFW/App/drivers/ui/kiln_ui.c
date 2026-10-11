@@ -138,6 +138,9 @@ static kiln_ui_page_t *find_page(const char *name)
  * re-show and log line once a minute purely from staying put. */
 static void handle_lcd_relock_to_home(void)
 {
+    /* Page-local modals live on cached page screens and would outlive the session. */
+    ui_page_network_relock_close();
+    ui_page_network_manage_relock_close();
     const char *current = kiln_ui_current_page();
     if (current && strcmp(current, "home") == 0) {
         return;

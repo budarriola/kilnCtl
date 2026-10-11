@@ -230,8 +230,10 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
             strncpy(origin_name, origin->name, sizeof(origin_name) - 1);
         }
         profile_t *fork_out = alloc_profile();
-        bool forked = fork_out && live_profile_fork(st.profile_id, origin_is_builtin, origin_name, origin, fork_out,
-                                                     &rec, err, err_cap);
+        uint32_t fork_gen = 0;
+        bool did_fork = false;
+        bool forked = fork_out && live_profile_fork_gen(st.profile_id, origin_is_builtin, origin_name, origin,
+                                                         fork_out, &rec, &fork_gen, &did_fork, err, err_cap);
         if (fork_out) {
             heap_caps_free(fork_out);
         }
@@ -242,7 +244,12 @@ bool edit_firing_apply(const profile_t *candidate, edit_firing_ctx_t *ctx, char 
             }
             return false;
         }
-        expect_gen = live_profile_generation();
+        /* Generation our own fork save produced (read under the save lock). If the fork turned out
+         * idempotent (a web fork landed first) we keep the page's generation, so the compare-and-save
+         * below refuses stale. Never a fresh unlocked read. */
+        if (did_fork) {
+            expect_gen = fork_gen;
+        }
     }
     heap_caps_free(origin);
 

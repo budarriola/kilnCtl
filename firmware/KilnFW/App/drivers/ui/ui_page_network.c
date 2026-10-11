@@ -590,6 +590,19 @@ static void ap_edit_modal_close(void)
     lv_obj_add_flag(s_ap_edit_modal, LV_OBJ_FLAG_HIDDEN);
 }
 
+/* Relock hook (kiln_ui.c): the page screen is cached, so a modal left open by an ended session would be
+ * shown to the next operator. Hide it and wipe the typed SSID/password. Safe before the page is built. */
+void ui_page_network_relock_close(void)
+{
+    if (!s_ap_edit_modal) {
+        return;
+    }
+    ap_edit_modal_close();
+    lv_textarea_set_text(s_ap_edit_ssid_ta, "");
+    lv_textarea_set_text(s_ap_edit_password_ta, "");
+    lv_label_set_text(s_ap_edit_status_label, "");
+}
+
 static void ap_edit_cancel_cb(lv_event_t *e)
 {
     (void)e;

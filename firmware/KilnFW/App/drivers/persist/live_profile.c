@@ -714,9 +714,11 @@ bool live_profile_has_pending_for_origin(uint8_t origin_id)
     return live_profile_load_record(&rec) && rec.pending && rec.origin_id == origin_id;
 }
 
-bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
-                        profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap)
+bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                           profile_t *out_working, live_edit_record_t *out_record, uint32_t *out_gen,
+                           bool *out_forked, char *err, size_t err_cap)
 {
+    if (out_forked) *out_forked = false;
     if (!origin || !out_working) {
         if (err) snprintf(err, err_cap, "internal error: missing origin profile");
         return false;
@@ -750,7 +752,10 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
         return true;
     }
 
-    if (!live_profile_save_working(origin, err, err_cap)) {
+    /* The generation THIS save produced is captured under the save lock; callers that go on to a
+     * compare-and-save (LCD Apply) must use it, never a fresh unlocked read. */
+    uint32_t own_gen = 0;
+    if (live_profile_save_working_if_gen(origin, false, 0, &own_gen, err, err_cap) != LIVE_SAVE_OK) {
         return false;
     }
 
@@ -770,7 +775,16 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
 
     *out_working = *origin;
     if (out_record) *out_record = rec;
+    if (out_gen) *out_gen = own_gen;
+    if (out_forked) *out_forked = true;
     return true;
+}
+
+bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                       profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap)
+{
+    return live_profile_fork_gen(origin_id, origin_is_builtin, origin_name, origin, out_working, out_record, NULL,
+                                 NULL, err, err_cap);
 }
 
 bool live_profile_clear(char *err, size_t err_cap)
