@@ -180,6 +180,32 @@ async function wizStep11(user, pass, adminUser, enable) {
   sb.renderSafetyTrip(td(4));
   ok(!/again/.test(banner()), 'LOW-3: a different trip reason drops the old refusal');
 
+  /* REVIEW_WEBFX7 LOW-3: a "no longer tripped" render resets the sticky refusal even when the same reason returns */
+  resp = { ok: false, status: 200, body: { ok: false, reason: 'stale cause', error: 'x' } };
+  await click();
+  sb.renderSafetyTrip(td(3));
+  ok(/stale cause/.test(banner()), 'WEBFX7 LOW-3: refusal present before the trip clears');
+  sb.renderSafetyTrip({ diag_ever_received: true, diag_state: 0, diag_age_ms: 10, diag_trip_reason: 0 });
+  sb.renderSafetyTrip(td(3));
+  ok(!/stale cause/.test(banner()), 'WEBFX7 LOW-3: not-tripped render then same reason again shows no stale refusal');
+
+  /* REVIEW_WEBFX7 LOW-1: the banner is redrawn (button replaced) between click and reply; the refusal must land
+   * on the live button's row, not the detached one, and must not be reported as a network error */
+  resp = { ok: false, status: 200, body: { ok: false, reason: 'refused late', error: 'x' } };
+  let release;
+  sb.fetch = () => new Promise((res) => { release = () => res({ ok: resp.ok, status: resp.status, text: () => Promise.resolve(JSON.stringify(resp.body)) }); });
+  sb.renderSafetyTrip(td(3));
+  const oldBtn = m.els.clearTripBtn;
+  oldBtn.insertAdjacentHTML = () => { throw new Error('detached button used'); };
+  oldBtn.fire('click');
+  const liveBtn = makeEl('clearTripBtn');
+  let liveRow = null;
+  liveBtn.insertAdjacentHTML = (where, html) => { if (/clearTripMsg/.test(html)) liveRow = makeEl('clearTripMsg'); };
+  sb.document.getElementById = (id) => (id === 'clearTripBtn' ? liveBtn : id === 'clearTripMsg' ? liveRow : m.getEl(id));
+  release();
+  await flush();
+  ok(liveRow && liveRow.textContent === 'refused late', 'WEBFX7 LOW-1: refusal text lands on the live button row after a mid-request redraw');
+
   console.log(failed ? failed + ' FAILED' : 'all passed');
   process.exit(failed ? 1 : 0);
 })().catch((e) => { console.log('FAIL: exception ' + e.stack); process.exit(1); });

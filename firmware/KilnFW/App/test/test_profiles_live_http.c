@@ -129,6 +129,7 @@ static profile_t g_fake_slots[PROFILES_MAX_COUNT];
 static bool g_fake_profiles_http_get_fail = false;
 static bool g_fake_profiles_http_save_fail = false;
 static bool g_fake_profiles_http_save_unpersisted = false;
+static void (*g_fake_save_hook)(void) = NULL; /* runs once inside the fake save: another task acting mid-decide */
 
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
@@ -148,6 +149,11 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
 bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                            uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
 {
+    if (g_fake_save_hook) {
+        void (*h)(void) = g_fake_save_hook;
+        g_fake_save_hook = NULL;
+        h();
+    }
     if (out_persisted) {
         *out_persisted = !g_fake_profiles_http_save_unpersisted;
     }
@@ -485,6 +491,7 @@ static void reset_fakes(void)
     g_fake_profiles_http_get_fail = false;
     g_fake_profiles_http_save_fail = false;
     g_fake_profiles_http_save_unpersisted = false;
+    g_fake_save_hook = NULL;
     g_fake_parse_ok = true;
     g_fake_builtin_on = false;
     g_fake_no_server = false;
@@ -751,6 +758,72 @@ static void test_decide_save_as_persist_failure_is_500_and_keeps_edit(void)
     (void)api_profile_live_decide_post_handler(&retry);
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "same-name retry after the failure succeeds");
     TEST_CHECK(profiles_slot_used(1), "retry landed in the freed slot");
+}
+
+/* REVIEW_WEBFX7 MED-1: an LCD Apply landing during the decide's slot save must not be erased by the clear. */
+static void mid_decide_lcd_apply(void)
+{
+    profile_t edited;
+    char e[96];
+    live_profile_load_working(&edited);
+    edited.segments[0].target_c = 888.0f;
+    (void)live_profile_save_working_if_gen(&edited, false, 0, NULL, e, sizeof(e));
+}
+
+static void check_edit_survived(const char *what)
+{
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, what);
+    profile_t w;
+    TEST_CHECK(live_profile_load_working(&w) && w.segments[0].target_c == 888.0f, "the mid-decide edit is still the working copy");
+    TEST_CHECK(strstr(s_resp_status, "409") != NULL, "409 Conflict");
+    TEST_CHECK(strstr(s_resp_body, "working copy edited during save, decide again") != NULL, "text names the race");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "not ok:true");
+}
+
+static void test_decide_save_as_edit_during_save_keeps_edit(void)
+{
+    TEST_SECTION("decide save_as -- an edit applied during the save stays pending (409), clear does not erase it");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_save_hook = mid_decide_lcd_apply;
+    httpd_req_t req = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(profiles_slot_used(1), "the slot was saved");
+    check_edit_survived("the pending record survives (save_as)");
+    char err[96] = {0};
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) == LIVE_DECIDE_OK,
+               "deciding again works");
+}
+
+static void test_decide_overwrite_edit_during_save_keeps_edit(void)
+{
+    TEST_SECTION("decide overwrite -- an edit applied during the save stays pending (409)");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_save_hook = mid_decide_lcd_apply;
+    httpd_req_t req = make_req("action=overwrite&confirm=1");
+    (void)api_profile_live_decide_post_handler(&req);
+    check_edit_survived("the pending record survives (overwrite)");
+    char err[96] = {0};
+    uint8_t id = 0;
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_OVERWRITE, NULL, true, &id, err, sizeof(err)) == LIVE_DECIDE_OK,
+               "deciding again works");
+}
+
+static void test_decide_clear_failure_after_save_is_reported(void)
+{
+    TEST_SECTION("decide save_as -- a failing clear after the save is a 500, not silent success");
+    reset_fakes();
+    fork_for_tests(0);
+    fake_kv_set_write_safe_here(false); /* live_profile_clear() refuses on a non-write-safe caller */
+    char err[96] = {0};
+    uint8_t id = 0;
+    profiles_live_decide_result_t r =
+        profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "ClrFail", false, &id, err, sizeof(err));
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(r == LIVE_DECIDE_SERVER_ERROR, "SERVER_ERROR, not OK");
+    TEST_CHECK(strstr(err, "clearing the working copy failed") != NULL, "err says the clear failed");
 }
 
 static void test_decide_overwrite_builtin_403(void)
@@ -1409,6 +1482,9 @@ int main(void)
     test_decide_save_as_missing_name_400();
     test_decide_save_as_persist_failure_is_500_and_keeps_edit();
     test_decide_save_as_success();
+    test_decide_save_as_edit_during_save_keeps_edit();
+    test_decide_overwrite_edit_during_save_keeps_edit();
+    test_decide_clear_failure_after_save_is_reported();
     test_decide_overwrite_builtin_403();
     test_decide_overwrite_missing_confirm_400();
     test_decide_overwrite_success();

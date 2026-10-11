@@ -48,6 +48,7 @@ typedef enum {
     LIVE_DECIDE_FORBIDDEN,       /* HTTP 403 -- overwrite of a builtin origin */
     LIVE_DECIDE_BUSY,            /* HTTP 409 -- a zone conversion is running; retry */
     LIVE_DECIDE_SERVER_ERROR,    /* HTTP 500 -- out of memory, working copy unreadable, clear failed */
+    LIVE_DECIDE_SAVED_BUT_EDITED, /* HTTP 409 -- saved, but the working copy was edited during the save; it stays pending */
 } profiles_live_decide_result_t;
 
 /* `name` is used by SAVE_AS only (NULL/empty -> BAD_REQUEST "missing name");

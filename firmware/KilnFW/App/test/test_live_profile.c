@@ -619,6 +619,41 @@ static void test_fork_is_idempotent_when_already_pending(void)
     TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
 }
 
+/* REVIEW_WEBFX7 LOW-4: a web fork + web edit that land while the LCD fork waits for the save lock must be seen by
+ * the pending check (check and origin save are one section under the lock), never overwritten by the origin. */
+static profile_t s_low4_origin, s_low4_edit;
+static void low4_web_fork_and_edit(void)
+{
+    char e[128];
+    profile_t w;
+    live_edit_record_t r;
+    (void)live_profile_fork(7, false, "Orig", &s_low4_origin, &w, &r, e, sizeof(e));
+    (void)live_profile_save_working(&s_low4_edit, e, sizeof(e));
+}
+
+static void test_fork_gen_check_and_save_are_atomic(void)
+{
+    TEST_SECTION("live_profile_fork_gen -- a web fork+edit racing the LCD fork is not overwritten by the origin");
+    s_low4_origin = make_test_profile();
+    s_low4_edit = make_test_profile();
+    s_low4_edit.segments[0].target_c = 777.0f;
+    profile_t working;
+    live_edit_record_t rec;
+    uint32_t gen = 0;
+    bool forked = true;
+    char err[128];
+    g_test_stub_semaphore_take_hook = low4_web_fork_and_edit;
+    bool ok = live_profile_fork_gen(7, false, "Orig", &s_low4_origin, &working, &rec, &gen, &forked, err, sizeof(err));
+    g_test_stub_semaphore_take_hook = 0;
+    TEST_CHECK(ok, "fork_gen succeeds (reuses the pending record)");
+    TEST_CHECK(!forked, "this call did not fork");
+    TEST_CHECK(working.segments[0].target_c == 777.0f, "returned working copy is the web edit");
+    profile_t loaded;
+    TEST_CHECK(live_profile_load_working(&loaded) && loaded.segments[0].target_c == 777.0f,
+               "the stored working copy is still the web edit, not the origin");
+    TEST_CHECK(live_profile_clear(err, sizeof(err)), "clear succeeds");
+}
+
 static void test_save_working_bumps_generation(void)
 {
     TEST_SECTION("live_profile_save_working -- bumps the generation counter the executor polls");
@@ -1048,6 +1083,7 @@ int main(void)
     test_clear_is_idempotent(); // run before the fork tests so state starts clean
     test_fork_then_load_working_and_record();
     test_fork_is_idempotent_when_already_pending();
+    test_fork_gen_check_and_save_are_atomic();
     test_save_working_bumps_generation();
     test_fork_refuses_pending_for_different_origin();
     test_load_working_for_origin_refuses_foreign_id();

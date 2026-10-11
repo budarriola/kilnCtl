@@ -155,6 +155,8 @@ static void run_decision_apply(void *user_data)
         } else {
             snprintf(msg, sizeof(msg), "Saved as %s.", name ? name : "new profile");
         }
+    } else if (r == LIVE_DECIDE_SAVED_BUT_EDITED) {
+        snprintf(msg, sizeof(msg), "%s", err);
     } else {
         snprintf(msg, sizeof(msg), "Refused: %s", err[0] ? err : "failed");
     }

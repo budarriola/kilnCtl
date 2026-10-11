@@ -2048,31 +2048,38 @@ function renderSafetyTrip(data) {
       // again instead of erasing it; one row, replaced (not appended) per click.
       function showClearTripMsg(text) {
         clearTripMsg = { text: text, until: Date.now() + 30000, reason: reason };
+        /* REVIEW_WEBFX7 LOW-1: a status poll may have re-rendered the banner since the click, so `btn` can be
+         * detached. Look the live row/button up now; if neither exists the state above is shown by the next render. */
         var row = document.getElementById('clearTripMsg');
         if (!row) {
-          btn.insertAdjacentHTML('afterend', '<div class="row fault" id="clearTripMsg"></div>');
-          row = document.getElementById('clearTripMsg');
+          var liveBtn = document.getElementById('clearTripBtn');
+          if (liveBtn && liveBtn.insertAdjacentHTML) {
+            liveBtn.insertAdjacentHTML('afterend', '<div class="row fault" id="clearTripMsg"></div>');
+            row = document.getElementById('clearTripMsg');
+          }
         }
-        row.textContent = text;
+        if (row) row.textContent = text;
       }
+      function onClearTripErr(err) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+        showClearTripMsg('Clear Trip was not sent (network error).');
+      }
+      function onClearTripText(r, t) {
+        var j = null;
+        try { j = JSON.parse(t); } catch (e) { j = null; }
+        if (j && j.ok === false && (j.reason || j.error)) showClearTripMsg(String(j.reason || j.error));
+        else if (!r.ok) showClearTripMsg('Clear Trip was refused (HTTP ' + r.status + '): ' + (t || '').slice(0, 120));
+        else {
+          clearTripMsg = { text: '', until: 0, reason: null };
+          var old = document.getElementById('clearTripMsg');
+          if (old && old.remove) old.remove();
+        }
+      }
+      /* then(onOk, onErr): a throw inside the response handler is not a network error. */
       fetch('/api/safety/clear_trip', { method: 'POST' })
         .then(function (r) {
-          return r.text().then(function (t) {
-            var j = null;
-            try { j = JSON.parse(t); } catch (e) { j = null; }
-            if (j && j.ok === false && (j.reason || j.error)) showClearTripMsg(String(j.reason || j.error));
-            else if (!r.ok) showClearTripMsg('Clear Trip was refused (HTTP ' + r.status + '): ' + (t || '').slice(0, 120));
-            else {
-              clearTripMsg = { text: '', until: 0, reason: null };
-              var old = document.getElementById('clearTripMsg');
-              if (old && old.remove) old.remove();
-            }
-          });
-        })
-        .catch(function (err) {
-          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
-          showClearTripMsg('Clear Trip was not sent (network error).');
-        });
+          return r.text().then(function (t) { onClearTripText(r, t); }, onClearTripErr);
+        }, onClearTripErr);
     });
   }
 }

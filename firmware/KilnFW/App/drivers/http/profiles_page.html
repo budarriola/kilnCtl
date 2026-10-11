@@ -1009,7 +1009,7 @@ function ooZoneOptionsHtml(selected) {
   var found = false;
   onOffZones.forEach(function (z) {
     if (z.index === selected) found = true;
-    html += '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' +
+    html += '<option value="' + (Number(z.index) || 0) + '"' + (z.index === selected ? ' selected' : '') + '>' +
             window.kcEscapeHtml(z.name) + '</option>';
   });
   // A stored rule can name a zone that is no longer an on/off zone (retyped,
@@ -1028,10 +1028,11 @@ function ooZoneOptionsHtml(selected) {
     // ooHasStaleZoneRow() below reads the attribute, not the label text, so
     // a copy-editing change to the label alone can never silently disable
     // the save-refusal guard.
-    html += '<option value="' + selected + '" selected data-oo-stale="1">' +
-            (ooIsAuxTarget(selected)
-              ? 'Aux relay ' + (selected - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
-              : 'Zone ' + selected + ' (no longer an on/off zone)') + '</option>';
+    var selN = Number(selected) || 0;
+    html += '<option value="' + selN + '" selected data-oo-stale="1">' +
+            (ooIsAuxTarget(selN)
+              ? 'Aux relay ' + (selN - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
+              : 'Zone ' + selN + ' (no longer an on/off zone)') + '</option>';
   }
   if (html === '') html = '<option value="">(none)</option>';
   return html;
@@ -1104,9 +1105,9 @@ function ooRuleFieldsHtml(r) {
   var dir = r.direction_mask || 0;
   var tempSource = r.temp_source || 0;
   var tempCmp = (tempSource === 1) ? (r.temp_cmp || 0) : 0;
-  var tempC = (r.temp_c != null) ? r.temp_c : 0;
-  var startS = r.time_start_s || 0;
-  var stopS = r.time_stop_s || 0;
+  var tempC = (r.temp_c != null) ? (Number(r.temp_c) || 0) : 0;
+  var startS = Number(r.time_start_s) || 0;
+  var stopS = Number(r.time_stop_s) || 0;
   var invert = r.invert || 0;
   return (
     '<div class="oo-row2">' +
@@ -2020,7 +2021,7 @@ function segmentTableHtml(segments) {
       return;
     }
     rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
-            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + seg.dwell_min + '</td></tr>';
+            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + (Number(seg.dwell_min) || 0) + '</td></tr>';
   });
   return '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target ' + window.kcUnit.label() + '</th>' +
          '<th>Hold min</th></tr>' + rows + '</table>';

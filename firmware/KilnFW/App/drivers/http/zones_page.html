@@ -3379,8 +3379,8 @@ function pollAutotune() {
       refusalEl.textContent = '';
       refusalEl.style.display = 'none';
     }
-    var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + s.zone + ', ' + s.elapsed_s + 's elapsed, ' +
-               s.sample_count + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
+    var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + (Number(s.zone) || 0) + ', ' + (Number(s.elapsed_s) || 0) + 's elapsed, ' +
+               (Number(s.sample_count) || 0) + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
     /* Cycle progress is the only honest progress bar a relay run has: the
        elapsed time says nothing about how far along it is, because how long a
        cycle takes is the quantity being measured. */
@@ -3481,7 +3481,7 @@ function pollAutotune() {
       // would need deg-per-deg math this page doesn't otherwise do).
       line += ' Measured Ku=' + s.relay_ku.toFixed(4) + ' duty/°C, Tu=' + s.relay_tu_s.toFixed(0) +
               's (' + (s.relay_tu_s / 60).toFixed(1) + ' min), amplitude ±' + s.relay_amplitude_c.toFixed(1) +
-              '°C over ' + s.relay_cycles_used + ' cycles. Proposed (' + window.kcEscapeHtml(String(s.rule)) + ') Kp=' +
+              '°C over ' + (Number(s.relay_cycles_used) || 0) + ' cycles. Proposed (' + window.kcEscapeHtml(String(s.rule)) + ') Kp=' +
               s.proposed_kp.toFixed(4) + ' Ki=' + s.proposed_ki.toFixed(5) + ' Kd=' + s.proposed_kd.toFixed(4) +
               '. No plant model measured -- accepting writes gains only. ' +
               '<a href="/api/autotune/trace.csv">Download trace CSV</a>';

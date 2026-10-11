@@ -625,6 +625,28 @@ static void decide_lock_init(void)
     }
 }
 
+/* REVIEW_WEBFX7 MED-1: after the slot save (no lock held across it) clear only if the working copy is still the
+ * one that was saved. An edit applied meanwhile (LCD Apply) keeps its working copy and pending record. */
+static profiles_live_decide_result_t decide_finish_clear(uint32_t work_gen, uint8_t id, uint8_t *out_id, char *err,
+                                                          size_t err_cap)
+{
+    if (out_id) {
+        *out_id = id;
+    }
+    char clear_err[64] = {0};
+    live_clear_result_t c = live_profile_clear_if_gen(work_gen, clear_err, sizeof(clear_err));
+    if (c == LIVE_CLEAR_STALE) {
+        snprintf(err, err_cap, "saved to slot %u; working copy edited during save, decide again", (unsigned)id);
+        return LIVE_DECIDE_SAVED_BUT_EDITED;
+    }
+    if (c != LIVE_CLEAR_OK) {
+        snprintf(err, err_cap, "saved to slot %u; clearing the working copy failed: %s", (unsigned)id,
+                 clear_err[0] ? clear_err : "failed");
+        return LIVE_DECIDE_SERVER_ERROR;
+    }
+    return LIVE_DECIDE_OK;
+}
+
 static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind_t kind, const char *name, bool confirm,
                                                           uint8_t *out_id, char *err, size_t err_cap)
 {
@@ -658,7 +680,8 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        if (!live_profile_load_working(working)) {
+        uint32_t work_gen = 0;
+        if (!live_profile_load_working_gen(working, &work_gen)) {
             heap_caps_free(working);
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
@@ -681,12 +704,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        char clear_err[64];
-        live_profile_clear(clear_err, sizeof(clear_err));
-        if (out_id) {
-            *out_id = id;
-        }
-        return LIVE_DECIDE_OK;
+        return decide_finish_clear(work_gen, id, out_id, err, err_cap);
     }
 
     if (kind == LIVE_EDIT_DECISION_OVERWRITE) {
@@ -705,7 +723,8 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        if (!live_profile_load_working(working)) {
+        uint32_t work_gen = 0;
+        if (!live_profile_load_working_gen(working, &work_gen)) {
             heap_caps_free(working);
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
@@ -722,12 +741,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        char clear_err[64];
-        live_profile_clear(clear_err, sizeof(clear_err));
-        if (out_id) {
-            *out_id = id;
-        }
-        return LIVE_DECIDE_OK;
+        return decide_finish_clear(work_gen, id, out_id, err, err_cap);
     }
 
     snprintf(err, err_cap, "unknown action");
@@ -755,6 +769,7 @@ static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_resu
     switch (r) {
     case LIVE_DECIDE_NOTHING_PENDING:
     case LIVE_DECIDE_BUSY:
+    case LIVE_DECIDE_SAVED_BUT_EDITED:
         return send_conflict(req, err);
     case LIVE_DECIDE_FORBIDDEN:
         return send_forbidden(req, err);

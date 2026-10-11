@@ -715,6 +715,10 @@ bool live_profile_has_pending_for_origin(uint8_t origin_id)
     return live_profile_load_record(&rec) && rec.pending && rec.origin_id == origin_id;
 }
 
+static bool live_profile_fork_locked(uint8_t origin_id, bool origin_is_builtin, const char *origin_name,
+                                     const profile_t *origin, profile_t *out_working, live_edit_record_t *out_record,
+                                     uint32_t *out_gen, bool *out_forked, char *err, size_t err_cap);
+
 bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
                            profile_t *out_working, live_edit_record_t *out_record, uint32_t *out_gen,
                            bool *out_forked, char *err, size_t err_cap)
@@ -734,6 +738,20 @@ bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char
      * handed to a NEW firing of a DIFFERENT profile as if it were that new
      * firing's own edit -- refuse instead, so the stale record's prompt is
      * what the operator sees, not a fork silently masquerading as one. */
+    /* REVIEW_WEBFX7 LOW-4: the pending check, the origin save and the record write are one section under the
+     * live save lock, so a web edit landing between them cannot be overwritten by the origin copy. Only
+     * kv / pref_cfg_fs reads and writes happen inside (cfg_save_lock.h allows that). */
+    cfg_save_lock_take(&s_live_save_lock);
+    bool fork_ok = live_profile_fork_locked(origin_id, origin_is_builtin, origin_name, origin, out_working,
+                                            out_record, out_gen, out_forked, err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return fork_ok;
+}
+
+static bool live_profile_fork_locked(uint8_t origin_id, bool origin_is_builtin, const char *origin_name,
+                                     const profile_t *origin, profile_t *out_working, live_edit_record_t *out_record,
+                                     uint32_t *out_gen, bool *out_forked, char *err, size_t err_cap)
+{
     live_edit_record_t existing;
     if (live_profile_load_record(&existing) && existing.pending) {
         if (existing.origin_id != origin_id) {
@@ -757,9 +775,10 @@ bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char
     /* The generation THIS save produced is captured under the save lock; callers that go on to a
      * compare-and-save (LCD Apply) must use it, never a fresh unlocked read. */
     uint32_t own_gen = 0;
-    if (live_profile_save_working_if_gen(origin, false, 0, &own_gen, err, err_cap) != LIVE_SAVE_OK) {
+    if (!live_profile_save_working_locked(origin, err, err_cap)) {
         return false;
     }
+    own_gen = atomic_load(&s_live_profile_generation);
 
     live_edit_record_t rec;
     memset(&rec, 0, sizeof(rec));
@@ -799,6 +818,31 @@ bool live_profile_clear(char *err, size_t err_cap)
     bool ok = live_profile_clear_locked(err, err_cap);
     cfg_save_lock_give(&s_live_save_lock);
     return ok;
+}
+
+/* REVIEW_WEBFX7 MED-1: working copy and generation read as one pair under the save lock. */
+bool live_profile_load_working_gen(profile_t *out, uint32_t *gen)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_load_working(out);
+    if (gen) *gen = atomic_load(&s_live_profile_generation);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+/* Clears only if the generation still equals expected. On mismatch (an edit landed meanwhile) returns
+ * LIVE_CLEAR_STALE and leaves the working copy and pending record untouched. */
+live_clear_result_t live_profile_clear_if_gen(uint32_t expected, char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    live_clear_result_t r;
+    if (atomic_load(&s_live_profile_generation) != expected) {
+        r = LIVE_CLEAR_STALE;
+    } else {
+        r = live_profile_clear_locked(err, err_cap) ? LIVE_CLEAR_OK : LIVE_CLEAR_FAILED;
+    }
+    cfg_save_lock_give(&s_live_save_lock);
+    return r;
 }
 
 static bool live_profile_clear_locked(char *err, size_t err_cap)

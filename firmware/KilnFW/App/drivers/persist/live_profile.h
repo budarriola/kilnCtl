@@ -318,6 +318,13 @@ bool live_profile_load_record(live_edit_record_t *out);
  * calling it with nothing pending is not an error. */
 bool live_profile_clear(char *err, size_t err_cap);
 
+/* REVIEW_WEBFX7 MED-1: for decide save-as/overwrite. load_working_gen reads the working copy and the generation
+ * together under the save lock; clear_if_gen clears only if the generation is unchanged (else LIVE_CLEAR_STALE:
+ * nothing touched, the newer edit stays pending). No lock is held between the two calls. */
+typedef enum { LIVE_CLEAR_OK = 0, LIVE_CLEAR_STALE, LIVE_CLEAR_FAILED } live_clear_result_t;
+bool live_profile_load_working_gen(profile_t *out, uint32_t *gen);
+live_clear_result_t live_profile_clear_if_gen(uint32_t expected, char *err, size_t err_cap);
+
 /* Boot hook: copies a legacy NVS record / working profile into the cfg files
  * when the matching file is absent. Never erases NVS. */
 void live_profile_start(void);
