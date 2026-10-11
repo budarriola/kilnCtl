@@ -79,6 +79,8 @@ real reboot whose boot_id collides across a link-down.
 
 ### LOW-1: a stale pending OFF defeats `leave_on_at_end` (firefx4 MED-1 interaction)
 
+**FIXED (firelowfx):** `io_seg_start()` clears the pending bit on a successful write and `io_seg_finish()` clears it on the leave-on path; test in `test_profile_executor_prestart.c`, both mutations CAUGHT.
+
 **Sequence:**
 
 1. `io_seg_finish()` now records a failed OFF in `zone_off_pending_mask` (MED-1).
@@ -98,6 +100,8 @@ write that supersedes it.
 
 ### LOW-2: a wrong-size used-bitmap blob is now a permanent save/delete outage with no repair path (01c74a3cc)
 
+**FIXED (firelowfx):** `used_bitmap_load()` accepts a longer (<= 64 B) newer-firmware bitmap and `used_bitmap_save()` rewrites it at full length with the tail verbatim; the two write callers (`used_bitmap_load_or_rebuild()`) rebuild a wrong-size bitmap from the present `profN` keys and overwrite the bad blob. Boot load stays fail-closed (degraded files-only path). Tests in `test_profiles_http.c`, mutations CAUGHT.
+
 **What changed.** `used_bitmap_load()` now returns `HAL_IO` for a blob that is neither 16 bytes nor
 1 byte. This is correct as fail-closed (no silent slot loss).
 
@@ -116,6 +120,8 @@ rewritten at its FULL original length").
   in readiness/diagnostics instead of only failing saves.
 
 ### LOW-3: favorites still read a wrong-size blob as "nothing favorited" (01c74a3cc)
+
+**FIXED (firelowfx):** a wrong-size favorites blob returns `HAL_IO`; header comment corrected (type mismatch ends in NOT_FOUND). Test + mutation CAUGHT.
 
 **What happens.** `favorites_load_user_mask()` now tries the legacy u32 before declaring the key absent
 (correct). However, a blob of the wrong size takes the same u32 read. On target, and in the typed fake,
@@ -141,7 +147,7 @@ of them is wrong: update the header comment and the matching comment in `used_bi
   write it neither clears the matching `zone_off_pending_mask` bits nor calls
   `sim_backend_note_zone_relay()`. The first leaves a redundant OFF retry (harmless). The second can
   leave the sim plant believing a zone heats after the terminal write.
-- **INFO-3: a fatal latch costs one resume.** The latch is consumed by the first acquire after it.
+- **INFO-3 (open, not small -- touches heat_enable latch semantics): a fatal latch costs one resume.** The latch is consumed by the first acquire after it.
   `profile_executor_resume()` sets RUNNING before `heat_enable_acquire_since()`, so the first resume
   after a fatal reboot returns true with heat withheld. The watchdog then re-pauses with
   `pico_fatal_reboot`, and only a second resume heats. This is consistent with "operator resumes", but
@@ -149,7 +155,7 @@ of them is wrong: update the header comment and the matching comment in `used_bi
   `reboot_fatal_latched` or `reboot_verdict_pending` is set, with a decoded message.
 - **INFO-4: `autotune_engine_abort_bounded()` logs `s_at` fields after giving the lock.** It logs
   `s_at.zone_index` and the abort reason after releasing the lock. This is a benign log-only race.
-- **INFO-5: the commit-time recheck message names the wrong cause.** The ldfx2 recheck in
+- **INFO-5 (FIXED, firelowfx): the commit-time recheck message names the wrong cause.** The ldfx2 recheck in
   `profile_executor_run()` passes `err` NULL and writes a fixed "safety link went down" message. When
   the gate closed because of a fault source other than the link, that message names the wrong cause.
   Pass `err_msg` through as the door check at line 413 does.
