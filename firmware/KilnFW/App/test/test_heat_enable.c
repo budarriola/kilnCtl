@@ -1184,6 +1184,17 @@ static void test_pico_reboot_after_tripped_holds(void)
     (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
     heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
     TEST_CHECK(heat_enable_reboot_hold(), "F8: DIAG after the re-acquire still holds");
+
+    /* F8: release while the reboot is unresolved must not clear the snapshot. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: release/re-acquire with the reboot unresolved keeps the trip snapshot");
 }
 
 static void test_pico_reboot_cause_holds_or_retries(void)
