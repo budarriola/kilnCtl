@@ -1,5 +1,7 @@
 # Review: tools batch 4 (toolfx6, auxgap), 2026-10-10
 
+**Fix status:** all findings above fixed in the commit titled "Review tools4 fixes" (HIGH-1, MED-1/2/3, LOW-MED, every LOW except the env-dependent `test_env_opt_in`, which was already mock-safe in its own body and is left as is). Seam guards in `land.ps1`/`dev_promote.ps1` now require a `kilnctl_scratch_repo` marker file in the target repo's git common dir (created only by `check_land.ps1`/`check_dev_promote.ps1` fixtures). Negtests CAUGHT: 7/7 pytest, land marker, dev_promote marker + exit report, 3/3 schannel variants.
+
 Reviewer: Opus, worktree at origin/dev 68e3b4966. No board access.
 
 Commits reviewed:
