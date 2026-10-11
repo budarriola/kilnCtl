@@ -522,6 +522,17 @@ static void seed_ct_nvs(const void *p, size_t n)
     hal_kv_close(&h);
 }
 
+static bool ct_nvs_key_exists(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, "ct_verify", HAL_KV_MODE_READ_ONLY, "kiln_nvs") != HAL_OK) {
+        return false;
+    }
+    bool e = hal_kv_key_exists(&h, "verdict_v1") == HAL_OK;
+    hal_kv_close(&h);
+    return e;
+}
+
 static void test_ct_verify(void)
 {
     TEST_SECTION("ct_verify_store -- validate, start (NVS/file), save failures");
@@ -560,6 +571,14 @@ static void test_ct_verify(void)
     TEST_CHECK(!ct_verify_store_get(&t), "persfx3 MED-3: frozen NVS blob NOT adopted");
     pref_cfg_fs_load_raw(CT_VERIFY_CFG_FILE_PATH, sizeof(f), ct_verify_blob_validate, &f, &frev, &fv);
     TEST_CHECK(!fv, "NVS verdict NOT migrated into a cfg file");
+    TEST_CHECK(ct_nvs_key_exists(), "persfx3 MED-3: no adopted file -> the frozen NVS verdict is kept (erase only once the file is adopted)");
+
+    /* a saved file is adopted; the next boot retires the frozen NVS copy */
+    TEST_CHECK(ct_verify_store_save(&b) == ESP_OK, "persfx3 MED-3: seed a cfg file");
+    TEST_CHECK(ct_nvs_key_exists(), "the file save does not touch the frozen NVS key");
+    ct_verify_store_start();
+    TEST_CHECK(ct_verify_store_get(&t), "file verdict adopted");
+    TEST_CHECK(!ct_nvs_key_exists(), "persfx3 MED-3: adopting the file erases the frozen NVS verdict");
 
     fresh();
     seed_ct_nvs(&b, sizeof(b) - 2);

@@ -747,6 +747,47 @@ static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
                "the failed save left no baseline anywhere (no NVS fallback write)");
 }
 
+static bool at_kibase_nvs_key_exists(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    bool e = hal_kv_key_exists(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE) == HAL_OK;
+    hal_kv_close(&h);
+    return e;
+}
+
+static void test_kibase_legacy_nvs_retired_only_once_file_adopted(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline: frozen NVS copy kept without a file, erased once the file is adopted");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(cfg_fs_init(AT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    adaptive_tune_kibase_blob_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.mask = 0x02;
+    legacy.vals[1] = 3.5f;
+    at_stage_legacy_kibase(&legacy, 1);
+    adaptive_tune_init();
+    TEST_CHECK(at_kibase_nvs_key_exists(), "persfx3 MED-3: no cfg file adopted -> frozen NVS copy is kept");
+
+    adaptive_tune_zones[2].ki_baseline_valid = true;
+    adaptive_tune_zones[2].ki_baseline = 7.25f;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
+    }
+    save_kibase_job(&job);
+    TEST_CHECK(job.result == ESP_OK, "cfg file saved");
+    TEST_CHECK(at_kibase_nvs_key_exists(), "the file save leaves the frozen NVS key alone");
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_init();
+    TEST_CHECK(adaptive_tune_zones[2].ki_baseline_valid, "file baseline adopted");
+    TEST_CHECK(!at_kibase_nvs_key_exists(), "persfx3 MED-3: adopting the file erases the frozen NVS copy");
+}
+
 static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
 {
     TEST_SECTION("adaptive_tune ki-baseline cfg_fs: NVS fallback migrates to file; a later boot prefers it");
@@ -859,6 +900,7 @@ int main(void)
 {
     run_test_adaptive_tune();
     test_kibase_cfg_fs_partition_absent_behaves_like_before();
+    test_kibase_legacy_nvs_retired_only_once_file_adopted();
     test_kibase_cfg_fs_migrates_then_prefers_file();
     test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_kibase_status_padding_is_not_data();
