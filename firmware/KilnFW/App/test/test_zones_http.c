@@ -51,6 +51,7 @@ int g_test_count = 0;
 #include "esp_err.h"
 #include "esp_http_server.h"
 #include "fake_kv.h"
+#include "fake_sysinfo.h"
 #include "psa/crypto.h"
 
 // psa/crypto.h's host stub declares this `extern` (only ONE definition per
@@ -3403,7 +3404,15 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
     memcpy(blob_before, &src, sizeof(src));
 
     s_zones_config_valid = true; // deliberately wrong, so a no-op bug can't accidentally read as a pass
-    (void)zones_http_start(); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
+    {
+        /* Review web7 LOW-4: the generation token is seeded from the boot RNG, never a fixed count. */
+        const uint32_t seeds[1] = {0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds, 1);
+    }
+    (void)zones_http_start();
+    TEST_CHECK(zones_config_generation() == ((0x2a5c1e76u & 0x3fffffffu) | 1u),
+               "zones generation is seeded from hal_sysinfo_random_u32() at start");
+    fake_sysinfo_script_random_sequence(NULL, 0); // returns ESP_ERR_INVALID_STATE (no HTTP server in this stub) AFTER the
                               // NVS load/migration logic below has already run -- exactly what's under test.
 
     TEST_CHECK(!s_zones_config_valid, "a refused newer-version blob must leave the config NOT valid for "

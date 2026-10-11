@@ -2733,6 +2733,22 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
         free(edit_text);
     }
 
+    {
+        /* Review web7 LOW-4: profiles_http_start() seeds the RAM-only slot generations from the boot RNG. */
+        char *ht = test_read_source_anchored(__FILE__, "../drivers/http/profiles_http.c", HTTP_C_CANDIDATES, 3);
+        TEST_CHECK(ht != NULL, "could not locate profiles_http.c");
+        if (ht) {
+            size_t len = 0;
+            const char *body = find_function_body(ht, "esp_err_t profiles_http_start(void)", &len);
+            char *fn = body ? dup_range(body, len) : NULL;
+            TEST_CHECK(fn != NULL && strstr(fn, "hal_sysinfo_random_u32()") != NULL &&
+                           strstr(fn, "atomic_store(&s_slot_gen[i]") != NULL,
+                       "profiles_http_start() seeds s_slot_gen from hal_sysinfo_random_u32()");
+            free(fn);
+            free(ht);
+        }
+    }
+
     /* Review web7 LOW-5: the LCD overwrite path captures the slot revision at pick time and refuses on change. */
     static const char *LCD_C_CANDIDATES[] = {
         "../drivers/ui/ui_page_profile_builder_review.c",
