@@ -3815,17 +3815,9 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                 result = CaseResult(Verdict.INCONCLUSIVE, reason="pre-existing PIN: " + why,
                                     observed=result.observed)
             elif (ctx.get("_lcd_pin") or {}).get("unverified"):
-                # Still unproven (unlock not attempted or ambiguous). Downgrade ONLY the one
-                # shape the override exists for: keypad raised, wrong PIN refused, and just
-                # the right-PIN step failed. Never mask "no keypad" or "any PIN accepted".
-                result.observed["pin_unverified"] = right_pin_started is not True
-                if (keypad_raised is True and wrong_pin_refused is True
-                        and right_pin_started is False and result.verdict != Verdict.PASS):
-                    result = CaseResult(
-                        Verdict.INCONCLUSIVE,
-                        reason="pre-existing PIN could not be unlocked with the configured PIN "
-                               "(it may differ from the env var); PIN lock not verified",
-                        observed=result.observed)
+                # Unlock never reached a verdict (keypad never raised, ambiguous reads, ...).
+                # No downgrade: a missing keypad or an accept-any-PIN keypad stays a FAIL.
+                result.observed["pin_unverified"] = True
     finally:
         if result is None:
             result = CaseResult(Verdict.FAIL, reason="LCD-19 aborted before a verdict was reached", observed=dict(state))
