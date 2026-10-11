@@ -46,7 +46,9 @@
 #       Removes a worktree cleanly (git worktree remove), but refuses if it
 #       has uncommitted changes (tracked modifications, staged changes, or
 #       untracked files) -- exactly the situation where a careless remove
-#       would silently discard real work.  Pass -Force together with
+#       would silently discard real work.
+#   -ForceUnverifiable: when git rev-list itself fails (corrupt ref), proceed anyway with a loud
+#       warning. Only pass it after reading git's message in the REFUSED line.  Pass -Force together with
 #       -Remove only when you have already confirmed (by hand) that the
 #       dirty state is disposable; the script never assumes that on its own.
 #
@@ -65,6 +67,7 @@ param(
     [switch]$Remove,
     [string]$Path,
     [switch]$Force,
+    [switch]$ForceUnverifiable,
     [string]$WtRoot = "C:\wt",
     [switch]$RunSetup,
     [switch]$NoSubmodules,
@@ -167,11 +170,31 @@ if ($Remove) {
     }
 
     # F4: a detached worktree's unlanded commits die with its reflog. Refuse unless -Force.
-    $unlanded = @(git -C $full rev-list HEAD --not --remotes --branches 2>$null)
+    $unlanded = @()
+    git -C $full rev-parse --verify -q HEAD *>$null
     if ($LASTEXITCODE -ne 0) {
-        # Fail closed (sweep INFO-6): an errored rev-list says nothing about unlanded commits.
-        Write-Host "REFUSED: could not list unlanded commits in '$full' (git rev-list failed); not removing, even with -Force." -ForegroundColor Red
-        exit 1
+        # Unborn HEAD (orphan worktree, no commits): nothing can be lost.
+        Write-Host "note: '$full' has an unborn HEAD (no commits); nothing unlanded to lose." -ForegroundColor Yellow
+    } else {
+        $errFile = [IO.Path]::GetTempFileName()
+        try {
+            $unlanded = @(git -C $full rev-list HEAD --not --remotes --branches 2>$errFile)
+            $revRc = $LASTEXITCODE
+            $revErr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        } finally { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue }
+        if ($revRc -ne 0) {
+            if ($ForceUnverifiable) {
+                Write-Host "WARNING: git rev-list failed in '$full'; unlanded commits could NOT be checked. Proceeding because -ForceUnverifiable was given:" -ForegroundColor Yellow
+                Write-Host "$revErr" -ForegroundColor Yellow
+                $unlanded = @()
+            } else {
+                # Fail closed (sweep INFO-6): an errored rev-list says nothing about unlanded commits.
+                Write-Host "REFUSED: could not list unlanded commits in '$full' (git rev-list failed); not removing, even with -Force." -ForegroundColor Red
+                Write-Host "git said: $revErr" -ForegroundColor Red
+                Write-Host "Fix the ref it names, or pass -ForceUnverifiable to remove anyway (unlanded commits, if any, are lost)." -ForegroundColor Red
+                exit 1
+            }
+        }
     }
     if ($unlanded.Count -gt 0) {
         Write-Host "commits reachable only from this worktree ($($unlanded.Count)):" -ForegroundColor Yellow

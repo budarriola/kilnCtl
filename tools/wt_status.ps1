@@ -403,7 +403,10 @@ if ($Prune) {
             if ($r.Class -eq 'STALE_CLEAN') {
                 Push-Location -LiteralPath $Repo
                 try { $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $mint -Remove -Force -Path $dirFull -WtRoot $rootFull 2>&1; $rc = $LASTEXITCODE } finally { Pop-Location }
-                if ($rc -ne 0) { $res.Result = "FAILED: worktree_mint -Remove exit $rc"; $failed++ }
+                if ($rc -ne 0) {
+                    $why = (@($out | ForEach-Object { "$_" }) | Where-Object { $_ -match 'REFUSED|ERROR|git said|fatal|error' } | Select-Object -First 3) -join ' | '
+                    $res.Result = "FAILED: worktree_mint -Remove exit $rc" + $(if ($why) { " ($why)" } else { '' }); $failed++
+                }
                 elseif (Test-Path -LiteralPath $dirFull) { $res.Result = 'PARTIAL: unregistered but directory remnant left'; $failed++ }
                 else { $res.Result = 'removed' }
             } else {

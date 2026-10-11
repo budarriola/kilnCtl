@@ -81,6 +81,31 @@ try {
     Remove-Item -LiteralPath $badRef -Force
     $r = Run-MintRemove @("-Path", $w5)
     Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w5)) "after the bad ref is gone: -Remove allowed"
+    # zero-byte loose ref: rev-list fails; REFUSED shows git's message; -ForceUnverifiable proceeds
+    $w6 = MintPath
+    $zeroRef = Join-Path $gc "refs/heads/zerobyte"
+    New-Item -ItemType File -Path $zeroRef -Force | Out-Null
+    $r = Run-MintRemove @("-Path", $w6, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w6) -and $r.Out -match "REFUSED" -and $r.Out -match "git said: \S") "zero-byte ref: refused with git's stderr shown"
+    $r = Run-MintRemove @("-Path", $w6, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w6) -and $r.Out -match "WARNING.*-ForceUnverifiable") "zero-byte ref: -ForceUnverifiable removes with a warning"
+    Remove-Item -LiteralPath $zeroRef -Force
+    # remote ref pointing at a missing object
+    $w7 = MintPath
+    $remRef = Join-Path $gc "refs/remotes/origin/ghost"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $remRef) -Force | Out-Null
+    Set-Content -LiteralPath $remRef -Value "2222222222222222222222222222222222222222" -Encoding ascii
+    $r = Run-MintRemove @("-Path", $w7, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w7) -and $r.Out -match "REFUSED" -and $r.Out -match "git said: \S") "remote ref at missing object: refused with git's stderr shown"
+    $r = Run-MintRemove @("-Path", $w7, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w7)) "remote ref at missing object: -ForceUnverifiable removes"
+    Remove-Item -LiteralPath $remRef -Force
+    # orphan worktree (unborn HEAD): nothing to lose, removable without any override
+    $w8 = Join-Path $wtroot "orphan_wt"
+    git -C $work worktree add --orphan -b orphanbr $w8 *>$null
+    Assert (Test-Path -LiteralPath $w8) "orphan worktree created"
+    $r = Run-MintRemove @("-Path", $w8)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w8)) "orphan worktree (unborn HEAD): -Remove allowed"
     # main tree refused, and nothing in it touched
     $r = Run-MintRemove @("-Path", $work)
     Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath (Join-Path $work "a.txt")) -and $r.Out -match "not a linked worktree") "main tree is refused"
