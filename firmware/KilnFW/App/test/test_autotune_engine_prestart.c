@@ -254,8 +254,10 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
  * INFO-5): linking the real function would pull relay_authority.c's own dependencies into this
  * executable, so it is not linked; instead, any change to the real function's semantics
  * (NULL link, uninitialised link, nonzero fault_sources) must be mirrored here, and the real
- * semantics are pinned by the relay_authority host test built from relay_authority.c itself
- * (build_host_tests.ps1, "relay_authority.c" executable). */
+ * semantics are exercised in the "safety_link" host-test executable (test_safety_link_compile.c
+ * #includes relay_authority.c; build_host_tests.ps1), though only with a live link and fault
+ * sources -- the NULL-link (APP source) and uninitialised-link branches mirrored here are not
+ * pinned there. */
 static bool s_stub_blocked_real_semantics = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
