@@ -57,7 +57,10 @@ async function zonesPage() {
   ok(/oo-tempval" value="450"/.test(good) && /oo-start" value="30"/.test(good) && /oo-stop" value="60"/.test(good), 'W2: good numbers still round-trip');
 
   /* stale zone option */
-  const zopts = p.ooZoneOptionsHtml('<img src=x>');
+  /* a value that compares as a number but concatenates as markup (the only way a hostile selection passes `selected >= 0`) */
+  const hostileSel = { [Symbol.toPrimitive]: (hint) => (hint === 'number' ? 5 : '<img src=x>') };
+  const zopts = p.ooZoneOptionsHtml(hostileSel);
+  ok(zopts.indexOf('data-oo-stale') >= 0, 'W2: harness reaches the stale option');
   ok(zopts.indexOf('<img') < 0, 'W2: ooZoneOptionsHtml stale option never emits an element from a hostile selected value');
 
   /* segment table dwell */
