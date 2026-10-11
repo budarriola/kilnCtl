@@ -103,11 +103,20 @@ __declspec(selectany) int g_test_stub_lock_depth = 0;
  * lock timeout) and the counter resets to 0. 0 = off. */
 __declspec(selectany) int g_test_stub_semaphore_fail_nth = 0;
 
+/* Test hook: when set, the next xSemaphoreTake() calls it once (then clears it) before taking, to
+ * model another task acting while this one waits for the lock. */
+__declspec(selectany) void (*g_test_stub_semaphore_take_hook)(void) = 0;
+
 #include <assert.h>
 static inline BaseType_t xSemaphoreTake(SemaphoreHandle_t sem, TickType_t ticks)
 {
     assert(sem != NULL && "xSemaphoreTake on a NULL handle -- would assert/panic on real FreeRTOS");
     (void)ticks;
+    if (g_test_stub_semaphore_take_hook) {
+        void (*h)(void) = g_test_stub_semaphore_take_hook;
+        g_test_stub_semaphore_take_hook = 0;
+        h();
+    }
     if (g_test_stub_semaphore_fail_nth > 0 && --g_test_stub_semaphore_fail_nth == 0) {
         return 0; /* pdFALSE */
     }

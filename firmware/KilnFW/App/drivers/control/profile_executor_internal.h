@@ -1316,6 +1316,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);
 void io_seg_start(uint8_t idx, const profile_segment_t *seg);
+void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since);
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);

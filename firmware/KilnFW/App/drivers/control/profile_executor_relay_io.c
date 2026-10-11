@@ -1143,7 +1143,12 @@ bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
  * ownership claim below exists to prevent for the blocking/relay case. */
 void io_seg_start(uint8_t idx, const profile_segment_t *seg)
 {
-    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the start decision */
+    io_seg_start_since(idx, seg, kiln_io_relay_off_epoch()); /* LOW-E: before the start decision */
+}
+
+/* As io_seg_start(), with the all-off epoch sampled by the caller before its own gate decision. */
+void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since)
+{
     io_seg_runtime_t *r = &s_exec.io_segs[idx];
     memset(r, 0, sizeof(*r));
     r->active = true;

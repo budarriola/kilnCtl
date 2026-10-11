@@ -166,10 +166,15 @@ esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t 
     (void)mask; (void)value;
     return ESP_OK;
 }
-uint32_t kiln_io_relay_off_epoch(void) { return 0; }
+static uint32_t g_at_fake_off_epoch = 0;
+static int g_at_stale_on_drops = 0;
+uint32_t kiln_io_relay_off_epoch(void) { return g_at_fake_off_epoch; }
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value, uint32_t since_epoch)
 {
-    (void)since_epoch;
+    if (since_epoch != g_at_fake_off_epoch && value != 0) {
+        g_at_stale_on_drops++;
+        return ESP_ERR_INVALID_STATE; /* stale ON dropped, as the real owner does */
+    }
     return kiln_io_owner_command_set_relay_mask_authorized(mask, value);
 }
 
@@ -280,9 +285,11 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     return ESP_OK;
 }
 
+static bool g_at_bump_epoch_in_gate = false;
 bool relay_authority_zone_blocked(SafetyLinkClass *safety, uint8_t zone_index, uint32_t *out_sources)
 {
     (void)safety; (void)zone_index;
+    if (g_at_bump_epoch_in_gate) g_at_fake_off_epoch++; /* LOW-3: an all-off lands during the gate decision */
     if (out_sources) *out_sources = 0;
     return false;
 }
@@ -7364,8 +7371,23 @@ static void test_accept_is_gated_by_the_reservation_too(void)
     s_stub_set_pid_result = false;
 }
 
+static void test_autotune_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- autotune_apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    static int s_io_dummy;
+    s_at.zone_index = 0;
+    s_at.io = (kiln_io_t *)&s_io_dummy;
+    g_at_stale_on_drops = 0;
+    g_at_bump_epoch_in_gate = true;
+    autotune_apply_relay(true);
+    g_at_bump_epoch_in_gate = false;
+    TEST_CHECK(g_at_stale_on_drops == 1, "the ON stamped before the gate was dropped as stale");
+    s_at.io = NULL;
+}
+
 void run_test_autotune_engine_prestart(void)
 {
+    test_autotune_apply_relay_samples_epoch_before_gate();
     test_heat_enable_acquire_never_called_under_s_at_lock();
     test_run_refuses_before_start();
     test_run_relay_refuses_before_start();

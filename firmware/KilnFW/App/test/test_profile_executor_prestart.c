@@ -413,9 +413,11 @@ bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev)
 // (matching the old hardcoded behavior) for every other test in this file.
 static bool s_test_relay_authority_blocked = false;
 static uint32_t s_test_relay_authority_blocked_sources = 0;
+static bool s_test_bump_epoch_in_aux_gate = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {
     (void)safety;
+    if (s_test_bump_epoch_in_aux_gate) g_fake_off_epoch++; /* LOW-3: an all-off lands during the aux gate */
     if (out_sources) *out_sources = s_test_relay_authority_blocked ? s_test_relay_authority_blocked_sources : 0;
     return s_test_relay_authority_blocked;
 }
@@ -686,9 +688,11 @@ static bool g_stub_force_link_up = true;
 static int g_stub_link_calls = 0; /* mode 5 only: calls seen since the test armed it */
 static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INVALID_STATE), 3 = ESP_FAIL, 4 = NULL link (INVALID_ARG) */
 
+static bool s_test_bump_epoch_in_link = false; /* LOW-3: an all-off lands during every start-gate link read */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
     (void)link;
+    if (s_test_bump_epoch_in_link) g_fake_off_epoch++;
     if (g_stub_force_link_up) {
         /* LOW-1: error returns leave garbage that looks link-up (the real function leaves *out untouched). */
         if (g_stub_link_mode >= 2 && g_stub_link_mode <= 4) {
@@ -11062,6 +11066,59 @@ static void test_aux_fault_drop_covers_disabled_and_raw_spare_relays(void)
     s_test_relay_authority_blocked = false;
 }
 
+static void test_aux_apply_relay_samples_epoch_before_gate(void)
+{
+    TEST_SECTION("LOW-E -- aux_apply_relay() samples the all-off epoch BEFORE its gate decision, so an all-off during the gate drops the ON");
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, true);
+    s_exec.io = &s_test_kiln_io;
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_aux_gate = true;
+    (void)aux_apply_relay(0, /*want_on=*/true);
+    s_test_bump_epoch_in_aux_gate = false;
+    TEST_CHECK(g_relay_write_calls >= 1, "a write was attempted");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the aux ON was dropped to OFF (epoch moved since the sample)");
+    s_exec.io = NULL;
+}
+
+static void test_warm_replay_samples_epoch_before_ld01_recheck(void)
+{
+    memset(g_stub_aux, 0, sizeof(g_stub_aux)); /* the preceding aux test left relay 1 bound to an aux output */
+    TEST_SECTION("LOW-E/INFO -- the warm replay samples the epoch BEFORE the LD-01 recheck: an all-off during the recheck drops the replayed ON");
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0xFF;
+    s_test_bump_epoch_in_link = true;
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    s_test_bump_epoch_in_link = false;
+    TEST_CHECK(ok, "the start itself still succeeds");
+    TEST_CHECK(s_exec.warm_start_replayed_count == 1, "the segment was replayed");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "the replayed ON went out as OFF (epoch moved after the sample)");
+    profile_executor_halt();
+}
+
+static void test_done_start_psram_alloc_failure_refuses_without_internal_fallback(void)
+{
+    TEST_SECTION("LOW-C -- a start from DONE refuses when the PSRAM snapshot allocation fails; no internal-RAM fallback");
+    med2_arrange_done();
+    heap_caps_malloc_test_set_fail_spiram(true); /* internal-capability allocations still succeed */
+    char err[128] = {0};
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    heap_caps_malloc_test_set_fail_spiram(false);
+    TEST_CHECK(!ok, "PSRAM exhaustion refuses the start");
+    TEST_CHECK(strstr(err, "out of memory") != NULL, "the refusal says why");
+    med2_check_done_untouched("state stays DONE after the PSRAM refusal");
+    TEST_CHECK(g_relay_claim_calls == 0, "no relay ownership grabbed");
+}
+
 static void test_aux_apply_relay_failed_write_is_not_a_transition(void)
 {
     TEST_SECTION("review 4 L1: failed aux write -> no cycle, commanded_on kept, failure logged once");
@@ -12354,6 +12411,9 @@ static void run_test_on_off_actuation(void)
     test_aux_fault_drop_failed_off_write_keeps_actuated_and_retries();
     test_aux_fault_drop_covers_disabled_and_raw_spare_relays();
     test_aux_apply_relay_failed_write_is_not_a_transition();
+    test_aux_apply_relay_samples_epoch_before_gate();
+    test_warm_replay_samples_epoch_before_ld01_recheck();
+    test_done_start_psram_alloc_failure_refuses_without_internal_fallback();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
     test_on_off_zone_tick_failsafe_on_only_when_explicitly_configured();

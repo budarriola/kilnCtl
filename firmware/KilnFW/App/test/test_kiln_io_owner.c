@@ -753,6 +753,27 @@ static void test_owner_task_sx_reset_notes_off_tracker(void)
     TEST_CHECK(relay_off_tracker_held_s(0x0Fu) > 0.0f, "N8: off-tracker records all relays OFF after a successful SX_RESET");
 }
 
+static void test_hook_all_off_while_waiting(void) { (void)kiln_io_all_relays_off(NULL); }
+static void test_epoch_compared_under_lock(void)
+{
+    TEST_SECTION("LOW-D -- the epoch is compared while the kiln_io lock is held (an all-off arriving while the owner waits for the lock makes the ON stale)");
+    s_dispatch_io.initialized = true;
+    s_dispatch_io.exp = (SX1509Class *)&s_dispatch_dummy;
+    s_dispatch_io.io_lock = xSemaphoreCreateMutex();
+    g_sx_dir_shadow = 0;
+    g_test_stub_semaphore_take_default = 1;
+    uint32_t sampled = kiln_io_relay_off_epoch();
+    bool stale = false;
+    g_sx_masked_writes = 0;
+    g_test_stub_semaphore_take_hook = test_hook_all_off_while_waiting; /* fires inside the lock wait */
+    (void)kiln_io_set_relay_mask_if_epoch(&s_dispatch_io, 0x01u, 0x01u, sampled, &stale);
+    g_test_stub_semaphore_take_hook = 0;
+    TEST_CHECK(stale, "an all-off during the lock wait makes the ON stale (compare is under the lock)");
+    TEST_CHECK(g_sx_masked_writes == 0 || g_sx_last_masked_value == 0, "the stale ON drove no relay pin high");
+    s_dispatch_io.io_lock = NULL;
+    g_sx_dir_shadow = 0xFFFFu;
+}
+
 static void test_epoch_stamp_and_stale_semantics(void)
 {
     TEST_SECTION("LOW-E/LOW-D -- post stamps the live epoch; stale OFF-only is not INVALID_STATE; epoch bumps on a failed all-off");
@@ -823,6 +844,7 @@ int main(void)
     test_authorized_on_queued_before_all_off_is_dropped();
     test_owner_task_sx_reset_notes_off_tracker();
     test_epoch_stamp_and_stale_semantics();
+    test_epoch_compared_under_lock();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

@@ -1437,6 +1437,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     /* LD-01 follow-up (REVIEW_LD01_WWFIX LOW-4): the start gate near the top of this function ran before
      * validation and plan work; a link drop since then would otherwise commit RUNNING with heat pending.
      * Recheck right before the commit, unwinding the claims exactly like the refusal above. */
+    const uint32_t warm_off_epoch = kiln_io_relay_off_epoch(); /* LOW-E: sampled BEFORE the LD-01 recheck */
     if (relay_authority_start_blocked(s_exec.safety, err_msg, err_cap, "a firing cannot start")) {
         /* Review INFO-5: err_msg now names the actual closed gate (link, fault, ...), as the door check does. */
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
@@ -1469,7 +1470,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
                 continue;
             }
-            io_seg_start(i, &p.segments[i]);
+            io_seg_start_since(i, &p.segments[i], warm_off_epoch);
             s_exec.io_segs[i].blocking = true;
             if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
                 s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
