@@ -445,6 +445,7 @@ def _default_zone_mask_fns(ctx: dict):
     accepted write. Returns None when the zones cannot be read."""
     from .. import zones_http_client as zhc
     from ..mcp_server_aux import _resolve_host
+    from ..mcp_server_control import _zone_collateral_diff  # defined here; not exported on the srv facade
     srv = _srv(ctx)
     try:
         host = _resolve_host(ctx.get("host"))
@@ -469,7 +470,7 @@ def _default_zone_mask_fns(ctx: dict):
         try:
             zhc.post_zones(host, zhc.build_post_body(snapshot, {}))
             after = zhc.get_zones(host)
-            return not srv._zone_collateral_diff(snapshot, after, zone, set())
+            return not _zone_collateral_diff(snapshot, after, zone, set())
         except Exception:  # noqa: BLE001
             return False
 

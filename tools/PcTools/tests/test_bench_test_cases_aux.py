@@ -676,9 +676,6 @@ class C03DefaultWriterTest(unittest.TestCase):
                 calls.append((zone, relay_mask, confirm))
                 return answers.pop(0)
 
-            def _zone_collateral_diff(self, *a):
-                return []
-
         srv = Srv()
         srv.r4e = True
         ctx = {"srv": srv, "aux_confirm": True, "sleep_fn": lambda s: None}
@@ -800,7 +797,6 @@ class AuxC03ReviewLowTest(unittest.TestCase):
         srv = FakeSrv()
         srv.r4e = True
         srv.control_set_zone_relay_mask = lambda **k: "ok - zone 0: relay_mask=9"
-        srv._zone_collateral_diff = lambda b, a, z, c: []
         ctx = {"srv": srv, "aux_confirm": True, "sleep_fn": lambda s: None}
         with um.patch.object(zhc, "get_zones", return_value=snap),                 um.patch.object(zhc, "build_post_body", return_value="BODY"),                 um.patch.object(zhc, "post_zones", side_effect=lambda h, b: posted.append(b) or "ok"),                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             C._case_ax_c03(ctx)
