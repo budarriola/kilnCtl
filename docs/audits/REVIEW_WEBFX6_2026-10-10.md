@@ -17,6 +17,8 @@ No HIGH or MED findings. The C changes (random generation seed, `live_profile_cl
 
 ### LOW-1: the I-1 hardening still has gaps (zones `s.rule`, profiles segment inputs)
 
+**FIXED (webfx7).**
+
 The question was whether the zones_page items webfx6 skipped (`s.state`, `s.rule`) reach innerHTML.
 
 - **`s.state`: no.** `pollAutotune()` builds `line` starting with `AT_STATE_NAMES[s.state] || s.state` (zones_page.html ~3382). `line` reaches `el.innerHTML` only in three branches: relay-done (~3488), step-done (~3511) and aborted-with-model (~3545). Those branches require `s.state === 'done'` or `s.state === 'aborted'`, and both always map to constant strings in `AT_STATE_NAMES`. Every other state renders through `el.textContent` (~3547). Skipping it is correct.
@@ -25,6 +27,8 @@ The question was whether the zones_page items webfx6 skipped (`s.state`, `s.rule
 - **profiles_page `rampFieldsHtml()` / `ioFieldsHtml()` were not hardened.** They are listed under I-1, but they still put `seg.target_c`, `seg.ramp_c_per_hr` and `seg.dwell_min` raw into `value="..."`. The values come from the board's numeric JSON; a client-side import posts to the board first and re-renders from the board's reply. That makes this defence-in-depth, not an exploitable path. Fix: `Number(...)`, the same as live_profile_page got. The webfx6 status note in WEB_UI_JS_AUDIT names only the zones leftovers and should list this one too.
 
 ### LOW-2: `live_profile_fork_gen()` reuse path contradicts its header and is not atomic
+
+**FIXED (webfx7).**
 
 webfx6 kept this write on the idempotent "already pending" path, and `8cda68715` left it in place:
 
@@ -47,6 +51,8 @@ It is latent today. The only caller, `ui_edit_firing_apply.c` (~214-272), uses `
 Interaction with `5c89d3a3b` (MED-1): the fork path returns `own_gen` from `live_profile_save_working_if_gen()`. That value is correct and is what Apply compares against, so the reuse-path write does not weaken MED-1.
 
 ### LOW-3: Clear Trip's sticky refusal outlives a later success and ignores `reason`
+
+**FIXED (webfx7).**
 
 main_page L-2 stores `clearTripMsg = {text, until: now + 30 s}`, and `renderSafetyTrip()` re-renders it on every poll. Two problems:
 

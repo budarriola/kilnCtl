@@ -168,6 +168,8 @@ after the early check, caught only by the compare-and-save. Negtest over
 
 ### LOW-3: the did_fork guard is untested, and the idempotent path writes *out_gen although the header says it does not
 
+**FIXED (webfx7).** The reuse-path write is removed; `test_fork_reuse_path_leaves_out_gen_alone()` pins `*out_gen` untouched and the interleaved Apply refusal (hook between the pending check and the fork). Note: with the write gone, `if (did_fork)` -> `if (1)` is behaviourally equivalent (fork_gen stays 0, Apply refuses stale either way), so that mutation cannot be CAUGHT by any test; re-adding the write is caught.
+
 The header says that on the idempotent "already pending" path `*out_gen` is
 untouched (`live_profile.h:228-231`). The code writes the current generation
 there under the lock (`live_profile.c:753-757`). Today the only caller ignores
