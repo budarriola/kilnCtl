@@ -735,6 +735,20 @@ static void test_failed_cfg_read_keeps_tc_not_installed_declared(void)
     TEST_CHECK(!is_tripped(), "F7: declared-not-installed survives a failed config read (no S5 trip)");
 }
 
+static void test_stale_thermo_does_not_advance_s12(void)
+{
+    TEST_SECTION("F5: a stale thermo snapshot does not advance S12 on its frozen cold junction");
+    world_reset_keep_clock();
+    core_start();
+    steps(3);
+    W.thermo.cj_c = 90.0f; // above cj_max (85)
+    steps(300);            // ~30 s over cj_max, below cj_time_s
+    TEST_CHECK(!is_tripped(), "F5 sanity: not yet tripped after ~30 s hot CJ");
+    W.thermo_publish = false; // snapshot goes stale
+    steps(350);               // stale data must not carry S12 past its 60 s bar
+    TEST_CHECK(!is_tripped(), "F5: S12 does not trip on stale cold-junction data");
+}
+
 static void test_s1_uncommissioned_never_trips(void)
 {
     TEST_SECTION("Campaign 1: S1 with abs_max_temp_c unconfigured -- no trip, ARMED forced off");
@@ -1112,6 +1126,7 @@ int main(void)
     test_s1_uncommissioned_never_trips();
     test_failed_cfg_read_keeps_last_good_guard_cfg();
     test_failed_cfg_read_keeps_tc_not_installed_declared();
+    test_stale_thermo_does_not_advance_s12();
     test_s5_stale_thermo();
     test_s5_spi_fault_and_not_installed();
     test_s6a_main_fault();
