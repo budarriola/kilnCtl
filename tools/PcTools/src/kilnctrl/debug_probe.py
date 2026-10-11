@@ -877,6 +877,7 @@ def write_memory(peer: str, address: int, value: int, width: int = 32,
     lines = (output or "").splitlines()
     werr = [ln for ln in lines if ln.startswith("KCTL_WRITE_ERR")]
     rerr = [ln for ln in lines if ln.startswith("KCTL_RESUME_ERR")]
+    herr = [ln for ln in lines if ln.startswith("KCTL_HALT_ERR")]
     halted = [ln.split()[1] for ln in lines
               if len(ln.split()) == 3 and ln.startswith("KCTL_AFTER") and ln.split()[2] != "running"]
     if not leave_halted and (rerr or halted):
@@ -886,6 +887,11 @@ def write_memory(peer: str, address: int, value: int, width: int = 32,
         return False, f"{output}\nERROR: {werr[0]}"
     if not ok and not (output or "").count("KCTL_AFTER"):
         return ok, output + "\nWARNING: write_memory could not confirm the core was resumed; run debug_resume."
+    if herr:
+        # KCTL markers are authoritative over OpenOCD's Error: heuristic (it logs
+        # Error: even for the caught halt failure): the write itself landed.
+        return True, (f"{output}\nWARNING: {herr[0]} -- the write went to a core that may have been "
+                      "RUNNING (not halted); it raced live code.")
     return ok, output
 
 

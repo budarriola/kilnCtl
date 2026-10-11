@@ -342,6 +342,7 @@ public static class NegJob {
     [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
     [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr retLen);
     // Live members of the job (JobObjectBasicProcessIdList = 3). Membership is a property of the
     // process object, so a reused PID or a stale parent PID can never add a stranger.
@@ -357,6 +358,12 @@ public static class NegJob {
             for (int i = 0; i < n; i++) r[i] = (int)Marshal.ReadIntPtr(buf, 8 + i * IntPtr.Size).ToInt64();
             return r;
         } finally { Marshal.FreeHGlobal(buf); }
+    }
+    // True only when the OPEN process handle is still a member of the job (re-check before a kill,
+    // so a member that exited and whose PID was reused is never killed).
+    public static bool InJob(IntPtr proc, IntPtr job) {
+        bool r;
+        return IsProcessInJob(proc, job, out r) && r;
     }
     public static IntPtr Create() {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
@@ -396,6 +403,8 @@ function Stop-JobMembers($job) {
         if ($id -eq $PID) { continue }
         try {
             $mp = [Diagnostics.Process]::GetProcessById($id)
+            $null = $mp.Handle   # open once; membership and Kill both go through THIS handle
+            if (-not [NegJob]::InJob($mp.Handle, $job)) { continue }
             if ($script:SpareNames -contains ("$($mp.ProcessName).exe").ToLowerInvariant()) { continue }
             $mp.Kill()
         } catch { }
@@ -500,8 +509,10 @@ exit 0
     # 4b (documented residual gap): the child is created by Start-Process and assigned to the job AFTER
     # it starts, so a grandchild spawned in that window escapes the job. Stop-CopyProcesses (command-line
     # match on the copy path) is the backstop; a suspended-create + resume needs CreateProcess P/Invoke.
+    $assignFailed = $false
     $job = [NegJob]::Create()
-    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
+    if ($job -eq [IntPtr]::Zero) { $assignFailed = $true }
+    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { $assignFailed = $true; Write-Line "negtest: could not assign child to job object; job kill is a no-op, falling back to killing the tracked descendants + command-line matches" Yellow } }
     $script:liveChild = $p
     $script:liveJob = $job
     $tracked = @{}
@@ -514,12 +525,13 @@ exit 0
         if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p $job; $p.WaitForExit(10000) | Out-Null; break }
     }
     try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }
-    if ($timedOut) { Stop-CopyProcesses $copy }
+    if ($timedOut) { if ($assignFailed) { Stop-Tracked $tracked }; Stop-CopyProcesses $copy }
     # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
     # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
     # sessions' builds use. Stragglers are handled by the targeted Stop-CopyProcesses below.
     if ($job -ne [IntPtr]::Zero) {
         if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { Stop-JobMembers $job; [NegJob]::Disarm($job) | Out-Null }
+        $script:liveJob = $null   # before Close: a throw after Close must not leave a stale handle value for the finally
         [NegJob]::Close($job)
     }
     Stop-Tracked $tracked

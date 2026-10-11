@@ -169,9 +169,16 @@ class StopTest(unittest.TestCase):
         # started and stopped this boot has none (bench1 HP-05 false FAIL).
         r = J.judge_stop(
             "idle", [0.0] * 3, [False] * 3, acked=False,
-            ack_reason="refused: no previous-run record to acknowledge",
+            ack_reason="refused: no previous-run record to acknowledge", card_clear=True,
         )
         self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_no_record_text_needs_card_read_back(self):
+        # toolfx7 L1: the same text also covers a run_state lock failure.
+        kw = dict(acked=False, ack_reason="refused: no previous-run record to acknowledge")
+        self.assertEqual(J.judge_stop("idle", [0.0] * 3, [False] * 3, **kw).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(J.judge_stop("idle", [0.0] * 3, [False] * 3, card_clear=False, **kw).verdict,
+                         Verdict.FAIL)
 
 
 class UnauthenticatedStopTest(unittest.TestCase):

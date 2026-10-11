@@ -107,3 +107,26 @@ class PicoGpioArmedGateTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriteWrapperAndHaltErrTest(unittest.TestCase):
+    """toolfx7 (REVIEW_TOOLS3 M2, L5)."""
+
+    def test_wrapper_has_no_leave_halted_and_never_passes_it(self):
+        import inspect
+        from kilnctrl import mcp_server_debug as msd
+        fn = getattr(msd.debug_write_memory, "fn", msd.debug_write_memory)
+        self.assertNotIn("leave_halted", inspect.signature(fn).parameters)
+        with unittest.mock.patch.object(msd.debug_probe, "pico_armed_state", return_value=(False, "x")), \
+             unittest.mock.patch.object(msd.debug_probe, "write_memory", return_value=(True, "")) as wm, \
+             unittest.mock.patch.object(msd, "_write_readback_note", return_value="\nread-back OK (0x5)"):
+            msd.debug_write_memory("pico", 0x40014004, 5, 32, confirm=True)
+        self.assertNotIn("leave_halted", wm.call_args.kwargs)
+        self.assertEqual(wm.call_args.args, ("pico", 0x40014004, 5, 32))
+
+    def test_halt_err_is_reported_as_warning(self):
+        with unittest.mock.patch.object(debug_probe, "_run", return_value=(
+                False, "Error: halt\nKCTL_HALT_ERR boom\nKCTL_AFTER core0 running\n")):
+            ok, out = debug_probe.write_memory("pico", 0x40014004, 5, 32)
+        self.assertTrue(ok)
+        self.assertIn("KCTL_HALT_ERR", out.split("WARNING:")[1])

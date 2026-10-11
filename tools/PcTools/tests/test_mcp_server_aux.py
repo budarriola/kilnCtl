@@ -214,6 +214,30 @@ class SetAuxManualTest(_Base):
         self.assertIn("10.0.0.9", r)
         post.assert_not_called()
 
+    def test_name_is_resolved_once_and_post_pinned_to_the_ip(self):
+        import socket
+        calls = []
+
+        def fake_gai(host, *a, **k):
+            calls.append(host)
+            return [(socket.AF_INET, 0, 0, "", ("10.0.0.5", 0))]
+        with unittest.mock.patch.object(socket, "getaddrinfo", side_effect=fake_gai),              unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
+            r, post = self._run(_snap({4: {"enabled": True}}), True, relay=4, on=True, confirm=True,
+                                host="kiln.local:8080")
+        self.assertTrue(r.startswith("ok"), r)
+        post.assert_called_once_with("10.0.0.5:8080", 4, True)
+        self.assertEqual(calls, ["kiln.local"])
+
+    def test_name_with_a_second_record_refuses(self):
+        import socket
+        recs = [(socket.AF_INET, 0, 0, "", ("10.0.0.5", 0)), (socket.AF_INET, 0, 0, "", ("10.0.0.99", 0))]
+        with unittest.mock.patch.object(socket, "getaddrinfo", return_value=recs),              unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", side_effect=lambda x: x):
+            r, post = self._run(_snap({4: {"enabled": True}}), True, relay=4, on=True, confirm=True,
+                                host="kiln.local")
+        self.assertTrue(r.startswith("refused"), r)
+        self.assertIn("10.0.0.99", r)
+        post.assert_not_called()
+
     def _run_wifi(self, wifi=None, exc=None, **kw):
         with unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_snap({4: {"enabled": True}})), \
              unittest.mock.patch.object(ahc, "post_aux_manual", return_value=True) as post, \

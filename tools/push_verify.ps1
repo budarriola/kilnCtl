@@ -108,7 +108,20 @@ public static class PvJob {
     [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
-    public static IntPtr Create() { return CreateJobObject(IntPtr.Zero, null); }
+    [DllImport("kernel32.dll")] static extern bool SetInformationJobObject(IntPtr h, int cls, IntPtr info, int len);
+    public static IntPtr Create() {
+        IntPtr job = CreateJobObject(IntPtr.Zero, null);
+        if (job == IntPtr.Zero) return IntPtr.Zero;
+        // JOBOBJECT_EXTENDED_LIMIT_INFORMATION: LimitFlags at offset 16, size 144 (x64) / 112 (x86)
+        int size = IntPtr.Size == 8 ? 144 : 112;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i++) Marshal.WriteByte(buf, i, 0);
+            Marshal.WriteInt32(buf, 16, 0x2000); // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            if (!SetInformationJobObject(job, 9, buf, size)) { CloseHandle(job); return IntPtr.Zero; }
+        } finally { Marshal.FreeHGlobal(buf); }
+        return job;
+    }
     public static bool Assign(IntPtr j, IntPtr p) { return AssignProcessToJobObject(j, p); }
     public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
     public static void Close(IntPtr j) { CloseHandle(j); }
@@ -122,9 +135,18 @@ try {
     $fetchProc = Start-Process -FilePath "git" -NoNewWindow -PassThru -RedirectStandardOutput $outTmp -RedirectStandardError $errTmp `
         -ArgumentList @("-C", "`"$repoRoot`"", "fetch", "--no-tags", $remote, "+refs/heads/${branchName}:refs/remotes/$remote/$branchName")
     $null = $fetchProc.Handle
-    if ($fetchJob -ne [IntPtr]::Zero) { [void][PvJob]::Assign($fetchJob, $fetchProc.Handle) }
+    # Assign result is checked: if the job cannot hold the process, a timeout falls back to killing git directly.
+    $jobAssigned = $false
+    if ($fetchJob -ne [IntPtr]::Zero) { $jobAssigned = [PvJob]::Assign($fetchJob, $fetchProc.Handle) }
     if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
-        if ($fetchJob -ne [IntPtr]::Zero) { [PvJob]::Kill($fetchJob) }
+        if ($jobAssigned) { [PvJob]::Kill($fetchJob) }
+        else {
+            # no job membership: kill git's direct children (git-remote-*) by parent pid, then git itself
+            try {
+                Get-CimInstance Win32_Process -Filter "ParentProcessId=$($fetchProc.Id)" -ErrorAction SilentlyContinue |
+                    ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch { } }
+            } catch { }
+        }
         try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }
         $null = $fetchProc.WaitForExit(5000)
         $fetchMsg = "timed out after ${FetchTimeoutSec}s"

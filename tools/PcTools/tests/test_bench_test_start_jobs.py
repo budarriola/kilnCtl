@@ -151,15 +151,30 @@ class BenchTestStartTest(_Base):
                   ota_image_build="2026-10-10", ota_pico_image_path="C:/img/p.bin",
                   ota_pico_image_commit="abc1234", ota_pico_corrupt_image_path="C:/img/pb.bin",
                   update_downgrade_repo="o/old", update_wrong_repo="o/wrong")
-        self.finish(BT.bench_test_start(suite="ota", cases="OT-G06", **kw))
+        self.finish(BT.bench_test_start(suite="ota", cases="OT-G06", confirm=True, **kw))
         ctx = _FakeRunner.instances[-1].ctx
         for k, v in kw.items():
             self.assertEqual(ctx[k], v, k)
         # and the synchronous twin
-        BT.bench_test_run(suite="ota", cases="OT-G06", **kw)
+        BT.bench_test_run(suite="ota", cases="OT-G06", confirm=True, **kw)
         ctx2 = _FakeRunner.instances[-1].ctx
         for k, v in kw.items():
             self.assertEqual(ctx2[k], v, k)
+
+    def test_ota_images_without_confirm_refuse_before_runner(self):
+        out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin")
+        self.assertIn("refused", out)
+        out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin", confirm="yes")
+        self.assertIn("refused", out)
+        out = self.finish(BT.bench_test_start(suite="ota", update_wrong_repo="o/w"))
+        self.assertIn("refused", out)
+        self.assertEqual(_FakeRunner.instances, [])
+
+    def test_ota_images_preflight_refusal_blocks_runner(self):
+        with mock.patch.object(M, "_run_level_preflight", return_value="safety is ARMED"):
+            out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin", confirm=True)
+        self.assertIn("run-level precondition failed: safety is ARMED", out)
+        self.assertEqual(_FakeRunner.instances, [])
 
     def test_omitted_ota_arguments_stay_out_of_ctx(self):
         self.finish(BT.bench_test_start(suite="smoke"))

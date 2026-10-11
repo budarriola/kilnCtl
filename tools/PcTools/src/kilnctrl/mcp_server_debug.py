@@ -698,8 +698,7 @@ def _write_readback_note(peer: str, address: int, value: int, width: int) -> str
 
 @_core._tool()
 def debug_write_memory(
-    peer: str, address: int, value: int, width: int = 32, confirm: bool = False, allow_running: bool = False,
-    leave_halted: bool = False
+    peer: str, address: int, value: int, width: int = 32, confirm: bool = False, allow_running: bool = False
 ) -> str:
     """Writes one `width`-bit (8/16/32) `value` at `address` in `peer`'s
     memory. Live RAM/flash-mapped memory write on a running board -- refused
@@ -713,8 +712,10 @@ def debug_write_memory(
     closed -- an unreadable state is never treated as "not armed"). This is
     additive to, never a replacement for, the confirm=True gate below.
 
-    The core is halted for the write and resumed afterwards (always, unless
-    leave_halted=True, for a core you halted on purpose); a failed resume or write
+    The core is halted for the write and resumed afterwards (always -- there is
+    deliberately no leave_halted option on the write path: the read-back that
+    follows resumes the core anyway, and a Pico halt must always be resumed);
+    a failed resume or write
     is reported even when OpenOCD printed an Error: line. ARMED is checked once
     before the write (the same window every debug_write_memory has).
 
@@ -738,10 +739,7 @@ def debug_write_memory(
             if armed is None:
                 return f"error: write refused -- could not confidently determine Pico ARMED state ({detail})"
             return f"error: write refused -- Pico is ARMED ({detail})"
-    if leave_halted is True:
-        ok, output = debug_probe.write_memory(peer, address, value, width, leave_halted=True)
-    else:
-        ok, output = debug_probe.write_memory(peer, address, value, width)
+    ok, output = debug_probe.write_memory(peer, address, value, width)
     if ok:
         _srv._session_log.warning(
             "debug_write_memory: peer=%s address=0x%x value=0x%x width=%d ok=True", peer, address, value, width

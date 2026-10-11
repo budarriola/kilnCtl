@@ -1789,7 +1789,8 @@ def judge_pause_resume(paused_state: str, duties_while_paused: "list[float]", fi
 
 
 def judge_stop(
-    state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool, ack_reason: str = ""
+    state_after_stop: str, duties: "list[float]", relays: "list[bool]", acked: bool, ack_reason: str = "",
+    card_clear: Optional[bool] = None,
 ) -> CaseResult:
     """HP-05: stop leaves RUNNING, zeroes duties and relays, and the last-run
     card can be acknowledged."""
@@ -1808,7 +1809,22 @@ def judge_stop(
     # such record, so the firmware answers "no previous-run record to
     # acknowledge": the card is already clear, which is the outcome HP-05
     # wants. Any other refusal is a real failure.
+    # The refusal text is identical for "no boot record", "already
+    # acknowledged" and a run_state lock failure, so it proves nothing alone:
+    # `card_clear` is the read-back of GET /api/profile_exec `last_run.present`
+    # == false after the ack, and the "already clear" acceptance needs it.
     already_clear = (not acked) and "no previous-run record" in (ack_reason or "")
+    if already_clear and card_clear is None:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="ack refused with 'no previous-run record' but the last-run card could not be read back",
+            observed={"acked": acked, "ack_reason": ack_reason},
+        )
+    if already_clear and card_clear is False:
+        return CaseResult(
+            Verdict.FAIL, reason="ack refused 'no previous-run record' yet GET /api/profile_exec still shows a last_run card",
+            observed={"acked": acked, "ack_reason": ack_reason, "card_clear": card_clear},
+        )
     if not acked and not already_clear:
         return CaseResult(
             Verdict.FAIL, reason="profiles_ack_last_run() did not clear the last-run card",

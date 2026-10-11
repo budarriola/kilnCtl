@@ -295,6 +295,40 @@ exit 0
     $mutBuild = @('-File', 'calc.ps1', '-Find', 'return $a + $b', '-Replace', "Write-Host 'BUILD FAILURES (1)'; Write-Host 'calc.c:42: error: expected'; exit 1")
     $r = Run-Neg "reqassert_buildfail" (@('-Command', $testCmd, '-RequireAssertion') + $mutBuild)
     Assert-True ($r.Exit -eq 1 -and $r.Json.mutations[0].verdict -eq 'MISSED') "reqassert_buildfail: a build failure must not count as an assertion (exit $($r.Exit), $($r.Json.mutations[0].verdict))"
+    # toolfx7 L3: Stop-JobMembers kills job stragglers, spares the SpareNames, never touches a non-member.
+    $mT = [regex]::Match($srcN, '(?s)Add-Type -TypeDefinition @"?
+(.*?)?
+"@')
+    Assert-True $mT.Success "NegJob Add-Type block not found in negtest.ps1"
+    if (-not ('NegJob' -as [type])) { Add-Type -TypeDefinition $mT.Groups[1].Value }
+    $mS = [regex]::Match($srcN, '(?s)function Stop-JobMembers.*??
+\}')
+    Assert-True $mS.Success "Stop-JobMembers not found in negtest.ps1"
+    . ([scriptblock]::Create($mS.Value))
+    $script:SpareNames = @('ping.exe')
+    $jb = [NegJob]::Create()
+    Assert-True ($jb -ne [IntPtr]::Zero) "NegJob.Create failed"
+    $pStr = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 120'
+    $pSpare = Start-Process ping.exe -WindowStyle Hidden -PassThru -ArgumentList '-n', '120', '127.0.0.1'
+    $pOut = Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList '-NoProfile', '-Command', 'Start-Sleep 120'
+    foreach ($x in $pStr, $pSpare, $pOut) { $null = $x.Handle }
+    $asg1 = [NegJob]::Assign($jb, $pStr.Handle); $asg2 = [NegJob]::Assign($jb, $pSpare.Handle)
+    Assert-True ($asg1 -and $asg2) "jobmembers: could not assign the test processes to a job (nested job?)"
+    Assert-True ([NegJob]::InJob($pStr.Handle, $jb) -and -not [NegJob]::InJob($pOut.Handle, $jb)) "jobmembers: InJob must be true for a member and false for a non-member"
+    Stop-JobMembers $jb
+    Start-Sleep -Milliseconds 700
+    $pStr.Refresh(); $pSpare.Refresh(); $pOut.Refresh()
+    Assert-True $pStr.HasExited "jobmembers: a job straggler must be killed by Stop-JobMembers"
+    Assert-True (-not $pSpare.HasExited) "jobmembers: a SpareNames member must survive Stop-JobMembers"
+    Assert-True (-not $pOut.HasExited) "jobmembers: a process outside the job must never be killed"
+    foreach ($x in $pSpare, $pOut) { try { $x.Kill() } catch { } }
+    [NegJob]::Close($jb)
+    # toolfx7 L2/L7: an Assign failure is flagged (not just printed) and the live job is cleared before Close.
+    Assert-True ($srcN -match 'assignFailed') "negtest.ps1 must track an Assign failure and kill the tracked descendants on timeout"
+    Assert-True ($srcN -match '(?s)\$script:liveJob = \$null[^
+]*
+\s*\[NegJob\]::Close\(\$job\)') "negtest.ps1 must clear `$script:liveJob immediately before NegJob.Close"
+    Assert-True ($srcN -notmatch 'falling back to taskkill') "negtest.ps1 must not claim a taskkill fallback that does not exist"
     # Extra: a detached grandchild (not in the copy's command line, outliving its parent) must be killed
     # when the run ends, on the normal-exit path (the job object is disarmed there on purpose).
     $tok = 'negorph' + [guid]::NewGuid().ToString('N').Substring(0, 10)

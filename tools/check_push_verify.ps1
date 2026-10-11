@@ -13,8 +13,23 @@ New-Item -ItemType Directory -Path $tmp | Out-Null
 $origin = Join-Path $tmp "origin.git"; $work = Join-Path $tmp "work"; $other = Join-Path $tmp "other"
 function Run-PV([string[]]$a) {
     Push-Location $work
-    try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "push_verify.ps1") @a 2>&1 | Out-String; $rc = $LASTEXITCODE }
-    finally { Pop-Location }
+    # Bounded: a hung push_verify child is killed after 60 s and reported as rc 99 (FAIL), never hangs the check.
+    try {
+        $outF = [IO.Path]::GetTempFileName(); $errF = [IO.Path]::GetTempFileName()
+        $argl = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$(Join-Path $here 'push_verify.ps1')`"") + ($a | ForEach-Object { if ($_ -match '\s') { "`"$_`"" } else { $_ } })
+        $p = Start-Process -FilePath "powershell" -ArgumentList $argl -NoNewWindow -PassThru -RedirectStandardOutput $outF -RedirectStandardError $errF
+        $null = $p.Handle
+        if (-not $p.WaitForExit(60000)) {
+            try { $p.Kill() } catch { }
+            $null = $p.WaitForExit(5000)
+            $rc = 99; $o = "RUN-PV TIMEOUT after 60s"
+        } else {
+            $p.WaitForExit()
+            $rc = $p.ExitCode
+            $o = (Get-Content -LiteralPath $outF -Raw) + (Get-Content -LiteralPath $errF -Raw)
+        }
+    }
+    finally { Pop-Location; Remove-Item -LiteralPath $outF, $errF -Force -ErrorAction SilentlyContinue }
     return [pscustomobject]@{ Rc = $rc; Out = $o }
 }
 function Commit([string]$repo, [string]$f, [string]$msg) {

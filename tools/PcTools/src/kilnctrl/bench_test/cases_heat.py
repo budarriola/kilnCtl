@@ -850,8 +850,18 @@ def _case_hp05(ctx: dict) -> CaseResult:
         duties = [z.duty for z in st.zones]
         relays = [z.relay_commanded_on for z in st.zones]
         ack_result = srv._profiles.ack_last_run()
+        card_clear: Optional[bool] = None
+        host = ctx.get("host")
+        if host:
+            try:
+                code, body = ctx.get("_http_get_json", _http_get_json)(host, "/api/profile_exec")
+                if code == 200 and isinstance(body, dict) and isinstance(body.get("last_run"), dict):
+                    card_clear = body["last_run"].get("present") is False
+            except Exception:  # noqa: BLE001 -- unreadable -> INCONCLUSIVE in the judge
+                card_clear = None
         return J.judge_stop(
-            st.state_name, duties, relays, bool(ack_result.ok), str(getattr(ack_result, "reason", "") or "")
+            st.state_name, duties, relays, bool(ack_result.ok), str(getattr(ack_result, "reason", "") or ""),
+            card_clear=card_clear,
         )
     finally:
         _cleanup_bench_profile(ctx)

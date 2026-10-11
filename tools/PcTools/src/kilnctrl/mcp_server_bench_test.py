@@ -38,7 +38,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                     ota_pico_image_commit: Optional[str] = None,
                     ota_pico_corrupt_image_path: Optional[str] = None,
                     update_downgrade_repo: Optional[str] = None,
-                    update_wrong_repo: Optional[str] = None) -> str:
+                    update_wrong_repo: Optional[str] = None,
+                    confirm: bool = False) -> str:
     """Run a standardized bench-test suite against this board
     (docs/BENCH_TEST_SYSTEM_PLAN.md). `suite` is one of `smoke`, `static`,
     `flash`, `stack`, `ota`, `autotune`, `heat`, `web`, `lcd`, `safety`,
@@ -90,8 +91,14 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     The `ota_*` image paths / commit / build and `update_*_repo` arguments are
     the same inputs `ota_matrix_run` takes; they are put into the case context
     unchanged so suite `ota` cases that need an image (OT-E01, OT-G01..G06, ...)
-    can run from here too. A case still gates itself, and still SKIPs when its
-    input is absent. Nothing here relaxes a gate.
+    can run from here too. Passing ANY of them (or `update_*_repo`) is gated
+    exactly like `ota_matrix_run`: it requires `confirm=True` (exactly True)
+    and then runs that tool's fail-closed run-level preflight
+    (`mcp_server_ota_matrix._run_level_preflight`: not ARMED, link up,
+    executor idle/paused, OTA interlock ok, no unacknowledged crash), and
+    refuses before `BenchTestRunner` is built if either fails (a `dry_run`
+    is exempt). A case still gates itself, and still SKIPs when its input is
+    absent.
 
     No case in this wave heats, flashes, writes config, or touches Wi-Fi,
     unless it was explicitly opted into as above.
@@ -129,6 +136,14 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                        ("update_wrong_repo", update_wrong_repo)):
         if value is not None:
             ctx[key] = value
+    if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
+        if confirm is not True:
+            return ("error: refused -- ota_*/update_*_repo image arguments can flash, roll back "
+                    "or reset the safety link; pass confirm=True (or use ota_matrix_run)")
+        from . import mcp_server_ota_matrix as _otam  # local import: avoids a circular import
+        refusal = _otam._run_level_preflight({}, resolved_host)
+        if refusal is not None:
+            return f"error: refused -- run-level precondition failed: {refusal}"
     runner = BenchTestRunner(ctx)
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
@@ -263,7 +278,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                       ota_pico_image_commit: Optional[str] = None,
                       ota_pico_corrupt_image_path: Optional[str] = None,
                       update_downgrade_repo: Optional[str] = None,
-                      update_wrong_repo: Optional[str] = None) -> str:
+                      update_wrong_repo: Optional[str] = None,
+                      confirm: bool = False) -> str:
     """Start `bench_test_run` in the background and return a job id at once.
 
     Same arguments, same meaning, same gating as `bench_test_run` (read its
@@ -291,7 +307,7 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                                ota_pico_image_commit=ota_pico_image_commit,
                                ota_pico_corrupt_image_path=ota_pico_corrupt_image_path,
                                update_downgrade_repo=update_downgrade_repo,
-                               update_wrong_repo=update_wrong_repo),
+                               update_wrong_repo=update_wrong_repo, confirm=confirm),
         {"suite": suite, "cases": cases, "dry_run": dry_run, "allow_heat": allow_heat,
          "tag": tag},
         classify=classify_bench_report,
