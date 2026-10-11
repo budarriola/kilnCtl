@@ -168,6 +168,11 @@ if ($Remove) {
 
     # F4: a detached worktree's unlanded commits die with its reflog. Refuse unless -Force.
     $unlanded = @(git -C $full rev-list HEAD --not --remotes --branches 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+        # Fail closed (sweep INFO-6): an errored rev-list says nothing about unlanded commits.
+        Write-Host "REFUSED: could not list unlanded commits in '$full' (git rev-list failed); not removing, even with -Force." -ForegroundColor Red
+        exit 1
+    }
     if ($unlanded.Count -gt 0) {
         Write-Host "commits reachable only from this worktree ($($unlanded.Count)):" -ForegroundColor Yellow
         $unlanded | ForEach-Object { Write-Host "  $_" }

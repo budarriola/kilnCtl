@@ -596,8 +596,8 @@ class WebSec04Test(unittest.TestCase):
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client.set_lcd_pin_calls, [])
-        # L6: a pre-existing PIN is unverified, so it is not handed on.
-        self.assertNotIn("_lcd_pin", ctx)
+        # A pre-existing PIN is handed on flagged unverified; LCD-19 proves it.
+        self.assertTrue(ctx["_lcd_pin"].get("unverified"))
         self.assertTrue(result.observed.get("pin_unverified"))
 
     def test_happy_path_passes_and_restores(self):

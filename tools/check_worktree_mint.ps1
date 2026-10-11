@@ -70,6 +70,17 @@ try {
     git -C $w3 add k.txt *>$null; git -C $w3 commit -m onbranch *>$null
     $r = Run-MintRemove @("-Path", $w3)
     Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w3)) "commit reachable from a branch: -Remove allowed"
+    # rev-list error (a branch ref pointing at a missing object): fail closed, even with -Force
+    $w5 = MintPath
+    $gc = (git -C $work rev-parse --git-common-dir).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gc)) { $gc = Join-Path $work $gc }
+    $badRef = Join-Path $gc "refs/heads/brokenref"
+    Set-Content -LiteralPath $badRef -Value "1111111111111111111111111111111111111111" -Encoding ascii
+    $r = Run-MintRemove @("-Path", $w5, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w5) -and $r.Out -match "REFUSED") "rev-list error: -Remove -Force refused (fail closed) and worktree kept"
+    Remove-Item -LiteralPath $badRef -Force
+    $r = Run-MintRemove @("-Path", $w5)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w5)) "after the bad ref is gone: -Remove allowed"
     # main tree refused, and nothing in it touched
     $r = Run-MintRemove @("-Path", $work)
     Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath (Join-Path $work "a.txt")) -and $r.Out -match "not a linked worktree") "main tree is refused"

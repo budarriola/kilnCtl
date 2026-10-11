@@ -250,7 +250,12 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
 /* When set, the stub reproduces relay_authority.c's real relay_authority_on_blocked()
  * body (NULL link -> APP source; otherwise blocked iff the link's fault_sources != 0,
  * and an uninitialised link reads 0 -- safety_link_get_fault_sources()). Kept in step by
- * hand with drivers/owners/relay_authority.c:16-29. */
+ * hand with drivers/owners/relay_authority.c relay_authority_on_blocked(). DRIFT NOTE (sweep
+ * INFO-5): linking the real function would pull relay_authority.c's own dependencies into this
+ * executable, so it is not linked; instead, any change to the real function's semantics
+ * (NULL link, uninitialised link, nonzero fault_sources) must be mirrored here, and the real
+ * semantics are pinned by the relay_authority host test built from relay_authority.c itself
+ * (build_host_tests.ps1, "relay_authority.c" executable). */
 static bool s_stub_blocked_real_semantics = false;
 bool relay_authority_on_blocked(SafetyLinkClass *safety, uint32_t *out_sources)
 {

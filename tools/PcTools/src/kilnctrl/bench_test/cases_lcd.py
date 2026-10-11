@@ -3206,6 +3206,8 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             verdict = {"missing": Verdict.NOT_RUN, "unverified": Verdict.INCONCLUSIVE}.get(exc.kind, Verdict.FAIL)
             return CaseResult(verdict, reason=exc.reason, observed=exc.observed)
         pin_cfg = {"right_pin": seeded["right_pin"], "wrong_pin": seeded["wrong_pin"]}
+        if seeded.get("unverified"):
+            pin_cfg["unverified"] = True
         ctx["_lcd_pin"] = pin_cfg
         # `seeded["state"]` is already PIN-free (admin_pin_set_before /
         # set_lcd_pin_status or set_lcd_pin_skipped) -- surface it on
@@ -3759,6 +3761,17 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
+            if (ctx.get("_lcd_pin") or {}).get("unverified"):
+                # The board's PIN was set outside this run. The right-PIN
+                # unlock above is the verification: if it did not succeed,
+                # the PIN may differ from the env var, which is not a FAIL.
+                result.observed["pin_unverified"] = right_pin_started is not True
+                if right_pin_started is not True:
+                    result = CaseResult(
+                        Verdict.INCONCLUSIVE,
+                        reason="pre-existing admin PIN could not be unlocked with the configured PIN "
+                               "(it may differ from the env var); PIN lock not verified",
+                        observed=result.observed)
     finally:
         if result is None:
             result = CaseResult(Verdict.FAIL, reason="LCD-19 aborted before a verdict was reached", observed=dict(state))

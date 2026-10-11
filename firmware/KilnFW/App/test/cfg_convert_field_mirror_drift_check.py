@@ -83,10 +83,20 @@ NON_ZONE_STRUCTURAL_KEYS = {"kind", "version", "profiles", "zones", "id", "segme
                             # Top-level additive blocks (relay_cycles, backup_export_prefs()) and
                             # their nested sub-keys. Not zone data: cfg_convert.py carries the
                             # top-level ones verbatim via ADDITIVE_TOP_LEVEL_KEYS.
-                            "relay_cycles", "stale_or_unknown_stores", "hw_relays", "c", "unit", "ramp_assist", "display_power",
+                            "relay_cycles", "stale_or_unknown_stores", "hw_relays", "ramp_assist", "display_power",
                             "brightness_percent", "timeout_setting", "keep_on_while_firing",
-                            "display_on_error", "hidden_builtin_profiles", "tz", "relay_names",
-                            "type"}
+                            "display_on_error", "hidden_builtin_profiles", "tz", "relay_names"}
+
+# Generic key names that are legitimate ONLY inside one export function (sweep INFO-3). Exempting them
+# globally would silently skip a future zone field of the same name; scoped, a zone key "type"/"unit"/"c"
+# emitted from any other function is still compared against cfg_convert.py. Key -> enclosing function(s).
+SCOPED_NON_ZONE_KEYS = {
+    "c": ("backup_export_relay_cycles",),
+    "unit": ("backup_export_prefs",),
+    "type": ("backup_export_prefs",),
+}
+# Top-level definitions only (column 0, not indented): calls inside `if (...) {` must not match.
+FUNC_DEF_RE = re.compile(r'^(?!\s|#)[^\n;{}]*?\b(\w+)\(\s*[^;{}]*\)\s*\{', re.MULTILINE)
 
 
 def strip_comments(text: str) -> str:
@@ -102,11 +112,22 @@ def collapse_indexed(key: str) -> str:
     return key
 
 
+def _enclosing_function(text: str, pos: int) -> str:
+    name = ""
+    for m in FUNC_DEF_RE.finditer(text, 0, pos):
+        name = m.group(1)
+    return name
+
+
 def extract_export_zone_keys(text: str) -> set:
     keys = set()
-    for call in STREAM_PRINTF_CALL_RE.findall(text):
-        for m in JSON_KEY_RE.finditer(call):
-            keys.add(m.group(1))
+    for m_call in STREAM_PRINTF_CALL_RE.finditer(text):
+        func = _enclosing_function(text, m_call.start())
+        for m in JSON_KEY_RE.finditer(m_call.group(1)):
+            k = m.group(1)
+            if func in SCOPED_NON_ZONE_KEYS.get(k, ()):
+                continue
+            keys.add(k)
     keys -= NON_ZONE_STRUCTURAL_KEYS
     return {collapse_indexed(k) for k in keys}
 

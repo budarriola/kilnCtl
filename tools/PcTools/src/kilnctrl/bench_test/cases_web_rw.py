@@ -1002,15 +1002,15 @@ def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
     """
     resolved = _resolve_lcd_pin(ctx)
     if resolved["cfg0"].get("admin_pin_set"):
-        # L6 residual: the config GET only says a PIN is set, and no route
-        # verifies one without side effects, so a PIN set outside this run
-        # is never trusted to equal KILNCTL_LCD_PIN.
-        raise LcdPinSeedError(
-            "unverified",
-            "board already has an admin PIN that this run did not set; it cannot be verified "
-            f"against {_LCD_PIN_ENV} without side effects, so it is not trusted",
-            {"pin_unverified": True, "admin_pin_set_before": True},
-        )
+        # The config GET only says a PIN is set, and no route verifies one
+        # without side effects. Do not overwrite it and do not trust it
+        # here: return it flagged unverified so the caller proves it with a
+        # real keypad unlock (LCD-19: enter_pin, INCONCLUSIVE if it fails).
+        return {
+            "right_pin": resolved["right_pin"], "wrong_pin": resolved["wrong_pin"],
+            "orig": resolved["orig"], "unverified": True,
+            "state": {"pin_unverified": True, "admin_pin_set_before": True},
+        }
     pin_set_ok, state = _write_lcd_pin_if_needed(resolved["client"], resolved["cfg0"], resolved["right_pin"])
     if not pin_set_ok:
         raise LcdPinSeedError(
@@ -1082,9 +1082,11 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
         state=state,
     )
     if result.verdict == Verdict.PASS and seed_state.get("admin_pin_set_before"):
-        # L6: a pre-existing PIN is never proven to be the env PIN (the config
-        # GET only says one is set), so it is not handed to LCD-19.
+        # A pre-existing PIN is not proven to be the env PIN (the config GET
+        # only says one is set). Hand it to LCD-19 flagged unverified; LCD-19
+        # proves it by a real keypad unlock and is INCONCLUSIVE otherwise.
         result.observed = dict(result.observed or {}, pin_unverified=True)
+        ctx["_lcd_pin"] = {"right_pin": right_pin, "wrong_pin": wrong_pin, "unverified": True}
     elif result.verdict == Verdict.PASS:
         # LCD-19 (registry.py depends_on WEB-SEC-04) reads this to drive
         # UiTestClient.enter_pin() -- never populated on anything less than

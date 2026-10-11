@@ -68,6 +68,8 @@ host test links littlefs.
 
 ### LOW-3: LCD-19 stays INCONCLUSIVE on the bench after the first run seeds the PIN
 
+**FIXED (sweepfx):** `seed_lcd_pin` no longer raises on a pre-set PIN; it returns the env PIN flagged `unverified`. WEB-SEC-04 hands it on flagged, and LCD-19 proves it with a real `enter_pin_verified` unlock, reporting INCONCLUSIVE only when the env var is missing or the unlock fails.
+
 `tools/PcTools/src/kilnctrl/bench_test/cases_web_rw.py:1004` (from `047844c5d`)
 
 `seed_lcd_pin()` now raises `unverified` (INCONCLUSIVE) whenever `admin_pin_set` is
@@ -90,6 +92,8 @@ the case already makes, so it needs no new web route.
 
 ### INFO-1: `af93e8232`: the "ONE shared gate" comment overstates its coverage
 
+**FIXED (sweepfx):** comment narrowed to zones_config blob writers and names the relay_names/zone_normals savers as not covered.
+
 `firmware/KilnFW/App/drivers/persist/zones_config_store.c:902`
 
 The comment says `nvs_save()`'s rollback-journal gate covers every zones writer.
@@ -103,6 +107,8 @@ add the same `kiln_cfg_swap_zone_edits_at_risk()` check to those savers.
 
 ### INFO-2: `708baa986`: an oversized pref file is treated as "newer" for good
 
+**NOT CHANGED (sweepfx):** deliberate earlier "cannot decide, so keep" design (same trade-off as K10-11); left alone.
+
 `firmware/KilnFW/App/drivers/persist/pref_cfg_fs.c:265-273`
 
 `cfg_fs_read()` returning `ESP_ERR_INVALID_SIZE` now always means "newer, version 0xFF",
@@ -114,6 +120,8 @@ preference stays on its NVS value with no path to repair. This is the same delib
 Suggested fix: log the condition once at WARN with the file size, so the bench log shows it.
 
 ### INFO-3: `6515efe70`: generic key names exempted globally in the cfg_convert drift check
+
+**FIXED (sweepfx):** `c`/`unit`/`type` are exempt only inside `backup_export_relay_cycles`/`backup_export_prefs`; elsewhere they are compared against cfg_convert.py.
 
 `firmware/KilnFW/App/test/cfg_convert_field_mirror_drift_check.py:77-89`
 
@@ -133,6 +141,8 @@ would pass the check. This matches how the other by-path entries work, so it is 
 
 ### INFO-5: `06eb0b62c`: the autotune test stub mirrors `relay_authority_on_blocked()` by hand
 
+**FIXED (sweepfx) as a drift note:** linking the real function would pull in relay_authority.c dependencies; the stub comment now names the real function and the host test that pins its semantics.
+
 `firmware/KilnFW/App/test/test_autotune_engine_prestart.c:245-250`
 
 The comment acknowledges the risk ("kept in step by hand"). If the real function changes,
@@ -142,6 +152,8 @@ Suggested fix: link the real `relay_authority_on_blocked()` into this test, or a
 mirror-drift line check.
 
 ### INFO-6: `b8b8c695e`: the `worktree_mint.ps1 -Remove` unlanded-commit guard fails open
+
+**FIXED (sweepfx):** `-Remove` refuses on a non-zero rev-list exit (even with -Force); `check_worktree_mint.ps1` has a broken-ref case.
 
 `tools/worktree_mint.ps1:170`
 

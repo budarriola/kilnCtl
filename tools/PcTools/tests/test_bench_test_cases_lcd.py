@@ -2665,10 +2665,9 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         self.assertEqual(result.observed.get("wrong_pin_refused"), True)
         self.assertEqual(result.observed.get("right_pin_started"), True)
 
-    def test_preexisting_admin_pin_is_inconclusive_never_driven(self):
-        # L6 residual: a PIN set outside this run is unverifiable (no
-        # side-effect-free verify route), so LCD-19 must not trust it, must
-        # not overwrite it, and must never drive the keypad with it.
+    def test_preexisting_admin_pin_verified_by_unlock(self):
+        # A PIN set outside this run is not overwritten; LCD-19 proves it by
+        # unlocking with the env PIN (enter_pin) and drives the checks.
         os.environ[CW._LCD_PIN_ENV] = "1234"
         sec = FakeSec04Client(admin_pin_set=True)
         ui = PinKeypadUiTest(right_pin="1234", wrong_pin=CW._derive_wrong_lcd_pin("1234"))
@@ -2676,9 +2675,20 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         ctx = {"srv": srv, "sec_client": sec}
         result = C._case_lcd19(ctx)
         self.assertEqual(sec.set_lcd_pin_calls, [])
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+        self.assertFalse(result.observed.get("pin_unverified"))
+        self.assertTrue(ctx["_lcd_pin"].get("unverified"))
+        self.assertNotIn("1234", (result.reason or "") + str(result.observed))
+
+    def test_preexisting_admin_pin_differs_is_inconclusive(self):
+        os.environ[CW._LCD_PIN_ENV] = "1234"
+        sec = FakeSec04Client(admin_pin_set=True)
+        ui = PinKeypadUiTest(right_pin="9876", wrong_pin=CW._derive_wrong_lcd_pin("1234"))
+        srv = FakeSrvFull(ui)
+        result = C._case_lcd19({"srv": srv, "sec_client": sec})
+        self.assertEqual(sec.set_lcd_pin_calls, [])
         self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
         self.assertTrue(result.observed.get("pin_unverified"))
-        self.assertNotIn("_lcd_pin", ctx)
         self.assertNotIn("1234", (result.reason or "") + str(result.observed))
 
     def test_self_seed_write_failure_fails_and_never_drives_keypad(self):

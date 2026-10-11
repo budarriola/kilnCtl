@@ -899,8 +899,10 @@ bool zones_config_persisted_equals_ram(void)
 
 esp_err_t nvs_save(void)
 {
-    /* Review 12 LOW-1: ONE shared gate for every zones writer (POST /api/zones, /pid, adaptive tune, autotune
-     * finalize, UART bridge, accessors, backup import ...). While a kept rollback journal would re-import or
+    /* Review 12 LOW-1: ONE shared gate for every zones_config BLOB writer (POST /api/zones, /pid, adaptive tune, autotune
+     * finalize, UART bridge, accessors, backup import ...). NOT covered: relay_names_save*() and
+     * zone_normals_save_locked() write their own keys without calling nvs_save(), so this gate does not apply
+     * to them (harmless while the kiln-config rollback journal never restores relay names or zone normals). While a kept rollback journal would re-import or
      * fault over a zones edit at the next boot, refuse the save; HTTP writers map this to 409. */
     if (kiln_cfg_swap_zone_edits_at_risk()) {
         ESP_LOGW(ZONES_HTTP_TAG, "zones config NOT saved: a kiln-config rollback journal is pending");
