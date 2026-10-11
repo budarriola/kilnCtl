@@ -526,6 +526,13 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
 #define CLEAR_TRIP_TOKEN_BOUND 0x100u
 static QueueHandle_t s_clear_trip_queue = NULL;
 
+// TEST_TRIP (docs/TEST_TRIP_PLAN.md section 4.2): depth-1 queue of "latch a
+// test trip on the next tick" tokens. link_task posts with a 0-tick send
+// (safety_core_request_test_trip()); safety_core_build_input() drains it into
+// safety_guard_input_t::test_trip_requested for exactly one tick. Depth 1: a
+// second request while one is pending is dropped (refused to the caller).
+static QueueHandle_t s_test_trip_queue = NULL;
+
 // Single-writer statics backing safety_core_get_clear_trip_stats() --
 // s_clear_trip_requested written only inside safety_core_request_clear_trip()
 // (called only from link_task, so effectively single-core-writer too, same
@@ -723,6 +730,12 @@ static volatile uint8_t  s_clear_trip_pre_spi_failed = 0;
 // Defined below, next to safety_core.h's outcome enum -- forward-declared
 // here because safety_core_task()'s log line above uses it before that point.
 static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome);
+
+static bool safety_core_test_trip_take(void)
+{
+    uint8_t token = 0;
+    return s_test_trip_queue != NULL && xQueueReceive(s_test_trip_queue, &token, 0) == pdTRUE;
+}
 
 static safety_guard_input_t safety_core_build_input(void)
 {
@@ -1422,6 +1435,8 @@ static safety_guard_input_t safety_core_build_input(void)
         // plain read of that cross-core flag, no debounce or gating of its
         // own needed here -- see safety_guards.h's field comment.
         .config_integrity_trip = config_store_ram_integrity_recurrence_pending(),
+        // Admin test trip: one-tick request drained from the depth-1 queue.
+        .test_trip_requested = safety_core_test_trip_take(),
         // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
         // computed above via tick_dt_compute_s() -- no longer the raw
         // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call
@@ -1841,6 +1856,15 @@ bool safety_core_request_clear_trip(bool bound, uint8_t trip_seq)
     return true;
 }
 
+bool safety_core_request_test_trip(void)
+{
+    if (s_test_trip_queue == NULL) {
+        return false;
+    }
+    uint8_t token = 1;
+    return xQueueSend(s_test_trip_queue, &token, 0) == pdTRUE;
+}
+
 // String form of safety_clear_trip_outcome_t for the log line
 // safety_core_task() emits once it dequeues and resolves a request --
 // factored out only so that log line and this comment stay next to the enum
@@ -1996,6 +2020,10 @@ bool safety_core_start(void)
     // itself a moment later.
     s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint16_t));
     if (s_clear_trip_queue == NULL) {
+        return false;
+    }
+    s_test_trip_queue = xQueueCreate(1, sizeof(uint8_t));
+    if (s_test_trip_queue == NULL) {
         return false;
     }
 

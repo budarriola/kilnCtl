@@ -123,6 +123,8 @@
 #include "kilnlink/kilnlink_param.h" // SAFETY_CMD_PARAM (0x1E reply), see link_task_send_param()
 #include "kilnlink/kilnlink_power.h"
 #include "kilnlink/kilnlink_reboot.h" // SAFETY_CMD_REBOOT, see link_task_handle_reboot()
+#include "kilnlink/kilnlink_test_trip.h"        // TEST_TRIP (0x2E), link_task_handle_test_trip()
+#include "kilnlink/kilnlink_test_trip_result.h" // TEST_TRIP_RESULT (0x2F)
 #include "kilnlink/kilnlink_reboot_result.h" // SAFETY_CMD_REBOOT_RESULT, see link_task_handle_reboot()
 #include "kilnlink/kilnlink_rollback.h" // SAFETY_CMD_ROLLBACK, see link_task_handle_rollback()
 #include "kilnlink/kilnlink_rollback_result.h" // SAFETY_CMD_ROLLBACK_RESULT, see link_task_send_rollback_result()
@@ -299,6 +301,29 @@ static link_peer_announce_t s_peer_announce = {false, 0u, 0u};
 
 static uint16_t s_msg_index = 0;
 static uint8_t s_boot_id = 0;
+
+// F6 (TEST_TRIP plan section 6): when the peer's protocol version was last
+// KNOWN (non-zero), in ms of the tick clock. Refreshed every link_task loop
+// iteration while s_peer_announce.version != 0, so "how long has it been
+// unknown" is now - this, whichever site forgot the version. Initialised at
+// boot (link_task_start) so the 30 s fallback is measured from boot.
+static uint32_t s_last_peer_known_ms = 0;
+
+// TEST_TRIP state (docs/TEST_TRIP_PLAN.md section 4): acceptance/rate-limit
+// memory, plus the reply burst. The reply is non-blocking: an ACCEPTED reply
+// waits (bounded) for safety_core to latch so it can carry the real trip_seq.
+#define LINK_TEST_TRIP_REPLY_COPIES      3u
+#define LINK_TEST_TRIP_REPLY_PERIOD_MS   40u
+#define LINK_TEST_TRIP_SEQ_WAIT_MS       300u
+static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u};
+static bool s_tt_waiting_seq = false;      // ACCEPTED, waiting for the latch to show a new trip_seq
+static uint8_t s_tt_seq_base = 0;
+static uint32_t s_tt_wait_deadline_ms = 0;
+static uint8_t s_tt_reply_request_id = 0;
+static uint8_t s_tt_reply_outcome = 0;
+static uint8_t s_tt_reply_trip_seq = 0;
+static uint8_t s_tt_reply_pending = 0;     // copies still to send
+static uint32_t s_tt_reply_last_ms = 0;
 
 static uint8_t s_rx_assembly[LINK_RX_ASSEMBLY_MAX];
 static size_t s_rx_assembly_len = 0;
@@ -1198,8 +1223,13 @@ static void link_task_send_diag(void)
         // before ANNOUNCE and for a protocol 16 peer the frame stays 30 bytes.
         .has_trip_seq = link_frame_trip_seq_supported(s_peer_announce.version),
         .trip_seq = diag_trip_seq,
+        // TEST_TRIP plan section 6 (F6): the 32-byte form carrying the Pico
+        // boot_id, only to a peer that announced >= 18 (link_frame_boot_id_
+        // supported()). Implies has_trip_seq (the gate is monotonic).
+        .has_boot_id = link_frame_boot_id_supported(s_peer_announce.version),
+        .pico_boot_id = s_boot_id,
     };
-    uint8_t payload[KILNLINK_DIAG_LEN_V2];
+    uint8_t payload[KILNLINK_DIAG_LEN_V3];
     kilnlink_diag_status_t status;
     size_t len = kilnlink_diag_encode(&dg, payload, sizeof(payload), &status);
     // 2026-08-23 call-path diagnostic, checkpoint 2 -- recorded regardless of
@@ -1207,7 +1237,7 @@ static void link_task_send_diag(void)
     s_diag_encode_len = (uint32_t)len;
     s_diag_encode_status = (uint8_t)status;
     if (len == 0) {
-        return; // can't happen: sizeof(payload) == KILNLINK_DIAG_LEN_V2, the larger form
+        return; // can't happen: sizeof(payload) == KILNLINK_DIAG_LEN_V3, the largest form
     }
 
     link_task_send_broadcast(payload, (uint8_t)len);
@@ -1578,6 +1608,108 @@ static void link_task_handle_request_enable(const kilnlink_frame_t *frame)
 // above) and LINK_PROTOCOL.md does not ask CLEAR_TRIP to reply; the ESP
 // observes the outcome via the tripped bit in the next Frame A/B it
 // receives.
+static uint32_t link_task_now_ms(void)
+{
+    return (uint32_t)xTaskGetTickCount() * portTICK_PERIOD_MS;
+}
+
+// ms the peer's protocol version has been unknown (0 while known).
+static uint32_t link_task_peer_unknown_ms(void)
+{
+    if (s_peer_announce.version != 0u) {
+        return 0u;
+    }
+    return link_task_now_ms() - s_last_peer_known_ms;
+}
+
+static void link_task_arm_test_trip_reply(uint8_t request_id, uint8_t outcome, uint8_t trip_seq)
+{
+    s_tt_reply_request_id = request_id;
+    s_tt_reply_outcome = outcome;
+    s_tt_reply_trip_seq = trip_seq;
+    s_tt_reply_pending = (uint8_t)LINK_TEST_TRIP_REPLY_COPIES;
+    s_tt_reply_last_ms = link_task_now_ms() - LINK_TEST_TRIP_REPLY_PERIOD_MS; // first copy at once
+}
+
+// TEST_TRIP (0x2E), docs/TEST_TRIP_PLAN.md section 4. Decode, run the pure
+// acceptance decision, and on ACCEPTED hand the request to safety_core, which
+// latches SAFETY_TRIP_TEST through the real guard path. Every outcome is
+// answered with a TEST_TRIP_RESULT burst (non-blocking, see
+// link_task_poll_test_trip_reply()). This path can only cause a trip.
+static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
+{
+    kilnlink_test_trip_t msg;
+    if (kilnlink_test_trip_decode(frame->payload, frame->length, &msg) != KILNLINK_TEST_TRIP_OK) {
+        return; // malformed: untrusted wire input, discarded like every other decode failure
+    }
+    safety_trip_t trip_reason = SAFETY_TRIP_NONE;
+    safety_core_get_diag_status(&trip_reason, NULL, NULL, NULL);
+    uint8_t outcome = link_frame_decide_test_trip(
+        &s_test_trip_state, link_task_now_ms(), msg.magic, msg.request_id, msg.pico_boot_id, s_boot_id,
+        s_peer_announce.version, update_task_transfer_active(), trip_reason != SAFETY_TRIP_NONE);
+    if (outcome == KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE) {
+        // Same request re-sent: answer the SAME way again (ACCEPTED, with the seq if known).
+        if (!s_tt_waiting_seq) {
+            uint8_t seq = 0;
+            (void)safety_core_get_trip_event(&seq, NULL, NULL, NULL, NULL);
+            link_task_arm_test_trip_reply(msg.request_id, outcome, seq);
+        }
+        return;
+    }
+    if (outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED) {
+        uint8_t base = 0;
+        (void)safety_core_get_trip_event(&base, NULL, NULL, NULL, NULL);
+        if (!safety_core_request_test_trip()) {
+            // Queue missing or a request already pending: nothing was latched.
+            outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+            log_task_log(LOG_LEVEL_WARN, "test_trip", "refused, safety_core request queue busy");
+            link_task_arm_test_trip_reply(msg.request_id, outcome, 0u);
+            return;
+        }
+        log_task_log(LOG_LEVEL_WARN, "test_trip", "ACCEPTED, test trip requested");
+        s_tt_waiting_seq = true;
+        s_tt_seq_base = base;
+        s_tt_reply_request_id = msg.request_id;
+        s_tt_wait_deadline_ms = link_task_now_ms() + LINK_TEST_TRIP_SEQ_WAIT_MS;
+        return;
+    }
+    log_task_log(LOG_LEVEL_INFO, "test_trip", "refused");
+    link_task_arm_test_trip_reply(msg.request_id, outcome, 0u);
+}
+
+// Once per link_task loop: finish an ACCEPTED reply (needs the latched
+// trip_seq, else 0 after the bounded wait) and send queued reply copies.
+static void link_task_poll_test_trip_reply(void)
+{
+    uint32_t now_ms = link_task_now_ms();
+    if (s_tt_waiting_seq) {
+        uint8_t seq = 0;
+        safety_trip_t reason = SAFETY_TRIP_NONE;
+        bool have = safety_core_get_trip_event(&seq, &reason, NULL, NULL, NULL);
+        if (have && seq != s_tt_seq_base) {
+            s_tt_waiting_seq = false;
+            link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, seq);
+        } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
+            s_tt_waiting_seq = false;
+            link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
+        }
+    }
+    if (s_tt_reply_pending > 0u && (now_ms - s_tt_reply_last_ms) >= LINK_TEST_TRIP_REPLY_PERIOD_MS) {
+        kilnlink_test_trip_result_t r = {
+            .request_id = s_tt_reply_request_id,
+            .outcome = s_tt_reply_outcome,
+            .trip_seq = s_tt_reply_trip_seq,
+        };
+        uint8_t payload[KILNLINK_TEST_TRIP_RESULT_LEN];
+        size_t len = kilnlink_test_trip_result_encode(&r, payload, sizeof(payload), NULL);
+        if (len != 0u) {
+            (void)link_task_send_broadcast(payload, (uint8_t)len);
+        }
+        s_tt_reply_pending--;
+        s_tt_reply_last_ms = now_ms;
+    }
+}
+
 static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
 {
     kilnlink_clear_trip_t msg;
@@ -1597,8 +1729,9 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
     // link_frame_decide_clear_trip() (src/tasks/link_frame.c) is the pure,
     // host-tested extraction of the two refusal checks documented above --
     // this function only acts on its verdict now.
-    link_clear_trip_decision_t decision = link_frame_decide_clear_trip(
-        trip_reason, msg.trip_mask, msg.has_trip_seq, s_peer_announce.version);
+    link_clear_trip_decision_t decision = link_frame_decide_clear_trip_v3(
+        trip_reason, msg.trip_mask, msg.has_trip_seq, msg.has_boot_id, msg.pico_boot_id,
+        s_boot_id, s_peer_announce.version, link_task_peer_unknown_ms());
 
     // A switch with no default, deliberately. This was an if-chain that tested
     // the two refusal values it knew about and let everything else fall
@@ -1636,6 +1769,17 @@ static void link_task_handle_clear_trip(const kilnlink_frame_t *frame)
         // stale or duplicated frame -- never let it clear whatever trip is
         // latched now.
         log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, unbound clear from protocol>=17 peer");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_PEER_UNKNOWN:
+        // F6: peer version unknown (no ANNOUNCE yet). A legacy clear cannot be
+        // bound to this Pico boot; refused until ANNOUNCE or the grace elapses.
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, peer version unknown (no ANNOUNCE yet)");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_BOOT_ID_REQUIRED:
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, protocol>=18 peer sent a clear without boot_id");
+        return;
+    case LINK_CLEAR_TRIP_REFUSE_BOOT_ID:
+        log_task_log(LOG_LEVEL_WARN, "clear_trip", "refused, boot_id is not this boot's");
         return;
     case LINK_CLEAR_TRIP_ACCEPT:
         break;
@@ -3133,6 +3277,9 @@ static void link_task_handle_raw_frame(const uint8_t *stuffed, size_t stuffed_le
     case LINK_FRAME_CLEAR_TRIP_CMD:
         link_task_handle_clear_trip(&frame);
         break;
+    case LINK_FRAME_TEST_TRIP_CMD:
+        link_task_handle_test_trip(&frame);
+        break;
     case LINK_FRAME_SET_CONFIG_CMD:
         link_task_handle_set_config(&frame);
         break;
@@ -3402,7 +3549,11 @@ static void link_task_fn(void *arg)
             link_task_send_power();
             last_power_tx = now;
         }
+        if (s_peer_announce.version != 0u) {
+            s_last_peer_known_ms = link_task_now_ms(); // F6: see s_last_peer_known_ms
+        }
         link_task_poll_trip_event(now);
+        link_task_poll_test_trip_reply();
         link_task_retry_pending_tc_type_reapply();
         link_task_config_check_poll(now);
 
@@ -3440,6 +3591,10 @@ bool link_task_start(void)
     }
     s_degraded_no_context = false;
     link_peer_announce_clear(&s_peer_announce); // version 0 = unknown until this boot's own ANNOUNCE_VERSION arrives
+    s_last_peer_known_ms = link_task_now_ms(); // F6: the 30 s unknown-peer grace runs from boot
+    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u};
+    s_tt_waiting_seq = false;
+    s_tt_reply_pending = 0u;
     s_msg_index = 0;
     s_rx_assembly_len = 0;
     s_rx_collecting = false;

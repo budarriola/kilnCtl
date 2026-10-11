@@ -132,6 +132,7 @@ try {
         (Join-Path $testDir "test_safety_core_stack_budget.c"),
         (Join-Path $testDir "test_safety_core_s8_wiring.c"),
         (Join-Path $testDir "test_safety_core_clear_trip_binding.c"),
+        (Join-Path $testDir "test_test_trip.c"),
         (Join-Path $testDir "test_safety_core_polarity_wiring.c"),
         (Join-Path $testDir "test_safety_core_ct_calibration_gate.c"),
         (Join-Path $testDir "test_safety_core_unconfigured_armed_backstop.c"),

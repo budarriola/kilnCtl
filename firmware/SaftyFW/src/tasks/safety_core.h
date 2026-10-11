@@ -133,6 +133,14 @@ void safety_core_get_diag_status(safety_trip_t *out_trip_reason, bool *out_warn_
 // resolved exactly as before.
 bool safety_core_request_clear_trip(bool bound, uint8_t trip_seq);
 
+// TEST_TRIP (docs/TEST_TRIP_PLAN.md section 4.2): ask safety_core to latch
+// SAFETY_TRIP_TEST on its next tick. link_task has ALREADY validated the
+// request (link_frame_decide_test_trip()); this is a 0-tick enqueue into a
+// depth-1 queue. false = queue missing or a request is already pending. It can
+// only cause a trip; the guard evaluation is safety_guards_tick()'s, and a
+// real guard firing the same tick keeps the reason.
+bool safety_core_request_test_trip(void);
+
 // Outcome of the most recently PROCESSED CLEAR_TRIP request (see
 // safety_core_get_clear_trip_stats() below) -- NONE until at least one has
 // been dequeued and run. safety_clear_trip_outcome_t itself lives in

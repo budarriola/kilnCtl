@@ -26,6 +26,8 @@
 #include "../config_store.h" // config_store_record_t -- pure, host-testable (its own header
                               // comment), same as this file; link_frame_apply_set_config()/
                               // link_frame_apply_set_ct_cal() below need the full record shape
+#include "kilnlink/kilnlink_test_trip.h"
+#include "kilnlink/kilnlink_test_trip_result.h"
 #include "kilnlink/kilnlink_frame_a_offsets.h" // KILNLINK_FRAME_A_* -- single source of truth for
                                                 // Frame A's byte offsets/lengths, ROADMAP.md M15
                                                 // "Frame A's field layout is hand-duplicated"
@@ -136,6 +138,13 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version);
 // no-include discipline as the two gates above.
 #define LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL 17u
 bool link_frame_trip_seq_supported(uint16_t peer_protocol_version);
+
+// TEST_TRIP plan section 6 (F6), KILNLINK_PROTOCOL_VERSION 17 -> 18. A peer
+// that announced >= 18 is sent the 32-byte DIAG V3 carrying the Pico boot_id
+// (link_task_send_diag()) and its CLEAR_TRIP must carry that boot_id back
+// (link_frame_decide_clear_trip_v3()). Mirrors kilnlink_version.h by value.
+#define LINK_FRAME_BOOT_ID_MIN_PROTOCOL 18u
+bool link_frame_boot_id_supported(uint16_t peer_protocol_version);
 
 // flags byte (offset 1): bits 0/1 (LINK_UP, FAULT) are the ESP's to own --
 // this module never sets them, they simply are not parameters below.
@@ -370,6 +379,12 @@ bool link_frame_unpack_context(const uint8_t *payload, uint8_t length, context_s
 // it's a fixed 3-byte frame with no variable-length fields, unlike
 // PUSH_CONTEXT, so there is no bespoke unpack helper to add in this file.
 #define LINK_FRAME_CLEAR_TRIP_CMD 0x0Au
+
+// --- ESP -> Pico: TEST_TRIP (0x2E) / Pico -> ESP: TEST_TRIP_RESULT (0x2F) -----
+// docs/TEST_TRIP_PLAN.md. Same values as KILNLINK_TEST_TRIP_CMD /
+// KILNLINK_TEST_TRIP_RESULT_CMD; local dispatch ids like the rest.
+#define LINK_FRAME_TEST_TRIP_CMD        0x2Eu
+#define LINK_FRAME_TEST_TRIP_RESULT_CMD 0x2Fu
 
 // --- ESP -> Pico: SAFETY_CMD_SET_CONFIG (0x16) -------------------------------
 // CommonFW/docs/LINK_PROTOCOL.md section 4. Same value as
@@ -609,6 +624,9 @@ typedef enum {
                                              // unclearable, see this function's own comment
     LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED,    // legacy 3-byte frame (no trip_seq) from a peer that
                                              // announced >= LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL (M4)
+    LINK_CLEAR_TRIP_REFUSE_PEER_UNKNOWN,     // F6: peer version unknown, legacy form, grace not elapsed
+    LINK_CLEAR_TRIP_REFUSE_BOOT_ID_REQUIRED, // F6: peer >= 18 sent a form without the Pico boot_id
+    LINK_CLEAR_TRIP_REFUSE_BOOT_ID,          // F6: boot_id on the frame is not this boot's
 } link_clear_trip_decision_t;
 
 // `current_trip_reason` is read fresh from safety_core_get_diag_status()
@@ -648,6 +666,41 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
                                                           uint16_t wire_trip_mask,
                                                           bool frame_has_trip_seq,
                                                           uint16_t peer_protocol_version);
+
+// F6 (TEST_TRIP plan section 6): CLEAR_TRIP bound to the Pico boot_id.
+// Runs link_frame_decide_clear_trip() first and returns its verdict unless it
+// is ACCEPT, then:
+//   - a frame carrying a boot_id that differs from own_boot_id -> REFUSE_BOOT_ID
+//   - peer >= 18 and no boot_id on the frame -> REFUSE_BOOT_ID_REQUIRED
+//   - peer version unknown (0), no boot_id, unknown for less than
+//     LINK_FRAME_CLEAR_PEER_UNKNOWN_GRACE_MS -> REFUSE_PEER_UNKNOWN (after the
+//     grace the legacy form is accepted: an old ESP never ANNOUNCEs)
+#define LINK_FRAME_CLEAR_PEER_UNKNOWN_GRACE_MS 30000u
+link_clear_trip_decision_t link_frame_decide_clear_trip_v3(safety_trip_t current_trip_reason,
+                                                             uint16_t wire_trip_mask,
+                                                             bool frame_has_trip_seq,
+                                                             bool frame_has_boot_id,
+                                                             uint32_t wire_boot_id,
+                                                             uint32_t own_boot_id,
+                                                             uint16_t peer_protocol_version,
+                                                             uint32_t peer_unknown_ms);
+
+// --- TEST_TRIP acceptance (plan section 4.1) ---------------------------------
+#define LINK_FRAME_TEST_TRIP_MIN_INTERVAL_MS 10000u
+typedef struct {
+    bool have_accept;
+    uint32_t last_accept_ms;
+    uint8_t last_request_id;
+} link_test_trip_state_t;
+
+// Returns a KILNLINK_TEST_TRIP_OUTCOME_* value. Check order: bad magic, peer
+// version, boot_id, duplicate request_id (within the interval), update busy,
+// already tripped, rate limit, else ACCEPTED (recorded in `state`).
+uint8_t link_frame_decide_test_trip(link_test_trip_state_t *state, uint32_t now_ms,
+                                     uint8_t wire_magic, uint8_t request_id,
+                                     uint32_t wire_boot_id, uint32_t own_boot_id,
+                                     uint16_t peer_protocol_version, bool update_busy,
+                                     bool any_trip_latched);
 
 // --- S6b liveness: only frames from the expected peer count ------------------
 // kilnlink audit 2026-10-09 L1. link_task_handle_raw_frame() refreshes S6b's

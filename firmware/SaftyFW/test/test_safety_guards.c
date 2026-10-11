@@ -4666,8 +4666,100 @@ static void test_guard_review_2026_10_09(void)
         TEST_CHECK(s.s10_warn, "S10 warn is held across a bad read");
     }}
 
+static void test_admin_test_trip(void)
+{
+    TEST_SECTION("TEST (reason 4) -- admin test trip, docs/TEST_TRIP_PLAN.md section 4");
+
+    /* No request: never trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == false, "no request: not tripped");
+        TEST_CHECK(!s.is_tripped, "no request: is_tripped clear");
+    }
+    /* One tick, no debounce, reason 4. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "request latches on the very first tick (no debounce)");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "reason is SAFETY_TRIP_TEST");
+        TEST_CHECK((int)SAFETY_TRIP_TEST == 4, "SAFETY_TRIP_TEST is reason 4");
+    }
+    /* A real guard that fires the same tick keeps the reason. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = true;
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "real guard + request: tripped");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "the real guard's reason wins over the test trip");
+    }
+    /* Ignored while already tripped: cannot rewrite or mask the latched reason. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.config_integrity_trip = false;
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == false, "request while tripped: not newly tripped");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "request while tripped leaves the reason alone");
+    }
+    /* Clear is held until trip_verify_s of K4-open has passed (S9 proved the relay). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg(); /* trip_verify_s 0 -> 10 s default */
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+
+        safety_guard_input_t open = base_input();
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &open), "clear refused at once (K4 not yet reported open)");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "still latched after the refused clear");
+
+        open.relay_deenergized = true;
+        for (int i = 0; i < 50; i++) { /* 5 s of verification */
+            (void)safety_guards_tick(&s, &cfg, &open);
+        }
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &open), "clear refused inside trip_verify_s");
+        for (int i = 0; i < 60; i++) { /* now 11 s */
+            (void)safety_guards_tick(&s, &cfg, &open);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST && !s.trip_ineffective,
+                   "no current present: S9 did not escalate");
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &open), "clear granted once trip_verify_s has passed");
+        TEST_CHECK(!s.is_tripped, "unlatched after the granted clear");
+    }
+    /* A K4 that never reads open never releases the hold. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        for (int i = 0; i < 300; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "relay never reported open: clear stays refused");
+    }
+}
+
 void run_test_safety_guards(void)
 {
+    test_admin_test_trip();
     test_s1();
     test_s1_ceiling_properties();
     test_s5();

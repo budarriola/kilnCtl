@@ -184,6 +184,14 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                              const safety_guard_state_t *state)
 {
     switch (reason) {
+    case SAFETY_TRIP_TEST: /* admin test trip (docs/TEST_TRIP_PLAN.md section 4.3): there is
+                            * no physical condition to re-test, so the clear is held until
+                            * S9's verification window has elapsed -- K4 is proven open
+                            * (and S9 had its chance to escalate) before a human clear is
+                            * honoured. s9_verify_elapsed_s only advances while K4 is
+                            * reported de-energized, so a relay that never opens never
+                            * releases the hold. */
+        return state->s9_verify_elapsed_s < effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT);
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
         return s5_bad_read_now(in);
     case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
@@ -1311,6 +1319,18 @@ context_guards:
                 }
             }
         }
+    }
+
+    /* Admin test trip (docs/TEST_TRIP_PLAN.md section 4.2). Evaluated LAST on the
+     * not-tripped path so a real guard that fired this tick has already
+     * returned and keeps the reason. One-tick request, no debounce: the ESP
+     * already authenticated and rate-limited it. Goes through the same
+     * trip() latch as a genuine guard, so safety_core's newly_tripped branch
+     * (relay drop, boot_reason latch, trip_seq bump, TRIP_EVENT) is shared.
+     * It can only ever CAUSE a trip -- nothing here clears, masks or blinds one. */
+    if (in->test_trip_requested) {
+        trip(state, SAFETY_TRIP_TEST, "admin test trip");
+        return true;
     }
 
     /* Not tripped this tick -- S9's verification window has nothing to

@@ -65,6 +65,11 @@ bool link_frame_rollback_result_supported(uint16_t peer_protocol_version)
     return peer_protocol_version >= LINK_FRAME_ROLLBACK_RESULT_MIN_PROTOCOL;
 }
 
+bool link_frame_boot_id_supported(uint16_t peer_protocol_version)
+{
+    return peer_protocol_version >= LINK_FRAME_BOOT_ID_MIN_PROTOCOL;
+}
+
 bool link_frame_trip_seq_supported(uint16_t peer_protocol_version)
 {
     return peer_protocol_version >= LINK_FRAME_TRIP_SEQ_MIN_PROTOCOL;
@@ -280,6 +285,67 @@ link_clear_trip_decision_t link_frame_decide_clear_trip(safety_trip_t current_tr
         return LINK_CLEAR_TRIP_REFUSE_SEQ_REQUIRED;
     }
     return LINK_CLEAR_TRIP_ACCEPT;
+}
+
+link_clear_trip_decision_t link_frame_decide_clear_trip_v3(safety_trip_t current_trip_reason,
+                                                             uint16_t wire_trip_mask,
+                                                             bool frame_has_trip_seq,
+                                                             bool frame_has_boot_id,
+                                                             uint32_t wire_boot_id,
+                                                             uint32_t own_boot_id,
+                                                             uint16_t peer_protocol_version,
+                                                             uint32_t peer_unknown_ms)
+{
+    link_clear_trip_decision_t base = link_frame_decide_clear_trip(
+        current_trip_reason, wire_trip_mask, frame_has_trip_seq, peer_protocol_version);
+    if (base != LINK_CLEAR_TRIP_ACCEPT) {
+        return base;
+    }
+    if (frame_has_boot_id) {
+        return (wire_boot_id == own_boot_id) ? LINK_CLEAR_TRIP_ACCEPT : LINK_CLEAR_TRIP_REFUSE_BOOT_ID;
+    }
+    if (link_frame_boot_id_supported(peer_protocol_version)) {
+        return LINK_CLEAR_TRIP_REFUSE_BOOT_ID_REQUIRED;
+    }
+    if (peer_protocol_version == 0u && peer_unknown_ms < LINK_FRAME_CLEAR_PEER_UNKNOWN_GRACE_MS) {
+        return LINK_CLEAR_TRIP_REFUSE_PEER_UNKNOWN;
+    }
+    return LINK_CLEAR_TRIP_ACCEPT;
+}
+
+uint8_t link_frame_decide_test_trip(link_test_trip_state_t *state, uint32_t now_ms,
+                                     uint8_t wire_magic, uint8_t request_id,
+                                     uint32_t wire_boot_id, uint32_t own_boot_id,
+                                     uint16_t peer_protocol_version, bool update_busy,
+                                     bool any_trip_latched)
+{
+    if (wire_magic != KILNLINK_TEST_TRIP_MAGIC) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BAD_FRAME;
+    }
+    if (!link_frame_boot_id_supported(peer_protocol_version)) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_PEER_VERSION;
+    }
+    if (wire_boot_id != own_boot_id) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BOOT_ID;
+    }
+    bool within = state->have_accept &&
+                  (uint32_t)(now_ms - state->last_accept_ms) < LINK_FRAME_TEST_TRIP_MIN_INTERVAL_MS;
+    if (within && request_id == state->last_request_id) {
+        return KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE;
+    }
+    if (update_busy) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_UPDATING;
+    }
+    if (any_trip_latched) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+    }
+    if (within) {
+        return KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;
+    }
+    state->have_accept = true;
+    state->last_accept_ms = now_ms;
+    state->last_request_id = request_id;
+    return KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
 }
 
 void link_frame_apply_set_config(const config_store_record_t *committed, uint8_t tc_type,

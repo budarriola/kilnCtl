@@ -625,6 +625,12 @@ typedef struct {
      * alongside S6a/S7, rather than gated on context_valid. */
     bool config_integrity_trip;
 
+    /* Admin test trip request (SAFETY_CMD_TEST_TRIP 0x2E, docs/TEST_TRIP_PLAN.md).
+     * True for exactly one tick (safety_core drains a depth-1 queue into it).
+     * Latches SAFETY_TRIP_TEST at the END of the not-tripped path, so a real
+     * guard firing the same tick wins the reason. Ignored while tripped. */
+    bool test_trip_requested;
+
     float dt_s;
 } safety_guard_input_t;
 

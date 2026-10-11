@@ -86,6 +86,8 @@ bool safety_core_request_enable(bool enable)
     return true;
 }
 bool safety_core_request_clear_trip(bool bound, uint8_t seq) { (void)bound; (void)seq; g_clear_trip_requests++; return true; }
+bool safety_core_request_test_trip(void) { return true; }
+bool update_task_transfer_active(void) { return false; }
 uint32_t safety_core_ms_since_last_enable_true_request(bool *ever) { if (ever) { *ever = false; } return 0; }
 void safety_core_set_tc_type_apply_in_progress(bool b) { (void)b; }
 void safety_core_get_output_status(bool *r, bool *h) { if (r) { *r = false; } if (h) { *h = false; } }
