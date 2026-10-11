@@ -31,7 +31,7 @@ None.
 
 ## MED
 
-### MED-1: DIAG-before-FW_VERSION double-counts one reboot, and the second bump erases the T3 lost-trip latch
+### MED-1 (FIXED in f8a12608f): DIAG-before-FW_VERSION double-counts one reboot, and the second bump erases the T3 lost-trip latch
 
 Files: `safety_link_frames.c` `safety_apply_fw_version()` (boot_id-changed branch, ~418) and
 `safety_apply_diag()` (~1105); `heat_enable.c` `heat_enable_note_pico_boot()` (~753-781).
@@ -98,7 +98,7 @@ Add P1 and P2 as permanent tests.
 
 ## LOW
 
-### LOW-1: the long-outage blind spot is not acknowledged, and the uptime test cannot close it
+### LOW-1 (FIXED in f8a12608f): the long-outage blind spot is not acknowledged, and the uptime test cannot close it
 
 Files: `safety_link.c` ~314 (comment), `safety_link_frame.c` `safety_pico_uptime_regressed()`.
 
@@ -128,7 +128,7 @@ is caught, however long the outage. The modular difference also handles the 32-b
 under about 24.8 days. Past that, fall back to "unknown, seed". At minimum, reword the comment so it
 states this blind spot and its 1/256 x short-previous-boot exposure.
 
-### LOW-2: reinstated LOW-4 false positive when an outage spans the wrap; the comment overstates the wrap band and says false positives "pause"
+### LOW-2 (FIXED in f8a12608f): reinstated LOW-4 false positive when an outage spans the wrap; the comment overstates the wrap band and says false positives "pause"
 
 Files: `safety_link_frame.h:49` (`SAFETY_PICO_UPTIME_WRAP_BAND_MS = 120000`), `safety_link.c` ~314.
 
@@ -149,7 +149,7 @@ So "any residual false positive pauses" is wrong in both directions. It may not 
 it does, it is a nuisance pause. Heat never resumes unsafely from this path, because the Pico's own
 state still gates K4. The expected-uptime fix in LOW-1 removes this false positive too.
 
-### LOW-3: the new test does not exercise the fatal-versus-benign consumer
+### LOW-3 (FIXED in f8a12608f): the new test does not exercise the fatal-versus-benign consumer
 
 File: `test_safety_link_compile.c` `test_low4_link_down_invalidates_uptime_baseline`.
 
