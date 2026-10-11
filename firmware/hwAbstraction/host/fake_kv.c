@@ -174,6 +174,9 @@ static bool key_logically_present(const fake_kv_key_slot_t *k)
  * of do_get() and fake_kv_reset_all(), both below) since this file has no
  * header of its own for internal statics and forward declarations. */
 static unsigned s_get_call_count = 0;
+/* Probe-error injection for hal_kv_key_exists(): the next `s_key_exists_fail_count` probes return the status. */
+static unsigned s_key_exists_fail_count = 0;
+static hal_status_t s_key_exists_fail_status = HAL_OK;
 
 void fake_kv_reset_all(void)
 {
@@ -189,6 +192,7 @@ void fake_kv_reset_all(void)
     s_silent_set_noops = 0u;
     s_blob_get_misses_size1 = false;
     s_get_call_count = 0u;
+    s_key_exists_fail_count = 0u;
     s_next_open_fail_armed = false;
     s_next_open_fail_status = HAL_OK;
     s_next_open_fail_namespace[0] = '\0';
@@ -618,6 +622,10 @@ hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key)
     fake_kv_handle_slot_t *hs = get_handle(h);
     if (!hs) return HAL_NOT_READY;
     if (key == NULL) return HAL_INVALID_ARG;
+    if (s_key_exists_fail_count > 0u) {
+        s_key_exists_fail_count--;
+        return s_key_exists_fail_status;
+    }
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO;
     fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];
     fake_kv_key_slot_t *k = find_key(ns, key, false);
@@ -732,4 +740,10 @@ void fake_kv_script_write_status_after(unsigned skip, hal_status_t status)
     s_next_write_fail_armed = true;
     s_next_write_fail_skip = skip;
     s_next_write_fail_status = status;
+}
+
+void fake_kv_script_key_exists_status(unsigned count, hal_status_t status)
+{
+    s_key_exists_fail_count = count;
+    s_key_exists_fail_status = status;
 }

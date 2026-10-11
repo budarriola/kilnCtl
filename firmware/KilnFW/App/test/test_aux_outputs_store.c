@@ -123,6 +123,24 @@ static void stash_blob(const void *bytes, size_t len, uint32_t rev)
     hal_kv_close(&h);
 }
 
+/* review web7 LOW-9: an existence-probe ERROR is not "absent"; the erase must report failure and keep the key. */
+static void test_legacy_erase_probe_error_is_not_absent(void)
+{
+    fresh_board();
+    const unsigned char bytes[4] = {1, 2, 3, 4};
+    stash_blob(bytes, sizeof(bytes), 1);
+    const char *const keys[1] = {NVS_KEY_AUX_OUT};
+    fake_kv_script_key_exists_status(1u, HAL_IO);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_FAIL,
+               "probe error is a failure, not absent");
+    hal_kv_handle_t h;
+    TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_OK, "open");
+    TEST_CHECK(hal_kv_key_exists(&h, NVS_KEY_AUX_OUT) == HAL_OK, "key kept after probe error");
+    hal_kv_close(&h);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_OK,
+               "retry with healthy probe erases");
+}
+
 static void test_predicate(void)
 {
     TEST_SECTION("aux_outputs_relay_conflict: pure predicate, bit i = relay i+1");
@@ -650,6 +668,7 @@ void run_test_aux_outputs_store(void)
     test_pico_mask_strips_aux();
     test_pico_mask_call_site_shape();
     test_raw_verify_and_journal();
+    test_legacy_erase_probe_error_is_not_absent();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

@@ -841,6 +841,59 @@ def _restore_zones_http_client(saved):
     real.get_zones, real.build_post_body, real.post_zones = saved
 
 
+class _GenerationFakeZhc(_FakeZonesHttpClient):
+    """Models webfx5's expected_generation guard: every committed POST bumps
+    the board's generation; a body built from an older generation is refused
+    409 zones_config_stale and writes nothing."""
+
+    def __init__(self):
+        super().__init__()
+        self.gen = 5
+        self.snapshot["generation"] = 5
+        self.stale_refusals = 0
+
+    def get_zones(self, host):
+        snap = dict(self.snapshot)
+        snap["generation"] = self.gen
+        return snap
+
+    def post_zones(self, host, body):
+        if body["current"].get("generation") != self.gen:
+            self.stale_refusals += 1
+            return "refused: HTTP 409: zones_config_stale"
+        result = super().post_zones(host, body)
+        if result == "ok":
+            self.gen += 1
+        return result
+
+
+class RestoreFreshGenerationTest(unittest.TestCase):
+    def setUp(self):
+        self.fake = _GenerationFakeZhc()
+        self._saved = _install_fake_zones_http_client(self.fake)
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def test_restore_after_case_post_bumped_generation_succeeds(self):
+        snapshot = self.fake.get_zones("h")
+        restore_body = self.fake.build_post_body(snapshot, {})
+        # the case's own change commits and bumps the generation
+        self.assertEqual(self.fake.post_zones("h", self.fake.build_post_body(
+            snapshot, {"zones": [{"index": 2, "zone_type": 1}]})), "ok")
+        ctx = {"_sleep": lambda s: None}
+        err = C._post_zones_restore(ctx, "h", restore_body, expected_snapshot=snapshot)
+        self.assertIsNone(err)
+        self.assertEqual(self.fake.stale_refusals, 0)
+        self.assertEqual(self.fake.posted_bodies[-1]["preset"], {})
+
+    def test_stale_body_alone_would_be_refused(self):
+        snapshot = self.fake.get_zones("h")
+        restore_body = self.fake.build_post_body(snapshot, {})
+        self.fake.gen += 1
+        self.assertIn("409", self.fake.post_zones("h", restore_body))
+
+
 class HP03Test(unittest.TestCase):
     def setUp(self):
         self.fake_zhc = _FakeZonesHttpClient()

@@ -19,6 +19,7 @@
 #include "esp_log.h"
 
 #include "hal_kv.h"
+#include "hal_sysinfo.h" /* hal_sysinfo_random_u32() -- boot seed of s_slot_gen */
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t seen by
                               * callers of this module's nvs_*()-named wrappers below */
 #include "nvs_key_check.h"
@@ -2313,6 +2314,14 @@ static esp_err_t profiles_boot_load(void)
 
 esp_err_t profiles_http_start(void)
 {
+    /* Review web7 LOW-4: s_slot_gen is RAM-only; a random boot seed (shared by all slots, each still counts up
+     * independently) keeps a pre-reboot page's expected_rev from matching a post-reboot count. */
+    {
+        const uint32_t seed = hal_sysinfo_random_u32() & 0x3ffffffeu;
+        for (size_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+            atomic_store(&s_slot_gen[i], seed);
+        }
+    }
     (void)profiles_boot_load();
     atomic_store(&s_profiles_loaded, true); /* load writes done; route registration below touches no slot */
     esp_err_t err;

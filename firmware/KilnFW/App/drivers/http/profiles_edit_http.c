@@ -866,6 +866,11 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "built-in schedules are read-only and cannot be deleted");
         return ESP_OK;
     case PROFILES_DELETE_PERSIST_FAILED:
+        /* Review web7 LOW-6: the store erase refuses (ESP_ERR_INVALID_STATE) on a slot whose rev floor is unknown
+         * this boot; that is the store_unreadable_at_boot 409, not a flash write failure. Any other failure keeps
+         * the plain 500 (persfx3 MED-2). */
+        return cfg_fs_http_persist_failed_state(req, s_profile_rev_unknown[id],
+                                                s_profile_rev_unknown[id] ? ESP_ERR_INVALID_STATE : ESP_FAIL, -1);
     default:
         return cfg_fs_http_persist_failed(req);
     }

@@ -347,16 +347,18 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     (void)msg;
     return ESP_OK;
 }
+static char s_last_status_str[48];
+static char s_last_sendstr[512];
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
-    (void)status;
+    snprintf(s_last_status_str, sizeof(s_last_status_str), "%s", status ? status : "");
     return ESP_OK;
 }
 esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
 {
     (void)r;
-    (void)s;
+    snprintf(s_last_sendstr, sizeof(s_last_sendstr), "%s", s ? s : "");
     return ESP_OK;
 }
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
@@ -2729,6 +2731,23 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
             }
         }
         free(edit_text);
+    }
+
+    /* Review web7 LOW-5: the LCD overwrite path captures the slot revision at pick time and refuses on change. */
+    static const char *LCD_C_CANDIDATES[] = {
+        "../drivers/ui/ui_page_profile_builder_review.c",
+        "App/drivers/ui/ui_page_profile_builder_review.c",
+        "firmware/KilnFW/App/drivers/ui/ui_page_profile_builder_review.c",
+    };
+    char *lcd_text = test_read_source_anchored(__FILE__, "../drivers/ui/ui_page_profile_builder_review.c",
+                                                LCD_C_CANDIDATES, 3);
+    TEST_CHECK(lcd_text != NULL, "could not locate ui_page_profile_builder_review.c");
+    if (lcd_text) {
+        TEST_CHECK(strstr(lcd_text, "s_pick_rev = profiles_http_slot_rev(slot)") != NULL,
+                   "LCD slot pick captures the slot revision");
+        TEST_CHECK(strstr(lcd_text, "profiles_http_slot_rev(slot) != s_pick_rev") != NULL,
+                   "LCD save compares the captured revision before writing");
+        free(lcd_text);
     }
 }
 
@@ -5731,6 +5750,20 @@ static void fuzz_small_setup(void)
     s_fake_restore_calls = 0;
 }
 
+static void test_delete_rev_unknown_is_409(void)
+{
+    TEST_SECTION("profile delete on a rev-unknown slot answers 409 store_unreadable_at_boot, not 500 (review web7 LOW-6)");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_delete_post_handler, "id=8", 4, (size_t)-1, 0);
+    TEST_CHECK(profiles_slot_used(8), "refused delete keeps the slot");
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    s_profile_rev_unknown[8] = false;
+}
+
 static void test_fuzz_small_body_handlers(void)
 {
     TEST_SECTION("delete/hide/restore/favorite fuzz -- hostile bodies change nothing");
@@ -5895,6 +5928,7 @@ void run_test_profiles_http(void)
     test_profile_rule_temp_nan_refused_even_with_cmp_none();
     test_profile_favorite_empty_slot_refused();
     test_fuzz_small_body_handlers();
+    test_delete_rev_unknown_is_409();
     test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();

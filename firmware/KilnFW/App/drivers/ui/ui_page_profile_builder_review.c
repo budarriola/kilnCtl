@@ -76,6 +76,11 @@ static lv_obj_t *s_slot_grid;
 static uint8_t s_slot_page;
 static lv_obj_t *s_slot_page_label;
 
+/* Review web7 LOW-5: the slot revision the operator saw when picking a slot. The save (after the PIN prompt and,
+ * for an occupied slot, the overwrite confirm) refuses if the slot was saved/deleted by anyone else in between. */
+static uint8_t s_pick_slot = 0xFF;
+static uint32_t s_pick_rev;
+
 static profile_t *draft(void)
 {
     return ui_page_profile_builder_draft();
@@ -88,6 +93,25 @@ static void do_save_apply(void *user_data)
     char err_msg[64] = "";
     uint8_t out_id = 0;
     uint8_t warn_count = 0;
+
+    if (s_pick_slot == slot && (s_pick_rev & 1u) != 0u) {
+        s_pick_slot = 0xFF; /* picked mid-write: stale by definition */
+    }
+    if (s_pick_slot != slot || profiles_http_slot_rev(slot) != s_pick_rev) {
+        ESP_LOGW(TAG, "slot %u changed since it was picked; save refused", (unsigned)slot);
+        s_pick_slot = 0xFF;
+        ui_confirm_params_t stale = {
+            .title = "Cannot Save",
+            .body = "That slot changed since you picked it. Pick the slot again.",
+            .confirm_label = "OK",
+            .confirm_color = UI_THEME_COLOR_CARD,
+            .on_confirm = NULL,
+            .user_data = NULL,
+        };
+        ui_confirm_show(&stale);
+        return;
+    }
+    s_pick_slot = 0xFF;
 
     /* profiles_http_save() writes NVS on the calling task. That is safe from
      * here: lvgl_port.c gives the LVGL task (this callback runs on it) an
@@ -152,6 +176,8 @@ static void slot_clicked_cb(lv_event_t *e)
 {
     uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
     profile_t existing;
+    s_pick_rev = profiles_http_slot_rev(slot); /* before the read, so a racing save makes the later check fail */
+    s_pick_slot = slot;
     bool occupied = profiles_http_get(slot, &existing);
     if (!occupied) {
         do_save(slot);

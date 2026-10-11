@@ -29,7 +29,14 @@ static inline esp_err_t legacy_nvs_erase_keys(const char *tag, const char *parti
     bool dirty = false;
     esp_err_t result = ESP_OK;
     for (size_t i = 0; i < nkeys; i++) {
-        if (hal_kv_key_exists(&h, keys[i]) != HAL_OK) {
+        hal_status_t ex = hal_kv_key_exists(&h, keys[i]);
+        if (ex == HAL_NOT_FOUND) {
+            continue;
+        }
+        if (ex != HAL_OK) { /* review web7 LOW-9: a probe error is not "absent" */
+            ESP_LOGW(tag, "legacy NVS %s/%s: existence probe failed (%s) -- copy kept, retried next boot", ns,
+                     keys[i], hal_status_to_name(ex));
+            result = ESP_FAIL;
             continue;
         }
         st = hal_kv_erase_key(&h, keys[i]);
@@ -44,8 +51,9 @@ static inline esp_err_t legacy_nvs_erase_keys(const char *tag, const char *parti
         result = ESP_FAIL;
     }
     for (size_t i = 0; i < nkeys && result == ESP_OK; i++) {
-        if (hal_kv_key_exists(&h, keys[i]) == HAL_OK) {
-            ESP_LOGW(tag, "legacy NVS %s/%s: still present after erase", ns, keys[i]);
+        hal_status_t ex = hal_kv_key_exists(&h, keys[i]);
+        if (ex != HAL_NOT_FOUND) { /* present, or the probe itself failed: neither proves the key is gone */
+            ESP_LOGW(tag, "legacy NVS %s/%s: still present (or unverifiable) after erase", ns, keys[i]);
             result = ESP_FAIL;
         }
     }

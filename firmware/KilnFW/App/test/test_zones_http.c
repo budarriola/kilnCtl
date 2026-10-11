@@ -2180,7 +2180,15 @@ static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
     s_zones.cfg.zones[1].max_temp_c = 100.0f;
     zones_cfg_t before = s_zones.cfg;
     int writes_before = s_ceiling_writer_calls;
+    /* Review web7 LOW-7: make the raise REAL (a link, and a Pico ceiling cache in sync with the live max of 100),
+     * so removing the early-out at zones_http_post.c lets the Pico write happen and fails this test. */
+    s_hw_safety = (SafetyLinkClass *)1;
+    test_cfg_rows_reset();
+    test_cfg_set_f32(SAFETY_PARAM_ID_ABS_MAX_TEMP_C, 100.0f, true);
+    s_ceiling_writer_on_write = test_ceiling_cache_follows_write;
     run_zones_post(body);
+    s_ceiling_writer_on_write = NULL;
+    s_hw_safety = NULL;
     zones_cfg_load_fault_t lf;
     TEST_CHECK(s_ceiling_writer_calls == writes_before,
                "persfx3 LOW-1: no Pico ceiling write at all for a POST that can never commit");
@@ -11002,7 +11010,14 @@ static void test_relay_name_get_set_round_trip(void)
     nvs_test_clear();
     reset_relay_names();
 
+    uint32_t gen_before_name = zones_config_generation();
     TEST_CHECK(zones_config_set_relay_name(3, "Vent fan"), "set on an in-range relay must succeed");
+    TEST_CHECK(zones_config_generation() != gen_before_name,
+               "review web7 MED/LOW-2: a relay-name write moves the zones config generation");
+    uint32_t gen_before_type = zones_config_generation();
+    TEST_CHECK(zones_config_set_relay_device_type(3, RELAY_DEVICE_TYPE_FAN), "set a relay type");
+    TEST_CHECK(zones_config_generation() != gen_before_type,
+               "review web7 MED/LOW-2: a relay-type write moves the zones config generation");
     char out[RELAY_NAME_MAX_LEN + 1];
     TEST_CHECK(zones_config_get_relay_name(3, out, sizeof(out)), "get on an in-range relay must succeed");
     TEST_CHECK(strcmp(out, "Vent fan") == 0, "the exact string set must come back out");

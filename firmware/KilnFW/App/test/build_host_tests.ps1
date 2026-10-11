@@ -665,6 +665,8 @@ try {
             "/Fo:`"$exe2ObjDir\`" /Fe:`"$exe2`" `"$(Join-Path $testDir 'test_zones_http.c')`" " +
             "`"$(Join-Path $testDir 'test_zones_config_cfg_fs.c')`" " +
             "`"$(Join-Path $testDir 'test_relay_names_cfg_fs.c')`" " +
+            # review web7 LOW-4: zones_http_start() seeds the generation through hal_sysinfo_random_u32().
+            "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" " +
             "`"$(Join-Path $testDir 'test_cfgfs_pref_validate.c')`" " +
             "`"$(Join-Path $testDir 'test_zone_normals_cfg_fs.c')`" " +
             # 2026-09-24: zones_current_sweep_engine.c (#included via
@@ -971,7 +973,8 @@ try {
                  "`"$(Join-Path $driversDir 'http/profiles_edit_http.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_cfg_fs.c')`" " +
                  "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
-                 "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" ")
+                 "`"$(Join-Path $driversDir 'control/profile_feasibility.c')`" " +
+                 "`"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" ")
     # profiles_http.c includes <stdatomic.h> (s_convert_busy): MSVC needs this flag.
     if (-not $cmdSl.Contains('/experimental:c11atomics')) { $cmdSl = $cmdSl.Replace('/std:c11 ', '/std:c11 /experimental:c11atomics ') }
     # Guard: $cmdSl is a chain of string Replace()s over $cmd4. If a future edit to $cmd4

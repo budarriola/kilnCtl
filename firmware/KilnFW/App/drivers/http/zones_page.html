@@ -4267,6 +4267,8 @@ function pollAdaptiveTune() {
               window.kcAlert('Enable failed: ' + (body || ('HTTP ' + r.status)));
             });
           }
+          // Review web7 LOW-3: the board bumped its config generation; refresh ours so the next Save is not a 409.
+          reloadUnlessDirty('The continuous-tuning setting changed');
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });
     });
@@ -4294,7 +4296,9 @@ function pollAdaptiveTune() {
             });
           }
           return r.json().then(function (j) {
-            if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); }
+            if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); return; }
+            // Review web7 LOW-3: revert changed gains and the generation on the board.
+            reloadUnlessDirty('The tuned gains were reverted');
           });
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });

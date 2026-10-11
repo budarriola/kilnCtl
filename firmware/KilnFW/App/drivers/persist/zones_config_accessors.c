@@ -600,6 +600,7 @@ bool zones_config_set_relay_name(uint8_t relay_n, const char *name)
     zones_cfg_lock();
     strncpy(s_relay_names.cfg.names[relay_n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
     s_relay_names.cfg.names[relay_n - 1][RELAY_NAME_MAX_LEN] = '\0';
+    s_config_generation++; /* review web7 MED/LOW-2: POST /api/zones commits relay names whole */
     zones_cfg_unlock();
     bool ok = relay_names_save_locked() == ESP_OK;
     zones_cfg_save_section_unlock();
@@ -644,6 +645,7 @@ bool zones_config_set_relay_device_type(uint8_t relay_n, relay_device_type_t typ
     zones_cfg_save_section_lock(); /* see zones_config_set_relay_name() */
     zones_cfg_lock();
     s_relay_names.cfg.types[relay_n - 1] = (uint8_t)type;
+    s_config_generation++; /* review web7 MED/LOW-2 */
     zones_cfg_unlock();
     bool ok = relay_names_save_locked() == ESP_OK;
     zones_cfg_save_section_unlock();

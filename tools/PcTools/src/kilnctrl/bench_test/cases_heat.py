@@ -1158,7 +1158,21 @@ def _post_zones_restore(
     last_error = ""
     for attempt in range(1, _HP07_RESTORE_ATTEMPTS + 1):
         try:
-            restore_result = zones_http_client.post_zones(host, restore_body)
+            body = restore_body
+            if expected_snapshot is not None and "generation" in expected_snapshot:
+                # webfx5 lost-update guard: the case's own POST bumped the
+                # board's generation, so the pre-case token baked into
+                # `restore_body` is stale (409 zones_config_stale). Keep the
+                # snapshot's values, take the generation from a fresh GET.
+                try:
+                    fresh = get_zones(host)
+                    if isinstance(fresh, dict) and "generation" in fresh:
+                        merged = dict(expected_snapshot)
+                        merged["generation"] = fresh["generation"]
+                        body = zones_http_client.build_post_body(merged, {})
+                except Exception:
+                    body = restore_body
+            restore_result = zones_http_client.post_zones(host, body)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
         else:
