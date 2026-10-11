@@ -199,7 +199,7 @@ static void test_level(void)
     reset();
     level("level=2&peer=safety&pad=xxxxxxxxxxxxxxxxx"); /* > 32 */
     TEST_CHECK(s_err_calls == 1 && s_send_calls == 0 && s_recv_calls == 0, "oversize: 400 before read");
-    static const char *const bad[] = { "peer=safety", "level=", "level=5", "level=-1", "level=2x", "level=x", "level=99999999" };
+    static const char *const bad[] = { "peer=safety", "level=", "level=5", "level=-1", "level=2x", "level=+2", "level=%202", "level=x", "level=99999999" };
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         reset();
         level(bad[i]);

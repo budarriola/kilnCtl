@@ -183,6 +183,13 @@ static void test_healthy(void)
     post("/api/cfgfs/format_confirm?force_healthy=1");
     TEST_CHECK(s_format_calls == 1 && s_status_code == 200, "force_healthy=1: formats once, 200");
     TEST_CHECK(strstr(s_body, "formatted") != NULL, "success body");
+    /* Duplicate key: the first occurrence decides. */
+    reset();
+    post("/api/cfgfs/format_confirm?force_healthy=0&force_healthy=1");
+    TEST_CHECK(s_status_code == 409 && s_format_calls == 0, "duplicate key: first (0) wins, refused");
+    reset();
+    post("/api/cfgfs/format_confirm?force_healthy=1&force_healthy=0");
+    TEST_CHECK(s_format_calls == 1, "duplicate key: first (1) wins, formats");
     reset();
     post("/api/cfgfs/format_confirm?a=b&force_healthy=1");
     TEST_CHECK(s_format_calls == 1, "force_healthy=1 as second key: formats");

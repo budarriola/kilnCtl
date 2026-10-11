@@ -1039,6 +1039,8 @@ static void scenario_commit_config(void)
     CHECK(s_tc_type_reapply_pending && s_tc_type_reapply_pending_value == 4,
           "heat unsafe: retry armed for tc_type 4 (pending=%d value=%u)", (int)s_tc_type_reapply_pending,
           (unsigned)s_tc_type_reapply_pending_value);
+    CHECK(g_reload_cal == 1, "heat unsafe: still reloads cal, got %d", g_reload_cal);
+    CHECK(link_staging_count(&s_staging) == 0, "heat unsafe: staging reset after accepted write");
 
     // 4b. Accepted with tc_type change while heat IS provably safe (fresh idle
     //     context, no current): immediate reapply, nothing armed.
@@ -1200,6 +1202,19 @@ static void scenario_set_ct_cal(void)
     CHECK(!g_cw_rec.ct_cal[0].calibrated, "other channel must stay uncalibrated");
     CHECK(link_staging_count(&s_staging) == 0u, "accepted SET_CT_CAL must drop the superseded staged gain, count=%u",
           (unsigned)link_staging_count(&s_staging));
+    // mcpfx1 LOW-6: edge-value accepted/refused pairs (positive controls at each bound).
+    g_cw_ret = true;
+    g_cw_calls = 0;
+    send_ct_cal(2, 1, 10.0f, 50.0f);   // top channel, gain max, +offset max: all inclusive
+    CHECK(g_cw_calls == 1, "ct_cal edge ch2/gain 10/off +50 accepted, calls=%d", g_cw_calls);
+    send_ct_cal(0, 1, 1.0f, -50.0f);   // -offset max inclusive
+    CHECK(g_cw_calls == 2, "ct_cal edge off -50 accepted, calls=%d", g_cw_calls);
+    send_ct_cal(0, 0, 0.0f, 0.0f);     // uncalibrated gain 0 is allowed
+    CHECK(g_cw_calls == 3, "ct_cal uncalibrated gain 0 accepted, calls=%d", g_cw_calls);
+    send_ct_cal(0, 1, 10.01f, 0.0f);   // just above gain max
+    send_ct_cal(0, 1, 1.0f, 50.01f);   // just above +offset max
+    send_ct_cal(0, 1, 1.0f, -50.01f);  // just below -offset max
+    CHECK(g_cw_calls == 3, "ct_cal just-out-of-range values refused, calls=%d", g_cw_calls);
     g_cw_ret = false; // LOW-5: do not leak the accepting fake into later scenarios (scenario_fuzz)
 }
 

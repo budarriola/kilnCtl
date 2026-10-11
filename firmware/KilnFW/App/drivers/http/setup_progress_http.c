@@ -179,7 +179,7 @@ static esp_err_t api_setup_progress_post_handler(httpd_req_t *req)
 
     char *endp = NULL;
     long step_num = strtol(step_val, &endp, 10);
-    if (endp == step_val || *endp != '\0' || step_num < 0 || step_num >= SETUP_WIZARD_STEP_COUNT) {
+    if (step_val[0] < '0' || step_val[0] > '9' || endp == step_val || *endp != '\0' || step_num < 0 || step_num >= SETUP_WIZARD_STEP_COUNT) {
         /* "unknown-step rejection": a step number outside the valid range is
          * refused here at the HTTP boundary AND, defense in depth, again by
          * setup_wizard_progress_set_step() itself below. */

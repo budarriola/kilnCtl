@@ -21,6 +21,8 @@ No HIGH or MED findings. Four LOW findings, two observations.
 
 ### LOW-1: post-rename read-back failure can resurrect a rolled-back SAVE_AS slot (pre-existing)
 
+Status: FIXED (misc8fx): the save_ex rollback now also calls `profiles_cfg_fs_delete()`; test `test_save_ex_rollback_unlinks_written_file`.
+
 `profiles_http.c` `profiles_http_save_ex()` now clears the fresh slot inside the
 lock/generation window when `nvs_save_slot_locked()` fails and the caller asked for
 `out_persisted` with a fresh slot (`requested_id >= PROFILES_MAX_COUNT`). That is
@@ -52,6 +54,8 @@ budget. The `profile_exec_wdt` ceiling change only adds margin (stack is 6144 B)
 
 ### LOW-3: `test_link_task_fuzz` case 4 lost two assertions
 
+Status: FIXED (misc8fx): both checks restored at the end of case 4.
+
 Case 4b (a heat-safe commit triggers an immediate reapply) was inserted above the
 existing `CHECK(g_reload_cal == 1, "still reloads cal")` and
 `CHECK(link_staging_count(&s_staging) == 0, "staging reset after accepted write")`.
@@ -60,6 +64,8 @@ asserts that the calibration reloads or that staging resets. Fix: repeat both
 checks at the end of case 4.
 
 ### LOW-4: test gaps in the new r3kfw tests
+
+Status: FIXED (misc8fx): duplicate-key test, STEP_COUNT-derived step, and strict leading-digit parsing (`+`/space refused) in setup_progress_http.c and dashboard_settings_http.c, each tested.
 
 - `test_cfg_fs_format_http.c` does not cover a duplicate key
   (`?force_healthy=0&force_healthy=1`). The gate takes the first occurrence; nothing

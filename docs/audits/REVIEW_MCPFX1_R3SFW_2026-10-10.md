@@ -152,9 +152,11 @@ Status: FIXED (mcpfx4): g_cw_ret reset at the end of scenario_set_ct_cal.
 
 **Fix:** add edge-value accepted/refused pairs.
 
+Status: FIXED (misc8fx): `scenario_set_ct_cal` asserts ch2/gain 10/offset +-50 accepted and 10.01/+-50.01 refused.
+
 ### LOW-7: ROLLBACK accepted path untested; announce version not restored
 
-Status: FIXED (mcpfx4): accepted-rollback case asserts no send; announce version saved and restored. LOW-6 (edge-value positive controls) remains OPEN.
+Status: FIXED (mcpfx4): accepted-rollback case asserts no send; announce version saved and restored. LOW-6 fixed in misc8fx.
 
 **Where:** `test_link_task_fuzz.c:1278-1291`.
 

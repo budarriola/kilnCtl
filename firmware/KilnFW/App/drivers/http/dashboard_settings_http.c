@@ -145,7 +145,7 @@ esp_err_t safety_log_level_post_handler(httpd_req_t *req)
     }
     char *endptr = NULL;
     long level = strtol(level_val, &endptr, 10);
-    if (endptr == level_val || *endptr != '\0' || level < 0 || level > UART_LOG_LEVEL_VERBOSE) {
+    if (level_val[0] < '0' || level_val[0] > '9' || endptr == level_val || *endptr != '\0' || level < 0 || level > UART_LOG_LEVEL_VERBOSE) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "level must be 0-4 (ERROR..VERBOSE)");
         return ESP_OK;
     }

@@ -2299,6 +2299,36 @@ static esp_err_t failing_write_fn(const char *rel_path, const void *data, size_t
     return ESP_FAIL;
 }
 
+/* Models cfg_fs_write_atomic() failing AFTER its rename: the file is in place, the caller sees ESP_FAIL. */
+static esp_err_t write_then_fail_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)cfg_fs_write_atomic(rel_path, data, len);
+    return ESP_FAIL;
+}
+
+static void test_save_ex_rollback_unlinks_written_file(void)
+{
+    TEST_SECTION("misc8 LOW-1: rolled-back fresh slot whose file landed on flash is unlinked");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    profiles_cfg_fs_set_write_fn(write_then_fail_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "save reports persisted=false");
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = true;
+    profiles_cfg_fs_load_raw(out_id, &loaded, &rev, &valid);
+    TEST_CHECK(!valid, "rolled-back slot's file is gone (would resurrect at next boot)");
+}
+
 static void test_save_ex_fresh_slot_rolled_back_in_lock(void)
 {
     TEST_SECTION("fwlow16 LOW-1: failed persist of a fresh slot rolls back inside save_ex; overwrite stays applied");
@@ -5726,6 +5756,7 @@ void run_test_profiles_http(void)
     test_profiles_http_delete_refuses_running_slot();
     test_profiles_delete_start_race_l23();
     test_profiles_slot_gen_seqlock();
+    test_save_ex_rollback_unlinks_written_file();
     test_save_ex_fresh_slot_rolled_back_in_lock();
     test_profile_edit_post_slot_gen();
     test_profile_post_expected_rev();

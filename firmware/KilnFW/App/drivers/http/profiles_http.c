@@ -2004,6 +2004,9 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
          * generation window, so no other save or delete can have touched the slot in a gap. */
         profiles_slot_clear(target_id);
         memset(&s_profiles.profiles[target_id], 0, sizeof(s_profiles.profiles[target_id]));
+        /* misc8 LOW-1: cfg_fs_write_atomic() can fail AFTER its rename (read-back verify), leaving the new file
+         * in place; without this the rolled-back slot reappears at the next boot. Best effort (NOT_FOUND is OK). */
+        (void)profiles_cfg_fs_delete(target_id);
     }
     profiles_slot_gen_end(target_id);
     profiles_save_unlock();

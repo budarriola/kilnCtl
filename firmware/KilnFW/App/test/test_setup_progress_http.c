@@ -198,13 +198,20 @@ static void test_validation(void)
         "state=done",                 /* missing step */
         "step=1",                     /* missing state */
         "step=&state=done",
-        "step=12&state=done",         /* == STEP_COUNT */
+        "step=%201&state=done",       /* leading space */
+        "step=+1&state=done",         /* leading plus */
         "step=-1&state=done",
         "step=1x&state=done",
         "step=%20&state=done",
         "step=1&state=finished",
         "step=1&state=DONE",
     };
+    char at_count[32];
+    snprintf(at_count, sizeof(at_count), "step=%d&state=done", (int)SETUP_WIZARD_STEP_COUNT);
+    reset();
+    post(at_count);
+    TEST_CHECK(s_err_calls == 1 && s_err_code == HTTPD_400_BAD_REQUEST, "step == STEP_COUNT: 400");
+    TEST_CHECK(s_set_calls == 0, "step == STEP_COUNT: store untouched");
     for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
         reset();
         post(bad[i]);
