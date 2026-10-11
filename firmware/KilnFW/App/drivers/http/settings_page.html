@@ -328,8 +328,8 @@ document.getElementById('swResetBtn').addEventListener('click', function () {
   kcConfirm('This reboots both processors right now -- this controller, and the safety '
                + 'processor in place (same firmware). No configuration is erased or changed. '
                + 'The safety processor may refuse if its relay is armed; the result will say so. '
-               + 'This WILL latch an S6a main-fault trip on the safety processor -- expect it '
-               + 'every time -- and it does NOT clear one. Required follow-up before heating: '
+               + 'This usually latches an S6a main-fault trip on the safety processor -- it is not '
+               + 'guaranteed (a dual reset has been seen not to) -- and it does NOT clear one. Required follow-up before heating: '
                + '"Clear latched trip" on the Safety page (or Clear Trip on the dashboard). '
                + 'Continue?').then(function (ok) {
     if (!ok) return;

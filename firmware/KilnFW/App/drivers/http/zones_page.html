@@ -2451,6 +2451,7 @@ function renderCtWarnings(ctWarnMask, zones) {
 }
 
 var sweepPollTimer = null;
+var sweepLastRunning = false; /* L-3: last known state, so a dropped poll keeps polling */
 
 // ROADMAP.md "Visually simplify the Thermocouples & Zones web page",
 // decision (a): each gate toggles a section's wrapper div and its paired
@@ -2556,6 +2557,7 @@ function renderSweepStatus(st) {
     if (st.nameplate_reason) text += ' (' + st.nameplate_reason + ')';
   }
   msg.textContent = text;
+  sweepLastRunning = !!running;
   if (running && !sweepPollTimer) {
     sweepPollTimer = setTimeout(pollSweepStatus, 1000);
   } else if (!running && sweepPollTimer) {
@@ -2572,7 +2574,11 @@ function renderSweepStatus(st) {
 function pollSweepStatus() {
   sweepPollTimer = null;
   fetch('/api/zones/current_sweep/status').then(function (r) { return r.json(); }).then(renderSweepStatus)
-    .catch(function () { /* transient -- next poll (or the next page load) will retry */ });
+    .catch(function () {
+      /* L-3: one dropped request must not freeze the status at "running": keep polling while the
+         last known state was running (renderSweepStatus clears the timer once it is not). */
+      if (sweepLastRunning && !sweepPollTimer) sweepPollTimer = setTimeout(pollSweepStatus, 3000);
+    });
 }
 
 document.getElementById('sweepStartBtn').addEventListener('click', function () {
@@ -2588,7 +2594,14 @@ document.getElementById('sweepStartBtn').addEventListener('click', function () {
   });
 });
 document.getElementById('sweepAbortBtn').addEventListener('click', function () {
-  fetch('/api/zones/current_sweep/abort', { method: 'POST' });
+  var st = document.getElementById('sweepStatus');
+  fetch('/api/zones/current_sweep/abort', { method: 'POST' }).then(function (r) {
+    if (!r.ok) st.textContent = 'Abort was NOT accepted (HTTP ' + r.status + '). Check the board.';
+    else pollSweepStatus();
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+    st.textContent = 'Abort was NOT sent (network error). Check the board.';
+  });
 });
 pollSweepStatus(); /* pick up a sweep already in progress from a previous page load */
 
@@ -4313,10 +4326,19 @@ document.getElementById('atStartBtn').addEventListener('click', function () {
   fetch('/api/autotune/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: 'zone=' + zone + (duty === '' ? '' : '&step_duty=' + duty) + '&rule=' + encodeURIComponent(rule),
-  }).then(function (r) { return r.json(); }).then(function (j) {
-    if (!j.ok) document.getElementById('atStatus').textContent = 'Start failed: ' + j.error;
-    else pollAutotune();
-  }).catch(function () {});
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var j = null;
+      try { j = JSON.parse(t); } catch (e) { j = null; }
+      if (j && j.ok) { pollAutotune(); return; }
+      /* L-4: non-JSON 400s/403s must not look like a dead click */
+      document.getElementById('atStatus').textContent = 'Start failed: ' +
+        ((j && j.error) || ('HTTP ' + r.status + (t ? ' ' + t.slice(0, 120) : '')));
+    });
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+    document.getElementById('atStatus').textContent = 'Start failed: could not reach the board.';
+  });
 });
 
 // Relay-feedback (Åström–Hägglund) UI removed, ROADMAP.md decision (b).

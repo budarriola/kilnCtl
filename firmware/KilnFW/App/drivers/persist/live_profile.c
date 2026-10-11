@@ -13,6 +13,7 @@
 #include "cfg_fs_status.h"
 #include "cfg_save_lock.h"
 #include "hal_kv.h"
+#include "hal_sysinfo.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
 #include "persist_scratch.h"
@@ -749,6 +750,11 @@ bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char
             return false;
         }
         if (out_record) *out_record = existing;
+        if (out_gen) {
+            cfg_save_lock_take(&s_live_save_lock);
+            *out_gen = atomic_load(&s_live_profile_generation);
+            cfg_save_lock_give(&s_live_save_lock);
+        }
         return true;
     }
 
@@ -787,7 +793,23 @@ bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *or
                                  NULL, err, err_cap);
 }
 
+    if (out_gen) *out_gen = forked_gen;
+    return true;
+}
+
+static bool live_profile_clear_locked(char *err, size_t err_cap);
+
+/* REVIEW_WEBFX4 LOW-2: the whole clear (erase + read-back + bump) runs under the live save lock, so a concurrent
+ * save cannot recreate the working file between the erase and the bump. */
 bool live_profile_clear(char *err, size_t err_cap)
+{
+    cfg_save_lock_take(&s_live_save_lock);
+    bool ok = live_profile_clear_locked(err, err_cap);
+    cfg_save_lock_give(&s_live_save_lock);
+    return ok;
+}
+
+static bool live_profile_clear_locked(char *err, size_t err_cap)
 {
     /* Legacy NVS copy first: if the file removal below were to fail or be
      * interrupted, the fallback must not be able to resurrect the edit. */
@@ -829,9 +851,7 @@ bool live_profile_clear(char *err, size_t err_cap)
         if (err) snprintf(err, err_cap, "clear could not be verified by read-back");
         return false;
     }
-    cfg_save_lock_take(&s_live_save_lock);
     atomic_fetch_add(&s_live_profile_generation, 1u);
-    cfg_save_lock_give(&s_live_save_lock);
     return true;
 }
 
@@ -840,6 +860,9 @@ bool live_profile_clear(char *err, size_t err_cap)
  * keys stay as a read fallback until live_profile_clear() erases them. */
 void live_profile_start(void)
 {
+    /* REVIEW_WEBFX4 LOW-1: the generation is RAM-only; a random boot seed keeps a pre-reboot client's value from
+     * matching a post-reboot save. profile_executor_run.c seeds its baseline from gen-1, which still works. */
+    atomic_store(&s_live_profile_generation, hal_sysinfo_random_u32() & 0x3fffffffu);
     uint8_t rbuf[sizeof(live_edit_persisted_t)];
     size_t rlen = 0;
     uint32_t rev = 0;

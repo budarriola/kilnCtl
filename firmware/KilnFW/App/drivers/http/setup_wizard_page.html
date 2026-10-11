@@ -1200,6 +1200,18 @@ function renderStep8() {
       }
     }
 
+    /* L-5: a sweep already running (page reload, or coming back to this step) must not read
+       "Not running." -- show it and resume polling. Only a running sweep is rendered here, so a
+       finished one is never re-posted as done on a mere visit. */
+    fetchJsonOr('/api/zones/current_sweep/status', null).then(function (st0) {
+      if (!st0 || st0.state !== 'running' || !document.getElementById('step8Status')) return;
+      renderSweepStatus(st0);
+      step8StopPoll();
+      step8Poll = setInterval(function () {
+        fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
+      }, 2000);
+    });
+
     document.getElementById('step8Start').addEventListener('click', function () {
       var errEl = document.getElementById('step8Err');
       renderErrList(errEl, []);
@@ -1447,8 +1459,8 @@ function renderStep11() {
       : ('<p class="hint">Currently off for both the web UI and the LCD (the shipped default). ' +
          'Administrator credential ' + (credsSet ? 'already set.' : 'not set yet.') + '</p>');
     var html = '<p class="hint">Optional. With authentication off, anyone on the network can start a ' +
-      'firing or change a safety limit -- the OTA/factory-reset/system-reset routes still require the ' +
-      'AP password either way.</p>' +
+      'firing or change a safety limit -- the OTA/factory-reset/system-reset routes are open too ' +
+      'while login is off.</p>' +
       statusLine +
       '<div class="wfield"><label for="s11User">Administrator username</label>' +
       '<input type="text" id="s11User" autocomplete="username" value="' + window.kcEscapeHtml(adminUser) + '"></div>' +
@@ -1473,6 +1485,16 @@ function renderStep11() {
       }
       if (wantEnable && !password && !credsSet) {
         renderErrList(errEl, ['Set an administrator password -- none is on record yet.']);
+        return;
+      }
+      /* L-12: a password without a username, or a changed username without a password, used to be
+         dropped silently while the page still said "Saved." */
+      if (password && !username) {
+        renderErrList(errEl, ['Enter the administrator username that goes with this password.']);
+        return;
+      }
+      if (username && !password && username !== adminUser) {
+        renderErrList(errEl, ['A changed username needs the password entered too -- it cannot be sent alone.']);
         return;
       }
       renderErrList(errEl, []);
@@ -2985,6 +3007,11 @@ function renderStep7() {
       fetchJsonOr('/api/zones', null).then(function (freshZones) {
         // Same thermo_count slice as the initial render above -- re-fetched
         // fresh, so a thermo_count change in another tab is honoured too.
+        /* L-16: an unreadable /api/zones must not pass the abs_max >= zone max check. */
+        if (!freshZones) {
+          renderErrList(errEl, ['Could not re-read the zone limits to check the ceiling -- nothing was saved. Try again.']);
+          return;
+        }
         var freshThermoCount = (freshZones && freshZones.thermo_count) || 0;
         var freshMaxTemps = ((freshZones && freshZones.zones) || []).slice(0, freshThermoCount)
           .map(function (z) { return z.max_temp_c || 0; });
@@ -3127,6 +3154,7 @@ function gResume() {
 }
 
 function loadAll() {
+  var seqAtStart = kcEditSeq; /* REVIEW_WEBFX4 LOW-4: an edit typed while the reload was in flight must survive it */
   return Promise.all([
     fetchJsonOr('/api/readiness', { items: [] }),
     fetchJsonOr('/api/setup/progress', defaultProgress()),
@@ -3139,7 +3167,7 @@ function loadAll() {
     gRenderOverview();
     gRenderStepper();
     var target = currentStepId();
-    if (target !== null) {
+    if (target !== null && kcEditSeq === seqAtStart) {
       gGoto(target);
     }
   });

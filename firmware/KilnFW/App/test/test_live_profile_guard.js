@@ -55,7 +55,7 @@ const ACTIVE = (id, gen) => ({ active: true, working_id: id, generation: gen ===
   r.els.saveBtn.fire('click'); await flush();
   ok(!r.prompts(), 'L5: guard clears after a successful save');
 
-  st = { live: { active: false, working_id: 5, editable_from_segment: 0, pending_decision: true, origin_is_builtin: false } };
+  st = { live: { active: false, working_id: 5, generation: 1, editable_from_segment: 0, pending_decision: true, origin_is_builtin: false } };
   r = boot(st); await flush();
   r.els.segments.fire('input');
   r.els.discardBtn.fire('click'); await flush();

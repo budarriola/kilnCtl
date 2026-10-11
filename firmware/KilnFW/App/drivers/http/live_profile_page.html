@@ -175,11 +175,11 @@ function segmentEditableState(index, editableFromSegment) {
 function segFieldsHtml(seg, editable) {
   var dis = editable ? '' : ' disabled';
   return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' +
-    (seg.target_c || 0) + '"' + dis + '></div>' +
+    (Number(seg.target_c) || 0) + '"' + dis + '></div>' +
     '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' +
-    (seg.ramp_c_per_hr || 0) + '"' + dis + '></div>' +
+    (Number(seg.ramp_c_per_hr) || 0) + '"' + dis + '></div>' +
     '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' +
-    (seg.dwell_min || 0) + '"' + dis + '></div>';
+    (Number(seg.dwell_min) || 0) + '"' + dis + '></div>';
 }
 
 // buildSegmentRow: renders one segment row for the given editable state.
@@ -416,7 +416,7 @@ document.getElementById('forkBtn').addEventListener('click', function () {
     .then(readJsonResult)
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'fork failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.reason || res.data.error || 'fork failed') + '</span>';
         return;
       }
       msg.textContent = '';
@@ -451,7 +451,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
         // carry the server's own message (plan section 10) -- shown
         // verbatim rather than replaced with a generic string, since it
         // names the offending segment/value/limit.
-        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'save failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.reason || res.data.error || 'save failed') + '</span>';
         return;
       }
       // The form already holds exactly what was saved, so no reload: adopt the
@@ -479,13 +479,18 @@ document.getElementById('reloadBtn').addEventListener('click', function () {
 
 function decide(body) {
   var msg = document.getElementById('decideMsg');
+  if (lastGen === null || lastGen === undefined) {
+    /* L-8: same gate as Save -- no generation means the board's changed-elsewhere check would be skipped. */
+    msg.textContent = 'Still loading the working copy -- try again in a moment.';
+    return Promise.resolve();
+  }
   msg.textContent = 'Working...';
   return fetch('/api/profile/live/decide' + genQuery(), {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(readJsonResult)
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.error || 'that failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + escapeHtml(res.data.reason || res.data.error || 'that failed') + '</span>';
         return;
       }
       msg.textContent = 'Done.';

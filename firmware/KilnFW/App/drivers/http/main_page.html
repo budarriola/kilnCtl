@@ -1020,11 +1020,11 @@ function renderPidPopup(z) {
     '<label style="display:inline;font-weight:normal"><input type="checkbox" id="pidPopupBumplessAck"> ' +
     'I understand this may cause a duty step</label></p>' +
     proposedHtml +
-    '<label>Kp (current ' + z.pid_kp + ')<input type="number" id="pidPopupKp" value="' + z.pid_kp +
+    '<label>Kp (current ' + window.kcEscapeHtml(String(z.pid_kp)) + ')<input type="number" id="pidPopupKp" value="' + window.kcEscapeHtml(String(z.pid_kp)) +
       '" step="any" min="0"></label>' +
-    '<label>Ki (current ' + z.pid_ki + ') -- small values matter here, e.g. 0.00012; do not round this' +
-      '<input type="number" id="pidPopupKi" value="' + z.pid_ki + '" step="any" min="0"></label>' +
-    '<label>Kd (current ' + z.pid_kd + ')<input type="number" id="pidPopupKd" value="' + z.pid_kd +
+    '<label>Ki (current ' + window.kcEscapeHtml(String(z.pid_ki)) + ') -- small values matter here, e.g. 0.00012; do not round this' +
+      '<input type="number" id="pidPopupKi" value="' + window.kcEscapeHtml(String(z.pid_ki)) + '" step="any" min="0"></label>' +
+    '<label>Kd (current ' + window.kcEscapeHtml(String(z.pid_kd)) + ')<input type="number" id="pidPopupKd" value="' + window.kcEscapeHtml(String(z.pid_kd)) +
       '" step="any" min="0"></label>' +
     '<div id="pidPopupMsg" class="msg"></div>' +
     '<div class="btnrow"><button type="button" id="pidPopupApplyBtn" onclick="applyPidPopup()">Apply</button>' +
@@ -1974,6 +1974,7 @@ var SAFETY_LINK_STALE_MS = 1500;
 // here, so cause/remedy text cannot drift from the LCD's. safetyTripWords()/
 // SAFETY_TRIP_WORDS above are kept only as an old-firmware fallback for a
 // board that hasn't picked up the new fields yet.
+var clearTripMsg = { text: '', until: 0 };
 function renderSafetyTrip(data) {
   var el = document.getElementById('safetyTripBanner');
   var tripped = data.diag_ever_received && data.diag_state === SAFETY_LINK_DIAG_STATE_TRIPPED &&
@@ -2033,19 +2034,38 @@ function renderSafetyTrip(data) {
     (reason !== 10
       ? '<button class="run-btn" id="clearTripBtn">Clear Trip</button>'
       : '') +
+    (clearTripMsg.text && Date.now() < clearTripMsg.until
+      ? '<div class="row fault" id="clearTripMsg">' + window.kcEscapeHtml(clearTripMsg.text) + '</div>'
+      : '') +
     '</div>';
   el.innerHTML = html;
   var btn = document.getElementById('clearTripBtn');
   if (btn) {
     btn.addEventListener('click', function () {
+      // L-2: keep the refusal in clearTripMsg so the next poll's re-render shows it
+      // again instead of erasing it; one row, replaced (not appended) per click.
+      function showClearTripMsg(text) {
+        clearTripMsg = { text: text, until: Date.now() + 30000 };
+        var row = document.getElementById('clearTripMsg');
+        if (!row) {
+          btn.insertAdjacentHTML('afterend', '<div class="row fault" id="clearTripMsg"></div>');
+          row = document.getElementById('clearTripMsg');
+        }
+        row.textContent = text;
+      }
       fetch('/api/safety/clear_trip', { method: 'POST' })
-        .then(function (r) { return r.json().catch(function () { return {}; }); })
-        .then(function (j) {
-          if (j && j.ok === false && j.error) {
-            btn.insertAdjacentHTML('afterend', '<div class="row fault">' + window.kcEscapeHtml(j.error) + '</div>');
-          }
+        .then(function (r) {
+          return r.text().then(function (t) {
+            var j = null;
+            try { j = JSON.parse(t); } catch (e) { j = null; }
+            if (j && j.ok === false && j.error) showClearTripMsg(String(j.error));
+            else if (!r.ok) showClearTripMsg('Clear Trip was refused (HTTP ' + r.status + '): ' + (t || '').slice(0, 120));
+          });
         })
-        .catch(function () {});
+        .catch(function (err) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+          showClearTripMsg('Clear Trip was not sent (network error).');
+        });
     });
   }
 }

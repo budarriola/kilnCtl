@@ -1477,16 +1477,27 @@
     // GET /api/status poll (via updateFromStatus above) is what would
     // correct `cached` back if the device actually rejected or failed to
     // persist it.
+    // L-9: a refused/failed POST puts the displayed unit back (only pages that
+    // never re-poll /api/status would otherwise keep showing the wrong unit).
+    function revert(prev) {
+      if (cached === prev) return;
+      cached = prev;
+      window.dispatchEvent(new Event('kcunitchange'));
+    }
     function set(u) {
       var next = u === 'f' ? 'f' : 'c';
+      var prev = cached;
       cached = next;
       window.dispatchEvent(new Event('kcunitchange'));
       fetch('/api/unit_pref', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'unit=' + (next === 'f' ? 'F' : 'C'),
+      }).then(function (r) {
+        if (r && r.ok === false) revert(prev);
       }).catch(function (err) {
-        console.warn('unit preference POST failed (will retry on next status poll):', err);
+        console.warn('unit preference POST failed; reverting display:', err);
+        revert(prev);
       });
     }
     // Celsius in, a plain number in the selected unit out. null/undefined/NaN
@@ -1939,6 +1950,19 @@
   // deliberately not DONE, where there is no live run left to adjust.
   var EDITABLE_STATES = { running: true, paused: true, faulted: true };
 
+  // L-1: POST a firing control and tell the operator when it did not go through.
+  // AuthCancelled (declined sign-in) stays quiet; every other failure is shown.
+  function kcExecPost(path, btn, what) {
+    return fetch(path, { method: 'POST' }).then(function (r) {
+      btn.disabled = false;
+      if (!r.ok) window.kcAlert(what + ' was NOT sent (HTTP ' + r.status + '). Check the board.');
+    }).catch(function (err) {
+      btn.disabled = false;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+      window.kcAlert(what + ' was NOT sent (network error). Check the board.');
+    });
+  }
+
   var stopBarEl = null;
   var pauseResumeBtnEl = null;
   var ackBtnEl = null;
@@ -1959,9 +1983,7 @@
     pauseBtn.addEventListener('click', function () {
       var action = pauseBtn.textContent === 'Resume' ? 'resume' : 'pause';
       pauseBtn.disabled = true;
-      fetch('/api/profile_exec/' + action, { method: 'POST' })
-        .then(function () { pauseBtn.disabled = false; })
-        .catch(function () { pauseBtn.disabled = false; });
+      kcExecPost('/api/profile_exec/' + action, pauseBtn, action === 'resume' ? 'Resume' : 'Pause');
     });
     pauseResumeBtnEl = pauseBtn;
 
@@ -1974,9 +1996,7 @@
       kcConfirm('Stop this firing now? This aborts the run in progress and cannot be resumed.').then(function (ok) {
         if (!ok) return;
         btn.disabled = true;
-        fetch('/api/profile_exec/stop', { method: 'POST' })
-          .then(function () { btn.disabled = false; })
-          .catch(function () { btn.disabled = false; });
+        kcExecPost('/api/profile_exec/stop', btn, 'Stop');
       });
     });
 
@@ -2001,9 +2021,7 @@
       kcConfirm(msg).then(function (ok) {
         if (!ok) return;
         ackBtn.disabled = true;
-        fetch('/api/profile_exec/stop', { method: 'POST' })
-          .then(function () { ackBtn.disabled = false; })
-          .catch(function () { ackBtn.disabled = false; });
+        kcExecPost('/api/profile_exec/stop', ackBtn, 'Clear');
       });
     });
     ackBtnEl = ackBtn;

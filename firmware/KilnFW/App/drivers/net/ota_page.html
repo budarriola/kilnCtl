@@ -1075,7 +1075,13 @@ document.getElementById('ghDownloadBtn').addEventListener('click', function () {
 document.getElementById('ghCancelBtn').addEventListener('click', function () {
   window.kcOtaAuthedFetch('/api/update/fetch/cancel', {
     method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
-  }).then(function () { return loadGh(); }).catch(function () {});
+  }).then(function (r) {
+    if (r && r.ok === false) window.kcAlert('Cancel was refused (HTTP ' + r.status + ').');
+    return loadGh();
+  }).catch(function (e) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+    window.kcAlert('Cancel was not sent (network error).');
+  });
 });
 ['ghPre', 'ghForce', 'ghDown', 'ghTyped'].forEach(function (id) {
   document.getElementById(id).addEventListener('input', function () { if (ghLast) renderGh(ghLast); });

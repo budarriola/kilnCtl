@@ -60,10 +60,11 @@ function act(path,q){if(!confirm(q))return;
 post(path,null).then(done,function(e){log(e.message)})}
 function upload(){var f=$("f").files[0];
 if(!f)return log("choose a .bin file first");
+if(!confirm("Overwrite the application with "+f.name+" and boot it?"))return;
 $("up").disabled=true;$("pr").value=0;
 post("/api/ota/esp",f,function(a,t){$("pr").value=100*a/t;$("pp").textContent=a+" / "+t+" bytes"}).then(done,function(e){log(e.message)}).then(function(){$("up").disabled=false;status()})}
-var pt=null,punk=false;
-function pshow(j){punk=j.phase=="outcome_unknown";var ab=document.getElementById("pab");if(ab)ab.textContent=(j.phase=="finishing"||j.phase=="retransmit")?"Stop (END sent: outcome will be UNKNOWN)":"Abort";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
+var pt=null,punk=false,pfin=false;
+function pshow(j){punk=j.phase=="outcome_unknown";pfin=(j.phase=="finishing"||j.phase=="retransmit");var ab=document.getElementById("pab");if(ab)ab.textContent=(j.phase=="finishing"||j.phase=="retransmit")?"Stop (END sent: outcome will be UNKNOWN)":"Abort";var t=j.phase+(j.pico_mode!="unknown"?" (Pico "+j.pico_mode+")":"");
 if(j.total_bytes)t+=" "+j.bytes_sent+"/"+j.total_bytes+" bytes";
 if(j.gap_count)t+=", "+j.gap_count+" gaps (round "+j.gap_rounds+")";
 if(j.target_slot!="unknown")t+=", target slot "+j.target_slot+(j.target_source=="operator"?" (TARGET UNVERIFIED: chosen by you)":" ["+j.target_source+"]");
@@ -76,7 +77,7 @@ if(punk)w.push("OUTCOME UNKNOWN: the Pico may or may not have taken the new imag
 else if(j.power_cycle&&j.phase!="done")w.push("Power-cycle the board before retrying (recovery cannot clear a safety trip).");
 $("pwarn").textContent=w.join(" ")}
 function ppoll(){if(pt)clearTimeout(pt);pt=null;
-xhr("GET","/api/recovery/pico/status").then(function(r){var j=JSON.parse(r.t);pshow(j);
+xhr("GET","/api/recovery/pico/status").then(function(r){var j;try{j=JSON.parse(r.t)}catch(x){$("pst").textContent="unreadable status reply";pt=setTimeout(ppoll,2000);return}pshow(j);
 if(j.busy){pt=setTimeout(ppoll,1000)}else{$("pup").disabled=false}},
 function(e){$("pst").textContent=e.message;pt=setTimeout(ppoll,2000)})}
 function picoUpload(){var f=$("pf").files[0];
@@ -92,7 +93,7 @@ return post("/api/recovery/pico/upload"+q,b,function(a,t){$("ppr").value=100*a/t
 if(r.s==202){$("ppp").textContent="uploaded; Pico transfer running";ppoll()}
 else{$("pwarn").textContent=r.t;$("pup").disabled=false}},
 function(e){log(e.message);$("pup").disabled=false})}
-function picoAbort(){post("/api/recovery/pico/abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
+function picoAbort(){if(pfin&&!confirm("The END frame was already sent. Stopping now leaves the outcome UNKNOWN. Stop anyway?"))return;post("/api/recovery/pico/abort",null).then(function(r){log(r.s+" "+r.t);ppoll()},function(e){log(e.message)})}
 var at=null;
 function ashow(j){var s=j.staged,t="";
 if(s)t="staged: "+s.state+", "+(s.semver||"no version")+", commit "+(s.commit||"unknown")+"\nsha256 "+s.sha256+"\n"+s.length+" bytes, source "+s.source;

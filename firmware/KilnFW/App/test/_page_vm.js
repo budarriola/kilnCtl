@@ -26,7 +26,7 @@ function makeEl(id, sel) {
   const attrs = {};
   return {
     id, textContent: '', hidden: false, checked: false, files: null, value: '',
-    disabled: false, style: {}, dataset: {}, innerHTML: '', querySelectorAll() { return []; }, querySelector(q) { return qs(sel, q, 'element ' + id); }, appendChild() {}, remove() {}, click() {}, classList: { add() {}, remove() {}, toggle() {} },
+    disabled: false, style: {}, parentElement: { style: {} }, dataset: {}, innerHTML: '', querySelectorAll() { return []; }, querySelector(q) { return qs(sel, q, 'element ' + id); }, appendChild() {}, remove() {}, click() {}, classList: { add() {}, remove() {}, toggle() {} },
     addEventListener(ev, fn) { (handlers[ev] = handlers[ev] || []).push(fn); },
     getAttribute(k) { return Object.prototype.hasOwnProperty.call(attrs, k) ? attrs[k] : null; },
     setAttribute(k, v) { attrs[k] = String(v); },

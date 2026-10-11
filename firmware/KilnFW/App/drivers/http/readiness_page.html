@@ -185,7 +185,7 @@ but it will not stop you.</p>
     // it every poll would yank the page back under an operator who has
     // scrolled away to read something else.
     if (!scrolledToHash && window.location.hash.length > 1) {
-      var target = document.getElementById(decodeURIComponent(window.location.hash.slice(1)));
+      var target = document.getElementById((function (h) { try { return decodeURIComponent(h); } catch (e) { return h; } })(window.location.hash.slice(1)));
       if (target) {
         target.scrollIntoView();
         target.style.outline = '2px solid var(--bad)';

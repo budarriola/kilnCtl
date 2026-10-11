@@ -450,7 +450,7 @@ static void test_apply_stale_foreign_origin_record_never_borrowed(void)
     live_edit_record_t stale_rec;
     profile_t tmp;
     TEST_CHECK(live_profile_fork(PROFILE_BUILTIN_ID_BASE, true, "C6TEST", &g_fake_builtin_profile, &tmp, &stale_rec,
-                                  err, sizeof(err)),
+                                  err, sizeof(err), NULL),
                "stale fork for a builtin origin, left pending/undecided");
 
     // A NEW firing starts on a different, USER-SLOT origin (5, "Glaze") with no
@@ -561,6 +561,34 @@ static void mount_fresh_cfg_scratch(void)
     (void)cfg_fs_init(scratch, NULL);
 }
 
+static void test_apply_refused_after_web_edit(void)
+{
+    TEST_SECTION("edit_firing_apply -- REVIEW_WEBFX4 MED-1: a web edit between two Applies is refused 'edited elsewhere' "
+                 "and the working copy keeps the web edit");
+    reset_world();
+    profile_t w;
+    edit_firing_ctx_t ctx;
+    char err[128];
+    TEST_CHECK(edit_firing_load(&w, &ctx), "load");
+    TEST_CHECK(edit_firing_step(&w, 1, ctx.running_seg, EDIT_FIRING_FIELD_TARGET, +1), "edit");
+    TEST_CHECK(edit_firing_apply(&w, &ctx, err, sizeof(err)), "first Apply forks and saves");
+
+    /* Stand-in for a web edit: save directly, bumping the generation past ctx.generation. */
+    profile_t web;
+    TEST_CHECK(live_profile_load_working(&web), "working copy readable");
+    web.segments[1].target_c += 17.0f;
+    TEST_CHECK(live_profile_save_working(&web, err, sizeof(err)), "web-style save");
+    TEST_CHECK(ctx.generation != live_profile_generation(), "ctx.generation is now stale");
+
+    TEST_CHECK(edit_firing_step(&w, 2, ctx.running_seg, EDIT_FIRING_FIELD_DWELL, +1), "second LCD edit");
+    err[0] = 0;
+    TEST_CHECK(!edit_firing_apply(&w, &ctx, err, sizeof(err)), "second Apply refused");
+    TEST_CHECK(strstr(err, "edited elsewhere") != NULL, "refusal says 'edited elsewhere'");
+    profile_t after;
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&after, &web, sizeof(after)) == 0,
+               "working copy still holds the web edit");
+}
+
 int main(void)
 {
     // fake_kv.c needs every partition initialized before hal_kv_open();
@@ -577,6 +605,7 @@ int main(void)
     test_apply_stale_generation_refused();
     test_apply_builtin_origin();
     test_apply_stale_foreign_origin_record_never_borrowed();
+    test_apply_refused_after_web_edit();
     test_poll();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

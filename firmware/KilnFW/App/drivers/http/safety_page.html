@@ -306,9 +306,9 @@ if the Pico's diagnostics are too stale to trust.</p>
       tripCard.className = ineffective ? 'card ineffective' : 'card tripped';
       tripCard.innerHTML =
         (ineffective ? row('!! TRIP_INEFFECTIVE !!', 'power still flowing -- breaker, not kiln') : '') +
-        row('Reason', window.kcEscapeHtml(st.trip_reason_words) + ' (0x' + hex(st.trip_reason) + ')') +
-        row('Cause', window.kcEscapeHtml(st.trip_reason_cause)) +
-        row('Remedy', window.kcEscapeHtml(st.trip_reason_remedy)) +
+        row('Reason', st.trip_reason_words + ' (0x' + hex(st.trip_reason) + ')') +
+        row('Cause', st.trip_reason_cause) +
+        row('Remedy', st.trip_reason_remedy) +
         row('Age', ageS + 's ago') +
         row('Safety TC at trip', fmtC(st.trip_safety_tc_c)) +
         row('Deciding threshold', fmtC(st.trip_deciding_threshold));
@@ -385,10 +385,10 @@ if the Pico's diagnostics are too stale to trust.</p>
     }
     var html =
       row('State', st.diag_state) +
-      row('Trip reason', window.kcEscapeHtml(st.diag_trip_reason_words) + ' (0x' + hex(st.diag_trip_reason) + ')') +
-      row('Cause', window.kcEscapeHtml(st.diag_trip_reason_cause)) +
-      row('Remedy', window.kcEscapeHtml(st.diag_trip_reason_remedy)) +
-      row('Warn mask', window.kcEscapeHtml(warnMaskWords(st.diag_warn_mask)) + ' (0x' + hex16(st.diag_warn_mask) + ')') +
+      row('Trip reason', st.diag_trip_reason_words + ' (0x' + hex(st.diag_trip_reason) + ')') +
+      row('Cause', st.diag_trip_reason_cause) +
+      row('Remedy', st.diag_trip_reason_remedy) +
+      row('Warn mask', warnMaskWords(st.diag_warn_mask) + ' (0x' + hex16(st.diag_warn_mask) + ')') +
       row('Trip mask', '0x' + hex(st.diag_trip_mask)) +
       row('Context age', (st.diag_context_age_100ms * 100) + ' ms');
     // Presence is tested on the value actually about to be rendered, not on

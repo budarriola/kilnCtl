@@ -261,12 +261,16 @@ function kcPost(path, formBody) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formBody,
   }).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) { return { httpOk: r.ok, body: j }; });
+  }).catch(function (e) {
+    /* L-14: a network error or declined sign-in is a failed result, not an unhandled rejection */
+    var cancelled = window.kcIsAuthCancelled && window.kcIsAuthCancelled(e);
+    return { httpOk: false, body: { ok: false, error: cancelled ? 'Sign-in cancelled.' : 'Could not reach the board.' } };
   });
 }
 function kcHandleResult(result, okMsg) {
   var failed = !result.httpOk || result.body.ok === false;
   if (failed) {
-    kcSetMsg(result.body.error || 'That failed.', true);
+    kcSetMsg(result.body.reason || result.body.error || 'That failed.', true);
   } else {
     kcSetMsg(okMsg, false);
   }
@@ -310,7 +314,7 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
     if (!r.ok) {
       return r.text().then(function (t) {
         var msg = t;
-        try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (e) { /* raw text */ }
+        try { var j = JSON.parse(t); if (j && (j.reason || j.error)) msg = j.reason || j.error; } catch (e) { /* raw text */ }
         kcSetMsg(msg || 'Apply failed.', true);
       });
     }
@@ -523,7 +527,7 @@ document.getElementById('kcDownloadBtn').addEventListener('click', function () {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     kcSetMsg('Downloaded "' + cfg.name + '".', false);
   }).catch(function (e) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
@@ -552,7 +556,7 @@ document.getElementById('kcUploadBtn').addEventListener('click', function () {
     });
   }).then(function (result) {
     if (!result.httpOk || result.body.error) {
-      kcSetMsg(result.body.error || result.raw || ('Import failed (HTTP status).'), true);
+      kcSetMsg(result.body.reason || result.body.error || result.raw || ('Import failed (HTTP status).'), true);
       return;
     }
     kcSetMsg('Imported as a new kiln config (id ' + result.body.id + ').', false);

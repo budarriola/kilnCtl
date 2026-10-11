@@ -164,10 +164,15 @@ browser only.</p>
     brightnessVal.textContent = brightness.value + '%';
   });
 
+  var loadedOk = false; /* L-17: never save markup defaults over the stored settings */
   function loadCurrent() {
     fetch('/api/settings/display_power')
-      .then(function (r) { return r.json(); })
+      .then(function (r) {
+        if (!r.ok) throw new Error('load failed: HTTP ' + r.status);
+        return r.json();
+      })
       .then(function (d) {
+        loadedOk = true;
         brightness.value = d.brightness_percent;
         brightnessVal.textContent = d.brightness_percent + '%';
         timeout.value = String(d.timeout_setting);
@@ -195,6 +200,7 @@ browser only.</p>
   loadCurrent();
 
   saveBtn.addEventListener('click', function () {
+    if (!loadedOk) { status.textContent = 'Current settings not loaded yet -- reload the page before saving.'; return; }
     status.textContent = 'Saving...';
     var savedEditSeq = kcEditSeq;
     var body = 'brightness=' + encodeURIComponent(brightness.value) +

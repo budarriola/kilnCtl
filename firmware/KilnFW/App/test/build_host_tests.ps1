@@ -1087,7 +1087,7 @@ try {
             # (test_profiles_http.c:444), the same fake the rest of the
             # executable already uses.
             "`"$(Join-Path $driversDir 'persist/profiles_favorites.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`" " +
             # kiln_http_register() rewiring: profiles_http.c (#included
             # above) now calls it instead of httpd_register_uri_handler()
@@ -1149,7 +1149,7 @@ try {
             "/Fo:`"$lpObjDir\\`" /Fe:`"$exeLp`" `"$(Join-Path $testDir 'test_live_profile.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "live_profile" -ExePath $exeLp -BuildCmd $cmdLp
@@ -1172,7 +1172,7 @@ try {
             "/Fo:`"$plhObjDir\\`" /Fe:`"$exePlh`" `"$(Join-Path $testDir 'test_profiles_live_http.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "profiles_live_http" -ExePath $exePlh -BuildCmd $cmdPlh
@@ -1191,7 +1191,7 @@ try {
             "/Fo:`"$efaObjDir\\`" /Fe:`"$exeEfa`" `"$(Join-Path $testDir 'test_ui_edit_firing_apply.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs.c')`" `"$(Join-Path $driversDir 'persist/pref_cfg_fs.c')`" " +
             "`"$(Join-Path $driversDir 'persist/cfg_fs_status.c')`" `"$(Join-Path $driversDir 'persist/flash_worker_wait.c')`" " +
-            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
+            "`"$(Join-Path $hwAbsDir 'host/fake_kv.c')`" `"$(Join-Path $hwAbsDir 'host/fake_sysinfo.c')`" `"$(Join-Path $hwAbsDir 'common/hal_status.c')`" " +
             "`"$(Join-Path $hwAbsDir 'esp/common/hal_esp_common.c')`""
 
     Invoke-HostTestExe -Name "ui_edit_firing_apply" -ExePath $exeEfa -BuildCmd $cmdEfa
