@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 197.
+Gate rows: 199.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 185 |
+| NEGATIVE-TESTED | 187 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -236,3 +236,5 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_no_alias_shadowing.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | check_worktree_mint.ps1: `function Rm {}` injected at line 3 | CAUGHT (exit 1): `FAIL: tools\check_worktree_mint.ps1:3 defines function 'Rm' shadowing built-in alias 'rm' -> Remove-Item`; baseline PASS |
 | `tools/check_runner_noninteractive.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | run_all_checks.ps1: `-NonInteractive` dropped from the .ps1 child args; `-RedirectStandardInput $inFile` replaced | CAUGHT both (exit 1): `does not launch .ps1 checks with ... -NonInteractive`, `does not redirect child stdin`; baseline PASS |
 | `tools/check_submodule_pins_pushed.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (`-Preset check -PresetArg tools/test_check_submodule_pins_pushed.ps1`) | check_submodule_pins_pushed.ps1: `if ($failed -gt 0) { exit 1 }` -> `exit 0` | CAUGHT (exit 1): `FAIL: never-pushed: exit 0, want 1`; baseline PASS. Network check, excluded from run_all_checks glob (offline test wired instead); run by land.ps1 and dev_promote.ps1 |
+| `tools/check_touch_cal_exit_target_caller.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (`-Preset check -PresetArg tools/check_touch_cal_exit_target_caller.ps1`) | `$allowedFile` `ui/ui_page_touch_cal.c` -> `ui/ui_page_other.c` (the one legal caller no longer matches) | CAUGHT (exit 1): `2 violation(s)`; baseline PASS. An `if ($allowedCalls -ne 1)` -> `if ($false)` mutation was MISSED, but it is an equivalent mutant (the real tree has exactly 1 call; the file-name mutation covers it) |
+| `tools/test_check_submodule_pins_pushed.ps1` | NEGATIVE-TESTED | see the `tools/check_submodule_pins_pushed.ps1` row (this test is that row's `-PresetArg`) | check_submodule_pins_pushed.ps1: `if ($failed -gt 0) { exit 1 }` -> `exit 0` | CAUGHT (exit 1): `FAIL: never-pushed: exit 0, want 1`; baseline PASS |
