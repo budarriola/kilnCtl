@@ -200,7 +200,7 @@ def zones_field_table_checks() -> None:
     missing_from_client_post = fw_post_keys - client_post_keys
     extra_in_client_post = client_post_keys - fw_post_keys
     check(
-        "zones POST top-level fields: _TOP_FIELD_FORM_KEY matches firmware "
+        "zones POST top-level fields: _TOP_FIELD_FORM_KEY + _TOP_POST_ONLY_FORM_KEYS match firmware "
         f"(missing from client: {sorted(missing_from_client_post)}, "
         f"extra in client: {sorted(extra_in_client_post)})",
         (missing_from_client_post, extra_in_client_post),

@@ -672,7 +672,8 @@ _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays"}
 #: Top-level POST-only control fields: the firmware's POST handler reads them but GET never emits them
 #: (so they are not in _TOP_FIELD_FORM_KEY, which GET echoes). build_post_body() sets
 #: expected_generation from GET's "generation" (WEB_UI_JS_AUDIT M-1).
-_TOP_POST_ONLY_FORM_KEYS = {"expected_generation"}
+_EXPECTED_GENERATION_KEY = "expected_generation"
+_TOP_POST_ONLY_FORM_KEYS = {_EXPECTED_GENERATION_KEY}
 #: Top-level keys GET emits that this module deliberately never echoes back:
 #: relay_names/timing_profiles/zones are handled by their own dedicated
 #: logic below (not this scalar map), and the rest are read-only telemetry
@@ -1221,7 +1222,7 @@ def build_post_body(current: dict, preset: dict) -> str:
     # 409 zones_config_stale (nothing written) if another writer committed in between. Older firmware ignores it.
     gen = current.get("generation")
     if isinstance(gen, int) and not isinstance(gen, bool) and gen >= 0:
-        fields["expected_generation"] = str(gen)
+        fields[_EXPECTED_GENERATION_KEY] = str(gen)
 
     return urllib.parse.urlencode(fields)
 

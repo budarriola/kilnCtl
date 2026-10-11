@@ -150,14 +150,14 @@ permanently block another claimant.
 
 **Negative test:** commented out (prefix `//ZZ_AUDIT `) the three real
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` calls in
-`firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c` (line 505)
+`firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c` (the call in the run-stop path; located by symbol, not line)
 and `profile_executor_status.c` (lines 59, 153). Result: FAILED —
 "profile_executor ... no heat_enable_release() call...". Restored via sed
 removing the prefix; `git diff --quiet` empty on both files;
 `git hash-object` (first 8 chars
 blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 489bc22c (not backtick-quoted here, per this repo's superseded-citation
-convention), since superseded by a later unrelated edit; line 505 still holds the same
+convention), since superseded by a later unrelated edit; the file still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
 targeted, so the citation is refreshed to
 blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`60c6b410`

@@ -213,7 +213,7 @@ void main_kiln_enter_safe_state(kiln_io_t *io, SafetyLinkClass *safety, bool saf
  * action, not an omission. */
 /* Factory-reset writer fence for the kiln_nvs partition (hal_kv.h "Mutation fence"): every hal_kv_set_*,
  * hal_kv_erase_key and hal_kv_commit on a kiln_nvs handle is refused while the reset mark is set, except on
- * the reset job's own task (relay_authority_reset_refuses_writer()). One choke point for estop_verification,
+ * the reset job's own task (relay_authority_reset_refuses_kiln_nvs_writer()). One choke point for estop_verification,
  * firing_shadow, kiln_cfg_swap, adaptive_tune, run_state and every other kiln_nvs writer. */
 static bool kiln_nvs_reset_refuses_write(const char *partition)
 {
