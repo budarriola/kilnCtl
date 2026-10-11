@@ -348,7 +348,7 @@ def elf_side_stack_words_by_root(objdump, elf):
 CEILING_BYTES = {
     "current_task": 2752,   # measured 1376 B, unresolved regsp -- 2x margin
     "discrete_task": 1160,
-    "link_task": 9472,      # measured 4736 B, unresolved regsp -- 2x margin
+    "link_task": 10304,     # measured 5152 B (2026-10-10 TEST_TRIP WP2: +416 B), unresolved regsp -- 2x margin
     "log_task": 472,
     "relay_owner": 224,
     # KILN_PROFILES_PLAN.md item 16: safety_core_task's tick gained one bool
@@ -377,7 +377,7 @@ CEILING_BYTES = {
     # runs only in the boot/load path, never in the safety_core task); the
     # growth most likely came from the earlier F1-F7 batch d53125fe, which
     # changed safety_core/safety_guards without re-pinning.
-    "safety_core": 2208,
+    "safety_core": 2216,    # 2026-10-10 TEST_TRIP WP2: measured 2208 -> 2216 B (test_trip queue take)
     # Live tc_type reapply (thermo_task_request_tc_type_reapply(), 2026-09-15):
     # thermo_task_fn()'s loop gained two locals (verified_before_retry,
     # forced_reconfigure) around the reconfig-retry gate, moving the measured

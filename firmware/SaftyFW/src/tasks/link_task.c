@@ -170,7 +170,8 @@
 // for the incident history. configTOTAL_HEAP_SIZE (FreeRTOSConfig.h) raised
 // in the same commit to keep non-stack heap headroom sane after this and
 // update_task's stacks both grew.
-#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 10)
+// 2026-10-10 TEST_TRIP WP2: measured 5152 B needs >= 10304 B; bumped *10 -> *11.
+#define LINK_TASK_STACK_WORDS      (configMINIMAL_STACK_SIZE * 11)
 // Bounded wait, not a blocking read: this task also owns the 500 ms TX
 // cadence and must check in with watchdog_task, so it polls uart_owner's RX
 // ring on a short period rather than blocking on a queue receive.
