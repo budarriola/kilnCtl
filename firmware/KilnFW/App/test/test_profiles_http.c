@@ -2851,7 +2851,7 @@ static void test_rvfx_rollback_keeps_unexamined_file(void)
     uint8_t out_id = 0xFF, warn = 0;
     bool persisted = true;
     char err[128];
-    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    bool ok = profiles_http_save_ex(0, &p, &out_id, &warn, &persisted, err, sizeof(err)); /* explicit id: PROFILESFX11 first-free would skip slot 0 */
     /* PROFILESFX10 MED-1: the refusal now happens before any RAM assignment, so there is nothing to roll back. */
     TEST_CHECK(!ok && strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "save onto the rev-unknown slot 0 is refused up front");
     TEST_CHECK(!profiles_slot_used(0), "slot 0 stays unused (no RAM mutation)");
@@ -2931,11 +2931,18 @@ static void test_profiles_slot_gen_seqlock(void)
     TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "successful save after capture: old copy refused");
     cap = profiles_http_slot_rev(4);
 
-    /* Failed save: persist refused, RAM still takes the new content. */
+    /* Failed save (PROFILESFX11 LOW-2): an overwrite whose persist fails still changed RAM, so it must bump the
+     * generation and refuse the old capture. (The rev-unknown refusal mutates nothing; checked just below.) */
+    profiles_cfg_fs_set_write_fn(failing_write_fn);
+    (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "failed save after capture: old copy refused");
+    cap = profiles_http_slot_rev(4);
+
+    /* PROFILESFX10 MED-1: a save refused for an unreadable store mutates nothing, so the capture stays valid. */
     s_profile_rev_unknown[4] = true;
     (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
     s_profile_rev_unknown[4] = false;
-    /* PROFILESFX10 MED-1: a save refused for an unreadable store mutates nothing, so the capture stays valid. */
     TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "refused save after capture: RAM untouched, old copy still runnable");
     TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh capture runnable after refused save");
 
@@ -6282,6 +6289,52 @@ static void test_save_refuses_rev_unknown_slot_without_mutating_ram(void)
     memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
 }
 
+/* PROFILESFX11 MED-1 + INFO: POST /api/profile on a rev-unknown slot refuses before the RAM copy; first-free skips
+ * rev-unknown slots, so a new-slot POST neither lands on one nor leaves a phantom. */
+static void test_post_handler_rev_unknown_refuses_before_ram_copy(void)
+{
+    TEST_SECTION("PROFILESFX11 MED-1: POST to a rev-unknown slot leaves RAM, used bit and generation untouched");
+    fuzz_small_setup();
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[8] = true;
+    profile_t before = s_profiles.profiles[8];
+    uint32_t cap = profiles_http_slot_rev(8);
+    TEST_CHECK(profiles_slot_used(8), "precondition: slot 8 used");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    const char *sb = "id=8&name=SgRevUnk2&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    (void)fuzz_post(profile_post_handler, sb, (long long)strlen(sb), (size_t)-1, 0);
+    check_profile_409("post rev-unknown");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged");
+    TEST_CHECK(profiles_slot_used(8), "used bit unchanged");
+    TEST_CHECK(profiles_http_slot_rev(8) == cap, "generation untouched");
+    TEST_CHECK(profiles_http_slot_runnable_rev(8, cap), "earlier capture still runnable");
+
+    /* New-slot POST: make the first free slot rev-unknown; nothing may land on it. */
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    int ff = -1;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if (!profiles_slot_used(i)) { ff = i; break; }
+    }
+    TEST_CHECK(ff >= 0, "precondition: a free slot exists");
+    if (ff >= 0) {
+        s_profile_rev_unknown[ff] = true;
+        const char *nb = "name=NewSkip&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+        (void)fuzz_post(profile_post_handler, nb, (long long)strlen(nb), (size_t)-1, 0);
+        TEST_CHECK(!profiles_slot_used((uint8_t)ff), "new profile never lands on the rev-unknown free slot");
+        TEST_CHECK(s_profiles.profiles[ff].name[0] == '\0', "no phantom content in the rev-unknown slot");
+        profile_t cand = make_stored_profile();
+        strncpy(cand.name, "NewSkip2", sizeof(cand.name) - 1);
+        uint8_t out_id = 0xEE;
+        char err[PROFILES_SAVE_ERR_MSG_LEN] = {0};
+        TEST_CHECK(profiles_http_save(PROFILES_MAX_COUNT, &cand, &out_id, NULL, err, sizeof(err)),
+                   "save with no id succeeds despite an unreadable free slot");
+        TEST_CHECK(out_id != (uint8_t)ff && out_id < PROFILES_MAX_COUNT, "allocated the next truly free slot");
+        TEST_CHECK(!profiles_slot_used((uint8_t)ff), "the rev-unknown slot stays unused");
+    }
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
 static void test_fuzz_small_body_handlers(void)
 {
     TEST_SECTION("delete/hide/restore/favorite fuzz -- hostile bodies change nothing");
@@ -6450,6 +6503,7 @@ void run_test_profiles_http(void)
     test_delete_rev_unknown_is_409();
     test_profile_routes_use_profile_409_text();
     test_save_refuses_rev_unknown_slot_without_mutating_ram();
+    test_post_handler_rev_unknown_refuses_before_ram_copy();
     test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();

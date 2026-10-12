@@ -1847,7 +1847,8 @@ static const char *profiles_http_name_at(void *ctx, uint8_t id)
 static bool profiles_http_slot_used_cb(void *ctx, uint8_t id)
 {
     (void)ctx;
-    return profiles_slot_used(id);
+    /* PROFILESFX11: a rev-unknown slot is not allocatable, so first-free skips it. */
+    return profiles_slot_used(id) || s_profile_rev_unknown[id];
 }
 
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,

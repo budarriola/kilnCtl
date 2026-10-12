@@ -167,7 +167,7 @@ static const char *import_board_name_at(void *ctx_v, uint8_t id)
 static bool backup_import_slot_used_sim_cb(void *ctx, uint8_t id)
 {
     const bool *slot_used_sim = (const bool *)ctx;
-    return slot_used_sim[id];
+    return slot_used_sim[id] || s_profile_rev_unknown[id]; /* PROFILESFX11: skip unreadable slots */
 }
 
 typedef struct {
@@ -1293,6 +1293,13 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
          * colliding mid-commit in pass 2. */
         for (size_t i = 0; i < candidate_count; i++) {
             if (candidates[i].has_id) {
+                if (s_profile_rev_unknown[candidates[i].id]) {
+                    /* PROFILESFX11 LOW-1: profiles_http_save() refuses this slot at commit; refuse now, before
+                     * zones/aux/prefs land. */
+                    snprintf(err_msg, err_cap, "%s", PROFILES_SAVE_ERR_STORE_UNREADABLE);
+                    free(scratch);
+                    return false;
+                }
                 write_ids[candidates[i].id] = true;
                 slot_used_sim[candidates[i].id] = true;
                 continue;
@@ -3032,9 +3039,9 @@ static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t
         char save_err[96];
         if (!profiles_http_save(c->has_id ? c->id : PROFILES_MAX_COUNT, &c->p, &out_id, NULL, save_err,
                                 sizeof(save_err))) {
-            /* Should not happen -- pass 1 (including backup_import_profiles_precheck()) already checked
-             * everything profiles_http_save() itself checks -- but if it does (a race with a concurrent
-             * change to zone config, say), report exactly which entry and why. Candidates before this one
+            /* Should not happen -- pass 1 (including backup_import_profiles_precheck(), the storage-full
+             * and rev-unknown pre-checks) already checked everything profiles_http_save() itself checks --
+             * but if it does (a race with a concurrent change to zone config, say), report exactly which entry and why. Candidates before this one
              * are already committed. */
             snprintf(err_msg, err_cap, "profile entry %u rejected at commit: %s", (unsigned)i, save_err);
             return false;

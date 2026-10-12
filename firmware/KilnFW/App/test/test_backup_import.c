@@ -2477,6 +2477,10 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     return true;
 }
 
+// PROFILESFX11: backup_import.c's pass 1 reads the real rev-unknown marks; this file stubs profiles_http.c, so it
+// owns the array (extern in profiles_http_internal.h).
+bool s_profile_rev_unknown[PROFILES_MAX_COUNT];
+
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap)
 {
@@ -3349,6 +3353,46 @@ static void test_import_write_ids_sim_matches_pass2_commit_order(void)
     TEST_CHECK(!ok, "the reviewer's example (no-id \"A\" ahead of id:1 \"Q\", with slot 3 already \"A\") "
                     "must be refused in pass 1");
     TEST_CHECK(g_profile_save_calls == 0, "nothing may be written -- refused before pass 2 commits anything");
+}
+
+// PROFILESFX11 LOW-1: a target slot with an unreadable rev floor is refused in pass 1: no zones/aux/prefs/profile
+// write lands first. A no-id candidate skips rev-unknown slots in the first-free simulation.
+static void test_import_rev_unknown_target_refused_nothing_written(void)
+{
+    TEST_SECTION("PROFILESFX11 LOW-1: backup import naming a rev-unknown slot refuses in pass 1, zero writes");
+    reset_stub_state();
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[2] = true;
+    const char *body =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":["
+        "{\"id\":2,\"name\":\"Q\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}"
+        "],\"zones\":[]}";
+    char err[160] = {0};
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    TEST_CHECK(!ok, "import onto a rev-unknown slot is refused");
+    TEST_CHECK(strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "refusal is the store-unreadable text");
+    TEST_CHECK(g_profile_save_calls == 0, "no profile written");
+    TEST_CHECK(g_total_write_calls == 0, "no zones/aux/prefs write landed before the refusal (no partial write)");
+
+    // No-id candidate: slot 0 free but rev-unknown -> the first-free simulation skips it, so the import succeeds.
+    reset_stub_state();
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+    s_profile_rev_unknown[0] = true;
+    const char *body2 =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,"
+        "\"profiles\":[{\"name\":\"Q\",\"zone_mask\":1,\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[]}";
+    ok = test_backup_import_apply(body2, err, sizeof(err));
+    TEST_CHECK(ok, "a no-id candidate imports when another slot is free");
+
+    // Every slot rev-unknown -> "storage full" in pass 1, zero writes.
+    reset_stub_state();
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) s_profile_rev_unknown[i] = true;
+    ok = test_backup_import_apply(body2, err, sizeof(err));
+    TEST_CHECK(!ok && strstr(err, "storage full") != NULL, "all slots unreadable: refused as storage full");
+    TEST_CHECK(g_profile_save_calls == 0 && g_total_write_calls == 0, "nothing written");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
 }
 
 // Opus review of 5dd23944, finding 1/BLOCKER: importing a backup containing
@@ -7485,6 +7529,7 @@ void run_test_backup_import(void)
     test_import_name_collides_with_existing_non_overwritten_slot_refused();
     test_import_name_overwriting_the_slot_holding_that_name_allowed();
     test_import_write_ids_sim_matches_pass2_commit_order();
+    test_import_rev_unknown_target_refused_nothing_written();
     test_import_allows_profile_named_like_a_builtin();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
     test_fuzz_hostile_backup_shapes();

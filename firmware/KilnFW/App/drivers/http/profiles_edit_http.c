@@ -703,7 +703,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
+            if (!profiles_slot_used(i) && !s_profile_rev_unknown[i]) {
                 free_slot = i;
                 break;
             }
@@ -716,6 +716,15 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
         target_id = (uint8_t)free_slot;
+    }
+
+    /* PROFILESFX11 MED-1: an unreadable-rev slot cannot be persisted; refuse BEFORE the RAM copy (mirrors
+     * profiles_http_save_impl), with the same 409 profile text. */
+    if (s_profile_rev_unknown[target_id]) {
+        profiles_save_unlock();
+        free(warn_json);
+        free(tmp);
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     }
 
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
