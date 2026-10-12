@@ -225,6 +225,13 @@ try {
     Write-Log $c @("  FAIL  tools/check_x.ps1 (exit 1)", "2 passed, 0 skipped (0 due to -Fast), 2 failed.")
     $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x", "-DryRun", "-ChecksScript", $okStub)
     Assert ($r.Code -eq 1 -and $r.Out -match 'FAIL line') "FAIL-count mismatch refused even with -AllowFail"
+    # run_all_checks' per-check cap prints "FAIL <rel> (timed out: ...)": it must parse as a normal FAIL for that check
+    # (named, classifiable, -AllowFail-able), never as an unparsed count mismatch and never as a silent pass.
+    Write-Log $c @("  FAIL  tools/check_x.ps1 (timed out: killed after exceeding 900s wall-clock cap)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.")
+    $r = Run-Land $c @("-CheckLog", $log, "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 1 -and $r.Json.error -match 'check_x' -and $r.Out -notmatch 'cannot classify') "timed-out FAIL line is parsed as a FAIL for that check and refused"
+    $r = Run-Land $c @("-CheckLog", $log, "-AllowFail", "check_x", "-DryRun", "-ChecksScript", $okStub)
+    Assert ($r.Code -eq 0) "timed-out FAIL line is allowed only via explicit -AllowFail"
 
     Write-Host "case: [remote rejected] is not retried (F11)"
     $c = New-Clone "c_rej"

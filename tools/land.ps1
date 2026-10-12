@@ -273,7 +273,7 @@ if ($WaitPid -gt 0 -or $CheckLog) {
     $sm = $sms[$sms.Count - 1]
     $failedCount = [int]$sm.Groups[1].Value
     if ($text -match '(?m)^\s*\d+ passed,[^\r\n]*?, [1-9]\d* BUSY \(not run\)') { Finish 1 "check log reports BUSY checks that never ran" }
-    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed|timed out)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     $failedLines = @([regex]::Matches($text, '(?m)^FAILED:.*$') | ForEach-Object { $_.Value.Trim() })
     $blocked = @()
     foreach ($n in $failNames) {
@@ -303,6 +303,8 @@ if ($WaitPid -gt 0 -or $CheckLog) {
                 $o = if ($outs.ContainsKey($_)) { [string]$outs[$_] } else { "" }
                 $ec = [regex]::Match($text, '(?m)^\s*FAIL\s+' + [regex]::Escape($_) + '\s+\(exit ([^)]*)\)')
                 $code = if ($ec.Success) { $ec.Groups[1].Value } else { $null }
+                # run_all_checks' per-check cap prints "FAIL <rel> (timed out: ...)"; its result Code is "timeout".
+                if (-not $ec.Success -and $text -match ('(?m)^\s*FAIL\s+' + [regex]::Escape($_) + '\s+\(timed out')) { $code = "timeout" }
                 [pscustomobject]@{ Path = $_; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output $o -ExitCode $code) } })
             $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline -Exact:$sel.Exact
             foreach ($w in $cmp.Warnings) { Write-Host "WARNING: $w" -ForegroundColor Yellow }
