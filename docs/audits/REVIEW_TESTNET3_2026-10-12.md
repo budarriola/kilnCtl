@@ -191,3 +191,14 @@ Fix: add `assertIn("snapshot unavailable", out)` to the new test.
 - Under a bench host, non-live tests keep the board environment by design
   (LOW-3 in REVIEW_TESTNET2). The network guard still blocks them from
   reaching the board.
+
+## Fix status
+
+| id | status | fix |
+|----|--------|-----|
+| L1 | fixed | `conftest.py` `_scrub_board_env()` drops every `KILNCTL_*` variable plus `MOUSER_API_KEY` and `GITHUB_TOKEN`, keeping control variables (`KILNCTL_TEST_*`, `KILNCTL_SLOW_TESTS`, `KILNCTL_BUILD_*`, `KILNCTL_LIGHT_GATE_*`, a few runner switches). With `KILNCTRL_BENCH_HOST` set it keeps only `KILNCTL_HOST`, `KILNCTL_WEB_USERNAME`, `KILNCTL_WEB_PASSWORD` (the live_bench tests use `host_resolve` and `http_auth`; `bench_fixture_session` reads only `KILNCTRL_BENCH_HOST`/`_PORT`). Pinned by a child run with 17 non-listed secrets. |
+| L2 | fixed | The keep test asserts every kept name and value, and that every other secret (including `KILNCTL_WEB_PASSWORD_NEW`) is dropped. Mutation n7 is CAUGHT. |
+| L3 | fixed | `web_commission_row.ps1` (live mode), `bench_hotspot.ps1` (`start`) and `make_release.ps1` (`-Publish`) refuse under `KILNCTL_TEST_NO_HUB=1` before any User-scope read. `test_user_scope_credential_scripts_refuse_under_test_env` runs all three under the test env and proves refusal with no sentinel secret in the output. |
+| I1 | fixed | `test_nulllink_fallback_warning_logged` imports `mcp_server` in a child and asserts the warning. n12 is CAUGHT. |
+| I2 | fixed | `test_conftest_forces_no_hub_over_inherited_zero`. n13 is CAUGHT. |
+| I3 | fixed | `assertIn("snapshot unavailable", out)` added to the not-a-list test. |
