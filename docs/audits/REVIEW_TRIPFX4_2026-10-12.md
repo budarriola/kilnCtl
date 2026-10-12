@@ -199,10 +199,10 @@ Suggested pins for LOW-2:
 
 | Item | Status |
 |---|---|
-| LOW-1 | fixed in 973dfbfeb (trip_is_test bound to TRIP_EVENT seq; host tests) |
-| LOW-2 | fixed in 973dfbfeb (M1, M2, M3, M6, M8 CAUGHT by negtest) |
-| INFO-1 | fixed in 973dfbfeb (cross-reference comments) |
-| INFO-2 | fixed in 973dfbfeb (safety_test_trip 6 s window plus TRIP_EVENT confirm) |
+| LOW-1 | fixed in 03228b65b (trip_is_test bound to TRIP_EVENT seq; host tests) |
+| LOW-2 | fixed in 03228b65b (M1, M2, M3, M6, M8 CAUGHT by negtest) |
+| INFO-1 | fixed in 03228b65b (cross-reference comments) |
+| INFO-2 | fixed in 03228b65b (safety_test_trip 6 s window plus TRIP_EVENT confirm) |
 | INFO-3 | open |
 | INFO-4 | open, no action proposed |
 | INFO-5 | no action |
