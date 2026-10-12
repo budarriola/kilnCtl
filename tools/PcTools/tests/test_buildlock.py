@@ -316,9 +316,15 @@ class BuildLockReviewFixes(unittest.TestCase):
         def info(pid):
             return (True, None) if pid == 4242 else real_info(pid)
 
-        with mock.patch.object(bl, "_pid_info", info):
-            with build_lock(key, wait_timeout=3, poll_interval=0.05, stale_after=10):
-                self.assertNotIn("4242", open(path).read())
+        try:
+            with mock.patch.object(bl, "_pid_info", info):
+                with build_lock(key, wait_timeout=3, poll_interval=0.05, stale_after=10):
+                    self.assertNotIn("4242", open(path).read())
+        except BuildLockTimeout:
+            self.fail("old lock of a holder with unknown start time was not age-reclaimed")
+        finally:
+            if os.path.exists(path) and "4242" in open(path).read():
+                os.remove(path)
 
     def test_release_restore_never_overwrites_a_newer_lock(self):
         # Our lock was reclaimed and replaced by A's; between our rename-aside
@@ -418,9 +424,17 @@ class BuildLockReviewFixes(unittest.TestCase):
         self.assertTrue(os.path.exists(side))
         old = time.time() - 600
         os.utime(side, (old, old))
-        with build_lock(key, wait_timeout=5, poll_interval=0.05):
-            pass
-        self.assertFalse(os.path.exists(side))
+        try:
+            try:
+                with build_lock(key, wait_timeout=5, poll_interval=0.05):
+                    pass
+            except BuildLockTimeout:
+                self.fail("stale sidecar never broken: dead lock not reclaimed")
+            self.assertFalse(os.path.exists(side))
+        finally:
+            for leftover in (path, side):
+                if os.path.exists(leftover):
+                    os.remove(leftover)
 
     def test_sidecar_break_restores_a_live_sidecar_grabbed_in_the_race(self):
         from unittest import mock
