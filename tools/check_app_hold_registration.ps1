@@ -6,7 +6,7 @@
 # profile_executor_note_external_app_hold() before it asserts, or a halt / relay-unknown release
 # drops the boot latch. Host tests do not compile main.c / main_control_bringup.c, so this scan is
 # the only mechanical guard: every safety_link_set_fault_source() call under firmware/KilnFW/App
-# (outside drivers/control and test/) whose mask is not a single non-APP SAFETY_FAULT_SRC_* constant
+# (outside test/ and the profile_executor*.c files; F5HOLDERFX LOW-3: the rest of drivers/control, e.g. autotune_engine.c, IS scanned) whose mask is not a single non-APP SAFETY_FAULT_SRC_* constant
 # and whose assert argument is not literal false must be preceded, within 8 lines, by the
 # registration call. Comments are stripped first.
 #
@@ -17,7 +17,7 @@ $AppDir = (Resolve-Path $AppDir).Path
 $fail = New-Object System.Collections.Generic.List[string]
 $checked = 0
 $files = Get-ChildItem -Path $AppDir -Recurse -Filter *.c -File |
-    Where-Object { $_.FullName -notmatch '[\\/](test|drivers[\\/]control)[\\/]' }
+    Where-Object { $_.FullName -notmatch '[\\/]test[\\/]' -and $_.Name -notmatch '^profile_executor' }
 foreach ($f in $files) {
     $raw = [IO.File]::ReadAllText($f.FullName)
     # blank out comments but keep line structure
@@ -29,6 +29,12 @@ foreach ($f in $files) {
         $asrt = $m.Groups[3].Value.Trim()
         if ($asrt -eq 'false') { continue }
         if ($mask -match '^SAFETY_FAULT_SRC_(?!APP\b)\w+$') { continue }
+        if ($mask -match '^[A-Za-z_]\w*$') {
+            # F5HOLDERFX LOW-3: a local variable is resolved to its assignment in the same file; accepted
+            # only when that assignment names SAFETY_FAULT_SRC_* constants and none of them is APP.
+            $am = [regex]::Match($s, '\b' + [regex]::Escape($mask) + '\s*=\s*([^;]+);')
+            if ($am.Success -and $am.Groups[1].Value -match 'SAFETY_FAULT_SRC_\w+' -and $am.Groups[1].Value -notmatch 'SAFETY_FAULT_SRC_APP\b') { continue }
+        }
         $checked++
         $line = ($s.Substring(0, $m.Index) -split "`n").Count
         $lines = $s -split "`n"

@@ -1136,6 +1136,17 @@ bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index)
     return false;
 }
 
+/* F5HOLDERFX MED-1: drop the pending gated-ON request of every other active segment on `target`. */
+static void io_segs_clear_wants_on_others(uint8_t except_idx, uint8_t target)
+{
+    for (uint8_t j = 0; j < PROFILE_MAX_SEGMENTS; j++) {
+        io_seg_runtime_t *o = &s_exec.io_segs[j];
+        if (j != except_idx && o->active && o->is_relay && o->target == target) {
+            o->wants_on = false;
+        }
+    }
+}
+
 /* Applies segment `idx`'s command once and starts tracking it. Called the
  * first tick segment_index reaches a RELAY_IO segment (see the
  * segment-stepping block) -- never re-applied on later ticks while the same
@@ -1155,6 +1166,11 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
     r->active = true;
     r->is_relay = (seg->io_target >= PROFILE_IO_TARGET_RELAY_BASE) &&
                   (seg->io_target < PROFILE_IO_TARGET_RELAY_BASE + KILN_IO_RELAY_COUNT);
+    if (r->is_relay) {
+        /* F5HOLDERFX MED-1: newest request wins -- an earlier still-active segment on this relay must
+         * not retry its gate-dropped ON over this segment's command (non-blocking segments, warm replay). */
+        io_segs_clear_wants_on_others(idx, seg->io_target);
+    }
     r->target = seg->io_target;
     r->blocking = seg->io_blocking != 0;
     r->state_on = seg->io_state != 0;
@@ -1172,8 +1188,8 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
         /* Review EXECTEST INFO-1: a relay_authority source (safety link down, PC link, APP latch...)
          * can rise mid-run WITHOUT faulting the executor (the watchdog aborts only after sustained
          * silence), and this write is AUTHORIZED (ungated by the owner). Gate the ON here the way
-         * apply_relay()/aux_apply_relay() do: drive OFF instead, and say so. Not retried: a dropped
-         * ON stays dropped for the run (never close a relay after a fault was seen). */
+         * apply_relay()/aux_apply_relay() do: drive OFF instead, and say so. Retried each tick by
+         * io_segs_retry_on() through the same gate (plus a fresh Pico TRIPPED refusal), never ungated. */
         bool drive_on = r->state_on;
         uint32_t blocked_sources = 0;
         if (drive_on && relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
@@ -1261,6 +1277,8 @@ void io_seg_finish(uint8_t idx, bool honor_leave_on)
          * if no profile had ever touched it. */
         s_exec.claimed_relay_mask &= (uint8_t)~bit;
         relay_authority_release_mask(bit);
+        /* F5HOLDERFX MED-1: this bit was just released/forced OFF; no other segment may retry it ON unowned. */
+        io_segs_clear_wants_on_others(idx, r->target);
     } else if (!leave_on && s_exec.io) {
         esp_err_t err = kiln_io_owner_command_set_io(r->target - PROFILE_IO_TARGET_IO_BASE + 1u, false);
         if (err != ESP_OK) {
@@ -1301,25 +1319,39 @@ void io_segs_tick(float dt_s)
 {
     for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
         io_seg_runtime_t *r = &s_exec.io_segs[i];
-        if (r->active && r->is_relay && r->wants_on && !r->state_on && s_exec.io) {
-            /* F5HOLDER LOW-4: retry a gate-dropped ON each tick, through the same gate. */
-            const uint32_t off_epoch_since = kiln_io_relay_off_epoch();
-            uint32_t blocked_sources = 0;
-            if (!relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
-                uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
-                if (kiln_io_owner_command_set_relay_mask_authorized_since(bit, bit, off_epoch_since) == ESP_OK) {
-                    r->state_on = true;
-                    s_exec.zone_off_pending_mask &= (uint8_t)~bit;
-                    ESP_LOGI(PE_TAG, "relay/IO segment %u: relay %u ON applied after the authority block cleared", i + 1, r->target);
-                }
-            }
-        }
         if (!r->active || r->blocking) {
             continue; /* a blocking segment is finished by the segment-stepping block itself */
         }
         r->remaining_s -= dt_s;
         if (r->remaining_s <= 0.0f) {
             io_seg_finish(i, false);
+        }
+    }
+}
+
+/* F5HOLDER LOW-4 / F5HOLDERFX LOW-1,2: retry gate-dropped relay ONs. Called once per RUNNING tick AFTER the
+ * guard checks and the blocking-segment finish, so a relay is never switched ON then OFF in one tick. Refuses
+ * while the authority gate is blocked OR a fresh Pico TRIPPED report is pending (fail-safe). s_exec.lock held. */
+void io_segs_retry_on(bool pico_tripped)
+{
+    if (!s_exec.io || pico_tripped) {
+        return;
+    }
+    for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
+        io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (!(r->active && r->is_relay && r->wants_on && !r->state_on)) {
+            continue;
+        }
+        const uint32_t off_epoch_since = kiln_io_relay_off_epoch();
+        uint32_t blocked_sources = 0;
+        if (relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
+            continue;
+        }
+        uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+        if (kiln_io_owner_command_set_relay_mask_authorized_since(bit, bit, off_epoch_since) == ESP_OK) {
+            r->state_on = true;
+            s_exec.zone_off_pending_mask &= (uint8_t)~bit;
+            ESP_LOGI(PE_TAG, "relay/IO segment %u: relay %u ON applied after the authority block cleared", i + 1, r->target);
         }
     }
 }

@@ -1321,6 +1321,7 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);
+void io_segs_retry_on(bool pico_tripped);
 /* Sets s_exec.state and clears the per-run scratch flags (dwelling,
  * ramp_lock_held) that only mean anything inside RUNNING/PAUSED -- see the
  * definition in profile_executor_relay_io.c for the full rationale. Use this

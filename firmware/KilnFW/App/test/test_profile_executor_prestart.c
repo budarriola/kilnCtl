@@ -2867,14 +2867,14 @@ static void test_io_seg_dropped_on_retried_through_gate(void)
     io_seg_start(0, &seg);
     TEST_CHECK(!s_exec.io_segs[0].state_on && s_exec.io_segs[0].wants_on, "dropped ON: state_on false, wants_on kept");
     g_relay_write_calls = 0;
-    io_segs_tick(1.0f);
+    io_segs_retry_on(false);
     TEST_CHECK(g_relay_write_calls == 0, "still blocked: the retry writes nothing");
     s_test_relay_authority_blocked = false;
-    io_segs_tick(1.0f);
+    io_segs_retry_on(false);
     TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0 && s_exec.io_segs[0].state_on,
                "gate clear: ON is applied once and state_on follows");
     g_relay_write_calls = 0;
-    io_segs_tick(1.0f);
+    io_segs_retry_on(false);
     TEST_CHECK(g_relay_write_calls == 0, "no repeat writes once ON");
     io_seg_finish(0, false);
 
@@ -2886,6 +2886,83 @@ static void test_io_seg_dropped_on_retried_through_gate(void)
     io_seg_finish(0, true);
     s_test_relay_authority_blocked = false;
     TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "dropped ON + leave_on: finish forces OFF, no leave-on handover");
+}
+
+
+static void test_f5holderfx_retry_semantics(void)
+{
+    TEST_SECTION("F5HOLDERFX MED-1 -- newest segment on a relay wins; a finish never leaves a pending retry; LOW-1 pico TRIPPED refuses");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.io_blocking = 0;
+    on_seg.dwell_min = 5;
+    profile_segment_t off_seg = on_seg;
+    off_seg.io_state = 0;
+
+    /* A (non-blocking) ON dropped by the gate, then B OFF on the same relay: A's retry must not fire. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &off_seg);
+    TEST_CHECK(!s_exec.io_segs[0].wants_on, "MED-1: starting B clears A's pending ON");
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "MED-1: gate opens, A does not turn relay ON over B's OFF");
+    io_segs_force_all_off(false);
+
+    /* Warm-start replay shape: A (ON, dropped) replayed first, B (OFF) replayed after. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &off_seg);
+    io_seg_start(2, &off_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "MED-1 replay: no replayed segment retries ON after a later OFF");
+    io_segs_force_all_off(false);
+
+    /* Variant: B's finish releases the relay; A's pending ON must not survive it. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_exec.io_segs[1] = s_exec.io_segs[0];
+    s_exec.io_segs[1].wants_on = false;
+    s_exec.io_segs[1].state_on = false;
+    s_test_relay_authority_blocked = false;
+    io_seg_finish(1, false);
+    TEST_CHECK(!s_exec.io_segs[0].wants_on, "MED-1: B's finish clears A's pending retry (no unowned ON)");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0, "MED-1: no retry after the other segment released the relay");
+    io_segs_force_all_off(false);
+
+    /* LOW-1: fresh Pico TRIPPED report refuses the retry; clears when it is gone. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(true);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "LOW-1: Pico TRIPPED pending -> no retry");
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.io_segs[0].state_on, "LOW-1: retry proceeds once not tripped");
+    io_segs_force_all_off(false);
+
+    /* LOW-2: the countdown tick itself never writes an ON; only the post-guard retry does. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &on_seg);
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_tick(1.0f);
+    TEST_CHECK(g_relay_write_calls == 0, "LOW-2: io_segs_tick (top of tick) never switches a relay ON");
+    io_segs_force_all_off(false);
 }
 
 static void test_io_seg_finish_default_forces_off_on_done(void)
@@ -12787,6 +12864,7 @@ void run_test_profile_executor_prestart(void)
     test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
     test_io_seg_start_on_gated_by_relay_authority();
     test_io_seg_dropped_on_retried_through_gate();
+    test_f5holderfx_retry_semantics();
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();

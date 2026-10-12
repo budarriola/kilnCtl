@@ -130,3 +130,14 @@ Host negtest (`-ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD F
 The unmutated baseline passed and every copy was removed. negtest reported an overall ERROR only
 because the real worktree changed during the run: the reviewer was writing these two audit docs
 at the time. No source file was touched.
+
+## Fix status
+
+| Finding | Status | Fix |
+|---|---|---|
+| MED-1 | FIXED | `io_seg_start_since()` and `io_seg_finish()` clear `wants_on` on every other active runtime targeting the same relay (`io_segs_clear_wants_on_others()`); tests: two segments, warm-start replay shape, finish-release variant |
+| LOW-1 | FIXED (retry only) | `io_segs_retry_on(pico_tripped)` refuses while a fresh Pico TRIPPED report is pending. `io_seg_start` and `aux_apply_relay` still gate on `relay_authority_on_blocked()` only: neither has the report at hand under the executor lock (it is read outside the lock by rule), so no shared helper exists; left as is |
+| LOW-2 | FIXED | Retry moved out of `io_segs_tick()` to `io_segs_retry_on()`, called after the guards, the blocking-segment finish and segment stepping, only while still RUNNING |
+| LOW-3 | FIXED | Check now scans `drivers/control/` except `profile_executor*.c`; resolves a local-variable mask to its assignment (accepted only if all constants are non-APP). Deasserts are not checked |
+| INFO stale comment | FIXED | "Not retried" comment replaced |
+| INFO status field | NOT DONE | not cheap; log line only |

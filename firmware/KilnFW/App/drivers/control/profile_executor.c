@@ -1243,6 +1243,11 @@ void executor_task_entry(void *arg)
             }
         }
 
+        /* F5HOLDERFX LOW-1/2: retry gate-dropped relay ONs only now -- after guards and the blocking finish. */
+        if (s_exec.state == PROFILE_EXEC_RUNNING) {
+            io_segs_retry_on(pre_lock_pico_tripped);
+        }
+
         /* --- Firing quality stats accumulation (PID_EXPANSION_PLAN.md Phase
          * 7a), per active zone --------------------------------------------
          * Placed here: target_c/dwelling/segment_index are already final for
