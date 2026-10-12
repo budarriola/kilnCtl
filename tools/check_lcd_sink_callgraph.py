@@ -29,21 +29,53 @@ NON_UI_ALLOW = [
     "safety_link_",
 ]
 OBJDUMP_GLOB = r"C:\Espressif\tools\xtensa-esp-elf\*\xtensa-esp-elf\bin\xtensa-esp32s3-elf-objdump.exe"
-SEC = re.compile(r"^RELOCATION RECORDS FOR \[(\.[a-z_]+)\.(.+)\]:")
+SEC = re.compile(r"^RELOCATION RECORDS FOR \[(\.[^\]]+)\]:")
+KIND_PFX = re.compile(r"^\.(?:text|literal|rodata|data|bss|sdata|srodata|iram\d*|dram\d*|flash\.text|flash\.rodata|rtc\.\w+)\.(.+)$")
+SYM = re.compile(r"^[0-9a-fA-F]+\s+.*?\s(\.\S+)\s+[0-9a-fA-F]+\s+(\S+)$")
 REL = re.compile(r"^[0-9a-fA-F]+\s+\S+\s+(\S+?)(?:[+-]0x[0-9a-fA-F]+)?\s*$")
 LOCAL_SEC = re.compile(r"^\.(?:text|literal|rodata|data|bss|sdata|srodata)\.(.+?)(?:\.\d+)?$")
 
 
-def parse(dump_text, objkey, rev):
+def parse_syms(sym_text):
+    """objdump -t text -> {section name: function/object symbol defined in it}."""
+    m = {}
+    for line in sym_text.splitlines():
+        sm = SYM.match(line.strip())
+        if sm and not sm.group(2).startswith("."):
+            m.setdefault(sm.group(1), sm.group(2))
+    return m
+
+
+def node_name(sec, secmap, unattrib):
+    """Section name -> node name. A symbol-table hit wins (e.g. .iram1.5 -> the function)."""
+    if secmap and sec in secmap:
+        return secmap[sec]
+    lm = LOCAL_SEC.match(sec)
+    if lm:
+        return lm.group(1)
+    km = KIND_PFX.match(sec)
+    if km:
+        n = km.group(1)
+        n = re.sub(r"\.\d+$", "", n)
+        if n.isdigit():
+            unattrib.append(sec)
+        return n
+    return sec  # plain .rodata/.data/...: its own node, never the previous section
+
+
+def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
+    unattrib = unattrib if unattrib is not None else []
     cur = None
     for line in dump_text.splitlines():
         m = SEC.match(line)
         if m:
-            kind, name = m.group(1), m.group(2)
-            if kind == ".xt":  # .xt.lit/.xt.prop: assembler metadata, not code
+            sec = m.group(1)
+            if sec.startswith((".xt.", ".debug", ".comment", ".note", ".xtensa")):  # metadata/debug info, not code
                 cur = None
                 continue
-            cur = f"{objkey}::{name}"
+            cur = f"{objkey}::{node_name(sec, secmap, unattrib)}"
+            if defined is not None:
+                defined.add(cur)
             continue
         if line.startswith("RELOCATION RECORDS"):
             cur = None
@@ -54,8 +86,10 @@ def parse(dump_text, objkey, rev):
         if not m:
             continue
         val = m.group(1)
-        lm = LOCAL_SEC.match(val)
-        tgt = f"{objkey}::{lm.group(1)}" if lm else val
+        if val.startswith("."):
+            tgt = f"{objkey}::{node_name(val, secmap, unattrib)}"
+        else:
+            tgt = val
         if tgt != cur:
             rev.setdefault(tgt, set()).add(cur)
 
@@ -64,8 +98,24 @@ def is_ui(node):
     return "/ui/" in node.split("::")[0]
 
 
-def analyse(rev):
+def analyse(rev, defined=None):
     fails, notes = [], []
+    # REVIEW_LCDFX10 MED-3: renaming/removing a sink or the gate edge must fail, not turn the check into a no-op.
+    if defined is not None:
+        defs = {n.partition("::")[2] for n in defined}
+        for s in sorted(SINKS):
+            if s not in defs:
+                fails.append(f"sink {s} has no defining section in the scanned objects (renamed or removed? update SINKS)")
+            if not rev.get(s):
+                fails.append(f"sink {s} has no referrers (renamed or removed? update SINKS)")
+    gate_nodes = [n for n in rev if n.partition("::")[2] == GATE_FN and os.path.basename(n.partition("::")[0]) == GATE_OBJ]
+    edge = any(os.path.basename(c.partition("::")[0]) == GATE_OBJ and c.partition("::")[2] == GATE_CALLER
+               for g in gate_nodes for c in rev.get(g, ()))
+    if not edge:
+        fails.append(f"gate edge {GATE_OBJ}::{GATE_CALLER} -> {GATE_FN} not found")
+    if not any(any(r.partition("::")[2] == GATE_FN and os.path.basename(r.partition("::")[0]) == GATE_OBJ
+                   for r in rev.get(s, ())) for s in SINKS):
+        fails.append(f"{GATE_OBJ}::{GATE_FN} does not reference a trip-clear sink (gate renamed?)")
     seen, work = set(), []
     for s in SINKS:
         for c in rev.get(s, ()):
@@ -85,9 +135,12 @@ def analyse(rev):
         obj, _, fn = node.partition("::")
         if is_ui(node):
             if os.path.basename(obj) == GATE_OBJ and fn == GATE_FN:
-                bad = [c for c in rev.get(node, ()) if c.partition("::")[2] != GATE_CALLER]
+                # MED-2: exact qualified match (object AND function); a bare-name (global) reference is never allowed.
+                bad = [c for c in rev.get(node, ())
+                       if not (os.path.basename(c.partition("::")[0]) == GATE_OBJ and c.partition("::")[2] == GATE_CALLER)]
+                bad += [f"(global reference by bare name) {c}" for c in rev.get(fn, ())]
                 for c in bad:
-                    fails.append(f"{c} references the gated clear action (only {GATE_CALLER} may)")
+                    fails.append(f"{c} references the gated clear action (only {GATE_OBJ}::{GATE_CALLER} may)")
                 continue  # gate edge: stop here
             fails.append(f"LCD UI code reaches a trip-clear sink: {node} (via {via})")
         for c in rev.get(node, ()):
@@ -119,14 +172,20 @@ def skip(msg):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--build-dir")
+    ap.add_argument("--sym-dump", action="append", default=[],
+                    help="OBJKEY=FILE: pre-dumped objdump -t text (test mode; section -> symbol map)")
     ap.add_argument("--reloc-dump", action="append", default=[],
                     help="OBJKEY=FILE: pre-dumped objdump -r text (test mode)")
     a = ap.parse_args()
-    rev = {}
+    rev, defined, unattrib = {}, set(), []
     if a.reloc_dump:
+        syms = {}
+        for spec in a.sym_dump:
+            k, f = spec.split("=", 1)
+            syms[k] = parse_syms(open(f, encoding="utf-8").read())
         for spec in a.reloc_dump:
             k, f = spec.split("=", 1)
-            parse(open(f, encoding="utf-8").read(), k, rev)
+            parse(open(f, encoding="utf-8").read(), k, rev, defined, syms.get(k), unattrib)
     else:
         root = a.build_dir or os.environ.get("KILNCTL_KILNFW_BUILD") or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "firmware", "KilnFW", "build")
@@ -136,13 +195,21 @@ def main():
         if not any(os.path.basename(p) == GATE_OBJ for p in objs):
             return skip(f"no {GATE_OBJ} under {root} (build not present)")
         od = find_objdump()
-        for p in objs:
+        def dump(p):
             r = subprocess.run([od, "-r", p], capture_output=True, text=True)
+            t = subprocess.run([od, "-t", p], capture_output=True, text=True) if r.returncode == 0 else None
+            return p, r, t
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(16, (os.cpu_count() or 4))) as ex:
+            results = list(ex.map(dump, objs))
+        for p, r, t in results:
             if r.returncode != 0:
                 print(f"FAIL: objdump failed on {p}: {r.stderr.strip()[:200]}")
                 return 1
-            parse(r.stdout, objkey_of(p), rev)
-    fails = analyse(rev)
+            parse(r.stdout, objkey_of(p), rev, defined, parse_syms(t.stdout), unattrib)
+    fails = analyse(rev, defined)
+    for u in sorted(set(unattrib)):
+        fails.append(f"relocation section {u} cannot be attributed to a function (no symbol-table entry)")
     if fails:
         print("LCD sink call-graph check FAILED:")
         for f in sorted(set(fails)):

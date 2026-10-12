@@ -4,6 +4,13 @@
 #   C: ui function reaches the sink through a non-ui helper (macro/wrapper)    -> exit 1
 #   D: ui function pointer table references clear_action                       -> exit 1
 #   E: unreviewed non-UI caller of the sink                                     -> exit 1
+#   G: sinks renamed / absent (check must not pass vacuously)                  -> exit 1
+#   H: clear_action referenced by bare name (global) from a non-ui object      -> exit 1
+#   I: btn_clicked_cb in a DIFFERENT object references the gated action         -> exit 1
+#   J: .iram1.N relocation section attributed via the symbol table              -> exit 1 (reaches sink)
+#   L: sink with no referrers                                                  -> exit 1
+#   M: gate edge btn_clicked_cb -> clear_action missing                        -> exit 1
+#   K: unattributable numeric section without a symbol-table entry             -> exit 1
 # -ScriptUnderTest lets negtest.ps1 point this at a mutated copy (must live in tools\).
 # checkcache: ok
 param([string]$ScriptUnderTest)
@@ -21,9 +28,10 @@ function Sec($name, $targets) {
     return $s + "`n"
 }
 function Dump($file, $text) { [IO.File]::WriteAllText((Join-Path $d $file), $text); return (Join-Path $d $file) }
-function Run($specs) {
+function Run($specs, $syms = @()) {
     $argv = @($ScriptUnderTest)
     foreach ($s in $specs) { $argv += @("--reloc-dump", $s) }
+    foreach ($s in $syms) { $argv += @("--sym-dump", $s) }
     $out = & python @argv 2>&1 | Out-String
     return @{ Code = $LASTEXITCODE; Out = $out }
 }
@@ -54,8 +62,50 @@ try {
     $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/misc/newcaller.c.obj=$e"))
     Check ($r.Code -eq 1 -and $r.Out -match 'unreviewed') "E unreviewed non-UI caller fails"
 
-    $r = Run @()
-    $r2 = & python $ScriptUnderTest --build-dir (Join-Path $d "nobuild") | Out-String
+    # G: both sinks renamed everywhere, plus an ungated direct call from a ui function.
+    $dashR = Dump "dashr.txt" ((Sec ".text.dashboard_safety_clear_trip_x" @("safety_link_send_clear_trip_x")) + (Sec ".text.safety_clear_trip_post_handler" @("dashboard_safety_clear_trip_x")))
+    $linkR = Dump "linkr.txt" (Sec ".text.safety_link_send_clear_trip_x" @("memcpy"))
+    $g = Dump "g.txt" ($gateGood + (Sec ".text.other_cb" @("dashboard_safety_clear_trip_x")))
+    $r = Run @("drivers/http/dashboard_exec_http.c.obj=$dashR", "drivers/safety/safety_link_tx.c.obj=$linkR", "drivers/ui/ui_page_safety.c.obj=$g")
+    Check ($r.Code -eq 1 -and $r.Out -match 'sink dashboard_safety_clear_trip ') "G renamed sinks fail (not a silent no-op)"
+
+    # H: a global clear_action referenced by bare name from a non-ui object.
+    $h = Dump "h.txt" (Sec ".text.dashboard_lcd_y" @("clear_action"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/http/other.c.obj=$h"))
+    Check ($r.Code -eq 1 -and $r.Out -match 'bare name') "H bare-name clear_action reference fails"
+
+    # I: a btn_clicked_cb in another object referencing the gated action.
+    $i1 = Dump "i.txt" (Sec ".text.btn_clicked_cb" @(".text.clear_action"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk"))
+    $gateObjCb = Dump "i2.txt" ((Sec ".text.clear_action" @("dashboard_safety_clear_trip")) + (Sec ".text.other_cb" @(".text.clear_action")))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$gateObjCb", "drivers/ui/ui_page_home.c.obj=$i1"))
+    Check ($r.Code -eq 1) "I btn_clicked_cb elsewhere / missing gate edge fails"
+    $i3 = Dump "i3.txt" ($gateGood + (Sec ".text.other_cb" @("clear_action")))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$i3"))
+    Check ($r.Code -eq 1 -and $r.Out -match 'other_cb') "I2 non-gate caller of clear_action fails"
+
+    # L: sinks defined but one has no referrer at all.
+    $dl = Dump "dl.txt" (Sec ".text.dashboard_safety_clear_trip" @("memcpy"))
+    $ll = Dump "ll.txt" (Sec ".text.safety_link_send_clear_trip" @("memcpy"))
+    $r = Run @("drivers/http/dashboard_exec_http.c.obj=$dl", "drivers/safety/safety_link_tx.c.obj=$ll", "drivers/ui/ui_page_safety.c.obj=$safetyOk")
+    Check ($r.Code -eq 1 -and $r.Out -match 'has no referrers') "L sink without referrers fails"
+    # M: gate edge missing (clear_action reaches the sink, but nothing references clear_action).
+    $mg = Dump "mg.txt" (Sec ".text.clear_action" @("dashboard_safety_clear_trip"))
+    $r = Run ($base + "drivers/ui/ui_page_safety.c.obj=$mg")
+    Check ($r.Code -eq 1 -and $r.Out -match 'gate edge') "M missing gate edge fails"
+
+    # J: IRAM wrapper whose section name is numeric; the symbol table maps it to the function.
+    $jr = Dump "j.txt" (Sec ".iram1.5" @("dashboard_safety_clear_trip"))
+    $js = Dump "js.txt" ("SYMBOL TABLE:`n00000000 g     F .iram1.5`t00000010 iram_wrapper`n")
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$jr")) @("drivers/ui/ui_page_home.c.obj=$js")
+    Check ($r.Code -eq 1 -and $r.Out -match 'iram_wrapper') "J IRAM wrapper in ui reaching the sink fails, named by function"
+    # K: same section without a symbol-table entry -> cannot attribute -> fail
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$jr"))
+    Check ($r.Code -eq 1 -and $r.Out -match 'cannot be attributed') "K unattributable relocation section fails"
+
+    $nb = Join-Path $d "nobuild"
+    New-Item -ItemType Directory -Force -Path $nb | Out-Null
+    $r2 = & python $ScriptUnderTest --build-dir $nb | Out-String
     Check ($LASTEXITCODE -eq 3 -and $r2 -match 'SKIP') "F no build skips"
 } finally { Remove-Item -Recurse -Force $d -ErrorAction SilentlyContinue }
 if ($fail) { Write-Host "$fail failure(s)"; exit 1 }

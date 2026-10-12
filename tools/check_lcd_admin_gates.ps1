@@ -508,10 +508,14 @@ if (Test-Path $drvCmake) {
     }
     if ($dct -match '(?i)-Wno-shadow|-Wno-error=shadow') { Write-Host "FAIL: L-shadow: App/drivers/CMakeLists.txt turns shadow warnings off"; $fail++ }
 }
-# LOW-1: the gate implementation must not be weak (a strong definition elsewhere would silently replace it at link time).
-foreach ($wf in 'ui_lcd_lock.c', 'ui_lcd_lock.h') {
-    $wp = Join-Path $UiDir $wf
-    if ((Test-Path $wp) -and ((Get-Content -Raw -Path $wp) -match '\bweak\b|__weak__|__attribute__\s*\(\(\s*(?:__)?weak')) { Write-Host "FAIL: L-weak: $wf mentions weak (a weak gate function can be overridden by a strong definition in another file at link time)"; $fail++ }
+# LOW-1 / REVIEW_LCDFX10 LOW-5: nothing in drivers/ui may be weak (a strong definition elsewhere would silently replace it at link time).
+foreach ($wf in $uiAll) {
+    if ((Remove-CComments ((Get-Content -Raw -Path $wf.FullName) -replace "`r", '')) -match '\bweak\b|__weak__|__attribute__\s*\(\(\s*(?:__)?weak') { Write-Host "FAIL: L-weak: $($wf.Name) mentions weak (a weak gate/page function can be overridden by a strong definition in another file at link time)"; $fail++ }
+}
+# REVIEW_LCDFX10 LOW-2: a diagnostic pragma naming shadow (or _Pragma) can switch -Werror=shadow off; the code scan strips pragmas, so look at the raw text.
+foreach ($pf in $uiAll) {
+    $praw = Get-Content -Raw -Path $pf.FullName
+    if ($praw -match '(?is)#\s*pragma\s+(GCC|clang)\s+diagnostic[^\r\n]*shadow|_Pragma\s*\([^)]*diagnostic') { Write-Host "FAIL: L-shadow: $($pf.Name) has a diagnostic pragma naming shadow (or _Pragma diagnostic); it can switch -Werror=shadow off"; $fail++ }
 }
 # MED-2: the AP password is revealed only in refresh_cb's unmasked ADMIN branch (and the ADMIN-gated editor prefill; both
 # are sink rows above, so Home or any other page reading it fails the inventory). The masked branch (all a USER sees)
@@ -525,6 +529,16 @@ else {
     else {
         $mb = ($mm.Groups[1].Value -replace 'ap_password\[0\]', '')
         if ($mb -match '\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri') { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
+        # REVIEW_LCDFX10 MED-4 (P2): the masked block must end with return; or it falls through into the reveal.
+        if ($mm.Groups[1].Value -notmatch '\breturn\s*;\s*$') { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block does not end with 'return;' (it would fall through into the ADMIN reveal)"; $fail++ }
+    }
+    # REVIEW_LCDFX10 MED-4 (P1): before the gate, the password may only be fetched into its local and tested via [0].
+    $gi = $rcb.body.IndexOf('bool show_secret')
+    if ($gi -ge 0) {
+        $pre = $rcb.body.Substring(0, $gi)
+        $pre = [regex]::Replace($pre, 'const\s+char\s*\*\s*ap_password\s*=\s*wifi_prov_get_ap_password\(\)\s*;', '')
+        $pre = $pre -replace 'ap_password\[0\]', ''
+        if ($pre -match '\bap_password\b|\bs_ap_qr_uri\b|build_wifi_qr_uri') { Write-Host "FAIL: L-secret: refresh_cb uses '$($Matches[0])' before the show_secret gate (only the single fetch declaration is allowed there)"; $fail++ }
     }
 }
 
