@@ -415,6 +415,31 @@ def _no_outbound_network(request, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "create_connection", guarded_create)
+
+    # asyncio bypasses socket.socket.connect: Windows' ProactorEventLoop calls ConnectEx on the
+    # raw fd via IocpProactor.connect, and the selector loop awaits sock_connect (oldpoolb MED-1).
+    import asyncio.selector_events as _ase
+    real_sock_connect = _ase.BaseSelectorEventLoop.sock_connect
+
+    async def guarded_sock_connect(self, sock, address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return await real_sock_connect(self, sock, address)
+
+    monkeypatch.setattr(_ase.BaseSelectorEventLoop, "sock_connect", guarded_sock_connect)
+    try:
+        import asyncio.windows_events as _awe
+    except ImportError:
+        _awe = None
+    if _awe is not None:
+        real_iocp_connect = _awe.IocpProactor.connect
+
+        def guarded_iocp_connect(self, conn, address):
+            if not _is_loopback_addr(address) or _is_hub_addr(address):
+                _refuse(address)
+            return real_iocp_connect(self, conn, address)
+
+        monkeypatch.setattr(_awe.IocpProactor, "connect", guarded_iocp_connect)
     yield attempts
     if attempts:
         pytest.fail(f"test attempted real outbound network connection(s): {attempts}",

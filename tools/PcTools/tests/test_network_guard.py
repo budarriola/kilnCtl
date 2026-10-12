@@ -280,77 +280,101 @@ def _repo_file(*parts):
 _PROBE = "GUARD-PROBE-PAST-GUARD"
 
 
+# Controls never reach real network/credentials even if a probe is dead: web_commission_row
+# targets a closed localhost port (dummy credentials), make_release uses -SkipBuild and an
+# origin URL overridden (GIT_CONFIG_*) to a nonexistent local path.
+_NOFETCH_ENV = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "remote.origin.url",
+                "GIT_CONFIG_VALUE_0": "file:///nonexistent/kilnctl-test-no-fetch",
+                "GIT_TERMINAL_PROMPT": "0"}
+_DUMMY_CREDS = {"KILNCTL_WEB_USERNAME": "dummy-user", "KILNCTL_WEB_PASSWORD": "dummy-pass"}
+_HS = ("tools", "PcTools", "scripts", "bench_hotspot.ps1")
+_WEB = ("tools", "PcTools", "scripts", "web_commission_row.ps1")
+_MR = ("tools", "make_release.ps1")
+_PROBE_RC = 86
+_NH = "KILNCTL_TEST_NO_HUB"
+# id, script, args, refusal needle, guard line (single-quoted form), first executable line
+# after the probe, marker the probe prints, extra env
+_CASES = [
+    ("web", _WEB, ["-Row", "W28", "-BoardHost", "127.0.0.1:1", "-ScreenshotDir", "unused"],
+     "live mode refused", "if (-not $DryRun -and $env:" + _NH + " -eq '1') {",
+     "$repoRoot = Resolve-Path", _PROBE, _DUMMY_CREDS),
+    ("hs-start", _HS, ["-Action", "start"], "start refused", "if ($env:" + _NH + " -eq '1') {",
+     "switch ($Action)", _PROBE, {}),
+    ("hs-stop", _HS, ["-Action", "stop"], "stop refused", "if ($env:" + _NH + " -eq '1') {",
+     "switch ($Action)", _PROBE, {}),
+    ("hs-status", _HS, ["-Action", "status"], "status refused", "if ($env:" + _NH + " -eq '1') {",
+     "switch ($Action)", _PROBE, {}),
+    ("publish", _MR, ["-Tag", "v0.0.0-test.1", "-Publish", "-SkipBuild"], "-Publish refused",
+     "if ($Publish -and $env:" + _NH + " -eq '1') {", "function Get-ReleaseApiHeaders",
+     _PROBE + " publish", _NOFETCH_ENV),
+    ("devdryrun", _MR, ["-Tag", "v0.0.0-test.1", "-DevDryRun", "-SkipBuild"], "network git access refused",
+     "if ($env:" + _NH + " -eq '1') {", "& git -C $repoRoot fetch --quiet origin release --tags",
+     _PROBE, _NOFETCH_ENV),
+]
+_IDS = [c[0] for c in _CASES]
+_PARAMS = "cid,script_parts,args,needle,guard,anchor,marker,xenv"
+
+
 @pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
-@pytest.mark.parametrize("script_parts,args", [
-    (("tools", "PcTools", "scripts", "web_commission_row.ps1"), ["-Row", "W28", "-BoardHost", "192.0.2.1", "-ScreenshotDir", "unused"]),
-    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "start"]),
-    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "stop"]),
-    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "status"]),
-    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-Publish"]),
-    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-DevDryRun"]),
-])
-def test_user_scope_credential_scripts_refuse_under_test_env(script_parts, args):
+@pytest.mark.parametrize(_PARAMS, _CASES, ids=_IDS)
+def test_user_scope_credential_scripts_refuse_under_test_env(cid, script_parts, args, needle, guard, anchor, marker, xenv):
     """Testnet3 L3 / testnet4 L2+L3: these scripts use User-scope credentials or the real
     hotspot / git credential manager, which the conftest env drop cannot hide. Under
-    KILNCTL_TEST_NO_HUB=1 each must refuse before the action.
+    KILNCTL_TEST_NO_HUB=1 each must refuse with that guard's OWN message before the action.
 
-    Safe on failure: KILNCTL_TEST_GUARD_PROBE=1 makes every script exit 0 printing the probe
-    marker just PAST its guard, so a regressed guard cannot start the hotspot, publish, fetch
-    or load credentials. The marker's absence plus a nonzero exit proves the guard fired first.
-    (No sentinel-secret assertion: the scripts read the User-scope registry, never the process
-    env, so a process-env sentinel could not leak and the check would be vacuous.)"""
+    Safe on failure: KILNCTL_TEST_GUARD_PROBE=1 makes each script write the probe marker to
+    stderr and exit 86 just PAST its guard, so a regressed guard cannot start the hotspot,
+    publish, fetch or load credentials. (No sentinel-secret assertion: the scripts read the
+    User-scope registry, never the process env, so it would be vacuous.)"""
     import subprocess, os
-    env = {**os.environ, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_TEST_GUARD_PROBE": "1"}
+    env = {**os.environ, **xenv, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_TEST_GUARD_PROBE": "1"}
     r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args],
                        capture_output=True, text=True, env=env, timeout=120)
     out = r.stdout + r.stderr
     assert _PROBE not in out, "guard regressed (stopped only by the probe): " + out
     assert r.returncode not in (0, _PROBE_RC), out
-    assert "refused" in out.lower() and "KILNCTL_TEST_NO_HUB" in out, out
-
-
-_PROBE_RC = 86
-
-# (script parts, args, text of the first line that must come AFTER the probe line). The
-# control runs each with the guard condition off, so a missing probe must not reach real
-# code: bench_hotspot uses read-only `status`; the static check below pins probe-before-action.
-_PROBED = [
-    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "status"], "switch ($Action)"),
-    (("tools", "PcTools", "scripts", "web_commission_row.ps1"),
-     ["-Row", "W28", "-BoardHost", "192.0.2.1", "-ScreenshotDir", "unused"], "$repoRoot = Resolve-Path"),
-    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-Publish"], "# ---------------------------------------------------------------- publish helpers"),
-    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-DevDryRun"], "& git -C $repoRoot fetch --quiet origin release --tags"),
-]
+    assert needle in out and _NH in out, out
 
 
 @pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
-@pytest.mark.parametrize("script_parts,args,after", _PROBED)
-def test_guard_probe_reaches_past_guard_without_no_hub(script_parts, args, after):
-    """Control for the refusal test: with the guard condition off, every probed invocation
-    reaches its probe (marker on stderr, distinct nonzero exit 86, never 0), so the refusal
-    test cannot pass merely because a probe path is dead. Testnet5 L1/L2/L3."""
+@pytest.mark.parametrize(_PARAMS, _CASES, ids=_IDS)
+def test_guard_probe_reaches_past_guard_without_no_hub(cid, script_parts, args, needle, guard, anchor, marker, xenv):
+    """Control for the refusal test: with the guard condition off, each invocation reaches ITS
+    OWN probe (site marker on stderr, exit 86, never 0). Inputs are inert even if a probe is
+    dead: closed localhost port + dummy credentials, -SkipBuild, unreachable origin."""
     import subprocess, os
-    env = {k: v for k, v in os.environ.items() if k != "KILNCTL_TEST_NO_HUB"}
+    env = {k: v for k, v in os.environ.items() if k != _NH}
+    env.update(xenv)
     env["KILNCTL_TEST_GUARD_PROBE"] = "1"
     r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args], capture_output=True, text=True,
                        env=env, timeout=120)
-    assert r.returncode == _PROBE_RC and _PROBE in r.stderr, r.stdout + r.stderr
+    assert r.returncode == _PROBE_RC and marker in r.stderr.strip().splitlines(), r.stdout + r.stderr
 
 
-@pytest.mark.parametrize("script_parts,args,after", _PROBED)
-def test_guard_probe_precedes_real_action(script_parts, args, after):
-    """Testnet5 L2/L3 static pin: a probe line exists and sits before the first real action,
-    exits with the distinct code and writes the marker to stderr (not stdout)."""
+@pytest.mark.parametrize(_PARAMS, _CASES, ids=_IDS)
+def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard, anchor, marker, xenv):
+    """Static pin: an executable guard line, then an executable probe `if (` whose condition is
+    the guard's with NO_HUB -> GUARD_PROBE (so not commented, no `$false -and` prefix), then
+    only blanks/comments, then the executable anchor line. The probe writes the marker to
+    stderr and exits 86."""
     with open(_repo_file(*script_parts), encoding="utf-8") as fh:
         lines = fh.read().splitlines()
+    norm = [l.strip().replace('"', "'") for l in lines]
+    gs = [n for n, l in enumerate(norm) if l == guard]
+    assert len(gs) == 1, ("guard line not found exactly once", guard, gs)
+    want = guard.replace(_NH, "KILNCTL_TEST_GUARD_PROBE")
     probes = [n for n, l in enumerate(lines) if "KILNCTL_TEST_GUARD_PROBE" in l and _PROBE in l]
-    assert probes, "no probe line"
-    first_after = next(n for n, l in enumerate(lines) if l.strip().startswith(after))
-    assert any(0 < first_after - n <= 3 for n in probes), (probes, first_after)
-    for n in probes:
-        assert "[Console]::Error.WriteLine('" + _PROBE + "')" in lines[n] and "exit %d" % _PROBE_RC in lines[n], lines[n]
+    assert len(probes) == 1, ("expected exactly one probe line", probes)
+    pn = probes[0]
+    assert norm[pn].startswith(want), ("probe is not an executable `if` on the guard's condition", lines[pn], want)
+    assert "[Console]::Error.WriteLine('" + marker + "')" in norm[pn] and ("exit %d" % _PROBE_RC) in norm[pn], lines[pn]
+    assert gs[0] < pn, ("guard must precede probe", gs[0], pn)
+    later = [n for n, l in enumerate(norm) if n > pn and l.startswith(anchor)]
+    assert later, ("executable anchor not found after the probe", anchor)
+    for n in range(pn + 1, later[0]):
+        assert norm[n] == "" or norm[n].startswith("#"), ("executable line between probe and anchor", lines[n])
 
 
 def test_settings_override_prints_notice():
@@ -410,3 +434,19 @@ def test_scrub_keep_prefix_boundary():
            "KILNCTL_BUILD_FLAG": "1"}
     conftest._scrub_board_env(env, False)
     assert env == {"KILNCTL_TEST_FLAG": "1", "KILNCTL_BUILD_FLAG": "1"}
+
+
+@pytest.mark.parametrize("host,port", [("127.0.0.1", 8765), ("127.0.0.1", 8766), ("127.0.0.1", 8767),
+                                       ("192.0.2.1", 80)])
+def test_guard_refuses_asyncio_connections(host, port, _no_outbound_network):
+    """oldpoolb MED-1: asyncio (ProactorEventLoop on Windows) bypasses socket.socket.connect.
+    Only refused targets are used, so the test can never reach a live server."""
+    import asyncio
+
+    async def go():
+        await asyncio.open_connection(host, port)
+
+    with pytest.raises(NetworkGuardError):
+        asyncio.run(go())
+    assert len(_no_outbound_network) == 1, _no_outbound_network
+    _no_outbound_network.clear()

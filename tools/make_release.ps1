@@ -80,7 +80,7 @@ if ($Publish -and $env:KILNCTL_TEST_NO_HUB -eq "1") {
 }
 # KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past a guard so a regressed guard cannot
 # publish, fetch or build (testnet4 L2).
-if ($Publish -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
+if ($Publish -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD publish'); exit 86 }
 
 # ---------------------------------------------------------------- publish helpers
 # Invoke-ReleasePublish calls Invoke-RestMethod and Get-AssetToFile by plain name so a

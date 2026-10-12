@@ -147,7 +147,7 @@ Three land.ps1 mutants survive `check_land.ps1`:
   produce. No practical exposure.
 - INFO-4: a `proc-receive` hook (AGit flow) can set an arbitrary status reason, including
   `incorrect old value provided`. That needs control of the server; out of scope.
-- INFO-5 (FIXED, 9d93e816a): `-MaxPushTries 0` or a negative value skipped the loop and finished with "still rejected
+- INFO-5 (FIXED, 4a4b1ef39 added ValidateRange; 9d93e816a added the check case): `-MaxPushTries 0` or a negative value skipped the loop and finished with "still rejected
   after 0 attempts". `land.ps1` now has `[ValidateRange(1,50)]` on the parameter; `check_land.ps1` case "MaxPushTries 0 refused at parameter binding".
 - INFO-6: if the rebase drops every agent commit as already upstream, HEAD equals the origin tip and
   `git push` exits 0 ("Everything up-to-date"). land then reports landed for a sha that is not the
