@@ -10,6 +10,7 @@
 #   J: .iram1.N relocation section attributed via the symbol table              -> exit 1 (reaches sink)
 #   L: sink with no referrers                                                  -> exit 1
 #   M: gate edge btn_clicked_cb -> clear_action missing                        -> exit 1
+#   N: ui reaches sink via a static helper chain inside an allowlisted object (node-keyed reverse walk) -> exit 1
 #   K: unattributable numeric section without a symbol-table entry             -> exit 1
 # -ScriptUnderTest lets negtest.ps1 point this at a mutated copy (must live in tools\).
 # checkcache: ok
@@ -102,6 +103,14 @@ try {
     # K: same section without a symbol-table entry -> cannot attribute -> fail
     $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$jr"))
     Check ($r.Code -eq 1 -and $r.Out -match 'cannot be attributed') "K unattributable relocation section fails"
+
+    # N: static helper s_do (object-qualified node key) in an allowlisted object calls the sink; global w_clear
+    # references .text.s_do; a ui function references w_clear by bare name. Only the node-keyed reverse walk
+    # (rev.get(node)) follows s_do -> w_clear, so removing it makes this pass.
+    $dashN = Dump "dashn.txt" ((Get-Content -Raw $dash) + (Sec ".text.s_do" @("dashboard_safety_clear_trip")) + (Sec ".text.w_clear" @(".text.s_do")))
+    $hn = Dump "hn.txt" (Sec ".text.home_cb" @("w_clear"))
+    $r = Run @("drivers/http/dashboard_exec_http.c.obj=$dashN", "drivers/safety/safety_link_tx.c.obj=$link", "drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$hn")
+    Check ($r.Code -eq 1 -and $r.Out -match 'home_cb') "N ui reaches sink via static helper chain in allowlisted object fails"
 
     $nb = Join-Path $d "nobuild"
     New-Item -ItemType Directory -Force -Path $nb | Out-Null
