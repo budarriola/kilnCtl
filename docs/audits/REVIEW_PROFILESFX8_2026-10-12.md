@@ -52,7 +52,7 @@ Earlier audit docs quote the old text as history only.
 
 ## Findings
 
-### MED-1: the generic text tells profile-route callers that "a factory reset (scope kiln)" clears the refusal; it cannot, and the new test pins it
+### MED-1: the generic text tells profile-route callers that "a factory reset (scope kiln)" clears the refusal; it cannot, and the new test pins it **[FIXED in profilesfx9: profile routes use CFG_FS_PROFILES_UNREADABLE_REASON, generic list split, zones/PcTools text completed]**
 
 `CFG_FS_STORE_UNREADABLE_REASON` is not only for kiln-scope stores. These profile paths also send it:
 
@@ -82,7 +82,7 @@ profile); a cfg format (…?force_healthy=1, then reboot) clears it only when th
 and ERASES ALL cfg-stored settings; scope kiln does not clear it". Also change `:6191` to assert the end of the new
 text.
 
-### LOW-1: the generic text's colon list swallows the second remedy
+### LOW-1: the generic text's colon list swallows the second remedy **[FIXED in profilesfx9: profile routes use CFG_FS_PROFILES_UNREADABLE_REASON, generic list split, zones/PcTools text completed]**
 
 "...which ERASES ALL cfg-stored settings: every user profile, the zones config and preferences, or a factory reset
 (scope kiln)" (`cfg_fs_refusal_http.h:40`). Read literally, "a factory reset" is one of the things the format
@@ -90,7 +90,7 @@ erases. Use a semicolon, or close the list and repeat the subject, e.g. "...and 
 reset (scope kiln)". This is moot for profile routes once MED-1 is fixed, but still applies to the kiln-scope
 stores.
 
-### LOW-2: two sibling remedy texts still have the fx7 LOW-3 defects
+### LOW-2: two sibling remedy texts still have the fx7 LOW-3 defects **[FIXED in profilesfx9: profile routes use CFG_FS_PROFILES_UNREADABLE_REASON, generic list split, zones/PcTools text completed]**
 
 - `zones_http_post.c:72-75` (`zones_config_undecided` 409): "cfgfs format with force_healthy". It gives no `?`
   spelling, no erase warning and no reboot.
