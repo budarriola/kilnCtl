@@ -147,3 +147,24 @@ zone". It now compares `_READBACK_FIELDS`.
 
 Every REVIEW_BENCHFX_2026-10-11 finding is fixed as its Fix status table states. H1, H3, H5, H8 and A8 are
 CAUGHT above, and INFO-1 is confirmed by `test_live_get_without_generation_posts_without_token`.
+
+## Fix status
+
+| Finding | Status | Where |
+|---|---|---|
+| LOW-1 nine guard floats not stripped | FIXED | `zones_http_client.py`: `ZONE_OMIT_PRESERVED_FLOAT_KEYS` now has all 21 float keys (plus `coupling_c<j>`); `ZONE_OMIT_PRESERVED_NONFLOAT_KEYS` lists the nine omit-preserved enums/ints/masks that are deliberately not stripped (lossless on GET, and the zone-type/failsafe/min-on/min-off writers must send them). Comments corrected (also in `mcp_server_control.py`). Drift test `tests/test_zone_omit_preserved_drift.py` parses `zones_http_post_parse.c` (snprintf key followed by `field_present`/`field_nonblank`) and fails if either list disagrees. |
+| LOW-1 caller audit | OK | Callers of the shared strip: `mcp_server_control` `control_set_zone_limits`/`_type`/`_relay_mask`/`_coupling`/`set_relay_type` (post no guard field, so they now leave guard thresholds bit-exact), `apply_zone_preset` and `config_presets` (keep every preset-named key, guard_* and `cross_zone_max_delta_c` are in `_PRESET_ZONE_OVERRIDE_FIELDS`), bench `cases_heat` HP-03/HP-07/restore and `cases_aux` AX-C03 (post no guard field). Backup import is firmware-side and does not use this path. Two existing tests that counted stripped keys (39 -> 66) were updated and now also assert the guard keys are absent. |
+| LOW-2 case POST strip unpinned | FIXED | `HP03Test`/`HP07Test` pass tests assert the first POST is stripped; HP-03 keeps `z2_hystc`, HP-07 keeps no `_hystc`. |
+| INFO-2 hyst_c tolerance | FIXED | `_READBACK_FLOAT_TOL`: `hyst_c` 0.001, `max_temp_c` 0.05; pinned by `test_readback_float_tolerance_pinned`. |
+| INFO-4 docstring | FIXED | `_post_zones_restore` names `_READBACK_FIELDS`. |
+| INFO-1 required floats at print precision | OPEN (investigated, no firmware change) | See below. |
+| INFO-3 fake limits | accepted | unchanged |
+
+### INFO-1 findings (GET print formats, `zones_http_get.c:445-449`)
+
+Required floats re-posted by every GET-merge-POST writer: `cal_offset_c` `%.3f`; `pid_kp/ki/kd` `%.9g` (lossless); `max_ramp_c_per_hr` `%.2f`; `sanity_rate_c_per_min` `%.3f`; `max_temp_c` `%.1f`; `min_temp_c` `%.1f`; `heater_window_ms`/`heater_min_on_ms`/`heater_min_off_ms` `%.0f`.
+
+- Guard/safety thresholds that lose precision: `max_temp_c` (guard 5 limit; the Pico `abs_max_temp_c` follows it) by at most 0.05 C in either direction; `min_temp_c` the same; `sanity_rate_c_per_min` (guard 1 dead-element rate) by at most 0.0005 C/min.
+- Worth a decision: a `sanity_rate_c_per_min` below 0.0005 prints `0.000`, and `0` means "never configured" (the executor substitutes its default), so a re-post would silently replace such a value. No sane config uses a value that small, so this is a corner, not a live bug.
+- Everything else (`cal_offset_c` 0.0005 C, ramp 0.005 C/hr, window ms integer) is below the noise floor.
+- Only fix: print these `%.9g` in `zones_http_get.c` (as done for the PID gains), or make the three guard-relevant ones omit-preserved in `parse_zone_fields()`. Left open per instructions.

@@ -1289,15 +1289,36 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
 
 
 #: POST keys parse_zone_fields() (zones_http_post_parse.c) treats as
-#: omit-PRESERVES-current (`field_present ? parse : current_z->...`): the
-#: measured plant model, the coupling cells and diagonal gain, the fuzzy/
-#: easeoff/approach/band floats, hystc and coilpower. Re-posting them at
-#: GET's coarser print (%.1f/%.2f/%.3f/%.4f) would round them; leaving them
-#: out of the body makes the firmware keep them bit-exact. Nothing else is
-#: strippable: a required field left out would 400 or zero.
+#: omit-PRESERVES-current. Two groups, both pinned against the firmware source
+#: by tests/test_zone_omit_preserved_drift.py:
+#:  - ZONE_OMIT_PRESERVED_FLOAT_KEYS: floats GET prints coarser than the
+#:    stored value (%.1f/%.2f/%.3f/%.4f/%.0f). Re-posting them would round
+#:    them (for the guard_* thresholds, loosening or tightening a guard), so
+#:    they are stripped and the firmware keeps them bit-exact. Sources in
+#:    zones_http_post_parse.c: `field_present ? parse : current_z->...`
+#:    (k, tau, deadtime, fuzzy_strength, coupling_diag_k_dc, easeoffmult,
+#:    approachratecap, errorband, rateband, progressband, hystc, coilpower,
+#:    coupling_c<j>) and `zones_http_field_nonblank` (the eight guard_*
+#:    keys wrongdirwindow..frozenwindow, plus xzone).
+#:  - ZONE_OMIT_PRESERVED_NONFLOAT_KEYS: omit-preserved enums/ints/masks.
+#:    GET prints them losslessly, so nothing is lost by echoing them, and
+#:    several writers (zonetype, failsafe, minons, minoffs) must send them
+#:    deliberately. NOT stripped.
+#: Required fields (relay_mask, cal, kp/ki/kd, ramp, sanity, mode, maxtemp,
+#: mintemp, window, minon, minoff, timingprofile) must never be stripped: a
+#: missing one 400s or zeroes.
+ZONE_OMIT_PRESERVED_FLOAT_KEYS = (
+    "k", "tau", "deadtime", "coupling_diag_k_dc", "fuzzy_strength", "easeoffmult",
+    "approachratecap", "errorband", "rateband", "progressband", "hystc", "coilpower",
+    "wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate", "runawaymargin",
+    "driftperiod", "debounce", "frozenwindow", "xzone",
+)
+ZONE_OMIT_PRESERVED_NONFLOAT_KEYS = (
+    "tctype", "relaytype", "zonetype", "failsafe", "minons", "minoffs",
+    "thermo_mask", "ct_mask", "settings_source",
+)
 ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
-    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
-    r"|approachratecap|errorband|rateband|progressband|hystc|coilpower)$")
+    r"^z\d+_(?:" + "|".join(ZONE_OMIT_PRESERVED_FLOAT_KEYS) + r"|coupling_c\d+)$")
 
 
 def strip_omit_preserved(body: str, keep_keys: "frozenset[str] | set[str]" = frozenset()) -> str:

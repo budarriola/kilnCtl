@@ -46,7 +46,7 @@ class UiRunScriptGateTests(unittest.TestCase):
 
 class ZoneStripTests(unittest.TestCase):
     def test_regex_covers_hystc_and_coilpower(self):
-        for k in ("z0_hystc", "z2_coilpower", "z1_k", "z1_coupling_c2"):
+        for k in ("z0_hystc", "z2_coilpower", "z1_k", "z1_coupling_c2", "z1_runawaymargin", "z0_xzone"):
             self.assertTrue(zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE.match(k), k)
         self.assertFalse(zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE.match("z0_kp"))
         self.assertIs(mcp_server_control._ZONE_OMIT_PRESERVED_KEY_RE, zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE)

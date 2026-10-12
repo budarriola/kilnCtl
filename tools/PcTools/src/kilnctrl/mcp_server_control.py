@@ -1236,8 +1236,11 @@ def control_set_zone_relay_mask(
 #: 2026-10-09: z%u_hystc and z%u_coilpower use the same branch
 #: (zones_http_post_parse.c, `field_present ? parse : current_z->...`) and
 #: are stripped as well.
-#: Nothing else is stripped: a required field left out of the body would 400
-#: or zero.
+#: 2026-10-11: the eight guard_* thresholds and xzone (the
+#: `zones_http_field_nonblank` branch) are stripped too. The full list lives
+#: in zones_http_client.ZONE_OMIT_PRESERVED_FLOAT_KEYS and is drift-tested
+#: against the firmware source. Required fields are never stripped: one left
+#: out of the body would 400 or zero.
 _ZONE_OMIT_PRESERVED_KEY_RE = zones_http_client.ZONE_OMIT_PRESERVED_KEY_RE  # single source: zones_http_client.py
 
 

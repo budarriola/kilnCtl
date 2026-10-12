@@ -1110,6 +1110,11 @@ _HP07_RESTORE_ATTEMPTS = 2
 _HP07_RESTORE_RETRY_DELAY_S = 5.0
 
 
+#: Per-field float tolerance for the read-back: the GET print step is
+#: %.1f for max_temp_c (half a step = 0.05) and %.3f for hyst_c (0.001).
+_READBACK_FLOAT_TOL = {"max_temp_c": 0.05, "hyst_c": 0.001}
+_READBACK_FLOAT_TOL_DEFAULT = 0.05
+
 _READBACK_FIELDS = ("zone_type", "max_temp_c", "failsafe_state", "hyst_c", "min_on_s", "min_off_s")
 
 
@@ -1138,7 +1143,7 @@ def _restore_readback_mismatch(expected_snapshot: dict, actual_snapshot: dict) -
                 continue
             exp, act = zone[key], actual[key]
             if isinstance(exp, float) or isinstance(act, float):
-                if exp is None or act is None or abs(float(exp) - float(act)) > 0.05:
+                if exp is None or act is None or abs(float(exp) - float(act)) > _READBACK_FLOAT_TOL.get(key, _READBACK_FLOAT_TOL_DEFAULT):
                     return f"read-back: zone {idx} {key} is {act}, expected {exp}"
             elif exp != act:
                 return f"read-back: zone {idx} {key} is {act}, expected {exp}"
@@ -1176,8 +1181,9 @@ def _post_zones_restore(
     config.
 
     With `expected_snapshot` (the pre-case GET), an "ok" is only believed
-    once a fresh GET /api/zones reads back the same `zone_type`/`max_temp_c`
-    per zone -- HP-02's bench failure (2026-09-25..27) was zone 2 left at
+    once a fresh GET /api/zones reads back every `_READBACK_FIELDS` field
+    (zone_type, max_temp_c, failsafe_state, hyst_c, min_on_s, min_off_s) per
+    zone -- HP-02's bench failure (2026-09-25..27) was zone 2 left at
     zone_type 1 by a restore whose "ok" text was trusted without a
     read-back. A mismatch counts as a failed attempt and is retried like a
     refusal."""
