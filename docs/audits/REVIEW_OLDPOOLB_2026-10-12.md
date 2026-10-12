@@ -59,3 +59,11 @@ Both runs used `tools/negtest.ps1` from `C:\wt\rvoldpoolb_*` at `b69ba4a94`, wit
 Baselines: check_land 525.2 s PASS, pytest 150.1 s PASS. Logs: `%TEMP%\negtest_logs\20261012_072555_pm7x` (land) and `20261012_072605_vbud` (pytest).
 
 This replaces the fixer's void land.ps1 run, which printed "REAL TREE CHANGED".
+
+## Fix status (2026-10-12, testnetfx7)
+
+MED-1 FIXED: conftest patches `IocpProactor.connect` and `BaseSelectorEventLoop.sock_connect`;
+`test_guard_refuses_asyncio_connections` (8765/8766/8767 loopback, 192.0.2.1) and
+`test_guard_refuses_selector_loop_connections` use refused targets only. Dropping the Iocp
+patch is CAUGHT. Dropping the selector patch is an equivalent mutant (that path calls
+`socket.connect`, already guarded). LOW-1 FIXED: REVIEW_TOOLFX13 INFO-5 now cites 4a4b1ef39 and 9d93e816a.
