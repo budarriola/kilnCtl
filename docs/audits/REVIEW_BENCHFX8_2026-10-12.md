@@ -26,7 +26,7 @@ tests was caught by a real assertion in `test_zones_http.c`. 2 LOW, 4 INFO.
 
 ### LOW-1: cheap spacing and parenthesis forms still bypass the scan
 
-**Fixed in b0b739347** (every form except nested-index-in-pointer-arith is now scanned and pinned by a self-test; negtested CAUGHT).
+**Fixed in 7e9bde161** (every form except nested-index-in-pointer-arith is now scanned and pinned by a self-test; negtested CAUGHT). The SHA was first recorded as the pre-rebase b0b739347. REVIEW_BENCHFX9 LOW-2 lists forms that are still missed.
 
 `test_zone_omit_preserved_drift.py:76` builds the left-hand side as
 `(?:\bz\s*->|\(\s*z\s*\)\s*->|\(\*z\)\s*\.)\s*FIELD(?:\[[^\]]*\])?`, and line 99
@@ -54,7 +54,7 @@ Nested index and pointer arithmetic can stay as documented gaps.
 
 ### LOW-2: docstring understates the uncovered write classes
 
-**Fixed in b0b739347** (docstring lists every uncovered class and names test_zones_http.c as the backstop; z[k].f, memmove and strncpy are now also scanned).
+**Fixed in 7e9bde161** (docstring lists every uncovered class and names test_zones_http.c as the backstop; z[k].f, memmove and strncpy are now also scanned).
 
 `test_zone_omit_preserved_drift.py:7-9` says the scan does not see "writes through
 a macro, memcpy/helper calls, or a conditional default nested inside the omit
@@ -98,7 +98,7 @@ Comparisons are no longer false positives: `==`, `!=`, `>=`, `<=`, a spaced
 
 ### INFO-2: the page-regex pin is sound but sees only the regex literal
 
-**Addressed in b0b739347**: redundant DEFAULTED assert dropped; the pin now also requires a single assignment of the regex and exactly one .test( in omitBlankOptionalParams (negtested CAUGHT).
+**Addressed in 7e9bde161**: redundant DEFAULTED assert dropped; the pin now also requires a single assignment of the regex and exactly one .test( in omitBlankOptionalParams (negtested CAUGHT). REVIEW_BENCHFX9 LOW-1: the pin does not check which regex the single .test( uses.
 
 `test_page_optional_key_regex_pinned_to_preserved_keys` (lines 257-268) does not
 pass vacuously. A missing or reshaped regex fails `assertIsNotNone` (line 263),
