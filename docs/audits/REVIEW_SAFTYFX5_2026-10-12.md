@@ -136,6 +136,18 @@ Fix: add these cases.
   - The find string `static bool s_test_trip_request_id_seeded;` exists at `safety_link_commands.c:1015`.
   - The `:3197` citation lands on the LOCAL_STALE assert in `test_safety_link_compile.c`.
 
+## Fix status
+
+| Finding | Status |
+|---|---|
+| LOW-1 | OWNER Q (comment only). Gap documented as (3) in the `s8_clear_refuse()` comment. Behavior unchanged; close it (check the rise over the last `S8_POST_MIN_S`-sized sub-window) only on an owner decision. |
+| LOW-2 | OWNER Q (comment only). Gap (2) now says "in progress, any rate, first `S8_POST_MIN_S` after each rollover". Behavior unchanged. |
+| LOW-3 | FIXED (comment only). Gap (1) now states the real bound: at most max_rate x W per window at any burst rate, clear granted only after the burst. |
+| LOW-4 | OWNER Q (comment only). The false "same resolution as S8" claim is removed; gap (4) says the check is coarser than S8 below a 60 s `rate_window_s`. Bounding `rate_window_s >= 60` is the open SAFTYFX3 item. |
+| LOW-5 | FIXED. `test_test_clear_s8_partial_floor_and_divisor` (test_safety_guards.c): 4.5 s after a rollover a 1.5 C rise is granted, 5.5 s refuses, 10 s with a 2 C rise refuses (elapsed divisor). F4, F5, F10 all CAUGHT by assertion (:5169; F4/F5 also :4950, :3534), `-Preset saftyfw-host`, base 5870895e4, `real_tree_unchanged: true`. |
+
+safety_guards.c: comment-only (diff with comments and whitespace stripped is empty).
+
 ## Appendix A: mutation run
 
 Command: `tools\negtest.ps1 -Preset saftyfw-host -Mutations mut.json -ExpectPattern "FAIL .*\.c:\d+|SAFTYFW HOST TESTS: FAILED"`.
