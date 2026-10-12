@@ -280,3 +280,7 @@ H3 exited 0 with no FAIL line.
 ## Fix status (FX7)
 
 MED-1: fixed by test_main_reset_fence.c (real main.c, app_main run, 4 hooks asserted); F8/F9/F11/F12/F14b/F15/F17 plus F0/F10b/F13/F14/F16b all CAUGHT by a real assertion. The static check stays but documents its limits (F10/F16 as written fail to compile in the test, not counted; rerun as F10b/F16b). LOW-1: stack-size check evaluates hex, sums and unique #define macros; M1/M2/M3 CAUGHT; 25 skipped names printed with reasons and ratcheted by $stackSkipAllowed. LOW-2: H1/H2/H3 CAUGHT. LOW-3: P0-P3 CAUGHT. INFO gate-lint items not changed.
+
+## INFO triage (2026-10-12)
+
+- INFO-1 to INFO-8: won't fix: all are observations that need no change (equal discovery, loud-failing or fail-safe edge cases, comment-only diffs). INFO-3 and INFO-4 fail loud and no caller triggers them.

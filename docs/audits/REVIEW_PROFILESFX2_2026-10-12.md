@@ -330,3 +330,8 @@ All findings fixed on origin/dev in the commit that adds this table (pfx2fix). N
  }
 ]
 ```
+
+## INFO triage (2026-10-12)
+
+- INFO-4: won't fix: the store refuses writes in the unresolved state, so a stale builtin mask cannot be persisted; the mask is display-only until the next successful load.
+- INFO-6: won't fix: test-only coverage gaps (conditions render, clear, user mask, flag reset) for a diagnostic key nothing consumes; no safety path depends on them. Revisit if a consumer of `conditions` is added.

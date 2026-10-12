@@ -189,3 +189,7 @@ Answers to the brief:
 Not reproduced. Ten clean-baseline runs of `build_host_tests.ps1 -Only test_update_fetch\.c` (four, then six, concurrently) while three kilnfw-host negtest workers and other sessions' builds ran (build-gate queue depth 25-42): every run reported `test_update_fetch: 232 checks, 0 failed`. The two checks (`:469`, `:489`) read `g_fr_heap_live` right after `WAIT_FOR(g_fr_live_tasks <= 1)`; if a task drops its live count before freeing its buffers, that is a plausible timing race under heavier load, but it did not show here. A separate review of the update_fetch test LOWs is in flight.
 
 Negative-test setup: `tools/negtest.ps1 -Preset kilnfw-host -ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD FAILURES"` (full suite, baseline PASS in 1330 s) for M1-M6 and M8; targeted runs limited to `test_safety_link_compile` for M7, P1 and P2; `-Preset pytest` for LOW-5. M9 and M10 were stopped unrun at the deadline; neither is observable from a host test.
+
+## INFO triage (2026-10-12)
+
+- INFO-3 / INFO-4: obsolete: this review's INFO items are lettered INFO-A..E and all are already resolved in its Fix status table (INFO-A fixed, INFO-C fixed, INFO-D unchanged, INFO-E measured, INFO-B Pico design left). The INFO-4 stack measurement is the INFO-E row.

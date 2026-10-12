@@ -160,3 +160,8 @@ is the one that catches it.
 | LOW-1 | Fixed: `test_setup_wizard.js` covers null/NaN, `formatZoneLimitC`, unedited vs edited posting, revert, step 3 read-back, and a drift pin on the three helper lines. The 5 listed mutations (plus 2 more) are CAUGHT by failing assertions. |
 | LOW-2 | Fixed: `sanity_rate_c_per_min` test value is 0.000100027195f (needs all 9 digits, still below 0.0005). |
 | INFO-4 | Fixed: the LOW-4 note in REVIEW_ZONESPREC_2026-10-12.md is corrected. |
+
+## INFO triage (2026-10-12)
+
+- INFO-1: won't fix: step 7 raw-max comparison predates the commit and a mismatch only shows past the 6th significant digit; it refuses toward safe (the user re-enters the shown value). Not worth a wizard change without a bench report.
+- INFO-2: won't fix: the review itself states the effect is far below the noise floor; "lossless" means unedited, not copied.
