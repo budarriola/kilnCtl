@@ -33,6 +33,8 @@ that is limited to `z1_`/`z2_` and avoids the regex-call shapes also passes. 2 L
 
 ### LOW-1: the call-site pin covers only the span between the call and `fetch(`
 
+**FIXED in benchfx11** (every `params` use in the Save handler must be an allowed form; node test runs the real fetch tail against a mocked fetch and checks the POST body; N1-N3 CAUGHT, see the benchfx11 table in the commit log).
+
 `test_zone_omit_preserved_drift.py:332-338` looks for a second filter only in the text between
 `omitBlankOptionalParams(params);` and the first `fetch('/api/zones'`. Within that span it
 recognises only `params = params.` and `params.filter/splice/length =`. Each of these drops a
@@ -55,6 +57,8 @@ pinned call between the `Saving` line and the fetch.
 
 ### LOW-2: the behavioural assertion feeds zone 0 only; non-regex drops are lexically invisible
 
+**FIXED in benchfx11** (node test generates every zone 0..2 x every key x blank/set and compares `omit()` with an independent firmware omit-preserved key list; N4, N6, N8b, N10 CAUGHT by the node test).
+
 `test_host_refusal_pages.js:58` checks only `z0_ct_mask=` and `z0_thermo_mask=`. The drift
 test's body checks (lines 322-329) look only for regex-call shapes: `.test(`, `.match(` and the
 like, and `/^`. So an extra condition in the filter callback that is not a regex call, and that
@@ -72,6 +76,8 @@ redundant.
 
 ### INFO-1: the regex can be replaced through `window[...]`
 
+**FIXED in benchfx11** (the name may appear only in its declaration and `omitBlankOptionalParams`, comments excluded; N5 CAUGHT).
+
 The page's `<script>` declares `var ZONE_OPTIONAL_KEY_RE` at top level (`zones_page.html:2751`),
 so it is a `window` property. `window['ZONE_OPTIONAL_KEY_RE'] = /^z\d+_(ct_mask|...)=\s*$/;`
 (N5) bypasses the `\bZONE_OPTIONAL_KEY_RE\s*=(?!=)` count, because the name is followed by `']`.
@@ -80,6 +86,8 @@ This is contrived. Counting `ZONE_OPTIONAL_KEY_RE` occurrences outside the `var`
 function (expected: zero) would close it.
 
 ### INFO-2: braces inside strings fool `_js_function_body`
+
+**Closed by the behavioural test** (N6 CAUGHT by the node test; the lexical scan is unchanged).
 
 `_js_function_body` (lines 54-68) counts braces without skipping strings, regex literals or
 comments, as its docstring says. In N6 the callback contains `p !== '}'`, so the extract ends
@@ -90,6 +98,8 @@ shape, so it adds little on top of LOW-2. Fix if wanted: skip quoted strings in 
 fail when the extracted body does not end at a line that is only `}`.
 
 ### INFO-3: the BENCHFX9 status lines need a SHA, and "see below" points at stale tables
+
+**FIXED in benchfx11** (SHAs added, table pointer fixed, INFO-2 marked Accepted).
 
 `REVIEW_BENCHFX9_2026-10-12.md:28,56,85,94,103` say "Fixed in benchfx10", not `f829ba4f3`.
 Line 28 says "P3-P7, J2, J3 re-negtested CAUGHT, see below", but the tables below still show
