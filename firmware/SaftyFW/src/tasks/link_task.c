@@ -309,7 +309,6 @@ static uint8_t s_boot_id = 0;
 // unknown" is now - this, whichever site forgot the version. Initialised at
 // boot (link_task_start) so the 30 s fallback is measured from boot.
 static uint32_t s_last_peer_known_ms = 0;
-static uint8_t s_tt_accepted_seq = 0; // trip_seq answered for the last ACCEPTED test trip (0 = unknown)
 
 // TEST_TRIP state (docs/TEST_TRIP_PLAN.md section 4): acceptance/rate-limit
 // memory, plus the reply burst. The reply is non-blocking: an ACCEPTED reply
@@ -1655,8 +1654,9 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         // when the original was answered (REVIEW_TRIPWP2 LOW-2: never the current trip_seq,
         // which may belong to a later, real trip). While the original is still waiting for
         // its seq, its own reply covers it.
-        if (!s_tt_waiting_seq) {
-            link_task_arm_test_trip_reply(msg.request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, s_tt_accepted_seq);
+        uint8_t dup_outcome = 0u, dup_seq = 0u;
+        if (link_frame_test_trip_duplicate_replay(&s_test_trip_state, s_tt_waiting_seq, &dup_outcome, &dup_seq)) {
+            link_task_arm_test_trip_reply(msg.request_id, dup_outcome, dup_seq);
         }
         return;
     }
@@ -1697,13 +1697,12 @@ static void link_task_poll_test_trip_reply(void)
             s_tt_waiting_seq = false;
             // REVIEW_TRIPWP2 LOW-1: only a TEST latch is "your test trip"; a real guard that
             // won the race is reported as already tripped (with its seq), never as ACCEPTED.
-            uint8_t o = (reason == SAFETY_TRIP_TEST) ? KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED
-                                                     : KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
-            s_tt_accepted_seq = seq;
+            uint8_t o = link_frame_test_trip_latched_outcome(reason == SAFETY_TRIP_TEST);
+            link_frame_test_trip_record_answer(&s_test_trip_state, o, seq);
             link_task_arm_test_trip_reply(s_tt_reply_request_id, o, seq);
         } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
             s_tt_waiting_seq = false;
-            s_tt_accepted_seq = 0u;
+            link_frame_test_trip_record_answer(&s_test_trip_state, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
             link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
         }
     }

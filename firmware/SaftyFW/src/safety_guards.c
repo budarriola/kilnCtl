@@ -169,7 +169,14 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
         return false;
     }
     if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
-        float elapsed_min = state->s8_window_elapsed_s / 60.0f;
+        /* saftyfx LOW-3: the window is frozen at latch time and may be tiny; floor the
+         * divisor at S8_POST_MIN_S so a moments-old window does not refuse every rise by
+         * dividing by ~0. Fail-safe: a real fast rise still exceeds the limit. */
+        float elapsed_s = state->s8_window_elapsed_s;
+        if (elapsed_s < S8_POST_MIN_S) {
+            elapsed_s = S8_POST_MIN_S;
+        }
+        float elapsed_min = elapsed_s / 60.0f;
         return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
     }
     return false;

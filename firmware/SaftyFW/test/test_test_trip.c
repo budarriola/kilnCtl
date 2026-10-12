@@ -100,6 +100,36 @@ static void test_decide_clear_v3(void)
                "S9 still unclearable");
 }
 
+/* saftyfx LOW-1/LOW-2: the poll outcome and the DUPLICATE replay, behaviourally. */
+static void test_answer_replay(void)
+{
+    TEST_SECTION("TEST_TRIP answer record and DUPLICATE replay (saftyfx LOW-1/2)");
+    TEST_CHECK(link_frame_test_trip_latched_outcome(true) == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED,
+               "TEST latch -> ACCEPTED");
+    TEST_CHECK(link_frame_test_trip_latched_outcome(false) == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED,
+               "real guard won the race -> REFUSED_ALREADY_TRIPPED");
+    link_test_trip_state_t st = {false, 0u, 0u, 0u, 0u};
+    TEST_CHECK(decide(&st, 1000, MAGIC, 5, OWN_BOOT, 18, false, false) == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED,
+               "accepted");
+    uint8_t o = 99u, q = 99u;
+    TEST_CHECK(!link_frame_test_trip_duplicate_replay(&st, true, &o, &q), "no replay while original waits for its seq");
+    link_frame_test_trip_record_answer(&st, link_frame_test_trip_latched_outcome(false), 42u);
+    TEST_CHECK(decide(&st, 2000, MAGIC, 5, OWN_BOOT, 18, false, true) == KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE,
+               "retry is DUPLICATE");
+    TEST_CHECK(link_frame_test_trip_duplicate_replay(&st, false, &o, &q), "replay armed");
+    TEST_CHECK(o == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED && q == 42u,
+               "DUPLICATE replays the stored REFUSED_ALREADY_TRIPPED outcome and seq");
+    link_frame_test_trip_record_answer(&st, link_frame_test_trip_latched_outcome(true), 7u);
+    TEST_CHECK(link_frame_test_trip_duplicate_replay(&st, false, &o, &q) &&
+                   o == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED && q == 7u,
+               "DUPLICATE replays ACCEPTED with the recorded seq");
+    TEST_CHECK(decide(&st, 20000, MAGIC, 6, OWN_BOOT, 18, false, false) == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED,
+               "next accepted");
+    TEST_CHECK(link_frame_test_trip_duplicate_replay(&st, false, &o, &q) &&
+                   o == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED && q == 0u,
+               "new acceptance resets the stored answer");
+}
+
 static char *read_src(const char *rel)
 {
     const char *candidates[] = { rel };
@@ -188,10 +218,14 @@ static void scan_wiring(void)
                            has(h, len, "outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;"),
                        "LOW-3: queue-busy restores dedup/rate state and does not claim ALREADY_TRIPPED");
         }
+        /* saftyfx LOW-2: behaviour is tested via the pure helpers (test_answer_replay); here
+         * only that link_task actually calls them. */
         const char *pl = function_body(lt, "static void link_task_poll_test_trip_reply(", &len);
-        TEST_CHECK(pl != NULL && has(pl, len, "reason == SAFETY_TRIP_TEST"), "LOW-1: ACCEPTED requires reason == TEST");
-        TEST_CHECK(h != NULL && strstr(h, "KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, s_tt_accepted_seq") != NULL,
-                   "LOW-2: DUPLICATE replays ACCEPTED with the recorded seq");
+        TEST_CHECK(pl != NULL && has(pl, len, "link_frame_test_trip_latched_outcome(reason == SAFETY_TRIP_TEST)") &&
+                       has(pl, len, "link_frame_test_trip_record_answer(&s_test_trip_state, o, seq)"),
+                   "poll path uses the pure outcome helper and records the answer");
+        TEST_CHECK(h != NULL && strstr(h, "link_frame_test_trip_duplicate_replay(&s_test_trip_state") != NULL,
+                   "DUPLICATE replays through the pure helper");
     }
     TEST_CHECK(strstr(lt, "case LINK_FRAME_TEST_TRIP_CMD:") != NULL, "0x2E dispatched");
     const char *cl = function_body(lt, "static void link_task_handle_clear_trip(", &len);
@@ -221,5 +255,6 @@ void run_test_test_trip(void)
 {
     test_decide_test_trip();
     test_decide_clear_v3();
+    test_answer_replay();
     scan_wiring();
 }

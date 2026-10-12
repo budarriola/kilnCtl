@@ -262,8 +262,18 @@ copy was removed. Logs: `%TEMP%\negtest_logs\20261011_224620_i1dv`.
 | M2: LINK_DEAD dropped from the TEST real-condition list | CAUGHT |
 | M3: OVERTEMP dropped | CAUGHT |
 | M4: OVER_SETPOINT dropped | CAUGHT |
-| M5: poll outcome ternary always ACCEPTED | **MISSED** (LOW-2) |
-| M6: `s_tt_accepted_seq = seq` removed | **MISSED** (LOW-2) |
+| M5: poll outcome ternary always ACCEPTED | **MISSED** (LOW-2); CAUGHT after the fix, see Fix status |
+| M6: `s_tt_accepted_seq = seq` removed | **MISSED** (LOW-2); CAUGHT after the fix, see Fix status |
 | M7: S8 previous-post-window check disabled | CAUGHT `:3512` |
 | M8: test-trip request evaluated before S16 | CAUGHT `:4705`, `:4802` x5 |
 | M9: S8 strict clear granted after one post window | CAUGHT `:3422`, `:3599` |
+
+## Fix status
+
+| Item | Status |
+|---|---|
+| LOW-1 | FIXED. The answered outcome and seq are stored in `link_test_trip_state_t` (`answer_outcome`/`answer_seq`, recorded when the reply is finalised) and a DUPLICATE replays them. |
+| LOW-2 | FIXED. `link_frame_test_trip_latched_outcome()`, `link_frame_test_trip_record_answer()` and `link_frame_test_trip_duplicate_replay()` are pure helpers in `link_frame.c`; `test_answer_replay` tests them. The vacuous source scans are replaced by a scan that link_task calls the helpers. |
+| LOW-3 | FIXED. The non-strict S8 check floors the frozen-window divisor at `S8_POST_MIN_S` (5 s); `test_test_clear_s8_tiny_window`: +0.5 C clears, +20 C still refuses. The slow-warming case (rise growing against a frozen window) still refuses, fail-safe. |
+| INFO S6a/S7/S16 | Tests added (`test_test_trip_clear_refuses_real_conditions`, k=9..11: the retest tick re-trips them). |
+| Stale docs | GUARD_TEST_MATRIX.md S1/S8 and TEST rows updated; REVIEW_SAFTYFX6/7 carry a correction note. |

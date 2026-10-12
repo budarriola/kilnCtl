@@ -691,7 +691,21 @@ typedef struct {
     bool have_accept;
     uint32_t last_accept_ms;
     uint8_t last_request_id;
+    // saftyfx LOW-1: the outcome and trip_seq answered for the last accepted request,
+    // replayed on a DUPLICATE (zero-init = ACCEPTED, seq 0).
+    uint8_t answer_outcome;
+    uint8_t answer_seq;
 } link_test_trip_state_t;
+
+// Outcome for a latched trip observed after an ACCEPTED request: ACCEPTED only when the
+// latch is a TEST latch; a real guard that won the race is REFUSED_ALREADY_TRIPPED.
+uint8_t link_frame_test_trip_latched_outcome(bool latch_is_test);
+// Record the answer sent for the request (call when the reply is finalised).
+void link_frame_test_trip_record_answer(link_test_trip_state_t *state, uint8_t outcome, uint8_t trip_seq);
+// DUPLICATE replay: the stored outcome and seq. Returns false while the original is still
+// waiting for its seq (its own reply covers it), true when a reply should be armed.
+bool link_frame_test_trip_duplicate_replay(const link_test_trip_state_t *state, bool original_waiting,
+                                           uint8_t *out_outcome, uint8_t *out_seq);
 
 // Returns a KILNLINK_TEST_TRIP_OUTCOME_* value. Check order: bad magic, peer
 // version, boot_id, duplicate request_id (within the interval), update busy,

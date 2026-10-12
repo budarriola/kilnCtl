@@ -345,7 +345,31 @@ uint8_t link_frame_decide_test_trip(link_test_trip_state_t *state, uint32_t now_
     state->have_accept = true;
     state->last_accept_ms = now_ms;
     state->last_request_id = request_id;
+    state->answer_outcome = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+    state->answer_seq = 0u;
     return KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+}
+
+uint8_t link_frame_test_trip_latched_outcome(bool latch_is_test)
+{
+    return latch_is_test ? KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED : KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+}
+
+void link_frame_test_trip_record_answer(link_test_trip_state_t *state, uint8_t outcome, uint8_t trip_seq)
+{
+    state->answer_outcome = outcome;
+    state->answer_seq = trip_seq;
+}
+
+bool link_frame_test_trip_duplicate_replay(const link_test_trip_state_t *state, bool original_waiting,
+                                           uint8_t *out_outcome, uint8_t *out_seq)
+{
+    if (original_waiting) {
+        return false;
+    }
+    *out_outcome = state->answer_outcome;
+    *out_seq = state->answer_seq;
+    return true;
 }
 
 void link_frame_apply_set_config(const config_store_record_t *committed, uint8_t tc_type,

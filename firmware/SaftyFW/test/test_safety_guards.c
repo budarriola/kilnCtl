@@ -4822,10 +4822,11 @@ static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard
 static void test_test_trip_clear_refuses_real_conditions(void)
 {
     TEST_SECTION("TEST trip clear refuses while a real guard condition holds (TRIPWP2 MED-1)");
-    enum { N = 9 };
+    enum { N = 12 };
     const char *names[N] = {"S1 over ceiling", "S2 over setpoint", "S3 current with nothing commanded",
                             "S5 bad TC read", "S8 mid-debounce rate", "S12 hot cold junction",
-                            "S13 stale samples", "S6b link down", "S5 NaN reading"};
+                            "S13 stale samples", "S6b link down", "S5 NaN reading", "S6a main fault (retest tick)",
+                            "S7 estop (retest tick)", "S16 config integrity (retest tick)"};
     for (int k = -1; k < N; k++) {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -4853,15 +4854,52 @@ static void test_test_trip_clear_refuses_real_conditions(void)
         if (k == 6) { c.sample_counter_advancing = false; }
         if (k == 7) { c.link_up = false; }
         if (k == 8) { c.tc_c = (float)NAN; c.tc_valid = false; }
+        if (k == 9) { c.main_fault_asserted = true; }
+        if (k == 10) { c.estop_pressed = true; }
+        if (k == 11) { c.config_integrity_trip = true; }
         if (k < 0) {
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "control: no real condition: TEST clear granted");
         } else {
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), names[k]);
+            if (k >= 9) {
+                /* retest tick: the real guard re-trips, so the latch now names it (still tripped) */
+                TEST_CHECK(s.is_tripped && s.reason != SAFETY_TRIP_TEST, "retest tick re-trips the real guard");
+                continue;
+            }
             TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "refused clear leaves the TEST latch untouched");
             safety_guard_input_t ok = base_input();
             ok.relay_deenergized = true;
             if (k == 4) { ok.tc_c = 40.0f; }
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &ok), "same latch clears once the condition is gone");
+        }
+    }
+}
+
+/* saftyfx LOW-3: a TEST latch landing moments after an S8 window opened has a tiny frozen
+ * window; the non-strict check floors the divisor so a small rise clears, a fast rise refuses. */
+static void test_test_clear_s8_tiny_window(void)
+{
+    TEST_SECTION("TEST clear S8 check with a tiny frozen window (saftyfx LOW-3)");
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 0.1f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre); /* opens a window */
+        (void)safety_guards_tick(&s, &cfg, &pre); /* elapsed 0.1 s */
+        latch_test_trip_and_hold(&s, &cfg);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 20.5f : 40.0f; /* +0.5 C: slow; +20 C: real fast rise */
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "0.5 C rise over a 0.1 s frozen window no longer refuses");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "20 C rise still refuses (S8 real condition)");
         }
     }
 }
@@ -4957,6 +4995,7 @@ void run_test_safety_guards(void)
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
     test_test_trip_loses_to_every_real_guard();
+    test_test_clear_s8_tiny_window();
     test_s8_clear_followups();
     test_s1();
     test_s1_ceiling_properties();
