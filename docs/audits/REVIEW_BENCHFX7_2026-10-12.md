@@ -47,7 +47,7 @@ when missing, so the page regex cannot silently drop them.
 
 ### LOW-1: drift scan has syntactic bypasses (caught only by host tests)
 
-**Status: FIXED in 8066eaeb6 for ++/--, spaced and parenthesised deref, memset without &; macro, memcpy and the conditional default inside the omit else are documented in the test docstring as covered by test_zones_http.c.**
+**Status: FIXED in f47e372c1 for ++/--, spaced and parenthesised deref, memset without &; macro, memcpy and the conditional default inside the omit else are documented in the test docstring as covered by test_zones_http.c.**
 
 `test_zone_omit_preserved_drift.py:70-71` matches `z->field` or `(*z).field`
 followed by an `=`-family operator. It does not see:
@@ -71,7 +71,7 @@ reject any write to the field inside the omit `else` other than the exact
 
 ### LOW-2: false positive on an equivalent comparison (FP1)
 
-**Status: FIXED in 8066eaeb6 (operator class is real compound operators only; FP1 rewrite now passes).**
+**Status: FIXED in f47e372c1 (operator class is real compound operators only; FP1 rewrite now passes).**
 
 The compound-operator class `[-+*/|&^%<>]*` (line 71) includes `<` and `>`, so
 `z->hyst_c >= ZONE_HYST_C_MIN` reads as a `>=` compound assignment. Rewriting the
@@ -84,7 +84,7 @@ operators, `(?:<<|>>|[-+*/%&|^])?=(?!=)`, so `>=`, `<=` are not matched.
 
 ### LOW-3: self-test gaps in the drift test
 
-**Status: FIXED in 8066eaeb6 (self-tests for S1, S6, S11).**
+**Status: FIXED in f47e372c1 (self-tests for S1, S6, S11).**
 
 Three scan clauses can be removed without any self-test failing:
 
@@ -101,7 +101,7 @@ Add one self-test per clause.
 
 ### LOW-4: page regex not pinned to the firmware or Python preserved list
 
-**Status: FIXED in 8066eaeb6 (test_page_optional_key_regex_pinned_to_preserved_keys; J7 CAUGHT; zones_page.html comment corrected).**
+**Status: FIXED in f47e372c1 (test_page_optional_key_regex_pinned_to_preserved_keys; J7 CAUGHT; zones_page.html comment corrected).**
 
 `zones_page.html:2705-2713` says `ZONE_OPTIONAL_KEY_RE` "lists exactly the ones a
 blank input may drop, and test_zone_omit_preserved_drift.py pins the firmware
