@@ -45,7 +45,7 @@ lines but not a bypass placed anywhere else (LOW-2).
 
 ## Findings
 
-### LOW-1: `sim_credibility_gate_closedloop` build failure gives a false MISMATCH, and can hide a real dropout
+### LOW-1: `sim_credibility_gate_closedloop` build failure gives a false MISMATCH, and can hide a real dropout (FIXED, devbreakfx12)
 
 `build_host_tests.ps1:3077` appends `sim_credibility_gate_closedloop` to
 `$script:buildFailures`, but that item is not one of the 99 counted in
@@ -71,7 +71,7 @@ the exit code but not to `-BuildFailures`. Alternatively, pass
 `-BuildFailures` only the failures that `Invoke-HostTestExe` tracked. Add a
 `check_host_test_verdict.ps1` case for it.
 
-### LOW-2: the static call-site assertions do not rule out an exit-0 bypass elsewhere in the file
+### LOW-2: the static call-site assertions do not rule out an exit-0 bypass elsewhere in the file (FIXED, devbreakfx12)
 
 The new assertions pin the dot-source, the single `$verdict =` line with its
 real counter arguments, and the three tail lines. They catch every edit to
@@ -108,14 +108,14 @@ closed. Cheap hardening:
 A behavioural test that runs the script against a deliberately failing
 fixture would be stronger, but it costs a host build.
 
-### INFO-1: dead branch in `Get-HostTestVerdict`
+### INFO-1: dead branch in `Get-HostTestVerdict` (FIXED, devbreakfx12)
 
 `host_test_verdict.ps1:18`, `if ($OnlyRun -and $Built -ne $Expected -and
 $code -eq 0)`, can no longer fire. If `$code` is 0, then `$mismatch` is false
 and `BuildFailures` is 0, which forces `Built == Expected`. It is harmless.
 Delete it or keep it as a documented belt-and-braces line.
 
-### INFO-2: stale header comment
+### INFO-2: stale header comment (FIXED, devbreakfx12)
 
 `host_test_verdict.ps1:1-3` still says the MISMATCH check "runs whenever the
 run is not -Only". Since INFO-2 it also runs under `-Only`.
