@@ -225,3 +225,21 @@ Results (base 5033604f3, baseline PASS 83 s):
 | M8 | CAUGHT | `test_first_lock_ten_seconds_waits_and_retries_right_pin` |
 | M9 | CAUGHT | `test_lockout_wait_bound_counts_read_time` |
 | M10 | MISSED | (INFO-5) |
+
+## Fix status
+
+Fixed in one change on top of 42a9a4b73 (`cases_lcd.py`, `test_bench_test_cases_lcd.py`).
+
+| Finding | Status | Fix and test |
+|---|---|---|
+| LOW-1 | Fixed | Verified right-PIN path: `False` only when dots cleared and the exact "Wrong PIN" label shows; full dots with OK still present gives `right_pin_outcome=submit_not_applied` and `None`. `test_right_pin_ok_click_not_applied_is_inconclusive_not_fail`, `test_right_pin_genuinely_denied_is_fail`. |
+| LOW-2 | Fixed | `_LCD19_LOCKOUT_MAX_S = 300`, pinned to `LOGIN_BACKOFF_LADDER_MS[4]` by `test_lockout_cap_pinned_to_firmware_last_rung`. N above the cap: `pin_lockout_n_out_of_range`, INCONCLUSIVE, no sleep (`test_lockout_n_above_cap_is_inconclusive_and_never_sleeps`). At or below: bounded `_lcd19_wait_out_lockout(first_sleep_s=N+1, max_wait_s=cap+5)` (`test_lockout_at_cap_waits_in_logged_chunks_and_passes`). |
+| LOW-3 | Fixed | `_lcd19_wake_if_blanked` runs before the retry: it taps only when the panel is confirmed off, never on an awake or unreadable panel (`test_wake_only_when_panel_confirmed_off`). Waits are chunked with a log line every 60 s. Long rungs must run through `bench_test_start` (comment above `_LCD19_LOCKOUT_MAX_S`). |
+| LOW-4 | Fixed | `wrong_pin_refused=True` requires the exact "Wrong PIN" label; cleared dots without it set `wrong_pin_no_label` and stay `None` (`test_wrong_pin_cleared_keypad_without_label_is_inconclusive`). The fake shows "Wrong PIN" only after a rejected PIN until the next key; the lock countdown is fixed at submit (`test_fake_wrong_pin_label_lives_until_next_key_or_show`). |
+| INFO-1 | Fixed | `test_wrong_pin_during_running_lock_is_not_refused` asserts INCONCLUSIVE, `wrong_pin_during_lock` and `keypad_raised`. |
+| INFO-2 | Fixed | Specific INCONCLUSIVE reasons for a running lock, an out-of-range N and an unreadable N. |
+| INFO-3 | Fixed | `test_unparseable_lockout_n_is_inconclusive_without_retry`. |
+| INFO-4 | Documented | Comment at the wrong-PIN stage: the other two lockout paths stay fail-safe INCONCLUSIVE, because a retry would retype an unproven PIN or a second wrong PIN (another ladder failure). |
+| INFO-5 | Fixed | `test_retry_sleep_is_ceil_n_plus_one_second` (9.2 s lock: N = 3, sleep 4.0 s); the fake countdown is fixed at submit. |
+| INFO-6 | Fixed | The retry path now uses `_lcd19_wait_out_lockout`; `test_wait_out_lockout_first_sleep_is_clamped_to_bound` covers the production path. |
+| INFO-7 | Fixed | Attempt-0 per-attempt keys are renamed `attempt0_*` before attempt 1 (`test_retry_clears_attempt0_diagnostics`). |

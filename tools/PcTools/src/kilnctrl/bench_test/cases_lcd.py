@@ -3013,18 +3013,91 @@ _LCD19_LOCKOUT_FIRST_STEP_S = 5.0
 _LCD19_LOCKOUT_MARGIN_S = 1.5
 
 
-def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> Dict[str, Any]:
+#: Client-side ceiling for a "try again in %us" N, pinned by a test to the
+#: firmware's last ladder rung (``LOGIN_BACKOFF_LADDER_MS[4]`` in
+#: login_backoff.c, 300000 ms). ``ui_lcd_keypad.c`` computes N =
+#: ceil(remaining/1000) at submit time, so it can never print more; a larger
+#: number is a misread label and is never slept on.
+_LCD19_LOCKOUT_MAX_S = 300
+#: Progress is logged at least this often during a long lockout wait.
+_LCD19_WAIT_LOG_EVERY_S = 60.0
+# LONG RUNGS: the 60 s and 300 s rungs outlast the MCP client's 300 s idle
+# watchdog, so LCD-19 on a board whose ladder is past rung 3 must be run
+# through ``bench_test_start`` (background job + ``bench_test_job_status``),
+# never ``bench_test_run``.
+
+
+def _lcd19_sleep(ctx: dict, total_s: float, what: str) -> None:
+    """Sleep `total_s` in chunks of at most _LCD19_WAIT_LOG_EVERY_S, logging
+    progress between chunks."""
+    sleep = ctx.get("_sleep", time.sleep)
+    left = float(total_s)
+    done = 0.0
+    while left > 0:
+        step = min(_LCD19_WAIT_LOG_EVERY_S, left)
+        sleep(step)
+        left -= step
+        done += step
+        if left > 0:
+            log.info("LCD-19: %s: waited %.0f s of %.0f s", what, done, total_s)
+
+
+def _lcd19_wake_if_blanked(ctx: dict) -> Optional[bool]:
+    """After a long wait the display may have blanked (shortest timeout 1
+    min); screen_idle then swallows the next touch, which would be the first
+    digit of the retyped PIN. Wake ONLY when the panel is confirmed off: a
+    tap on an awake panel at x<40 is the keypad backdrop and cancels the
+    keypad. An unreadable state never taps. Returns None (no touch / state
+    unreadable / inject failed), False (already on, no tap sent), True (a
+    wake tap was sent)."""
+    touch = getattr(_srv(ctx), "_touch", None)
+    if touch is None:
+        return None
+    sleep = ctx.get("_sleep", time.sleep)
+    try:
+        st = touch.get_state()
+        on = _power_state_is_on(st)
+        if on is None:
+            on = bool(st.screen_on)
+    except Exception:
+        return None
+    if on:
+        return False
+    try:
+        x, y = _WAKE_TOUCH_XY
+        touch.inject(x, y, True)
+        touch.inject(x, y, False)
+    except Exception:
+        return None
+    for _ in range(max(1, int(math.ceil(_WAKE_SCREEN_ON_TIMEOUT_S / _WAKE_SCREEN_ON_POLL_S)))):
+        try:
+            st = touch.get_state()
+            on = _power_state_is_on(st)
+            if on is None:
+                on = bool(st.screen_on)
+            if on:
+                break
+        except Exception:
+            break
+        sleep(_WAKE_SCREEN_ON_POLL_S)
+    return True
+
+
+def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0,
+                            first_sleep_s: Optional[float] = None) -> Dict[str, Any]:
     """Wait out the lock a wrong PIN just started. ALWAYS sleeps at least the
     firmware's first ladder step plus a margin (the lock is invisible on
-    screen after a wrong PIN). If `names` additionally shows the "try again
+    screen after a wrong PIN), or `first_sleep_s` when given (the retry path
+    passes N+1 s for a lock whose N it already read). The first sleep is
+    clamped to `max_wait_s`. If `names` additionally shows the "try again
     in %us" text (a submit that landed inside the lock), keep sleeping that
     long and re-reading. Total elapsed time, reads included, is bounded by
-    `max_wait_s` (the one unconditional wait is always taken)."""
-    sleep = ctx.get("_sleep", time.sleep)
+    `max_wait_s`."""
     now = ctx.get("_now", time.monotonic)
     start = now()
     info: Dict[str, Any] = {"lockout_seen": False, "waited_s": 0.0}
-    sleep(_LCD19_LOCKOUT_FIRST_STEP_S + _LCD19_LOCKOUT_MARGIN_S)
+    first = (_LCD19_LOCKOUT_FIRST_STEP_S + _LCD19_LOCKOUT_MARGIN_S) if first_sleep_s is None else first_sleep_s
+    _lcd19_sleep(ctx, min(first, max_wait_s), "lockout")
     cur = names
     while now() - start < max_wait_s:
         secs = None
@@ -3036,7 +3109,7 @@ def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> D
         if secs is None:
             break
         info["lockout_seen"] = True
-        sleep(min(secs + 1.0, max(0.0, max_wait_s - (now() - start))))
+        _lcd19_sleep(ctx, min(secs + 1.0, max(0.0, max_wait_s - (now() - start))), "lockout")
         cur, _, _, _, _ = _wait_stable_names(ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
     info["waited_s"] = now() - start
     return info
@@ -3534,6 +3607,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     pin_cfg["bad"] = True
                                 state["unverified_right_first_refused"] = True
                                 wrong_pin = None
+                    # INFO-4: only the verified right-PIN path waits and retries. The unverified
+                    # right-PIN-first path and the wrong-PIN-during-lock path stay fail-safe
+                    # INCONCLUSIVE on purpose: a retry there would have to retype a PIN whose
+                    # correctness is unproven (or a second wrong PIN, which counts another ladder
+                    # failure), so the operator reruns after the lockout instead.
                     if wrong_pin:
                         # enter_pin_verified() (2026-09-30, LCD-19), not the
                         # older enter_pin(): confirms each digit's tap was
@@ -3604,8 +3682,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     # wrong_pin_refused stays at its initial
                                     # None (INCONCLUSIVE) rather than a
                                     # fabricated True.
+                                    # LOW-4: a positive "Wrong PIN" label is required;
+                                    # cleared dots alone also read after a re-shown keypad.
                                     if _dots_have_cleared(names):
-                                        wrong_pin_refused = True
+                                        if "Wrong PIN" in names:
+                                            wrong_pin_refused = True
+                                        else:
+                                            state["wrong_pin_no_label"] = True
                                 else:
                                     wrong_pin_refused = False
                         # else: leave wrong_pin_refused at None -- the PIN
@@ -3626,6 +3709,12 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # immediately before this entry starts.
                         for _attempt in range(2):
                             state.pop('pin_lockout', None)
+                            # INFO-7: attempt-0 entry diagnostics must not leak into attempt 1.
+                            for _k in ("right_pin_entry", "after_right_pin_names",
+                                       "after_right_pin_empty_polls", "after_right_pin_truncated",
+                                       "after_right_pin_stabilized", "right_pin_outcome"):
+                                if _k in state:
+                                    state["attempt0_" + _k] = state.pop(_k)
                             entry = ui.enter_pin_verified(right_pin)
                             state["right_pin_entry"] = _entry_result_summary(entry)
                             if entry is not None and entry.get("entry_incomplete"):
@@ -3669,16 +3758,31 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     if any("try again in" in str(n).lower() for n in names):
                                         # Locked out, not rejected on merit: cannot judge.
                                         state["pin_lockout"] = True
+                                    elif "OK" not in names and "Cancel" in names:
+                                        right_pin_started = True
+                                    elif "OK" in names and not _dots_have_cleared(names):
+                                        # LOW-1: OK reported ok but never applied
+                                        # (full dots, no status): instrument failure.
+                                        state["right_pin_outcome"] = "submit_not_applied"
+                                    elif "OK" in names and "Wrong PIN" in names:
+                                        # Dots cleared + "Wrong PIN": genuine DENIED.
+                                        right_pin_started = False
                                     else:
-                                        right_pin_started = "OK" not in names and "Cancel" in names
+                                        state["right_pin_outcome"] = "indeterminate"
                             # LOW-A: the ladder is kept per boot and may be past rung 0; a right
                             # PIN that lands in a still-running lock is waited out once and retyped
                             # (a LOCKED_OUT submit does not count as a failure).
                             if _attempt == 0 and state.get('pin_lockout'):
                                 _secs = [int(_m.group(1)) for _n in (names or []) for _m in [_LOCKOUT_RE.search(str(_n))] if _m]
-                                if _secs:
-                                    ctx.get('_sleep', time.sleep)(max(_secs) + 1.0)
+                                if _secs and max(_secs) > _LCD19_LOCKOUT_MAX_S:
+                                    # LOW-2: firmware never prints more; a misread label. No sleep.
+                                    state['pin_lockout_n_out_of_range'] = max(_secs)
+                                elif _secs:
                                     state['right_pin_lockout_retry'] = max(_secs)
+                                    state['right_pin_lockout_retry_wait'] = _lcd19_wait_out_lockout(
+                                        ctx, ui, None, max_wait_s=_LCD19_LOCKOUT_MAX_S + 5.0,
+                                        first_sleep_s=max(_secs) + 1.0)
+                                    state['right_pin_retry_wake'] = _lcd19_wake_if_blanked(ctx)
                                     continue
                             break
 
@@ -3907,6 +4011,23 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
+            if result.verdict == Verdict.INCONCLUSIVE:
+                if state.get("wrong_pin_during_lock"):
+                    _ln = [int(_m.group(1)) for _n in (state.get("after_wrong_pin_names") or [])
+                           for _m in [_LOCKOUT_RE.search(str(_n))] if _m]
+                    result.reason = (
+                        "a login lockout from an earlier run was still active when the wrong PIN was "
+                        "typed, so firmware never evaluated it"
+                        + (f"; wait it out (about {max(_ln)} s) and rerun" if _ln else "; wait it out and rerun"))
+                elif state.get("pin_lockout_n_out_of_range"):
+                    result.reason = (
+                        f"the keypad lockout label read {state['pin_lockout_n_out_of_range']} s, above the "
+                        f"firmware ceiling of {_LCD19_LOCKOUT_MAX_S} s (misread label); not waited out")
+                elif state.get("pin_lockout"):
+                    result.reason = ("the right PIN landed in a login lockout whose duration could not "
+                                     "be read; wait it out and rerun")
+                elif state.get("right_pin_outcome") == "submit_not_applied":
+                    result.reason = "the right PIN's OK click was reported but not applied (dots still full); rerun"
             if state.get("pin_unlock_verified"):
                 result.observed["pin_unverified"] = False
             if state.get("unverified_right_first_refused"):
