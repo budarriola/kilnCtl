@@ -416,7 +416,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     live_profile_start();
     esp_err_t fav_err = profiles_favorites_start();
     if (fav_err != ESP_OK) {
-        ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- no favorites shown this boot",
+        ESP_LOGW(MAIN_TAG, "profiles_favorites_start failed: %s -- favorites unresolved (the next favorite POST retries the read)",
                  esp_err_to_name(fav_err));
         startup_fault_note(STARTUP_FAULT_SETTINGS_STORE);
     }

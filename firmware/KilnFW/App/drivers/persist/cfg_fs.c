@@ -383,10 +383,103 @@ bool cfg_fs_degraded_is(const char *name)
     return found;
 }
 
+#define CFG_FS_CONDITION_MAX 8
+static char s_condition[CFG_FS_CONDITION_MAX][CFG_FS_DEGRADED_NAME_MAX];
+
+void cfg_fs_condition_set(const char *name, bool active)
+{
+    if (!name || name[0] == '\0') {
+        return;
+    }
+    bool overflow = false;
+    portENTER_CRITICAL(&s_degraded_mux);
+    int free_slot = -1;
+    bool done = false;
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] == '\0') {
+            if (free_slot < 0) {
+                free_slot = i;
+            }
+        } else if (strncmp(s_condition[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            if (!active) {
+                s_condition[i][0] = '\0';
+            }
+            done = true;
+            break;
+        }
+    }
+    if (active && !done) {
+        if (free_slot >= 0) {
+            strncpy(s_condition[free_slot], name, CFG_FS_DEGRADED_NAME_MAX - 1);
+            s_condition[free_slot][CFG_FS_DEGRADED_NAME_MAX - 1] = '\0';
+        } else {
+            overflow = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    if (overflow) {
+        ESP_LOGE("cfg_fs", "condition table full: %s not listed", name);
+    }
+}
+
+int cfg_fs_condition_count(void)
+{
+    int n = 0;
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0') {
+            n++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return n;
+}
+
+bool cfg_fs_condition_name(int idx, char *out, size_t cap)
+{
+    bool ok = false;
+    if (!out || cap == 0 || idx < 0) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    int seen = 0;
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0') {
+            if (seen == idx) {
+                strncpy(out, s_condition[i], cap - 1);
+                out[cap - 1] = '\0';
+                ok = true;
+                break;
+            }
+            seen++;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return ok;
+}
+
+bool cfg_fs_condition_is(const char *name)
+{
+    bool found = false;
+    if (!name || name[0] == '\0') {
+        return false;
+    }
+    portENTER_CRITICAL(&s_degraded_mux);
+    for (int i = 0; i < CFG_FS_CONDITION_MAX; i++) {
+        if (s_condition[i][0] != '\0' && strncmp(s_condition[i], name, CFG_FS_DEGRADED_NAME_MAX - 1) == 0) {
+            found = true;
+            break;
+        }
+    }
+    portEXIT_CRITICAL(&s_degraded_mux);
+    return found;
+}
+
 void cfg_fs_degraded_clear_for_test(void)
 {
     portENTER_CRITICAL(&s_degraded_mux);
     memset(s_degraded, 0, sizeof(s_degraded));
+    memset(s_condition, 0, sizeof(s_condition));
     portEXIT_CRITICAL(&s_degraded_mux);
 }
 

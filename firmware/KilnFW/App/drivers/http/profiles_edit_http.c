@@ -1017,7 +1017,7 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed_for(req, PROFILES_FAVORITES_FILE_PATH, err);
+        return cfg_fs_http_persist_failed_favorites(req, PROFILES_FAVORITES_FILE_PATH, err);
     }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,

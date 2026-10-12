@@ -215,3 +215,18 @@ later `set()` heals the store. This is cosmetic.
 
 The `cur_len > sizeof(*bm) &&` test duplicates the first clause of
 `used_bitmap_len_is_longer_shape()`.
+
+## Fix status (firelowfx4)
+
+| Finding | Status | Where |
+|---|---|---|
+| LOW-1 | FIXED (honest text, no new route) | `cfg_fs_refusal_http.h` `CFG_FS_FAVORITES_UNREADABLE_REASON` + `cfg_fs_http_persist_failed_favorites()`; the favorite POST 409 now says a retry re-reads, and that cfg format / scope kiln do not clear it, only `factory_reset scope=profiles` does (and it also erases all user profiles). No favorites-only reset added (would need a route; URI cap has 9 spare, left alone). Test in `test_profiles_http.c`. |
+| LOW-2 | FIXED | `favorites_load()` resolves into locals and publishes only on success; a refused retry leaves `s_fav_user`/`s_fav_builtin` untouched (builtin re-read starts from the current value). Test `test_favorites_refused_retry_keeps_published_masks`. |
+| LOW-3, LOW-4 | already fixed (see above) | |
+| LOW-5 | FIXED | new `cfg_fs_condition_*` registry (`cfg_fs.c`); `profiles_used_bitmap` is listed under `GET /api/cfgfs` `"conditions"` only, no longer in `degraded` or the backup `stale_or_unknown_stores`, and no longer uses the 6/8 listing caps. Test asserts it is a condition and NOT degraded. |
+| INFO-1 | FIXED | redundant `cfg_fs_degraded_set(path,false)` at the top of `favorites_load` removed; `pref_cfg_fs_resolve()` owns the entry (existing heal test still asserts the mark clears). |
+| INFO-4 | left | wire contract name kept. |
+| INFO-6 | PARTLY | boot log line reworded ("favorites unresolved (the next favorite POST retries the read)"); no API exists to withdraw the startup fault note, not added. |
+| INFO-2,3,5,7 | no action | |
+
+Negtests (`tools\negtest.ps1 -Preset kilnfw-host`): see the commit message / handoff report.

@@ -30,3 +30,9 @@ bool cfg_fs_degraded_name(int idx, char *out, size_t cap)
     }
     return false;
 }
+
+/* FIRELOWFX3 LOW-5: conditions registry stub -- nothing active. */
+void cfg_fs_condition_set(const char *name, bool active) { (void)name; (void)active; }
+int cfg_fs_condition_count(void) { return 0; }
+bool cfg_fs_condition_name(int idx, char *out, size_t cap) { (void)idx; (void)out; (void)cap; return false; }
+bool cfg_fs_condition_is(const char *name) { (void)name; return false; }

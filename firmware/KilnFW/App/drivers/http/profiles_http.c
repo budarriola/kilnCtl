@@ -936,11 +936,11 @@ static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slo
         } else if (perr != HAL_NOT_FOUND) {
             ESP_LOGE(PROFILES_TAG, "used bitmap rebuild: profN probe for slot %u failed (%s) -- failing closed", (unsigned)id,
                      hal_status_to_name(perr));
-            cfg_fs_degraded_set("profiles_used_bitmap", true); /* LOW-3: visible in GET /api/cfgfs */
+            cfg_fs_condition_set("profiles_used_bitmap", true); /* LOW-3 / FX3 LOW-5: GET /api/cfgfs "conditions", not "degraded" */
             return perr; /* cannot tell present from absent: fail closed, drop no bit, save nothing */
         }
     }
-    cfg_fs_degraded_set("profiles_used_bitmap", false);
+    cfg_fs_condition_set("profiles_used_bitmap", false);
     *out = rebuilt;
     return HAL_OK;
 }

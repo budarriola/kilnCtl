@@ -196,6 +196,18 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
         }
         APPEND("]");
     }
+    /* FIRELOWFX3 LOW-5: runtime conditions (no save refused, not boot-unreadable stores). */
+    {
+        int cn = cfg_fs_condition_count();
+        APPEND(",\"conditions\":[");
+        for (int i = 0; i < cn && i < 6; i++) {
+            char cname[48];
+            if (cfg_fs_condition_name(i, cname, sizeof(cname))) {
+                APPEND("%s\"%s\"", i == 0 ? "" : ",", cname);
+            }
+        }
+        APPEND("]");
+    }
 
     APPEND(",\"file_count\":%lu,\"files\":[", (unsigned long)file_count);
     for (size_t i = 0; i < file_count; i++) {

@@ -38,6 +38,14 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
  * the cause persists, GET /api/cfgfs names the store and these two routes clear it. */
 #define CFG_FS_STORE_UNREADABLE_REASON     "a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the "     "controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded), then clear it with a cfg "     "format (POST /api/cfgfs/format_confirm force_healthy=1) or a factory reset (scope kiln)"
 
+/* FIRELOWFX3 LOW-1: the favorites store (prof_favusr in profiles_nvs) is cleared by NEITHER cfg format (erases the cfg
+ * partition only) NOR factory reset scope kiln (does not touch profiles_nvs): only scope profiles erases it, and that
+ * also erases every user profile. The generic text above would send the operator to remedies that cannot work. */
+#define CFG_FS_FAVORITES_UNREADABLE_REASON     "the favorites list could not be read, so saves to it are refused to avoid overwriting it; this request " \
+    "re-reads it each time, so retry (a reboot also retries); if it keeps failing, neither a cfg format nor a " \
+    "factory reset with scope kiln clears it -- only factory_reset scope=profiles does, and that ALSO erases every " \
+    "user profile"
+
 /* Post-failure response for a save that failed. 503 with the cfg text when the partition is unmounted; 409
  * store_unreadable_at_boot ONLY when the caller says THIS store is refused (`store_refused`) and the error is the
  * refusal's ESP_ERR_INVALID_STATE (persfx3 MED-2: a flash write error or OOM on another store is a 500, and a
@@ -78,6 +86,18 @@ static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool 
 static inline esp_err_t cfg_fs_http_persist_failed_for(httpd_req_t *req, const char *store, esp_err_t err)
 {
     return cfg_fs_http_persist_failed_state(req, cfg_fs_degraded_is(store), err, -1);
+}
+
+/* Favorites-only form: same as cfg_fs_http_persist_failed_for(), but the 409 carries the favorites-specific reason. */
+static inline esp_err_t cfg_fs_http_persist_failed_favorites(httpd_req_t *req, const char *store, esp_err_t err)
+{
+    if (cfg_fs_is_available() && cfg_fs_degraded_is(store) && err == ESP_ERR_INVALID_STATE) {
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_set_status(req, "409 Conflict");
+        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_FAVORITES_UNREADABLE_REASON "\"}");
+        return ESP_OK;
+    }
+    return cfg_fs_http_persist_failed_for(req, store, err);
 }
 
 /* Handlers with no store/error to name: unmounted -> 503, otherwise 500. Never the unreadable-store 409. */

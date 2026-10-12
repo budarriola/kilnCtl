@@ -212,12 +212,9 @@ static void favorites_read_builtin_only(uint32_t *builtin)
 
 static esp_err_t favorites_load(void)
 {
-    profiles_slot_bitmap_from_u32(&s_fav_user, 0);
-    s_fav_builtin = 0;
-    s_fav_rev = 0;
-    s_fav_dirty = false;
-    s_fav_user_unresolved = false;
-    cfg_fs_degraded_set(PROFILES_FAVORITES_FILE_PATH, false);
+    /* FIRELOWFX3 LOW-2: everything is resolved into locals and published only at the end. profiles_favorites_is()
+     * and _masks() read s_fav_* without s_save_lock, so a retry that is refused again must never zero them.
+     * INFO-1: no explicit degraded clear here -- pref_cfg_fs_resolve() re-evaluates the registry entry on every path. */
 
     /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
      * rev; otherwise the legacy NVS copy stands and, when cfg is mounted, is
@@ -237,16 +234,28 @@ static esp_err_t favorites_load(void)
     if (!have) {
         if (nerr == HAL_OK) {
             ESP_LOGI(TAG, "no favorites saved yet");
+            profiles_slot_bitmap_t zero;
+            profiles_slot_bitmap_from_u32(&zero, 0);
+            s_fav_user = zero;
+            s_fav_builtin = 0;
+            s_fav_rev = 0;
+            s_fav_dirty = false;
+            s_fav_user_unresolved = false;
             return ESP_OK;
         }
         s_fav_user_unresolved = true;
         cfg_fs_degraded_set(PROFILES_FAVORITES_FILE_PATH, true); /* FIRELOWFX2 MED-1: listed in GET /api/cfgfs, HTTP save 409 */
-        favorites_read_builtin_only(&s_fav_builtin);
+        /* Only the builtin mask has an independent key; keep the current RAM value if it cannot be read. */
+        uint32_t builtin = s_fav_builtin;
+        favorites_read_builtin_only(&builtin);
+        s_fav_builtin = builtin;
         return hal_status_to_esp_err(nerr);
     }
     s_fav_user = resolved.user;
     s_fav_builtin = resolved.builtin;
     s_fav_rev = rev;
+    s_fav_dirty = false;
+    s_fav_user_unresolved = false;
     ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx (source=%s, rev=%lu)",
              (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin,
              used_file ? "file" : "NVS", (unsigned long)s_fav_rev);

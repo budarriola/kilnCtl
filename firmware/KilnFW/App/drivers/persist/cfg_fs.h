@@ -158,6 +158,13 @@ bool cfg_fs_degraded_name(int idx, char *out, size_t cap);
 /* persfx3 MED-2: true iff `name` itself is registered degraded (per-store decision for the HTTP 409). */
 bool cfg_fs_degraded_is(const char *name);
 void cfg_fs_degraded_clear_for_test(void);
+/* FIRELOWFX3 LOW-5: runtime conditions that are NOT a boot-unreadable store (no save is refused by them, they can be
+ * set at any time and clear on a later success): listed in GET /api/cfgfs "conditions" only, never in "degraded"
+ * and never in the backup stale_or_unknown_stores list. Thread-safe; at most 8 names. */
+void cfg_fs_condition_set(const char *name, bool active);
+int cfg_fs_condition_count(void);
+bool cfg_fs_condition_name(int idx, char *out, size_t cap);
+bool cfg_fs_condition_is(const char *name);
 
 #ifndef ESP_PLATFORM /* host builds only */
 void cfg_fs_test_inject_read_error(const char *rel_path, esp_err_t err, int count);
