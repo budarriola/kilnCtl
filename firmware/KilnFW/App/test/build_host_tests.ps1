@@ -1452,7 +1452,7 @@ try {
 
     Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd $cmd9
 
-    # REBOOTFX7 LOW-2: same TU with a 10 ms tick period, running only the uart_proto_message_make() rx_ms units test.
+    # REBOOTFX7 LOW-2: same TU with a 10 ms tick period, running only the uart_proto_message_init() rx_ms units test.
     $exe9t = Join-Path $outDir "kilnctl_host_tests_uart_protocol_tick10.exe"
     $linkObjDirT = Join-Path $outDir "link_tick10"
     New-Item -ItemType Directory -Force -Path $linkObjDirT | Out-Null

@@ -307,19 +307,20 @@ static void test_message_init(void)
 
 /* REBOOTFX7 LOW-2: absolute rx_ms units. Only meaningful at a tick period != 1 (built a second time with
  * /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY): a raw-tick stamp would give 300, not 3000. */
-static void test_message_make_units_period_10(void)
+static void test_message_init_units_period_10(void)
 {
-    uart_proto_message_t m = uart_proto_message_make(UART_PROTO_DEVICE_SAFETY, 1u, 2u, 3u, 300u);
+    uart_proto_message_t m;
+    uart_proto_message_init(&m, UART_PROTO_DEVICE_SAFETY, 1u, 2u, 3u, 300u);
     CHECK(portTICK_PERIOD_MS == 10u, "this executable is built with a 10 ms tick period");
-    CHECK(m.rx_ms == 3000u, "uart_proto_message_make(.., 300 ticks) stamps 3000 ms, not raw ticks");
+    CHECK(m.rx_ms == 3000u, "uart_proto_message_init(.., 300 ticks) stamps 3000 ms, not raw ticks");
 }
 
 int main(void)
 {
 #ifdef KILN_TICK10_ONLY
-    test_message_make_units_period_10();
+    test_message_init_units_period_10();
     if (g_failures == 0) {
-        printf("ALL PASS: message_make rx_ms units at 10 ms tick\n");
+        printf("ALL PASS: message_init rx_ms units at 10 ms tick\n");
         return 0;
     }
     printf("%d FAILURE(S)\n", g_failures);
