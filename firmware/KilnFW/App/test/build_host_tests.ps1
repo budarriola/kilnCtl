@@ -2239,6 +2239,20 @@ try {
 
     Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
 
+    # ---- test_main_reset_fence.c: compiles the REAL main.c (REVIEW_DEVBREAKFX6 MED-1) ----
+    # app_main() is run with recording stubs for the bring-up phases and the four fence setters; the test
+    # asserts each hook was installed before the first phase. Defeats every dead-install shape regardless
+    # of syntax (tools/check_reset_fence_hooks.ps1 is only a text check).
+    $exeMrf = Join-Path $outDir "kilnctl_host_tests_main_reset_fence.exe"
+    $mrfObjDir = Join-Path $outDir "mrf"
+    New-Item -ItemType Directory -Force -Path $mrfObjDir | Out-Null
+    $cmdMrf = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$mrfObjDir\\`" /Fe:`"$exeMrf`" " +
+            "`"$(Join-Path $testDir 'test_main_reset_fence.c')`" " +
+            "`"$(Join-Path $driversDir 'owners/relay_authority.c')`""
+
+    Invoke-HostTestExe -Name "main_reset_fence" -ExePath $exeMrf -BuildCmd $cmdMrf
+
     # ---- test_time_sync.c: its own THIRTY-FIRST, separate executable ---------
     # docs/FILESYSTEM_USER_DATA.md item 14 (TZ) close-out: this file used
     # to live in the "main" executable's $sources list, testing only

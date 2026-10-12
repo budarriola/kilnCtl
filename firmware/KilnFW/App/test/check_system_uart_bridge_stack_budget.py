@@ -113,15 +113,22 @@ def read_configured_stack(path=BRIDGE_SOURCE):
     except OSError as exc:
         return None, f"cannot read {path}: {exc}"
     src = strip_dead_c(src)
-    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(\d+)[uUlL]*\s*,', src)
-    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(\d+)[uUlL]*\s*\)\s*;', src)
-    if len(created) != 1 or len(regd) != 1:
-        return None, (f"expected exactly one xTaskCreatePinnedToCore(system_bridge_task, ...) literal and one "
-                      f"stack_margin_register(\"system_uart_bridge\", ...) literal in {path}; found {len(created)} and {len(regd)}")
-    if created[0] != regd[0]:
-        return None, (f"{path}: task created with stack {created[0]} B but stack_margin_register() reports against "
-                      f"{regd[0]} B -- the margin is graded against the wrong denominator")
-    return int(created[0]), None
+    # REVIEW_DEVBREAKFX6 LOW-3: count EVERY create/register site that names the task, parseable or not, and require
+    # exactly one of each; a site whose size is not a plain decimal/hex literal is a failure, never "absent" (a hex
+    # real create beside a decimal decoy used to leave the decoy as the only parseable match).
+    any_create = re.findall(r'xTaskCreate\w*\s*\([^;]*?"system_uart_bridge"', src)
+    any_reg = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"', src)
+    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*,', src)
+    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*\)\s*;', src)
+    if len(any_create) != 1 or len(any_reg) != 1 or len(created) != 1 or len(regd) != 1:
+        return None, (f"expected exactly one xTaskCreate*(... \"system_uart_bridge\" ...) and one "
+                      f"stack_margin_register(\"system_uart_bridge\", ...), each with a plain decimal/hex literal size, in {path}; "
+                      f"found {len(any_create)} create site(s) ({len(created)} parseable) and {len(any_reg)} register site(s) ({len(regd)} parseable)")
+    c_val, r_val = int(created[0], 0), int(regd[0], 0)
+    if c_val != r_val:
+        return None, (f"{path}: task created with stack {c_val} B but stack_margin_register() reports against "
+                      f"{r_val} B -- the margin is graded against the wrong denominator")
+    return c_val, None
 
 
 CONFIGURED_STACK_BYTES, _STACK_ERR = read_configured_stack()

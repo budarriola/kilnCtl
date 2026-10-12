@@ -22,6 +22,9 @@
 # epilogue. Task-identity semantics (another task IS refused while the reset job runs) are pinned by
 # test_link_watchdog.c via stub_set_current_task(). Self-tested by tools\negtest.ps1 (REVIEW_DEVBREAK4 R1-R10, REVIEW_DEVBREAK5 F1-F7).
 #
+# LIMITS: static regex over C text, cannot be complete (REVIEW_DEVBREAKFX6 MED-1); F8/F9/F11/F12/F14b/F15/F17 bypass it. Do NOT extend it further.
+# Primary proof: test_main_reset_fence.c compiles the real main.c, runs app_main() and asserts all 4 hooks non-NULL.
+#
 # Usage: powershell -File tools\check_reset_fence_hooks.ps1 [-MainFile <path to main.c>]
 param(
     [string]$MainFile,

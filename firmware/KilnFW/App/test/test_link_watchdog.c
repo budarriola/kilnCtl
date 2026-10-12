@@ -234,9 +234,20 @@ static void test_reset_refuses_writer_exempts_reset_job_task(void)
     TEST_CHECK(relay_authority_reset_refuses_writer(), "the default task (1) is refused too: the job is task 3, not a constant 1");
     stub_set_current_task((TaskHandle_t)3);
     TEST_CHECK(!relay_authority_reset_refuses_writer(), "switching back to the job task is exempt again");
-    stub_set_current_task((TaskHandle_t)1);
+    // REVIEW_DEVBREAKFX6 LOW-2: assert as the FORMER JOB TASK (3). Task 1 is refused whether or not job_exit
+    // cleared anything, so asserting there is vacuous (a job_exit that does not clear the job would pass).
+    stub_set_current_task((TaskHandle_t)3);
     relay_authority_reset_job_exit();
-    TEST_CHECK(relay_authority_reset_refuses_writer(), "after the job exits the exemption is gone");
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "after the job exits the exemption is gone (asserted as the former job task)");
+    // A second job entered from a different task (4) must exempt task 4 and no longer task 3 (a job_enter that
+    // records a constant matching the first job's id would exempt 3 here).
+    stub_set_current_task((TaskHandle_t)4);
+    relay_authority_reset_job_enter();
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "second job from task 4: task 4 exempt");
+    stub_set_current_task((TaskHandle_t)3);
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "second job from task 4: task 3 is refused");
+    relay_authority_reset_job_exit();
+    stub_set_current_task((TaskHandle_t)1);
     relay_authority_reset_in_flight_end();
     TEST_CHECK(!relay_authority_reset_refuses_writer(), "mark cleared: nothing refused");
 }
@@ -260,8 +271,10 @@ static void test_kiln_nvs_fence_only_when_scope_erases_it(void)
     TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "the default task (1) is refused too: the job is task 3");
     stub_set_current_task((TaskHandle_t)3);
     TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "switching back to the job task is exempt again");
-    stub_set_current_task((TaskHandle_t)1);
+    stub_set_current_task((TaskHandle_t)3);
     relay_authority_reset_job_exit();
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "after the job exits the exemption is gone (asserted as the former job task)");
+    stub_set_current_task((TaskHandle_t)1);
     relay_authority_reset_in_flight_end();
     TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "mark cleared: nothing refused, flag cleared");
     relay_authority_reset_in_flight_begin();

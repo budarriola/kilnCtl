@@ -598,17 +598,84 @@ if ($unrecognized.Count -gt 0) {
 
 Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count) xTaskCreate*() call site(s) all accounted for (registered or exempted)." -ForegroundColor Green
 
-# --- Create-vs-register stack LITERAL comparison (REVIEW_DEVBREAK5 LOW-4) ---
+# --- Create-vs-register stack comparison (REVIEW_DEVBREAK5 LOW-4, REVIEW_DEVBREAKFX6 LOW-1) ---
 #
 # The name check above proves a created task is registered; it never compared the stack SIZE. stack_margin grades
 # free space against the size handed to stack_margin_register(), so a registration that disagrees with the
 # xTaskCreate*() stack (zone_sweep: created 5120, registered 4096) reports a denominator that is wrong by the
-# difference. For every task whose FreeRTOS name equals a registered name, when BOTH the creating call and the
-# registering call carry a plain integer literal (optional [uUlL]* suffix), they must be equal. A non-literal
-# (macro/sizeof/expression) on either side is skipped, listed in the output, and may be exempted below.
-$stackLiteralExempt = @{}   # name -> reason (names created through a macro or in another file)
-$createStackRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"\s*,\s*(\d+)[uUlL]*\s*,'
-$regStackRe = 'stack_margin_register\s*\(\s*"([^"]+)"\s*,[^;]*?,\s*(\d+)[uUlL]*\s*\)\s*;'
+# difference. Each size argument is EVALUATED when it is a decimal/hex literal, a simple literal expression
+# (+ - * / and parentheses, u/l suffixes ignored), or an object-like #define (found in any .c/.h under drivers or
+# main, defined exactly once) that reduces to one. For every name created and registered, every create x register pair
+# whose sizes both evaluate must be equal.
+#
+# SKIPPED names are never silent: every name with no evaluable pair (sizeof, an unresolved or ambiguous macro, a
+# non-constant expression) or with only a create or only a register site under that name is printed with its reason,
+# and the skipped set is a RATCHET: it must equal $stackSkipAllowed exactly. A new skip fails until someone edits
+# that table; an entry that now compares (or vanished) fails too, so the table can only shrink by deleting lines.
+$stackSkipAllowed = @{
+    'cfg_autofmt' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'factory_reset_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'i2c_owner_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'info_boot_push' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'monitor_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'ota_pico_relay' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'recovery_exit_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'spi_owner_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'sw_reset_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'wifi_ap_id_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'wifi_connect_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'wifi_forget_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'wifi_mode_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'wifi_scan_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'i2c_owner_ns2009' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'i2c_owner_sx1509' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'recovery_exit' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'safety_owner_evt' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'safety_proto_rx' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'spi_owner' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'uart_owner_evt_task' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'lvgl' = 'create size is sizeof(static stack array)/sizeof(StackType_t): not a literal'
+    'uart_proto_rx' = 'create size is a function parameter (stack_depth) in uart_protocol.c: not a literal'
+}
+$minStackCompared = 5
+
+$macroValues = @{}
+$macroFiles = @(Get-ChildItem -Path $driversDir -Include "*.c","*.h" -Recurse -File) + $mainFiles
+foreach ($f in $macroFiles) {
+    foreach ($ln in (Get-CodeOnlyLines -Path $f.FullName)) {
+        if ($ln -match '^\s*#\s*define\s+([A-Za-z_]\w*)\s+(\S.*?)\s*$') {
+            $mn = $Matches[1]
+            if (-not $macroValues.ContainsKey($mn)) { $macroValues[$mn] = New-Object System.Collections.Generic.List[string] }
+            $macroValues[$mn].Add($Matches[2].Trim())
+        }
+    }
+}
+
+$script:unresolvedId = $null
+function Resolve-StackExpr([string]$tok, [int]$depth = 0) {
+    $t = $tok.Trim()
+    if ($t -match 'sizeof') { return @{ Ok = $false; Reason = 'sizeof' } }
+    if ($depth -gt 5) { return @{ Ok = $false; Reason = 'macro chain too deep' } }
+    $sub = [regex]::Replace($t, '(?<![0-9A-Za-z_])[A-Za-z_]\w*', {
+        param($m)
+        $id = $m.Value
+        if (-not $macroValues.ContainsKey($id)) { $script:unresolvedId = "macro $id (not found)"; return $id }
+        if ($macroValues[$id].Count -ne 1) { $script:unresolvedId = "macro $id (defined $($macroValues[$id].Count) times)"; return $id }
+        $r = Resolve-StackExpr $macroValues[$id][0] ($depth + 1)
+        if (-not $r.Ok) { $script:unresolvedId = "macro $id -> $($r.Reason)"; return $id }
+        return "($($r.Value))"
+    })
+    if ($script:unresolvedId) { $why = $script:unresolvedId; $script:unresolvedId = $null; return @{ Ok = $false; Reason = $why } }
+    $sub = [regex]::Replace($sub, '(?<=[0-9a-fA-F])[uUlL]+(?![0-9A-Za-z_])', '')
+    if ($sub -notmatch '^[0-9a-fA-FxX+\-*/()\s]+$') { return @{ Ok = $false; Reason = "expression '$t'" } }
+    try { $v = [int64](Invoke-Expression $sub) } catch { return @{ Ok = $false; Reason = "expression '$t'" } }
+    return @{ Ok = $true; Value = $v }
+}
+
+$createStackRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"\s*,\s*([^,;]+?)\s*,'
+$regStackRe = 'stack_margin_register\s*\(\s*"([^"]+)"\s*,[^;]*?,\s*([^,;]+?)\s*\)\s*;'
 $createdStacks = @{}
 $registeredStacks = @{}
 foreach ($f in $sourceFiles) {
@@ -616,36 +683,51 @@ foreach ($f in $sourceFiles) {
     foreach ($m in [regex]::Matches($joined, $createStackRe)) {
         $n = $m.Groups[1].Value
         if (-not $createdStacks.ContainsKey($n)) { $createdStacks[$n] = @() }
-        $createdStacks[$n] += [pscustomobject]@{ Bytes = [int]$m.Groups[2].Value; File = $f.Name }
+        $createdStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
     }
     foreach ($m in [regex]::Matches($joined, $regStackRe)) {
         $n = $m.Groups[1].Value
         if (-not $registeredStacks.ContainsKey($n)) { $registeredStacks[$n] = @() }
-        $registeredStacks[$n] += [pscustomobject]@{ Bytes = [int]$m.Groups[2].Value; File = $f.Name }
+        $registeredStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
     }
 }
 $stackMismatch = @()
 $stackCompared = 0
-foreach ($n in $createdStacks.Keys) {
-    if (-not $registeredStacks.ContainsKey($n) -or $stackLiteralExempt.ContainsKey($n)) { continue }
+$skipped = @{}   # name -> reason
+foreach ($n in (@($createdStacks.Keys) + @($registeredStacks.Keys) | Sort-Object -Unique)) {
+    if (-not $createdStacks.ContainsKey($n)) { $skipped[$n] = 'register site only (no create site with this task name)'; continue }
+    if (-not $registeredStacks.ContainsKey($n)) { $skipped[$n] = 'create site only (registered under another name or not at all)'; continue }
+    $pairs = 0
+    $why = @()
     foreach ($c in $createdStacks[$n]) {
         foreach ($r in $registeredStacks[$n]) {
-            $stackCompared++
-            if ($c.Bytes -ne $r.Bytes) {
-                $stackMismatch += "$n : created with $($c.Bytes) B in $($c.File) but stack_margin_register() reports against $($r.Bytes) B in $($r.File)"
+            if (-not $c.Eval.Ok) { $why += "create '$($c.Tok)' in $($c.File): $($c.Eval.Reason)"; continue }
+            if (-not $r.Eval.Ok) { $why += "register '$($r.Tok)' in $($r.File): $($r.Eval.Reason)"; continue }
+            $stackCompared++; $pairs++
+            if ($c.Eval.Value -ne $r.Eval.Value) {
+                $stackMismatch += "$n : created with $($c.Eval.Value) B ($($c.Tok)) in $($c.File) but stack_margin_register() reports against $($r.Eval.Value) B ($($r.Tok)) in $($r.File)"
             }
         }
     }
-}
-if ($stackCompared -lt 5) {
-    throw "check_stack_margin_registration.ps1: only $stackCompared create/register stack literal pair(s) compared -- the patterns have probably gone blind."
+    if ($pairs -eq 0) { $skipped[$n] = (($why | Select-Object -Unique) -join '; ') }
 }
 if ($stackMismatch.Count -gt 0) {
-    Write-Host "STACK MARGIN STACK-LITERAL CHECK FAILED:" -ForegroundColor Red
+    Write-Host "STACK MARGIN STACK-SIZE CHECK FAILED:" -ForegroundColor Red
     foreach ($v in $stackMismatch) { Write-Host "    $v" -ForegroundColor Red }
-    throw "A task's xTaskCreate*() stack size and its stack_margin_register() size disagree -- get_stack_margin grades free space against the wrong denominator. Make both the same literal (or add the name to `$stackLiteralExempt with a reason)."
+    throw "A task's xTaskCreate*() stack size and its stack_margin_register() size disagree -- get_stack_margin grades free space against the wrong denominator. Make both the same value."
 }
-Write-Host "Stack margin stack-literal check passed: $stackCompared create/register pair(s) agree." -ForegroundColor Green
+if ($stackCompared -lt $minStackCompared) {
+    throw "check_stack_margin_registration.ps1: only $stackCompared create/register stack pair(s) compared (ratchet floor $minStackCompared) -- the patterns have probably gone blind."
+}
+Write-Host "Stack margin stack-size check: $stackCompared create/register pair(s) agree; $($skipped.Count) name(s) NOT compared:" -ForegroundColor Green
+foreach ($k in ($skipped.Keys | Sort-Object)) { Write-Host "    skipped $k -- $($skipped[$k])" }
+$newSkips = @($skipped.Keys | Where-Object { -not $stackSkipAllowed.ContainsKey($_) } | Sort-Object)
+$staleSkips = @($stackSkipAllowed.Keys | Where-Object { -not $skipped.ContainsKey($_) } | Sort-Object)
+if ($newSkips.Count -gt 0 -or $staleSkips.Count -gt 0) {
+    if ($newSkips.Count -gt 0) { Write-Host "    NEW skipped name(s) not in `$stackSkipAllowed: $($newSkips -join ', ')" -ForegroundColor Red }
+    if ($staleSkips.Count -gt 0) { Write-Host "    `$stackSkipAllowed entries no longer skipped (delete them): $($staleSkips -join ', ')" -ForegroundColor Red }
+    throw "The set of stack-size-check skipped names changed. Make the size evaluable (a literal or a uniquely defined literal #define), or edit `$stackSkipAllowed in this script with a reason; delete entries that now compare."
+}
 
 # --- Recovery image (firmware/KilnFW_recovery) -----------------------------
 #
