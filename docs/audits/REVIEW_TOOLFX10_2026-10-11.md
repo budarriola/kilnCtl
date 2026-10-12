@@ -168,3 +168,13 @@ was CAUGHT. That is timing, not design. Fix: `Assert (-not $sacB.WaitForExit(100
 | M5 lib: `Stop-PvTargets` no-op | CAUGHT (S2 sacA, no-job survivors) |
 | M6 push_verify: 300 ms sleep before the job assign | CAUGHT (both survivor assertions; reproduces M1) |
 | M7 lib: tolerance 2 -> 4 ms | MISSED (I1, expected) |
+
+## Fix status
+
+| ID | Status | Fix |
+|----|--------|-----|
+| M1 | FIXED | `push_verify.ps1` now creates git suspended (`CreateProcessW` with `CREATE_SUSPENDED`, std handles redirected to the temp files), assigns it to the job, then resumes it, so no descendant can predate job membership. Test hook `PUSH_VERIFY_TEST_ASSIGN_DELAY_MS` widens the create-to-assign window; `check_push_verify.ps1` runs a 300 ms late-assign case on the job path and asserts no survivors. |
+| L1 | FIXED | The static assertion strips comments and the Add-Type block, then forbids `Stop-Process`, `taskkill`, `GetProcessById`, `.Kill(` and the `kill`/`spps`/`saps` aliases, and requires `Stop-PvTargets -Order ... -Handles`. |
+| L2 | FIXED | `Assert (-not $sacB.WaitForExit(1000))`. |
+| I2 | FIXED | The no-job path prints `snapshot walk found N descendant(s)`; the check requires N >= 1 on the hung-fetch case. |
+| I1 | NO ACTION | Informational. |

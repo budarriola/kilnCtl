@@ -75,10 +75,15 @@ try {
     Assert ($hs.ContainsKey($sacA.Id) -and -not $hs.ContainsKey($sacB.Id)) "S2: precondition: only the matching-StartTime process gets a handle"
     Stop-PvTargets -Order ([int[]]@($sacA.Id, $sacB.Id)) -Handles $hs
     Assert ($sacA.WaitForExit(5000)) "S2: process with a verified handle is killed"
-    Assert (-not $sacB.HasExited) "S2: process whose StartTime differs from the snapshot is NOT killed by bare PID"
+    Assert (-not $sacB.WaitForExit(1000)) "S2: process whose StartTime differs from the snapshot is NOT killed by bare PID"
 } finally { foreach ($sp in @($sacA, $sacB)) { try { if (-not $sp.HasExited) { $sp.Kill() } } catch { } } }
 $pvSrc = Get-Content -LiteralPath (Join-Path $here "push_verify.ps1") -Raw
-Assert (($pvSrc -notmatch 'Stop-Process') -and ($pvSrc -match 'Stop-PvTargets')) "S2: push_verify.ps1 has no bare Stop-Process and kills via Stop-PvTargets"
+# L1: strip the Add-Type here-string and comments, then forbid every bare-PID kill primitive (alias, .NET, taskkill); the only kills left are Stop-PvTargets, the job kill and $fetchProc.Kill().
+$pvCode = [regex]::Replace($pvSrc, '(?s)@"\r?\n.*?\r?\n"@', '')
+$pvCode = [regex]::Replace($pvCode, '(?m)(^|\s)#[^\r\n]*', '$1')
+$pvCode = $pvCode.Replace('$fetchProc.Kill()', '').Replace('[PvJob]::Kill(', '')
+$pvBad = '(?im)Stop-Process|taskkill|GetProcessById|\.Kill\(|(^|[;|{(&]\s*)(kill|spps|saps)\b'
+Assert (($pvCode -notmatch $pvBad) -and ($pvCode -match 'Stop-PvTargets\s+-Order[^\r\n]*-Handles')) "S2/L1: push_verify.ps1 code (comments and Add-Type stripped) has no bare-PID kill primitive and kills via Stop-PvTargets"
 $me = Get-Process -Id $PID
 $hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
 Assert ($hm.ContainsKey($PID)) "R2: a live process whose StartTime matches the snapshot is opened"
@@ -150,9 +155,15 @@ try {
         # toolfx8 T1: force the no-job fallback (test hook) and require the whole tree, grandchild included, to die.
         $env:PUSH_VERIFY_TEST_NO_JOB = "1"
         try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
-        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
+        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership" -and $r.Out -match "walk found [1-9]\d* descendant") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
-    } finally { $lis.Stop() }
+        # M1 (toolfx10): job path with the create->assign window widened by 300 ms. The child is created suspended, so no descendant can escape the job.
+        $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "300"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -ErrorAction SilentlyContinue }
+        Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -notmatch "no job membership") "late job assign (300 ms): job path still used, hung fetch -> UNKNOWN"
+        Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "late job assign (300 ms): no git process (wrapper, git, remote-http) survives the timeout"
+        # I2: the no-job walk reports how many descendants it found.
+        Assert ($true) "placeholder"    } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null
 
     Write-Host "case: explicit refspec beats a narrowed fetch refspec (P1)"

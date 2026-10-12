@@ -124,7 +124,39 @@ public static class PvJob {
         return job;
     }
     public static bool Assign(IntPtr j, IntPtr p) { return AssignProcessToJobObject(j, p); }
-    public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
+    // M1 (toolfx10): the child is created SUSPENDED, joined to the job, then resumed, so it (and every
+    // descendant) is a job member from its first instruction; a late assign can no longer leak the tree.
+    // assignDelayMs is a test hook only (PUSH_VERIFY_TEST_ASSIGN_DELAY_MS): it widens the create->assign window.
+    [StructLayout(LayoutKind.Sequential)] struct SA { public int n; public IntPtr d; public int inh; }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct SI {
+        public int cb; public string r, desk, title; public int x, y, xs, ys, xc, yc, fill, flags; public short show, res2;
+        public IntPtr res2p, hin, hout, herr; }
+    [StructLayout(LayoutKind.Sequential)] struct PI { public IntPtr hp, ht; public int pid, tid; }
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool CreateProcessW(string app, System.Text.StringBuilder cmd, IntPtr pa, IntPtr ta, bool inh, uint fl, IntPtr env, string dir, ref SI si, out PI pi);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFileW(string f, uint acc, uint share, ref SA sa, uint disp, uint fl, IntPtr t);
+    [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr t);
+    [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr p, uint c);
+    public static System.Diagnostics.Process Launch(string cmdLine, string outPath, string errPath, IntPtr job, int assignDelayMs, out bool assigned) {
+        assigned = false;
+        SA sa = new SA(); sa.n = Marshal.SizeOf(typeof(SA)); sa.inh = 1;
+        IntPtr hin = CreateFileW("NUL", 0x80000000, 3, ref sa, 3, 0x80, IntPtr.Zero);
+        IntPtr hout = CreateFileW(outPath, 0x40000000, 7, ref sa, 2, 0x80, IntPtr.Zero);
+        IntPtr herr = CreateFileW(errPath, 0x40000000, 7, ref sa, 2, 0x80, IntPtr.Zero);
+        try {
+            SI si = new SI(); si.cb = Marshal.SizeOf(typeof(SI)); si.flags = 0x100; si.hin = hin; si.hout = hout; si.herr = herr;
+            PI pi;
+            if (!CreateProcessW(null, new System.Text.StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, true, 0x4, IntPtr.Zero, null, ref si, out pi))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            try {
+                if (assignDelayMs > 0) System.Threading.Thread.Sleep(assignDelayMs);
+                if (job != IntPtr.Zero) assigned = AssignProcessToJobObject(job, pi.hp);
+                System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(pi.pid); // handle still held: PID cannot be reused
+                ResumeThread(pi.ht);
+                return p;
+            } catch { TerminateProcess(pi.hp, 1); throw; }
+            finally { CloseHandle(pi.ht); CloseHandle(pi.hp); }
+        } finally { CloseHandle(hin); CloseHandle(hout); CloseHandle(herr); }
+    }    public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
     public static void Close(IntPtr j) { CloseHandle(j); }
 }
 "@
@@ -133,12 +165,13 @@ $fetchJob = [PvJob]::Create()
 $outTmp = [IO.Path]::GetTempFileName(); $errTmp = [IO.Path]::GetTempFileName()
 $fetchOk = $false; $fetchMsg = ""
 try {
-    $fetchProc = Start-Process -FilePath "git" -NoNewWindow -PassThru -RedirectStandardOutput $outTmp -RedirectStandardError $errTmp `
-        -ArgumentList @("-C", "`"$repoRoot`"", "fetch", "--no-tags", $remote, "+refs/heads/${branchName}:refs/remotes/$remote/$branchName")
-    $null = $fetchProc.Handle
-    # Assign result is checked: if the job cannot hold the process, a timeout falls back to killing git directly.
+    $fetchCmd = "git -C `"$repoRoot`" fetch --no-tags $remote +refs/heads/${branchName}:refs/remotes/$remote/$branchName"
+    $assignDelay = 0; if ($env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -match '^\d+$') { $assignDelay = [int]$env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS }  # env hook: check_push_verify widens the create->assign window
     $jobAssigned = $false
-    if ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1') { $jobAssigned = [PvJob]::Assign($fetchJob, $fetchProc.Handle) }  # env hook: check_push_verify forces the no-job fallback
+    $useJob = ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1')  # env hook: check_push_verify forces the no-job fallback
+    # Created suspended, assigned to the job, then resumed (M1). Assign result is checked: if the job cannot hold the process, a timeout falls back to the snapshot walk.
+    $fetchProc = [PvJob]::Launch($fetchCmd, $outTmp, $errTmp, $(if ($useJob) { $fetchJob } else { [IntPtr]::Zero }), $assignDelay, [ref]$jobAssigned)
+    $null = $fetchProc.Handle
     if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
         if ($jobAssigned) { [PvJob]::Kill($fetchJob) }
         else {
@@ -159,6 +192,7 @@ try {
                 foreach ($w in $walk) { [void]$order.Add($w.Id); $keep[$w.Id] = $w.Created }
                 $handles = Open-PvTargets -Ids ([int[]]@($order)) -Created $keep
                 # discovered parent-first (breadth-first); kill in reverse so leaves go first
+                Write-Host "push_verify: snapshot walk found $($order.Count) descendant(s) of the fetch process."  # I2: 0 means the walk failed or was empty, so only the root dies
                 Stop-PvTargets -Order ([int[]]@($order)) -Handles $handles   # lib: kills only via the handles opened above, never by bare PID
             } catch { }
         }
