@@ -592,6 +592,136 @@ class BuildLockBuildFx6(unittest.TestCase):
         self.assertEqual(created, [], "sidecar taken for a confirmed-alive holder")
 
 
+class BuildLockReviewBuildFx6(unittest.TestCase):
+    """REVIEW_BUILDFX6: race tests for the buildfx6 fixes."""
+
+    def _write(self, path, text):
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+
+    def _cleanup(self, *paths):
+        import glob
+        for p in paths:
+            for f in [p] + glob.glob(p + ".rel.*") + glob.glob(p + ".dead.*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+
+    def test_concurrent_reclaimers_admit_exactly_one_new_holder(self):
+        """Eight threads judge the same dead lock, reclaim it, then race to
+        create a new one. Nobody releases, so exactly one may end up holding
+        it: a second winner means a reclaimer deleted a live lock."""
+        import random
+        import threading
+        import mcpkit.buildlock as bl
+        real_dead = bl._text_is_dead_holder
+
+        def slow_dead(text):
+            time.sleep(random.uniform(0, 0.01))  # widen the check-to-remove window
+            return real_dead(text)
+
+        for rnd in range(10):
+            key = f"test-rv6-race-{os.getpid()}-{time.time_ns()}"
+            path = _lock_path(key)
+            judged = f"99999999 0 dead{rnd}"
+            self._write(path, judged)
+            winners = []
+            barrier = threading.Barrier(8)
+
+            def worker(i):
+                barrier.wait()
+                for _ in range(20):
+                    bl._try_reclaim(path, judged, force=False)
+                    try:
+                        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    except OSError:
+                        time.sleep(0.002)
+                        continue
+                    os.write(fd, f"{os.getpid()} 0 winner{i}\n".encode("ascii"))
+                    os.close(fd)
+                    winners.append(i)
+                    return
+
+            try:
+                with mock.patch.object(bl, "_text_is_dead_holder", slow_dead):
+                    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+                    for t in threads:
+                        t.start()
+                    for t in threads:
+                        t.join(30)
+                self.assertEqual(len(winners), 1, f"round {rnd}: holders {winners}")
+                self.assertFalse(os.path.exists(path + ".reclaim"), "sidecar leaked")
+            finally:
+                self._cleanup(path, path + ".reclaim")
+
+    def test_release_sidecar_restores_a_foreign_stale_sidecar_still_stale(self):
+        """Restoring someone else's sidecar must not refresh it: a stale one
+        stays breakable, so the restore cannot resurrect it as live."""
+        import mcpkit.buildlock as bl
+        key = f"test-rv6-stale-{os.getpid()}-{time.time_ns()}"
+        side = _lock_path(key) + ".reclaim"
+        self._write(side, "othertoken")
+        old = time.time() - 120
+        os.utime(side, (old, old))
+        try:
+            bl._release_sidecar(side, "mytoken")
+            self.assertEqual(bl._read_holder(side), "othertoken", "foreign sidecar not restored")
+            self.assertLess(os.path.getmtime(side), time.time() - 60, "restore refreshed mtime")
+            bl._break_stale_sidecar(side)
+            self.assertFalse(os.path.exists(side), "restored stale sidecar is not breakable")
+        finally:
+            self._cleanup(side)
+
+    def test_release_keeps_a_new_holders_lock_that_never_became_readable(self):
+        """A lock that reads empty through every retry may be a new holder's
+        half-written file: it is restored, never deleted."""
+        import mcpkit.buildlock as bl
+        key = f"test-rv6-empty-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        open(path, "w").close()
+        try:
+            with mock.patch.object(bl.time, "sleep"):
+                bl._release(path, "1 0 mytoken")
+            self.assertTrue(os.path.exists(path), "deleted an unreadable (foreign) lock")
+        finally:
+            self._cleanup(path)
+
+    def test_release_restores_new_holder_whose_write_lands_during_retry(self):
+        import glob
+        import mcpkit.buildlock as bl
+        key = f"test-rv6-late-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        open(path, "w").close()
+
+        def late_write(_s):
+            for aside in glob.glob(path + ".rel.*"):
+                with open(aside, "w", encoding="ascii") as handle:
+                    handle.write("1 0 newholder\n")
+
+        try:
+            with mock.patch.object(bl.time, "sleep", late_write):
+                bl._release(path, "1 0 mytoken")
+            self.assertEqual(bl._read_holder(path), "1 0 newholder")
+        finally:
+            self._cleanup(path)
+
+    def test_own_process_detection_rejects_pid_reuse_and_tokenless(self):
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        if start is None:
+            self.skipTest("process start time unavailable")
+        pid = os.getpid()
+        self.assertTrue(bl._holder_is_this_process(f"{pid} {int(start)} tok"))
+        self.assertFalse(bl._holder_is_this_process(f"{pid} {int(start) - 100} tok"),
+                         "earlier process with a reused PID claimed as this one")
+        self.assertFalse(bl._holder_is_this_process(f"{pid} {int(start)}"),
+                         "legacy (tokenless) content claimed as this process")
+        self.assertFalse(bl._holder_is_this_process(f"{pid} 0 tok"))
+        msg = str(BuildLockTimeout("r", 1.0, f"{pid} {int(start) - 100} tok", "C:/x.lock"))
+        self.assertNotIn("THIS server process", msg)
+
+
 class BuildLockReleaseAndReclaimGuards(unittest.TestCase):
     def test_release_does_not_remove_a_lock_it_no_longer_owns(self):
         key = f"test-token-{os.getpid()}-{time.time_ns()}"
