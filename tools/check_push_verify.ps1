@@ -99,20 +99,28 @@ $pvAst0 = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [re
 foreach ($hs in @($pvAst0.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
 # toolfx16 (review TOOLFX15 LOW-1/INFO-1): positive exact-count asserts on the kill surface. A bumped pin cannot satisfy these.
-function Count-Re([string]$s, [string]$re) { return [regex]::Matches($s, $re).Count }
+function Count-Re([string]$s, [string]$re) { return [regex]::Matches($s, $re, [Text.RegularExpressions.RegexOptions]::IgnoreCase).Count }   # IgnoreCase: PowerShell resolves cmdlets/types/methods case-insensitively (review TOOLFX16 LOW-1)
 $pvSelf = Get-Content -LiteralPath $MyInvocation.MyCommand.Path -Raw
+# $pvPs: push_verify.ps1 minus Comment tokens and the double-quoted C# here-string (the latter is covered by K8-K10), so K7 scans code and strings only.
+$pvToks = $null; $null = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$pvToks, [ref]$null)
+$pvPs = $pvSrc
+foreach ($tk in @($pvToks | Where-Object { $_.Kind -eq 'Comment' -or $_.Kind -eq 'HereStringExpandable' } | Sort-Object { $_.Extent.StartOffset } -Descending)) { $pvPs = $pvPs.Remove($tk.Extent.StartOffset, $tk.Extent.EndOffset - $tk.Extent.StartOffset) }
 Assert ((Count-Re $pvSrc 'Add-Type\b') -eq 1) "K1: exactly one Add-Type in push_verify.ps1"
 Assert ((Count-Re $pvSrc '\[PvJob\]::Launch\(') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::Launch\(\$gitExe,') -eq 1) "K2: exactly one [PvJob]::Launch, and it takes `$gitExe"
-Assert ((Count-Re $pvSrc '\$gitExe\s*=') -eq 1) "K2b: `$gitExe is assigned exactly once"
+Assert (((Count-Re $pvSrc '\$\{?((script|global|local|private):)?gitExe\}?\s*=') -eq 1) -and ((Count-Re $pvSrc '(Set|New)-Variable\s+(-Name\s+)?[''"]?gitExe') -eq 0)) "K2b: `$gitExe is assigned exactly once (any scope prefix / braces; no Set-Variable)"
 Assert ((Count-Re $pvSrc '\[PvJob\]::Kill\(\$fetchJob\)') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::Kill\(') -eq 1) "K3: [PvJob]::Kill(`$fetchJob) exactly once, no other Kill caller"
 Assert ((Count-Re $pvSrc '\[PvJob\]::KillProc\(\$fetchH\)') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::KillProc\(') -eq 1) "K4: [PvJob]::KillProc(`$fetchH) exactly once, no other KillProc caller"
-Assert (((Count-Re $pvSrc '\.Kill\(\)') -eq 0) -and ((Count-Re $pvLibSrc '\.Kill\(\)') -eq 1)) "K5: .Kill() only at its named site (Stop-PvTargets in the lib)"
+Assert (((Count-Re $pvSrc '\.Kill\s*\(') -eq 0) -and ((Count-Re $pvLibSrc '\.Kill\s*\(\s*\)') -eq 1)) "K5: .Kill( only at its named site (Stop-PvTargets in the lib)"
 Assert (((Count-Re $pvSrc 'GetProcessById') -eq 0) -and ((Count-Re $pvLibSrc 'GetProcessById') -eq 1)) "K6: GetProcessById only at its named site (Open-PvTargets in the lib)"
-Assert ((Count-Re ($pvSrc -replace '(?m)^\s*#.*$', '') '(Stop-Process|taskkill|Invoke-CimMethod|\.Terminate\(|WScript\.Shell)') -eq 0) "K7: no other process-kill spelling in push_verify.ps1"
+Assert ((Count-Re $pvPs '(Stop-Process|taskkill|Invoke-CimMethod|\.Terminate\s*\(|WScript\.Shell|Invoke-Expression|(?<![\w:.\[-])(spps|kill|iex)\b|(ForEach-Object|%)\s+(-MemberName\s+)?Kill\b)') -eq 0) "K7: no known process-kill spelling in push_verify.ps1 (a tripwire for a careless edit, not a proof; the pin plus review is the control)"
 Assert (((Count-Re $pvCs 'TerminateProcess\(') -eq 3) -and ((Count-Re $pvCs 'TerminateProcess\((pi\.hp|h),\s*1\)') -eq 2)) "K8: C# TerminateProcess: the extern plus exactly (pi.hp,1) and (h,1)"
 Assert (((Count-Re $pvCs 'TerminateJobObject\(') -eq 2) -and ((Count-Re $pvCs 'TerminateJobObject\(j,\s*1\)') -eq 1)) "K9: C# TerminateJobObject: the extern plus exactly (j,1)"
 Assert ((Count-Re $pvCs 'OpenProcess|GetProcessById|DuplicateHandle|EntryPoint') -eq 0) "K10: no OpenProcess/GetProcessById/DuplicateHandle/EntryPoint in the C#"
-Assert ((Count-Re $pvSelf 'Assert \(\$pvHash -eq \$PvPinSha256\)') -eq 1) "K11: the pin assert compares the COMPUTED hash to the pin (not the pin to itself)"
+$pvSelfAst = [System.Management.Automation.Language.Parser]::ParseInput($pvSelf, [ref]$null, [ref]$null)
+$pvAsserts = @($pvSelfAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Assert' -and $n.CommandElements.Count -ge 2 -and $n.CommandElements[1].Extent.Text -eq '($pvHash -eq $PvPinSha256)' }, $true))
+Assert (($pvAsserts.Count -eq 1) -and ($pvAsserts[0].Parent.Parent -is [System.Management.Automation.Language.NamedBlockAst]) -and ($pvAsserts[0].Parent.Parent.Parent -is [System.Management.Automation.Language.ScriptBlockAst])) "K11: exactly one pin Assert comparing the COMPUTED hash to the pin, as a top-level statement (not under if/function, not commented out)"
+function Count-Assign($ast, [string]$name) { return @($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left -is [System.Management.Automation.Language.VariableExpressionAst] -and $n.Left.VariablePath.UserPath -ieq $name }, $true)).Count }
+Assert (((Count-Assign $pvSelfAst 'pvHash') -eq 1) -and ((Count-Assign $pvSelfAst 'PvPinSha256') -eq 1)) "K11b: `$pvHash and `$PvPinSha256 are each assigned exactly once"
 $pvRev = [regex]::Match($pvSelf, "\`$PvPinSha256 = '([0-9a-f]{64})'\s*#\s*reviewed:\s*(docs/audits/\S+\.md)")
 Assert $pvRev.Success "K12: the pin line carries '# reviewed: docs/audits/<file>.md'"
 $pvRevDoc = if ($pvRev.Success) { Join-Path (Split-Path -Parent $here) $pvRev.Groups[2].Value } else { '' }
