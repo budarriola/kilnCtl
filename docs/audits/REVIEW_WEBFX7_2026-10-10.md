@@ -159,3 +159,15 @@ C (`build_host_tests.ps1 -Only '^(ui_edit_firing_apply|live_profile)( |$)'`, Kil
 | C1 reuse path writes `*out_gen` again | CAUGHT (test_ui_edit_firing_apply.c:454) |
 | C2 caller ignores `did_fork` | MISSED (I-1, expected) |
 | C3 C1 + C2 | CAUGHT (lines 454, 467, 468, 472) |
+
+## Fix status
+
+| Finding | Fixed in | Notes |
+|---|---|---|
+| MED-1 decide loses a mid-save edit | `2b51f307f` | Clear only if the generation is unchanged; else 409 `LIVE_DECIDE_SAVED_BUT_EDITED`, edit kept. A failed clear is now a 500. |
+| LOW-1 Clear Trip detached button | `2b51f307f` | Message looks up the live `#clearTripBtn`. |
+| LOW-2 numeric fields unescaped | `2b51f307f`, `3216d76d7` | `Number()` on profiles/zones fields; stale-option test. `relay_cycles_seen/target` left as is (textContent path, not injectable). |
+| LOW-3 not-tripped reset untested | `2b51f307f` | Test only. |
+| LOW-4 `fork_gen()` check and save not atomic | `2b51f307f` | One hold of `s_live_save_lock`. |
+
+Reviewed in `docs/audits/REVIEW_WEBFX8_2026-10-11.md`: all five fixed, negative tests all CAUGHT.
