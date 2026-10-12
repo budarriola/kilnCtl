@@ -4904,6 +4904,47 @@ static void test_test_clear_s8_tiny_window(void)
     }
 }
 
+/* saftyfx2 INFO-1: the divisor is frozen elapsed + s9_verify_elapsed_s, floored at 5 s.
+ * trip_verify_s = 1 s so the TEST latch can be checked after only a few seconds. */
+static void test_test_clear_s8_divisor(void)
+{
+    TEST_SECTION("TEST clear S8 divisor = frozen elapsed + verify time, floored (saftyfx2 INFO-1)");
+    struct { int hold; float rise; bool clear; const char *msg; } cases[] = {
+        {2, 0.5f, true, "0.5 C, 2.1 s true span: 5 s floor applies, clear"},
+        {2, 1.0f, false, "1 C over the 5 s floor is 12 C/min: refuse (floor not larger than 5 s)"},
+        {60, 1.0f, true, "1 C over 60 s of verify time is 1 C/min: clear (verify time counts)"},
+        {60, 20.0f, false, "20 C over 60 s is 20 C/min: refuse"},
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        cfg.trip_verify_s = 1;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 0.1f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre);
+        (void)safety_guards_tick(&s, &cfg, &pre); /* frozen elapsed 0.1 s */
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < cases[k].hold; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = 20.0f + cases[k].rise;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c) == cases[k].clear, cases[k].msg);
+    }
+}
+
 /* saftyfx2 LOW-3: the TEST latch lands right after S8 completed an over-rate window and
  * slid (frozen elapsed exactly 0, streak 1): a rise since the slide must refuse, a flat
  * reading clears. */
@@ -5027,6 +5068,7 @@ void run_test_safety_guards(void)
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
     test_test_clear_s8_streak_zero_elapsed();
+    test_test_clear_s8_divisor();
     test_test_trip_loses_to_every_real_guard();
     test_test_clear_s8_tiny_window();
     test_s8_clear_followups();
