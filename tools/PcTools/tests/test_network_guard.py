@@ -1,4 +1,5 @@
 """Tests of conftest's _no_outbound_network guard (review confx HIGH-1)."""
+import re
 import socket
 
 import pytest
@@ -268,8 +269,26 @@ def test_nulllink_fallback_warning_logged():
 
 
 def _ps_exe():
-    import shutil
-    return shutil.which("powershell") or shutil.which("pwsh")
+    """Windows PowerShell by ABSOLUTE path under %SystemRoot% on win32 (never PATH, so a
+    stripped PATH cannot make the guard pins silently skip; testnetfx9 LOW-2); pwsh/powershell
+    from PATH elsewhere. None only when it is genuinely absent."""
+    import os, shutil, sys
+    if sys.platform == "win32":
+        root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+        p = os.path.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+        return p if os.path.isfile(p) else None
+    return shutil.which("pwsh") or shutil.which("powershell")
+
+
+def _need_ps():
+    """The PowerShell exe, or skip off Windows / FAIL on Windows when it is missing."""
+    import sys
+    ps = _ps_exe()
+    if ps is None:
+        if sys.platform == "win32":
+            pytest.fail("Windows PowerShell not found under %SystemRoot%\\System32\\WindowsPowerShell\\v1.0")
+        pytest.skip("needs powershell (PSParser tokenizer)")
+    return ps
 
 
 def _repo_file(*parts):
@@ -287,22 +306,21 @@ _TOKENIZE_PS = (
     "$tk = [System.Management.Automation.PSParser]::Tokenize($t, [ref]$e); "
     "$o = @($tk | ForEach-Object { [pscustomobject]@{ T = [string]$_.Type; C = [string]$_.Content; "
     "S = $_.Start; L = $_.Length; N = $_.StartLine } }); "
-    "[Console]::Out.Write((ConvertTo-Json -InputObject $o -Compress))")
+    "$er = @($e | ForEach-Object { [string]$_.Message }); "
+    "[Console]::Out.Write((ConvertTo-Json -InputObject ([pscustomobject]@{ E = $er; T = $o }) -Compress))")
 _TOK_CACHE = {}
 
 
 def _tokens(text):
     """Real PowerShell tokens (PSParser.Tokenize) of `text`: list of (type, content, start,
     length, 1-based start line). Comments and strings are genuine tokens, so no regex can be
-    fooled by `#` inside a string or `<#` inside a line comment. Skips loudly only when
-    PowerShell is absent; any tokenizer failure is a hard test failure (fail closed)."""
+    fooled by `#` inside a string or `<#` inside a line comment. Skips only off Windows when
+    PowerShell is absent; any tokenizer failure or parse error is a hard test failure."""
     import json, os, subprocess, tempfile
     text = text.lstrip("﻿")
     if text in _TOK_CACHE:
         return _TOK_CACHE[text]
-    ps = _ps_exe()
-    if ps is None:
-        pytest.skip("needs powershell (PSParser tokenizer)")
+    ps = _need_ps()
     fd, path = tempfile.mkstemp(suffix=".ps1.txt")
     try:
         with os.fdopen(fd, "wb") as fh:
@@ -313,7 +331,9 @@ def _tokens(text):
     finally:
         os.unlink(path)
     assert r.returncode == 0 and r.stdout.strip(), ("PSParser tokenizer failed", r.stderr)
-    toks = [(d["T"], d["C"], d["S"], d["L"], d["N"]) for d in json.loads(r.stdout)]
+    doc = json.loads(r.stdout)
+    assert not doc["E"], ("PSParser reported parse errors (testnetfx9 INFO-4)", doc["E"])
+    toks = [(d["T"], d["C"], d["S"], d["L"], d["N"]) for d in doc["T"]]
     _TOK_CACHE[text] = toks
     return toks
 
@@ -380,30 +400,176 @@ def _env_write_problems(text, last_line=None):
     return probs
 
 
-def _dot_sourced(text, last_line, script_path):
-    """.ps1 files dot-sourced on lines <= last_line. Fails closed on a dot-source whose target
-    cannot be resolved to an existing file."""
-    import os
-    toks = [t for t in _tokens(text) if t[0] != "Comment" and t[4] <= last_line]
-    out = []
-    for i, (typ, c, _s, _l, ln) in enumerate(toks):
-        if typ == "Operator" and c == "." and (i == 0 or toks[i - 1][0] in ("NewLine", "StatementSeparator")):
-            line_toks = []
-            for t in toks[i + 1:]:
-                if t[0] in ("NewLine", "StatementSeparator"):
-                    break
-                line_toks.append(t)
-            names = [t[1] for t in line_toks if t[0] == "String" and t[1].lower().endswith(".ps1")]
-            found = None
-            for nm in names:
-                for d in (os.path.dirname(script_path), _repo_file("tools")):
-                    cand = os.path.join(d, os.path.basename(nm))
-                    if os.path.isfile(cand):
-                        found = cand
+# testnetfx9 LOW-1: ALLOW-LIST, not deny-list. Everything that can execute before the probe must
+# be one of the shapes below; anything else fails, so an unlisted disarm form cannot pass.
+_SCAN_CMDS = {"write-error", "write-host", "join-path", "split-path", "resolve-path", "test-path",
+              "get-item", "get-command", "select-object", "fail", "gate", "resolve-pctoolspython",
+              "git"}
+_SCAN_CALLED_FUNCS = {"fail", "gate", "resolve-pctoolspython"}
+_SCAN_MEMBERS = {"supportsshouldprocess", "mandatory", "error", "writeline", "trim", "count", "length", "isnullorempty",
+                 "isnullorwhitespace", "source"}
+_SCAN_TYPES = {"string", "console", "switch", "int", "bool"}
+_SCAN_ATTRS = {"parameter", "validateset", "cmdletbinding"}
+_SCAN_KEYWORDS = {"if", "else", "elseif", "try", "catch", "finally", "return", "exit", "throw", "param",
+                  "foreach", "in"}
+_SCAN_ENV_VARS = {"env:kilnctl_test_no_hub", "env:kilnctl_test_guard_probe", "env:kilnctl_pctools_python"}
+_SCAN_BAN_TEXT = re.compile(r"env:|environment|hkey|psdrive|psprovider|scriptblock|powershell|pwsh|"
+                            r"\bcmd\b|invoke|getmethod|-enc\b|sessionstate|psvariable|executioncontext", re.I)
+_CALLOP_PREV = ("NewLine", "StatementSeparator", "GroupStart", "Keyword", "Operator")
+
+
+def _split_defs(toks):
+    """(top, defs): top = tokens outside any function body; defs = {lower name: body tokens}.
+    A function definition runs nothing by itself; its body is scanned only if it is called."""
+    top, defs, i, n = [], {}, 0, len(toks)
+    while i < n:
+        typ, c = toks[i][0], toks[i][1]
+        if typ == "Keyword" and c.lower() in ("function", "filter"):
+            j = i + 1
+            name = toks[j][1].lower()
+            while not (toks[j][0] == "GroupStart" and toks[j][1].endswith("{")):
+                j += 1
+            depth = 0
+            while True:
+                if toks[j][0] == "GroupStart" and toks[j][1].endswith("{"):
+                    depth += 1
+                elif toks[j][0] == "GroupEnd" and toks[j][1] == "}":
+                    depth -= 1
+                    if depth == 0:
                         break
-            assert found, ("dot-sourced file cannot be resolved (fail closed)", ln, line_toks)
-            out.append(found)
-    return out
+                j += 1
+            defs[name] = toks[i + 2:j + 1]
+            i = j + 1
+            continue
+        top.append(toks[i])
+        i += 1
+    return top, defs
+
+
+def _is_call_op(toks, i):
+    """Operator `.` in statement-start position = dot-source / call operator (not property access)."""
+    return toks[i][0] == "Operator" and toks[i][1] == "." and (i == 0 or toks[i - 1][0] in _CALLOP_PREV)
+
+
+def _lib_dot_source(toks, i, script_path):
+    """Resolved path if toks[i] starts the one allowed `. (Join-Path $PSScriptRoot "x.ps1")` form
+    (x.ps1 in the script's own directory and existing), else None."""
+    import os
+    shape = toks[i + 1:i + 6]
+    if len(shape) == 5 and [(s[0], s[1].lower()) for s in shape[:3]] == [
+            ("GroupStart", "("), ("Command", "join-path"), ("Variable", "psscriptroot")] \
+            and shape[3][0] == "String" and shape[3][1].lower().endswith(".ps1") \
+            and "/" not in shape[3][1] and "\\" not in shape[3][1] and shape[4][:2] == ("GroupEnd", ")"):
+        cand = os.path.join(os.path.dirname(script_path), shape[3][1])
+        return cand if os.path.isfile(cand) else None
+    return None
+
+
+def _string_problem(c):
+    if _SCAN_BAN_TEXT.search(c):
+        return "banned text in " + repr(c[:60])
+    for m in re.finditer(r"\$\(([^)]*)\)", c):
+        if not re.fullmatch(r"\$\w+(?:\.\w+|\[\d+\])*", m.group(1).strip()):
+            return "subexpression in string: " + m.group(0)
+    return None
+
+
+def _strict_problems(toks, allowed_dot=frozenset()):
+    """Problems for any token outside the allow-list. `toks` has no Comment tokens."""
+    probs = []
+    for i, (typ, c, s, _l, ln) in enumerate(toks):
+        cl = c.lower().strip("[]")
+        prev = toks[i - 1] if i else None
+        nxt = toks[i + 1] if i + 1 < len(toks) else None
+        why = None
+        if typ == "Command":
+            if cl not in _SCAN_CMDS:
+                why = "command not on allow-list: " + c
+        elif typ == "Operator":
+            if c == "&":
+                if not (nxt and ((nxt[0] == "Variable" and nxt[1].lower() == "python")
+                                 or (nxt[0] == "Command" and nxt[1].lower() == "git"))):
+                    why = "call operator on something other than $python / git"
+            elif c == "." and _is_call_op(toks, i):
+                if s not in allowed_dot:
+                    why = "dot-source / call operator not the resolved lib dot-source"
+            elif c == "::":
+                if not (prev and prev[0] == "Type" and prev[1].lower().strip("[]") in ("console", "string")):
+                    why = "static member access on a type other than [Console]/[string]"
+        elif typ == "Member":
+            if cl not in _SCAN_MEMBERS:
+                why = "member not on allow-list: " + c
+        elif typ == "Type":
+            if cl not in _SCAN_TYPES:
+                why = "type not on allow-list: " + c
+        elif typ == "Attribute":
+            if cl not in _SCAN_ATTRS:
+                why = "attribute not on allow-list: " + c
+        elif typ == "Keyword":
+            if cl not in _SCAN_KEYWORDS:
+                why = "keyword not on allow-list: " + c
+        elif typ == "Variable":
+            if ":" in c:
+                if cl not in _SCAN_ENV_VARS:
+                    why = "provider-qualified variable: " + c
+            elif cl in ("executioncontext", "host", "pshome", "myinvocation", "pscmdlet"):
+                why = "variable not allowed before the probe: " + c
+        elif typ in ("String", "CommandArgument", "CommandParameter"):
+            why = _string_problem(c)
+        elif typ in ("Unknown", "LoopLabel", "Position"):
+            why = "token type not allowed: " + typ
+        if why:
+            probs.append((ln, why))
+    return probs
+
+
+def _assert_probe_is_first_statement(text, guard_line):
+    """testnetfx10 LOW-1: the guard `if` is the first executable token after the param() block
+    (nothing can run before it)."""
+    toks = [x for x in _tokens(text) if x[0] not in ("Comment", "NewLine")]
+    k = next(i for i, x in enumerate(toks) if x[0] == "Keyword" and x[1].lower() == "param")
+    depth = 0
+    for j in range(k + 1, len(toks)):
+        if toks[j][0] == "GroupStart":
+            depth += 1
+        elif toks[j][0] == "GroupEnd":
+            depth -= 1
+            if depth == 0:
+                break
+    first = toks[j + 1]
+    assert first[0] == "Keyword" and first[1].lower() == "if" and first[4] == guard_line,         ("first executable statement after param() must be the guard", first, guard_line)
+
+
+_FIRST_STMT = {"web", "hs-start", "hs-stop", "hs-status"}
+
+
+def _pre_probe_problems(text, probe_line, script_path):
+    """Allow-list scan of everything that can execute from the start of `text` through
+    `probe_line` (1-based), plus the bodies of the functions it calls and the one allowed
+    dot-sourced lib (which must hold only function definitions)."""
+    toks = [t for t in _tokens(text) if t[0] != "Comment"]
+    top, defs = _split_defs(toks)
+    allowed_dot, probs = set(), []
+    for i, t in enumerate(top):
+        if _is_call_op(top, i) and t[4] <= probe_line:
+            lib = _lib_dot_source(top, i, script_path)
+            if lib is None:
+                probs.append((t[4], "dot-source / call operator that is not the resolved lib dot-source"))
+                continue
+            allowed_dot.add(t[2])
+            with open(lib, encoding="utf-8") as fh:
+                ltop, ldefs = _split_defs([x for x in _tokens(fh.read()) if x[0] != "Comment"])
+            if [x for x in ltop if x[0] not in ("NewLine", "StatementSeparator")]:
+                probs.append((t[4], "dot-sourced lib has top-level code: " + lib))
+            defs.update(ldefs)
+    pre = [t for t in top if t[4] <= probe_line]
+    probs += _strict_problems(pre, frozenset(allowed_dot))
+    for name in sorted({t[1].lower() for t in pre if t[0] == "Command"} & set(defs)):
+        if name not in _SCAN_CALLED_FUNCS:
+            probs.append((0, "user function called before the probe: " + name))
+        else:
+            probs += _strict_problems(defs[name])
+    return probs
 
 
 def test_nofetch_env_is_network_dead():
@@ -441,7 +607,7 @@ _NH = "KILNCTL_TEST_NO_HUB"
 _CASES = [
     ("web", _WEB, ["-Row", "W28", "-BoardHost", "127.0.0.1:1", "-ScreenshotDir", "unused"],
      "live mode refused", "if (-not $DryRun -and $env:" + _NH + " -eq '1') {",
-     "$repoRoot = Resolve-Path", _PROBE, {}),
+     "$ErrorActionPreference = 'Stop'", _PROBE, {}),
     ("hs-start", _HS, ["-Action", "start"], "start refused", "if ($env:" + _NH + " -eq '1') {",
      _HS_ANCHOR, _PROBE, {}),
     ("hs-stop", _HS, ["-Action", "stop"], "stop refused", "if ($env:" + _NH + " -eq '1') {",
@@ -459,7 +625,6 @@ _IDS = [c[0] for c in _CASES]
 _PARAMS = "cid,script_parts,args,needle,guard,anchor,marker,xenv"
 
 
-@pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
 @pytest.mark.parametrize(_PARAMS, _CASES, ids=_IDS)
 def test_user_scope_credential_scripts_refuse_under_test_env(cid, script_parts, args, needle, guard, anchor, marker, xenv):
     """Testnet3 L3 / testnet4 L2+L3: these scripts use User-scope credentials or the real
@@ -471,8 +636,9 @@ def test_user_scope_credential_scripts_refuse_under_test_env(cid, script_parts, 
     publish, fetch or load credentials. (No sentinel-secret assertion: the scripts read the
     User-scope registry, never the process env, so it would be vacuous.)"""
     import subprocess, os
+    ps = _need_ps()
     env = {**os.environ, **xenv, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_TEST_GUARD_PROBE": "1"}
-    r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args],
                        capture_output=True, text=True, env=env, timeout=120)
     out = r.stdout + r.stderr
@@ -481,17 +647,17 @@ def test_user_scope_credential_scripts_refuse_under_test_env(cid, script_parts, 
     assert needle in out and _NH in out, out
 
 
-@pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
 @pytest.mark.parametrize(_PARAMS, _CASES, ids=_IDS)
 def test_guard_probe_reaches_past_guard_without_no_hub(cid, script_parts, args, needle, guard, anchor, marker, xenv):
     """Control for the refusal test: with the guard condition off, each invocation reaches ITS
     OWN probe (site marker on stderr, exit 86, never 0). Inputs are inert even if a probe is
     dead: closed localhost port, no credentials (the web script's backstop stops it), -SkipBuild, unreachable origin."""
     import subprocess, os
+    ps = _need_ps()
     env = {k: v for k, v in os.environ.items() if k != _NH}
     env.update(xenv)
     env["KILNCTL_TEST_GUARD_PROBE"] = "1"
-    r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+    r = subprocess.run([ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args], capture_output=True, text=True,
                        env=env, timeout=120)
     assert _BACKSTOP not in r.stderr, r.stdout + r.stderr
@@ -520,14 +686,16 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     assert gs[0] < pn, ("guard must precede probe", gs[0], pn)
     # testnetfx7 LOW-1: guard..probe holds only the refusal body and its closing brace; no
     # disarm of the probe variable and no network command in that executable span.
-    # testnetfx9 LOW-1: token-based; no disarm of KILNCTL_TEST_GUARD* by ANY form before the
+    # testnetfx8 LOW-1: token-based; no disarm of KILNCTL_TEST_GUARD* by ANY form before the
     # probe, including in files dot-sourced before it.
     probs = _env_write_problems(text, pn + 1)
     assert not probs, ("env write before the probe", probs)
-    for dep in _dot_sourced(text, pn + 1, _repo_file(*script_parts)):
-        with open(dep, encoding="utf-8") as dfh:
-            dprobs = _env_write_problems(dfh.read())
-        assert not dprobs, ("env write in dot-sourced file before the probe", dep, dprobs)
+    # testnetfx10 LOW-1: allow-list, not deny-list: only the listed token shapes may execute
+    # before the probe (commands, members, types, call operators, the one lib dot-source).
+    probs = _pre_probe_problems(text, pn + 1, _repo_file(*script_parts))
+    assert not probs, ("token outside the pre-probe allow-list", probs)
+    if cid in _FIRST_STMT:
+        _assert_probe_is_first_statement(text, gs[0] + 1)
     span = [(n, norm[n]) for n in range(gs[0] + 1, pn) if norm[n] and not norm[n].startswith("#")]
     assert span and span[-1][1] == "}", ("guard block must close with } right before the probe", span)
     bad = re.compile(r"GUARD_PROBE|Remove-Item|Set-Item|Clear-Item|\bgit\b|ls-remote|\bfetch\b|\bpush\b|"
@@ -550,7 +718,7 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     (_HS, ["GetEnvironmentVariable", "switch ($Action)", "TetheringManager"]),
 ], ids=["web", "hotspot"])
 def test_credential_backstop_precedes_credential_load(script_parts, actions):
-    """testnetfx7 LOW-3 / testnetfx9 LOW-2: the script refuses (exit 87) while the test probe
+    """testnetfx7 LOW-3 / testnetfx8 LOW-2: the script refuses (exit 87) while the test probe
     variable is set, as one executable line AFTER the probe and BEFORE the first credential
     read, tethering call or action dispatch."""
     with open(_repo_file(*script_parts), encoding="utf-8") as fh:

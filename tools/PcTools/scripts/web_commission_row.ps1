@@ -22,8 +22,8 @@ param(
     [string]$ScreenshotDir = (Join-Path $PSScriptRoot '..\..\..\logs\web_commission')
 )
 
-$ErrorActionPreference = 'Stop'
-
+# testnetfx10 LOW-1: the guard and probe are the FIRST executable statements after param(), so
+# nothing can run (or disarm the probe) before them; tests/test_network_guard.py pins this.
 # Review testnet3 L3: live mode re-reads credentials from User scope (the registry), which a
 # test's scrubbed environment cannot hide. Refuse live mode under the PcTools test suite.
 if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
@@ -33,6 +33,8 @@ if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
 # KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past the guard so a regressed guard cannot
 # load credentials or contact a board (testnet4 L2).
 if (-not $DryRun -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
+
+$ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $venvPython = Join-Path $repoRoot 'tools\PcTools\.venv\Scripts\python.exe'
