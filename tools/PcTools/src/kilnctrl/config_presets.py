@@ -195,6 +195,16 @@ def _validate(name: str, data: object) -> None:
         if idx in seen_index:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
         seen_index.add(idx)
+        for key in zones_http_client._ZONE_INT_FIELDS:
+            if isinstance(zone.get(key), float):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} is an integer field but the preset gives "
+                    f"a float ({zone[key]!r}); write it as a plain integer")
+    for key in zones_http_client._TOP_INT_FIELDS:
+        if isinstance(data.get(key), float):
+            raise ConfigPresetError(
+                f"preset {name!r}: {key!r} is an integer field but the preset gives a float "
+                f"({data[key]!r}); write it as a plain integer")
     if not isinstance(data["ramp_assist_enabled"], bool):
         raise ConfigPresetError(f"preset {name!r}: 'ramp_assist_enabled' must be a bool (true/false), "
                                 "not inherited or inferred -- see this field's own comment above "

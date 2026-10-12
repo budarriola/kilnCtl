@@ -1300,7 +1300,9 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
             continue
         expected = preset[key]
         actual = after.get(key)
-        if isinstance(expected, float):
+        if isinstance(expected, float) and key not in _FLOAT_FIELD_PRINT_FORMAT:
+            ok = False  # int field given as a float (LOW-5): a mismatch report, never a KeyError
+        elif isinstance(expected, float):
             ok = actual is not None and _float_close(expected, actual, key)
         else:
             ok = actual == expected
@@ -1319,7 +1321,9 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
                 continue
             expected = pz[key]
             actual = az.get(key)
-            if isinstance(expected, float):
+            if isinstance(expected, float) and key not in _FLOAT_FIELD_PRINT_FORMAT:
+                ok = False  # int field given as a float (LOW-5): mismatch, never a KeyError
+            elif isinstance(expected, float):
                 ok = actual is not None and _float_close(expected, actual, key)
             else:
                 ok = actual == expected

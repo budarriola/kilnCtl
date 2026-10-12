@@ -55,6 +55,41 @@ class PresetsDirTest(unittest.TestCase):
         self.assertTrue(os.path.isfile(os.path.join(d, "bench_fixture.json")))
 
 
+class IntFieldFloatValueTest(unittest.TestCase):
+    """REVIEW_OLDPOOLA LOW-5: an int field written as a float."""
+
+    def _preset(self):
+        import copy
+        return copy.deepcopy(config_presets.load_preset_data("bench_fixture"))
+
+    def test_validator_rejects_float_zone_int_field(self):
+        d = self._preset()
+        d["zones"][0]["control_mode"] = 2.0
+        with self.assertRaises(config_presets.ConfigPresetError) as cm:
+            config_presets._validate("t", d)
+        self.assertIn("control_mode", str(cm.exception))
+
+    def test_validator_rejects_float_top_int_field(self):
+        d = self._preset()
+        d["thermo_count"] = 3.0
+        with self.assertRaises(config_presets.ConfigPresetError):
+            config_presets._validate("t", d)
+
+    def test_validator_accepts_int_values(self):
+        d = self._preset()
+        d["zones"][0]["control_mode"] = 2
+        config_presets._validate("t", d)
+
+    def test_verify_never_raises_keyerror_for_float_int_field(self):
+        pre = {"zones": [{"index": 0, "control_mode": 2.0}]}
+        after = {"zones": [{"index": 0, "control_mode": 2}]}
+        try:
+            mism = zones_http_client._verify_against_preset(after, pre)
+        except KeyError as exc:  # pragma: no cover
+            raise AssertionError(f"KeyError escaped verify: {exc}")
+        self.assertTrue(any("control_mode" in m for m in mism))
+
+
 class LoadPresetDataTest(unittest.TestCase):
     def test_bench_fixture_loads_and_validates(self):
         preset = config_presets.load_preset_data("bench_fixture")
