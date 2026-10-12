@@ -270,3 +270,22 @@ Suggested tests:
   acquires it.
 - LOW-1 regression: the restore raises `PermissionError` once, and H's lock
   must survive.
+
+## Fix status (buildfx8)
+
+LOW-1, LOW-2 and INFO-1 to INFO-5 are fixed in `buildlock.py` / `test_buildlock.py`
+(`BuildLockBuildFx8`), commits below on origin/dev:
+
+- LOW-1: shared `_put_back` (retries any non-`FileExistsError`; on
+  `FileExistsError` deletes the moved file only when its text equals the
+  newcomer's, else leaves it as an aside); used at all four put-back sites.
+- LOW-2: `_maybe_leaked` records leaked own lock texts; the next contention frees
+  one by exact text match.
+- INFO-1: a `judged is None` match also needs the aside older than `stale_after`.
+- INFO-2: `build_lock` sweeps `.rec./.rel./.dead.` asides older than `stale_after`.
+- INFO-3: "restored" is logged only after a successful put-back.
+- INFO-4: reviewer's wording, pinned by a test. INFO-5: docstring and test
+  continuations fixed.
+- M4, M5, M8, M9 and one mutant per new fix are CAUGHT by AssertionError.
+  Note: `test_release_restore_never_overwrites_a_newer_lock` no longer asserts that
+  a differing grabbed aside is deleted (it is left for the sweep, per LOW-1).
