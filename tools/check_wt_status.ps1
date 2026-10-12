@@ -231,6 +231,26 @@ try {
     Assert-True (Test-Path -LiteralPath (Join-Path $ext1 "deep\sentinel.txt")) "JUNCTION: registered-worktree prune followed a junction and deleted its target"
     Assert-True (Test-Path -LiteralPath (Join-Path $ext2 "deep\sentinel.txt")) "JUNCTION: orphan prune followed a junction and deleted its target"
     Assert-True ((Test-Path -LiteralPath (Join-Path $repo "a.txt"))) "prune damaged the scratch main repo"
+    Step 'prune done'
+    # ======== -Prune failure reason (sweepfx2 LOW-C) ========
+    # A STALE_CLEAN worktree whose worktree_mint -Remove fails (a remote ref at a missing object
+    # makes mint's rev-list fail closed) must report FAILED with git's/mint's own reason text.
+    $pf = New-Wt "failprune"; Set-TreeAge $pf 3
+    $gcDir = (& git -C $repo rev-parse --git-common-dir).Trim()
+    if (-not [IO.Path]::IsPathRooted($gcDir)) { $gcDir = Join-Path $repo $gcDir }
+    $ghost = Join-Path $gcDir "refs/remotes/origin/ghost"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $ghost) -Force | Out-Null
+    Set-Content -LiteralPath $ghost -Value "2222222222222222222222222222222222222222" -Encoding ascii
+    $pr = Run-Tool @{ Prune = $true }
+    $row = $pr.Prune | Where-Object { $_.Name -eq "failprune" } | Select-Object -First 1
+    Assert-True ($null -ne $row) "prune failure: failprune was not a prune candidate"
+    if ($row) {
+        Assert-True ($row.Result -match '^FAILED: worktree_mint -Remove exit') "prune failure: result should be FAILED, got '$($row.Result)'"
+        Assert-True ($row.Result -match 'REFUSED|git said') "prune failure: FAILED result must carry the refusal reason, got '$($row.Result)'"
+    }
+    Assert-True ($pr.Failed -ge 1) "prune failure: Failed count should be >= 1"
+    Assert-True (Test-Path -LiteralPath (Join-Path $wt "failprune")) "prune failure: the refused worktree must survive"
+    Remove-Item -LiteralPath $ghost -Force
 }
 finally {
     foreach ($pr in $procs) { try { Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue } catch { } }

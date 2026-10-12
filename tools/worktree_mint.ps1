@@ -172,9 +172,40 @@ if ($Remove) {
     # F4: a detached worktree's unlanded commits die with its reflog. Refuse unless -Force.
     $unlanded = @()
     git -C $full rev-parse --verify -q HEAD *>$null
-    if ($LASTEXITCODE -ne 0) {
+    $headRc = $LASTEXITCODE
+    $unborn = $false
+    if ($headRc -ne 0) {
+        # Only a GENUINELY unborn HEAD may skip the unlanded check (sweepfx2 LOW-B): HEAD
+        # names a branch ref (symbolic-ref), that ref is absent everywhere (show-ref exit 1,
+        # no loose file) and HEAD's reflog is empty. A deleted branch ref, an unreadable
+        # (e.g. zero-byte) ref or a detached HEAD that fails to resolve falls through to the
+        # fail-closed path below.
+        $symRef = (git -C $full symbolic-ref -q HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $symRef) {
+            git -C $full show-ref --verify -q "$symRef" *>$null
+            $showRc = $LASTEXITCODE
+            $common = (git -C $full rev-parse --git-common-dir 2>$null)
+            if ($common -and -not [IO.Path]::IsPathRooted($common)) { $common = Join-Path $full $common }
+            $looseExists = $common -and (Test-Path -LiteralPath (Join-Path $common $symRef))
+            # `git reflog show HEAD` errors on an unresolvable HEAD, so read the worktree's own log file.
+            $gitDir = (git -C $full rev-parse --absolute-git-dir 2>$null)
+            $logFile = if ($gitDir) { Join-Path $gitDir "logs/HEAD" } else { $null }
+            $hasReflog = $logFile -and (Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt 0)
+            if ($showRc -eq 1 -and -not $looseExists -and -not $hasReflog) { $unborn = $true }
+        }
+    }
+    if ($unborn) {
         # Unborn HEAD (orphan worktree, no commits): nothing can be lost.
         Write-Host "note: '$full' has an unborn HEAD (no commits); nothing unlanded to lose." -ForegroundColor Yellow
+    } elseif ($headRc -ne 0) {
+        if ($ForceUnverifiable) {
+            Write-Host "WARNING: HEAD of '$full' does not resolve and is not a genuinely unborn branch (deleted/unreadable ref?); unlanded commits could NOT be checked. Proceeding because -ForceUnverifiable was given." -ForegroundColor Yellow
+        } else {
+            Write-Host "REFUSED: HEAD of '$full' does not resolve but is not a genuinely unborn branch (deleted or unreadable ref?); unlanded commits cannot be checked, not removing, even with -Force." -ForegroundColor Red
+            Write-Host "git said: HEAD does not resolve (rev-parse --verify HEAD failed)" -ForegroundColor Red
+            Write-Host "Restore the ref, or pass -ForceUnverifiable to remove anyway (unlanded commits, if any, are lost)." -ForegroundColor Red
+            exit 1
+        }
     } else {
         $errFile = [IO.Path]::GetTempFileName()
         try {

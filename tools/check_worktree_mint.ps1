@@ -106,6 +106,17 @@ try {
     Assert (Test-Path -LiteralPath $w8) "orphan worktree created"
     $r = Run-MintRemove @("-Path", $w8)
     Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w8)) "orphan worktree (unborn HEAD): -Remove allowed"
+    # deleted branch ref with an unlanded commit (sweepfx2 LOW-B): HEAD does not resolve but is NOT
+    # a genuinely unborn branch -> -Force alone must refuse; -ForceUnverifiable proceeds
+    $w9 = MintPath
+    git -C $w9 checkout -b delme *>$null
+    Set-Content -LiteralPath (Join-Path $w9 "d.txt") -Value "d" -Encoding ascii
+    git -C $w9 add d.txt *>$null; git -C $w9 commit -m unlanded_delme *>$null
+    git -C $work update-ref -d refs/heads/delme *>$null
+    $r = Run-MintRemove @("-Path", $w9, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w9) -and $r.Out -match "REFUSED" -and $r.Out -match "not a genuinely unborn") "deleted branch ref: -Remove -Force refused (not treated as unborn)"
+    $r = Run-MintRemove @("-Path", $w9, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w9)) "deleted branch ref: -ForceUnverifiable removes"
     # main tree refused, and nothing in it touched
     $r = Run-MintRemove @("-Path", $work)
     Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath (Join-Path $work "a.txt")) -and $r.Out -match "not a linked worktree") "main tree is refused"

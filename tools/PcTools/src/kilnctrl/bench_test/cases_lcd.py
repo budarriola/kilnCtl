@@ -2979,6 +2979,53 @@ def _entry_all_clicked_ok(entry: Optional[Dict[str, Any]]) -> bool:
 _KEYPAD_BACKDROP_XY = (20, 160)
 
 
+def _lcd19_relock(ctx: dict, client, orig: dict, ui, state: dict) -> bool:
+    """Force the LCD session back to locked: set_policy lcd_enabled off then on
+    (the edge makes firmware call ui_lcd_lock_force_lock(), same as the
+    allow_heat relock), then wait for the home page to settle past the 1 Hz
+    lock tick. Returns True only when both POSTs confirmed and home settled."""
+    off_status, _ = client.set_policy(
+        orig["web_enabled"], False, orig["web_timeout_min"], orig["lcd_timeout_min"])
+    on_status, on_resp = client.set_policy(
+        orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
+    ok = (off_status == 200 and on_status == 200 and bool(on_resp) and on_resp.get("ok") is True)
+    state["unverified_relock_ok"] = ok
+    if not ok:
+        return False
+    settled = _wait_for_home_settled(ctx, ui, "Start")
+    state["unverified_relock_settled"] = settled
+    return bool(settled)
+
+
+_LOCKOUT_RE = re.compile(r"try again in (\d+)\s*s", re.IGNORECASE)
+
+
+def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> Dict[str, Any]:
+    """If `names` (the stable read after a refused PIN) shows the keypad's
+    "Wrong PIN -- try again in %us" text, sleep that long (plus a margin) and
+    re-read until it is gone or `max_wait_s` is spent."""
+    sleep = ctx.get("_sleep", time.sleep)
+    info: Dict[str, Any] = {"lockout_seen": False, "waited_s": 0.0}
+    waited = 0.0
+    cur = names
+    while waited < max_wait_s:
+        secs = None
+        for n in (cur or []):
+            m = _LOCKOUT_RE.search(str(n))
+            if m:
+                secs = int(m.group(1))
+                break
+        if secs is None:
+            break
+        info["lockout_seen"] = True
+        step = min(secs + 1.0, max_wait_s - waited)
+        sleep(step)
+        waited += step
+        cur, _, _, _, _ = _wait_stable_names(ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+    info["waited_s"] = waited
+    return info
+
+
 def _dismiss_lcd19_overlay(ctx: dict, ui) -> Dict[str, Any]:
     """Best-effort: dismiss a PIN keypad or Confirm Start/Confirm Stop dialog
     left open, never via the dialog's own confirm/OK/digit buttons. Returns
@@ -3438,7 +3485,14 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                 state["pin_unlock_role"] = "USER or higher (Start is USER-gated)"
                                 # Back to a fresh keypad for the wrong-then-right checks.
                                 state["unverified_re_dismiss"] = _dismiss_lcd19_overlay(ctx, ui)
-                                reclick = ui.click_by_name("Start")
+                                # The granted PIN left the session unlocked
+                                # (ui_lcd_lock.c gate_keypad_done_cb ->
+                                # lcd_lock_grant), so a second Start tap would open
+                                # Confirm Start with no keypad. Relock first (policy
+                                # off->on, as the allow_heat path does) and let the
+                                # 1 Hz lock tick settle (sweepfx2 MED-A).
+                                relock_ok = _lcd19_relock(ctx, client, orig, ui, state)
+                                reclick = ui.click_by_name("Start") if relock_ok else {"result": "relock_failed"}
                                 rp = _wait_for_keypad_raise(ui) if reclick.get("result") == "ok" else None
                                 if not (rp and rp["raised_ever"] and not rp["closed_after_raise"]):
                                     state["unverified_reraise_failed"] = True
@@ -3448,11 +3502,21 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     if not (rs and rn is not None and _KEYPAD_DIGIT_NAMES <= rn and "OK" in rn):
                                         wrong_pin = None
                             else:
-                                # Keypad still open: right PIN refused (or locked out).
-                                state["unverified_right_first_refused"] = True
+                                # Keypad still open (OK present). Only a checked
+                                # rejection (dots cleared, no lockout text) marks
+                                # the PIN bad; every other shape is INCONCLUSIVE
+                                # (sweepfx2 LOW-A).
                                 if any("try again in" in str(n).lower() for n in pnames):
                                     state["pin_lockout"] = True
-                                pin_cfg["bad"] = True
+                                    state["unverified_right_first_outcome"] = "lockout"
+                                elif "OK" not in pnames and "Cancel" not in pnames:
+                                    state["unverified_right_first_outcome"] = "keypad_closed"
+                                elif not _dots_have_cleared(pnames):
+                                    state["unverified_right_first_outcome"] = "submit_not_applied"
+                                else:
+                                    state["unverified_right_first_outcome"] = "rejected"
+                                    pin_cfg["bad"] = True
+                                state["unverified_right_first_refused"] = True
                                 wrong_pin = None
                     if wrong_pin:
                         # enter_pin_verified() (2026-09-30, LCD-19), not the
@@ -3529,6 +3593,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # one, so no conclusion can be drawn from what
                         # follows.
                     if wrong_pin_refused and right_pin:
+                        # The wrong PIN just opened a login_backoff lockout (5 s
+                        # first step, "Wrong PIN -- try again in %us"). Wait it
+                        # out so the right PIN is not LOCKED_OUT (false FAIL).
+                        state["wrong_pin_lockout_wait"] = _lcd19_wait_out_lockout(
+                            ctx, ui, state.get("after_wrong_pin_names"))
                         # No separate before-entry stabilization wait here:
                         # `wrong_pin_refused` being True already required a
                         # STABILIZED read (`after_wrong_pin_names`, via
@@ -3575,7 +3644,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # firing"); gating on `stabilized` (2026-09-30
                             # review fix) covers that case too.
                             if stabilized:
-                                right_pin_started = "OK" not in names and "Cancel" in names
+                                if any("try again in" in str(n).lower() for n in names):
+                                    # Locked out, not rejected on merit: cannot judge.
+                                    state["pin_lockout"] = True
+                                else:
+                                    right_pin_started = "OK" not in names and "Cancel" in names
 
                 # Owner decision 2026-09-30: stop_gated has never been
                 # reachable in practice -- `firing_active_with_lock` is not
@@ -3807,8 +3880,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             if state.get("unverified_right_first_refused"):
                 # Right PIN tried first and refused: one failure only, nothing else judged.
                 result.observed["pin_unverified"] = True
-                if state.get("pin_lockout"):
+                outcome = state.get("unverified_right_first_outcome")
+                if outcome == "lockout":
                     why = "the keypad reports a PIN lockout; PIN lock not verified (retry after the lockout)"
+                elif outcome == "keypad_closed":
+                    why = "the keypad closed without unlocking and without a rejection; PIN lock not verified"
+                elif outcome == "submit_not_applied":
+                    why = "the PIN entry was not submitted (dots still full); PIN lock not verified"
                 else:
                     why = ("the configured PIN was refused (it may differ from the env var); "
                            "PIN lock not verified")
