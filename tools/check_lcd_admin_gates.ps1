@@ -486,9 +486,9 @@ foreach ($uf in $uiAll) {
     foreach ($rx in $declRx) {
         foreach ($dm in [regex]::Matches($dc, $rx)) {
             $tok = $dm.Groups[1].Value
-            $home = $false
-            foreach ($h in $gateHome) { if ($tok -match $h[0] -and $uf.Name -in $h[1]) { $home = $true } }
-            if (-not $home) { Write-Host "FAIL: L-declarator: $($uf.Name) declares/defines gate token '$tok' (`"$($dm.Value.Trim() -replace '\s+', ' ')`"); a local, parameter, enumerator, typedef or function pointer with a gate name shadows the real one and defeats the gate rows"; $fail++ }
+            $isHome = $false
+            foreach ($h in $gateHome) { if ($tok -match $h[0] -and $uf.Name -in $h[1]) { $isHome = $true } }
+            if (-not $isHome) { Write-Host "FAIL: L-declarator: $($uf.Name) declares/defines gate token '$tok' (`"$($dm.Value.Trim() -replace '\s+', ' ')`"); a local, parameter, enumerator, typedef or function pointer with a gate name shadows the real one and defeats the gate rows"; $fail++ }
         }
     }
 }
