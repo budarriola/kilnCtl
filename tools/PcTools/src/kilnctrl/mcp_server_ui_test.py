@@ -287,9 +287,9 @@ def factory_default_then_load_preset(name: str, scope: int = FACTORY_RESET_SCOPE
     except ControlQueryError as exc:
         return _wiped_message(scope, backup, f"preset apply failed: {exc}{_partial_note(exc)}")
     except zones_http_client.ZonesHttpError as exc:
-        return _wiped_message(scope, backup, f"PID/model applied, but zones config write failed (host={resolved}): {exc}{_partial_note(exc)}")
+        return _wiped_message(scope, backup, f"PID/model UART writes were sent (see stages below for read-back), but zones config write failed (host={resolved}): {exc}{_partial_note(exc)}")
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
-        return _wiped_message(scope, backup, "PID/model applied, but safety config write failed "
+        return _wiped_message(scope, backup, "PID/model UART writes were sent (see stages below for read-back), but safety config write failed "
                               f"(host={resolved_safety}): {exc}{_partial_note(exc)}")
     except Exception as exc:  # noqa: BLE001 -- after a wipe EVERY failure must still name the backup
         return _wiped_message(scope, backup, f"preset apply raised {type(exc).__name__}: {exc}{_partial_note(exc)}")
@@ -302,7 +302,13 @@ def _partial_note(exc: BaseException) -> str:
     """Stages that landed before ``exc`` (config_presets.apply_preset attaches
     ``preset_partial``), or empty."""
     partial = getattr(exc, "preset_partial", None)
-    return f"\nstages completed before the failure:\n{partial}" if partial else ""
+    if partial is None:
+        return ""
+    if not partial:
+        return ("\nno stage had confirmed landing before the failure; a write in flight "
+                "may still have applied")
+    return ("\nstages that had ALREADY landed before the failure (board is partially written; "
+            f"the failing stage's own write may also have applied):\n{partial}")
 
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the

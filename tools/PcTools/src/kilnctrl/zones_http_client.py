@@ -982,6 +982,11 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # hysteresis/timing, none of which a preset should be forced to leave at
     # whatever the board happened to have.
     "zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s",
+    # relay_type / progress_band_c / coil_power_w: POST-accepted (omit-preserve) per
+    # zones_http_post_parse.c (z%u_relaytype :203, z%u_progressband :953, z%u_coilpower :316), and
+    # in _ZONE_FIELD_FORM_KEY, so a GET-copied preset naming them must be written, not refused
+    # (REVIEW_ZONESPRECFX6 MED-1).
+    "relay_type", "progress_band_c", "coil_power_w",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:
@@ -1060,7 +1065,21 @@ _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
     "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "tuning_seq",
     "model_fit_temp_c", "model_fit_ambient_c",
+    # No POST key: fuzzy_model_valid is computed per GET (zones_http_get.c), and
+    # autotune_baseline_k_dc is copied from current_z by zones_http_post_parse.c:505.
+    "fuzzy_model_valid", "autotune_baseline_k_dc",
 }
+
+
+def preset_zone_key_known(key: str) -> bool:
+    """True when build_post_body() accepts `key` in a preset zone dict (written or
+    deliberately ignored). config_presets._validate uses this same predicate so an
+    unknown key is refused before any UART write."""
+    return (key == _PRESET_ZONE_COUPLING_FIELD
+            or key in _PRESET_ZONE_OVERRIDE_FIELDS
+            or key in _PRESET_ZONE_KNOWN_IGNORED_FIELDS
+            or bool(_ZONE_COUPLING_CELL_RE.match(key))
+            or bool(_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key)))
 
 
 #: ZONES_CFG_VERSION 16->17 backward compatibility (PID_EXPANSION_PLAN.md
@@ -1275,6 +1294,7 @@ _FLOAT_FIELD_PRINT_FORMAT = {
     "hyst_c": "%.3f", "ease_off_window_mult": "%.3f",
     "approach_rate_cap_c_per_hr": "%.3f", "error_band_c": "%.3f",
     "rate_band_c_per_s": "%.4f", "fuzzy_strength_pct": "%.2f",
+    "progress_band_c": "%.3f", "coil_power_w": "%.2f",
 }
 _FLOAT_ABS_FLOOR = 1e-12
 _FLOAT_EPS_REL = 1e-6  # %.9g carries ~9 significant digits; float32 eps is ~1.2e-7

@@ -176,7 +176,8 @@ def _partial_note(exc: BaseException) -> str:
     if not partial:
         return ("\nno stage had confirmed landing before the failure; a write in flight "
                 "may still have applied")
-    return ("\nstages that had ALREADY landed before the failure (board is partially written; "
+    return ("\nstages that had ALREADY landed before the failure (a line marked FAILED did not read back; "
+            "board is partially written; "
             f"the failing stage's own write may also have applied):\n{partial}")
 
 

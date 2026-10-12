@@ -1195,6 +1195,10 @@ class CapturedLiveGetFixtureTest(unittest.TestCase):
                     continue
                 if zh._ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key):
                     continue
+                if key == "settings_source_groups":
+                    for g in zone[key]:
+                        self.assertIn(f"z{idx}_settings_source_{g}", form)
+                    continue
                 suffix = zh._ZONE_FIELD_FORM_KEY.get(key)
                 if suffix is None and zh._ZONE_COUPLING_CELL_RE.match(key):
                     suffix = key
