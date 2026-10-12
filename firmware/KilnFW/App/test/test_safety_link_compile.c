@@ -3949,8 +3949,38 @@ static void test_safetyfx10_trip_event_after_diag_is_arrival_order(void)
     s_fake_tick_count = 0;
 }
 
+// REBOOTFX5 LOW-1: with a 10 ms tick the host can finally tell ticks from ms. Built as its own executable
+// (-DportTICK_PERIOD_MS=10u -DKILN_TICK10_ONLY), see build_host_tests.ps1.
+static void test_diag_frame_age_tick_period_10(void)
+{
+    TEST_SECTION("safety_link_get_status diag_frame_age_ms -- 10 ms tick period (REBOOTFX5 LOW-1)");
+    TEST_CHECK(portTICK_PERIOD_MS == 10u, "this executable is built with a 10 ms tick period");
+    TEST_CHECK(uart_proto_rx_stamp_ms(300u) == 3000u, "rx stamp helper multiplies by the tick period");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TickType_t saved_tick = s_fake_tick_count;
+    s_fake_tick_count = 500u; /* 5000 ms */
+    apply_diag_uptime_rx(&link, 1000u, uart_proto_rx_stamp_ms(300u)); /* received at 3000 ms */
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.diag_ever_received, "DIAG seen");
+    TEST_CHECK(st.diag_frame_age_ms == 2000u, "DIAG age is 2000 ms (200 ticks x 10 ms)");
+    s_fake_tick_count = saved_tick;
+}
+
 int main(void)
 {
+#ifdef KILN_TICK10_ONLY
+    test_diag_frame_age_tick_period_10();
+    return g_test_failures > 0 ? 1 : 0;
+#endif
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
 
     test_apply_status_accepts_v1_and_v2_lengths();

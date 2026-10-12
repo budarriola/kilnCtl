@@ -235,19 +235,83 @@ static void test_rx_stamp(void)
     size_t n = fread(buf, 1, sizeof(buf) - 1, f);
     fclose(f);
     buf[n] = 0;
-    int stamped = 0, total = 0;
-    for (const char *p = buf; (p = strstr(p, ".rx_ms")) != NULL; p++) {
-        total++;
-        if (strncmp(p, ".rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount()),", 53) == 0) {
-            stamped++;
+    /* REBOOTFX5 LOW-2: strip comments (a commented-out call must not count), then anchor on construction:
+     * no hand-built uart_proto_message_t initializer may remain, and exactly two uart_proto_message_make()
+     * calls (BROADCAST and DATA) must each be fed xTaskGetTickCount(). */
+    static char code[200000];
+    size_t o = 0;
+    for (size_t k = 0; k < n;) {
+        if (buf[k] == '/' && buf[k + 1] == '*') {
+            k += 2;
+            while (k < n && !(buf[k] == '*' && buf[k + 1] == '/')) {
+                k++;
+            }
+            k += 2;
+        } else if (buf[k] == '/' && buf[k + 1] == '/') {
+            while (k < n && buf[k] != '
+') {
+                k++;
+            }
+        } else {
+            code[o++] = buf[k++];
         }
     }
-    CHECK(total == 2 && stamped == 2, "both uart_proto_message_t construction sites stamp rx_ms via the helper");
+    code[o] = 0;
+    int made = 0, with_tick = 0, handbuilt = 0;
+    for (const char *p = code; (p = strstr(p, "uart_proto_message_make(")) != NULL; p++) {
+        made++;
+        const char *end = strchr(p, ';');
+        if (end) {
+            for (const char *q = p; q < end; q++) {
+                if (strncmp(q, "xTaskGetTickCount())", 20) == 0) {
+                    with_tick++;
+                    break;
+                }
+            }
+        }
+    }
+    for (const char *p = code; (p = strstr(p, "uart_proto_message_t")) != NULL; p++) {
+        const char *q = p + strlen("uart_proto_message_t");
+        while (*q == ' ' || *q == '
+' || *q == '	' || *q == '') {
+            q++;
+        }
+        while (*q == '_' || (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9')) {
+            q++;
+        }
+        while (*q == ' ' || *q == '
+' || *q == '	' || *q == '') {
+            q++;
+        }
+        if (q[0] == '=' && q[1] != '=') {
+            q++;
+            while (*q == ' ' || *q == '
+' || *q == '	' || *q == '') {
+                q++;
+            }
+            if (*q == '{') {
+                handbuilt++;
+            }
+        }
+    }
+    CHECK(made == 2 && with_tick == 2,
+          "both receive-path message constructions go through uart_proto_message_make(.., xTaskGetTickCount())");
+    CHECK(handbuilt == 0, "no hand-built uart_proto_message_t initializer (unstamped rx_ms) in uart_protocol.c");
+}
+
+static void test_message_make(void)
+{
+    uart_proto_message_t m = uart_proto_message_make(UART_PROTO_DEVICE_SAFETY, 7u, 0x1234u, 5u, 777u);
+    CHECK(m.device == UART_PROTO_DEVICE_SAFETY && m.task_id == 7u && m.msg_index == 0x1234u && m.length == 5u,
+          "message_make fills the header fields");
+    CHECK(m.rx_ms == uart_proto_rx_stamp_ms(777u), "message_make stamps rx_ms with the helper");
+    CHECK(m.payload[0] == 0u && m.payload[UART_PROTO_MAX_PAYLOAD - 1] == 0u, "message_make zero-initialises payload");
 }
 
 int main(void)
 {
     test_rx_stamp();
+    test_message_make();
     test_required_cases();
     test_known_frame_wire_bytes();
     test_rx_chunk_sizing();

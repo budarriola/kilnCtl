@@ -1656,6 +1656,14 @@ try {
 
     Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 
+    # REBOOTFX5 LOW-1: the same TU again with a 10 ms tick period, running only the tick-vs-ms DIAG age test.
+    # The stub's period is 1, so no other executable can tell a tick count from a millisecond count.
+    $exe14t = Join-Path $outDir "kilnctl_host_tests_safety_link_tick10.exe"
+    $slObjDirT = Join-Path $outDir "sl_tick10"
+    New-Item -ItemType Directory -Force -Path $slObjDirT | Out-Null
+    $cmd14t = $cmd14.Replace("/Fo:`"$slObjDir\`"", "/Fo:`"$slObjDirT\`"").Replace("/Fe:`"$exe14`"", "/Fe:`"$exe14t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    Invoke-HostTestExe -Name "safety_link_tick10" -ExePath $exe14t -BuildCmd $cmd14t
+
     # ---- test_dashboard_json.c: its own FIFTEENTH, separate executable --------
     # Opus review round 3, blocker 1: dashboard_http.c's /api/control handler was
     # silently emitting truncated (invalid) JSON at 3 zones once ff_hold_used_

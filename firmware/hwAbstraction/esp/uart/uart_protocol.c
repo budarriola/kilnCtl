@@ -278,13 +278,8 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
             xSemaphoreGive(proto->tasks_lock);
             return; /* fire-and-forget: no NACK, unregistered task is just dropped */
         }
-        uart_proto_message_t bmsg = {
-            .device = src_device,
-            .task_id = src_task,
-            .msg_index = msg_index,
-            .length = length,
-            .rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount()),
-        };
+        uart_proto_message_t bmsg =
+            uart_proto_message_make(src_device, src_task, msg_index, length, xTaskGetTickCount());
         memcpy(bmsg.payload, &raw[HEADER_LEN], length);
         /* No dedup, no reply either way: a lost or duplicated broadcast is
          * the sender's problem to notice (staleness), never this layer's --
@@ -333,13 +328,8 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         return;
     }
 
-    uart_proto_message_t msg = {
-        .device = src_device,
-        .task_id = src_task,
-        .msg_index = msg_index,
-        .length = length,
-        .rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount()),
-    };
+    uart_proto_message_t msg =
+        uart_proto_message_make(src_device, src_task, msg_index, length, xTaskGetTickCount());
     memcpy(msg.payload, &raw[HEADER_LEN], length);
 
     if (xQueueSend(slot->inbox, &msg, 0) != pdTRUE) {

@@ -82,7 +82,9 @@ carries its own fork of the UART protocol and is outside this change.
 
 ## Findings
 
-### LOW-1: tick-versus-ms units are unpinned on host (M1, M6, M7 MISSED)
+### LOW-1: tick-versus-ms units are unpinned on host (M1, M6, M7 MISSED) -- FIXED (rebootfx6)
+
+Fix: `safety_link.c` now calls `uart_proto_rx_stamp_ms()`; the stub's `portTICK_PERIOD_MS` is `#ifndef`-guarded and `kilnctl_host_tests_safety_link_tick10.exe` rebuilds the safety_link TU with period 10 and runs `test_diag_frame_age_tick_period_10`.
 
 The host FreeRTOS stub (`test/stubs/freertos/FreeRTOS.h`) defines
 `configTICK_RATE_HZ 1000u` and `portTICK_PERIOD_MS 1u`, so on host a tick
@@ -115,7 +117,9 @@ compile-time check in the stub path, for example
 `_Static_assert(portTICK_PERIOD_MS != 1 || ...)` in a dedicated test TU that
 defines period 10. With period 10, M1, M6 and M7 all change observable ages.
 
-### LOW-2: the uart_protocol.c source pin is brittle and bypassable (M4 false CAUGHT, M5 MISSED)
+### LOW-2: the uart_protocol.c source pin is brittle and bypassable (M4 false CAUGHT, M5 MISSED) -- FIXED (rebootfx6)
+
+Fix: both receive sites build the message through `uart_proto_message_make()` (tested behaviourally in `test_message_make`); the source pin strips comments, requires exactly two make calls fed `xTaskGetTickCount()` and no hand-built `uart_proto_message_t x = {` initializer.
 
 `test_rx_stamp` reads `uart_protocol.c` as text, counts every `.rx_ms`
 substring, comments included, requires exactly 2, and requires each one to

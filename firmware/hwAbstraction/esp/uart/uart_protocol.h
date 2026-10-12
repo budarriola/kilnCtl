@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "esp_err.h"
 #include "freertos/FreeRTOS.h"
@@ -130,6 +131,22 @@ typedef struct {
     uint8_t payload[UART_PROTO_MAX_PAYLOAD];
     uint32_t rx_ms; /* ESP tick (ms) when the frame was received, not when the inbox was drained */
 } uart_proto_message_t;
+
+/* REBOOTFX5 LOW-2: the ONE place a received-frame uart_proto_message_t is built, so the rx_ms stamp cannot be
+ * forgotten at a construction site. handle_raw_frame() calls this at both its sites (BROADCAST and DATA); the
+ * caller copies the payload afterwards. Zero-initialises everything else. */
+static inline uart_proto_message_t uart_proto_message_make(uart_proto_device_t device, uint8_t task_id,
+                                                           uint16_t msg_index, uint8_t length, TickType_t now_ticks)
+{
+    uart_proto_message_t m;
+    memset(&m, 0, sizeof(m));
+    m.device = device;
+    m.task_id = task_id;
+    m.msg_index = msg_index;
+    m.length = length;
+    m.rx_ms = uart_proto_rx_stamp_ms(now_ticks);
+    return m;
+}
 
 typedef struct {
     bool in_use;
