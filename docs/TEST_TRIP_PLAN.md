@@ -224,7 +224,11 @@ condition stays "still true" until the trip has been latched for
 `trip_verify_s` (the S9 verify window; `safety_guard_state_t` already tracks
 `s9_verify_elapsed_s`). This adds no new way to clear. It makes the test trip
 harder to clear than "immediately", so a clear cannot cut S9's check that K4
-opened short. After the window, the clear is accepted like any other.
+opened short. "K4 opened" means K4 was COMMANDED open (the Pico's relay mirror, not
+contact feedback); only S9's current check can catch welded contacts. The clear is also
+refused while any other guard's immediate condition holds (S1, S2, S3, S5, S8, S11, S12,
+S13, S6b), because those guards' debounce is frozen while the test trip is latched. After
+the window and with no such condition, the clear is accepted like any other.
 
 S9 escalation applies unchanged. If current still flows after a test trip,
 the reason becomes `SAFETY_TRIP_INEFFECTIVE` and cannot be cleared, exactly

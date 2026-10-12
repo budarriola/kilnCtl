@@ -542,6 +542,26 @@ static void test_estop_trip_latch_and_clear(void)
     TEST_CHECK(W.clear_cmd_calls == 1, "no repeated clear commands");
 }
 
+static void test_admin_test_trip_boot_reason_latch(void)
+{
+    TEST_SECTION("TEST trip (plan 4.4): latched like any real trip, reason 4 reaches boot_reason (REVIEW_TRIPWP2 LOW-5)");
+    world_reset_keep_clock();
+    core_start();
+    steps(5);
+    unsigned latch_before = W.latch_trip_calls;
+    TEST_CHECK(safety_core_request_test_trip(), "request queued");
+    int n = steps_until_trip(5);
+    TEST_CHECK(n >= 1, "test trip latches within a few ticks");
+    expect_trip(SAFETY_TRIP_TEST, "TEST", 0);
+    TEST_CHECK(W.latch_trip_calls == latch_before + 1 && W.last_latched_reason == 4u,
+               "boot_reason latch written exactly once with reason 4, same path as every real trip");
+    TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_TEST) == 0x0008u, "mask 0x0008");
+    /* Pico side of the pre-reboot rule: nothing about a TEST latch is special-cased -- the
+     * latch survives with no stimulus, exactly like the e-stop latch above. */
+    steps(500);
+    TEST_CHECK(is_tripped() && trip_reason() == SAFETY_TRIP_TEST, "TEST latch holds without any stimulus");
+}
+
 static void test_clear_queue_refusals(void)
 {
     TEST_SECTION("Campaign 1: clear-trip queue -- stale occurrence, nothing latched, unbound, depth");
@@ -1119,6 +1139,7 @@ int main(void)
 {
     test_healthy_never_trips();
     test_estop_trip_latch_and_clear();
+    test_admin_test_trip_boot_reason_latch();
     test_clear_queue_refusals();
     test_command_retry_until_relay_accepts();
     test_trip_seq_wrap();

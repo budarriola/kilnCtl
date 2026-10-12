@@ -136,6 +136,63 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
                                 SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
 }
 
+/* S8 clear test. strict=true: a RATE trip is latched (post-trip window state valid).
+ * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1) -- no post state exists,
+ * only the last pre-latch tripping window, if any, is a usable basis. */
+static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
+                            const safety_guard_state_t *state, bool strict)
+{
+    if (cfg->max_rate_c_per_min <= 0.0f) {
+        return false;
+    }
+    /* review saftyfx6 F4: unknown reading refuses; s8clrfx2 LOW-3: so does NaN flagged valid. */
+    if (!in->tc_valid || isnan(in->tc_c)) {
+        return true;
+    }
+    if (strict) {
+        /* review s8clrfx2 LOW-1: a grant needs TWO consecutive full post-trip windows
+         * at or under the limit (mirrors the trip streak). Until then refuse -- the
+         * frozen tripping window is a single-sample test and one outlier would grant. */
+        if (state->s8_post_windows_done < 2u) {
+            return true;
+        }
+        if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min ||
+            state->s8_post_prev_rate_c_per_min > cfg->max_rate_c_per_min) {
+            return true;
+        }
+        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+            float m = state->s8_post_elapsed_s / 60.0f;
+            if (((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
+        float elapsed_min = state->s8_window_elapsed_s / 60.0f;
+        return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
+    }
+    return false;
+}
+
+static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
+                                             const safety_guard_input_t *in,
+                                             const safety_guard_state_t *state);
+static bool test_trip_masks_real_condition(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
+                                           const safety_guard_state_t *state)
+{
+    static const safety_trip_t real[] = {
+        SAFETY_TRIP_SENSOR_INVALID, SAFETY_TRIP_OVERTEMP, SAFETY_TRIP_OVER_SETPOINT,
+        SAFETY_TRIP_LOAD_STUCK_ON, SAFETY_TRIP_FROZEN_SENSOR, SAFETY_TRIP_ENCLOSURE_TEMP,
+        SAFETY_TRIP_BORROWED_STALE, SAFETY_TRIP_LINK_DEAD};
+    for (unsigned i = 0; i < sizeof(real) / sizeof(real[0]); i++) {
+        if (guard_condition_still_immediate(real[i], cfg, in, state)) {
+            return true;
+        }
+    }
+    return s8_clear_refuse(cfg, in, state, false);
+}
+
 /* 2026-08-23 hardware finding: safety_guards_try_clear() resets every
  * graduated guard's elapsed-time accumulator to zero (safety_guards_clear())
  * before its one-tick retest. For a guard whose trip condition needs several
@@ -185,13 +242,20 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
 {
     switch (reason) {
     case SAFETY_TRIP_TEST: /* admin test trip (docs/TEST_TRIP_PLAN.md section 4.3): there is
-                            * no physical condition to re-test, so the clear is held until
-                            * S9's verification window has elapsed -- K4 is proven open
-                            * (and S9 had its chance to escalate) before a human clear is
-                            * honoured. s9_verify_elapsed_s only advances while K4 is
-                            * reported de-energized, so a relay that never opens never
-                            * releases the hold. */
-        return state->s9_verify_elapsed_s < effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT);
+                            * no physical condition of its own to re-test, so the clear is held
+                            * until S9's verification window has elapsed -- K4 has been COMMANDED
+                            * open for trip_verify_s (the Pico's own relay mirror, not contact
+                            * feedback; REVIEW_TRIPWP2 LOW-4) and S9 had its chance to escalate.
+                            * s9_verify_elapsed_s only advances while K4 is reported
+                            * de-energized, so a relay that never opens never releases the hold. */
+        if (state->s9_verify_elapsed_s < effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT)) {
+            return true;
+        }
+        /* REVIEW_TRIPWP2 MED-1: while TEST is latched the tick runs only the tripped path, so
+         * every other guard's debounce is frozen. A clear must therefore also refuse while any
+         * real guard's immediate condition holds right now, so the test trip never masks a real
+         * one. (S9 is not listed: it escalates by itself in the tripped path.) */
+        return test_trip_masks_real_condition(cfg, in, state);
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
         return s5_bad_read_now(in);
     case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
@@ -199,48 +263,8 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                 * this level; refusing here never loosens the guard). */
         /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
         return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || in->tc_c > cfg->abs_max_temp_c);
-    case SAFETY_TRIP_RATE: { /* S8 -- the window that tripped (baseline + elapsed are still in
-                              * `state`, this runs before safety_guards_clear()) measured
-                              * against the CURRENT reading still exceeds the rate. A cooled
-                              * kiln gives a smaller or negative delta and the clear is granted. */
-        if (cfg->max_rate_c_per_min <= 0.0f) {
-            return false;
-        }
-        if (!in->tc_valid) { /* review saftyfx6 F4: unknown reading refuses */
-            return true;
-        }
-        /* Review saftyfx6 F2 + saftyfx7 MED-1: a grant is decided only from a
-         * COMPLETED full post-trip window (s8_post_windows_done), never from a
-         * partial one alone -- a few seconds of TC noise can fake a plateau on
-         * a kiln still rising fast. Until the first full window completes the
-         * frozen tripping window decides (refuses while it exceeds the limit).
-         * Once a full window exists, refuse if EITHER the last full rate OR the
-         * partial window now accumulating (>= S8_POST_MIN_S) is over the limit. */
-        if (state->s8_post_windows_done == 1u) {
-            /* review s8clrfx LOW-1: a grant needs TWO consecutive full post
-             * windows at or under the limit (mirrors the trip streak), so one
-             * outlier anchor cannot grant. After only one, refuse. */
-            return true;
-        }
-        if (state->s8_post_windows_done >= 2u) {
-            if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min ||
-                state->s8_post_prev_rate_c_per_min > cfg->max_rate_c_per_min) {
-                return true;
-            }
-            if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
-                float m = state->s8_post_elapsed_s / 60.0f;
-                if (((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min) {
-                    return true;
-                }
-            }
-            return false;
-        }
-        if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
-            float elapsed_min = state->s8_window_elapsed_s / 60.0f;
-            return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
-        }
-        return false;
-    }
+    case SAFETY_TRIP_RATE: /* S8 -- see s8_clear_refuse(); strict = a real RATE trip is latched */
+        return s8_clear_refuse(cfg, in, state, true);
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
         return in->context_valid && cfg->tc_placement_valid &&
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
@@ -448,7 +472,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
          * clear refusal in guard_condition_still_immediate() is bounded in time.
          * Only used by the clear check; never touches the trip path. */
-        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid) {
+        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid && !isnan(in->tc_c)) {
             if (!state->s8_post_active) {
                 state->s8_post_active = true;
                 state->s8_post_start_c = in->tc_c;

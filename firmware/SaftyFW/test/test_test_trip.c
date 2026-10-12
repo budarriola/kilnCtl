@@ -155,6 +155,44 @@ static void scan_wiring(void)
         TEST_CHECK(has(tt, len, "if (outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED) {"),
                    "latch requested only for ACCEPTED");
     }
+
+    /* REVIEW_TRIPWP2 MED-2 (a)(b): the main loop body must refresh the F6 grace timer under the
+     * known-version condition and poll the test-trip reply. */
+    const char *loop = function_body(lt, "static void link_task_fn(", &len);
+    TEST_CHECK(loop != NULL, "link_task_fn found");
+    if (loop) {
+        const char *cond = strstr(loop, "if (s_peer_announce.version != 0u) {");
+        const char *refresh = strstr(loop, "s_last_peer_known_ms = link_task_now_ms();");
+        TEST_CHECK(cond != NULL && refresh != NULL && cond < refresh && (size_t)(refresh - cond) < 120u &&
+                       (size_t)(refresh - loop) < len,
+                   "F6: loop refreshes s_last_peer_known_ms only while the peer version is known");
+        TEST_CHECK(has(loop, len, "link_task_poll_test_trip_reply();"), "loop polls the TEST_TRIP_RESULT reply");
+    }
+    TEST_CHECK(strstr(lt, "s_last_peer_known_ms = link_task_now_ms(); // F6: the 30 s unknown-peer grace runs from boot") != NULL,
+               "F6: grace timer initialised at start");
+    /* (c): exactly one request site in the whole file, inside the ACCEPTED block of the handler. */
+    {
+        size_t count = 0;
+        for (const char *q = lt; (q = strstr(q, "safety_core_request_test_trip()")) != NULL; q += 10) {
+            count++;
+        }
+        TEST_CHECK(count == 1u, "exactly one safety_core_request_test_trip() call in link_task.c");
+        const char *h = function_body(lt, "static void link_task_handle_test_trip(", &len);
+        if (h) {
+            const char *acc = strstr(h, "if (outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED) {");
+            const char *req = strstr(h, "safety_core_request_test_trip()");
+            const char *refused = strstr(h, "\"refused\");");
+            TEST_CHECK(acc && req && refused && acc < req && req < refused,
+                       "the request sits inside the ACCEPTED block, before the generic refusal path");
+            TEST_CHECK(has(h, len, "s_test_trip_state = tt_state_before;") &&
+                           has(h, len, "outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;"),
+                       "LOW-3: queue-busy restores dedup/rate state and does not claim ALREADY_TRIPPED");
+        }
+        const char *pl = function_body(lt, "static void link_task_poll_test_trip_reply(", &len);
+        TEST_CHECK(pl != NULL && has(pl, len, "reason == SAFETY_TRIP_TEST"), "LOW-1: ACCEPTED requires reason == TEST");
+        TEST_CHECK(h != NULL && strstr(h, "KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, s_tt_accepted_seq") != NULL,
+                   "LOW-2: DUPLICATE replays ACCEPTED with the recorded seq");
+    }
     TEST_CHECK(strstr(lt, "case LINK_FRAME_TEST_TRIP_CMD:") != NULL, "0x2E dispatched");
     const char *cl = function_body(lt, "static void link_task_handle_clear_trip(", &len);
     TEST_CHECK(cl != NULL, "clear handler found");

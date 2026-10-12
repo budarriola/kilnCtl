@@ -309,6 +309,7 @@ static uint8_t s_boot_id = 0;
 // unknown" is now - this, whichever site forgot the version. Initialised at
 // boot (link_task_start) so the 30 s fallback is measured from boot.
 static uint32_t s_last_peer_known_ms = 0;
+static uint8_t s_tt_accepted_seq = 0; // trip_seq answered for the last ACCEPTED test trip (0 = unknown)
 
 // TEST_TRIP state (docs/TEST_TRIP_PLAN.md section 4): acceptance/rate-limit
 // memory, plus the reply burst. The reply is non-blocking: an ACCEPTED reply
@@ -1645,15 +1646,17 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
     }
     safety_trip_t trip_reason = SAFETY_TRIP_NONE;
     safety_core_get_diag_status(&trip_reason, NULL, NULL, NULL);
+    const link_test_trip_state_t tt_state_before = s_test_trip_state;
     uint8_t outcome = link_frame_decide_test_trip(
         &s_test_trip_state, link_task_now_ms(), msg.magic, msg.request_id, msg.pico_boot_id, s_boot_id,
         s_peer_announce.version, update_task_transfer_active(), trip_reason != SAFETY_TRIP_NONE);
     if (outcome == KILNLINK_TEST_TRIP_OUTCOME_DUPLICATE) {
-        // Same request re-sent: answer the SAME way again (ACCEPTED, with the seq if known).
+        // Same request re-sent: answer the SAME way again -- ACCEPTED with the seq recorded
+        // when the original was answered (REVIEW_TRIPWP2 LOW-2: never the current trip_seq,
+        // which may belong to a later, real trip). While the original is still waiting for
+        // its seq, its own reply covers it.
         if (!s_tt_waiting_seq) {
-            uint8_t seq = 0;
-            (void)safety_core_get_trip_event(&seq, NULL, NULL, NULL, NULL);
-            link_task_arm_test_trip_reply(msg.request_id, outcome, seq);
+            link_task_arm_test_trip_reply(msg.request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, s_tt_accepted_seq);
         }
         return;
     }
@@ -1661,8 +1664,11 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         uint8_t base = 0;
         (void)safety_core_get_trip_event(&base, NULL, NULL, NULL, NULL);
         if (!safety_core_request_test_trip()) {
-            // Queue missing or a request already pending: nothing was latched.
-            outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+            // Queue missing or a request already pending: nothing was latched. Do not charge
+            // the dedup / rate state for a request that never happened (REVIEW_TRIPWP2 LOW-3),
+            // and do not claim ALREADY_TRIPPED: a request is already pending, i.e. rate-limited.
+            s_test_trip_state = tt_state_before;
+            outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;
             log_task_log(LOG_LEVEL_WARN, "test_trip", "refused, safety_core request queue busy");
             link_task_arm_test_trip_reply(msg.request_id, outcome, 0u);
             return;
@@ -1689,9 +1695,15 @@ static void link_task_poll_test_trip_reply(void)
         bool have = safety_core_get_trip_event(&seq, &reason, NULL, NULL, NULL);
         if (have && seq != s_tt_seq_base) {
             s_tt_waiting_seq = false;
-            link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, seq);
+            // REVIEW_TRIPWP2 LOW-1: only a TEST latch is "your test trip"; a real guard that
+            // won the race is reported as already tripped (with its seq), never as ACCEPTED.
+            uint8_t o = (reason == SAFETY_TRIP_TEST) ? KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED
+                                                     : KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+            s_tt_accepted_seq = seq;
+            link_task_arm_test_trip_reply(s_tt_reply_request_id, o, seq);
         } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
             s_tt_waiting_seq = false;
+            s_tt_accepted_seq = 0u;
             link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
         }
     }
