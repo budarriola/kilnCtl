@@ -316,7 +316,7 @@ static uint32_t s_last_peer_known_ms = 0;
 #define LINK_TEST_TRIP_REPLY_COPIES      3u
 #define LINK_TEST_TRIP_REPLY_PERIOD_MS   40u
 #define LINK_TEST_TRIP_SEQ_WAIT_MS       300u
-static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u};
+static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u, 0u, 0u};
 static bool s_tt_waiting_seq = false;      // ACCEPTED, waiting for the latch to show a new trip_seq
 static uint8_t s_tt_seq_base = 0;
 static uint32_t s_tt_wait_deadline_ms = 0;
@@ -3604,7 +3604,7 @@ bool link_task_start(void)
     s_degraded_no_context = false;
     link_peer_announce_clear(&s_peer_announce); // version 0 = unknown until this boot's own ANNOUNCE_VERSION arrives
     s_last_peer_known_ms = link_task_now_ms(); // F6: the 30 s unknown-peer grace runs from boot
-    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u};
+    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u, 0u, 0u};
     s_tt_waiting_seq = false;
     s_tt_reply_pending = 0u;
     s_msg_index = 0;

@@ -23,7 +23,7 @@ static uint8_t decide(link_test_trip_state_t *st, uint32_t now, uint8_t magic, u
 static void test_decide_test_trip(void)
 {
     TEST_SECTION("TEST_TRIP acceptance (plan section 4.1)");
-    link_test_trip_state_t st = {false, 0u, 0u};
+    link_test_trip_state_t st = {false, 0u, 0u, 0u, 0u};
 
     TEST_CHECK(link_frame_trip_mask_for_reason(SAFETY_TRIP_TEST) == 0x0008u, "reason 4 mask is 0x0008");
     TEST_CHECK(decide(&st, 100, 0x00, 1, OWN_BOOT, 18, false, false) == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_BAD_FRAME,
@@ -54,7 +54,7 @@ static void test_decide_test_trip(void)
     TEST_CHECK(decide(&st, 11001, MAGIC, 9, OWN_BOOT, 18, false, true) == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED,
                "tripped check outranks the rate limit");
     /* Tick-counter wrap: 32-bit ms subtraction stays correct. */
-    link_test_trip_state_t w = {true, 0xFFFFFF00u, 3u};
+    link_test_trip_state_t w = {true, 0xFFFFFF00u, 3u, 0u, 0u};
     TEST_CHECK(decide(&w, 0x100u, MAGIC, 4, OWN_BOOT, 18, false, false) == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT,
                "rate limit survives ms wrap");
 }
