@@ -6191,6 +6191,16 @@ static void test_delete_rev_unknown_is_409(void)
     TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL, "PROFILESFX9 MED-1: names scope=profiles");
     TEST_CHECK(strstr(s_last_sendstr, "does not clear it\"}") != NULL, "PROFILESFX9 MED-1: profile body not truncated, says scope kiln does not clear it");
     TEST_CHECK(strstr(s_last_sendstr, "or a factory reset (scope kiln)") == NULL, "PROFILESFX9 MED-1: never offers scope kiln as the cure");
+    /* PROFILESFX9 LOW-1: the generic (non-profile) text keeps scope kiln as its own remedy, as a separate clause. */
+    {
+        httpd_req_t greq;
+        memset(&greq, 0, sizeof(greq));
+        s_last_sendstr[0] = '\0';
+        (void)cfg_fs_http_persist_failed_state(&greq, true, ESP_ERR_INVALID_STATE, -1);
+        TEST_CHECK(strstr(s_last_sendstr, "and preferences; alternatively use a factory reset (scope kiln)\"}") != NULL,
+                   "PROFILESFX9 LOW-1: generic text separates the factory reset from the format's erase list");
+        TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") == NULL, "generic text does not name the profile scope");
+    }
     s_profile_rev_unknown[8] = false;
 }
 
