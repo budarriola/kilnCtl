@@ -3024,7 +3024,9 @@ class Lcd19SelfSeedTest(unittest.TestCase):
 
     def test_right_pin_keypad_closed_no_confirm_is_fail_with_reason(self):
         # MED-1 / P2: the keypad closes after the right PIN and no Start/Cancel
-        # confirm follows (e.g. granted role below min_role).
+        # confirm follows. Causes: firmware defect, confirm OOM, LCD session
+        # timeout, forced relock after a policy/credential change, or
+        # network_manage (not a role shortfall: Start needs the lowest role).
         def closes(u):
             u._state = "idle"
             u._entry = ""
@@ -3117,6 +3119,55 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         srv._touch = t2
         self.assertIsNone(C._lcd19_wake_if_blanked({"srv": srv, "_sleep": lambda s: None}))
         self.assertEqual(t2.injected, [])
+
+    def _wake_touch(self, **fields):
+        from kilnctrl import devices_touch as DT  # noqa
+        from types import SimpleNamespace as NS
+        class T:
+            def __init__(s):
+                s.injected = []
+            def get_state(s):
+                return NS(idle_ms=0, **fields)
+            def inject(s, x, y, pressed):
+                s.injected.append((x, y, pressed))
+        t = T()
+        srv = FakeSrvFull(FakeUiTest(page="home", targets=_HOME_TARGETS), touch=t)
+        r = C._lcd19_wake_if_blanked({"srv": srv, "_sleep": lambda s: None})
+        return r, t
+
+    def test_wake_taps_for_off_and_error_hold(self):
+        from kilnctrl import devices_touch as DT
+        # REVIEW_LCD19FX3 LOW-1 (X6): both states swallow the touch.
+        for ps in (DT.TOUCH_POWER_STATE_OFF, DT.TOUCH_POWER_STATE_ERROR_HOLD):
+            r, t = self._wake_touch(power_state=ps, screen_on=False)
+            self.assertTrue(len(t.injected) >= 2, ps)
+
+    def test_wake_never_taps_when_on_or_unreadable(self):
+        from kilnctrl import devices_touch as DT
+        r, t = self._wake_touch(power_state=DT.TOUCH_POWER_STATE_ON, screen_on=True)
+        self.assertIs(r, False)
+        self.assertEqual(t.injected, [])
+        r, t = self._wake_touch(power_state=None, screen_on=None)
+        self.assertIsNone(r)
+        self.assertEqual(t.injected, [])
+
+    def test_wake_unknown_future_power_state_taps_failsafe(self):
+        # INFO-3: an unknown value is treated as not ON, so it taps. On an
+        # awake panel that lands on the keypad backdrop and cancels the
+        # keypad, which fails safe (never starts a firing). Pinned as such.
+        r, t = self._wake_touch(power_state=99, screen_on=True)
+        self.assertTrue(len(t.injected) >= 2)
+
+    def test_pin_keypad_ok_on_short_entry_is_noop(self):
+        # REVIEW_LCD19FX3 LOW-2 (X12): OK with <4 digits changes nothing.
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="1235")
+        ui.click_by_name("Start")
+        for d in "12":
+            ui.click_by_name(d)
+        before = (ui._state, ui._entry, ui._label, ui._granted)
+        ui.click_by_name("OK")
+        self.assertEqual((ui._state, ui._entry, ui._label, ui._granted), before)
+        self.assertNotEqual(ui._label, "Wrong PIN")
 
     def test_wrong_pin_cleared_keypad_without_label_is_inconclusive(self):
         # LOW-4: a re-shown keypad also has empty dots; no label means no proof.

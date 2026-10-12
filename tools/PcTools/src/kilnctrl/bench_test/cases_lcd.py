@@ -3773,8 +3773,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                         right_pin_started = False
                                     elif names and "OK" not in names and "Cancel" not in names:
                                         # MED-1: keypad closed and no Start/Cancel confirm
-                                        # followed: the right PIN did not start the firing
-                                        # (e.g. granted role below min_role). Firmware defect.
+                                        # followed: the right PIN did not start the firing.
+                                        # Start needs the lowest role (USER), so a role
+                                        # shortfall is not a cause. Real causes: a firmware
+                                        # defect, confirm OOM, LCD session timeout, a forced
+                                        # relock after a policy/credential change, or
+                                        # network_manage closing the overlay. The judge has no
+                                        # signal for the last four, so all FAIL (INFO-2).
                                         right_pin_started = False
                                         state["right_pin_outcome"] = "closed_no_confirm"
                                     else:
