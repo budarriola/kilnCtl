@@ -200,7 +200,8 @@ static hal_status_t favorites_read_nvs(profiles_slot_bitmap_t *user, uint32_t *b
     return HAL_OK;
 }
 
-/* Set when RAM was changed but the write failed (audit L1): a retry that finds
+/* Legacy (audit L1): RAM used to change before the write; since PROFILESFX4 LOW-B it is published only after a
+ * successful commit, so this stays false. Kept so a retry that finds
  * "no change" against RAM must still write. Guarded by s_save_lock. */
 static bool s_fav_dirty = false;
 /* Set when the user mask could not be resolved at start (failed NVS load, no cfg file): profiles_favorites_set()
@@ -342,7 +343,6 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         changed = (updated != cur_builtin);
         cur_builtin = updated;
     }
-    fav_publish(&cur_user, cur_builtin);
 
     if (!changed && !s_fav_dirty) {
         /* No change -- nothing to write. Saying OK here keeps an unfavorite
@@ -359,8 +359,9 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     esp_err_t err = pref_cfg_fs_commit(PROFILES_FAVORITES_FILE_PATH, &item, sizeof(item), new_rev, "profile favorites");
     if (err == ESP_OK) {
         s_fav_rev = new_rev;
+        fav_publish(&cur_user, cur_builtin); /* PROFILESFX4 LOW-B: RAM changes only once the commit succeeded */
     }
-    s_fav_dirty = (err != ESP_OK);
+    s_fav_dirty = false; /* a refused/failed commit leaves RAM equal to the file: nothing to retry */
     cfg_save_lock_give(&s_save_lock);
     return err;
 }

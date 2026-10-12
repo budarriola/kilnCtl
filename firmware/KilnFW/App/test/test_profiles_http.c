@@ -2271,13 +2271,49 @@ static void test_favorites_unreadable_file_gets_generic_409(void)
     s_last_sendstr[0] = '\0';
     (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
     TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
-    TEST_CHECK(strstr(s_last_sendstr, "reboot") != NULL && strstr(s_last_sendstr, "cfg format") != NULL,
-               "text says a reboot retries and a cfg format clears it");
-    TEST_CHECK(strstr(s_last_sendstr, "re-reads it each time") == NULL, "no wrong 'retry now' advice");
-    TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") == NULL, "does not send the operator to scope=profiles");
+    TEST_CHECK(strstr(s_last_sendstr, "cfg format") != NULL, "text says a cfg format clears it");
+    TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") != NULL && strstr(s_last_sendstr, "scope=all") != NULL,
+               "PROFILESFX4 LOW-A: names scope=profiles / scope=all, which delete prof_fav.bin");
+    TEST_CHECK(strstr(s_last_sendstr, "scope kiln does not") != NULL, "says scope kiln does not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "reason\":\"a stored setting") == NULL, "not the generic scope-kiln text");
     cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
     pref_cfg_fs_clear_rev_unknown_for_test();
     cfg_fs_degraded_clear_for_test();
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_refused_commit_leaves_ram_unchanged(void)
+{
+    TEST_SECTION("profile favorite POST -- PROFILESFX4 LOW-B: legacy NVS adopted + unreadable file, refused set leaves RAM unchanged");
+    fuzz_small_setup();
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "favorite 2 saved to the cfg file");
+    /* A valid legacy NVS copy (favorite 2 only) so the unreadable file resolves via NVS adoption. */
+    profiles_slot_bitmap_t u;
+    profiles_slot_bitmap_from_u32(&u, 0);
+    profiles_slot_bitmap_set(&u, 2);
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, "prof_favusr", &u, sizeof(u));
+    nvs_commit(h);
+    nvs_close(h);
+    cfg_fs_test_inject_read_error(PROFILES_FAVORITES_FILE_PATH, ESP_FAIL, 64);
+    (void)profiles_favorites_start();
+    TEST_CHECK(pref_cfg_fs_rev_unknown(PROFILES_FAVORITES_FILE_PATH), "file is rev-unknown");
+    TEST_CHECK(profiles_favorites_is(2), "adopted NVS favorite 2 is shown");
+    TEST_CHECK(!profiles_favorites_is(3), "3 is not a favorite yet");
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_ERR_INVALID_STATE, "set refused on the unreadable file");
+    TEST_CHECK(!profiles_favorites_is(3), "refused commit did not publish favorite 3");
+    TEST_CHECK(profiles_favorites_is(2), "favorite 2 unchanged");
+    TEST_CHECK(profiles_favorites_set(2, false) == ESP_ERR_INVALID_STATE, "unfavorite refused too");
+    TEST_CHECK(profiles_favorites_is(2), "refused unfavorite left favorite 2 in RAM");
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_degraded_clear_for_test();
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
     (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
     (void)profiles_favorites_start();
 }
@@ -2549,8 +2585,8 @@ static void test_favorites_refused_when_unmounted(void)
     esp_err_t e = profiles_favorites_set(2, true);
     TEST_CHECK(e == ESP_ERR_INVALID_STATE, "set returns the unmounted error");
     TEST_CHECK(!fav_nvs_has_keys(), "and nothing was written to NVS as a fallback");
-    TEST_CHECK(profiles_favorites_is(2), "the change still applies live for this boot");
-    // Audit L1: RAM already holds the change, so a retry sees "no change" -- it must still try the write.
+    TEST_CHECK(!profiles_favorites_is(2), "PROFILESFX4 LOW-B: a refused save is not published to RAM");
+    // A retry still hits the same refusal (RAM and file agree, so it is not a silent ESP_OK no-op either).
     TEST_CHECK(profiles_favorites_set(2, true) == ESP_ERR_INVALID_STATE,
                "retry after a failed save is not a silent ESP_OK no-op");
     nvs_stub_reset();
@@ -6381,6 +6417,7 @@ void run_test_profiles_http(void)
     test_used_bitmap_18_byte_junk_converges_to_16();
     test_used_bitmap_1_byte_blob_is_wrong_size();
     test_favorites_refused_retry_keeps_published_masks();
+    test_favorites_refused_commit_leaves_ram_unchanged();
     test_favorites_unresolved_is_degraded_409_and_retry_heals();
     test_favorites_success_load_clears_unresolved_flag();
     test_favorites_unreadable_file_gets_generic_409();

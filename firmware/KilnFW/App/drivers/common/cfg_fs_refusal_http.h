@@ -47,6 +47,14 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
     "factory reset with scope kiln clears it -- only factory_reset scope=profiles (or scope=all) does, and that ALSO " \
     "erases every user profile"
 
+/* PROFILESFX4 LOW-A: prof_fav.bin itself is unreadable (rev-unknown). A cfg format erases the file, and factory reset
+ * scope profiles/all deletes it (profiles_scope_cfg_files.c kRootPaths); scope kiln does NOT touch it. */
+#define CFG_FS_FAVORITES_FILE_UNREADABLE_REASON \
+    "the favorites file could not be read, so saves to it are refused to avoid overwriting it; this request " \
+    "re-reads it each time, so retry (a reboot also retries); if it keeps failing, clear it with a cfg format " \
+    "(POST /api/cfgfs/format_confirm force_healthy=1) or factory_reset scope=profiles (or scope=all, which ALSO " \
+    "erases every user profile); factory reset scope kiln does not clear it"
+
 /* Post-failure response for a save that failed. 503 with the cfg text when the partition is unmounted; 409
  * store_unreadable_at_boot ONLY when the caller says THIS store is refused (`store_refused`) and the error is the
  * refusal's ESP_ERR_INVALID_STATE (persfx3 MED-2: a flash write error or OOM on another store is a 500, and a
@@ -92,13 +100,16 @@ static inline esp_err_t cfg_fs_http_persist_failed_for(httpd_req_t *req, const c
 /* Favorites-only form: same as cfg_fs_http_persist_failed_for(), but the 409 carries the favorites-specific reason. */
 static inline esp_err_t cfg_fs_http_persist_failed_favorites(httpd_req_t *req, const char *store, esp_err_t err)
 {
-    /* LOW-1: when the cfg FILE itself is unreadable (rev-unknown), only a reboot re-reads it and a cfg format
-     * erases it, so the favorites-key text would be wrong: fall through to the generic reason. */
-    if (cfg_fs_is_available() && cfg_fs_degraded_is(store) && err == ESP_ERR_INVALID_STATE &&
-        !pref_cfg_fs_rev_unknown(store)) {
+    /* PROFILESFX4 LOW-A: the cfg FILE itself unreadable (rev-unknown) has its own text: cfg format and scope
+     * profiles/all clear it, scope kiln does not. */
+    if (cfg_fs_is_available() && cfg_fs_degraded_is(store) && err == ESP_ERR_INVALID_STATE) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_FAVORITES_UNREADABLE_REASON "\"}");
+        if (pref_cfg_fs_rev_unknown(store)) {
+            httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_FAVORITES_FILE_UNREADABLE_REASON "\"}");
+        } else {
+            httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_FAVORITES_UNREADABLE_REASON "\"}");
+        }
         return ESP_OK;
     }
     return cfg_fs_http_persist_failed_for(req, store, err);
