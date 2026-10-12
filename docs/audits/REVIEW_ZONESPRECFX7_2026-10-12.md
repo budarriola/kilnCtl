@@ -47,7 +47,7 @@ and in test reach. The affected pytest files pass (158 passed).
   the firmware accepts. The client's `_format_scalar` already refused an empty string, so
   nothing that used to work stops working.
 
-## LOW-1: newly writable per-zone fields have no range check before the UART stage
+## LOW-1: newly writable per-zone fields have no range check before the UART stage [FIXED in zonesprecfx8, SHA_PLACEHOLDER]
 
 These values pass `_validate` (probe at 90511c413): `relay_type` 3 or -1, `progress_band_c`
 0.2 or 25, `coil_power_w` 0.05 or 2e5, `zone_type` 7, `hyst_c` -1, `min_on_s` -5, and
@@ -62,7 +62,7 @@ after the UART stage, as an unknown field, so this is not a regression.
 `zones_config_json.h` `#define`s the way `BoundsTest` pins the current four. Cover at least
 the new override keys and the `ON_OFF` fields.
 
-## LOW-2: the drift test cannot see macro-built keys or a per-zone omission
+## LOW-2: the drift test cannot see macro-built keys or a per-zone omission [FIXED in zonesprecfx8, SHA_PLACEHOLDER]
 
 `_emitted_keys()` matches only literal `\"name\":` strings. It finds 98 keys, so the `> 80`
 sanity floor holds, but it cannot see:
@@ -80,7 +80,7 @@ from one zone, or present only in a nested object, still passes. Negtest M16 rem
 templates. Pin `SRC_GROUP_NAMES` from source. Compare each per-zone key set against every
 zone in the fixture.
 
-## LOW-3: two behaviours added in beca47b9d have no test
+## LOW-3: two behaviours added in beca47b9d have no test [FIXED in zonesprecfx8, SHA_PLACEHOLDER]
 
 - M12: after read-back, `done[-1] = _uart_line(results)` refreshes the PID line. Deleting
   that line leaves `pid=ok` in the partial note even when read-back verification marked a
