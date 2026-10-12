@@ -51,6 +51,8 @@ const out = omit(['z0_driftperiod=', 'z0_kp=', 'z1_debounce=  ', 'z0_driftperiod
   'z0_k=', 'thermo_count=']);
 assert(out.join(',') === 'z0_kp=,z0_driftperiod=30,z0_name=,thermo_count=',
   'blank optional fields dropped, required blanks and set values kept: ' + out.join(','));
+assert(omit(['z0_coilpower=','z1_hystc= ','z0_minons=','z0_minoffs=','z0_coilpower=5']).join(',') === 'z0_coilpower=5',
+  'blank coilpower/hystc/minons/minoffs dropped (keep stored), set value kept');
 assert(/saveBtnEl\.disabled = true;[\s\S]*?omitBlankOptionalParams\(params\)[\s\S]*?fetch\('\/api\/zones'/.test(ZONES),
   'Save disables the button and filters params before the POST');
 assert(/\.then\(function \(r\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);\s*saveBtnEl\.disabled = false;/.test(ZONES), 'button re-enabled on response');

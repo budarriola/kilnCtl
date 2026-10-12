@@ -2704,9 +2704,11 @@ document.getElementById('relayCount').addEventListener('change', renderZones);
 
 /* Optional model/tuning fields: a blank value ("z0_driftperiod=") is "present" and used to fail the
    firmware's range parse with a misleading 400, so a blank optional field is left out of the POST.
-   An omitted field is NOT generally "keep the stored value" (zones_post_apply_body starts from a
-   memset tmp); only the guard thresholds and xzone are keep-stored on omit AND blank in
-   zones_http_post_parse.c. The 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
+   Omitting a field is "keep the stored value" only for the keys zones_http_post_parse.c omit-PRESERVES
+   (guard thresholds, xzone, tc/relay/zone type, failsafe, hystc/minons/minoffs, coilpower, model
+   k/tau/deadtime, fuzzy strength, the bands and caps, coupling cells); ZONE_OPTIONAL_KEY_RE lists exactly
+   the ones a blank input may drop, and test_zone_omit_preserved_drift.py pins the firmware side. Of those,
+   the 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
    refused client-side when blank (blankGuardKeys), never dropped, so a cleared field is shown to
    the operator and can never silently disable a thermal guard. */
 var ZONE_GUARD_BLANK_RE = /^z\d+_(xzone|wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
@@ -2745,7 +2747,7 @@ function guardFieldHidden(zi, suffix) {
   var wrap = el && el.closest('.heaterOnly');
   return !!(wrap && wrap.style.display === 'none');
 }
-var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|coilpower|hystc|minons|minoffs|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
 }

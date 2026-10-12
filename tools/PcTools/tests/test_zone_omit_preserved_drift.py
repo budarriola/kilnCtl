@@ -61,24 +61,33 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
         em = exact[-1]
         span = (block_start + em.start(), block_start + em.end())
         # `else if` chained onto this key's presence check (conditional default, BENCHFX5 X1)
-        if field not in _ALLOWED_RHS and re.search(r"\belse\s+if\b", block[:em.start()]):
+        # exempt fields may chain only the one literal `else if (have_legacy)` arm
+        elifs = re.findall(r"\belse\s+if\s*\(([^)]*)\)", block[:em.start()])
+        if any(c.strip() != "have_legacy" for c in elifs) or (elifs and field not in _ALLOWED_RHS):
             violations.append(f"{name}: `else if` in the omit branch chain")
-        fields_to_check.append((name, field, span))
-    for name, field, span in fields_to_check:
-        pat = re.compile(r"\bz->" + re.escape(field) + r"(?:\[\w+\])?\s*([-+*/|&]?)=(?!=)\s*([A-Za-z_]\w*)?")
+        fields_to_check.append((name, field, span, block_start))
+    for name, field, span, bstart in fields_to_check:
+        lhs = r"(?:\bz->|\(\*z\)\.)" + re.escape(field) + r"(?:\[[^\]]*\])?"
+        pat = re.compile(lhs + r"\s*([-+*/|&^%<>]*)=(?!=)\s*([^;]*);")
         for m in pat.finditer(whole):
             if span[0] <= m.start() < span[1]:
                 continue
-            if m.group(1):
-                violations.append(f"{name}: compound assignment to z->{field}")
-            elif m.group(2) in _ALLOWED_RHS.get(field, ()):
+            where = "after" if m.start() >= span[0] else "before"
+            # The key's own present branch (block start .. omit else) assigns the parsed value;
+            # that is legitimate unless it is conditioned on current_z (BENCHFX6 Y6).
+            if (where == "before" and m.start() >= bstart
+                    and "current_z" not in whole[bstart:m.start()]
+                    and not m.group(1) and field not in _ALLOWED_RHS):
                 continue
-            elif m.start() >= span[0]:
-                violations.append(f"{name}: later assignment to z->{field} after the omit branch")
-            elif field in _ALLOWED_RHS or m.start() >= 0:
-                # an assignment before its own omit branch: only exempt fields have legitimate ones
-                if field in _ALLOWED_RHS:
-                    violations.append(f"{name}: unexpected assignment to z->{field}")
+            rhs = m.group(2).strip()
+            if (not m.group(1) and re.fullmatch(r"[A-Za-z_]\w*", rhs)
+                    and rhs in _ALLOWED_RHS.get(field, ())):
+                continue
+            kind = "compound assignment" if m.group(1) else "assignment"
+            violations.append(f"{name}: {kind} to z->{field} {where} the omit branch (rhs {rhs!r})")
+        for m in re.finditer(r"\bmemset\(\s*&\s*" + lhs, whole):
+            if not (span[0] <= m.start() < span[1]):
+                violations.append(f"{name}: memset of z->{field} outside the omit branch")
     return preserved, defaulted, violations
 
 
@@ -150,7 +159,7 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertEqual(len(cls(ok + chr(10) + "z->foo = 0.0f;")[2]), 1)
         self.assertEqual(cls(ok + chr(10) + "if (z->foo == 1.0f) { y = 1; }")[2], [])
         # BENCHFX5: else-if default, compound assignment, override in a later block
-        self.assertEqual(len(cls("else if (current_z->t == 0u) { z->foo = 0.0f; } " + ok)[2]), 1)
+        self.assertTrue(any("else if" in v for v in cls("else if (current_z->t == 0u) { z->foo = 0.0f; } " + ok)[2]))
         self.assertEqual(len(cls(ok + chr(10) + "z->foo *= 0.0f;")[2]), 1)
         later = (blk("foo", ok) + chr(10) + 'snprintf(key, sizeof(key), "z%u_bar", i);' + chr(10)
                  + "if (zones_config_json_field_present(body, key)) { x = 1; }" + chr(10)
@@ -160,6 +169,25 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         tc = blk("tc_type", "else { z->tc_type = current_z->tc_type; }")
         self.assertEqual(_classify_full(tc + chr(10) + "z->tc_type = preserved_tc_type;")[2], [])
         self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = 5u;")[2]), 1)
+        # BENCHFX6 LOW-1/LOW-2: escape shapes and per-rule self-tests
+        self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = preserved_tc_type & 0u;")[2]), 1)  # Y1
+        self.assertEqual(len(_classify_full(chr(10).join(
+            [f'snprintf(key, sizeof(key), "z%u_tc_type", i);',
+             "if (zones_config_json_field_present(body, key)) { x = 1; }",
+             "else if (g == 3) { src = 1; }", "else { z->tc_type = current_z->tc_type; }"]))[2]), 1)  # Y2
+        self.assertEqual(_classify_full(chr(10).join(
+            ['snprintf(key, sizeof(key), "z%u_tc_type", i);',
+             "if (zones_config_json_field_present(body, key)) { x = 1; }",
+             "else if (have_legacy) { src = 1; }", "else { z->tc_type = current_z->tc_type; }"]))[2], [])
+        self.assertEqual(len(cls(ok + chr(10) + "memset(&z->foo, 0, sizeof(z->foo));")[2]), 1)  # Y3
+        self.assertEqual(len(cls(ok + chr(10) + "(*z).foo = 0.0f;")[2]), 1)  # Y4
+        self.assertEqual(len(cls("else { z->foo[j] = current_z->foo[j]; }" + chr(10)
+                                 + "z->foo[(i + 1u) % N] = 0.0f;")[2]), 1)  # Y5
+        self.assertEqual(len(cls("if (current_z->t == 0u) { z->foo = 0.0f; } else {" + chr(10) + "z->foo = 2.0f; }" + chr(10) + ok)[2]), 2)  # Y6 conditioned before span
+        self.assertEqual(cls("z->foo = parsed;" + chr(10) + ok)[2], [])  # the present branch is fine
+        self.assertEqual(len(cls("z->foo *= 0.0f;" + chr(10) + ok)[2]), 1)  # P1 compound before span
+        self.assertEqual(len(_classify_full("z->tc_type = other;" + chr(10) + tc)[2]), 1)  # P4
+        self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = other_ident;")[2]), 1)  # P6
         # indexed form must match on both sides
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[k]; }")[1], {"foo"})
