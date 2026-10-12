@@ -211,6 +211,7 @@
 // for exactly the frame that has no deadline riding on it, without making
 // the diagnostics stale on any timescale a human bench-watching them would
 // notice.
+/* Mirrored by KilnFW's SAFETY_LINK_DIAG_FRESH_MS (safety_link.h) = 2 x this + 500; change both together. */
 #define LINK_DIAG_TX_PERIOD_MS     2000
 // Frame E (SAFETY_CMD_POWER) cadence: "No guard reads any of this. It exists
 // to be displayed" (kilnlink_power.h) -- same reasoning as Frame B above, a

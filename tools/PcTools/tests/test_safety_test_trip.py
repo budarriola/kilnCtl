@@ -16,15 +16,21 @@ import urllib.error
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from kilnctrl import kilnlink_codec, mcp_server, safety_test_trip_http_client as cl  # noqa: E402
+from kilnctrl import kilnlink_codec, mcp_server, mcp_server_safety, safety_test_trip_http_client as cl  # noqa: E402
 
 
 def _diag(reason=0, mask=0, ever=True):
     return unittest.mock.MagicMock(ever_received=ever, trip_reason=reason, trip_mask=mask)
 
 
-def _run(post, diags, confirm=True):
+def _ev(seq=7, reason=4, ever=True):
+    return unittest.mock.MagicMock(ever_received=ever, last_seq=seq, trip_reason=reason)
+
+
+def _run(post, diags, confirm=True, event=None):
+    ev = event if event is not None else _ev(ever=False)
     with unittest.mock.patch.object(mcp_server._safety, "get_diag", side_effect=diags) as gd, \
+         unittest.mock.patch.object(mcp_server._safety, "get_trip_event", return_value=ev), \
          unittest.mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"), \
          unittest.mock.patch.object(cl, "post_test_trip", return_value=post) as pt, \
          unittest.mock.patch("time.sleep"):
@@ -60,6 +66,22 @@ class ToolTests(unittest.TestCase):
         with unittest.mock.patch("time.monotonic", side_effect=[0.0, 99.0, 99.0, 99.0]):
             out, _, _ = _run((200, {"ok": True, "trip_seq": 7}), [_diag(), _diag(6, 0x20)])
         self.assertTrue(out.startswith("FAILED VERIFY"))
+
+    def test_late_diag_confirmed_by_trip_event(self):
+        # TRIPFX4 INFO-2: DIAG still shows the old (untripped) state but TRIP_EVENT carries this call's
+        # trip_seq with reason 4 -> ok, not FAILED VERIFY.
+        out, _, _ = _run((200, {"ok": True, "trip_seq": 7}), [_diag(), _diag(0, 0)] , event=_ev(7, 4))
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertIn("TRIP_EVENT", out)
+
+    def test_trip_event_wrong_seq_or_reason_does_not_confirm(self):
+        for ev in (_ev(6, 4), _ev(7, 2)):
+            with unittest.mock.patch("time.monotonic", side_effect=[0.0, 99.0, 99.0, 99.0]):
+                out, _, _ = _run((200, {"ok": True, "trip_seq": 7}), [_diag(), _diag(0, 0)], event=ev)
+            self.assertTrue(out.startswith("FAILED VERIFY"), out)
+
+    def test_verify_window_covers_diag_period(self):
+        self.assertGreaterEqual(mcp_server_safety._TEST_TRIP_VERIFY_WINDOW_S, 4.5)
 
     def test_readback_right_reason_wrong_mask_fails(self):
         # WP3 review LOW-5: reason 4 but a real guard latched alongside (mask 0x28 != 0x08) must fail on the

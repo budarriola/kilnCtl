@@ -473,6 +473,9 @@ extern "C" {
  * the pure, host-testable comparison against this constant. */
 #define SAFETY_LINK_STALE_MS 1500u
 /* Freshness bound for a cached DIAG itself (two 2000 ms DIAG periods plus jitter); trip_is_test uses it. */
+/* INFO-1: 4500 = 2 x 2000 + 500, where 2000 mirrors the Pico's LINK_DIAG_TX_PERIOD_MS
+ * (firmware/SaftyFW/src/tasks/link_task.c:214). Tolerates one lost DIAG. If the Pico period changes,
+ * revisit this bound (a period above 2250 ms makes trip_is_test flap false on a healthy link). */
 #define SAFETY_LINK_DIAG_FRESH_MS 4500u
 
 /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: 30 s of continued silence aborts a

@@ -3319,6 +3319,43 @@ static void test_tripfx3_lowa_second_quick_reboot_within_note_window_counted(voi
     s_fake_tick_count = 0;
 }
 
+static void test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear(void)
+{
+    TEST_SECTION("TRIPFX4 LOW-2 -- safety_link_get_status() reports diag_frame_age_ms as ms since the DIAG "
+                 "(1 tick = 1 ms, not /100, not 0), 0 before any DIAG, and a Pico reboot clears diag_since_reboot");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    link.initialized = true; // safety_link_get_status() refuses ESP_ERR_INVALID_STATE otherwise
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status before any DIAG");
+    TEST_CHECK(!st.diag_ever_received && st.diag_frame_age_ms == 0u, "no DIAG yet -> age 0");
+    s_fake_tick_count = 5000u;
+    v3_apply_diag_uptime(&link, 600000u, 42u);
+    v3_apply_diag_uptime(&link, 601000u, 42u);
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status right after DIAG");
+    TEST_CHECK(st.diag_ever_received && st.diag_since_reboot, "DIAG latched, since_reboot true");
+    TEST_CHECK(st.diag_frame_age_ms == 0u, "age 0 on the tick the DIAG arrived");
+    s_fake_tick_count += 3700u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status 3700 ticks later");
+    TEST_CHECK(st.diag_frame_age_ms == 3700u, "age is exactly the elapsed ticks (3700 ms), not scaled, not 0");
+    s_fake_tick_count += 1000u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "get_status 4700 ticks later");
+    TEST_CHECK(st.diag_frame_age_ms == 4700u, "age keeps growing past SAFETY_LINK_DIAG_FRESH_MS");
+    /* Pico reboot (new boot id): since_reboot must read false until the next DIAG. */
+    v3_apply_diag_uptime(&link, 1500u, 43u);
+    TEST_CHECK(link.cached.pico_reboot_seq > 0u, "setup: reboot counted");
+    safety_link_status_t st2;
+    memset(&st2, 0, sizeof(st2));
+    /* The reboot DIAG itself re-latches since_reboot; check the note directly on a reboot with no DIAG after. */
+    safety_note_pico_reboot_locked(&link);
+    TEST_CHECK(safety_link_get_status(&link, &st2) == ESP_OK, "get_status after reboot note");
+    TEST_CHECK(!st2.diag_since_reboot, "Pico reboot clears diag_since_reboot until the next DIAG");
+    s_fake_tick_count = 0;
+}
+
 static void test_wp3_info5_test_trip_result_counted_in_stats(void)
 {
     TEST_SECTION("WP3 review INFO-5 -- the stats switch counts TEST_TRIP_RESULT (0x2F) and records its length");
@@ -3987,6 +4024,7 @@ int main(void)
     test_v3_diag_caches_boot_id_and_clear_is_bound();
     test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag();
     test_tripfx3_lowa_second_quick_reboot_within_note_window_counted();
+    test_tripfx4_low2_diag_age_through_get_status_and_reboot_clear();
     test_wp3_info5_test_trip_result_counted_in_stats();
     test_send_test_trip();
     test_low4_link_down_invalidates_uptime_baseline();
