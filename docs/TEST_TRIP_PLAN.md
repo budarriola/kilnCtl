@@ -400,6 +400,8 @@ Behaviour of a mixed pair (none of these is an unsafe state):
 | 17 | 18 | not sent (no route) | 4-byte; the Pico sends 31-byte DIAG |
 | 16 or older | 18 | not sent | 3-byte; legacy path |
 
+The update gates compare the protocol version by exact equality (17 vs 18), so a mixed pair is only a transient state of the dual reflash, not a supported steady state.
+
 Procedure (the bench is pre-authorised; memory
 `project_owner_decision_bench_free_use_no_usb_recovery`):
 
@@ -535,7 +537,7 @@ run in parallel; WP4 needs WP3's tool; WP5 runs last and needs the bench.
 |---|---|---|---|
 | **WP1** CommonFW wire (DONE on dev 2026-10-10; WP3 note: `SAFETY_CMD_TEST_TRIP*` defines are not in `uart_task_ids.h`, because adding them forces a `UART_PROTOCOL_VERSION` bump; use `KILNLINK_TEST_TRIP_CMD` / `KILNLINK_TEST_TRIP_RESULT_CMD`) | `firmware/CommonFW` | Version 18 and comments. New `kilnlink_test_trip.h/.c` and `kilnlink_test_trip_result.h/.c`. DIAG V3 (32 B) and CLEAR_TRIP V3 (5 B) codecs. Codec host tests with frozen vectors. PcTools `protocol.py` ids and `kilnlink_codec.py` decode. Recovery image compile check. LINK_PROTOCOL.md sections. | none |
 | **WP2** SaftyFW (DONE on dev 2026-10-10: reason 4, TEST_TRIP handler with result enum and 3-copy reply, F6 boot_id clear binding, DIAG V3 for 18+ peers; host-tested and negtested; ESP side is WP3) | `firmware/SaftyFW` | - | WP1 |
-| **WP3** KilnFW link, HTTP, MCP | `firmware/KilnFW`, `tools/PcTools` | `safety_link_send_test_trip()`. DIAG V3 cache with the boot_id reset on a Pico boot_id change. V3 clear build. Word tables (3 copies) and the sync check. `POST /api/safety/test_trip` and the route-tier row. Web banner badge and `trip_is_test`. LCD words. Executor parity test. `safety_test_trip` MCP tool and tests. CLAUDE.md and MCP_SERVERS.md counts. | WP1 |
+| **WP3** KilnFW link, HTTP, MCP (DONE on dev 2026-10-11: `safety_test_trip(confirm=False, host=None)`, `POST /api/safety/test_trip`, DIAG V3 and CLEAR_TRIP V3, boot_id reset, `trip_is_test`; host-tested and negtested) | `firmware/KilnFW`, `tools/PcTools` | `safety_link_send_test_trip()`. DIAG V3 cache with the boot_id reset on a Pico boot_id change. V3 clear build. Word tables (3 copies) and the sync check. `POST /api/safety/test_trip` and the route-tier row. Web banner badge and `trip_is_test`. LCD words. Executor parity test. `safety_test_trip` MCP tool and tests. CLAUDE.md and MCP_SERVERS.md counts. | WP1 |
 | **WP4** Bench cases | `tools/PcTools/.../bench_test` | AX-T02 conversion; SP-12, SP-13, SP-14, HP-09 with judges; registry and ratchet; fake-board tests; BENCH_TEST_SYSTEM_PLAN rows. | WP3 (tool name and route contract) |
 | **WP5** Coordinated reflash and bench run | bench | The sec 7 procedure, the smoke test, then `bench_test_run` for suites aux and safety plus HP-09. Record in `docs/BENCH_TEST_LOG.md`, mark F6 fixed in the audits, update ROADMAP. | WP2, WP3, WP4 on dev |
 
