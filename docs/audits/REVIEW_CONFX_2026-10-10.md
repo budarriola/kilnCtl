@@ -41,6 +41,8 @@ Real tree unchanged; copies removed.
 
 ### HIGH-1 (pre-existing, outside the range): flash-verify tests send real HTTP, including one POST, to the bench board
 
+**FIXED: autouse `_no_outbound_network` guard in conftest.py (raises and records; teardown fails the test even if the caller swallows it; loopback and `live_bench` allowed), `test_network_guard.py`, and mocks in the flash-verify, preflight, heat, wifi and profile_live tests.**
+
 `_idle_shared_link_stub` covers the UART link only (`_link.send`, plus the exec, autotune and wifi reads).
 None of the shared-link clients reach the board except through `_link.send`. The other link methods,
 `connect`, `disconnect` and `status`, are only called from `mcp_server_link.py` tools and
@@ -72,6 +74,8 @@ boot_guard calls in the flash-verify tests.
 
 ### MED-1: id-less profile content matching can pair two backup entries with one board entry (false OK)
 
+**FIXED: id-less profiles claim board entries (seeded with id-matched entries); case 3 uses a pre-import export taken only when the backup has id-less profiles. Tests for all three cases.**
+
 `_backup_import_readback_problem()` takes the first re-exported profile whose content matches,
 using `next(e for e in g ...)`. It does not remove that entry from later matches, and it ignores
 entries already claimed by an id-carrying backup entry. Run against `2f9aa19cc`, each of these
@@ -95,6 +99,8 @@ export, or report "cannot verify id-less profiles" as UNVERIFIED.
 
 ### LOW-1: the `bench_test_start` sweep exemption is unnecessary, and its comment is wrong
 
+**FIXED: exemption dropped, `bench_test_start` has the same override as `bench_test_run`.**
+
 The new comment says the refusal "arrives in the job's FAILED report". Since `de796cfa3` (toolfx8 T4),
 `bench_test_start` refuses an unconfirmed OTA/update run **synchronously** with `confirm is not True`,
 before any job exists (`mcp_server_bench_test.py:297-304`).
@@ -109,6 +115,8 @@ with the override and correct the comment. The cited test name is also not the s
 
 ### LOW-2: the idle autotune stub is still a bare `SimpleNamespace` with `state_name="IDLE"`
 
+**FIXED: idle autotune stub is a real `AutotuneStatus(state=0)`.**
+
 The same defect class as mcpfx4 HIGH-1 part 2 remains for autotune. The real
 `AutotuneStatus.state_name` is lowercase `"idle"` (`STATE_NAMES`), and the stub has no `zone`, `method`
 or other fields. Two gates compare `state_name` against lowercase sets:
@@ -119,6 +127,8 @@ result is a refusal, so this fails safe today. But the fixture docstring says th
 `AutotuneStatus(state=0, ...)`, as the commit now does for `ProfileExecStatus`.
 
 ### LOW-3: `_IMPORT_ONLY_KEYS` is accurate, but the legacy pair's effect is never verified
+
+**FIXED: the derived `coupling_c<neighbor>` cell is compared against `coupling_coeff`.**
 
 The list is accurate. A literal key diff of `backup_import.c` against `backup_export.c` and
 `backup_json.c` finds no other import-only field names. The remaining literals are `c0`/`c4` (the
@@ -136,7 +146,7 @@ not only under `zones`. That is harmless today, because no other section uses th
 
 ## INFO
 
-- **INFO-1 (pre-existing, real defect):** the full suite's one failure is
+- **INFO-1 (pre-existing, real defect):** the full suite's one failure is **FIXED earlier in 55f871ab1** (import from `mcp_server_control`).
   `test_bench_test_srv_tool_names::test_every_srv_attribute_exists_on_real_server`.
   `bench_test/cases_aux.py:472` calls `srv._zone_collateral_diff`, which is defined in
   `mcp_server_control.py` but not exported on `mcp_server`. AX-C03's `restore()` wraps the call in
