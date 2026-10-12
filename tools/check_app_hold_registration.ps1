@@ -30,23 +30,28 @@ foreach ($f in $files) {
         if ($asrt -eq 'false') { continue }
         if ($mask -match '^SAFETY_FAULT_SRC_(?!APP\b)\w+$') { continue }
         if ($mask -match '^[A-Za-z_]\w*$') {
-            # F5HOLDERFX2 LOW-2: a local variable is accepted only when EVERY assignment to it inside the
-            # enclosing function (=, |=, ternaries; declaration or later) is built solely from non-APP
-            # SAFETY_FAULT_SRC_* constants, ?, :, |, parentheses and condition identifiers that are not
-            # called. Any APP term, call (identifier followed by "("), or no assignment at all falls through
-            # to the registration requirement (fail loud).
+            # F5HOLDERFX2 LOW-2 / F5HOLDERFX3 LOW-3: a local variable is accepted only when EVERY use of it
+            # inside the enclosing function is safe: each assignment is plain "=" or "|=" (no +=, ^=, &=, ++,
+            # ...), no "&name" (address passed on), and each right-hand side is, after removing
+            # parenthesised "x == NAMED_CONSTANT" conditions, made ONLY of literal non-APP
+            # SAFETY_FAULT_SRC_* names and ? : | ( ). A bare variable/field operand, a macro, a call or
+            # anything else falls through to the registration requirement (fail loud).
             $fnStart = $s.LastIndexOf("`n{", $m.Index)
             if ($fnStart -lt 0) { $fnStart = 0 }
             $fnEnd = $s.IndexOf("`n}", $m.Index)
             if ($fnEnd -lt 0) { $fnEnd = $s.Length }
             $body = $s.Substring($fnStart, $fnEnd - $fnStart)
-            $arx = [regex]('(?<![\w.>])' + [regex]::Escape($mask) + '\s*(\|=|=(?!=))\s*([^;]+);')
+            $esc = [regex]::Escape($mask)
+            $arx = [regex]('(?<![\w.>])' + $esc + '\s*(\|=|\+=|-=|\^=|&=|\*=|/=|%=|<<=|>>=|=(?!=)|\+\+|--)\s*([^;]*);')
             $assigns = $arx.Matches($body)
             $allOk = ($assigns.Count -gt 0)
+            if ([regex]::IsMatch($body, '(?<!&)&\s*' + $esc + '\b') -or [regex]::IsMatch($body, '(\+\+|--)\s*' + $esc + '\b')) { $allOk = $false }
             foreach ($am in $assigns) {
+                if ($am.Groups[1].Value -ne '=' -and $am.Groups[1].Value -ne '|=') { $allOk = $false; continue }
                 $rhs = $am.Groups[2].Value
-                if ($rhs -notmatch 'SAFETY_FAULT_SRC_\w+' -or $rhs -match 'SAFETY_FAULT_SRC_APP\b' -or $rhs -match '\w\s*\(' -or
-                    $rhs -match '[^\w\s?:|()&!<>=.\-\[\]]') { $allOk = $false }
+                $rest = [regex]::Replace($rhs, '\(\s*[\w.>\-\[\]]+\s*(==|!=)\s*[A-Z][A-Z0-9_]*\s*\)', ' ')
+                $rest = [regex]::Replace($rest, '\bSAFETY_FAULT_SRC_(?!APP\b)[A-Z0-9_]+\b', ' ')
+                if ($rhs -notmatch 'SAFETY_FAULT_SRC_(?!APP\b)\w+' -or $rest -notmatch '^[\s?:|()]*$') { $allOk = $false }
             }
             if ($allOk) { continue }
         }

@@ -688,6 +688,8 @@ static bool g_stub_force_link_up = true;
 static int g_stub_link_calls = 0; /* mode 5 only: calls seen since the test armed it */
 static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INVALID_STATE), 3 = ESP_FAIL, 4 = NULL link (INVALID_ARG) */
 
+static bool g_stub_diag_tripped = false;      /* F5HOLDERFX3: the Pico DIAG reads TRIPPED ... */
+static uint16_t g_stub_diag_age_ms = 0;        /* ... with this age (fresh unless >= SAFETY_LINK_STALE_MS) */
 static bool s_test_bump_epoch_in_link = false; /* LOW-3: an all-off lands during every start-gate link read */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
@@ -703,6 +705,11 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
         if (out) memset(out, 0, sizeof(*out));
         /* mode 5 = up on the first call (the entry gate), down on every later one (commit recheck). */
         if (g_stub_link_mode == 5) g_stub_link_calls++;
+        if (out && g_stub_diag_tripped) {
+            out->diag_ever_received = true;
+            out->age_ms = g_stub_diag_age_ms;
+            out->diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+        }
         if (out) out->link_up = (g_stub_link_mode == 0) || (g_stub_link_mode == 5 && g_stub_link_calls <= 1);
         return ESP_OK;
     }
@@ -2977,6 +2984,48 @@ static const char *pe_last_occurrence(const char *hay, const char *needle)
     return last;
 }
 
+/* F5HOLDERFX3 LOW-4: copy of `code` without #if 0 ... (#else|#endif) regions, nesting-aware. */
+static char *pe_strip_if0_blocks(const char *code)
+{
+    size_t n = strlen(code);
+    char *out = (char *)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    int depth = 0, skip_depth = 0;
+    const char *line = code;
+    while (*line) {
+        const char *eol = strchr(line, '\n');
+        size_t len = eol ? (size_t)(eol - line) + 1 : strlen(line);
+        const char *t = line;
+        while (t < line + len && (*t == ' ' || *t == '\t')) t++;
+        bool keep = (skip_depth == 0);
+        if (*t == '#') {
+            t++;
+            while (*t == ' ' || *t == '\t') t++;
+            if (!strncmp(t, "if", 2)) {
+                depth++;
+                if (skip_depth == 0 && !strncmp(t, "if 0", 4) && (t[4] == '\0' || t[4] == ' ' || t[4] == '\n' || t[4] == '\r' || t[4] == '\t')) {
+                    skip_depth = depth;
+                    keep = false;
+                }
+            } else if (!strncmp(t, "else", 4) || !strncmp(t, "elif", 4)) {
+                if (skip_depth == depth) { skip_depth = 0; keep = false; }
+            } else if (!strncmp(t, "endif", 5)) {
+                if (skip_depth == depth) { skip_depth = 0; keep = false; }
+                depth--;
+            }
+        }
+        if (keep) { memcpy(out + o, line, len); o += len; }
+        line += len;
+    }
+    out[o] = '\0';
+    return out;
+}
+
+static int pe_count_in_range(const char *begin, const char *end, const char *needle);
+static void test_f5holderfx3_start_gate_pico_tripped(void);
+static void test_f5holderfx3_aux_tick_pico_gate(void);
+
 static void test_f5holderfx2_retry_placement_and_pico_gate(void)
 {
     TEST_SECTION("F5HOLDERFX2 LOW-1/3/4 -- retry is the last relay write of the RUNNING tick; other-relay ON survives; Pico TRIPPED gates starts");
@@ -3037,10 +3086,30 @@ static void test_f5holderfx2_retry_placement_and_pico_gate(void)
     char *src = profile_executor_c_read_source();
     TEST_CHECK(src != NULL, "could locate profile_executor.c");
     if (src) {
-        char *code = pe_strip_c_comments(src);
+        char *nocomment = pe_strip_c_comments(src);
         free(src);
-        const char *retry = code ? strstr(code, "io_segs_retry_on(pre_lock_pico_tripped);") : NULL;
+        char *code_all = nocomment ? pe_strip_if0_blocks(nocomment) : NULL;
+        free(nocomment);
+        /* F5HOLDERFX3 LOW-4: scope every scan to executor_task_entry()'s body (up to the next column-0 "}"). */
+        char *code = NULL;
+        const char *fn = code_all ? strstr(code_all, "void executor_task_entry(void *arg)") : NULL;
+        TEST_CHECK(fn != NULL, "found executor_task_entry()");
+        if (fn) {
+            const char *body_end = strstr(fn, "\n}");
+            size_t blen = body_end ? (size_t)(body_end - fn) : strlen(fn);
+            code = (char *)malloc(blen + 1);
+            memcpy(code, fn, blen);
+            code[blen] = '\0';
+        }
+        free(code_all);
+        TEST_CHECK(code && pe_count_in_range(code, code + strlen(code), "io_segs_retry_on(") == 1,
+                   "LOW-4: exactly one io_segs_retry_on( call in the tick body (a second, ungated retry goes red)");
+        const char *retry = code ? strstr(code, "io_segs_retry_on(") : NULL;
         TEST_CHECK(retry != NULL, "MUST GO RED if the executor loop stops calling io_segs_retry_on()");
+        TEST_CHECK(retry && strncmp(retry, "io_segs_retry_on(retry_pico_tripped);", 37) == 0,
+                   "LOW-2: the retry uses the under-lock re-sampled Pico state");
+        TEST_CHECK(code && strstr(code, "relay_authority_pico_tripped_fresh(&retry_st)") != NULL,
+                   "LOW-2: the Pico state is re-sampled under the lock before the retry");
         if (retry) {
             const char *tg = pe_last_occurrence(code, "thermal_guard_tick(");
             const char *eg = pe_last_occurrence(code, "escalate_guard_trip(");
@@ -3051,7 +3120,7 @@ static void test_f5holderfx2_retry_placement_and_pico_gate(void)
                        "LOW-1: retry comes after the thermal guards, guard escalation, aux tick and mode check "
                        "(a same-tick guard trip never has an ON write after it)");
             TEST_CHECK(give != NULL && (give - retry) < 400, "LOW-1: retry is before the lock is released");
-            char gate[200];
+            char gate[700];
             size_t n = (size_t)(retry - code) < sizeof(gate) - 1 ? (size_t)(retry - code) : sizeof(gate) - 1;
             memcpy(gate, retry - n, n);
             gate[n] = '\0';
@@ -12708,6 +12777,7 @@ static void run_test_aux_wp3(void)
     test_aux_start_refusals();
     test_aux_manual_toggle_handoff_at_start();
     test_aux_rule_drives_relay_on_and_off();
+    test_f5holderfx3_aux_tick_pico_gate();
     test_aux_disabled_mid_run_opens_once_and_stops_driving();
     test_aux_pause_holds_state_resume_continues();
     test_aux_off_on_every_end_path();
@@ -12758,6 +12828,7 @@ static void run_test_on_off_actuation(void)
     test_aux_apply_relay_failed_write_is_not_a_transition();
     test_aux_apply_relay_samples_epoch_before_gate();
     test_warm_replay_samples_epoch_before_ld01_recheck();
+    test_f5holderfx3_start_gate_pico_tripped();
     test_done_start_psram_alloc_failure_refuses_without_internal_fallback();
     test_on_off_zone_tick_every_run_ending_path_applies_failsafe();
     test_on_off_zone_tick_plain_pause_without_override_holds_last_state();
@@ -13638,6 +13709,75 @@ static int pe_count_in_range(const char *begin, const char *end, const char *nee
     int n = 0;
     for (const char *p = strstr(begin, needle); p && p < end; p = strstr(p + 1, needle)) n++;
     return n;
+}
+
+/* F5HOLDERFX3 LOW-1: the shared start gate refuses a fresh Pico TRIPPED; a stale/never-received DIAG does not
+ * (policy documented at relay_authority_pico_tripped_fresh()). Warm replay never drives ON while TRIPPED. */
+static void test_f5holderfx3_start_gate_pico_tripped(void)
+{
+    TEST_SECTION("F5HOLDERFX3 LOW-1 -- start gate refuses a fresh Pico TRIPPED; warm replay never drives ON");
+    char err[160] = {0};
+    bool saved_force = g_stub_force_link_up;
+    g_stub_force_link_up = true;
+    g_stub_link_mode = 0;
+
+    g_stub_diag_tripped = false;
+    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "Pico not tripped -> start allowed");
+    g_stub_diag_tripped = true;
+    g_stub_diag_age_ms = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "Pico fresh TRIPPED -> start refused");
+    TEST_CHECK(strstr(err, "tripped") != NULL, "refusal names the trip");
+    g_stub_diag_age_ms = (uint16_t)(SAFETY_LINK_STALE_MS + 1u);
+    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"),
+               "stale TRIPPED DIAG on a live link -> allowed (documented policy; the 2 s watchdog covers it)");
+    g_stub_diag_tripped = false;
+
+    profile_t p;
+    memset(&p, 0, sizeof(p));
+    p.zone_mask = 0x01;
+    p.segment_count = 3;
+    p.segments[0] = relay_io_seg(PROFILE_IO_TARGET_RELAY_BASE, 1, 1, 5);
+    p.segments[1] = zone_ramp_seg(200.0f, 100.0f, 0);
+    p.segments[2] = zone_ramp_seg(600.0f, 100.0f, 10);
+
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    g_last_relay_write_value = 0;
+    g_stub_diag_tripped = true;
+    g_stub_diag_age_ms = 0;
+    bool ok = profile_executor_run(0, err, sizeof(err));
+    g_stub_diag_tripped = false;
+    TEST_CHECK(!ok, "warm start refused while the Pico is TRIPPED");
+    TEST_CHECK((g_last_relay_write_value & 0x01u) == 0, "warm replay never drove relay 1 ON while TRIPPED");
+    TEST_CHECK(s_exec.state != PROFILE_EXEC_RUNNING, "not RUNNING");
+
+    warm_start_test_setup(&p, 300.0f);
+    g_relay_write_calls = 0;
+    ok = profile_executor_run(0, err, sizeof(err));
+    TEST_CHECK(ok && g_last_relay_write_value == 0x01, "same warm start with the Pico not tripped still replays ON");
+    profile_executor_halt();
+    s_exec.state = PROFILE_EXEC_IDLE;
+    s_test_profiles_http_get_ok = false;
+    s_test_zones_config_valid = false;
+    g_stub_force_link_up = saved_force;
+}
+
+/* F5HOLDERFX3 INFO (mutation H-f): the aux tick refuses an ON while the tick's Pico report says TRIPPED. */
+static void test_f5holderfx3_aux_tick_pico_gate(void)
+{
+    TEST_SECTION("F5HOLDERFX3 INFO -- aux tick with Pico TRIPPED never writes ON; ON resumes once clear");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    for (int i = 0; i < 4; i++) {
+        xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+        profile_executor_aux_tick_pico(2.0f, false, 0, 4, true);
+        xSemaphoreGive(s_exec.lock);
+    }
+    TEST_CHECK(!aux_test_wrote(0x01, 0x01), "no ON written for aux relay 1 while Pico TRIPPED");
+    TEST_CHECK(!s_exec.aux[0].actuated_on, "aux 1 not actuated while Pico TRIPPED");
+    aux_test_settle();
+    TEST_CHECK(aux_test_wrote(0x01, 0x01), "ON written once the Pico is not tripped");
+    profile_executor_halt();
 }
 
 static void test_task_entry_reads_before_taking_s_exec_lock(void)

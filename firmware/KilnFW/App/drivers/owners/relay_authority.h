@@ -339,10 +339,21 @@ bool relay_authority_reset_refuses_kiln_nvs_writer(void);
  * fault_on_link_loss is on, so a never-up / stale-within-one-period / override-off / uninitialised
  * link reads fault_sources == 0 and a run would start and enable the safety link. This refuses
  * unless no fault source is asserted AND the link is positively up and fresh
- * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down).
+ * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down) and the
+ * Pico's fresh DIAG does not report TRIPPED (F5HOLDERFX3 LOW-1: closes warm replay and every start).
  * Fail closed. Never consults fault_on_link_loss, so the bench override opens no start path.
  * Writes a decoded refusal (<128 chars) to err when non-NULL; `what` completes the sentence
  * ("autotune cannot drive the element"). Returns true when the start must be refused. */
+/* F5HOLDERFX3 LOW-1: true when the Pico's DIAG is FRESH and reports TRIPPED. Same rule as the executor
+ * tick's pre_lock_pico_tripped. Policy: a DIAG that was never received or is stale (age >=
+ * SAFETY_LINK_STALE_MS) reads as NOT tripped here -- the link_up requirement above is what fails closed
+ * for a dead link, and a stale DIAG on a live link is covered by the 2 s watchdog Pico-TRIPPED fault. */
+static inline bool relay_authority_pico_tripped_fresh(const safety_link_status_t *st)
+{
+    return st->diag_ever_received && !safety_link_is_stale(st->age_ms, SAFETY_LINK_STALE_MS) &&
+           st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+}
+
 static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *err, size_t cap, const char *what)
 {
     uint32_t sources = 0;
@@ -362,6 +373,12 @@ static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *
     if (safety_link_get_status(safety, &st) != ESP_OK || !st.link_up) {
         if (err && cap) {
             snprintf(err, cap, "safety link is down or not yet confirmed up -- %s", what);
+        }
+        return true;
+    }
+    if (relay_authority_pico_tripped_fresh(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "the safety processor is tripped (clear the trip first) -- %s", what);
         }
         return true;
     }

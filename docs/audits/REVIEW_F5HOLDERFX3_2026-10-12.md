@@ -288,3 +288,14 @@ Command (narrowed to the affected test file, every build into a fresh `{OUT}`):
 
 Baseline passed (115 s). H-f and H-g are real coverage gaps (LOW-4 / INFO), neither is
 a defect in the shipped code.
+
+## Fix status
+
+| Finding | Status | Fix |
+|---|---|---|
+| LOW-1 warm replay / start vs latched Pico TRIPPED | FIXED | `relay_authority_start_blocked()` refuses when the DIAG is fresh and TRIPPED (`relay_authority_pico_tripped_fresh()`); closes warm replay, every profile start and every autotune start. Policy: link down or never-up -> refused (link_up already required); DIAG never received or stale on a live link -> NOT treated as tripped (the 2 s watchdog Pico-TRIPPED fault covers it). `io_seg_start_since()` comment corrected. Tests: gate allowed/refused/stale, warm start refused with no ON write. |
+| LOW-2 pre-lock Pico sample | FIXED (retry only) | Under-lock re-sample of the Pico state immediately before `io_segs_retry_on()`, OR-ed with the pre-lock value. Segment start and aux ON keep the pre-lock sample (not re-sampled; residual bounded by the 2 s watchdog). |
+| LOW-3 check script false accepts | FIXED | Variable-mask rule now requires plain `=`/`|=`, rejects `+=`/`^=`/`&=`/`++`/`--`, rejects `&name`, and whitelists the RHS (literal non-APP `SAFETY_FAULT_SRC_*`, `? : \| ( )`, `x == NAMED_CONST` conditions). Real site `autotune_engine_guard.c` still accepted. |
+| LOW-4 source-order test | FIXED | Scoped to `executor_task_entry()` body, `#if 0` blocks removed, asserts exactly one `io_segs_retry_on(` in the tick, after the guards. |
+| INFO stale "Last thing in the tick" comment | FIXED | Reworded. |
+| INFO aux tick Pico gate untested (H-f) | FIXED | `test_f5holderfx3_aux_tick_pico_gate`. |

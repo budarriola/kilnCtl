@@ -1181,8 +1181,8 @@ void io_seg_start_pico(uint8_t idx, const profile_segment_t *seg, bool pico_trip
 /* As io_seg_start(), with the all-off epoch sampled by the caller before its own gate decision. */
 void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since)
 {
-    /* Warm-replay start (profile_executor_run.c) has no fresh Pico report; it is gated by
-     * relay_authority_start_blocked() just before. F5HOLDERFX2 LOW-3: documented, not gated here. */
+    /* Warm-replay start (profile_executor_run.c) has no tick Pico report; it is gated by
+     * relay_authority_start_blocked() just before, which (F5HOLDERFX3 LOW-1) refuses a fresh Pico TRIPPED. */
     io_seg_start_since_pico(idx, seg, off_epoch_since, false);
 }
 

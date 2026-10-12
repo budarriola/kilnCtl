@@ -741,9 +741,7 @@ void executor_task_entry(void *arg)
         if (s_exec.safety) {
             safety_link_status_t pre_st;
             if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
-                pre_lock_pico_tripped = pre_st.diag_ever_received &&
-                                        !safety_link_is_stale(pre_st.age_ms, SAFETY_LINK_STALE_MS) &&
-                                        pre_st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+                pre_lock_pico_tripped = relay_authority_pico_tripped_fresh(&pre_st);
             }
         }
 
@@ -1988,7 +1986,7 @@ void executor_task_entry(void *arg)
         }
 
         /* --- Unowned-relay sweep (TODO.md 6A.7) -----------------------------
-         * Last thing in the tick that touches copper, deliberately: it must
+         * Last of the tick's relay-OFF work, deliberately (only the gated ON retry below runs after it): it must
          * judge the relay state this tick actually left behind, including a
          * guard trip's force-off above that reported an error. Running it
          * before the apply pass would have it clearing contacts the same tick
@@ -2079,7 +2077,15 @@ void executor_task_entry(void *arg)
          * thermal guards, the aux tick and the mode-state check -- so a guard trip this tick never
          * has an ON write after it. Still gated on RUNNING (a trip/abort already forced everything off). */
         if (s_exec.state == PROFILE_EXEC_RUNNING && !run_faulted_this_tick) {
-            io_segs_retry_on(pre_lock_pico_tripped);
+            /* F5HOLDERFX3 LOW-2: re-sample the Pico state under the lock, right before the write. */
+            bool retry_pico_tripped = pre_lock_pico_tripped;
+            if (s_exec.safety) {
+                safety_link_status_t retry_st;
+                if (safety_link_get_status(s_exec.safety, &retry_st) == ESP_OK) {
+                    retry_pico_tripped = retry_pico_tripped || relay_authority_pico_tripped_fresh(&retry_st);
+                }
+            }
+            io_segs_retry_on(retry_pico_tripped);
         }
 
         run_snapshot_buf_t tick_snap;
