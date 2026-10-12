@@ -140,6 +140,19 @@ is `0x42` (the scripted seed is consumed only once).
 - **Stale comment.** The `s8_clear_refuse()` header still says "strict=false ... no
   post state exists". After this change it does exist.
 
+## Fix status
+
+| Finding | Status |
+|---|---|
+| LOW-1 | FIXED. `test_test_clear_s8_post_window_checks` (test_safety_guards.c): 590 s flat pre-latch dilutes the whole-hold average, +15 C inside the first 600 s post window, clear 2 s after the rollover refuses (only the completed-window check can refuse), and one quiet window later grants. R1 CAUGHT :5083, R2 CAUGHT :5083. |
+| LOW-2 | FIXED. Same function: cooling at -20 C/min (limit 10) clears in the completed state (2 s after rollover) and the partial state (12 s after). R3 CAUGHT :5125 (partial), R4 CAUGHT :5125 (completed and partial). |
+| LOW-3 | FIXED (doc only). REVIEW_SAFTYFX3's LOW-3 row now says the seeding landed in 57c4e0454; its LOW-3b mutation uses the real find string and cites :3197. |
+| INFO-1 | FIXED. `test_send_test_trip` asserts the second `request_id` is 0x42. K2 CAUGHT test_safety_link_compile.c:3209. |
+| INFO-2 | FIXED (comment only). The `safety_guards.c` comment now says the windows are tumbling and names the two gaps (2x burst straddling a boundary; first `S8_POST_MIN_S` after a rollover). Algorithm unchanged. **Owner question:** should the TEST clear use sliding or overlapping post windows (for example a half-window stride) to close the boundary gap? Recommendation: no. S8's own trip has the same resolution (two consecutive windows), so the clear is no weaker than the guard it stands in for, and a change would add state to a safety path for no gain in protection. |
+| Stale comment | FIXED. `s8_clear_refuse()` header no longer says "no post state exists". |
+
+Negative tests, all CAUGHT, `real_tree_unchanged: true`: R1-R4 via `-Preset saftyfw-host` (base aae788e6b), K2 via `-Preset kilnfw-host`. R1/R4 search strings carry trailing context to be unique.
+
 ## Appendix: negative tests (this review)
 
 Base 9ba887351, worktree `C:\wt\sfx4r_xy45nc`. Both runs reported

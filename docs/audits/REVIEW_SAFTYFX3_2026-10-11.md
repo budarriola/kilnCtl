@@ -221,14 +221,14 @@ forwarding scan catches a wrong id argument.
 | LOW-1 | FIXED. TEST latches now run the `s8_post_*` window tracking in `safety_guards_tick`; the non-strict `s8_clear_refuse` also refuses when the latest completed post window, or a partial one of at least `S8_POST_MIN_S`, is over the rate limit. Only adds refusals; a slowly warming kiln still clears (`test_test_clear_s8_late_rise`, k=0..3). Existing hold tests now hold at the clear reading to avoid a phantom jump. |
 | LOW-2 | FIXED. `test_test_trip.c` scan pins `s_tt_waiting_seq = true; s_tt_seq_base = base; s_tt_wait_request_id = msg.request_id;`. Mutation: store removed, CAUGHT `test_test_trip.c:318`. |
 | INFO-3 (P2) | FIXED. Scan pins `if (have && seq != s_tt_seq_base) {`. Mutation: inverted, CAUGHT `test_test_trip.c:304`. |
-| LOW-3 | FIXED on the ESP side only: `safety_link_send_test_trip` lazily seeds `s_test_trip_request_id` from `hal_sysinfo_random_u32()` once per boot (under xact_lock). Pico-side reorder not done: it changes decision semantics. Residual 1/256 chance of a post-reboot collision with the Pico dedup memory. Test: `test_send_test_trip` scripts the RNG to 0x40 and asserts the first id is 0x41. |
+| LOW-3 | FIXED on the ESP side only (the seeding itself landed in 57c4e0454, TEST_TRIP WP3 review fixes; 9ba887351 added only the test, per REVIEW_SAFTYFX4 LOW-3): `safety_link_send_test_trip` lazily seeds `s_test_trip_request_id` from `hal_sysinfo_random_u32()` once per boot (under xact_lock). Pico-side reorder not done: it changes decision semantics. Residual 1/256 chance of a post-reboot collision with the Pico dedup memory. Test: `test_send_test_trip` scripts the RNG to 0x40 and asserts the first id is 0x41. |
 | INFO-4, INFO-5 | FIXED (wording): streak test title says near-zero frozen window; "exact" changed to "a lower bound". |
 | TRIPWP2 LOW-6 | FIXED: boot heap log in `main.c`. |
 | Pooled: bound on 0x0205 `rate_window_s` | NOT DONE. No precedent for a U16 time-field bound in `config_params.c` (only the F32 rate has a range), and adding one to `config_params_validate_ranges` could invalidate stored records at load. Needs an owner decision. |
 
 Negative tests (SaftyFW `-Preset saftyfw-host`, KilnFW `-Preset kilnfw-host`), all CAUGHT:
 - L1-a post-window refusal disabled; L1-b TEST latch not tracking post windows; L1-c partial window ignored; L1-d wrong comparison sense; LOW-2 request id store removed; P2 latch trigger inverted.
-- LOW-3: seed removed (`s_test_trip_request_id = 0u;`); LOW-3b: seeded flag preset true (CAUGHT `test_safety_link_compile.c:3150`).
+- LOW-3: seed removed (`s_test_trip_request_id = 0u;`); LOW-3b: seeded flag preset true (CAUGHT `test_safety_link_compile.c:3197`; corrected in REVIEW_SAFTYFX4 LOW-3, the earlier :3150 was `tt_set_reply()`'s opening brace).
 
 Mutation definitions (negtest `-Mutations` JSON):
 
@@ -250,6 +250,6 @@ KilnFW:
 ```json
 [
 {"name":"LOW-3: request id seed removed","file":"firmware/KilnFW/App/drivers/safety/safety_link_commands.c","find":"        s_test_trip_request_id = (uint8_t)hal_sysinfo_random_u32();\n","replace":"        s_test_trip_request_id = 0u;\n"},
-{"name":"LOW-3b: seed never applied (flag preset)","file":"firmware/KilnFW/App/drivers/safety/safety_link_commands.c","find":"static bool s_test_trip_request_id_seeded; /* guarded by xact_lock */","replace":"static bool s_test_trip_request_id_seeded = true; /* guarded by xact_lock */"}
+{"name":"LOW-3b: seed never applied (flag preset)","file":"firmware/KilnFW/App/drivers/safety/safety_link_commands.c","find":"static bool s_test_trip_request_id_seeded;","replace":"static bool s_test_trip_request_id_seeded = true;"}
 ]
 ```
