@@ -7,6 +7,7 @@
 #include "cfg_fs.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
+#include "pref_cfg_fs.h"
 
 /* Sends the 503 body for an unmounted cfg. Two literals, no buffer: the
  * recovery-mode variant (cfg_fs_skipped_for_recovery()) must not advise a
@@ -43,8 +44,8 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
  * also erases every user profile. The generic text above would send the operator to remedies that cannot work. */
 #define CFG_FS_FAVORITES_UNREADABLE_REASON     "the favorites list could not be read, so saves to it are refused to avoid overwriting it; this request " \
     "re-reads it each time, so retry (a reboot also retries); if it keeps failing, neither a cfg format nor a " \
-    "factory reset with scope kiln clears it -- only factory_reset scope=profiles does, and that ALSO erases every " \
-    "user profile"
+    "factory reset with scope kiln clears it -- only factory_reset scope=profiles (or scope=all) does, and that ALSO " \
+    "erases every user profile"
 
 /* Post-failure response for a save that failed. 503 with the cfg text when the partition is unmounted; 409
  * store_unreadable_at_boot ONLY when the caller says THIS store is refused (`store_refused`) and the error is the
@@ -91,7 +92,10 @@ static inline esp_err_t cfg_fs_http_persist_failed_for(httpd_req_t *req, const c
 /* Favorites-only form: same as cfg_fs_http_persist_failed_for(), but the 409 carries the favorites-specific reason. */
 static inline esp_err_t cfg_fs_http_persist_failed_favorites(httpd_req_t *req, const char *store, esp_err_t err)
 {
-    if (cfg_fs_is_available() && cfg_fs_degraded_is(store) && err == ESP_ERR_INVALID_STATE) {
+    /* LOW-1: when the cfg FILE itself is unreadable (rev-unknown), only a reboot re-reads it and a cfg format
+     * erases it, so the favorites-key text would be wrong: fall through to the generic reason. */
+    if (cfg_fs_is_available() && cfg_fs_degraded_is(store) && err == ESP_ERR_INVALID_STATE &&
+        !pref_cfg_fs_rev_unknown(store)) {
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "409 Conflict");
         httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_FAVORITES_UNREADABLE_REASON "\"}");

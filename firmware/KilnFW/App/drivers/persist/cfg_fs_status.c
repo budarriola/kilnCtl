@@ -188,10 +188,12 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
     {
         int dn = cfg_fs_degraded_count();
         APPEND(",\"degraded_count\":%d,\"degraded\":[", dn);
+        bool emitted = false; /* INFO-2: a failed name() must not leave a leading comma */
         for (int i = 0; i < dn && i < 6; i++) {
             char dname[48];
             if (cfg_fs_degraded_name(i, dname, sizeof(dname))) {
-                APPEND("%s\"%s\"", i == 0 ? "" : ",", dname);
+                APPEND("%s\"%s\"", emitted ? "," : "", dname);
+                emitted = true;
             }
         }
         APPEND("]");
@@ -199,11 +201,13 @@ esp_err_t cfg_fs_status_build_json_ex(const char *base_dir_for_sizes, const cfg_
     /* FIRELOWFX3 LOW-5: runtime conditions (no save refused, not boot-unreadable stores). */
     {
         int cn = cfg_fs_condition_count();
-        APPEND(",\"conditions\":[");
-        for (int i = 0; i < cn && i < 6; i++) {
+        APPEND(",\"conditions_count\":%d,\"conditions\":[", cn);
+        bool emitted = false;
+        for (int i = 0; i < cn; i++) { /* INFO-1: every condition (table max 8) is listed, no cap below it */
             char cname[48];
             if (cfg_fs_condition_name(i, cname, sizeof(cname))) {
-                APPEND("%s\"%s\"", i == 0 ? "" : ",", cname);
+                APPEND("%s\"%s\"", emitted ? "," : "", cname);
+                emitted = true;
             }
         }
         APPEND("]");

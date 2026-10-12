@@ -2132,6 +2132,27 @@ static void test_used_bitmap_rebuild_fails_closed_on_probe_error(void)
     TEST_CHECK(!cfg_fs_degraded_is("profiles_used_bitmap"), "FX3 LOW-5: it is NOT a degraded (boot-unreadable) store");
 }
 
+static void test_used_bitmap_condition_clears_on_successful_load(void)
+{
+    TEST_SECTION("used bitmap -- INFO-3: the profiles_used_bitmap condition clears on any successful bitmap load");
+    pcfg_reset_all();
+    cfg_fs_condition_set("profiles_used_bitmap", true);
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    s_profiles.profiles[3] = src;
+    (void)nvs_erase_slot(3); /* loads the (valid) bitmap */
+    TEST_CHECK(!cfg_fs_condition_is("profiles_used_bitmap"), "stale condition cleared by a good load");
+    /* The wrong-size rebuild path clears it too. */
+    pcfg_reset_all();
+    cfg_fs_condition_set("profiles_used_bitmap", true);
+    stage_legacy_slot(3, &src, 1);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    set_used_blob(junk, sizeof(junk));
+    s_profiles.profiles[3] = src;
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "erase succeeds after a rebuild");
+    TEST_CHECK(!cfg_fs_condition_is("profiles_used_bitmap"), "stale condition cleared by a successful rebuild");
+}
+
 static void test_favorites_set_refuses_while_user_mask_unresolved(void)
 {
     TEST_SECTION("profiles_favorites_set -- review LOW-3a: refuses after a failed load with no cfg file");
@@ -2170,15 +2191,19 @@ static void test_favorites_refused_retry_keeps_published_masks(void)
         TEST_CHECK(hal_kv_set_u32(&kh, "prof_favbi", 0x5u) == HAL_OK, "builtin mask has its own readable key");
         hal_kv_close(&kh);
     }
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "slot 2 favorited (cfg file written)");
+    TEST_CHECK(cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH) == ESP_OK, "cfg file removed so only the junk NVS blob remains");
     TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable user blob");
     profiles_slot_bitmap_t u;
     uint32_t b = 0;
     profiles_favorites_masks(&u, &b);
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: the published USER mask (slot 2) is kept, not zeroed");
     TEST_CHECK(b == 0x5u, "builtin mask recovered from its own key at boot");
     /* Retry that fails again: the published builtin mask must not drop to 0 in between or afterwards. */
     TEST_CHECK(profiles_favorites_set(8, true) != ESP_OK, "retry refused again");
     profiles_favorites_masks(&u, &b);
     TEST_CHECK(b == 0x5u, "LOW-2: refused retry leaves the builtin mask published");
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: refused retry leaves the user mask published");
     /* Even when the builtin key becomes unreadable, the prior published value stays. */
     nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
     nvs_erase_key(h, "prof_favbi");
@@ -2186,7 +2211,74 @@ static void test_favorites_refused_retry_keeps_published_masks(void)
     nvs_close(h);
     TEST_CHECK(profiles_favorites_set(8, true) != ESP_OK, "retry refused (builtin key gone)");
     profiles_favorites_masks(&u, &b);
-    TEST_CHECK(b == 0x5u, "LOW-2: the earlier published builtin mask is kept, not zeroed");
+    TEST_CHECK(b == 0u, "INFO-4: a genuinely absent builtin key reads as 0, not the stale RAM mask");
+    TEST_CHECK(profiles_slot_bitmap_test(&u, 2), "INFO-6: user mask still published");
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_success_load_clears_unresolved_flag(void)
+{
+    TEST_SECTION("profiles_favorites -- INFO-6: a successful load resets the unresolved flag (set() must not reload)");
+    fuzz_small_setup();
+    nvs_handle_t h;
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start fails: unresolved");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    {
+        hal_kv_handle_t kh;
+        TEST_CHECK(hal_kv_open(&kh, "kiln_cfg", HAL_KV_MODE_READ_WRITE, "profiles_nvs") == HAL_OK, "open");
+        TEST_CHECK(hal_kv_set_u32(&kh, "prof_favusr", 0x4u) == HAL_OK, "legacy user mask in NVS");
+        hal_kv_close(&kh);
+    }
+    TEST_CHECK(profiles_favorites_start() == ESP_OK, "start succeeds from the legacy NVS copy");
+    TEST_CHECK(profiles_favorites_is(2), "legacy mask published");
+    /* Make a reload fail again: file gone, NVS user key junk. If the flag were still set, set() would reload and
+     * be refused; with the flag cleared by the successful load it writes straight away. */
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_set(3, true) == ESP_OK, "set does not reload and is not refused");
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static void test_favorites_unreadable_file_gets_generic_409(void)
+{
+    TEST_SECTION("profile favorite POST -- REVIEW_PROFILESFX2 LOW-1: an unreadable prof_fav.bin gets the reboot/format text, not the key text");
+    fuzz_small_setup();
+    TEST_CHECK(profiles_favorites_set(2, true) == ESP_OK, "favorite saved to the cfg file");
+    cfg_fs_test_inject_read_error(PROFILES_FAVORITES_FILE_PATH, ESP_FAIL, 64);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start is unresolved, not 'no favorites saved yet'");
+    TEST_CHECK(pref_cfg_fs_rev_unknown(PROFILES_FAVORITES_FILE_PATH), "file is rev-unknown");
+    TEST_CHECK(cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "store is listed as degraded");
+    TEST_CHECK(profiles_favorites_is(2), "the published mask was not zeroed for the unreadable file");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
+    TEST_CHECK(strstr(s_last_sendstr, "reboot") != NULL && strstr(s_last_sendstr, "cfg format") != NULL,
+               "text says a reboot retries and a cfg format clears it");
+    TEST_CHECK(strstr(s_last_sendstr, "re-reads it each time") == NULL, "no wrong 'retry now' advice");
+    TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") == NULL, "does not send the operator to scope=profiles");
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_degraded_clear_for_test();
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
     (void)profiles_favorites_start();
 }
 
@@ -2208,6 +2300,7 @@ static void test_favorites_unresolved_is_degraded_409_and_retry_heals(void)
     TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409, not 500");
     TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
     TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL, "FX3 LOW-1: the 409 names the one real recovery");
+    TEST_CHECK(strstr(s_last_sendstr, "scope=all") != NULL, "REVIEW_PROFILESFX2 LOW-1: the 409 also names scope=all");
     TEST_CHECK(strstr(s_last_sendstr, "user profile") != NULL, "FX3 LOW-1: the 409 says it also erases user profiles");
     TEST_CHECK(strstr(s_last_sendstr, "scope kiln") != NULL && strstr(s_last_sendstr, "cfg format") != NULL,
                "FX3 LOW-1: the 409 says cfg format / scope kiln do not clear it");
@@ -6249,6 +6342,9 @@ void run_test_profiles_http(void)
     test_used_bitmap_1_byte_blob_is_wrong_size();
     test_favorites_refused_retry_keeps_published_masks();
     test_favorites_unresolved_is_degraded_409_and_retry_heals();
+    test_favorites_success_load_clears_unresolved_flag();
+    test_favorites_unreadable_file_gets_generic_409();
+    test_used_bitmap_condition_clears_on_successful_load();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();

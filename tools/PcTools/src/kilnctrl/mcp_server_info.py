@@ -1578,6 +1578,20 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
     else:
         lines.append(f"tmp_entries_now={tmp_now}")
 
+    # REVIEW_PROFILESFX2 LOW-3: stores refused this boot and runtime conditions were only in the raw JSON.
+    degraded = cfgfs.get("degraded") or []
+    if degraded:
+        lines.append(
+            f"!!! degraded_count={cfgfs.get('degraded_count', len(degraded))} "
+            f"(saves refused until reboot): {', '.join(str(n) for n in degraded)}"
+        )
+    conditions = cfgfs.get("conditions") or []
+    if conditions:
+        lines.append(
+            f"!!! conditions_count={cfgfs.get('conditions_count', len(conditions))}: "
+            f"{', '.join(str(n) for n in conditions)}"
+        )
+
     subdirs = cfgfs.get("subdirs") or []
     for sd in subdirs:
         unknown = sd.get("unknown_size") or 0

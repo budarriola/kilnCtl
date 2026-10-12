@@ -919,6 +919,9 @@ static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slo
 {
     bool wrong_size = false;
     hal_status_t err = used_bitmap_load_ex(h, out, &wrong_size);
+    if (err == HAL_OK) {
+        cfg_fs_condition_set("profiles_used_bitmap", false); /* INFO-3: any successful load cures the condition */
+    }
     if (err != HAL_IO || !wrong_size) {
         return err; /* a genuine read error is NOT a reason to rebuild (review LOW-2a) */
     }

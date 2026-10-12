@@ -503,6 +503,33 @@ class GetCfgfsStatusMcpToolTest(unittest.TestCase):
         self.assertIn("profiles/: 3 file(s), 1800 B", result)
         self.assertIn("NVS by design: wifi_creds, profiles_favorites, aux_convert_journal", result)
 
+    def test_degraded_and_conditions_are_reported(self):
+        from kilnctrl import mcp_server as m
+
+        cfgfs = _sample_cfgfs()
+        cfgfs["degraded_count"] = 2
+        cfgfs["degraded"] = ["prof_fav.bin", "zones.json"]
+        cfgfs["conditions_count"] = 1
+        cfgfs["conditions"] = ["profiles_used_bitmap"]
+        body = json.dumps(cfgfs).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertIn("degraded_count=2", result)
+        self.assertIn("prof_fav.bin, zones.json", result)
+        self.assertIn("conditions_count=1: profiles_used_bitmap", result)
+
+    def test_no_degraded_or_conditions_lines_when_empty(self):
+        from kilnctrl import mcp_server as m
+
+        cfgfs = _sample_cfgfs()
+        cfgfs["degraded"] = []
+        cfgfs["conditions"] = []
+        body = json.dumps(cfgfs).encode("utf-8")
+        with unittest.mock.patch("urllib.request.urlopen", return_value=_fake_response(body)):
+            result = m.get_cfgfs_status(host="10.0.0.5")
+        self.assertNotIn("degraded_count", result)
+        self.assertNotIn("conditions_count", result)
+
     def test_diverged_dual_write_is_flagged(self):
         from kilnctrl import mcp_server as m
 

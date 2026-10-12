@@ -91,7 +91,10 @@ typedef struct {
  * (diagnostics_http.c's cfgfs_status_scratch_t). Shared so the worst-case
  * host test in test_cfg_fs_status.c sizes its buffer from the same constant
  * the handler uses, rather than a second literal that could drift. */
-#define CFG_FS_STATUS_HANDLER_JSON_BUF 5632u
+/* LOW-2 (REVIEW_PROFILESFX2): 5632 -> 6656 B so a render with the degraded list (6 x 47-char names) and the
+ * conditions list (8 x 47-char names) both full still leaves >= 400 B of margin; measured in
+ * test_worst_case_fits_handler_buffer. Heap scratch, not stack. */
+#define CFG_FS_STATUS_HANDLER_JSON_BUF 6656u
 
 /* THE single definition of "this item's file and NVS copies disagree",
  * shared by every caller so a future bridge cannot invent a second one.

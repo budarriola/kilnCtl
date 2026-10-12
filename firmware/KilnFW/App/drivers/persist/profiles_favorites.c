@@ -8,6 +8,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "hal_esp_common.h"
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
@@ -48,6 +50,16 @@ static profiles_slot_bitmap_t s_fav_user;
  * hidden mask -- not affected by the user-slot count, so this one stays a
  * plain uint32_t. */
 static uint32_t s_fav_builtin;
+/* INFO-5: the two masks are published together under this spinlock so lock-free readers (LCD picker, httpd GETs)
+ * never see a new user mask with an old builtin mask. Held only for a 20-byte copy. */
+static portMUX_TYPE s_fav_mux = portMUX_INITIALIZER_UNLOCKED;
+static void fav_publish(const profiles_slot_bitmap_t *user, uint32_t builtin)
+{
+    portENTER_CRITICAL(&s_fav_mux);
+    s_fav_user = *user;
+    s_fav_builtin = builtin;
+    portEXIT_CRITICAL(&s_fav_mux);
+}
 /* rev of the cfg file as last verified on flash (0 = never written). The NVS
  * copy carries no rev of its own, so it always competes at rev 0 and any
  * file this build wrote (rev >= 1) beats it. */
@@ -204,8 +216,11 @@ static void favorites_read_builtin_only(uint32_t *builtin)
         return;
     }
     uint32_t v = 0;
-    if (hal_kv_get_u32(&h, NVS_KEY_FAV_BUILTIN, &v) == HAL_OK) {
+    hal_status_t gerr = hal_kv_get_u32(&h, NVS_KEY_FAV_BUILTIN, &v);
+    if (gerr == HAL_OK) {
         *builtin = v;
+    } else if (gerr == HAL_NOT_FOUND) {
+        *builtin = 0; /* INFO-4: the key is genuinely absent, so the true value is 0, not the stale RAM mask */
     }
     hal_kv_close(&h);
 }
@@ -232,12 +247,14 @@ static esp_err_t favorites_load(void)
     bool have = pref_cfg_fs_resolve(PROFILES_FAVORITES_FILE_PATH, &nvs_item, sizeof(nvs_item),
                                     nerr == HAL_OK && nvs_found, 0, profiles_favorites_file_validate, &resolved, &rev, &used_file);
     if (!have) {
-        if (nerr == HAL_OK) {
+        /* LOW-1: "no file, no NVS copy" is only "nothing saved yet" when the file was actually readable; an
+         * unreadable prof_fav.bin (rev-unknown) must stay unresolved so no zero mask is published for it. */
+        bool file_unreadable = pref_cfg_fs_rev_unknown(PROFILES_FAVORITES_FILE_PATH);
+        if (nerr == HAL_OK && !file_unreadable) {
             ESP_LOGI(TAG, "no favorites saved yet");
             profiles_slot_bitmap_t zero;
             profiles_slot_bitmap_from_u32(&zero, 0);
-            s_fav_user = zero;
-            s_fav_builtin = 0;
+            fav_publish(&zero, 0);
             s_fav_rev = 0;
             s_fav_dirty = false;
             s_fav_user_unresolved = false;
@@ -248,16 +265,17 @@ static esp_err_t favorites_load(void)
         /* Only the builtin mask has an independent key; keep the current RAM value if it cannot be read. */
         uint32_t builtin = s_fav_builtin;
         favorites_read_builtin_only(&builtin);
-        s_fav_builtin = builtin;
-        return hal_status_to_esp_err(nerr);
+        profiles_slot_bitmap_t keep_user;
+        profiles_favorites_masks(&keep_user, NULL);
+        fav_publish(&keep_user, builtin);
+        return nerr == HAL_OK ? ESP_ERR_INVALID_STATE : hal_status_to_esp_err(nerr);
     }
-    s_fav_user = resolved.user;
-    s_fav_builtin = resolved.builtin;
+    fav_publish(&resolved.user, resolved.builtin);
     s_fav_rev = rev;
     s_fav_dirty = false;
     s_fav_user_unresolved = false;
     ESP_LOGI(TAG, "favorites: saved mask 0x%02lx, builtin mask 0x%08lx (source=%s, rev=%lu)",
-             (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin,
+             (unsigned long)profiles_slot_bitmap_to_u32(&resolved.user), (unsigned long)resolved.builtin,
              used_file ? "file" : "NVS", (unsigned long)s_fav_rev);
     return ESP_OK;
 }
@@ -274,10 +292,13 @@ bool profiles_favorites_is(uint8_t id)
     if (!fav_locate(id, &is_user, &builtin_bit)) {
         return false;
     }
+    profiles_slot_bitmap_t u;
+    uint32_t b = 0;
+    profiles_favorites_masks(&u, &b);
     if (is_user) {
-        return profiles_slot_bitmap_test(&s_fav_user, id);
+        return profiles_slot_bitmap_test(&u, id);
     }
-    return (s_fav_builtin & builtin_bit) != 0;
+    return (b & builtin_bit) != 0;
 }
 
 /* Callers: httpd and the LCD picker task. Covers the bitmap edit too, so the blob
@@ -305,19 +326,23 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         }
     }
     bool changed;
+    profiles_slot_bitmap_t cur_user;
+    uint32_t cur_builtin = 0;
+    profiles_favorites_masks(&cur_user, &cur_builtin);
     if (is_user) {
-        bool was = profiles_slot_bitmap_test(&s_fav_user, id);
+        bool was = profiles_slot_bitmap_test(&cur_user, id);
         changed = (was != favorite);
         if (favorite) {
-            profiles_slot_bitmap_set(&s_fav_user, id);
+            profiles_slot_bitmap_set(&cur_user, id);
         } else {
-            profiles_slot_bitmap_clear(&s_fav_user, id);
+            profiles_slot_bitmap_clear(&cur_user, id);
         }
     } else {
-        uint32_t updated = favorite ? (s_fav_builtin | builtin_bit) : (s_fav_builtin & ~builtin_bit);
-        changed = (updated != s_fav_builtin);
-        s_fav_builtin = updated;
+        uint32_t updated = favorite ? (cur_builtin | builtin_bit) : (cur_builtin & ~builtin_bit);
+        changed = (updated != cur_builtin);
+        cur_builtin = updated;
     }
+    fav_publish(&cur_user, cur_builtin);
 
     if (!changed && !s_fav_dirty) {
         /* No change -- nothing to write. Saying OK here keeps an unfavorite
@@ -329,7 +354,7 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
     /* cfg file ONLY (docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed"):
      * no NVS write follows, and a failure is returned, never masked. The rev
      * advances only after a verified write. */
-    fav_item_t item = { .user = s_fav_user, .builtin = s_fav_builtin };
+    fav_item_t item = { .user = cur_user, .builtin = cur_builtin };
     uint32_t new_rev = s_fav_rev + 1;
     esp_err_t err = pref_cfg_fs_commit(PROFILES_FAVORITES_FILE_PATH, &item, sizeof(item), new_rev, "profile favorites");
     if (err == ESP_OK) {
@@ -371,10 +396,12 @@ void profiles_favorites_get_dualwrite_status(bool *file_valid, uint32_t *file_re
 
 void profiles_favorites_masks(profiles_slot_bitmap_t *out_user, uint32_t *out_builtin)
 {
+    portENTER_CRITICAL(&s_fav_mux);
     if (out_user) {
         *out_user = s_fav_user;
     }
     if (out_builtin) {
         *out_builtin = s_fav_builtin;
     }
+    portEXIT_CRITICAL(&s_fav_mux);
 }
