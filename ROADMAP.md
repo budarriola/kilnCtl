@@ -1,4 +1,4 @@
-﻿# kilnCtl Roadmap — both processors
+# kilnCtl Roadmap — both processors
 
 > **Status:** planning · **Last reviewed:** 2026-10-05. The dated status log
 > that used to fill this block (2026-08 through 2026-09-28, about 2300 lines) was
@@ -92,6 +92,7 @@ open is short:
 | Landed 2026-10-10 on origin/dev, host tests (same record, not promoted): round 2 campaigns R2-A..F (`51ab1ea36`, `a3950b140`, `68548bef8`, `2e515d27e`, `0131bb43a`, `f5e7a6002`), R2-1/R2-9/R2-10 (`31779fc9f`, `2a5f1d60c`, `508b30f44`, `b9a659737`, `5a3cd917f`); campaigns 2 and 8 and 10 (`a23a67daa`, `251f9b2e3`, `bbb25f5de`); LCD profile-builder seams (`21b163662`); the round-2 gap list is `1d5c5d683` | None | `docs/HOST_TEST_COVERAGE_GAPS_ROUND2_2026-10-10.md` |
 | Landed 2026-10-10 on origin/dev, tooling (same record, not promoted): main_baseline, push_verify and negtest review batch (`1d54d0730`, `2ac609343`, `3d9486bbf`, `c43e0a0f2`, `e5936650a`); submodule pin check fails on bad URL and checks gitlink pushed (`fd1905824`, `ccb7b5d26`, `0122566b5`); mykicadMcp pointer bump (`d70ee7816`); run_all_checks message (`efab45a18`) | None | `docs/audits/` tooling entries 2026-10-10 (`65ed917a3`, `c1605d69a`) |
 | Landed 2026-10-10 on origin/dev, build and stack (same record, not promoted): stack budgets re-pinned (`6e5e30b52`, `d93cf774a`, measured 6272 B for bx_flash_worker); SaftyFW trip_seq_next moved to link-free header (`cf3359523`, `2f8192dd2`); SaftyFW build-gate re-entrancy check negtested (`942cefb97`); lint_pages mojibake test (`ae7124b01`, `8eba89bd2`); MCP tool gates audit, 3 HIGH and 11 MED open (`83871f43f`, see that audit for each finding) | None | `docs/audits/` MCP tool gates review 2026-10-10 (`83871f43f`) |
+| Promoted to main 2026-10-11: `679ef379a` (squash of dev `6fb350b55`; full suite 0 NEW failures) carries TEST_TRIP WP3 and the dev batch since main `129586d4f`; the "not yet promoted" markers on the rows above are superseded for work in that range. | origin/main `679ef379a` |
 | `iter_tune` replay inputs live in gitignored logs the session cannot read, so the A8 failure and the section 6.5 credibility gate cannot be replayed without the owner | `iter_tune` redesign row below | `docs/ITER_TUNE_REDESIGN_PLAN.md`; `docs/ITER_TUNE_REDESIGN.md` |
 | T20 and T26 are untouched; T26 needs `firmware/KilnFW/TODO.md`, which the session is not permitted to read | Those two tasks | M1 |
 | The SaftyFW debug probe (CMSIS-DAP, serial E66540F0A36C6E21) has not enumerated since 2026-10-03; every Pico flash and OT-P* case waits on reconnecting it | Pico flashing, OT-P01..05, the Pico relay through recovery | M8 |
