@@ -277,7 +277,7 @@ Totals: 8 CAUGHT by assertion, 1 CAUGHT by exception (N4), 1 MISSED (N8).
 
 ## Fix status (buildfx9)
 
-Fixed on origin/dev; SHAs are the landed commits listed by `git log` for
+Fixed on origin/dev in 21118b47b (fixes and tests), 562655f33 and f74e6cbdb (LOW-1 test bounded so a regression fails instead of hanging).
 `tools/PcTools/src/mcpkit/buildlock.py`.
 
 - LOW-1 fixed: the leaked-lock free path checks `wait_timeout` before `continue`.
