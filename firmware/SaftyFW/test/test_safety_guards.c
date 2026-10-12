@@ -4910,7 +4910,7 @@ static void test_s8_clear_followups(void)
         TEST_CHECK(s.s8_post_windows_done == 0u, "LOW-2: no post window closes within 30 s");
     }
     /* LOW-3: tc_valid must gate the post block; NaN flagged valid must not grant. */
-    for (int mode = 0; mode < 3; mode++) {
+    for (int mode = 0; mode < 5; mode++) {
         safety_guard_state_t s;
         safety_guards_reset(&s);
         safety_guard_cfg_t cfg = base_cfg();
@@ -4932,9 +4932,22 @@ static void test_s8_clear_followups(void)
             in.tc_valid = true; in.tc_c = (float)NAN;
             for (int i = 0; i < 1300; i++) (void)safety_guards_tick(&s, &cfg, &in);
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid for 2 windows must not grant");
-        } else { /* NaN flagged valid right after the trip */
+        } else if (mode == 2) { /* NaN flagged valid right after the trip */
             in.tc_valid = true; in.tc_c = (float)NAN;
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid right after the trip must not grant");
+        } else {
+            /* two good cooled windows, then NaN flagged valid */
+            in.tc_c = 30.0f;
+            for (int i = 0; i < 1300 && s.s8_post_windows_done < 2u; i++) (void)safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-3 sanity: two good windows");
+            in.tc_valid = true; in.tc_c = (float)NAN;
+            if (mode == 3) {
+                TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid after good windows must not grant");
+            } else {
+                for (int i = 0; i < 700; i++) (void)safety_guards_tick(&s, &cfg, &in);
+                TEST_CHECK(!isnan(s.s8_post_last_rate_c_per_min) && !isnan(s.s8_post_start_c),
+                           "LOW-3: NaN ticks never poison the post-window state");
+            }
         }
     }
 }
