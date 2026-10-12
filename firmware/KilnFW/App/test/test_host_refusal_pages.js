@@ -54,8 +54,9 @@ assert(out.join(',') === 'z0_kp=,z0_driftperiod=30,z0_name=,thermo_count=',
 assert(omit(['z0_coilpower=','z1_hystc= ','z0_minons=','z0_minoffs=','z0_coilpower=5']).join(',') === 'z0_coilpower=5',
   'blank coilpower/hystc/minons/minoffs dropped (keep stored), set value kept');
 // BENCHFX9 LOW-1 / BENCHFX10 LOW-2: exhaustive, independent of ZONE_OPTIONAL_KEY_RE. The firmware
-// omit-PRESERVES these keys AND xzone, tctype, zonetype, failsafe, settings_source and relaytype
-// (firmware_omit_preserved_keys() in zones_http_post_parse.c). The page deliberately drops a blank only for
+// omit-PRESERVES these keys AND xzone, tctype, zonetype, failsafe, settings_source, relaytype and name
+// (parsed out of zones_http_post_parse.c by firmware_omit_preserved_keys() in
+// tools/PcTools/tests/test_zone_omit_preserved_drift.py). The page deliberately drops a blank only for
 // FW_DROPPABLE (= the page's ZONE_OPTIONAL_KEY_RE set, a subset) and KEEPS every other blank
 // (ct_mask/thermo_mask are omit-DEFAULTED, the rest required). A regex key listed in neither array fails
 // the coverage assert below, so drift is loud.
@@ -152,6 +153,17 @@ if (g3 && g4) {
   assert(!threw, 'blankGuardKeys/blankGuardLabels do not mutate their params argument: ' + (threw && threw.message));
   assert(frozen.join(',') === live.join(','), 'params unchanged after blankGuard helpers');
   assert(!threw && labels.join(',') === 'Zone 1 Drift period,Zone 2 Cross-zone limit', 'blankGuardLabels result');
+  // BENCHFX12 INFO-1: also a frozen, realistic array with NO blank guard (the successful-save path).
+  const live2 = ['z0_ct_mask=0', 'z0_thermo_mask=1', 'z0_driftperiod=30', 'z0_xzone=50', 'z1_xzone=40', 'z0_kp=1', 'z0_debounce=5'];
+  const frozen2 = Object.freeze(live2.slice());
+  let threw2 = null, labels2 = null, keys2 = null;
+  try {
+    const f2 = new Function('"use strict";' + g1[0] + g2[0] + g3[0] + g4[0] + '; return [blankGuardKeys, blankGuardLabels];')();
+    keys2 = f2[0](frozen2); labels2 = f2[1](frozen2, null);
+  } catch (e) { threw2 = e; }
+  assert(!threw2, 'helpers run on a frozen no-blank array: ' + (threw2 && threw2.message));
+  assert(frozen2.join(',') === live2.join(','), 'no-blank params unchanged after blankGuard helpers');
+  assert(!threw2 && labels2.length === 0 && keys2.length === 0, 'no-blank array yields no blank guards');
 }
 assert(bg(['z0_driftperiod=', 'z1_runawaymargin= ', 'z0_kp=', 'z0_k=', 'z0_debounce=5']).join(',') === 'z0_driftperiod,z1_runawaymargin',
   'blank guard thresholds detected, other blanks and set values not');
