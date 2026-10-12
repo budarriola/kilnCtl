@@ -248,8 +248,7 @@ static void test_rx_stamp(void)
             }
             k += 2;
         } else if (buf[k] == '/' && buf[k + 1] == '/') {
-            while (k < n && buf[k] != '
-') {
+            while (k < n && buf[k] != '\n') {
                 k++;
             }
         } else {
@@ -272,21 +271,18 @@ static void test_rx_stamp(void)
     }
     for (const char *p = code; (p = strstr(p, "uart_proto_message_t")) != NULL; p++) {
         const char *q = p + strlen("uart_proto_message_t");
-        while (*q == ' ' || *q == '
-' || *q == '	' || *q == '') {
+        while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
             q++;
         }
         while (*q == '_' || (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9')) {
             q++;
         }
-        while (*q == ' ' || *q == '
-' || *q == '	' || *q == '') {
+        while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
             q++;
         }
         if (q[0] == '=' && q[1] != '=') {
             q++;
-            while (*q == ' ' || *q == '
-' || *q == '	' || *q == '') {
+            while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
                 q++;
             }
             if (*q == '{') {
