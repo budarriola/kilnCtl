@@ -79,6 +79,23 @@ def test_guard_refuses_link_hub_port_on_loopback(_no_outbound_network):
     _no_outbound_network.clear()
 
 
+@pytest.mark.parametrize("port", [8766, 8767])
+def test_guard_refuses_mcp_server_ports_on_loopback(port, _no_outbound_network):
+    """Testnet4 I1: loopback to the running MCP servers is refused."""
+    with pytest.raises(NetworkGuardError):
+        socket.create_connection(("127.0.0.1", port), timeout=0.2)
+    assert len(_no_outbound_network) == 1
+    _no_outbound_network.clear()
+
+
+def test_scrub_drops_reuse_sid():
+    """Testnet4 I3: KC_REUSE_SID (a web session cookie) is not KILNCTL_-prefixed but is dropped."""
+    import conftest
+    env = {"KC_REUSE_SID": "abc", "KILNCTL_TEST_FLAG": "1"}
+    conftest._scrub_board_env(env, False)
+    assert env == {"KILNCTL_TEST_FLAG": "1"}
+
+
 def test_get_shared_link_disabled_under_pytest():
     from kilnctrl import link_hub
     with pytest.raises(link_hub.LinkHubDisabled):

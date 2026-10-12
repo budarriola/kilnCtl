@@ -52,7 +52,7 @@ _CONTROL_NAMES = frozenset({
     "KILNCTL_SLOW_TESTS", "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS", "KILNCTL_GZIP_ASSETS",
     "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"})
 _BENCH_KEEP = frozenset({"KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD"})
-_EXTRA_SECRETS = ("MOUSER_API_KEY", "GITHUB_TOKEN")
+_EXTRA_SECRETS = ("MOUSER_API_KEY", "GITHUB_TOKEN", "KC_REUSE_SID")
 
 
 def _scrub_board_env(environ, bench_host_set):
@@ -325,11 +325,16 @@ class NetworkGuardError(RuntimeError):
     """Raised (and recorded) when a test tries to reach a non-loopback address."""
 
 
+_MCP_SERVER_PORTS = (8766, 8767)
+
+
 def _is_hub_addr(address) -> bool:
     """True for a loopback address on the shared link hub's port."""
     from kilnctrl.link_hub import HUB_PORT
-    return (isinstance(address, tuple) and len(address) >= 2 and address[1] == HUB_PORT
-            and _is_loopback_addr(address))
+    # Testnet4 I1: the long-running MCP servers (kicad 8766, kilnctrl 8767) hold the real
+    # environment and board link; loopback to them is refused like the hub port.
+    return (isinstance(address, tuple) and len(address) >= 2
+            and address[1] in (HUB_PORT, *_MCP_SERVER_PORTS) and _is_loopback_addr(address))
 
 
 _PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")

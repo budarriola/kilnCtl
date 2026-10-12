@@ -77,7 +77,7 @@ param(
     [string]$ChecksScript,
     [string]$PinCheckScript,
     [switch]$AllowStandaloneClone,
-    [int]$MaxPushTries = 3,
+    [ValidateRange(1,50)][int]$MaxPushTries = 3,
     [double]$McpTimeoutMin = 10
 )
 
