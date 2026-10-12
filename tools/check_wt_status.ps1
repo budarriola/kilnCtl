@@ -276,10 +276,23 @@ try {
     }
     if ('WtStatusWalk' -as [type]) {
         $tag = 'sleep 47'
-        $gr = [WtStatusWalk]::Git($repo, "-c `"alias.zz=!$tag >/dev/null & git`" zz rev-parse HEAD")
+        $sleepFilter = { Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match 'sleep(\.exe)?"?\s+47\s*$' } }
+        # Other sessions may run this same check; only count sleeps this call started.
+        $pre = @(& $sleepFilter | ForEach-Object { $_.ProcessId })
+        $gr = $null
+        # msys fork occasionally fails to start the backgrounded sleep (git then exits 0 at once,
+        # nothing holds stderr); that is not a reap failure, so retry the setup a few times.
+        for ($try = 0; $try -lt 4; $try++) {
+            $gr = [WtStatusWalk]::Git($repo, "-c `"alias.zz=!$tag >/dev/null & git`" zz rev-parse HEAD")
+            if ($gr.ExitCode -eq -1) { break }
+        }
         Assert-True ($gr.ExitCode -eq -1) "git timeout: stderr-held call must fail closed with -1, got $($gr.ExitCode)"
-        Start-Sleep -Milliseconds 500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match 'sleep(\.exe)?"?\s+47\s*$' })
+        $left = @()
+        for ($w = 0; $w -lt 20; $w++) {
+            Start-Sleep -Milliseconds 250
+            $left = @(& $sleepFilter | Where-Object { $pre -notcontains $_.ProcessId })
+            if ($left.Count -eq 0) { break }
+        }
         foreach ($l in $left) { try { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
         Assert-True ($left.Count -eq 0) "git timeout: $($left.Count) '$tag' grandchild(ren) survived the timeout (job kill missing)"
     }
