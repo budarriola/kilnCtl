@@ -103,44 +103,7 @@ $mainFiles = @(Get-ChildItem -Path $appDir -Filter "*.c" -File)
 # check_bridge_reject_reason.ps1 / check_uart_version_independence.ps1
 # (duplicated rather than imported -- this project has no shared
 # PowerShell module mechanism).
-function Get-CodeOnlyLines {
-    param([string]$Path)
-    $inBlockComment = $false
-    $lines = Get-Content -Path $Path
-    $result = @()
-    foreach ($line in $lines) {
-        $code = $line
-        if ($inBlockComment) {
-            $endIdx = $code.IndexOf("*/")
-            if ($endIdx -ge 0) {
-                $code = $code.Substring($endIdx + 2)
-                $inBlockComment = $false
-            } else {
-                $result += ""
-                continue
-            }
-        }
-        $lineCommentIdx = $code.IndexOf("//")
-        if ($lineCommentIdx -ge 0) {
-            $code = $code.Substring(0, $lineCommentIdx)
-        }
-        while ($true) {
-            $startIdx = $code.IndexOf("/*")
-            if ($startIdx -lt 0) { break }
-            $endIdx = $code.IndexOf("*/", $startIdx)
-            if ($endIdx -ge 0) {
-                $code = $code.Substring(0, $startIdx) + $code.Substring($endIdx + 2)
-            } else {
-                $code = $code.Substring(0, $startIdx)
-                $inBlockComment = $true
-                break
-            }
-        }
-        $result += $code
-    }
-    return $result
-}
-
+. (Join-Path $PSScriptRoot "lib_code_only_lines.ps1")  # shared string-aware stripper
 # Every task DRAM_PSRAM_STATUS.md / stack_margin.h's own header comment tracks
 # as needing a live stack_margin_register() call site. See this script's
 # top comment for why this is a named list rather than a blind create-vs-
@@ -528,18 +491,37 @@ if (Test-Path $hwAbstractionRoot) {
 # task losing its registration" AND "a task nobody ever wired in" cases both
 # covered by one mechanism, keyed on the created task's own name rather than
 # on which file happened to create it.
-$createPattern2 = 'xTaskCreate\w*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*"([^"]+)"'
+# First argument: any text up to the first comma (cast, &fn, (void *)fn ...), reduced to the bare
+# identifier by Get-TaskFnName below (LCD19FX5 LOW-2).
+$createPattern2 = 'xTaskCreate\w*\s*\(\s*([^,"]+?)\s*,\s*"([^"]+)"'
+function Get-TaskFnName([string]$arg) {
+    $a = $arg -replace '\([^()]*\)', '' -replace '[&\s]', ''
+    if ($a -notmatch '^[A-Za-z_]\w*$') { throw "check_stack_margin_registration.ps1: unparseable xTaskCreate first argument '$arg'" }
+    return $a
+}
+# Files that legitimately hold an xTaskCreate*( call whose task name is not a string literal (a wrapper taking the
+# name as a parameter). The count must match exactly; any other file with an unmatched call fails (LCD19FX5 LOW-2).
+$nonLiteralCreateAllowed = @{
+    'uart_bridge_ext.c' = 1
+    'http_async_job.c'  = 1
+    'hal_uart_esp.c'    = 1
+}
+$nonLiteralCreates = @{}
 $createdTasks = @()
 foreach ($f in $sourceFiles) {
     $codeLines = Get-CodeOnlyLines -Path $f.FullName
     $joined = [string]::Join("`n", $codeLines)
+    $callCount = [regex]::Matches([string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName -BlankLiterals)), '\bxTaskCreate\w*\s*\(').Count
+    $matchCount = 0
     foreach ($m in [regex]::Matches($joined, $createPattern2)) {
+        $matchCount++
         $createdTasks += [PSCustomObject]@{
             FreeRtosName = $m.Groups[2].Value
-            TaskFunction = $m.Groups[1].Value
+            TaskFunction = (Get-TaskFnName $m.Groups[1].Value)
             File         = $f.Name
         }
     }
+    if ($callCount -ne $matchCount) { $nonLiteralCreates[$f.Name] = $callCount - $matchCount }
 }
 
 # Exemptions: tasks legitimately not tracked by stack_margin_register(),
@@ -578,6 +560,16 @@ $exemptCreatedNames = @{
     "monitor_task"      = "monitor_task.c monitor_task_entry: long-lived heartbeat task, NOT YET registered for stack-margin reporting -- pre-existing gap, out of scope for docs/audits/2026-09-08-stack-margin-audit.md, flagged for a follow-up pass"
 }
 
+$nlBad = @()
+foreach ($k in (@($nonLiteralCreates.Keys) + @($nonLiteralCreateAllowed.Keys) | Sort-Object -Unique)) {
+    $have = 0; if ($nonLiteralCreates.ContainsKey($k)) { $have = $nonLiteralCreates[$k] }
+    $want = 0; if ($nonLiteralCreateAllowed.ContainsKey($k)) { $want = $nonLiteralCreateAllowed[$k] }
+    if ($have -ne $want) { $nlBad += "$k : $have xTaskCreate*( call(s) without a literal task name, allowed $want" }
+}
+if ($nlBad.Count -gt 0) {
+    foreach ($v in $nlBad) { Write-Host "    $v" -ForegroundColor Red }
+    throw "check_stack_margin_registration.ps1: xTaskCreate*( call(s) with no readable literal task name are invisible to the name and size checks. Use a literal name, or (wrapper only) edit `$nonLiteralCreateAllowed with a reason."
+}
 $unrecognized = @()
 foreach ($t in $createdTasks) {
     $freeRtosName = $t.FreeRtosName
@@ -618,6 +610,7 @@ $stackSkipAllowed = @{
     'i2c_owner_task' = 'create site only: FreeRTOS name behind i2c_owner_sx1509/i2c_owner_ns2009; the size arrives through the stack_depth parameter, not a literal'
     'info_boot_push' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
     'monitor_task' = 'create site only: permanent boot heartbeat task (monitor_task.c), not yet registered for stack-margin reporting (see $exemptCreatedNames)'
+    'ota_confirm' = 'create site only: one-shot self-deleting task (exempt in $exemptCreatedNames); logs its own high-water mark. The site was hidden by the string-literal comment bug until LCD19FX5 LOW-1'
     'ota_pico_relay' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
     'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
     'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
@@ -677,15 +670,16 @@ function Resolve-StackExpr([string]$tok, [int]$depth = 0) {
     return @{ Ok = $true; Value = $v }
 }
 
-$createStackRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"\s*,\s*([^,;]+?)\s*,'
+$createStackRe = 'xTaskCreate\w*\s*\(\s*[^,"]+?\s*,\s*"([^"]+)"\s*,\s*([^,;]+?)\s*,'
 $regStackRe = 'stack_margin_register\s*\(\s*"([^"]+)"\s*,[^;]*?,\s*([^,;]+?)\s*\)\s*;'
+$aliasUsed = @{}
 $createdStacks = @{}
 $registeredStacks = @{}
 foreach ($f in $sourceFiles) {
     $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
     foreach ($m in [regex]::Matches($joined, $createStackRe)) {
         $n = $m.Groups[1].Value
-        if ($stackNameAlias.ContainsKey($n)) { $n = $stackNameAlias[$n] }
+        if ($stackNameAlias.ContainsKey($n)) { $aliasUsed[$n] = $true; $n = $stackNameAlias[$n] }
         if (-not $createdStacks.ContainsKey($n)) { $createdStacks[$n] = @() }
         $createdStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
     }
@@ -732,6 +726,23 @@ if ($stackCompared -lt $minStackCompared) {
 }
 Write-Host "Stack margin stack-size check: $stackCompared create/register pair(s) agree; $($skipped.Count) name(s) NOT compared:" -ForegroundColor Green
 foreach ($k in ($skipped.Keys | Sort-Object)) { Write-Host "    skipped $k -- $($skipped[$k])" }
+# An alias entry that matched no create site is stale (the task was renamed): fail instead of silently dead (LCD19FX5 INFO-4).
+$deadAliases = @($stackNameAlias.Keys | Where-Object { -not $aliasUsed.ContainsKey($_) } | Sort-Object)
+if ($deadAliases.Count -gt 0) {
+    throw "check_stack_margin_registration.ps1: `$stackNameAlias entr(ies) matched no create site (delete or fix): $($deadAliases -join ', ')"
+}
+# Compare the skip REASON CLASS as well as the name (LCD19FX5 INFO-1): a name that stays skipped but for a different
+# reason (e.g. create-only -> unevaluable size) is a change the ratchet must see.
+function Get-SkipClass([string]$r) {
+    if ($r -like 'create site only*') { return 'create-only' }
+    if ($r -like 'register site only*') { return 'register-only' }
+    return 'unevaluable'
+}
+$classChanged = @($skipped.Keys | Where-Object { $stackSkipAllowed.ContainsKey($_) -and (Get-SkipClass $skipped[$_]) -ne (Get-SkipClass $stackSkipAllowed[$_]) } | Sort-Object)
+if ($classChanged.Count -gt 0) {
+    foreach ($k in $classChanged) { Write-Host "    $k : skipped as $(Get-SkipClass $skipped[$k]) now, allowed as $(Get-SkipClass $stackSkipAllowed[$k])" -ForegroundColor Red }
+    throw "The reason class of a stack-size-check skipped name changed -- review it and update `$stackSkipAllowed."
+}
 $newSkips = @($skipped.Keys | Where-Object { -not $stackSkipAllowed.ContainsKey($_) } | Sort-Object)
 $staleSkips = @($stackSkipAllowed.Keys | Where-Object { -not $skipped.ContainsKey($_) } | Sort-Object)
 if ($newSkips.Count -gt 0 -or $staleSkips.Count -gt 0) {
