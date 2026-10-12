@@ -179,7 +179,7 @@ Fix: point the BENCHFX3 row at this review.
 |---|---|---|
 | MED-1 wrong-field omit copy slips both layers | MED | open |
 | LOW-1 loose omit regex; HEATER `hyst_c` conditional slips | LOW | open |
-| LOW-2 `_float_close` full-step, unpinned | LOW | open |
+| LOW-2 `_float_close` full-step, unpinned | LOW | fixed: per-field half-step tolerance (`%.9g`: relative 1e-6), format table pinned to `zones_http_get.c` by `test_zones_http_float_tolerance_pin.py`; negtest widen-to-2e-3 and format-mapping mutations CAUGHT |
 | INFO-1 `name` third idiom uncovered on PC | INFO | no action needed |
 | INFO-2 BENCHFX3 evidence pointer | INFO | open (doc) |
 

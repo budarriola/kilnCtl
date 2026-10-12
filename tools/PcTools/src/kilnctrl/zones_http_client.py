@@ -1244,8 +1244,39 @@ class ZonesApplyResult:
         return "\n".join(lines)
 
 
-def _float_close(a: float, b: float, tol: float = 1e-3) -> bool:
-    return abs(float(a) - float(b)) <= tol
+#: printf format zones_http_get.c uses for each float field that
+#: _verify_against_preset compares. Pinned against the firmware source by
+#: tests/test_zones_http_float_tolerance_pin.py, so a format change there
+#: fails a test instead of silently loosening or tightening read-back.
+_FLOAT_FIELD_PRINT_FORMAT = {
+    "cal_offset_c": "%.9g", "pid_kp": "%.9g", "pid_ki": "%.9g", "pid_kd": "%.9g",
+    "max_ramp_c_per_hr": "%.9g", "sanity_rate_c_per_min": "%.9g",
+    "max_temp_c": "%.9g", "min_temp_c": "%.9g", "coupling_diag_k_dc": "%.9g",
+    "heater_window_ms": "%.0f", "heater_min_on_ms": "%.0f", "heater_min_off_ms": "%.0f",
+    "guard_sensor_fault_debounce_ticks": "%.0f",
+    "guard_wrong_dir_window_s": "%.1f", "guard_off_settle_s": "%.1f",
+    "guard_runaway_margin_c": "%.1f", "guard_drift_period_s": "%.1f",
+    "guard_frozen_window_s": "%.1f", "cross_zone_max_delta_c": "%.1f",
+    "guard_wrong_dir_rate_c_per_min": "%.3f", "guard_runaway_rate_c_per_min": "%.3f",
+    "hyst_c": "%.3f", "ease_off_window_mult": "%.3f",
+    "approach_rate_cap_c_per_hr": "%.3f", "error_band_c": "%.3f",
+    "rate_band_c_per_s": "%.4f", "fuzzy_strength_pct": "%.2f",
+}
+_FLOAT_EPS_REL = 1e-6  # %.9g carries ~9 significant digits; float32 eps is ~1.2e-7
+
+
+def _float_tolerance(a: float, b: float, field: "Optional[str]") -> float:
+    """Half the field's GET print step; relative float epsilon for %.9g (and
+    for an unmapped field, the strictest choice)."""
+    fmt = _FLOAT_FIELD_PRINT_FORMAT.get(field, "%.9g") if field else "%.9g"
+    if fmt == "%.9g":
+        return _FLOAT_EPS_REL * max(abs(float(a)), abs(float(b)), 1.0)
+    decimals = int(fmt[2:-1])
+    return 0.5 * 10.0 ** -decimals
+
+
+def _float_close(a: float, b: float, field: "Optional[str]" = None) -> bool:
+    return abs(float(a) - float(b)) <= _float_tolerance(a, b, field)
 
 
 def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
@@ -1261,7 +1292,7 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
         expected = preset[key]
         actual = after.get(key)
         if isinstance(expected, float):
-            ok = actual is not None and _float_close(expected, actual)
+            ok = actual is not None and _float_close(expected, actual, key)
         else:
             ok = actual == expected
         if not ok:
@@ -1280,7 +1311,7 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
             expected = pz[key]
             actual = az.get(key)
             if isinstance(expected, float):
-                ok = actual is not None and _float_close(expected, actual)
+                ok = actual is not None and _float_close(expected, actual, key)
             else:
                 ok = actual == expected
             if not ok:
