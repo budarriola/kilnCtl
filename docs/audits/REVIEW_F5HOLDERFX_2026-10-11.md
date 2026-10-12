@@ -137,7 +137,7 @@ at the time. No source file was touched.
 |---|---|---|
 | MED-1 | FIXED | `io_seg_start_since()` and `io_seg_finish()` clear `wants_on` on every other active runtime targeting the same relay (`io_segs_clear_wants_on_others()`); tests: two segments, warm-start replay shape, finish-release variant |
 | LOW-1 | FIXED (retry only) | `io_segs_retry_on(pico_tripped)` refuses while a fresh Pico TRIPPED report is pending. `io_seg_start` and `aux_apply_relay` still gate on `relay_authority_on_blocked()` only: neither has the report at hand under the executor lock (it is read outside the lock by rule), so no shared helper exists; left as is |
-| LOW-2 | FIXED | Retry moved out of `io_segs_tick()` to `io_segs_retry_on()`, called after the guards, the blocking-segment finish and segment stepping, only while still RUNNING |
+| LOW-2 | FIXED | Retry moved out of `io_segs_tick()` to `io_segs_retry_on()`, called after the blocking-segment finish and segment stepping, only while still RUNNING (it did NOT run after the guards; REVIEW_F5HOLDERFX2 LOW-1 moved it to the end of the RUNNING body, fixed in F5HOLDERFX2) |
 | LOW-3 | FIXED | Check now scans `drivers/control/` except `profile_executor*.c`; resolves a local-variable mask to its assignment (accepted only if all constants are non-APP). Deasserts are not checked |
 | INFO stale comment | FIXED | "Not retried" comment replaced |
 | INFO status field | NOT DONE | not cheap; log line only |

@@ -119,3 +119,44 @@ loop. The placement (LOW-1 above) is unverified by any test, and so is the `stat
 - Check negtest (`-Preset check -PresetArg tools/check_app_hold_registration.ps1`): baseline PASS,
   C3 CAUGHT, C1/C2/C4 MISSED.
 - Every negtest copy was removed and the real tree was unchanged.
+
+## Fix status
+
+Fixed in the commit that adds this table (origin/dev after b460f5077).
+
+| Finding | Status | Fix |
+|---|---|---|
+| LOW-1 | FIXED | `io_segs_retry_on()` moved to the end of the RUNNING body in `profile_executor.c` (after the zone loop, thermal guards, aux tick and `exec_mode_state_check()`, before the lock is released), gated on `state == RUNNING && !run_faulted_this_tick`. Comments in `profile_executor_relay_io.c` and the REVIEW_F5HOLDERFX fix table corrected. |
+| LOW-2 | FIXED | `tools/check_app_hold_registration.ps1` resolves a variable mask only if EVERY assignment (`=`, `\|=`, ternary) inside the enclosing function is built from non-APP `SAFETY_FAULT_SRC_*` constants, `?`, `:`, `\|`, parentheses and condition identifiers; any APP term, call, other token, or no assignment fails loud. |
+| LOW-3 | FIXED (warm replay documented) | `io_seg_start_pico()` / `aux_apply_relay_pico()` / `profile_executor_aux_tick_pico()` take the tick's `pre_lock_pico_tripped`; the normal segment start and the aux tick refuse an ON while the Pico reports TRIPPED (OFF never gated). Warm-replay `io_seg_start_since()` has no fresh Pico report (it runs in `profile_executor_run.c` after `relay_authority_start_blocked()`), so it passes `false`; documented in code. |
+| LOW-4 | FIXED | `test_f5holderfx2_retry_placement_and_pico_gate` in `test_profile_executor_prestart.c`: pending ON on relay 2 survives a start and a finish on relay 3 (H6); source-order test that the retry is called, is after the last thermal guard / escalation / aux tick / mode check, is before the lock release, and keeps its RUNNING gate (H5, LOW-1 same-tick guard trip); Pico TRIPPED start/aux tests. |
+
+### Negtest evidence (tools/negtest.ps1)
+
+Host (`-Preset kilnfw-host -ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD FAILURES"`), all in `profile_executor.c` / `profile_executor_relay_io.c` under `firmware/KilnFW/App/drivers/control/`:
+
+| Id | Mutation | Result |
+|---|---|---|
+| H5 | `io_segs_retry_on(pre_lock_pico_tripped);` replaced by `(void)pre_lock_pico_tripped;` | CAUGHT |
+| H5b | `s_exec.state == PROFILE_EXEC_RUNNING && !run_faulted_this_tick` -> `!run_faulted_this_tick` | CAUGHT |
+| H6 | `o->is_relay && o->target == target` -> `o->is_relay` | CAUGHT |
+| P1 | extra early `io_segs_retry_on()` before the aux tick | CAUGHT |
+| P2 | 400+ characters of padding after the retry (retry far from the lock release) | CAUGHT |
+| L3a | `io_seg_start_pico(..., pre_lock_pico_tripped)` -> `false` | CAUGHT |
+| L3b | `profile_executor_aux_tick_pico(..., pre_lock_pico_tripped)` -> `false` | CAUGHT |
+| L3c | `drive_on && (pico_tripped \|\| ...` -> `(false \|\| ...` in `io_seg_start_since_pico` | CAUGHT |
+| L3d | `want_on && (pico_tripped \|\| ...` -> `(false \|\| ...` in `aux_apply_relay_pico` | CAUGHT |
+
+Check (`-Preset check -PresetArg tools/check_app_hold_registration.ps1`, all on `drivers/control/autotune_engine_guard.c`):
+
+| Id | Mutation | Result |
+|---|---|---|
+| C1 | `source \|= SAFETY_FAULT_SRC_APP;` before the assert | CAUGHT |
+| C2 | later `source = SAFETY_FAULT_SRC_APP;` | CAUGHT |
+| C3 | `? SAFETY_FAULT_SRC_THERMO` -> `? SAFETY_FAULT_SRC_APP` | CAUGHT |
+| C4 | `: (SAFETY_FAULT_SRC_THERMAL_SANITY \| at_extra_src());` | CAUGHT |
+
+Mutation definitions: replace the quoted text in the named file exactly as in the Mutation column (find/replace pairs for `negtest.ps1 -Mutations`).
+The host run's final "REAL TREE CHANGED" error was the review doc being edited in the worktree while it ran; no source file changed.
+
+Tests: full KilnFW host suite 98/98 passed; `check_00_kilnfw_target_build.ps1` passed; `check_app_hold_registration.ps1` PASS.
