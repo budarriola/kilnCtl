@@ -1058,6 +1058,89 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
     'step6: a changed min_temp_c alone produces no confirm line');
 })();
 
+// ---- Lossless unedited save (zprecfx3 MED-1/LOW-1): inputs show kgR6(raw)
+// but remember the exact GET value; an unedited field must post raw and must
+// not trip the ceiling-change confirm.
+function parseInputsFromHtml(html) {
+  const inputs = {};
+  const re = /<input\b([^>]*)>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const attrs = {};
+    const are = /([\w-]+)="([^"]*)"/g;
+    let a;
+    while ((a = are.exec(m[1]))) attrs[a[1]] = a[2];
+    const cls = attrs['class'];
+    let val = attrs.value;
+    inputs[cls] = { get value() { return val; }, set value(v) { val = String(v); }, getAttribute: (k) => (k in attrs ? attrs[k] : null) };
+  }
+  return inputs;
+}
+function fakeStep6El(htmlByZone) {
+  const cards = htmlByZone.map((h) => parseInputsFromHtml(h));
+  return {
+    cards,
+    querySelector: (sel) => {
+      const mm = /data-zone="(\d+)"/.exec(sel);
+      const card = cards[Number(mm[1])];
+      return { querySelector: (cs) => card[cs.replace(/^\./, '')] || null };
+    },
+  };
+}
+
+(function testWizardKgR6AndKgPost() {
+  const ctx = loadPageScript(noopFetch);
+  assert(ctx.kgR6(null) === '' && ctx.kgR6(undefined) === '', 'wizard kgR6: null/undefined render empty');
+  assert(ctx.kgR6(NaN) === '', 'wizard kgR6: NaN renders empty');
+  assert(ctx.kgR6(123.400002) === 123.4, 'wizard kgR6: rounds to 6 significant digits');
+  assert(ctx.formatZoneLimitC(1260.30005) === '1260.3\u00b0C', 'wizard formatZoneLimitC rounds via kgR6');
+  const raw = { 'data-raw': '123.400002', 'data-disp': '123.4' };
+  const mk = (value) => ({ value, getAttribute: (k) => (k in raw ? raw[k] : null) });
+  assert(ctx.kgPost(mk('123.4')) === '123.400002', 'wizard kgPost: unedited posts raw');
+  assert(ctx.kgPost(mk('500')) === '500', 'wizard kgPost: edited posts the edited value');
+})();
+
+(function testWizardStep6UneditedSaveIsLossless() {
+  const ctx = loadPageScript(noopFetch);
+  const zones = [{ name: 'Z', zone_type: 0, max_temp_c: 123.400002, max_ramp_c_per_hr: 123.400002, min_temp_c: -20.1000004, cal_offset_c: 0.100000024 }];
+  const el = fakeStep6El([ctx.step6ZoneRowHtml(0, zones[0])]);
+  const live = ctx.step6ReadLiveZones(el, zones, 1);
+  assert(ctx.step6LimitConfirmLines(zones, live, 1).length === 0,
+    'step6: unedited fractional max_temp/max_ramp gives zero confirm lines');
+  const q = ctx.zoneToPostParams(live[0], 0).join('&');
+  assert(q.indexOf('z0_maxtemp=123.400002') >= 0, 'step6: unedited save posts raw max_temp');
+  assert(q.indexOf('z0_ramp=123.400002') >= 0, 'step6: unedited save posts raw max_ramp');
+  assert(q.indexOf('z0_mintemp=-20.1000004') >= 0, 'step6: unedited save posts raw min_temp');
+  // Edited value posts the edited value and does produce a confirm line.
+  el.cards[0].s6maxtemp.value = '1300';
+  const live2 = ctx.step6ReadLiveZones(el, zones, 1);
+  assert(ctx.zoneToPostParams(live2[0], 0).join('&').indexOf('z0_maxtemp=1300') >= 0,
+    'step6: edited max_temp posts the edited value');
+  assert(ctx.step6LimitConfirmLines(zones, live2, 1).length === 1, 'step6: edited max_temp gives a confirm line');
+  // Revert puts the displayed (rounded) value back and the field reads unedited again.
+  ctx.step6RevertInputsOn(el, zones, 1);
+  assert(String(el.cards[0].s6maxtemp.value) === '123.4', 'step6RevertInputs restores the displayed value');
+  assert(ctx.step6LimitConfirmLines(zones, ctx.step6ReadLiveZones(el, zones, 1), 1).length === 0,
+    'step6RevertInputs: reverted fields read as unedited');
+})();
+
+(function testWizardStep3CalUneditedPostsRaw() {
+  const ctx = loadPageScript(noopFetch);
+  const z = { tc_type: 3, cal_offset_c: 0.100000024 };
+  const inputs = parseInputsFromHtml(ctx.step3ZoneRowHtml(0, z));
+  assert(inputs.s3cal.getAttribute('data-raw') === '0.100000024', 'step3: cal input carries data-raw');
+  assert(ctx.kgPost(inputs.s3cal) === '0.100000024', 'step3: unedited cal posts raw');
+})();
+
+(function testKgR6CopiesIdenticalToZonesPage() {
+  const zp = fs.readFileSync(resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html'), 'utf8').split('\n').map((l) => l.replace(/\r$/, ''));
+  const wz = fs.readFileSync(PAGE_PATH, 'utf8').split('\n').map((l) => l.replace(/\r$/, ''));
+  ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].forEach((pre) => {
+    const a = zp.find((l) => l.indexOf(pre) === 0), b = wz.find((l) => l.indexOf(pre) === 0);
+    assert(!!a && a === b, 'drift pin: ' + pre + ' identical in zones_page.html and setup_wizard_page.html');
+  });
+})();
+
 // ---- commissioning_shared.js: the read-back verification itself (Non-
 // negotiable 1: "a post-write read-back that fails loudly on disagreement").
 // Loads the real shared file (not a reimplementation) into its own vm

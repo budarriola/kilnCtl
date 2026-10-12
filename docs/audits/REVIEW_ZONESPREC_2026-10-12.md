@@ -195,6 +195,6 @@ The max-width test comment already documents this (about 10 bytes per zone unmea
 | LOW-1 setup wizard float noise | Fixed: `kgR6` added to `setup_wizard_page.html` and applied to step 3 cal, step 6 ramp/max/min inputs, the limit hint, and the related messages. |
 | LOW-2 tolerance floor | Pooled for a later fixer (`zones_http_client.py` is being edited by another agent). |
 | LOW-3 unmapped fields | Pooled for a later fixer (same file). |
-| LOW-4 9-digit test values | Fixed: test uses 0.100000024f, 123.400024f, 12.3000145f, 1000.00006f (cal/ramp/min/max). cal `%.8g` and `%.7g` mutations CAUGHT; max_temp `%.8g` see commit message. |
+| LOW-4 9-digit test values | Fixed: test uses 0.100000024f, 123.400024f, 12.3000145f, 1000.00006f (cal/ramp/min/max). cal `%.8g` and `%.7g` mutations CAUGHT; max_temp `%.8g` is caught by float32 analysis (1000.0001 reads back as 1000.000122), not by a commit-message note (REVIEW_ZPRECFX2 INFO-4). |
 | LOW-5 kgR6 lossy save, empty for undefined | Fixed: inputs keep `data-raw`/`data-disp`, `kgPost` posts the raw value when unedited; `kgR6(undefined/null)` renders empty; JS test `test_zones_kgr6.js`. |
 | INFO-1 headroom 779 | Fixed: 475 in `zones_http_get.c` comment and test message. |

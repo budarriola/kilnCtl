@@ -7680,7 +7680,7 @@ static void test_zones_get_round_trip_precision_fields(void)
     zone_cfg_t *z = &s_zones.cfg.zones[0];
     z->cal_offset_c = 0.100000024f;
     z->max_ramp_c_per_hr = 123.400024f;
-    z->sanity_rate_c_per_min = 0.00031f;
+    z->sanity_rate_c_per_min = 0.000100027195f;
     z->max_temp_c = 1000.00006f;
     z->min_temp_c = -12.3000145f;
     httpd_req_t req;
@@ -7689,7 +7689,7 @@ static void test_zones_get_round_trip_precision_fields(void)
     TEST_CHECK(zones_get_handler(&req) == ESP_OK, "GET ok");
     const struct { const char *key; float want; } f[] = {
         {"\"cal_offset_c\":", 0.100000024f}, {"\"max_ramp_c_per_hr\":", 123.400024f},
-        {"\"sanity_rate_c_per_min\":", 0.00031f}, {"\"max_temp_c\":", 1000.00006f},
+        {"\"sanity_rate_c_per_min\":", 0.000100027195f}, {"\"max_temp_c\":", 1000.00006f},
         {"\"min_temp_c\":", -12.3000145f}};
     for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
         const char *at = strstr(s_last_resp_body, f[k].key);

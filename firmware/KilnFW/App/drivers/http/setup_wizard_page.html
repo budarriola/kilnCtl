@@ -596,6 +596,10 @@ function isZoneCommissioned(zone) {
 
 function kgR6(v) { if (v === undefined || v === null || v === '') return ''; var n = Number(v); return isFinite(n) ? parseFloat(n.toPrecision(6)) : ''; }
 
+/* Lossless save (copy of zones_page.html's helpers; test_zones_kgr6.js pins them identical): inputs show kgR6(raw) but remember the exact GET value; kgPost returns raw unless the user edited the field. */
+function kgRawAttrs(v) { return (v === undefined || v === null || !isFinite(Number(v))) ? '' : ' data-raw="' + String(v) + '" data-disp="' + kgR6(v) + '"'; }
+function kgPost(el) { var r = el.getAttribute('data-raw'); return (r !== null && el.value === el.getAttribute('data-disp')) ? r : el.value; }
+
 function formatZoneLimitC(v) {
   return (v === 0) ? 'NOT SET' : (kgR6(v) + '°C');
 }
@@ -2139,7 +2143,7 @@ function step3ZoneRowHtml(i, z) {
     '<div class="wfield"><label>Thermocouple type</label><select class="s3type" data-zone="' + i + '">' +
     tcTypeOptionsHtml(z.tc_type) + '</select></div>' +
     '<div class="wfield"><label>Calibration offset (&deg;C)</label>' +
-    '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '" value="' + kgR6(z.cal_offset_c) + '"></div>' +
+    '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '"></div>' +
     '<p class="hint">Verify: <span class="s3verify" data-zone="' + i + '">not yet checked</span></p></div>';
 }
 
@@ -2151,7 +2155,7 @@ function step3ReadCurrentZones(thermoCount, existingZones) {
     if (!card) { zones.push(prev); continue; }
     zones.push({
       tc_type: parseInt(card.querySelector('.s3type').value, 10),
-      cal_offset_c: parseFloat(card.querySelector('.s3cal').value),
+      cal_offset_c: parseFloat(kgPost(card.querySelector('.s3cal'))),
     });
   }
   return zones;
@@ -2582,16 +2586,41 @@ function renderStep5() {
 function step6ZoneRowHtml(i, z) {
   var rampField = (z.zone_type === 1) ? '' :
     '<div class="wfield"><label>Max ramp rate (&deg;C/hr) -- required for a heater zone, 0 = NOT SET</label>' +
-    '<input type="number" step="1" class="s6ramp" data-zone="' + i + '" value="' + kgR6(z.max_ramp_c_per_hr || 0) + '"></div>';
+    '<input type="number" step="1" class="s6ramp" data-zone="' + i + '"' + kgRawAttrs(z.max_ramp_c_per_hr || 0) + ' value="' + kgR6(z.max_ramp_c_per_hr || 0) + '"></div>';
   return '<div class="zonecard" data-zone="' + i + '">' +
     '<h4>Zone ' + (i + 1) + (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + '</h4>' +
     '<div class="wfield"><label>Max temp (&deg;C) -- required, hard safety trip, no debounce, 0 = NOT SET</label>' +
-    '<input type="number" step="1" class="s6maxtemp" data-zone="' + i + '" value="' + kgR6(z.max_temp_c || 0) + '"></div>' +
+    '<input type="number" step="1" class="s6maxtemp" data-zone="' + i + '"' + kgRawAttrs(z.max_temp_c || 0) + ' value="' + kgR6(z.max_temp_c || 0) + '"></div>' +
     rampField +
     '<div class="wfield"><label>Min temp (&deg;C) -- below this reads as a broken/disconnected sensor</label>' +
-    '<input type="number" step="1" class="s6mintemp" data-zone="' + i + '" value="' + kgR6(z.min_temp_c) + '"></div>' +
+    '<input type="number" step="1" class="s6mintemp" data-zone="' + i + '"' + kgRawAttrs(z.min_temp_c) + ' value="' + kgR6(z.min_temp_c) + '"></div>' +
     '<p class="hint">Currently stored: max temp ' + formatZoneLimitC(z.max_temp_c) + ', max ramp ' +
     formatZoneLimitC(z.max_ramp_c_per_hr) + (z.max_ramp_c_per_hr ? '/hr' : '') + '.</p></div>';
+}
+
+function step6ReadLiveZones(el, zones, thermoCount) {
+  var out = zones.slice();
+  for (var i = 0; i < thermoCount; i++) {
+    var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
+    var copy = Object.assign({}, zones[i] || {});
+    copy.max_temp_c = parseFloat(kgPost(card.querySelector('.s6maxtemp'))) || 0;
+    var rampInput = card.querySelector('.s6ramp');
+    if (rampInput) copy.max_ramp_c_per_hr = parseFloat(kgPost(rampInput)) || 0;
+    copy.min_temp_c = parseFloat(kgPost(card.querySelector('.s6mintemp')));
+    out[i] = copy;
+  }
+  return out;
+}
+
+function step6RevertInputsOn(el, zones, thermoCount) {
+  for (var i = 0; i < thermoCount; i++) {
+    var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
+    var z = zones[i] || {};
+    var maxTempInput = card.querySelector('.s6maxtemp');
+    if (maxTempInput) maxTempInput.value = kgR6(z.max_temp_c || 0);
+    var rampInput = card.querySelector('.s6ramp');
+    if (rampInput) rampInput.value = kgR6(z.max_ramp_c_per_hr || 0);
+  }
 }
 
 function renderStep6() {
@@ -2627,19 +2656,7 @@ function renderStep6() {
     html += '<div class="gnav"><button type="button" id="step6Save">Save &amp; mark done</button></div>';
     el.innerHTML = html;
 
-    function readLiveZones() {
-      var out = zones.slice();
-      for (var i = 0; i < thermoCount; i++) {
-        var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
-        var copy = Object.assign({}, zones[i] || {});
-        copy.max_temp_c = parseFloat(card.querySelector('.s6maxtemp').value) || 0;
-        var rampInput = card.querySelector('.s6ramp');
-        if (rampInput) copy.max_ramp_c_per_hr = parseFloat(rampInput.value) || 0;
-        copy.min_temp_c = parseFloat(card.querySelector('.s6mintemp').value);
-        out[i] = copy;
-      }
-      return out;
-    }
+    function readLiveZones() { return step6ReadLiveZones(el, zones, thermoCount); }
 
     // Consequence-bearing confirm (setup_wizard_review_2026-09-08): these
     // two fields bound every firing (a hard, no-debounce trip and the
@@ -2649,16 +2666,7 @@ function renderStep6() {
     // confirm. min_temp_c (broken-sensor floor) is excluded: it narrows,
     // not widens, what the guards will accept, so it is not a safety
     // boundary a routine click could cross by accident.
-    function step6RevertInputs() {
-      for (var i = 0; i < thermoCount; i++) {
-        var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
-        var z = zones[i] || {};
-        var maxTempInput = card.querySelector('.s6maxtemp');
-        if (maxTempInput) maxTempInput.value = kgR6(z.max_temp_c || 0);
-        var rampInput = card.querySelector('.s6ramp');
-        if (rampInput) rampInput.value = kgR6(z.max_ramp_c_per_hr || 0);
-      }
-    }
+    function step6RevertInputs() { step6RevertInputsOn(el, zones, thermoCount); }
 
     document.getElementById('step6Save').addEventListener('click', function () {
       var liveZones = readLiveZones();
