@@ -34,6 +34,8 @@ call-graph check can lose that loop and stay green.
 
 ### MED-1: the node-keyed reverse walk (M4) has no test, and the row calls it "redundant"
 
+STATUS: FIXED (case N in `tools/test_check_lcd_sink_callgraph.ps1`; M4 now CAUGHT by `FAIL: N`; evidence row corrected).
+
 Where: `tools/check_lcd_sink_callgraph.py:93-94`
 (`for c in rev.get(node, ()): work.append((c, node))`), and
 `tools/test_check_lcd_sink_callgraph.ps1` cases A to F. The row text in
@@ -71,6 +73,8 @@ exercised by any synthetic case (needed for static-helper chains in allowlisted
 objects)".
 
 ### LOW-1: the test row says NEGATIVE-TESTED, but it records the same MISSED mutation
+
+STATUS: FIXED (M4 CAUGHT; both rows NEGATIVE-TESTED, header counts 190 / 0 PARTIAL).
 
 Where: the `tools/test_check_lcd_sink_callgraph.ps1` row. It cites "the same four
 mutations" with "M4 MISSED", yet its status is NEGATIVE-TESTED, while the check row with
