@@ -195,6 +195,7 @@ try {
     $assignDelay = 0
     if ($env:PUSH_VERIFY_TEST_MODE -eq '1' -and $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -match '^\d{1,5}$') { $assignDelay = [math]::Min(5000, [int]$env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS) }
     $gitExe = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    if ($assignDelay -gt 0) { Write-Host "push_verify: TEST HOOK assign delay ${assignDelay} ms" }
     $jobAssigned = $false
     $useJob = ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1')  # env hook: check_push_verify forces the no-job fallback
     # Created suspended, assigned to the job, then resumed (M1). Assign result is checked: if the job cannot hold the process, a timeout falls back to the snapshot walk.

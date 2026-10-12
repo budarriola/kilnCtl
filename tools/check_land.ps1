@@ -239,6 +239,14 @@ try {
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after cannot-lock-ref retry"
     Assert ($rebases -eq 2) "rebased twice after ref-lock race (got $rebases)"
 
+    Write-Host "case: persistent ref-lock race ends with git's last output in the error"
+    $c = New-Clone "c_lkpersist"
+    Commit-File $c "lkp.txt" "x" "lkp"
+    $hook = Join-Path $origin "hooks/pre-receive"
+    [IO.File]::WriteAllText($hook, "#!/bin/sh`necho `"error: cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb`" >&2`nexit 1`n")
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+    Assert ($r.Code -eq 1 -and $r.Out -match 'still rejected after' -and $r.Out -match 'is at aaaa but expected bbbb') "persistent race: final error keeps the git output"
+
     # LOW-1: a genuine refusal whose free text mentions the race phrases, or a lock that never clears, is NOT a race.
     foreach ($variant in @(
         @{ n = 'refusal text'; msg = 'no pushes today: signed commit expected; cannot lock ref until review' },

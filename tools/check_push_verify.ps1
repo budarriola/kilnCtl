@@ -93,6 +93,8 @@ foreach ($hs in @($pvAst.FindAll({ param($n) $n -is [System.Management.Automatio
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
 $pvCsBad = '(?i)GetProcessById|Process\.GetProcess\w*|\.Kill\s*\(|taskkill|Process\.Start\b|TerminateProcess\s*\((?!\s*(IntPtr\s+p\b|pi\.hp\s*,|h\s*,))'
 Assert ($pvErr.Count -eq 0 -and $pvCmdHits.Count -eq 0 -and $pvMemHits.Count -eq 0 -and $pvStopCalls.Count -ge 1) "S2/L1: push_verify.ps1 (AST) has no bare-PID kill command or member call and kills via Stop-PvTargets"
+Assert (($pvCs -match 'ResumeThread\(pi\.ht\)\s*==\s*0xFFFFFFFF') -and ($pvCs -match 'hin\s*==\s*bad') -and ($pvCs -match 'hout\s*==\s*bad') -and ($pvCs -match 'herr\s*==\s*bad')) "LOW-2: ResumeThread and every CreateFileW result is checked (INVALID_HANDLE_VALUE / 0xFFFFFFFF)"
+Assert (($pvCs -match 'CreateProcessW\(gitExe,') -and ($pvSrc -match 'Get-Command git -CommandType Application')) "INFO-3: CreateProcessW gets the resolved git.exe path as lpApplicationName"
 Assert ($pvCs.Length -gt 200 -and $pvCs -notmatch $pvCsBad) "L1: C# block has no GetProcessById / Process.GetProcess* / .Kill( / taskkill, and TerminateProcess only on held handles"
 $me = Get-Process -Id $PID
 $hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
@@ -173,9 +175,15 @@ try {
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -notmatch "no job membership") "late job assign (300 ms): job path still used, hung fetch -> UNKNOWN"
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "late job assign (300 ms): no git process (wrapper, git, remote-http) survives the timeout"
         # LOW-4: the delay hook is ignored without the test-mode flag (production env var stray), and capped with it.
-        $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "99999999999"
-        try { $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2"); $sw.Stop() } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -ErrorAction SilentlyContinue }
-        Assert ($r.Rc -eq 1 -and $r.Out -match "timed out" -and $sw.Elapsed.TotalSeconds -lt 30) "stray huge PUSH_VERIFY_TEST_ASSIGN_DELAY_MS without test mode: ignored, no stall, no crash"
+        $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "90000"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -ErrorAction SilentlyContinue }
+        Assert ($r.Rc -eq 1 -and $r.Out -match "timed out" -and $r.Out -notmatch "TEST HOOK") "stray PUSH_VERIFY_TEST_ASSIGN_DELAY_MS without PUSH_VERIFY_TEST_MODE: ignored (no stall)"
+        $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "99999999999"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
+        Assert ($r.Rc -eq 1 -and $r.Out -match "timed out" -and $r.Out -notmatch "TEST HOOK") "oversized delay value parsed safely (ignored, no cast crash)"
+        $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "99999"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
+        Assert ($r.Out -match "assign delay 5000 ms") "delay hook with test mode is capped at 5000 ms"
     } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null
 
