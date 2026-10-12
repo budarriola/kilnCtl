@@ -234,3 +234,21 @@ row (caught, through the dispatch case it guards).
   the other commands.
 - The full host suite after the rebase. Only the targeted subset above was run.
 - SaftyFW (WP2) code, beyond the wire facts quoted here.
+
+## Fix status
+
+Fixed in the commit "TEST_TRIP WP3 review fixes: single reboot count across 30/32-byte DIAG, route
+read-back, live trip_is_test, tests" (2026-10-11, on origin/dev).
+
+| ID | Status | Fix |
+|---|---|---|
+| LOW-1 | fixed | `safety_apply_diag()` V3 block honours the uptime path's reboot note for `SAFETY_REBOOT_NOTE_WINDOW_MS` (as the FW_VERSION branch does), so one reboot is counted once; the new boot id is adopted either way. Test: `test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag` |
+| LOW-2 | fixed | The 200 reply reads the live DIAG: `readback:true` with the observed `trip_reason`/`trip_mask` and `is_test`; otherwise `readback:false` with `requested_trip_reason`/`requested_trip_mask` only. A real guard that won shows its own reason and `is_test:false` |
+| LOW-3 | fixed | `trip_is_test` is emitted in the DIAG block from `diag_state == TRIPPED && diag_trip_reason == 4` on a DIAG fresher than `SAFETY_LINK_STALE_MS`; clears with the trip |
+| LOW-4 | fixed | `test_safety_test_trip` pins DUPLICATE as 409 `ok:false` |
+| LOW-5 | fixed | New `test_readback_right_reason_wrong_mask_fails` (reason 4, mask 0x28); the old mismatch test is renamed `test_readback_wrong_reason_fails` |
+| INFO-1 | fixed | `s_test_trip_request_id` is seeded once per ESP boot from `hal_sysinfo_random_u32()` |
+| INFO-2 | fixed | The DIAG boot-id reboot path now logs a WARN line |
+| INFO-3 | open | Unchanged (REBOOTFX2 LOW-1; V3 does not close it) |
+| INFO-4 | open | Stack budget still unmeasured; needs a target ELF measurement on the bench-flashed build |
+| INFO-5 | fixed | `test_wp3_info5_test_trip_result_counted_in_stats` covers the 0x2F stats case |
