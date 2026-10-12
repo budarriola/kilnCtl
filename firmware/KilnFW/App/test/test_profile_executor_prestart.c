@@ -690,6 +690,7 @@ static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INV
 
 static bool g_stub_diag_tripped = false;      /* F5HOLDERFX3: the Pico DIAG reads TRIPPED ... */
 static uint16_t g_stub_diag_age_ms = 0;        /* ... with this age (fresh unless >= SAFETY_LINK_STALE_MS) */
+static bool g_stub_diag_since_reboot = true;     /* F5HOLDERFX4: ... independent of diag_ever_received */
 static bool g_stub_diag_received = true;        /* F5HOLDERFX4: a DIAG was received since the Pico's reboot ... */
 static uint32_t g_stub_diag_frame_age_ms = 0;   /* ... this old (diag_frame_age_ms; age_ms is the STATUS age) */
 static bool s_test_bump_epoch_in_link = false; /* LOW-3: an all-off lands during every start-gate link read */
@@ -709,7 +710,7 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
         if (g_stub_link_mode == 5) g_stub_link_calls++;
         if (out) {
             out->diag_ever_received = g_stub_diag_received;
-            out->diag_since_reboot = g_stub_diag_received;
+            out->diag_since_reboot = g_stub_diag_since_reboot;
             out->diag_frame_age_ms = g_stub_diag_frame_age_ms;
             out->age_ms = g_stub_diag_age_ms;
             if (g_stub_diag_tripped) out->diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
@@ -3129,7 +3130,7 @@ static void test_f5holderfx2_retry_placement_and_pico_gate(void)
         }
         TEST_CHECK(code_all && strstr(code_all, "safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS") != NULL,
                    "F5HOLDERFX4 MED-1: watchdog DIAG validity uses diag_frame_age_ms");
-        TEST_CHECK(code_all && strstr(code_all, "safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status)") != NULL,
+        TEST_CHECK(code_all && strstr(code_all, "safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status);") != NULL,
                    "F5HOLDERFX4 MED-1: watchdog treats a cached TRIPPED as tripped at any age");
         free(code_all);
         TEST_CHECK(code && pe_count_in_range(code, code + strlen(code), "io_segs_retry_on(") == 1,
@@ -13789,6 +13790,11 @@ static void test_f5holderfx3_start_gate_pico_tripped(void)
     TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "no DIAG since reboot -> refused");
     TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "missing-DIAG refusal says to wait");
     g_stub_diag_received = true;
+    g_stub_diag_since_reboot = false; /* a DIAG was received, but not since the Pico's last reboot */
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "DIAG not since Pico reboot -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "pre-reboot-DIAG refusal says to wait");
+    g_stub_diag_since_reboot = true;
 
     profile_t p;
     memset(&p, 0, sizeof(p));
