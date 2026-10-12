@@ -1227,12 +1227,17 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 5000u), "equal (duplicate frame) does not");
     TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 6000u), "forward step does not");
     TEST_CHECK(!safety_pico_uptime_behind_expected(5000u, 0u, 4000u), "small step back inside the 2 s tolerance does not");
-    TEST_CHECK(safety_pico_uptime_behind_expected(5000u, 0u, 2999u), "step back past the tolerance is a reboot");
+    TEST_CHECK(safety_pico_uptime_behind_expected(5000u, 1000u, 2999u), "step back past the tolerance is a reboot");
+    // REBOOTFX2 LOW-3: a drain delay / frozen DIAG has a large now_ms (above elapsed + tol): not a reboot.
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 1000u, 600000u - 3500u),
+               "LOW-3: frozen uptime far above the elapsed time is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 0u, 590000u),
+               "LOW-3: late-drained DIAG (uptime well above elapsed) is not a reboot");
     // LOW-1: a long outage on a Pico that kept running is on schedule; a repeat-id reboot whose new uptime
     // already passed the OLD baseline is still behind the EXPECTED uptime.
     TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 300000u, 900100u), "kept running over a long outage: not a reboot");
-    TEST_CHECK(safety_pico_uptime_behind_expected(20000u, 300000u, 310000u),
-               "LOW-1: new uptime (310 s) passed the old baseline (20 s) but is behind baseline+elapsed (320 s)");
+    TEST_CHECK(safety_pico_uptime_behind_expected(20000u, 300000u, 100000u),
+               "LOW-1: new uptime (100 s) passed the old baseline (20 s) but is behind baseline+elapsed (320 s)");
     // LOW-2: the 49.7-day wrap, with the outage straddling it by more than the old 120 s band.
     TEST_CHECK(!safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 300000u - 1u),
                "LOW-2: outage spanning the wrap (-600 s .. +300 s) is not a reboot");
@@ -3491,7 +3496,7 @@ static void test_long_outage_repeat_boot_id_reboot_detected(void)
     s_fake_tick_count = 1000;
     apply_diag_uptime(&b, 20000u);
     s_fake_tick_count = 301000;
-    apply_diag_uptime(&b, 310000u);
+    apply_diag_uptime(&b, 100000u);
     TEST_CHECK(b.pico_reboot_by_uptime_count == 1u, "MUST GO RED if uptime >= old baseline hides the reboot (LOW-1)");
     // Outage spanning the 32-bit wrap by more than the old 120 s band.
     SafetyLinkClass w = make_link();

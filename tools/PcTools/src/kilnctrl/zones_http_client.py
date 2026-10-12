@@ -1252,6 +1252,7 @@ _FLOAT_FIELD_PRINT_FORMAT = {
     "cal_offset_c": "%.9g", "pid_kp": "%.9g", "pid_ki": "%.9g", "pid_kd": "%.9g",
     "max_ramp_c_per_hr": "%.9g", "sanity_rate_c_per_min": "%.9g",
     "max_temp_c": "%.9g", "min_temp_c": "%.9g", "coupling_diag_k_dc": "%.9g",
+    "pc_link_abort_silence_ms": "%.0f",
     "heater_window_ms": "%.0f", "heater_min_on_ms": "%.0f", "heater_min_off_ms": "%.0f",
     "guard_sensor_fault_debounce_ticks": "%.0f",
     "guard_wrong_dir_window_s": "%.1f", "guard_off_settle_s": "%.1f",
@@ -1262,15 +1263,23 @@ _FLOAT_FIELD_PRINT_FORMAT = {
     "approach_rate_cap_c_per_hr": "%.3f", "error_band_c": "%.3f",
     "rate_band_c_per_s": "%.4f", "fuzzy_strength_pct": "%.2f",
 }
+_FLOAT_ABS_FLOOR = 1e-12
 _FLOAT_EPS_REL = 1e-6  # %.9g carries ~9 significant digits; float32 eps is ~1.2e-7
 
 
 def _float_tolerance(a: float, b: float, field: "Optional[str]") -> float:
-    """Half the field's GET print step; relative float epsilon for %.9g (and
-    for an unmapped field, the strictest choice)."""
-    fmt = _FLOAT_FIELD_PRINT_FORMAT.get(field, "%.9g") if field else "%.9g"
+    """Half the field's GET print step; relative float epsilon (tiny absolute
+    floor, ZONESPREC LOW-2) for %.9g. A named field missing from
+    _FLOAT_FIELD_PRINT_FORMAT raises (ZONESPREC LOW-3): a new float field must
+    be forced into the table, not silently get the %.9g rule."""
+    if field is None:
+        fmt = "%.9g"
+    elif field in _FLOAT_FIELD_PRINT_FORMAT:
+        fmt = _FLOAT_FIELD_PRINT_FORMAT[field]
+    else:
+        raise KeyError(f"float field {field!r} has no entry in _FLOAT_FIELD_PRINT_FORMAT")
     if fmt == "%.9g":
-        return _FLOAT_EPS_REL * max(abs(float(a)), abs(float(b)), 1.0)
+        return max(_FLOAT_EPS_REL * max(abs(float(a)), abs(float(b))), _FLOAT_ABS_FLOOR)
     decimals = int(fmt[2:-1])
     return 0.5 * 10.0 ** -decimals
 

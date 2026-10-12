@@ -56,7 +56,13 @@ bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elaps
     uint32_t expected = baseline_ms + esp_elapsed_ms; /* modular: handles the 32-bit wrap */
     int32_t diff = (int32_t)(now_ms - expected);
     int32_t tol = (int32_t)(SAFETY_PICO_UPTIME_TOL_BASE_MS + esp_elapsed_ms / SAFETY_PICO_UPTIME_TOL_PPM_DIV);
-    return diff < -tol;
+    if (diff >= -tol) {
+        return false;
+    }
+    /* REBOOTFX2 LOW-3: physical bound. A reboot happens after the baseline, so the new boot's uptime cannot
+     * exceed the ESP time elapsed since it. A late-drained DIAG or a frozen uptime makes `diff` very negative
+     * with a large now_ms; that is not a reboot. */
+    return now_ms <= esp_elapsed_ms + (uint32_t)tol;
 }
 
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,

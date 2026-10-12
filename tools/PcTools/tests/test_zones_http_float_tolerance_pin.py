@@ -32,6 +32,28 @@ class FloatToleranceTest(unittest.TestCase):
         for f in zh._PRESET_ZONE_OVERRIDE_FIELDS - nonfloat:
             self.assertIn(f, zh._FLOAT_FIELD_PRINT_FORMAT, f)
 
+    def test_every_top_level_float_field_is_mapped(self):
+        for f in zh._TOP_FIELD_FORM_KEY:
+            if f in zh._TOP_INT_FIELDS or f == "continue_on_zone_trip":
+                continue
+            self.assertIn(f, zh._FLOAT_FIELD_PRINT_FORMAT, f)
+
+    def test_unmapped_named_field_raises(self):
+        with self.assertRaises(KeyError):
+            zh._float_close(1.0, 1.0, "not_a_mapped_field")
+
+    def test_small_magnitude_mismatch_fails(self):
+        # ZONESPREC LOW-2: the 1.0 floor let a 3% pid_ki mismatch pass
+        self.assertFalse(zh._float_close(3.4e-5, 3.5e-5, "pid_ki"))
+        self.assertFalse(zh._float_close(0.0, 9e-7, "pid_kd"))
+        self.assertFalse(zh._float_close(0.05, 0.050001, "sanity_rate_c_per_min"))
+        self.assertTrue(zh._float_close(3.4e-5, 3.4e-5 * (1 + 1e-7), "pid_ki"))
+        self.assertTrue(zh._float_close(0.0, 0.0, "pid_kd"))
+
+    def test_fractional_abort_silence_reads_back_rounded(self):
+        # ZONESPREC LOW-3: GET prints pc_link_abort_silence_ms at %.0f
+        self.assertTrue(zh._float_close(1500.4, 1500.0, "pc_link_abort_silence_ms"))
+
     def test_tolerance_below_one_step(self):
         for field, fmt in zh._FLOAT_FIELD_PRINT_FORMAT.items():
             tol = zh._float_tolerance(10.0, 10.0, field)
