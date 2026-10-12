@@ -365,10 +365,10 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     gs = [n for n, l in enumerate(norm) if l == guard]
     assert len(gs) == 1, ("guard line not found exactly once", guard, gs)
     want = guard.replace(_NH, "KILNCTL_TEST_GUARD_PROBE")
-    probes = [n for n, l in enumerate(lines) if "KILNCTL_TEST_GUARD_PROBE" in l and _PROBE in l]
-    assert len(probes) == 1, ("expected exactly one probe line", probes)
+    probes = [n for n, l in enumerate(norm) if l.startswith(want) and _PROBE in l]
+    assert len(probes) == 1, ("expected exactly one executable probe `if` on the guard's condition", want,
+                              [lines[n] for n, l in enumerate(lines) if "KILNCTL_TEST_GUARD_PROBE" in l])
     pn = probes[0]
-    assert norm[pn].startswith(want), ("probe is not an executable `if` on the guard's condition", lines[pn], want)
     assert "[Console]::Error.WriteLine('" + marker + "')" in norm[pn] and ("exit %d" % _PROBE_RC) in norm[pn], lines[pn]
     assert gs[0] < pn, ("guard must precede probe", gs[0], pn)
     later = [n for n, l in enumerate(norm) if n > pn and l.startswith(anchor)]
