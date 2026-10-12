@@ -11,7 +11,7 @@ and the hotspot script. Neither is a live leak today.
 
 ## Findings
 
-### LOW-1: static pin bypasses (comment/string-blind, outside-span disarms)
+### LOW-1: static pin bypasses (comment/string-blind, outside-span disarms) -- FIXED in 9ab6925e0 (PSParser tokens, any KILNCTL_TEST_GUARD* env write refused before the probe incl. dot-sourced files; S1-S5 CAUGHT)
 
 `tools/PcTools/tests/test_network_guard.py:284-288` (`_exec_lines`) strips
 `<# ... #>` with a regex that ignores `#` line comments and string literals.
@@ -52,7 +52,7 @@ tokens. Also refuse any `Env:` write, `Remove-Item Env:`, `Set-Item Env:` or
 names. Scan dot-sourced files as well, or forbid dot-sourcing before the
 last probe.
 
-### LOW-2: bench_hotspot.ps1 has no credential/action backstop
+### LOW-2: bench_hotspot.ps1 has no credential/action backstop -- FIXED in 9ab6925e0 (exit-87 backstop, pinned)
 
 `tools/PcTools/scripts/bench_hotspot.ps1:91` (guard), `:95` (probe). In
 `web_commission_row.ps1`, a probe disarmed by one of the LOW-1 bypasses
@@ -135,7 +135,7 @@ no programmatic callers, and it ends with `exit $LASTEXITCODE`, so nothing
 treats 87 as success. This fails safe. Consider stating the behaviour in the
 script header.
 
-### INFO-5: stale control-test docstring
+### INFO-5: stale control-test docstring -- FIXED in 9ab6925e0
 
 `test_network_guard.py:371` still says "closed localhost port + dummy
 credentials". The dummy credentials were dropped in `f8b761565`.
