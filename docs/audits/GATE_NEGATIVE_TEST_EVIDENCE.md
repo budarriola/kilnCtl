@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 199.
+Gate rows: 200.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 187 |
+| NEGATIVE-TESTED | 188 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -238,3 +238,4 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_submodule_pins_pushed.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (`-Preset check -PresetArg tools/test_check_submodule_pins_pushed.ps1`) | check_submodule_pins_pushed.ps1: `if ($failed -gt 0) { exit 1 }` -> `exit 0` | CAUGHT (exit 1): `FAIL: never-pushed: exit 0, want 1`; baseline PASS. Network check, excluded from run_all_checks glob (offline test wired instead); run by land.ps1 and dev_promote.ps1 |
 | `tools/check_touch_cal_exit_target_caller.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (`-Preset check -PresetArg tools/check_touch_cal_exit_target_caller.ps1`) | `$allowedFile` `ui/ui_page_touch_cal.c` -> `ui/ui_page_other.c` (the one legal caller no longer matches) | CAUGHT (exit 1): `2 violation(s)`; baseline PASS. Guard negtest (REVIEW_DEVBREAK2 LOW-1): a second `lcd_touch_cal_saved_exit_target` call in ui_page_touch_cal.c is CAUGHT by the `$allowedCalls -ne 1` branch; that branch is NOT an equivalent mutant -- with it disabled (`if ($false)`) both a duplicate call and zero calls are MISSED, so it is the only guard for the in-file call count and must stay |
 | `tools/test_check_submodule_pins_pushed.ps1` | NEGATIVE-TESTED | see the `tools/check_submodule_pins_pushed.ps1` row (this test is that row's `-PresetArg`) | check_submodule_pins_pushed.ps1: `if ($failed -gt 0) { exit 1 }` -> `exit 0` | CAUGHT (exit 1): `FAIL: never-pushed: exit 0, want 1`; baseline PASS |
+| `tools/check_app_hold_registration.ps1` | NEGATIVE-TESTED | negtest 2026-10-12 (`-Preset check -PresetArg tools/check_app_hold_registration.ps1`) | (1) main.c: `profile_executor_note_external_app_hold();` -> `(void)0;`; (2) main_control_bringup.c: same removal; (3) main.c: call renamed to `profile_executor_note_external_app_hold_x()` | CAUGHT all three (exit 1): `FAIL: main.c:183: APP-capable fault-source assert (fault_sources) not preceded by profile_executor_note_external_app_hold()`, `FAIL: main_control_bringup.c:109: ... (ctx->boot_fault_sources) ...`; baseline PASS each run |
