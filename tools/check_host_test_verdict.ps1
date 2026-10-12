@@ -28,7 +28,7 @@ Assert-True ($v.Mismatch -and $v.ExitCode -ne 0 -and $v.MismatchText -match "^MI
 # Wiring (REVIEW_DEVBREAKFX10 LOW-1): the call site in build_host_tests.ps1.
 $bht = Join-Path $PSScriptRoot "..\firmware\KilnFW\App\test\build_host_tests.ps1"
 $src = Get-Content $bht -Raw
-$dot = [regex]::Matches($src, '(?m)^\s*\.\s+\(Join-Path \$PSScriptRoot "\.\./\.\./\.\./\.\./tools/host_test_verdict\.ps1"\)\s*$')
+$dot = [regex]::Matches($src, '(?m)^\s*\.\s+\(Join-Path\s+\$PSScriptRoot\s+"\.\./\.\./\.\./\.\./tools/host_test_verdict\.ps1"\)\s*$')
 Assert-True ($dot.Count -eq 1) "build_host_tests.ps1 dot-sources host_test_verdict.ps1 exactly once"
 $callRe = '(?m)^\s*\$verdict = Get-HostTestVerdict -Built \$script:builtExes\.Count -Expected \$totalExpected -BuildFailures \$script:buildFailures\.Count -RunFailures \$script:failedExes\.Count\s*$'
 Assert-True ([regex]::Matches($src, $callRe).Count -eq 1) "verdict assigned once, straight from Get-HostTestVerdict with the real counters"
