@@ -3418,7 +3418,13 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
         const uint32_t zero_seed[1] = {0u};
         fake_sysinfo_script_random_sequence(zero_seed, 1);
         (void)zones_http_start();
-        TEST_CHECK(zones_config_generation() != 0u, "zero RNG seed still yields a nonzero zones generation");
+        const uint32_t gen_zero = zones_config_generation();
+        const uint32_t one_seed[1] = {1u};
+        fake_sysinfo_script_random_sequence(one_seed, 1);
+        (void)zones_http_start();
+        /* seeds 0 and 1 both map to 1 through `| 1u`; without it they differ by one (startup may bump after the seed) */
+        TEST_CHECK(gen_zero != 0u && gen_zero == zones_config_generation(),
+                   "zero RNG seed gives the same nonzero zones generation as seed 1");
         const uint32_t seeds2[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
                                     0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
         fake_sysinfo_script_random_sequence(seeds2, 8);
