@@ -25,12 +25,12 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 200.
+Gate rows: 202.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 188 |
-| PARTIAL | 0 |
+| NEGATIVE-TESTED | 189 |
+| PARTIAL | 1 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
 | NOT AUDITED (pass 12 pending) | 0 |
@@ -164,6 +164,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_kiln_scope_cfg_mirrors.ps1` | NEGATIVE-TESTED | 10-07 | scope-list vs cfg-mirror drift in kiln_scope_cfg_files.c, unit_pref.[ch], kiln_package.c, cfg_fs.c | each RED, names the item; restored |
 | `tools/check_lcd_admin_gates.ps1` | NEGATIVE-TESTED | 10-09 | tools\negtest.ps1 -Preset check: `Admin PIN to switch relay` -> `Pin to switch relay` in ui_page_temperature.c | CAUGHT (exit 1, `FAIL: L3 relay: ... lacks an admin gate`); negtest copy removed, real tree unchanged. 2026-10-10 (comment stripping + relock and hub pre-gate rules): deleting either `*_relock_close` call, a gate call left in a comment (C2) and a `kiln_ui_show` before the gate (C3) all CAUGHT. 2026-10-10 (LCDFX4 LOW-1..4, INFO-1; 3ba63d59d): comma operator after the USER gate, role weakened to USER-1 with a dead exact-text twin, `#ifdef`/`#if (0)` gated twins, extra code after the ADMIN touch-cal gate, cast callback registration, Home trip strip `if (0)` and ungated trip-strip call, duplicate callback definition: all CAUGHT |
 | `tools/check_lcd_home_nav_gated.ps1` | NEGATIVE-TESTED | 10-02 | nav ungated in ui_page_home_actions.c | RED; restored |
+| `tools/check_lcd_sink_callgraph.ps1` | PARTIAL | negtest 2026-10-12 (b4c819c80) | `tools\negtest.ps1 -Preset check -PresetArg tools/test_check_lcd_sink_callgraph.ps1 -Mutations <json>`, four mutations of `tools/check_lcd_sink_callgraph.py` (synthetic-dump test, base b4c819c80): M1 gate-edge referencer filter -> `if False`; M2 non-UI caller allowlist test `if not is_ui(c):` -> `if False:`; M3 UI-reach `fails.append` -> `pass`; M4 first reverse-walk loop over `rev.get(node, ())` emptied | M1 CAUGHT (exit 1, `FAIL: D table referencing gated action fails`); M2 CAUGHT (`FAIL: E unreviewed non-UI caller fails`); M3 CAUGHT (`FAIL: B ...`, `FAIL: C ...`); M4 MISSED (exit 0, all A-F PASS: the bare-name `rev.get(fn, ())` loop after it reaches the same callers in the synthetic dumps, so it is redundant there; not claimed as covered); baseline PASS; real tree unchanged. The real-build path (`check_lcd_sink_callgraph.ps1` wrapper, objdump over build objects, SKIP when no build) is NOT mutated |
 | `tools/check_lint_pages.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js / nav.js | RED on the right rule; restored |
 | `tools/check_mcp_facade_coverage.ps1` | NEGATIVE-TESTED | 09-16e, 09-16f | [09-16e] uncovered @_srv._tool() negtest function added to mcp_server_io.py; the documented plant_sim_compare example found stale ; [09-16f] ramp_assist_set_enabled KEYWORDS entry removed (replaces the stale documented example) | [09-16e] RED naming the tool; hand-restored; docstring example fixed in 09-16f ; [09-16f] RED naming the tool; hand-restored; PASS |
 | `tools/check_mcp_tool_count_doc.ps1` | NEGATIVE-TESTED | 09-16e | CLAUDE.md edited to claim 999 tools | RED, doc vs actual count; hand-restored; PASS |
@@ -233,6 +234,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_dev_promote.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | dev_promote.ps1: Test-RealPromote tree-equality and named-sha-on-dev checks removed one at a time | RED each time (forged-promote cases refused no longer); check returned to PASS on restore |
 | `tools/check_worktree_mint.ps1` | NEGATIVE-TESTED | 10-09 | worktree_mint.ps1 default changed to origin/main; -Base ignored; commit_guard.ps1 / push_verify.ps1 defaults changed to origin/main | RED each time; hand-restored; PASS |
 | `tools/test_check_duplicate_symbols.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (hand mutation, worktree off origin/dev) | check_duplicate_symbols.ps1 line 218 manifest selection: `Descending = $true` -> `$false` (picks the least-covering source); ran test_check_duplicate_symbols.ps1 | RED: `FAIL: A: output says the manifest was used`, `2 check(s) FAILED`, exit 1; restored by hand; `all passed`, exit 0 |
+| `tools/test_check_lcd_sink_callgraph.ps1` | NEGATIVE-TESTED | negtest 2026-10-12 (b4c819c80) | the same four mutations (the test is the evidence harness for the check logic) | M1-M3 CAUGHT by the test's own FAIL lines; M4 MISSED, see the check's row; baseline PASS |
 | `tools/check_no_alias_shadowing.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | check_worktree_mint.ps1: `function Rm {}` injected at line 3 | CAUGHT (exit 1): `FAIL: tools\check_worktree_mint.ps1:3 defines function 'Rm' shadowing built-in alias 'rm' -> Remove-Item`; baseline PASS |
 | `tools/check_runner_noninteractive.ps1` | NEGATIVE-TESTED | negtest 2026-10-09 (`-Preset check`) | run_all_checks.ps1: `-NonInteractive` dropped from the .ps1 child args; `-RedirectStandardInput $inFile` replaced | CAUGHT both (exit 1): `does not launch .ps1 checks with ... -NonInteractive`, `does not redirect child stdin`; baseline PASS |
 | `tools/check_submodule_pins_pushed.ps1` | NEGATIVE-TESTED | negtest 2026-10-10 (`-Preset check -PresetArg tools/test_check_submodule_pins_pushed.ps1`) | check_submodule_pins_pushed.ps1: `if ($failed -gt 0) { exit 1 }` -> `exit 0` | CAUGHT (exit 1): `FAIL: never-pushed: exit 0, want 1`; baseline PASS. Network check, excluded from run_all_checks glob (offline test wired instead); run by land.ps1 and dev_promote.ps1 |
