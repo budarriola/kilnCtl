@@ -112,6 +112,8 @@ Suggested fix: time with `QueryPerformanceCounter` plus thread CPU time
 (`GetThreadTimes`), or take the minimum of N runs per path, or relax the bound
 when the process is not alone.
 
+**Fix status:** fixed. `time_verify_calls()` now uses QueryPerformanceCounter and the minimum of 9 batches per path (load can only inflate a batch); the 5x assertion is unchanged. Stress: 128 runs at 32 parallel, 0 failures (review saw 2 of 96 before). Negtest: `rec.iterations : 1` for the unconfigured path in `web_auth_store.c` is CAUGHT (test line 412).
+
 ### LOW-4: the `test_update_fetch.c:469/489` side failure is a plausible real load race (not reproduced; unrelated to this commit)
 
 `test_writer_wedge()` sets `g_fr_time_div = 1000`. That shrinks the writer wait,
@@ -133,6 +135,8 @@ It is a test-harness race, not a firmware defect: on target the bound is 30 s.
 Suggested fix: have the test wait until the fake flash write is actually
 blocked (`g_fr_flash_blocked_n >= 1`) before letting the scaled timeout run.
 Alternatively, gate the scaled clock on that event.
+
+**Fix status:** fixed (test stub only). The fake `xSemaphoreTake` now starts the scaled writer-timeout clock only once a writer thread is parked in flash (`g_fr_flash_blocked_n >= 1`, 15 s fallback), in `stubs_update_fetch/fake_support.c`. Stress: 128 runs at 32 parallel, 0 failures. Negtest: forcing `wedged = false` in `update_fetch.c` is CAUGHT.
 
 ### LOW-5: `profiles_used_bitmap` in the degraded registry is reported as an unreadable boot store
 
