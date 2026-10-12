@@ -538,6 +538,8 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(fracEqual.valid === true, 'step6: raw 1260.30005 vs printed ceiling 1260.3 is accepted');
   const fracOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.5, max_ramp_c_per_hr: 200 }], 1260.3);
   assert(fracOver.valid === false, 'step6: a genuinely over fractional max (1260.5 vs 1260.3) is refused');
+  const fracJustOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.35, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracJustOver.valid === false, 'step6: 1260.35 vs 1260.3 (0.05 over, past kgR6) is refused -- no 0.1 slack');
 })();
 
 // ---- getAbsMaxTempC(): reads the Pico's abs_max_temp_c off GET
@@ -975,6 +977,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const fracUnder = Object.assign({}, base, { absMaxTempC: 1260.1 });
   assert(ctx.validateStep7(fracUnder, [1260.30005]).valid === false,
     'step7: a genuinely lower ceiling (1260.1 vs 1260.30005) is refused');
+  const fracJustUnder = Object.assign({}, base, { absMaxTempC: 1260.25 });
+  assert(ctx.validateStep7(fracJustUnder, [1260.3]).valid === false,
+    'step7: 1260.25 vs zone max 1260.3 (0.05 tighter, past kgR6) is refused -- no 0.1 slack');
 
   const belowCeiling = Object.assign({}, base, { absMaxTempC: 1000 });
   const v = ctx.validateStep7(belowCeiling, [1200]);

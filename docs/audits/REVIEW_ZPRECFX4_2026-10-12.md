@@ -163,3 +163,7 @@ baseline passed, every real tree was unchanged and every copy was removed.
 | `step6RevertInputsOn`: ramp revert removed | same | CAUGHT | `FAIL: step6RevertInputs restores the displayed ramp value` |
 | `PROFILES_SAVE_ERR_MSG_LEN` 192 to 128 | `build_host_tests.ps1 -Only profiles_http`, `-ExpectPattern` | CAUGHT | Compiled. `FAIL ...test_profiles_http.c:4533: longest io-segment refusal leaves >= 16 bytes of margin`, `RUN FAILURES (1)`, no build failure |
 | `_parse_saved`: drop `not isinstance(i, bool)` | pytest preset, `tests/test_profile_live_http_client.py` | CAUGHT | `AssertionError: True is not None` at `test_profile_live_http_client.py:270` |
+
+## Fix status
+
+Fixed (zprecfx5): LOW-1 (rule: no epsilon anywhere. `guard_raise` and `apply_lower` act on any exact float difference, so reconcile heals what the exact divergence check flags and the Pico ceiling is never left tighter than a zone max; wizard steps 6/7 compare at `kgR6`; divergence alarm prints `%.9g`), INFO-1 (header comment, `SAFETY_CEILING_EPSILON_C` deleted), INFO-2 (0.05-past-print boundary cases pin the slack), INFO-4 (stale sha corrected to `3a4191f7c`). INFO-3 and the unchecked LVGL frame remain informational.

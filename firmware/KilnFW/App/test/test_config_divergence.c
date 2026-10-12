@@ -69,8 +69,20 @@ static void test_value_mismatch_is_caught(void)
     bool diverged = config_divergence_check(esp_f, pico_f, 1, reason, sizeof(reason));
     TEST_CHECK(diverged, "a real mismatch diverges");
     TEST_CHECK(strstr(reason, "abs_max_temp_c") != NULL, "the reason names the diverging field");
-    TEST_CHECK(strstr(reason, "80.00") != NULL, "the reason gives the ESP's value");
-    TEST_CHECK(strstr(reason, "75.00") != NULL, "the reason gives the Pico's value");
+    TEST_CHECK(strstr(reason, "80") != NULL, "the reason gives the ESP's value");
+    TEST_CHECK(strstr(reason, "75") != NULL, "the reason gives the Pico's value");
+}
+
+static void test_close_values_print_distinguishably(void)
+{
+    TEST_SECTION("two differing values never print identically in the alarm");
+    config_identity_field_t esp_f[1] = { { .name = "abs_max_temp_c", .known = true, .value = 1260.305f } };
+    config_identity_field_t pico_f[1] = { { .name = "abs_max_temp_c", .known = true, .value = 1260.3f } };
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    TEST_CHECK(config_divergence_check(esp_f, pico_f, 1, reason, sizeof(reason)), "a 0.005 difference diverges");
+    TEST_CHECK(strstr(reason, "ESP=1260.305") != NULL, "ESP value printed with enough decimals");
+    TEST_CHECK(strstr(reason, "Pico=1260.3") != NULL && strstr(reason, "Pico=1260.305") == NULL,
+               "Pico value printed distinctly");
 }
 
 static void test_unknown_on_one_side_diverges(void)
@@ -229,6 +241,7 @@ int main(void)
 {
     test_identical_fields_match();
     test_value_mismatch_is_caught();
+    test_close_values_print_distinguishably();
     test_unknown_on_one_side_diverges();
     test_both_known_and_equal_via_identity_api();
     test_format_version_gates_the_comparison();

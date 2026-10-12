@@ -64,7 +64,7 @@ bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool curren
      * below rather than risk skipping a needed one. */
     float effective_current = current_known ? current_pico_ceiling_c : 0.0f;
 
-    if (new_target <= effective_current + SAFETY_CEILING_EPSILON_C) {
+    if (new_target <= effective_current) {
         /* Already satisfied (or a lowering case, handled separately,
          * post-commit, by safety_ceiling_policy_apply_lower()). */
         if (out_result) {
@@ -132,7 +132,7 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
         return;
     }
 
-    if (new_target >= current_pico_ceiling_c - SAFETY_CEILING_EPSILON_C) {
+    if (new_target >= current_pico_ceiling_c) {
         /* Not a lowering case (equal, or actually a raise that the caller
          * should have already handled via guard_raise() before commit). */
         if (out_result) {

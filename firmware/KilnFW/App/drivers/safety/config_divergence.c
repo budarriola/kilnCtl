@@ -114,12 +114,12 @@ static bool format_first_field_difference(const config_identity_field_t *esp_fie
             char esp_side[32];
             char pico_side[32];
             if (e->known) {
-                snprintf(esp_side, sizeof(esp_side), "%.2f", (double)e->value);
+                snprintf(esp_side, sizeof(esp_side), "%.9g", (double)e->value);
             } else {
                 snprintf(esp_side, sizeof(esp_side), "%s", "unconfirmed");
             }
             if (p->known) {
-                snprintf(pico_side, sizeof(pico_side), "%.2f", (double)p->value);
+                snprintf(pico_side, sizeof(pico_side), "%.9g", (double)p->value);
             } else {
                 snprintf(pico_side, sizeof(pico_side), "%s", "unconfirmed");
             }

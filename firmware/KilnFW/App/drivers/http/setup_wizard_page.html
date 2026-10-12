@@ -902,8 +902,9 @@ function getAbsMaxTempC(commissioning) {
 // absMaxTempC may be null (Pico not yet commissioned / value not known
 // reliably) -- in that case the ceiling half of the check is skipped, never
 // treated as "no ceiling" or as 0. Requirement 3: refuse, never clamp.
-// The 0.01 slack matches SAFETY_CEILING_EPSILON_C: zone max is the raw %.9g
-// value, the Pico ceiling prints %.6g, so equal floats can differ by ~5e-5.
+// Compared at kgR6 (6 significant digits, the Pico GET print precision): zone
+// max is the raw %.9g value, the Pico ceiling prints %.6g. Firmware compares
+// exactly and reconcile raises the Pico ceiling to heal sub-print gaps.
 function validateStep6(zones, absMaxTempC) {
   var errors = [];
   zones.forEach(function (z, i) {
@@ -917,7 +918,7 @@ function validateStep6(zones, absMaxTempC) {
           ' -- a firing refuses to start until every heater zone has one.');
       }
     }
-    if (typeof absMaxTempC === 'number' && z.max_temp_c > 0 && z.max_temp_c > absMaxTempC + 0.01) {
+    if (typeof absMaxTempC === 'number' && z.max_temp_c > 0 && kgR6(z.max_temp_c) > kgR6(absMaxTempC)) {
       errors.push('Zone ' + (i + 1) + ' max temp (' + kgR6(z.max_temp_c) + ' °C) exceeds the safety ' +
         'processor\'s abs_max_temp_c ceiling (' + absMaxTempC + ' °C). The Pico\'s ceiling is a ' +
         'second set of eyes and must never be tighter than the ESP\'s -- lower this zone\'s max temp, or ' +
@@ -1645,7 +1646,7 @@ function validateStep7(fields, zoneMaxTemps) {
   } else {
     var maxZone = (zoneMaxTemps || []).filter(function (v) { return v > 0; })
       .reduce(function (a, b) { return Math.max(a, b); }, 0);
-    if (maxZone > 0 && fields.absMaxTempC + 0.01 < maxZone) {
+    if (maxZone > 0 && kgR6(fields.absMaxTempC) < kgR6(maxZone)) {
       errors.push('abs_max_temp_c (' + fields.absMaxTempC + ' °C) is BELOW the highest configured ' +
         'zone max_temp_c (' + maxZone + ' °C). The Pico\'s ceiling is a second set of eyes and must ' +
         'never be tighter than the ESP\'s -- refused, not clamped. Raise abs_max_temp_c or lower that ' +

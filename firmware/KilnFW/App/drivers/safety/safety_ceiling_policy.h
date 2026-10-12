@@ -112,20 +112,15 @@ extern "C" {
  * ballast. */
 #define SAFETY_CEILING_HEADROOM_C 5.0f
 
-/* Small epsilon for float compares -- these values arrive via a %.9g wire
- * round trip (safety_cfg_http.c's existing convention for every f32 param),
- * so an exact `==` between "what we computed" and "what came back" is
- * appropriate at the confirm layer (param_value_equal() there does a bit-
- * for-bit memcmp on purpose) but NOT appropriate here, where we are
- * comparing a value we just computed against one that arrived from a
- * completely separate computation (or a live fetch) that may carry
- * ordinary float rounding noise. 0.01 C is far below anything a real
- * thermocouple channel or this UI resolves. Public (moved from
- * safety_ceiling_policy.c 2026-09-14) so every caller that needs to decide
- * "does the Pico's ceiling match the ESP's" -- safety_ceiling_sync.c's
- * divergence enforcement, readiness_http.h's readiness_ceiling_match_status()
- * -- uses this SAME number rather than each defining its own and drifting. */
-#define SAFETY_CEILING_EPSILON_C 0.01f
+/* No epsilon: "equal" means exactly equal floats. config_divergence.c
+ * compares the %.9g-normalized values exactly (a lossless float round trip)
+ * and halts heat on any difference, and reconcile heals a divergence only
+ * through guard_raise()/apply_lower(). A slack here would let an accepted
+ * state (e.g. zone max 0.005 above the Pico ceiling) latch a divergence no
+ * reconcile can clear (REVIEW_ZPRECFX4 LOW-1), so both functions act on any
+ * difference. Net effect: the Pico ceiling is never left tighter than a zone
+ * max by even 0.005 C. Neither the divergence code nor readiness uses a
+ * ceiling epsilon. */
 
 /* Computes the Pico ceiling TARGET this policy wants for a given set of
  * zone `max_temp_c` values (`n` entries, one per configured zone).
