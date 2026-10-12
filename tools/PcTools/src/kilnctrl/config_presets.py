@@ -205,6 +205,34 @@ EASE_OFF_WINDOW_MULT_MAX = 10.0
 ZONE_NAME_MAX_LEN = 15
 
 
+#: Per-zone ranges mirrored from the firmware POST parser (refused there with a 400, never
+#: clamped). (lo, hi, zero_ok): value must be 0 (when zero_ok) or in [lo, hi].
+#:   relay_type [0, 2]: zones_http_post_parse.c:208 (ZONE_RELAY_TYPE_MAX, zones_config_json.h:208)
+#:   zone_type [0, 1]: zones_http_post_parse.c:235 (ZONE_TYPE_ON_OFF = 1)
+#:   progress_band_c 0 or [0.5, 20]: zones_http_post_parse.c:956-958 (zones_config_json.h:224-225)
+#:   coil_power_w 0 or [0.1, 100000]: zones_http_post_parse.c:319-321 (zones_config_json.h:309-310)
+#:   hyst_c 0 or [0.5, 25]: zones_http_post_parse.c:261-262 (zones_config_json.h:241-242)
+#:   min_on_s / min_off_s 0 or [1, 3600]: zones_http_post_parse.c:278-281, :293-295
+#:     (zones_config_json.h:244-245)
+#:   approach_rate_cap_c_per_hr 0 or [1, 1000]: zones_http_post_parse.c:898-901
+#:     (zones_config_json.h:142-143, ZONE_MAX_RAMP_C_PER_HR_MAX zones_config_accessors.h:195)
+ZONE_RANGES = {
+    "relay_type": (0, 2, True),
+    "zone_type": (0, 1, True),
+    "progress_band_c": (0.5, 20.0, True),
+    "coil_power_w": (0.1, 100000.0, True),
+    "hyst_c": (0.5, 25.0, True),
+    "min_on_s": (1, 3600, True),
+    "min_off_s": (1, 3600, True),
+    "approach_rate_cap_c_per_hr": (1.0, 1000.0, True),
+}
+
+
+def _zone_range_ok(key: str, v: float) -> bool:
+    lo, hi, zero_ok = ZONE_RANGES[key]
+    return (zero_ok and v == 0) or lo <= v <= hi
+
+
 def _ease_off_in_range(v: float) -> bool:
     return v == 0 or EASE_OFF_WINDOW_MULT_MIN <= v <= EASE_OFF_WINDOW_MULT_MAX
 
@@ -259,6 +287,11 @@ def _validate(name: str, data: object) -> None:
                 raise ConfigPresetError(
                     f"preset {name!r}: zones[{i}].name must be a non-empty string of at most "
                     f"{ZONE_NAME_MAX_LEN} bytes with no control characters, got {zname!r}")
+        for key, rng in ZONE_RANGES.items():
+            if key in zone and not (_is_finite_number(zone[key]) and _zone_range_ok(key, zone[key])):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} must be 0 or in [{rng[0]}, {rng[1]}] "
+                    f"(firmware refuses anything else), got {zone[key]!r}")
         for key, val in zone.items():
             if (key in _ZONE_NON_FLOAT_KEYS or key in zones_http_client._ZONE_INT_FIELDS
                     or key.startswith("_")):
