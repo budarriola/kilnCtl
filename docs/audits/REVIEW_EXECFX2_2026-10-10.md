@@ -201,3 +201,14 @@ Baseline passed (33.7 s). Real tree unchanged; copies removed.
 The two MISSED rows are the expected ones and are filed as LOW-1 and LOW-3.
 LOW-D's under-lock placement (LOW-2) and the autotune sample point were not
 mutated: by inspection no current test can tell them apart (see LOW-2, LOW-3).
+
+## Fix status
+
+| Finding | Status | Fixed in |
+|---------|--------|----------|
+| LOW-1 (PSRAM-only snapshot fallback untested) | FIXED, negtest CAUGHT | 8e2993867 |
+| LOW-2 (epoch compare under kiln_io lock untested) | FIXED, negtest CAUGHT | 8e2993867 |
+| LOW-3 (aux/autotune sample point untested) | FIXED, negtest CAUGHT | 8e2993867 |
+| INFO (warm replay samples epoch after LD-01 recheck) | FIXED (io_seg_start_since) | 8e2993867 |
+
+Verified by REVIEW_EXECTEST_2026-10-10.md (all five mutations CAUGHT).
