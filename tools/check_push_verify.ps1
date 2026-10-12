@@ -33,6 +33,16 @@ function Run-PV([string[]]$a) {
     finally { Pop-Location; Remove-Item -LiteralPath $outF, $errF -Force -ErrorAction SilentlyContinue }
     return [pscustomobject]@{ Rc = $rc; Out = $o }
 }
+# S3: survivors are polled (up to 10 s, every 250 ms) so a loaded machine does not give a false FAIL; on failure each survivor is printed.
+function Get-PvSurvivors([int]$port, [string]$tmpLeaf) {
+    @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape($tmpLeaf) })
+}
+function Assert-NoSurvivors([int]$port, [string]$tmpLeaf, [string]$w) {
+    $deadline = [DateTime]::UtcNow.AddSeconds(10); $left = @(Get-PvSurvivors $port $tmpLeaf)
+    while ($left.Count -gt 0 -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250; $left = @(Get-PvSurvivors $port $tmpLeaf) }
+    foreach ($s in $left) { Write-Host "  survivor: PID $($s.ProcessId) $($s.Name) $($s.CommandLine)" }
+    Assert ($left.Count -eq 0) $w
+}
 function Commit([string]$repo, [string]$f, [string]$msg) {
     Set-Content -LiteralPath (Join-Path $repo $f) -Value $msg -Encoding ascii
     git -C $repo add $f *>$null; git -C $repo commit -m $msg *>$null
@@ -51,8 +61,24 @@ Assert (($w -contains 15) -and ($w -contains 16)) "R1: root slack is about 1 ms 
 Assert ($w.IndexOf(11) -lt $w.IndexOf(12)) "R1: parent-first order"
 $snapR1b = @((P 10 1 0), (P 17 10 -0.5))
 Assert ((Get-PvDescendantOrder -Snap $snapR1b -RootId 10 -RootCreated $t0).Count -eq 0) "R1: child 0.5 s older than the root dropped (no 1 s slack)"
-Assert (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(30)) "R2: StartTime within tolerance of the snapshot matches"
+Assert (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(1)) "R2: StartTime within tolerance of the snapshot matches"
 Assert (-not (Test-PvStartMatch -Actual $t0.AddMinutes(5) -Expected $t0)) "R2: a reused PID (later StartTime) is skipped, not killed"
+Assert (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(1)) "S1: 1 ms difference matches"
+Assert (-not (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(5))) "S1: 5 ms difference does not match (tolerance ~2 ms)"
+Assert (-not (Test-PvStartMatch -Actual $t0 -Expected $t0.AddMilliseconds(-5))) "S1: -5 ms difference does not match"
+# S2: Stop-PvTargets kills only through a checked handle. Sacrificial process: one with a handle is killed, one without (reused-PID stand-in) survives.
+$sacA = Start-Process -FilePath "ping" -ArgumentList "-n","40","127.0.0.1" -WindowStyle Hidden -PassThru
+$sacB = Start-Process -FilePath "ping" -ArgumentList "-n","40","127.0.0.1" -WindowStyle Hidden -PassThru
+try {
+    $null = $sacA.Handle; $null = $sacB.Handle
+    $hs = Open-PvTargets -Ids @($sacA.Id, $sacB.Id) -Created @{ $sacA.Id = $sacA.StartTime; $sacB.Id = $sacB.StartTime.AddMinutes(-30) }
+    Assert ($hs.ContainsKey($sacA.Id) -and -not $hs.ContainsKey($sacB.Id)) "S2: precondition: only the matching-StartTime process gets a handle"
+    Stop-PvTargets -Order ([int[]]@($sacA.Id, $sacB.Id)) -Handles $hs
+    Assert ($sacA.WaitForExit(5000)) "S2: process with a verified handle is killed"
+    Assert (-not $sacB.HasExited) "S2: process whose StartTime differs from the snapshot is NOT killed by bare PID"
+} finally { foreach ($sp in @($sacA, $sacB)) { try { if (-not $sp.HasExited) { $sp.Kill() } } catch { } } }
+$pvSrc = Get-Content -LiteralPath (Join-Path $here "push_verify.ps1") -Raw
+Assert (($pvSrc -notmatch 'Stop-Process') -and ($pvSrc -match 'Stop-PvTargets')) "S2: push_verify.ps1 has no bare Stop-Process and kills via Stop-PvTargets"
 $me = Get-Process -Id $PID
 $hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
 Assert ($hm.ContainsKey($PID)) "R2: a live process whose StartTime matches the snapshot is opened"
@@ -119,17 +145,13 @@ try {
         git -C $work remote set-url origin "http://127.0.0.1:$port/x.git" *>$null
         $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2")
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out") "a fetch that exceeds the timeout -> UNKNOWN, never LANDED"
-        Start-Sleep -Milliseconds 2500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
-        Assert ($left.Count -eq 0) "no git process for the hung fetch survives the timeout"
+        Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no git process for the hung fetch survives the timeout"
         # I2: survivors are matched by the URL (git-remote-http) OR this run's unique scratch dir (wrapper git and inner git carry it in -C).
         # toolfx8 T1: force the no-job fallback (test hook) and require the whole tree, grandchild included, to die.
         $env:PUSH_VERIFY_TEST_NO_JOB = "1"
         try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
-        Start-Sleep -Milliseconds 2500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name like 'git%'" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match "127\.0\.0\.1:$port" -or $_.CommandLine -match [regex]::Escape((Split-Path -Leaf $tmp)) })
-        Assert ($left.Count -eq 0) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
+        Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
     } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null
 
@@ -147,3 +169,4 @@ try {
 } finally { Set-Location $here; Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 if ($script:fails -gt 0) { Write-Host "check_push_verify: $script:fails FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "check_push_verify: all cases passed"; exit 0
+

@@ -159,10 +159,7 @@ try {
                 foreach ($w in $walk) { [void]$order.Add($w.Id); $keep[$w.Id] = $w.Created }
                 $handles = Open-PvTargets -Ids ([int[]]@($order)) -Created $keep
                 # discovered parent-first (breadth-first); kill in reverse so leaves go first
-                for ($i = $order.Count - 1; $i -ge 0; $i--) {
-                    if ($handles.ContainsKey($order[$i])) { try { $handles[$order[$i]].Kill() } catch { } }
-                }
-                foreach ($h in $handles.Values) { try { $h.Dispose() } catch { } }
+                Stop-PvTargets -Order ([int[]]@($order)) -Handles $handles   # lib: kills only via the handles opened above, never by bare PID
             } catch { }
         }
         try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }

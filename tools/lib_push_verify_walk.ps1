@@ -23,10 +23,10 @@ function Get-PvDescendantOrder {
     return ,$out
 }
 
-# R2: a snapshot CreationDate and an opened handle's StartTime must agree (PID reuse gives a far later time).
+# R2/S1: tolerance 2 ms (measured skew < 1 us; wider widens the PID-reuse window). A snapshot CreationDate and an opened handle's StartTime must agree (PID reuse gives a far later time).
 function Test-PvStartMatch {
     param([datetime]$Actual, [datetime]$Expected)
-    return ([Math]::Abs(($Actual - $Expected).TotalMilliseconds) -le 100)
+    return ([Math]::Abs(($Actual - $Expected).TotalMilliseconds) -le 2)
 }
 
 # R2: open a handle per target BEFORE any kill (an open handle blocks PID reuse) and keep only those whose
@@ -42,4 +42,14 @@ function Open-PvTargets {
         } catch { }
     }
     return $handles
+}
+
+# S2: kill the opened targets leaves-first. $Order is parent-first; $Handles is Open-PvTargets' pid -> Process map.
+# Kills ONLY through a handle (whose StartTime was checked); an id with no handle is skipped, never killed by bare PID.
+function Stop-PvTargets {
+    param([int[]]$Order, $Handles)
+    for ($i = $Order.Count - 1; $i -ge 0; $i--) {
+        if ($Handles.ContainsKey($Order[$i])) { try { $Handles[$Order[$i]].Kill() } catch { } }
+    }
+    foreach ($h in $Handles.Values) { try { $h.Dispose() } catch { } }
 }
