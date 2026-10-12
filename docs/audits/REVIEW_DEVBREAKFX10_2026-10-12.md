@@ -180,3 +180,10 @@ right. A one-line `Write-Host` would restore the explanation.
   pass.
 - The content assertion is the stronger handshake the DEVBREAKFX8 review
   asked for.
+
+## Fix status
+
+- LOW-1 fixed (8416ac8c7): check_host_test_verdict.ps1 statically asserts the dot-source, the single verdict assignment with the real counters, and ExitCode reaching exit before the success exit 0; mutations B, C, F CAUGHT on real assertions.
+- LOW-2 fixed (8416ac8c7): MISMATCH compares Built + BuildFailures to Expected; check cases added.
+- LOW-3 fixed (8416ac8c7): child writes the ready file via temp + Move-Item; parent read is null-safe. (Race itself is not deterministically negtestable.)
+- INFO-2 fixed (8416ac8c7): -Only dropout now prints the MISMATCH line.
