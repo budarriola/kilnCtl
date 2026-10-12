@@ -13986,6 +13986,12 @@ static void test_safetyfx10_stale_log_once_per_segment_and_run(void)
     TEST_CHECK(!pico_diag_stale_for_on(), "fresh DIAG: not stale");
     TEST_CHECK(stale_log_once_seg(0), "after a fresh read segment 0 logs again");
     safetyfx7_clear_diag();
+    /* the real run start re-arms the warnings (profile_executor_run.c) */
+    TEST_CHECK(stale_log_once_seg(3) && stale_log_once_aux(0x04), "setup: warnings consumed");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    TEST_CHECK(stale_log_once_seg(3) && stale_log_once_aux(0x04), "run start re-armed the warnings");
+    profile_executor_halt();
     profile_executor_stale_log_reset();
 }
 
