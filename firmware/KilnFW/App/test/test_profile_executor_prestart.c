@@ -3055,6 +3055,7 @@ static void test_f5holderfx3_aux_tick_pico_gate(void);
 static void test_safetyfx7_stale_diag_on_gates(void);
 static void test_safetyfx7_watchdog_any_age_tripped(void);
 static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void);
+static void test_safetyfx10_stale_log_once_per_segment_and_run(void);
 
 static void test_f5holderfx2_retry_placement_and_pico_gate(void)
 {
@@ -12828,6 +12829,7 @@ static void run_test_aux_wp3(void)
     test_safetyfx7_stale_diag_on_gates();
     test_safetyfx7_watchdog_any_age_tripped();
     test_safetyfx9_unreadable_and_trip_event_and_stale_accounting();
+    test_safetyfx10_stale_log_once_per_segment_and_run();
     test_aux_disabled_mid_run_opens_once_and_stops_driving();
     test_aux_pause_holds_state_resume_continues();
     test_aux_off_on_every_end_path();
@@ -13965,6 +13967,28 @@ static void test_safetyfx7_watchdog_any_age_tripped(void)
 }
 
 /* SAFETYFX8 LOW-1 / LOW-2 / LOW-3 / I-2. */
+/* SAFETYFX10 I-3: the stale-DIAG log-once flags are per segment and re-armed per run. */
+static void test_safetyfx10_stale_log_once_per_segment_and_run(void)
+{
+    TEST_SECTION("SAFETYFX10 I-3: stale-DIAG warning logs once per segment (not once globally) and re-arms per run");
+    profile_executor_stale_log_reset();
+    TEST_CHECK(stale_log_once_seg(0), "segment 0 logs the first time");
+    TEST_CHECK(!stale_log_once_seg(0), "segment 0 does not log twice");
+    TEST_CHECK(stale_log_once_seg(1), "a second segment in the same episode still logs");
+    TEST_CHECK(!stale_log_once_seg(1), "segment 1 does not log twice");
+    TEST_CHECK(stale_log_once_aux(0x01), "aux 0 logs the first time");
+    TEST_CHECK(!stale_log_once_aux(0x01), "aux 0 does not log twice");
+    TEST_CHECK(stale_log_once_aux(0x02), "aux 1 logs independently");
+    profile_executor_stale_log_reset();
+    TEST_CHECK(stale_log_once_seg(0) && stale_log_once_seg(1), "a new run re-arms both segments");
+    TEST_CHECK(stale_log_once_aux(0x01) && stale_log_once_aux(0x02), "a new run re-arms both aux");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED); /* fresh read re-arms too */
+    TEST_CHECK(!pico_diag_stale_for_on(), "fresh DIAG: not stale");
+    TEST_CHECK(stale_log_once_seg(0), "after a fresh read segment 0 logs again");
+    safetyfx7_clear_diag();
+    profile_executor_stale_log_reset();
+}
+
 static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void)
 {
     TEST_SECTION("SAFETYFX8 LOW-1: unreadable link status counts as stale (aux/segment/retry ON refused)");
@@ -14018,10 +14042,27 @@ static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void)
     st.diag_frame_age_ms = 5000;
     TEST_CHECK(!relay_authority_pico_tripped(&st), "no trip event: not tripped");
     st.trip_event_ever_received = true;
-    st.trip_event_age_ms = 100; /* event after the DIAG, DIAG still ARMED */
+    st.trip_event_age_ms = 100;
+    st.trip_event_after_diag = true; /* event after the DIAG, DIAG still ARMED */
     TEST_CHECK(relay_authority_pico_tripped(&st), "trip event newer than DIAG: tripped");
-    st.diag_frame_age_ms = 50; /* fresh DIAG after the event: normal clear flow, no latch */
+    st.trip_event_after_diag = false; /* DIAG after the event: normal clear flow, no latch */
     TEST_CHECK(!relay_authority_pico_tripped(&st), "newer DIAG ARMED supersedes the event (no sticky latch)");
+    /* SAFETYFX10 MED-1 / I-2: ages are irrelevant. A 2^32 ms alias makes the event age look small or equal; with the
+     * DIAG later in arrival order it must not trip (no spurious abort), and it must still trip the other way. */
+    st.trip_event_age_ms = 5;
+    st.diag_frame_age_ms = 5;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "equal (aliased) ages, DIAG later: not tripped");
+    st.trip_event_age_ms = 1;
+    st.diag_frame_age_ms = 1900;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "small event age but DIAG later in arrival order: not tripped");
+    st.trip_event_after_diag = true;
+    st.trip_event_age_ms = 5;
+    st.diag_frame_age_ms = 5;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "equal ages, event later in arrival order: tripped");
+    st.trip_event_age_ms = 4000000000u;
+    st.diag_frame_age_ms = 10;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "ancient-looking event age but later in arrival order: tripped");
+    st.trip_event_after_diag = false;
     st.diag_ever_received = false;
     TEST_CHECK(relay_authority_pico_tripped(&st), "trip event with no DIAG ever: tripped");
 
@@ -14031,6 +14072,7 @@ static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void)
     st.diag_since_reboot = true;
     st.diag_frame_age_ms = 60000;
     st.trip_event_ever_received = true;
+    st.trip_event_after_diag = true;
     st.trip_event_age_ms = 10;
     profile_executor_aux_fault_drop(relay_authority_pico_tripped(&st));
     TEST_CHECK(aux_test_wrote(0x01, 0x00), "trip event with no new DIAG drops an on aux");

@@ -270,6 +270,7 @@ void safety_link_send_announce_version_burst(SafetyLinkClass *link)
 static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 {
     link->cached.trip_event_ever_received = false;
+    link->cached.trip_event_after_diag = false; /* SAFETYFX10 MED-1: paired with trip_event_ever_received */
     link->cached.trip_last_seq = 0u;
     /* Safety-link fix batch 2 (MED-1, LOW-3): the last DIAG describes the
      * OLD boot. Mark it so consumers can ignore its state (an old ARMED must
@@ -1173,6 +1174,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
     link->cached.diag_since_reboot = true;
+    link->cached.trip_event_after_diag = false; /* SAFETYFX10 MED-1: a DIAG arrived after any TRIP_EVENT */
     link->diag_tick = msg->rx_ms; /* TRIPFX3 LOW-B / REBOOTFX4 LOW-2: receive stamp (ms) of the DIAG itself */
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
@@ -1398,6 +1400,7 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
         link->cached.trip_fault_sources_valid = is_genuinely_live_event;
     }
     link->cached.trip_event_ever_received = true;
+    link->cached.trip_event_after_diag = true; /* SAFETYFX10 MED-1: arrival order, not an age comparison */
     link->trip_event_tick = xTaskGetTickCount();
     safety_unlock(link);
 

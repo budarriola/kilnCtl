@@ -2344,6 +2344,11 @@ void watchdog_task_entry(void *arg)
                 safety_diag_since_reboot = safety_status.diag_since_reboot;
                 safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                /* SAFETYFX10 LOW-1: a trip inferred from a TRIP_EVENT newer than the DIAG has no DIAG reason;
+                 * name the event's own reason instead of "none". */
+                if (safety_diag_tripped_any_age && safety_status.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
+                    safety_diag_trip_reason = safety_status.trip_reason;
+                }
                 safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;
             }
         }

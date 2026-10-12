@@ -352,12 +352,14 @@ static inline bool relay_authority_pico_tripped(const safety_link_status_t *st)
     if (st->diag_ever_received && st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
         return true;
     }
-    /* SAFETYFX8 LOW-3: a TRIP_EVENT frame at least as recent as the last DIAG (or with no DIAG ever) means the Pico
-     * tripped and no DIAG has said otherwise yet -- DIAG frames can be lost while STATUS/TRIP_EVENT still arrive.
-     * Fail toward OFF. No auto-clear: the next DIAG (older age than the event) supersedes it, which is exactly the
-     * normal trip-clear flow; the Pico repeats the event while latched. */
+    /* SAFETYFX8 LOW-3 / SAFETYFX10 MED-1: a TRIP_EVENT that arrived after the last DIAG (or with no DIAG ever) means
+     * the Pico tripped and no DIAG has said otherwise yet -- DIAG frames can be lost while STATUS/TRIP_EVENT still
+     * arrive. Fail toward OFF. Order is arrival order (trip_event_after_diag), never a comparison of the two ages,
+     * which wrap every 2^32 ms. No auto-clear: the next DIAG of any state supersedes the event, which is exactly the
+     * normal trip-clear flow. The Pico sends one 4-copy, 750 ms TRIP_EVENT burst per new trip_seq (it does not repeat
+     * while latched), so this holds until the next DIAG (at most ~2 s); after that only diag_state matters. */
     if (st->trip_event_ever_received &&
-        (!st->diag_ever_received || st->trip_event_age_ms <= st->diag_frame_age_ms)) {
+        (!st->diag_ever_received || st->trip_event_after_diag)) {
         return true;
     }
     return false;

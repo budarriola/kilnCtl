@@ -99,7 +99,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
 
 ## Findings
 
-### LOW-1: the "unreadable status = stale" branch is untested (mutant M01 survives) -- FIXED (safetyfx9)
+### LOW-1: the "unreadable status = stale" branch is untested (mutant M01 survives) -- FIXED (safetyfx9)
 
 - **Where:** `control/profile_executor_relay_io.c:689-690`.
 - **What:** mutant M01 changes `return true;` to `return false;` and passes all 99 executables. A regression would let an aux or segment newly switch ON while the link status cannot be read.
@@ -109,7 +109,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
   - a segment ON is driven OFF with `wants_on` kept;
   - a retry is skipped.
 
-### LOW-2: a stale-DIAG aux refusal is invisible to the aux trigger state and the status JSON -- FIXED (safetyfx9)
+### LOW-2: a stale-DIAG aux refusal is invisible to the aux trigger state and the status JSON -- FIXED (safetyfx9)
 
 - **Where:** `control/profile_executor_relay_io.c:1016-1081` (`profile_executor_aux_tick_pico`).
 - **What:** the aux tick feeds only `authority_blocked` (on_blocked or pico_tripped) into `profile_executor_aux_on_off_input()`. It does not feed in the stale-DIAG refusal, which happens later, inside `aux_apply_relay_pico`. While the DIAG is stale and the rule wants ON:
@@ -120,7 +120,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
 - **Safety:** none. The output fails toward OFF. This is an accounting and display issue.
 - **Fix:** compute `pico_diag_stale_for_on() && !s_exec.aux[i].commanded_on` once per aux in the tick and OR it into the trigger's blocked input for that aux, so that `actuated_on`, `held_s` and `rule_reason` follow the real state. Give `rule_reason` a distinct value such as `AUTHORITY` or a new `PICO_STALE`.
 
-### LOW-3 (pre-existing): a Pico trip during a DIAG gap does not drop an aux that is already on -- FIXED (safetyfx9)
+### LOW-3 (pre-existing): a Pico trip during a DIAG gap does not drop an aux that is already on -- FIXED (safetyfx9)
 
 - **Where:**
   - `safety/safety_link_frames.c:803` masks `SAFETY_FLAG_FAULT` out of the STATUS flags.

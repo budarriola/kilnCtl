@@ -211,9 +211,12 @@ uint32_t safety_elapsed_ms(TickType_t since)
 {
     /* Unsigned tick subtraction, so the 32-bit tick counter's eventual wrap
      * (~497 days at the default 100 Hz) produces the right delta rather than
-     * a nonsense one. */
+     * a nonsense one. The millisecond product is computed in 64 bit and
+     * saturates: 2^32 ms is only 49.7 days, so a 32-bit multiply would wrap
+     * (SAFETYFX10 MED-1) and make a very old age read as a fresh one. */
     TickType_t delta = xTaskGetTickCount() - since;
-    return (uint32_t)delta * portTICK_PERIOD_MS;
+    uint64_t ms = (uint64_t)delta * (uint64_t)portTICK_PERIOD_MS;
+    return ms > UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
 }
 
 /* See safety_link.h's doc comment on safety_link_await_poll_fn/

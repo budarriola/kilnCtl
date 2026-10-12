@@ -81,7 +81,7 @@ cannot block a clear.
 
 ## Findings
 
-### MED-1: `trip_event_age_ms` wraps every 49.7 days, so a long-past trip periodically reads as a fresh one and aborts a healthy firing
+### MED-1 -- FIXED (safetyfx10): `trip_event_age_ms` wraps every 49.7 days, so a long-past trip periodically reads as a fresh one and aborts a healthy firing
 
 - **Where:**
   - `owners/relay_authority.h:359-360`: `st->trip_event_age_ms <= st->diag_frame_age_ms`.
@@ -118,7 +118,7 @@ cannot block a clear.
   - Add a host test that sets `trip_event_age_ms` small with an ARMED DIAG received after the event. Today that case
     cannot be told apart from a genuine fresh event, which is the defect.
 
-### LOW-1: a trip inferred from TRIP_EVENT reports reason "none" in the watchdog fault
+### LOW-1 -- FIXED (safetyfx10): a trip inferred from TRIP_EVENT reports reason "none" in the watchdog fault
 
 - **Where:** `control/profile_executor.c:2345,2438` passes `safety_status.diag_trip_reason` as the watchdog's
   `safety_trip_reason`; `profile_executor.h:229-232` renders it.
@@ -129,7 +129,7 @@ cannot block a clear.
 - **Fix:** when `diag_state != TRIPPED` but the predicate is true, use `st.trip_reason`. Better, have the predicate
   (or a sibling) return the reason it acted on.
 
-### LOW-2: the fixer's comment claims the Pico repeats TRIP_EVENT "while latched"; it sends one 750 ms burst
+### LOW-2 -- FIXED (safetyfx10): the fixer's comment claims the Pico repeats TRIP_EVENT "while latched"; it sends one 750 ms burst
 
 - **Where:** `owners/relay_authority.h:356-358`.
 - **What:** the Pico sends `LINK_TRIP_REPEAT_COUNT` = 4 copies, 250 ms apart, once per new `trip_seq`
@@ -142,14 +142,14 @@ cannot block a clear.
 
 ### INFO
 
-- **I-1. Doc line endings.** `580a848ac` rewrote `REVIEW_SAFETYFX8_2026-10-12.md` from LF to CRLF (344-line diff
+- **I-1. Doc line endings.** FIXED (safetyfx10): converted to LF, bare CRs removed. `580a848ac` rewrote `REVIEW_SAFETYFX8_2026-10-12.md` from LF to CRLF (344-line diff
   for 5 changed lines), and it left 3 bare CRs where " -- FIXED (safetyfx9)" was appended to the LOW-1/2/3
   headings. The file now has 169 CRLF, 3 bare CR and 3 LF line ends. A renderer that treats a bare CR as a line
   break splits those headings. Normalise to LF.
-- **I-2. Equality boundary untested.** Mutant M7 (`<=` -> `<`) survives. Equal ages happen when a TRIP_EVENT and a
+- **I-2. Equality boundary untested.** FIXED (safetyfx10): same-tick order tests in `test_safety_link_compile.c` and aliased-equal-age tests in `test_profile_executor_prestart.c`. Mutant M7 (`<=` -> `<`) survives. Equal ages happen when a TRIP_EVENT and a
   DIAG land in the same 10 ms tick. `<=` (tripped) is the fail-toward-OFF choice. A one-line check at equal ages
   would pin it.
-- **I-3. Log-once is global for segments and not reset per run.**
+- **I-3. FIXED (safetyfx10): per-segment mask, reset per run, tested via `stale_log_once_seg/aux`.** Log-once is global for segments and not reset per run.**
   - `s_stale_logged_seg` is one flag for all segments, so a second segment refused in the same stale episode is
     silent.
   - Neither flag is reset at run start, so a stale episode that spans a run boundary hides the next run's first
@@ -157,7 +157,7 @@ cannot block a clear.
   - The re-arm happens only inside `pico_diag_stale_for_on()`, which every aux tick calls for each not-on aux, so it
     re-arms promptly in practice.
   - Logs only.
-- **I-4. Second status read per aux per tick.** The aux tick now calls `pico_diag_stale_for_on()` (one
+- **I-4. DEFERRED (safetyfx10): needs an `aux_apply_relay_pico()` signature change.** Second status read per aux per tick.** The aux tick now calls `pico_diag_stale_for_on()` (one
   `safety_link_get_status()` lock round) for every not-commanded-on aux, then `aux_apply_relay_pico()` reads it
   again on an ON request. The two reads can disagree across a DIAG arrival.
   - Stale then fresh: the trigger says OFF and the write is OFF.
@@ -165,7 +165,7 @@ cannot block a clear.
     tick.
 
   Both outcomes fail toward OFF. Passing the first result into `aux_apply_relay_pico()` would make them consistent.
-- **I-5. Stale-hold resets the aux trigger's hold timing.** Feeding staleness through `failsafe_base` takes the
+- **I-5. NOTED, no change (safetyfx10).** Stale-hold resets the aux trigger's hold timing.** Feeding staleness through `failsafe_base` takes the
   fail-safe override path (OFF, hold bypassed). After a stale episode, the aux may also wait out `min_off_s` before
   its first ON. The test settles twice and does not pin this. That matches how `authority_blocked` already behaves,
   so it is noted only.

@@ -1081,6 +1081,10 @@ typedef struct {
      * the same event refresh trip_event_age_ms but are not logged as a new
      * event (see safety_apply_trip_event() in safety_link.c). */
     bool     trip_event_ever_received;
+    /* SAFETYFX10 MED-1: arrival order of the last TRIP_EVENT versus the last DIAG. Set when a TRIP_EVENT is applied,
+     * cleared when a DIAG is applied and on a Pico reboot. True = no DIAG has arrived since the last TRIP_EVENT.
+     * Replaces comparing trip_event_age_ms with diag_frame_age_ms, which wrap every 2^32 ms. */
+    bool     trip_event_after_diag;
     uint8_t  trip_last_seq;
     uint8_t  trip_reason;              /* SAFETY_TRIP_* at the moment of this trip */
     uint32_t trip_uptime_ms;           /* Pico uptime at trip */

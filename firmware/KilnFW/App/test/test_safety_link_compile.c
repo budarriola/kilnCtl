@@ -3854,6 +3854,64 @@ static void test_fault_edge_uninitialized_link_refuses(void)
 int g_test_failures = 0;
 int g_test_count = 0;
 
+// SAFETYFX10 MED-1 / I-2: TRIP_EVENT-vs-DIAG order is arrival order (a bool), never an age comparison.
+static void apply_trip_event_seq(SafetyLinkClass *link, uint8_t seq)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.length = SAFETY_LINK_TRIP_EVENT_FRAME_LEN;
+    msg.payload[0] = SAFETY_CMD_TRIP_EVENT;
+    msg.payload[1] = seq;
+    msg.payload[2] = 1u;
+    msg.rx_ms = (uint32_t)s_fake_tick_count;
+    TEST_CHECK(safety_apply_trip_event(link, &msg) == true, "TRIP_EVENT frame applied");
+}
+
+static void test_safetyfx10_trip_event_after_diag_is_arrival_order(void)
+{
+    TEST_SECTION("SAFETYFX10 MED-1 -- trip_event_after_diag records arrival order: set by TRIP_EVENT, cleared by DIAG "
+                 "and by a Pico reboot; immune to the 2^32 ms age aliasing");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TEST_CHECK(!link.cached.trip_event_after_diag, "fresh link: flag clear");
+    apply_diag_uptime(&link, 600000u);
+    apply_trip_event_seq(&link, 1u);
+    TEST_CHECK(link.cached.trip_event_after_diag, "TRIP_EVENT after a DIAG sets the flag");
+    apply_trip_event_seq(&link, 1u); /* resend copy of the same burst */
+    TEST_CHECK(link.cached.trip_event_after_diag, "a resend copy keeps the flag set");
+    apply_diag_uptime(&link, 601000u);
+    TEST_CHECK(!link.cached.trip_event_after_diag, "a DIAG after the event clears the flag");
+
+    // I-2: same tick, both orders. Equal ages must not decide anything.
+    apply_trip_event_seq(&link, 2u);
+    apply_diag_uptime(&link, 602000u);
+    TEST_CHECK(!link.cached.trip_event_after_diag, "same tick, event then DIAG: DIAG supersedes");
+    apply_diag_uptime(&link, 603000u);
+    apply_trip_event_seq(&link, 3u);
+    TEST_CHECK(link.cached.trip_event_after_diag, "same tick, DIAG then event: event stands");
+
+    // Pico reboot clears it together with trip_event_ever_received.
+    safety_note_pico_reboot_locked(&link);
+    TEST_CHECK(!link.cached.trip_event_after_diag && !link.cached.trip_event_ever_received,
+               "Pico reboot clears the flag with trip_event_ever_received");
+
+    // MED-1: event then DIAG at tick 0, then the ms counter aliases 2^32 later (modelled as tick 5): both ages read
+    // 5 although the DIAG came after the event. The flag is what decides, and it is clear.
+    s_fake_tick_count = 0;
+    SafetyLinkClass l2 = make_link();
+    l2.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    l2.initialized = true;
+    apply_trip_event_seq(&l2, 1u);
+    apply_diag_uptime(&l2, 600000u);
+    s_fake_tick_count = 5;
+    safety_link_status_t st;
+    TEST_CHECK(safety_link_get_status(&l2, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.trip_event_age_ms == 5u && st.diag_frame_age_ms == 5u, "ages alias to equal values");
+    TEST_CHECK(!st.trip_event_after_diag, "aliased equal ages: flag still says the DIAG came later");
+    s_fake_tick_count = 0;
+}
+
 int main(void)
 {
     TEST_SECTION("safety_link.c host build -- safety_apply_status() / safety_link_versions_compatible()");
@@ -3872,6 +3930,7 @@ int main(void)
     test_k4_edge_counting_boot_id_change_counts_zero();
     test_pico_reboot_detected_by_uptime_regression();
     test_pico_uptime_uses_receive_time_not_drain_time();
+    test_safetyfx10_trip_event_after_diag_is_arrival_order();
     test_stalled_inbox_fw_version_does_not_double_count_reboot();
     test_diag_frame_age_uses_receive_time();
     test_rx_ms_units_pinned_at_uptime_consumer();
