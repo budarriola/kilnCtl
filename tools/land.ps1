@@ -400,7 +400,8 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     if ($verdict -eq 'race') {
         Write-Host "push lost a ref race / non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
         continue
-    }    Finish 1 "git push failed (not a non-fast-forward rejection): $($pout.Trim())"
+    }
+    Finish 1 "git push failed (not a recognised race or remote refusal): $($pout.Trim())"
 }
 if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts; last git output: $("$script:lastPushOut".Trim())" }
 

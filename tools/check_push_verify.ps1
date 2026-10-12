@@ -79,136 +79,24 @@ try {
 } finally { foreach ($sp in @($sacA, $sacB)) { try { if (-not $sp.HasExited) { $sp.Kill() } } catch { } } }
 $pvSrc = Get-Content -LiteralPath (Join-Path $here "push_verify.ps1") -Raw
 $pvLibSrc = Get-Content -LiteralPath (Join-Path $here "lib_push_verify_walk.ps1") -Raw
-# L1 (review LOW-3): kill-surface ALLOWLIST over push_verify.ps1 AND lib_push_verify_walk.ps1 (PowerShell AST, no regex comment
-# stripping). Process-kill-capable tokens are permitted only at named sites: [PvJob]::Kill($fetchJob) and [PvJob]::KillProc($fetchH)
-# once each in the script, Process.Kill() only inside Stop-PvTargets and Process.GetProcessById only inside Open-PvTargets in the
-# lib, and in the C# block TerminateProcess/TerminateJobObject only at pinned call sites. Dynamic command names, process-spawning
-# commands (cmd, Start-Process, nested powershell), CIM/WMI method invocation, Get-Process and Invoke-Expression are refused outright.
-function Get-LintCount([string]$src, [string]$kind) { $r = Get-KillLintViolations $src $kind; return [int]$r.Count }
-function Get-FnOf($n) { $p = $n.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
-function Get-KillLintViolations([string]$src, [string]$kind) {
-    $tok = $null; $err = $null
-    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tok, [ref]$err)
-    $v = New-Object System.Collections.ArrayList
-    if ($err.Count -gt 0) { [void]$v.Add("parse error: $($err[0].Message)") }
-    $bad = '^(stop-process|kill|spps|taskkill(\.exe)?|get-process|gps|ps|start-process|saps|start|invoke-cimmethod|invoke-wmimethod|invoke-expression|iex|invoke-command|icm|remove-ciminstance|remove-wmiobject|cmd(\.exe)?|wmic(\.exe)?|powershell(\.exe)?|pwsh(\.exe)?|stop-computer|start-job|start-threadjob|set-alias|new-alias|sal|nal|get-wmiobject|gwmi|new-ciminstance|invoke-item|ii|add-member)$'
-    $addType = 0; $launch = 0
-    foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-        $nm = $c.GetCommandName()
-        # LOW-1: strip any module qualifier or path and a trailing .exe before matching, so 'Mod\Stop-Process' and 'C:\...\taskkill.exe' are seen as bare names.
-        if ($nm) { $nm = ($nm -replace '^.*[\\/]', '') -replace '(?i)\.(exe|com|bat|cmd)$', '' }
-        if ($c.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot) {
-            if ($c.Extent.Text -notmatch '^\.\s*\(Join-Path \$PSScriptRoot "lib_push_verify_walk[.]ps1"\)$') { [void]$v.Add("dot-source of something else: $($c.Extent.Text)") }
-            continue
-        }
-        if (-not $nm) { [void]$v.Add("dynamic command name: $($c.Extent.Text)"); continue }
-        if ($nm -match $bad) {
-            [void]$v.Add("forbidden command: $nm")
-        }
-        if ($nm -ieq 'Add-Type') { $addType++; if ($kind -ne 'script') { [void]$v.Add("Add-Type outside the script") } }
-        if ($nm -match '(?i)^(foreach-object|foreach|%)$') {
-            foreach ($e in @($c.CommandElements | Select-Object -Skip 1)) {
-                if ($e -is [System.Management.Automation.Language.CommandParameterAst] -and $e.ParameterName -match '(?i)^m') { [void]$v.Add("ForEach-Object -MemberName: $($c.Extent.Text)") }
-                elseif ($e -is [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$v.Add("ForEach-Object member-name form: $($c.Extent.Text)") }
-            }
-        }
-    }
-    foreach ($t in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TypeExpressionAst] }, $true)) {
-        $tn = $t.TypeName.FullName
-        if ($tn -match '(?i)(^|\.)(Process|ManagementObject|WmiObject|CimMethod\w*|ScriptBlock|Activator|Marshal)$|Management\.|Wmi|Cim') {
-            if ($tn -match '(?i)diagnostics\.process$' -and (Get-FnOf $t) -eq 'Open-PvTargets' -and $kind -eq 'lib') { continue }
-            [void]$v.Add("type [$tn] outside its allowed site")
-        }
-    }
-    $killJob = 0; $killProc = 0; $libKill = 0; $libGet = 0
-    foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
-        if ($m.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$v.Add("dynamic member call: $($m.Extent.Text)"); continue }
-        $mn = [string]$m.Member.Value; $recv = $m.Expression.Extent.Text
-        $args0 = (@($m.Arguments) | ForEach-Object { $_.Extent.Text }) -join ','
-        if ($recv -eq '[PvJob]') {
-            if ($mn -eq 'Kill') { if ($args0 -eq '$fetchJob') { $killJob++ } else { [void]$v.Add("[PvJob]::Kill with argument '$args0'") } }
-            elseif ($mn -eq 'KillProc') { if ($args0 -eq '$fetchH') { $killProc++ } else { [void]$v.Add("[PvJob]::KillProc with argument '$args0'") } }
-            elseif ($mn -eq 'Launch') { if ($args0 -match '^\$gitExe,') { $launch++ } else { [void]$v.Add("[PvJob]::Launch with first argument other than gitExe: $args0") } }
-            elseif ($mn -notmatch '^(Create|WaitExit|ExitCode|StartFileTime|CloseProc|Close|Assign)$') { [void]$v.Add("[PvJob]::$mn not allowlisted") }
-            continue
-        }
-        if ($mn -match '(?i)^(Kill|Terminate\w*|CloseMainWindow|GetProcess\w*|Start|Invoke\w*|CreateInstance|Create\w*|Load\w*|Add\w*Script\w*)$') {
-            $fn = Get-FnOf $m
-            if ($kind -eq 'lib' -and $mn -ceq 'Kill' -and $fn -eq 'Stop-PvTargets') { $libKill++; continue }
-            if ($kind -eq 'lib' -and $mn -ceq 'GetProcessById' -and $fn -eq 'Open-PvTargets') { $libGet++; continue }
-            [void]$v.Add("$recv.$mn() outside its allowed site (in '$fn')")
-        }
-    }
-    if ($kind -eq 'script') {
-        if ($addType -ne 1) { [void]$v.Add("expected exactly one Add-Type, found $addType") }
-        if ($launch -ne 1) { [void]$v.Add("expected exactly one [PvJob]::Launch(gitExe, ...), found $launch") }
-        # Every string constant outside the one C# here-string is scanned for process-API tokens too (a second, single-quoted Add-Type body).
-        foreach ($sc in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -ne 'DoubleQuotedHereString' }, $true)) {
-            if ($sc.Value -match '(?i)DllImport|OpenProcess|NtTerminate|TerminateProcess|TerminateJobObject') { [void]$v.Add("string constant carries a process-API token: $($Matches[0])") }
-        }
-        if ($killJob -ne 1) { [void]$v.Add("expected exactly one [PvJob]::Kill(`$fetchJob), found $killJob") }
-        if ($killProc -ne 1) { [void]$v.Add("expected exactly one [PvJob]::KillProc(`$fetchH), found $killProc") }
-        if (@($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Stop-PvTargets' }, $true)).Count -lt 1) { [void]$v.Add("no Stop-PvTargets call") }
-    } else {
-        if ($libKill -ne 1) { [void]$v.Add("expected exactly one .Kill() inside Stop-PvTargets, found $libKill") }
-        if ($libGet -ne 1) { [void]$v.Add("expected exactly one GetProcessById inside Open-PvTargets, found $libGet") }
-    }
-    if ($kind -eq 'script') {
-        $cs = ''
-        foreach ($hs in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true)) { $cs += $hs.Value + "`n" }
-        $cs = [regex]::Replace($cs, '//[^\r\n]*', '')
-        if ($cs.Length -lt 200) { [void]$v.Add("C# block not found") }
-        if ($cs -match '(?i)GetProcessById|Process\.GetProcess\w*|\.Kill\s*\(|taskkill|Process\.Start\b|OpenProcess|NtTerminate|EntryPoint|DuplicateHandle|ExitWindows|GenerateConsoleCtrlEvent') { [void]$v.Add("C# block uses a forbidden process API: $($Matches[0])") }
-        $tp = @([regex]::Matches($cs, '(?<!extern bool )TerminateProcess\s*\(([^)]*)\)') | ForEach-Object { ($_.Groups[1].Value -replace '\s', '') })
-        if (($tp -join '|') -ne 'pi.hp,1|h,1') { [void]$v.Add("TerminateProcess call sites/args not pinned to (pi.hp,1) and (h,1): $($tp -join '|')") }
-        $tj = @([regex]::Matches($cs, '(?<!extern bool )TerminateJobObject\s*\(([^)]*)\)') | ForEach-Object { ($_.Groups[1].Value -replace '\s', '') })
-        if (($tj -join '|') -ne 'j,1') { [void]$v.Add("TerminateJobObject call sites/args not pinned to (j,1): $($tj -join '|')") }
-        if ($cs -notmatch 'public static void KillProc\(IntPtr h\)\s*\{\s*TerminateProcess\(h, 1\);\s*\}') { [void]$v.Add("KillProc body is not exactly TerminateProcess(h, 1)") }
-        if ($cs -notmatch 'catch\s*\{\s*TerminateProcess\(pi\.hp, 1\);\s*throw;') { [void]$v.Add("Launch failure path does not terminate its own pi.hp") }
-    }
-    return ,$v
+# L1 (toolfx15, review TOOLFX14 LOW-1/2/3): the kill/launch surface is PINNED, not deny-listed. A deny-list of process-kill
+# spellings kept being bypassed (reassign $gitExe, a second Add-Type body, New-Object, WScript.Shell). Instead the SHA-256 of
+# push_verify.ps1 + lib_push_verify_walk.ps1 (CRLF normalised to LF) is compared to a pin. ANY edit to either file fails here until a
+# reviewer has read the kill surface (the Add-Type C# block, the one [PvJob]::Launch call and what feeds $gitExe/$fetchCmd,
+# [PvJob]::Kill/KillProc, Stop-PvTargets .Kill, Open-PvTargets GetProcessById) and updated $PvPinSha256 below.
+$PvPinSha256 = '51b9bb56ed585d30347ba3e132610e4617f034b6872880a51e569861033c9869'
+function Get-PvSurfaceHash([string]$a, [string]$b) {
+    $t = (($a -replace "`r`n", "`n") + "`n--LIB--`n" + ($b -replace "`r`n", "`n"))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($t))) -replace '-', '').ToLowerInvariant()
 }
-$pvV = Get-KillLintViolations $pvSrc 'script'
-$libV = Get-KillLintViolations $pvLibSrc 'lib'
-foreach ($x in @($pvV) + @($libV)) { Write-Host "  lint: $x" }
-$pvCs = ''
+$pvHash = Get-PvSurfaceHash $pvSrc $pvLibSrc
+Write-Host "  push_verify surface sha256: $pvHash"
+Assert ($pvHash -eq $PvPinSha256) "L1: push_verify.ps1 + lib_push_verify_walk.ps1 match the pinned kill-surface hash (review the kill surface, then set `$PvPinSha256 to $pvHash)"
+Assert ((Get-PvSurfaceHash ($pvSrc + "`n`$gitExe = 'x'") $pvLibSrc) -ne $PvPinSha256) "L1: the hash changes when the script changes"$pvCs = ''
 $pvAst0 = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$null, [ref]$null)
 foreach ($hs in @($pvAst0.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
-Assert (@($pvV).Count -eq 0 -and @($libV).Count -eq 0) "S2/L1: kill-surface allowlist holds for push_verify.ps1 and lib_push_verify_walk.ps1"
-Assert ((Get-LintCount $pvSrc 'script') -eq 0 -and (Get-LintCount $pvLibSrc 'lib') -eq 0) "L1: Get-LintCount returns 0 for the clean sources"
-Assert ((Get-LintCount ($pvSrc + "`nWrite-Host hi") 'script') -eq 0) "L1: a harmless extra command is not flagged"
-# The lint itself must reject each hole the 2026-10-12 review demonstrated (dead code inserted at the end of the file).
-$holes = @{
-    'Stop-Process' = 'if ($false) { Stop-Process -Id $fetchPid }'
-    'cmd taskkill' = 'if ($false) { cmd /c taskkill /F /PID $fetchPid }'
-    'Start-Process taskkill' = 'if ($false) { Start-Process taskkill -ArgumentList "/F /PID $fetchPid" }'
-    'CIM Terminate' = 'if ($false) { Invoke-CimMethod -Query "select * from Win32_Process where ProcessId=$fetchPid" -MethodName Terminate }'
-    'KillProc via Get-Process' = 'if ($false) { [PvJob]::KillProc((Get-Process -Id $fetchPid).Handle) }'
-    'dynamic command name' = 'if ($false) { & (''Stop-'' + ''Process'') -Id $fetchPid }'
-    'Process.Kill via GetProcessById' = 'if ($false) { [System.Diagnostics.Process]::GetProcessById($fetchPid).Kill() }'
-    'second KillProc' = 'if ($false) { [PvJob]::KillProc($otherH) }'
-    'dynamic member' = 'if ($false) { $p.("Ki" + "ll")() }'
-}
-$holes['module-qualified Stop-Process'] = 'if ($false) { Microsoft.PowerShell.Management\Stop-Process -Id 1 }'
-$holes['absolute-path taskkill'] = 'if ($false) { C:\Windows\System32\taskkill.exe /F /PID 1 }'
-$holes['Set-Alias'] = 'if ($false) { Set-Alias zz Stop-Process; zz }'
-$holes['WMI ForEach-Object Terminate'] = 'if ($false) { Get-WmiObject Win32_Process | ForEach-Object Terminate }'
-$holes['ForEach-Object -MemberName'] = 'if ($false) { Get-CimInstance Win32_Process | ForEach-Object -MemberName Terminate }'
-$holes['InvokeScript'] = 'if ($false) { $ExecutionContext.InvokeCommand.InvokeScript("x") }'
-$holes['Launch other exe'] = 'if ($false) { [PvJob]::Launch("C:\Windows\System32\taskkill.exe", "/F", $a, $b, $c, 0, [ref]$d, [ref]$e) }'
-$holes['second single-quoted Add-Type'] = "if (`$false) { Add-Type -TypeDefinition 'public class Zk { public static void K(int p){} }' }"
-$holes['qualified Get-Process ForEach Kill'] = 'if ($false) { Microsoft.PowerShell.Management\Get-Process | ForEach-Object Kill }'
-$holes['concatenated EntryPoint'] = 'if ($false) { Add-Type -TypeDefinition ''using System.Runtime.InteropServices; public class Zk { [DllImport("kernel32.dll", EntryPoint = "Open" + "Process")] public static extern int O(); }'' }'
-$holes['ForEach-Object member-name string'] = 'if ($false) { Get-CimInstance Win32_Process | ForEach-Object Terminate }'
-foreach ($k in $holes.Keys) {
-    Assert ((Get-LintCount ($pvSrc + "`n" + $holes[$k]) 'script') -gt 0) "L1 hole closed (script): $k"
-}
-Assert ((Get-LintCount ($pvLibSrc + "`nif (`$false) { Stop-Process -Id 1 }") 'lib') -gt 0) "L1 hole closed (lib): Stop-Process"
-Assert ((Get-LintCount ($pvLibSrc + "`nif (`$false) { `$x.Kill() }") 'lib') -gt 0) "L1 hole closed (lib): Kill outside Stop-PvTargets"
-Assert ((Get-LintCount ($pvSrc.Replace('[PvJob]::Launch($gitExe,', '[PvJob]::Launch("taskkill.exe",')) 'script') -gt 0) "L1 hole closed: the one Launch retargeted at another exe"
-Assert ((Get-LintCount ($pvSrc.Replace('TerminateProcess(h, 1);', 'TerminateProcess(h, 1); TerminateProcess(pi.hp, 9);')) 'script') -gt 0) "L1 hole closed: extra C# TerminateProcess call site"
-Assert ((Get-LintCount ($pvSrc.Replace('static extern bool CloseHandle(IntPtr h);', 'static extern bool CloseHandle(IntPtr h); [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, uint c);')) 'script') -gt 0) "L1 hole closed: C# OpenProcess"
 Assert (($pvCs -match 'ResumeThread\(pi\.ht\)\s*==\s*0xFFFFFFFF') -and ($pvCs -match 'hin\s*==\s*bad') -and ($pvCs -match 'hout\s*==\s*bad') -and ($pvCs -match 'herr\s*==\s*bad')) "LOW-2: ResumeThread and every CreateFileW result is checked (INVALID_HANDLE_VALUE / 0xFFFFFFFF)"
 Assert (($pvCs -match 'CreateProcessW\(gitExe,') -and ($pvSrc -match 'Get-Command git -CommandType Application')) "INFO-3: CreateProcessW gets the resolved git.exe path as lpApplicationName"
 $me = Get-Process -Id $PID
