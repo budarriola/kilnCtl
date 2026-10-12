@@ -161,7 +161,7 @@ class BoundsTest(unittest.TestCase):
             config_presets._validate("t", d)
 
     def test_zone_name_checked(self):
-        for bad in (None, "", ["a"], 5, "x" * 16, "bad\x01name", "é" * 8):
+        for bad in (None, "", ["a"], 5, "x" * 16, "bad\x01name", "bad\x7fname", "é" * 8):
             d = _preset()
             d["zones"][0]["name"] = bad
             with self.assertRaises(config_presets.ConfigPresetError, msg=bad):
