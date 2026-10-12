@@ -425,8 +425,7 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * still the most recent thing that actually happened, and
              * blanking it would erase evidence rather than refresh it. */
             if (link->reboot_noted_by_uptime && link->pico_uptime_baseline_known &&
-                (uint32_t)((uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS) -
-                           link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS) {
+                (uint32_t)(msg->rx_ms - link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS) {
                 /* Firing audit 2 MED-1: the DIAG uptime path already counted THIS reboot (the new boot's
                  * first DIAG beat its lost FW_VERSION). A second bump would reset heat_enable's verdict
                  * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
@@ -1174,7 +1173,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
     link->cached.diag_since_reboot = true;
-    link->diag_tick = xTaskGetTickCount(); /* TRIPFX3 LOW-B: age of the DIAG itself */
+    link->diag_tick = msg->rx_ms; /* TRIPFX3 LOW-B / REBOOTFX4 LOW-2: receive stamp (ms) of the DIAG itself */
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
     /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip

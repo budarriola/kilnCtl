@@ -1436,7 +1436,7 @@ typedef struct {
 
     /* When the last DIAG (Frame B) was applied; cached_tick only moves on STATUS (Frame A).
      * Becomes safety_link_status_t::diag_frame_age_ms. Meaningless until diag_ever_received. */
-    TickType_t            diag_tick;
+    uint32_t              diag_tick; /* ms receive stamp (uart_proto_message_t::rx_ms), not a tick count */
 
     /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
      * one, kept so safety_link_get_config_page() can still find it.
@@ -1677,7 +1677,7 @@ typedef struct {
      * a link-down with a repeated boot_id is caught only by this); cleared on a boot_id change,
      * since the new boot's baseline is not yet known. Under state_lock. */
     uint32_t pico_uptime_baseline_ms;
-    uint32_t pico_uptime_baseline_esp_ms; /* ESP tick (ms) when the baseline DIAG was applied */
+    uint32_t pico_uptime_baseline_esp_ms; /* ESP receive stamp (ms, DIAG rx_ms) of the baseline DIAG */
     bool     pico_uptime_baseline_known;
     /* Firing audit 2 MED-1: the uptime path already counted this boot's reboot (seq+1) and no FW_VERSION
      * has accounted for it yet. A FW_VERSION boot_id change that arrives while this is set records the

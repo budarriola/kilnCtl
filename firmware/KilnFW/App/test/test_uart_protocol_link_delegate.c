@@ -205,8 +205,49 @@ static void test_rx_chunk_sizing(void)
           "RX chunk carries several back-to-back frames per wakeup");
 }
 
+/* REBOOTFX4 LOW-3: pin the rx_ms receive stamp (uart_protocol.c is not host-compiled, so the helper is
+ * tested directly and both construction sites are checked in the source text). */
+static void test_rx_stamp(void)
+{
+    CHECK(uart_proto_rx_stamp_ms(12345u) == (uint32_t)(12345u * (TickType_t)portTICK_PERIOD_MS),
+          "rx stamp is ticks * period in ms, not seconds");
+    CHECK(uart_proto_rx_stamp_ms(0xFFFFFFFFu) == (uint32_t)(0xFFFFFFFFu * (TickType_t)portTICK_PERIOD_MS),
+          "rx stamp wraps mod 2^32");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", __FILE__);
+    char *slash = strrchr(path, '/');
+    char *bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
+    if (slash) {
+        *slash = 0;
+    } else {
+        snprintf(path, sizeof(path), ".");
+    }
+    strncat(path, "/../../../hwAbstraction/esp/uart/uart_protocol.c", sizeof(path) - strlen(path) - 1);
+    FILE *f = fopen(path, "rb");
+    CHECK(f != NULL, "uart_protocol.c source readable");
+    if (!f) {
+        return;
+    }
+    static char buf[200000];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    int stamped = 0, total = 0;
+    for (const char *p = buf; (p = strstr(p, ".rx_ms")) != NULL; p++) {
+        total++;
+        if (strncmp(p, ".rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount())", 51) == 0) {
+            stamped++;
+        }
+    }
+    CHECK(total == 2 && stamped == 2, "both uart_proto_message_t construction sites stamp rx_ms via the helper");
+}
+
 int main(void)
 {
+    test_rx_stamp();
     test_required_cases();
     test_known_frame_wire_bytes();
     test_rx_chunk_sizing();

@@ -575,6 +575,7 @@ static void test_apply_status_accepts_v1_and_v2_lengths(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     set_status_frame(msg.payload, (uint8_t)(SAFETY_FLAG_TEMP_VALID), 123.5f, 24.0f, 0, 1.0f, 2.0f, 3.0f);
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
@@ -642,6 +643,7 @@ static void test_apply_power_accepts_v1_and_v2_lengths_and_gates_counts_on_flag(
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (55-byte) frame from a legacy Pico: no bytes 55..60 exist at all.
     // power_calibrated bit set, COUNTS_VALID bit clear (a real legacy peer
@@ -700,6 +702,7 @@ static void test_apply_status_v3_borrowed(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as borrowed_known ==
     // false, the "not yet known" state, never a confident "not borrowed".
@@ -756,6 +759,7 @@ static void test_apply_status_v3_tc_config_reasserted(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as
     // tc_config_reasserted_known == false, never a confident "not
@@ -834,6 +838,7 @@ static void test_apply_status_v3_active_slot(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // V1 (23 bytes): no byte 24/25 at all -- must read as
     // pico_active_slot_known == false, never a confident slot A.
@@ -940,6 +945,7 @@ static void test_apply_status_temp_valid_flag_is_sole_authority(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
 
     // Flag SET: a live-looking reading passes through untouched.
@@ -967,6 +973,7 @@ static void test_apply_status_ignores_peer_link_up_and_fault_bits(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
 
     // A peer that (incorrectly) sets both LINK_UP and FAULT alongside a
@@ -1048,6 +1055,7 @@ static void test_fw_version_known_and_dirty_roundtrips(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     const uint8_t commit_in[8] = "abcd123"; // 7 chars + NUL, but only commit_len (7) is meaningful
     const uint8_t datetime_in[5] = "12:00";
@@ -1097,6 +1105,7 @@ static void test_k4_edge_counting_off_on_on_off_counts_two(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     send_status_with_relay_bit(&link, &msg, false); // off
     TEST_CHECK(s_stub_relay_cycles_safety_edge_calls == 0, "off -> off (relative to the unknown start) is not an edge");
@@ -1122,6 +1131,7 @@ static void test_k4_edge_counting_first_frame_counts_zero(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // First observation reads K4 ON. If the tracked "previous" state
     // defaulted to false/off instead of genuinely unknown, this would be
@@ -1139,6 +1149,7 @@ static void test_pico_boot_id_change_logs_once(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/7, 0, 0);
     safety_apply_fw_version(&link, &fw_msg);
     esp_log_test_capture_reset();
@@ -1163,6 +1174,7 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // Establish a known state: K4 OFF.
     send_status_with_relay_bit(&link, &msg, false);
@@ -1172,6 +1184,7 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
     // The Pico reboots -- a FW_VERSION frame with a NEW boot_id arrives.
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(&link, &fw_msg);
@@ -1212,6 +1225,7 @@ static void apply_diag_uptime_rx(SafetyLinkClass *link, uint32_t uptime_ms, uint
 {
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.rx_ms = rx_ms; /* REBOOTFX3 LOW-2: receive-time stamp, independent of the (fake) drain tick */
     set_diag_frame(msg.payload, 0u, 0u);
     safety_put_u32_le(&msg.payload[6], uptime_ms);
@@ -1232,6 +1246,7 @@ static void test_pico_uptime_uses_receive_time_not_drain_time(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(&link, &fw_msg);
@@ -1305,6 +1320,7 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     SafetyLinkClass link = make_link();
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(&link, &fw_msg);
@@ -1318,6 +1334,7 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
     link.cached.trip_last_seq = 3u;
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     send_status_with_relay_bit(&link, &msg, true);
     TEST_CHECK(link.safety_relay_state_known == true, "setup: relay baseline known");
     TEST_CHECK(link.pico_reboot_by_uptime_count == 0u, "rising uptime is not a reboot");
@@ -1368,6 +1385,7 @@ static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unkno
     link.initialized = true;
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // A pre-min_compatible ANNOUNCE/FW_VERSION frame carried only cmd(1) +
     // protocol(2) = 3 bytes total -- one short of the 5 needed to reach
@@ -1395,6 +1413,7 @@ static void test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unkno
     link2.initialized = true;
     uart_proto_message_t msg2;
     memset(&msg2, 0, sizeof(msg2));
+    msg2.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg2.payload[0] = 0x0B;
     msg2.payload[1] = 5; msg2.payload[2] = 0; // protocol_version = 5
     msg2.payload[3] = 3; msg2.payload[4] = 0; // min_compatible = 3
@@ -1420,6 +1439,7 @@ static void test_fw_version_max_length_commit_and_datetime_no_truncation(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     // Deliberately no zero byte anywhere in either buffer -- a reader that
     // treated this as a C string would run off the end looking for a NUL
@@ -1458,6 +1478,7 @@ static void test_fw_version_oversized_commit_len_is_capped(void)
     link.initialized = true; // safety_link_get_peer_build_status() refuses ESP_ERR_INVALID_STATE otherwise
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
 
     uint8_t commit_in[100];
     for (int i = 0; i < 100; i++) commit_in[i] = (uint8_t)('X');
@@ -1608,6 +1629,7 @@ static void test_rollback_result_late_frame_is_stashed_not_dropped(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_rollback_result_frame(msg.payload, /*accepted=*/0,
                                              KILNLINK_ROLLBACK_RESULT_REASON_SLOT_INVALID);
 
@@ -1655,6 +1677,7 @@ static void test_rollback_result_frame_is_not_stashed_when_someone_is_waiting(vo
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_rollback_result_frame(msg.payload, /*accepted=*/0, KILNLINK_ROLLBACK_RESULT_REASON_ARMED);
 
     fake_inbox_reset();
@@ -1707,6 +1730,7 @@ static void test_param_frame_5_byte_found_zero_is_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_param_frame(msg.payload, /*param_id=*/0x0505, /*found=*/0,
                                    /*type=*/KILNLINK_PARAM_TYPE_U8, NULL, 0);
     TEST_CHECK(msg.length == KILNLINK_PARAM_HDR_LEN, "a found=0 reply is exactly the header, 5 bytes");
@@ -1741,6 +1765,7 @@ static void test_param_frame_9_byte_found_one_f32_is_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = make_param_frame(msg.payload, /*param_id=*/0x0102, /*found=*/1,
                                    /*type=*/KILNLINK_PARAM_TYPE_F32, value, sizeof(value));
     TEST_CHECK(msg.length == KILNLINK_PARAM_MAX_LEN, "a found=1/F32 reply is the widest shape, 9 bytes");
@@ -1772,6 +1797,7 @@ static void test_param_frame_4_byte_too_short_is_not_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = KILNLINK_PARAM_HDR_LEN - 1;
     msg.payload[0] = KILNLINK_PARAM_CMD;
 
@@ -1792,6 +1818,7 @@ static void test_param_frame_10_byte_too_long_is_not_stashed(void)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = KILNLINK_PARAM_MAX_LEN + 1;
     msg.payload[0] = KILNLINK_PARAM_CMD;
 
@@ -2128,6 +2155,7 @@ static void test_link_blip_same_boot_id_is_not_a_reboot(void)
     uint8_t commit[3] = {1, 2, 3};
     uint8_t datetime[2] = {4, 5};
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.length = set_fw_version_frame(msg.payload, false, commit, 3, datetime, 2, 42, 1, 0);
     safety_apply_fw_version(&link, &msg);
     uint32_t seq0 = link.cached.pico_reboot_seq;
@@ -2174,6 +2202,7 @@ static void test_stale_reset_then_reapply_recovers_after_reconnect(void)
     // applied through the real decode path.
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     uint8_t commit[3] = {1, 2, 3};
     uint8_t datetime[2] = {4, 5};
     msg.length = set_fw_version_frame(msg.payload, /*dirty=*/false, commit, 3, datetime, 2,
@@ -2283,6 +2312,7 @@ static bool compat_frame_has_dispatch_case(uint8_t cmd)
 
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     msg.payload[0] = cmd;
     msg.length = 1; // enough to enter the switch; decode success is not what this proves
 
@@ -2998,6 +3028,7 @@ static SafetyLinkClass boot_clear_test_setup(void)
 
     uart_proto_message_t status;
     memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
     status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
     TEST_CHECK(safety_apply_status(&link, &status) == true, "status frame primes cached_tick");
@@ -3016,12 +3047,14 @@ static unsigned drive_one_diag_and_service(SafetyLinkClass *link, uint8_t trip_r
 {
     uart_proto_message_t status;
     memset(&status, 0, sizeof(status));
+    status.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_status_frame(status.payload, 0, 20.0f, 20.0f, 0, 0, 0, 0);
     status.length = SAFETY_LINK_STATUS_FRAME_LEN_V1;
     safety_apply_status(link, &status);
 
     uart_proto_message_t diag;
     memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(diag.payload, trip_reason, SAFETY_LINK_DIAG_STATE_TRIPPED);
     diag.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(link, &diag) == true, "DIAG frame decodes");
@@ -3036,6 +3069,7 @@ static void m4_apply_diag(SafetyLinkClass *link, size_t len, uint8_t trip_seq, b
 {
     uart_proto_message_t diag;
     memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(diag.payload, SAFETY_LINK_TRIP_REASON_MAIN_FAULT, SAFETY_LINK_DIAG_STATE_TRIPPED);
     diag.payload[4] = (uint8_t)(1u << (SAFETY_LINK_TRIP_REASON_MAIN_FAULT - 1u)); /* trip_mask LE */
     diag.payload[5] = 0u;
@@ -3093,11 +3127,75 @@ static void low_fw_version(SafetyLinkClass *link, uint8_t boot_id, uint16_t prot
 {
     uart_proto_message_t fw_msg;
     memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, boot_id,
                                           /*config_version=*/0, /*config_crc=*/0);
     safety_apply_fw_version(link, &fw_msg);
     link->peer_version_known = true;
     link->peer_protocol_version = proto;
+}
+
+// REBOOTFX4 LOW-1: an inbox stall must not make one reboot count twice.
+static void test_stalled_inbox_fw_version_does_not_double_count_reboot(void)
+{
+    TEST_SECTION("safety_apply_fw_version -- DIAG rx 20000 + FW_VERSION rx 20100 drained together at 23500 "
+                 "is ONE reboot (REBOOTFX4 LOW-1)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    s_fake_tick_count = 10000u;
+    apply_diag_uptime_rx(&link, 600000u, 10000u);
+    apply_diag_uptime_rx(&link, 601000u, 11000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    s_fake_tick_count = 23500u; /* both frames drained after a 3.5 s inbox stall */
+    apply_diag_uptime_rx(&link, 1500u, 20000u);
+    uart_proto_message_t fw;
+    memset(&fw, 0, sizeof(fw));
+    fw.rx_ms = 20100u;
+    fw.length = set_fw_version_frame(fw.payload, false, NULL, 0, NULL, 0, /*boot_id=*/43, 0, 0);
+    safety_apply_fw_version(&link, &fw);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u, "FW_VERSION must not double count a stalled-inbox reboot");
+    s_fake_tick_count = saved_tick;
+}
+
+// REBOOTFX4 LOW-2: a DIAG that sat in the inbox reads stale to the freshness gates.
+static void test_diag_frame_age_uses_receive_time(void)
+{
+    TEST_SECTION("safety_link_get_status -- DIAG received 5000 ms before drain fails the 4500 ms freshness gate "
+                 "(REBOOTFX4 LOW-2)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    link.initialized = true;
+    s_fake_tick_count = 6000u;
+    apply_diag_uptime_rx(&link, 1000u, 1000u);
+    TEST_CHECK(link.diag_tick == 1000u, "diag_tick is the receive stamp, not the drain time");
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read");
+    TEST_CHECK(st.diag_frame_age_ms == 5000u, "age counts from receive");
+    TEST_CHECK(st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS, "stalled-inbox DIAG is stale to the freshness gate");
+    // Tick wrap: stamp near 2^32, now just past it.
+    s_fake_tick_count = 100u;
+    apply_diag_uptime_rx(&link, 1000u, UINT32_MAX - 99u);
+    s_fake_tick_count = 300u;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 400u, "age is wrap-safe");
+    s_fake_tick_count = saved_tick;
+}
+
+// REBOOTFX4 INFO-1: pin the ms units of rx_ms at the uptime consumer (a /1000 slip must go red).
+static void test_rx_ms_units_pinned_at_uptime_consumer(void)
+{
+    TEST_SECTION("safety_apply_diag -- a Pico that rebooted during a 600 s receive gap is counted (ms units, "
+                 "REBOOTFX4 INFO-1)");
+    SafetyLinkClass link = make_link();
+    TickType_t saved_tick = s_fake_tick_count;
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    apply_diag_uptime_rx(&link, 5000u, 1000u);
+    apply_diag_uptime_rx(&link, 5700u, 601000u); /* on-schedule would be ~605000; 5700 is a fresh boot */
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "reboot across a 600 s gap counted");
+    s_fake_tick_count = saved_tick;
 }
 
 static void test_low1_pico_reboot_forgets_cached_diag_trip_seq(void)
@@ -3122,6 +3220,7 @@ static void v3_apply_diag(SafetyLinkClass *link, uint8_t state, uint8_t trip_seq
 {
     uart_proto_message_t diag;
     memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(diag.payload, state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 4u : 0u, state);
     diag.payload[4] = state == SAFETY_LINK_DIAG_STATE_TRIPPED ? 0x08u : 0u;
     diag.payload[30] = trip_seq;
@@ -3164,6 +3263,7 @@ static void v3_apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms, uint
 {
     uart_proto_message_t diag;
     memset(&diag, 0, sizeof(diag));
+    diag.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(diag.payload, 0u, 0u);
     safety_put_u32_le(&diag.payload[6], uptime_ms);
     diag.payload[31] = boot_id;
@@ -3426,6 +3526,7 @@ static void diag_with_reason(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t 
 {
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(msg.payload, 0u, 0u);
     safety_put_u32_le(&msg.payload[6], uptime_ms);
     msg.payload[10] = reason;
@@ -3437,6 +3538,7 @@ static void fw_version_with_boot_id(SafetyLinkClass *link, uint8_t boot_id)
 {
     uart_proto_message_t fw;
     memset(&fw, 0, sizeof(fw));
+    fw.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     fw.length = set_fw_version_frame(fw.payload, false, NULL, 0, NULL, 0, boot_id, 0, 0);
     safety_apply_fw_version(link, &fw);
 }
@@ -3445,6 +3547,7 @@ static void apply_diag_v3(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t boo
 {
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(msg.payload, 0u, 0u);
     safety_put_u32_le(&msg.payload[6], uptime_ms);
     msg.payload[31] = boot_id;
@@ -3638,6 +3741,7 @@ static void test_boot_clear_refused_then_retried_succeeds(void)
     s_fake_tick_count += SAFETY_LINK_BOOT_CLEAR_RETRY_GAP_MS;
     uart_proto_message_t cleared;
     memset(&cleared, 0, sizeof(cleared));
+    cleared.rx_ms = (uint32_t)s_fake_tick_count; /* REBOOTFX4 LOW-3: real receive stamps the frame */
     set_diag_frame(cleared.payload, 0, SAFETY_LINK_DIAG_STATE_ARMED);
     cleared.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(&link, &cleared) == true, "cleared DIAG frame decodes");
@@ -3768,6 +3872,9 @@ int main(void)
     test_k4_edge_counting_boot_id_change_counts_zero();
     test_pico_reboot_detected_by_uptime_regression();
     test_pico_uptime_uses_receive_time_not_drain_time();
+    test_stalled_inbox_fw_version_does_not_double_count_reboot();
+    test_diag_frame_age_uses_receive_time();
+    test_rx_ms_units_pinned_at_uptime_consumer();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();
