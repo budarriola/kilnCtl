@@ -213,3 +213,18 @@ GUARD_TEST_MATRIX S1/S8 row matches the code.
 | P4 probe: NaN with `tc_valid` right after the trip, asserts refusal | CAUGHT, so it is granted (LOW-3) |
 
 Logs: `%TEMP%\negtest_logs\20261010_200647_kr8j`.
+
+## Fix status
+
+Fixed in 05c6832c1 (fix) and 150d14c6a (tests), reviewed in
+`REVIEW_SAFTYFX_2026-10-11.md` (negtests M7, M9 caught).
+
+| Finding | Status |
+|---|---|
+| LOW-1 | Fixed. A real RATE trip is refused outright until two full post windows complete; no frozen-window fallback remains. |
+| LOW-2 | Fixed. The 60 s clamp floor is tested. |
+| LOW-3 | Fixed. The post block and both clear paths refuse an invalid or NaN TC; NaN never enters post state. |
+
+The earliest S8 clear is now 2 x clamp(rate_window_s, 60, 600) s: 120 s at the
+default window, at most 1200 s. `GUARD_TEST_MATRIX.md` and the SAFTYFX6/7 fix
+notes still describe the older frozen-window behaviour.

@@ -286,3 +286,20 @@ report `xPortGetMinimumEverFreeHeapSize()` so the next bump is not blind.
 - **INFO-7, sizes.** DIAG V3 is 32 B, well under the 253 B maximum payload.
   Stack arithmetic: 11264 B ≥ 10304 B. The safety_core ceiling of 2216 B
   (from 2208 B) is consistent with the added 0-tick `xQueueReceive`.
+
+## Fix status
+
+Fixed in 05c6832c1 (fix) and 150d14c6a (tests), reviewed in
+`REVIEW_SAFTYFX_2026-10-11.md`.
+
+| Finding | Status |
+|---|---|
+| HIGH-1 | Tracked by TEST_TRIP WP3 (KilnFW side); not part of this fix. |
+| MED-1 | Fixed. A TEST clear refuses while any real guard's immediate condition holds; S6a/S7/S16 re-trip in the retest tick. |
+| MED-2 | Fixed. New behavioural tests plus source scans; F6 refresh still pinned by a proximity scan only. |
+| LOW-1 | Partly fixed. The first reply is correct; a DUPLICATE retry after a real guard won replays ACCEPTED with the real seq (REVIEW_SAFTYFX LOW-1). |
+| LOW-2 | Partly fixed. DUPLICATE now re-sends a seq, but always as ACCEPTED, and its source scan is vacuous (REVIEW_SAFTYFX LOW-1, LOW-2). |
+| LOW-3 | Fixed. Queue busy restores the dedup/rate state and replies REFUSED_RATE_LIMIT. |
+| LOW-4 | Fixed (wording in `docs/TEST_TRIP_PLAN.md`). |
+| LOW-5 | Fixed. `test_admin_test_trip_boot_reason_latch`. |
+| LOW-6 | Not addressed. |
