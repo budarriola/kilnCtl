@@ -141,3 +141,19 @@ while there is no in-repo exposure.
   | 22 | low2_marker_only | exemption on the marker alone | CAUGHT |
 
   Logs: `%TEMP%\negtest_logs\20261011_233408_7sgs`.
+
+## Fix status
+
+| Finding | Status | Where |
+|---|---|---|
+| LOW-1 non-list snapshot | Fixed: `test_snapshot_profiles_not_a_list_is_unverified` (None, missing, str) | `tests/test_mcp_server_backup.py` |
+| LOW-1 `NO_PROXY=*` | Fixed: guarded child asserts `NO_PROXY`/`no_proxy` == `*` and `getproxies() == {"no": "*"}` | `tests/test_network_guard.py` |
+| LOW-1 lowercase proxy loop | No action (equivalent mutation on Windows) | - |
+| LOW-2 hub with bench host | Fixed: conftest disables the hub unconditionally (no live_bench test uses `mcp_server._link`); child test pins it | `tests/conftest.py` |
+| LOW-3 board env in children | Fixed: conftest drops `KILNCTL_HOST`, `KILNCTL_WEB_USERNAME/PASSWORD/PASSWORD_NEW` unless `KILNCTRL_BENCH_HOST` is set; two child tests | `tests/conftest.py` |
+| INFO NullLink warning | Fixed: `log.warning` in the fallback | `src/kilnctrl/mcp_server.py` |
+| INFO type assert | Fixed: `assertIsInstance(_link, NullLink)` | `tests/test_network_guard.py` |
+| INFO backup.py:443 continuations | Fixed: backslash continuations restored | `tests/test_mcp_server_backup.py` |
+| INFO unbound `_idless` call | Left (cosmetic) | - |
+
+Negtest (`-Preset pytest`): medB_nonlist_no_flag, no_no_proxy, low2_no_hub_conditional, low3_no_env_drop, NullLink-not-instance all CAUGHT (low2 was MISSED until the child env stopped inheriting `KILNCTL_TEST_NO_HUB`). Full PcTools suite: 7520 passed, 57 skipped.
