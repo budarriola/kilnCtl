@@ -206,3 +206,13 @@ only where byte identity is the claim.
   and never matches Windows backslash paths
   (`'C:\a\build\x.ps1' -match ...` is False), so build output directories
   are scanned too.
+
+## Fix status (devbreak3, 2026-10-11)
+
+- MED-1: target build of origin/dev tip 48caa9a8a (`check_00_kilnfw_target_build.ps1`, ELF `C:\wt\checkbuild_eb602e08e8\...\KilnCtrl.elf`, built from 48caa9a8a). Measured on that ELF: httpd (autotune_start_post_handler) 4528 B, link_watchdog 1200 B, kiln_io_owner 2208 B, bx_flash_worker 6336 B, system bridge 3216 B. All equal the committed ceilings; none changed. System bridge honest headroom 580 B (> 512 B), so its 4096 B stack is unchanged. (The httpd and system-bridge checkers have no `--dump-ceilings`; read from their reported deepest path.)
+- LOW-1: gate table touch_cal row corrected (guard is not an equivalent mutant). Negtest: duplicate call and zero calls CAUGHT with the guard intact; the check needed no change.
+- LOW-2: exemption now matches repo-relative `tools/check_build_gate_reentrant.ps1`; directory-exclusion regex handles backslashes. Negtest: same-name misuse at firmware/KilnFW/tools/ CAUGHT.
+- LOW-3: check requires the exact return expression in main.c and the exact predicate body in relay_authority.c. Negtests `&& 0`, `|| 1`, `bool refuse = 0 && ...` all CAUGHT. main.c comment fixed.
+- LOW-4: stale line cite replaced by a symbol reference.
+- LOW-5: no change; noted that blob-pinned citations churn (prefer symbol or SHA for history claims).
+- Nits: selfcheck PASS label fixed; `build_post_body` uses `_EXPECTED_GENERATION_KEY`.
