@@ -12,6 +12,8 @@
 #   L: sink with no referrers                                                  -> exit 1
 #   M: gate edge btn_clicked_cb -> clear_action missing                        -> exit 1
 #   N: ui reaches sink via a static helper chain inside an allowlisted object (node-keyed reverse walk) -> exit 1
+#   O: gate clear_action no longer references any sink (gate renamed/hollowed)  -> exit 1
+#   P: two symbols share one section in a ui object (hidden 2nd function)        -> exit 1
 #   K: unattributable numeric section without a symbol-table entry             -> exit 1
 # -ScriptUnderTest lets negtest.ps1 point this at a mutated copy (must live in tools\).
 # checkcache: ok
@@ -112,6 +114,16 @@ try {
     $hn = Dump "hn.txt" (Sec ".text.home_cb" @("w_clear"))
     $r = Run @("drivers/http/dashboard_exec_http.c.obj=$dashN", "drivers/safety/safety_link_tx.c.obj=$link", "drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$hn")
     Check ($r.Code -eq 1 -and $r.Out -match 'home_cb') "N ui reaches sink via static helper chain in allowlisted object fails"
+
+    # O (REVIEW_LCDFX11 LOW-4): the gate edge btn_clicked_cb -> clear_action exists but clear_action references no sink.
+    $og = Dump "og.txt" ((Sec ".text.clear_action" @("memcpy")) + (Sec ".text.btn_clicked_cb" @(".text.clear_action")))
+    $r = Run ($base + "drivers/ui/ui_page_safety.c.obj=$og")
+    Check ($r.Code -eq 1 -and $r.Out -match 'does not reference a trip-clear sink') "O gate that references no sink fails"
+
+    # P (REVIEW_LCDFX11 LOW-2): a second symbol shares the gate caller's section, so its edges would be attributed to the first.
+    $ps = Dump "ps.txt" ("SYMBOL TABLE:`n00000000 l     F .text.btn_clicked_cb`t0000000e btn_clicked_cb`n00000010 l     F .text.btn_clicked_cb`t0000000b evil`n")
+    $r = Run ($base + "drivers/ui/ui_page_safety.c.obj=$safetyOk") @("drivers/ui/ui_page_safety.c.obj=$ps")
+    Check ($r.Code -eq 1 -and $r.Out -match 'shared by btn_clicked_cb, evil') "P two symbols sharing a section in a ui object fail"
 
     $nb = Join-Path $d "nobuild"
     New-Item -ItemType Directory -Force -Path $nb | Out-Null

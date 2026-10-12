@@ -512,33 +512,62 @@ if (Test-Path $drvCmake) {
 foreach ($wf in $uiAll) {
     if ((Remove-CComments ((Get-Content -Raw -Path $wf.FullName) -replace "`r", '')) -match '\bweak\b|__weak__|__attribute__\s*\(\(\s*(?:__)?weak') { Write-Host "FAIL: L-weak: $($wf.Name) mentions weak (a weak gate/page function can be overridden by a strong definition in another file at link time)"; $fail++ }
 }
-# REVIEW_LCDFX10 LOW-2: a diagnostic pragma naming shadow (or _Pragma) can switch -Werror=shadow off; the code scan strips pragmas, so look at the raw text.
+# REVIEW_LCDFX10 LOW-2 / REVIEW_LCDFX11 LOW-3: a diagnostic pragma naming shadow (or any _Pragma) can switch -Werror=shadow off; the code
+# scan strips pragmas, so look at the raw text, after joining backslash-newline line splices. Any _Pragma at all is refused (no App
+# source uses one; a stringizing macro such as _Pragma(#x) hides its argument). The scan also covers every App header a drivers/ui
+# source #includes by quoted name (a header outside drivers/ui is compiled into the same -Werror=shadow translation unit).
+$hdrIndex = @{}
+foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorAction SilentlyContinue)) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
+$pragmaScan = @{}
+foreach ($pf in $uiAll) { $pragmaScan[$pf.FullName] = $pf.Name }
 foreach ($pf in $uiAll) {
-    $praw = Get-Content -Raw -Path $pf.FullName
-    if ($praw -match '(?is)#\s*pragma\s+(GCC|clang)\s+diagnostic[^\r\n]*shadow|_Pragma\s*\([^)]*diagnostic') { Write-Host "FAIL: L-shadow: $($pf.Name) has a diagnostic pragma naming shadow (or _Pragma diagnostic); it can switch -Werror=shadow off"; $fail++ }
+    $inc = (Get-Content -Raw -Path $pf.FullName) -replace '\\r?\n', ''
+    foreach ($im in [regex]::Matches($inc, '(?m)^\s*#\s*include\s*"([^"]+)"')) {
+        $hn = [IO.Path]::GetFileName($im.Groups[1].Value)
+        if ($hdrIndex.ContainsKey($hn) -and -not $pragmaScan.ContainsKey($hdrIndex[$hn])) { $pragmaScan[$hdrIndex[$hn]] = "$hn (included by $($pf.Name))" }
+    }
+}
+foreach ($pk in $pragmaScan.Keys) {
+    $praw = (Get-Content -Raw -Path $pk) -replace '\\r?\n', ''
+    if ($praw -match '(?is)#\s*pragma\s+(GCC|clang)\s+diagnostic[^\r\n]*shadow|_Pragma\s*\(|__pragma|#\s*pragma\s+GCC\s+(?:system_header|poison|optimize)') { Write-Host "FAIL: L-shadow: $($pragmaScan[$pk]) has a diagnostic pragma naming shadow, a _Pragma, or a GCC system_header/poison/optimize pragma; it can switch -Werror=shadow off"; $fail++ }
 }
 # MED-2: the AP password is revealed only in refresh_cb's unmasked ADMIN branch (and the ADMIN-gated editor prefill; both
 # are sink rows above, so Home or any other page reading it fails the inventory). The masked branch (all a USER sees)
 # must show string literals only.
+# REVIEW_LCDFX11 MED-1: the rules below track whatever local(s) receive wifi_prov_get_ap_password() in refresh_cb, not a literal name.
 $nw = Get-CachedCode 'ui_page_network.c'
 $rcb = Get-FuncBody $nw 'refresh_cb'
 if (-not $rcb.ok) { Write-Host "FAIL: L-secret: ui_page_network.c refresh_cb not found exactly once"; $fail++ }
 else {
+    $fetchRx = 'const\s+char\s*\*\s*(\w+)\s*=\s*wifi_prov_get_ap_password\(\)\s*;'
+    $pwNames = @([regex]::Matches($rcb.body, $fetchRx) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $nFetch = @([regex]::Matches($rcb.body, 'wifi_prov_get_ap_password')).Count
+    if ($pwNames.Count -ne 1 -or $nFetch -ne 1) { Write-Host "FAIL: L-secret: refresh_cb must contain exactly one wifi_prov_get_ap_password() call, assigned to a 'const char *<local>' declaration (found $nFetch call(s), $($pwNames.Count) tracked local(s)); the L-secret rules track that local by name"; $fail++ }
+    else {
+    $pw = [regex]::Escape($pwNames[0])
+    # Only the emptiness test of the local may be exempt: !X[0], X[0] ? .., X[0] ==/!= 0 or '\0', if/while (X[0]), X[0] &&/||.
+    # Never &X[0] (the full password), and never X[0] passed as a value.
+    $exRx = "(?<![&\w])(?:!\s*$pw\[0\]|$pw\[0\](?=\s*(?:\?|&&|\|\||[=!]=\s*(?:0|'[^']*')))|(?<=\b(?:if|while)\s*\(\s*)$pw\[0\](?=\s*\)))"
     $mm = [regex]::Match($rcb.body, 'if\s*\(!show_secret\)\s*\{([^{}]*)\}')
     if (-not $mm.Success) { Write-Host "FAIL: L-secret: refresh_cb has no recognisable masked '!show_secret' block"; $fail++ }
     else {
-        $mb = ($mm.Groups[1].Value -replace 'ap_password\[0\]', '')
-        if ($mb -match '\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri') { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
-        # REVIEW_LCDFX10 MED-4 (P2): the masked block must end with return; or it falls through into the reveal.
-        if ($mm.Groups[1].Value -notmatch '\breturn\s*;\s*$') { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block does not end with 'return;' (it would fall through into the ADMIN reveal)"; $fail++ }
+        $mb = [regex]::Replace($mm.Groups[1].Value, $exRx, '')
+        if ($mb -match "\b$pw\b|\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
+        # REVIEW_LCDFX10 MED-4 (P2) / REVIEW_LCDFX11 MED-2: the masked block's last statement must be a bare, unconditional return;
+        # (the text after the previous ';' is exactly 'return'), or it falls through into the reveal.
+        $stmts = @($mm.Groups[1].Value -split ';')
+        $lastIdx = -1
+        for ($si = $stmts.Count - 1; $si -ge 0; $si--) { if ($stmts[$si].Trim() -ne '') { $lastIdx = $si; break } }
+        if ($lastIdx -lt 0 -or $stmts[$lastIdx].Trim() -ne 'return' -or $mm.Groups[1].Value -notmatch '\breturn\s*;\s*$') { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block does not end with an unconditional 'return;' (it would fall through into the ADMIN reveal)"; $fail++ }
     }
-    # REVIEW_LCDFX10 MED-4 (P1): before the gate, the password may only be fetched into its local and tested via [0].
+    # REVIEW_LCDFX10 MED-4 (P1): before the gate, the password may only be fetched into its local and emptiness-tested.
     $gi = $rcb.body.IndexOf('bool show_secret')
     if ($gi -ge 0) {
         $pre = $rcb.body.Substring(0, $gi)
-        $pre = [regex]::Replace($pre, 'const\s+char\s*\*\s*ap_password\s*=\s*wifi_prov_get_ap_password\(\)\s*;', '')
-        $pre = $pre -replace 'ap_password\[0\]', ''
-        if ($pre -match '\bap_password\b|\bs_ap_qr_uri\b|build_wifi_qr_uri') { Write-Host "FAIL: L-secret: refresh_cb uses '$($Matches[0])' before the show_secret gate (only the single fetch declaration is allowed there)"; $fail++ }
+        $pre = [regex]::Replace($pre, $fetchRx, '')
+        $pre = [regex]::Replace($pre, $exRx, '')
+        if ($pre -match "\b$pw\b|\bap_password\b|\bs_ap_qr_uri\b|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb uses '$($Matches[0])' before the show_secret gate (only the single fetch declaration is allowed there)"; $fail++ }
+    }
     }
 }
 

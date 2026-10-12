@@ -42,14 +42,22 @@ def parse_syms(sym_text):
     for line in sym_text.splitlines():
         sm = SYM.match(line.strip())
         if sm and not sm.group(2).startswith("."):
-            m.setdefault(sm.group(1), sm.group(2))
+            lst = m.setdefault(sm.group(1), [])  # REVIEW_LCDFX11 LOW-2: keep every symbol of the section
+            if sm.group(2) not in lst:
+                lst.append(sm.group(2))
     return m
 
 
-def node_name(sec, secmap, unattrib):
+def node_name(sec, secmap, unattrib, strict=False):
     """Section name -> node name. A symbol-table hit wins (e.g. .iram1.5 -> the function)."""
     if secmap and sec in secmap:
-        return secmap[sec]
+        names = secmap[sec]
+        if strict and len(names) > 1:
+            # Only for UI objects (non-UI objects legitimately share sections: aliases, $part$0 clones, ICF).
+            # Two symbols share one section (e.g. -fno-toplevel-reorder, hand-written section attributes): relocations
+            # cannot be split between them, so a hidden second function would inherit the first one's edges. Fail closed.
+            unattrib.append(sec + " (shared by " + ", ".join(names) + ")")
+        return names[0]
     lm = LOCAL_SEC.match(sec)
     if lm:
         return lm.group(1)
@@ -66,6 +74,7 @@ def node_name(sec, secmap, unattrib):
 def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
     unattrib = unattrib if unattrib is not None else []
     cur = None
+    ui = is_ui(objkey + "::")
     for line in dump_text.splitlines():
         m = SEC.match(line)
         if m:
@@ -73,7 +82,7 @@ def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
             if sec.startswith((".xt.", ".debug", ".comment", ".note", ".xtensa")):  # metadata/debug info, not code
                 cur = None
                 continue
-            cur = f"{objkey}::{node_name(sec, secmap, unattrib)}"
+            cur = f"{objkey}::{node_name(sec, secmap, unattrib, ui)}"
             if defined is not None:
                 defined.add(cur)
             continue
@@ -87,7 +96,7 @@ def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
             continue
         val = m.group(1)
         if val.startswith("."):
-            tgt = f"{objkey}::{node_name(val, secmap, unattrib)}"
+            tgt = f"{objkey}::{node_name(val, secmap, unattrib, ui)}"
         else:
             tgt = val
         if tgt != cur:
@@ -209,7 +218,7 @@ def main():
             parse(r.stdout, objkey_of(p), rev, defined, parse_syms(t.stdout), unattrib)
     fails = analyse(rev, defined)
     for u in sorted(set(unattrib)):
-        fails.append(f"relocation section {u} cannot be attributed to a function (no symbol-table entry)")
+        fails.append(f"relocation section {u} cannot be attributed to a single function (no symbol-table entry, or several symbols share it)")
     if fails:
         print("LCD sink call-graph check FAILED:")
         for f in sorted(set(fails)):
