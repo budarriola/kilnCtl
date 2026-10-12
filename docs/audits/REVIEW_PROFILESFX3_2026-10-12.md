@@ -21,9 +21,9 @@ Reviewed at `3bee3a583` in worktree `C:\wt\rvpfx3_8d5p4j`. No code was changed.
 
 | ID | Status | Fix |
 |----|--------|-----|
-| MED-1 | fixed in f5939a4c3 | `profile_live_http_client._error_info` reads the body once; `saved` must be literally true with an int id. Non-seekable fakes plus loopback `http.server` tests. Negtested (seek parse, dropped check, truthy check: all CAUGHT). |
-| LOW-1 | fixed in f5939a4c3 | `PROFILES_SAVE_ERR_MSG_LEN` (128) in `profiles_store.h`; the LCD save dialog uses it; host test checks the real caller. Negtested (CAUGHT by assertions). Stack: +64 B in the LVGL task, not measured on hardware. |
-| INFO-1 | fixed in f5939a4c3 | New scenario in `test_live_profile_action_errors.js`. Negtested (CAUGHT). |
+| MED-1 | fixed in 603f5283c | `profile_live_http_client._error_info` reads the body once; `saved` must be literally true with an int id. Non-seekable fakes plus loopback `http.server` tests. Negtested (seek parse, dropped check, truthy check: all CAUGHT). |
+| LOW-1 | fixed in 603f5283c | `PROFILES_SAVE_ERR_MSG_LEN` (128) in `profiles_store.h`; the LCD save dialog uses it; host test checks the real caller. Negtested (CAUGHT by assertions). Stack: +64 B in the LVGL task, not measured on hardware. |
+| INFO-1 | fixed in 603f5283c | New scenario in `test_live_profile_action_errors.js`. Negtested (CAUGHT). |
 | INFO-2 | open | Web page still ignores `saved:true` on a failed decide. |
 
 None of the changes is HIGH. LOW-1 (web), H3b, H5b and H7 are correct and pin real behavior. Negtest results are below.
