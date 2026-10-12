@@ -139,7 +139,7 @@ unmapped floats (`autotune_baseline_k_dc`, `bangbang_hysteresis_c`,
 `tc_temp_c`, `target_c`, ...) but none of them is in either iterated set.
 Int fields print `%u`, bools `%s`, `name` is a string.
 
-**LOW-5 (new, introduced by this commit): float value for an int field
+**LOW-5 (FIXED: validator rejects float int fields, verify never raises KeyError): float value for an int field
 raises KeyError after the POST.** A preset that writes an int field as a
 float (e.g. `"control_mode": 2.0`) is accepted by `config_presets._validate`
 (`config_presets.py` 173-199, no type check on int fields), POSTs fine
@@ -208,4 +208,4 @@ Logs: `%TEMP%\negtest_logs\20261012_071931_xzw8`. ALL_CAUGHT.
 | LOW/MED-2 | LOW/MED | no (pre-existing) | `safety_link_frame.c:57-58` int32 diff, 24.9-49.7 d wrap |
 | INFO-3 | INFO | no | `safety_link_frame.c:65` frozen uptime early in boot |
 | INFO-4 | INFO | yes (test gap) | `test_safety_link_compile.c` ~1226-1240, C2/C4 MISSED |
-| LOW-5 | LOW | yes | `zones_http_client.py:1280` via `:1304`/`:1323`, after POST in `:1409` |
+| LOW-5 | LOW | yes (fixed) | `zones_http_client.py:1280` via `:1304`/`:1323`, after POST in `:1409` |
