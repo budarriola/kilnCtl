@@ -348,3 +348,19 @@ new file mode 100644
  }
 ]
 ```
+
+## Fix status
+
+| Finding | Status | Evidence |
+|---|---|---|
+| MED-1 fence check bypasses | fixed | literal-aware comment strip, `[uUlL]*` suffixes, structural anchor (app_main body, brace depth 1, outside every conditional, previous line ends `;{}`); negtest F0-F7 all CAUGHT |
+| MED-2 overstated docs | fixed | DEVBREAK4 doc and GATE_NEGATIVE_TEST_EVIDENCE row corrected: 9/9 for the check, R4/R5/R9/R10 caught by test_link_watchdog, F1-F7 recorded as MISSED then fixed |
+| LOW-1 host test task 3 | fixed | test_link_watchdog enters the job as task 3; H0, H1 CAUGHT |
+| LOW-2 gate usage -z/UTF-8 | fixed | `git ls-files -z`, UTF-8, unresolved path fails loud; G0, G1 CAUGHT; G2 applied by hand (gitignored build_agent script with Enter and no Exit): check exit 1, then removed, exit 0 |
+| LOW-3 lint discovery union | fixed | shared `tools/lib_check_discovery.ps1` used by run_all_checks and the lint |
+| LOW-4 zone_sweep stack | fixed | registered at 5120; tree-wide create-vs-register literal comparison (23 pairs); S0, S1 and extra M0 (zone_sweep 4096) CAUGHT |
+| LOW-5 stack checker dead code | fixed | `strip_dead_c` plus `[uUlL]*` suffixes in check_system_uart_bridge_stack_budget.py |
+| INFO stale 3072 comments | fixed | uart_bridge_system.c, factory_reset.c |
+| INFO-4 hex ids in DEVBREAK4 doc | left | check_doc_hash_citations risk; not restored |
+
+Runs: full KilnFW host suite 98/98 passed; check_00_kilnfw_target_build PASS; all stack checks, reset-fence, build-gate-usage, doc-hash-citations pass against the built ELF.
