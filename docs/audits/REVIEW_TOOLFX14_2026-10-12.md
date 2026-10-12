@@ -190,3 +190,7 @@ Fix: add one hole case per rule that only that rule catches. Examples:
 Every CAUGHT log was inspected. Each has one or two real `  FAIL: <assert text>` lines, a final
 `check_*: N FAILED` line, and no parse error. Every MISSED log ends with
 `check_push_verify: all cases passed`.
+
+## Fix status (toolfx15)
+
+LOW-1, LOW-2, LOW-3 and the land.ps1 INFO text are FIXED. The deny-list in 	ools/check_push_verify.ps1 was removed and replaced by a SHA-256 pin over push_verify.ps1 + lib_push_verify_walk.ps1 (any edit fails the check until a reviewer updates PvPinSha256). The vacuous deny-list rules (.exe strip, string-constant scan, C# EntryPoint) went with it. Negtest (-Preset check): reassign gitExe before Launch, GetProcessById(p).Kill() in the Add-Type, and WScript.Shell .Run were each CAUGHT by the pin's FAIL line. 	ools/land.ps1 push-failure text no longer claims a non-fast-forward rejection.
