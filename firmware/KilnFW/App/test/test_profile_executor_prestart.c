@@ -720,9 +720,11 @@ static int      g_fault_source_deassert_count = 0;
 static uint32_t g_last_fault_source_mask = 0;
 static bool     g_last_fault_source_assert = false;
 
+static void (*g_on_deassert_hook)(void) = NULL;
 esp_err_t safety_link_set_fault_source(SafetyLinkClass *link, uint32_t source_mask, bool assert_fault)
 {
     (void)link;
+    if (!assert_fault && g_on_deassert_hook) { void (*hk)(void) = g_on_deassert_hook; g_on_deassert_hook = NULL; hk(); }
     g_set_fault_source_calls++;
     g_seq_set_fault_source = ++g_pe_seq;
     g_last_fault_source_mask = source_mask;
@@ -2597,6 +2599,46 @@ static void test_app_holder_races_low2(void)
     s_exec.io = NULL;
 }
 
+// F5HOLDER LOW-2/LOW-3
+static void test_f5holder_low2_low3(void)
+{
+    TEST_SECTION("F5HOLDER LOW-2 -- latch registering inside the release window is honoured; LOW-3 -- halt keeps APP while guard 9 pending");
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.io = (kiln_io_t *)0x1;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    pe_app_owner_foreign = false;
+    g_kiln_io_relay_unknown = true;
+    relay_unknown_prelock_check();
+    g_kiln_io_relay_unknown = false;
+    g_on_deassert_hook = profile_executor_note_external_app_hold; /* registers after the foreign check */
+    g_set_fault_source_calls = 0;
+    relay_unknown_release_locked();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert && g_last_fault_source_mask == SAFETY_FAULT_SRC_APP,
+               "LOW-2: relay-unknown release re-asserts APP when a boot latch registered mid-release");
+    pe_app_owner_foreign = false;
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_on_deassert_hook = profile_executor_note_external_app_hold;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 2 && g_last_fault_source_assert,
+               "LOW-2: halt release re-asserts APP when a boot latch registered mid-release");
+    g_on_deassert_hook = NULL;
+    pe_app_owner_foreign = false;
+
+    /* LOW-3 */
+    reset_relay_claim_test_state();
+    s_exec.lock = xSemaphoreCreateMutex();
+    s_exec.safety = (SafetyLinkClass *)0x1;
+    s_guard9_bookkeeping_pending = true;
+    s_exec.global_fault_source = SAFETY_FAULT_SRC_APP;
+    g_set_fault_source_calls = 0;
+    clear_this_runs_faults();
+    TEST_CHECK(g_set_fault_source_calls == 0, "LOW-3: halt does not deassert APP while guard-9 bookkeeping is pending");
+    s_guard9_bookkeeping_pending = false;
+    s_exec.io = NULL;
+}
+
 // K7 review F4 / N1: one real watchdog_task_entry() pass (vTaskDelay hook: one delay through, the
 // second longjmps out). With relay_state_unknown raised the pass must retry the all-off and hold
 // APP (N1: the prelock call is wired in); and when guard 9 fires in the same pass the APP bit must
@@ -2806,6 +2848,44 @@ static void test_io_seg_start_on_gated_by_relay_authority(void)
     TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0,
                "not blocked: the same segment still commands ON");
     io_seg_finish(0, false);
+}
+
+static void test_io_seg_dropped_on_retried_through_gate(void)
+{
+    TEST_SECTION("F5HOLDER LOW-4 -- a gate-dropped RELAY_IO ON reports OFF, is not leave-on, and is retried through the gate");
+    reset_io_seg_test_state();
+    profile_segment_t seg;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_target = 2;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+    seg.io_leave_on_at_end = 1;
+    seg.dwell_min = 5;
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &seg);
+    TEST_CHECK(!s_exec.io_segs[0].state_on && s_exec.io_segs[0].wants_on, "dropped ON: state_on false, wants_on kept");
+    g_relay_write_calls = 0;
+    io_segs_tick(1.0f);
+    TEST_CHECK(g_relay_write_calls == 0, "still blocked: the retry writes nothing");
+    s_test_relay_authority_blocked = false;
+    io_segs_tick(1.0f);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0 && s_exec.io_segs[0].state_on,
+               "gate clear: ON is applied once and state_on follows");
+    g_relay_write_calls = 0;
+    io_segs_tick(1.0f);
+    TEST_CHECK(g_relay_write_calls == 0, "no repeat writes once ON");
+    io_seg_finish(0, false);
+
+    /* leave_on must not hand over a relay that is physically OFF */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    io_seg_start(0, &seg);
+    g_relay_write_calls = 0;
+    io_seg_finish(0, true);
+    s_test_relay_authority_blocked = false;
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "dropped ON + leave_on: finish forces OFF, no leave-on handover");
 }
 
 static void test_io_seg_finish_default_forces_off_on_done(void)
@@ -12692,6 +12772,7 @@ void run_test_profile_executor_prestart(void)
     test_relay_state_unknown_is_a_fault();
     test_app_fault_source_is_owner_tracked();
     test_app_holder_races_low2();
+    test_f5holder_low2_low3();
     test_watchdog_pass_wires_relay_unknown_and_orders_release();
     test_guard9_watchdog_source_order();
     test_guard9_pending_verdict_survives_lock_timeout();
@@ -12705,6 +12786,7 @@ void run_test_profile_executor_prestart(void)
     test_profile_zones_have_ceiling_ignores_off_zones_in_mask();
     test_profile_zones_have_ceiling_still_refuses_on_zero_when_off_zone_is_healthy();
     test_io_seg_start_on_gated_by_relay_authority();
+    test_io_seg_dropped_on_retried_through_gate();
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();

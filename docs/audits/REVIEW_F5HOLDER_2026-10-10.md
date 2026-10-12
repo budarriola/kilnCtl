@@ -166,3 +166,12 @@ latent.
 | M5 `main.c` registration removed | **MISSED** (LOW-1) |
 | M6 `main_control_bringup.c` registration removed | **MISSED** (LOW-1) |
 | M7 registration function a no-op | CAUGHT (prestart:2536..2595) |
+
+## Fix status
+
+| Finding | Status | Fix |
+|---|---|---|
+| LOW-1 | fixed | `tools/check_app_hold_registration.ps1`: every APP-capable `safety_link_set_fault_source()` assert outside `drivers/control` and `test/` must be preceded by `profile_executor_note_external_app_hold()`. Negtest: deleting either registration line is CAUGHT. |
+| LOW-2 | fixed | `pe_app_release_recheck()` runs right after each APP deassert (`relay_unknown_release_locked()`, `clear_this_runs_faults()`): if a boot latch registered in the window it re-asserts (idempotent, cancels the deferred deassert). `pe_app_owner_foreign` is now `volatile`. Host test `test_f5holder_low2_low3`. |
+| LOW-3 | fixed | `clear_this_runs_faults()` also keeps APP while `pe_app_guard9_pending()`. Host test `test_f5holder_low2_low3`. |
+| LOW-4 | fixed | `io_seg_runtime_t.state_on` is now the physical state; `wants_on` keeps the request. A gate-dropped ON logs OFF, is never handed over as leave-on, and `io_segs_tick()` retries it each tick through the same `relay_authority_on_blocked()` gate. Host test `test_io_seg_dropped_on_retried_through_gate`. |

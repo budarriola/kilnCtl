@@ -1158,6 +1158,7 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
     r->target = seg->io_target;
     r->blocking = seg->io_blocking != 0;
     r->state_on = seg->io_state != 0;
+    r->wants_on = r->state_on;
     r->leave_on_at_end = seg->io_leave_on_at_end != 0;
     r->remaining_s = (float)(seg->dwell_min * 60u);
 
@@ -1179,6 +1180,7 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
             ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X -- commanded OFF",
                      idx + 1, r->target, (unsigned)blocked_sources);
             drive_on = false;
+            r->state_on = false; /* F5HOLDER LOW-4: physical truth; wants_on keeps the request for the gated retry */
         }
         if (s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, drive_on ? bit : 0, off_epoch_since);
@@ -1198,9 +1200,9 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
                      idx + 1, r->target - PROFILE_IO_TARGET_IO_BASE + 1u, esp_err_to_name(err));
         }
     }
-    ESP_LOGI(PE_TAG, "relay/IO segment %u: %s %u %s (%s, %lus hold)", idx + 1,
+    ESP_LOGI(PE_TAG, "relay/IO segment %u: %s %u %s%s (%s, %lus hold)", idx + 1,
              r->is_relay ? "relay" : "IO_", r->is_relay ? r->target : (uint8_t)(r->target - PROFILE_IO_TARGET_IO_BASE + 1u),
-             r->state_on ? "ON" : "OFF", r->blocking ? "blocking" : "non-blocking",
+             r->state_on ? "ON" : "OFF", (r->wants_on && !r->state_on) ? " (ON dropped by gate, will retry)" : "", r->blocking ? "blocking" : "non-blocking",
              (unsigned long)seg->dwell_min * 60u);
 }
 
@@ -1299,6 +1301,19 @@ void io_segs_tick(float dt_s)
 {
     for (uint8_t i = 0; i < PROFILE_MAX_SEGMENTS; i++) {
         io_seg_runtime_t *r = &s_exec.io_segs[i];
+        if (r->active && r->is_relay && r->wants_on && !r->state_on && s_exec.io) {
+            /* F5HOLDER LOW-4: retry a gate-dropped ON each tick, through the same gate. */
+            const uint32_t off_epoch_since = kiln_io_relay_off_epoch();
+            uint32_t blocked_sources = 0;
+            if (!relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
+                uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));
+                if (kiln_io_owner_command_set_relay_mask_authorized_since(bit, bit, off_epoch_since) == ESP_OK) {
+                    r->state_on = true;
+                    s_exec.zone_off_pending_mask &= (uint8_t)~bit;
+                    ESP_LOGI(PE_TAG, "relay/IO segment %u: relay %u ON applied after the authority block cleared", i + 1, r->target);
+                }
+            }
+        }
         if (!r->active || r->blocking) {
             continue; /* a blocking segment is finished by the segment-stepping block itself */
         }
@@ -1528,7 +1543,7 @@ void clear_this_runs_faults(void)
     /* K7 review F5: APP is shared. A live relay-unknown hold or a foreign (boot safe-state) holder
      * keeps the link bit; only this run's own claim on it is forgotten (global_fault_source below). */
     uint32_t release_mask = s_exec.global_fault_source;
-    if (pe_app_owner_relay_unknown() || pe_app_owner_foreign) {
+    if (pe_app_owner_relay_unknown() || pe_app_owner_foreign || pe_app_guard9_pending()) {
         release_mask &= ~(uint32_t)SAFETY_FAULT_SRC_APP;
     }
     if (release_mask != 0 && s_exec.safety) {
@@ -1537,6 +1552,7 @@ void clear_this_runs_faults(void)
             ESP_LOGE(PE_TAG, "clearing fault source 0x%02X failed: %s", (unsigned)release_mask,
                      esp_err_to_name(err));
         }
+        if ((release_mask & SAFETY_FAULT_SRC_APP) != 0u) pe_app_release_recheck(s_exec.safety); /* F5HOLDER LOW-2 */
     }
     s_exec.global_fault_source = 0;
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {

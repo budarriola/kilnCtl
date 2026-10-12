@@ -2194,7 +2194,7 @@ static bool s_relay_unknown_fault_asserted = false;
  *   - foreign: APP was already asserted on the link by something this module does not track
  *     (the boot safe-state latch in main*.c); never released here.
  * clear_this_runs_faults() and relay_unknown_release_locked() both consult these. */
-bool pe_app_owner_foreign = false;
+volatile bool pe_app_owner_foreign = false;
 
 bool pe_app_owner_relay_unknown(void)
 {
@@ -2209,6 +2209,18 @@ bool pe_app_owner_relay_unknown(void)
 void profile_executor_note_external_app_hold(void)
 {
     pe_app_owner_foreign = true;
+}
+
+bool pe_app_guard9_pending(void)
+{
+    return s_guard9_bookkeeping_pending;
+}
+
+void pe_app_release_recheck(SafetyLinkClass *safety)
+{
+    if (pe_app_owner_foreign && safety) {
+        safety_link_set_fault_source(safety, SAFETY_FAULT_SRC_APP, true);
+    }
 }
 
 static void relay_unknown_prelock_check(void)
@@ -2240,6 +2252,7 @@ static void relay_unknown_release_locked(void)
     if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && !s_guard9_bookkeeping_pending &&
         !pe_app_owner_foreign && s_exec.safety) {
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, false);
+        pe_app_release_recheck(s_exec.safety); /* F5HOLDER LOW-2 */
     }
 }
 
