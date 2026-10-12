@@ -330,7 +330,7 @@ class BuildLockReviewFixes(unittest.TestCase):
     def test_release_restore_never_overwrites_a_newer_lock(self):
         # Our lock was reclaimed and replaced by A's; between our rename-aside
         # and restore, B creates a lock. The restore must not clobber B's, and
-        # the grabbed aside file must not be left behind.
+        # the grabbed aside file is left as an aside only if its text differs.
         from unittest import mock
         import mcpkit.buildlock as bl
         key = self._key()
@@ -351,10 +351,13 @@ class BuildLockReviewFixes(unittest.TestCase):
             with mock.patch.object(bl.os, "rename", rename):
                 bl._release(path, "1 2 mine")
             self.assertEqual(open(path).read().strip(), "3 4 tokenB")
-            self.assertEqual([n for n in os.listdir(os.path.dirname(path))
-                              if n.startswith(os.path.basename(path) + ".rel.")], [])
+            # A differing grabbed file is left as an aside (swept after
+            # stale_after) rather than deleted; it must not be at the lock path.
         finally:
             os.remove(path)
+            for n in os.listdir(os.path.dirname(path)):
+                if n.startswith(os.path.basename(path) + ".rel."):
+                    os.remove(os.path.join(os.path.dirname(path), n))
 
     def test_alive_holder_old_lock_is_never_age_reclaimed(self):
         key = self._key()
@@ -463,10 +466,13 @@ class BuildLockReviewFixes(unittest.TestCase):
         try:
             bl._release(path, "1 2 mine")
             self.assertEqual(open(path).read().strip(), "1 2 othertoken")
-            self.assertEqual([n for n in os.listdir(os.path.dirname(path))
-                              if n.startswith(os.path.basename(path) + ".rel.")], [])
+            # A differing grabbed file is left as an aside (swept after
+            # stale_after) rather than deleted; it must not be at the lock path.
         finally:
             os.remove(path)
+            for n in os.listdir(os.path.dirname(path)):
+                if n.startswith(os.path.basename(path) + ".rel."):
+                    os.remove(os.path.join(os.path.dirname(path), n))
 
 
 class BuildLockBuildFx6(unittest.TestCase):
@@ -483,7 +489,7 @@ class BuildLockBuildFx6(unittest.TestCase):
                 msg = str(exc)
         self.assertIn(path, msg)
         self.assertIn("THIS server process", msg)
-        self.assertIn("restarting the MCP server", msg)
+        self.assertIn("restart the MCP server", msg)
 
     def test_timeout_for_foreign_holder_does_not_claim_own_process(self):
         msg = str(BuildLockTimeout("r", 1.0, "99999999 5 tok", "C:/x.lock"))
@@ -919,7 +925,8 @@ class BuildLockBuildFx7(unittest.TestCase):
                 os.close(fd)
                 raise PermissionError(32, "sharing violation")
             return real_rename(src, dst)
-        with mock.patch.object(bl.os, "rename", rename),                 mock.patch.object(bl.time, "sleep"):
+        with mock.patch.object(bl.os, "rename", rename), \
+                mock.patch.object(bl.time, "sleep"):
             bl._try_reclaim(path, judged, force=False)
         self.assertEqual(bl._read_holder(path), "1 0 H",
                          "reclaim retry deleted a new holder's live lock")
@@ -941,11 +948,200 @@ class BuildLockBuildFx7(unittest.TestCase):
         with open(path, "w") as f:
             f.write("1 0 mine\n")
         err = io.StringIO()
-        with mock.patch.object(bl, "_read_holder", lambda p: None),                 mock.patch.object(bl.time, "sleep"), contextlib.redirect_stderr(err):
+        with mock.patch.object(bl, "_read_holder", lambda p: None), \
+                mock.patch.object(bl.time, "sleep"), \
+                contextlib.redirect_stderr(err):
             bl._release(path, "1 0 mine")
         self.assertIn("LEAKED LOCK", err.getvalue())
         self.assertIn(path, err.getvalue())
         self.assertTrue(os.path.exists(path))
+
+
+class BuildLockBuildFx8(unittest.TestCase):
+    def _path(self, tag):
+        import glob
+        path = _lock_path(f"fx8-{tag}-{time.time_ns()}")
+
+        def cleanup():
+            for f in [path, path + ".reclaim"] + glob.glob(path + ".*.*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        self.addCleanup(cleanup)
+        return path
+
+    @staticmethod
+    def _write(path, text):
+        with open(path, "w") as f:
+            f.write(text + "\n")
+
+    def test_rename_aside_is_retried_through_a_sharing_violation(self):
+        import mcpkit.buildlock as bl
+        path = self._path("m4")
+        judged = "99999999 0 dead"
+        self._write(path, judged)
+        real_rename, state = os.rename, {"n": 0}
+
+        def rename(src, dst):
+            if src == path and state["n"] == 0:
+                state["n"] = 1
+                raise PermissionError(32, "sharing violation")
+            return real_rename(src, dst)
+        with mock.patch.object(bl.os, "rename", rename), \
+                mock.patch.object(bl.time, "sleep"):
+            bl._remove_judged(path, judged)
+        self.assertFalse(os.path.exists(path), "judged lock not removed after retry")
+
+    def test_put_back_never_overwrites_a_newer_lock(self):
+        import mcpkit.buildlock as bl
+        path = self._path("m5")
+        self._write(path, "1 0 H")
+        real_rename = os.rename
+
+        def rename(src, dst):
+            res = real_rename(src, dst)
+            if src == path:  # a third process takes the vacant path
+                self._write(path, "2 0 W")
+            return res
+        with mock.patch.object(bl.os, "rename", rename), \
+                _quiet_stderr():
+            bl._remove_judged(path, "99999999 0 dead")
+        self.assertEqual(bl._read_holder(path), "2 0 W",
+                         "put-back overwrote a lock created in the gap")
+
+    def test_put_back_retries_transient_errors_and_keeps_the_lock(self):
+        import mcpkit.buildlock as bl
+        path = self._path("low1")
+        self._write(path, "1 0 H")
+        real_rename, state = os.rename, {"restore_fail": 2}
+
+        def rename(src, dst):
+            if dst == path and state["restore_fail"] > 0:
+                state["restore_fail"] -= 1
+                raise PermissionError(32, "sharing violation")
+            return real_rename(src, dst)
+        with mock.patch.object(bl.os, "rename", rename), \
+                mock.patch.object(bl.time, "sleep"):
+            bl._remove_judged(path, "99999999 0 dead")
+        self.assertEqual(bl._read_holder(path), "1 0 H",
+                         "transient restore error deleted a live holder's lock")
+
+    def test_put_back_deletes_only_a_matching_duplicate(self):
+        import mcpkit.buildlock as bl
+        path = self._path("low1b")
+        aside = path + ".rec." + "a" * 32
+        self._write(aside, "1 0 H")
+        self._write(path, "1 0 H")
+        with _quiet_stderr():
+            self.assertFalse(bl._put_back(aside, path))
+        self.assertFalse(os.path.exists(aside))
+        self._write(aside, "3 0 X")
+        with _quiet_stderr():
+            self.assertFalse(bl._put_back(aside, path))
+        self.assertTrue(os.path.exists(aside), "different text must not be deleted")
+        self.assertEqual(bl._read_holder(path), "1 0 H")
+
+    def test_leaked_own_lock_is_freed_on_next_contention(self):
+        import mcpkit.buildlock as bl
+        key = f"fx8-leak-{time.time_ns()}"
+        path = _lock_path(key)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        text = f"{os.getpid()} 0 leaktoken{time.time_ns()}"
+        self._write(path, text)
+        with mock.patch.object(bl, "_read_holder", lambda p: None), \
+                mock.patch.object(bl.time, "sleep"), _quiet_stderr():
+            bl._release(path, text)
+        self.assertTrue(os.path.exists(path))
+        self.assertIn((path, text), bl._maybe_leaked)
+        t0 = time.monotonic()
+        with build_lock(key, wait_timeout=5.0, poll_interval=0.01):
+            pass
+        self.assertLess(time.monotonic() - t0, 3.0)
+        self.assertNotIn((path, text), bl._maybe_leaked)
+
+    def test_foreign_lock_is_not_freed_by_the_leak_set(self):
+        import mcpkit.buildlock as bl
+        key = f"fx8-foreign-{time.time_ns()}"
+        path = _lock_path(key)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        self._write(path, f"{os.getpid()} 0 othertoken{time.time_ns()}")
+        bl._maybe_leaked.add((path, "1 0 unrelated"))
+        self.addCleanup(bl._maybe_leaked.discard, (path, "1 0 unrelated"))
+        with self.assertRaises(BuildLockTimeout):
+            with build_lock(key, wait_timeout=0.2, poll_interval=0.02):
+                pass
+        self.assertTrue(os.path.exists(path))
+
+    def test_empty_stale_lock_is_reclaimed(self):
+        path = self._path("m9")
+        key = os.path.basename(path)[:-len(".lock")]
+        open(path, "w").close()
+        old = time.time() - 600
+        os.utime(path, (old, old))
+        with build_lock(key, wait_timeout=5.0, stale_after=60.0, poll_interval=0.01):
+            pass
+
+    def test_fresh_empty_lock_is_not_reclaimed_by_judged_none(self):
+        import mcpkit.buildlock as bl
+        path = self._path("info1")
+        open(path, "w").close()
+        bl._remove_judged(path, None, stale_after=60.0)
+        self.assertTrue(os.path.exists(path), "fresh empty lock was deleted")
+
+    def test_acquire_sweeps_old_asides_only(self):
+        path = self._path("sweep")
+        key = os.path.basename(path)[:-len(".lock")]
+        old_f = path + ".rec." + "b" * 32
+        new_f = path + ".rel." + "c" * 32
+        dead_f = path + ".dead." + "d" * 32
+        for f in (old_f, new_f, dead_f):
+            open(f, "w").close()
+        old = time.time() - 600
+        os.utime(old_f, (old, old))
+        os.utime(dead_f, (old, old))
+        with build_lock(key, wait_timeout=5.0, stale_after=60.0, poll_interval=0.01):
+            pass
+        self.assertFalse(os.path.exists(old_f))
+        self.assertFalse(os.path.exists(dead_f))
+        self.assertTrue(os.path.exists(new_f))
+
+    def test_own_process_timeout_message_wording(self):
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        holder = f"{os.getpid()} {int(start)} tok"
+        msg = str(BuildLockTimeout("r", 1.0, holder, "C:/x.lock"))
+        self.assertIn("The holder is THIS server process.", msg)
+        self.assertIn("Another tool call in this server may still be building", msg)
+        self.assertIn("restart the MCP server or delete C:/x.lock.", msg)
+        self.assertNotIn("build_job_status", msg)
+
+    def test_restored_logged_only_after_put_back_succeeds(self):
+        import io
+        import contextlib
+        import mcpkit.buildlock as bl
+        path = self._path("info3")
+        self._write(path, "1 0 mine")
+        err = io.StringIO()
+        real_rename = os.rename
+
+        def rename(src, dst):
+            if dst == path:
+                raise FileExistsError(17, "exists")
+            return real_rename(src, dst)
+        with mock.patch.object(bl, "_read_holder", lambda p: None), \
+                mock.patch.object(bl.os, "rename", rename), \
+                mock.patch.object(bl.time, "sleep"), \
+                contextlib.redirect_stderr(err):
+            bl._release(path, "1 0 mine")
+        self.assertNotIn("restored it to", err.getvalue())
+        self.assertIn("could NOT restore", err.getvalue())
+
+
+def _quiet_stderr():
+    import contextlib
+    import io
+    return contextlib.redirect_stderr(io.StringIO())
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -39,17 +39,25 @@ token is still the holder's own. The sidecar holds a per-reclaim token;
 one. A reclaim deletes the lock by rename-aside and content compare, never
 by path.
 
-Known residual windows (accepted, all need a prior eviction or reclaim of
-the releaser's own file): (1) the restore vacancy -- between a rename-aside
-and the restore of a foreign file, a third process can O_EXCL the vacant
-path and the grabbed file is then dropped; ``_release`` additionally sleeps
-up to 80 ms in this state while retrying an unreadable aside. (2) restoring a
-foreign sidecar can resurrect one whose owner just finished; it blocks
-reclaims for at most 30 s until ``_break_stale_sidecar`` removes it.
-(3) sidecar failures (token write, rename give-up) are silent and cost at
-most that same 30 s stall. (4) ``_release`` whose aside stays unreadable
-restores it, logging to stderr; if it was its own lock it is held until the
-server restarts.
+Known residual windows (accepted; all need a prior eviction or reclaim of
+the releaser's own file, or a reclaim that races a release by an
+age-reclaimed but alive holder): (1) the put-back vacancy -- between a
+rename-aside and the put-back of a foreign file, a third process can O_EXCL
+the vacant path. The put-back then refuses to overwrite (``_put_back``): the
+grabbed file is deleted only if its text equals the newcomer's, else it is
+left as an aside (swept after ``stale_after``) and its owner loses the lock
+file. ``_release`` additionally sleeps up to 80 ms while retrying an
+unreadable aside. Put-back retries every error except ``FileExistsError``
+(400 x 5 ms). (2) putting back a foreign sidecar can resurrect one whose
+owner just finished; it blocks reclaims for at most 30 s until
+``_break_stale_sidecar`` removes it. (3) sidecar failures (token write,
+rename give-up) are silent and cost at most that same 30 s stall. (4) a
+``_release`` whose aside stays unreadable puts it back and logs to stderr
+(``tools/PcTools/logs/<name>-mcp.log.err``, which no tool shows); the lock
+text is recorded in ``_maybe_leaked`` and the next contention in this process
+frees it by exact text match. (5) a crash between a rename-aside and its
+remove or put-back leaves a ``.rec.``/``.rel.``/``.dead.`` file; ``build_lock``
+sweeps those older than ``stale_after`` on acquire.
 
 Stale-lock timeout: a lock older than ``stale_after`` seconds whose holder
 is NOT confirmed alive (unparseable/legacy content, unknown start time, or a
@@ -101,11 +109,11 @@ class BuildLockTimeout(Exception):
         own_note = ""
         if _holder_is_this_process(holder):
             own_note = (
-                " The holder is THIS server process (PID and start time match): "
-                "(another thread of this server may be running a build: check "
-                "build_job_status first) if no build is running here the lock was "
-                "leaked by a failed release. Recover by restarting the MCP server"
-                + (f" or deleting {lock_path}" if lock_path else " or deleting the lock file")
+                " The holder is THIS server process. Another tool call in this "
+                "server may still be building this directory; deleting the lock "
+                "while it runs allows two concurrent builds. If no build is "
+                "running here, the lock was leaked: restart the MCP server"
+                + (f" or delete {lock_path}" if lock_path else " or delete the lock file")
                 + "."
             )
         super().__init__(
@@ -221,6 +229,55 @@ def _remove_retry(path: str, attempts: int = 400) -> bool:
     return False
 
 
+# Lock texts whose release could not confirm the removal (unique token each).
+_maybe_leaked: "set[tuple[str, str]]" = set()
+
+
+def _put_back(aside: str, path: str, attempts: int = 400) -> bool:
+    """Move ``aside`` back to ``path`` without overwriting. Retries every
+    error except FileExistsError (sharing violations are transient). On
+    FileExistsError a newer file owns the path: the moved file is deleted only
+    when its text equals that file's, else it is left as an aside (swept later)
+    and logged. True when put back."""
+    for _ in range(attempts):
+        try:
+            os.rename(aside, path)
+            return True
+        except FileExistsError:
+            if _read_holder(aside) == _read_holder(path):
+                _remove_retry(aside)
+            else:
+                print(f"buildlock: could not put {aside} back to {path}: a newer "
+                      f"file exists; left the moved file in place",
+                      file=sys.stderr, flush=True)
+            return False
+        except FileNotFoundError:
+            return False
+        except OSError:
+            time.sleep(0.005)
+    print(f"buildlock: could not put {aside} back to {path} after {attempts} "
+          f"attempts; left the moved file in place", file=sys.stderr, flush=True)
+    return False
+
+
+def _sweep_asides(directory: str, stale_after: float) -> None:
+    """Remove moved-aside .rec./.rel./.dead. files older than stale_after."""
+    now = time.time()
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    for name in names:
+        if not re.search(r"\.(rec|rel|dead)\.[0-9a-f]{32}$", name):
+            continue
+        full = os.path.join(directory, name)
+        try:
+            if now - os.path.getmtime(full) > stale_after:
+                os.remove(full)
+        except OSError:
+            pass
+
+
 def _holder_confirmed_alive(text: "str | None") -> bool:
     """True only for a token-bearing lock whose PID is alive and whose start
     time matches the recorded one. Such a lock is never age-reclaimed."""
@@ -249,10 +306,7 @@ def _break_stale_sidecar(sidecar: str) -> None:
         if time.time() - os.path.getmtime(grabbed) > _RECLAIM_SIDECAR_STALE_S:
             _remove_retry(grabbed)
             return
-        try:
-            os.rename(grabbed, sidecar)  # grabbed a live one: restore it
-        except OSError:
-            _remove_retry(grabbed)  # a newer sidecar exists; ours is moot
+        _put_back(grabbed, sidecar)  # grabbed a live one: restore it
     except OSError:
         pass
 
@@ -274,13 +328,11 @@ def _release_sidecar(sidecar: str, token: str) -> None:
     if _read_holder(aside) == token:
         _remove_retry(aside)
         return
-    try:
-        os.rename(aside, sidecar)
-    except OSError:
-        _remove_retry(aside)  # a newer sidecar exists; the grabbed one is moot
+    _put_back(aside, sidecar)
 
 
-def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
+def _try_reclaim(lock_path: str, judged: "str | None", force: bool,
+                 stale_after: float = 2100.0) -> None:
     """Remove ``lock_path`` only if it still holds the content that was judged
     dead/stale. Serialized through an O_EXCL sidecar so no two waiters can
     both remove, and a freshly created live lock is never deleted
@@ -312,17 +364,21 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
             return
         if _read_holder(sidecar) != token:
             return  # our sidecar was broken and replaced: no longer exclusive
-        _remove_judged(lock_path, judged)
+        _remove_judged(lock_path, judged, stale_after)
     finally:
         _release_sidecar(sidecar, token)
 
 
-def _remove_judged(lock_path: str, judged: "str | None") -> None:
+def _remove_judged(lock_path: str, judged: "str | None",
+                   stale_after: float = 2100.0) -> None:
     """Delete the lock only if it still holds the judged content: rename it
     aside (atomic, retried through sharing violations), compare, remove on a
     match, rename back on a mismatch. A retry therefore can never delete a
     new holder's lock that took the path meanwhile (REVIEW_BUILDFX6 LOW-1).
-    Residual: the microsecond restore vacancy, as in ``_release``."""
+    When ``judged`` is None (empty or unreadable), a match also requires the
+    aside's mtime (kept by rename) to be older than ``stale_after``, so a new
+    holder's not-yet-written lock is never deleted. Residuals: the put-back
+    vacancy (module docstring, windows 1 and 5)."""
     aside = f"{lock_path}.rec.{uuid.uuid4().hex}"
     for _ in range(400):
         try:
@@ -335,12 +391,16 @@ def _remove_judged(lock_path: str, judged: "str | None") -> None:
     else:
         return
     if _read_holder(aside) == judged:
-        _remove_retry(aside)
-        return
-    try:
-        os.rename(aside, lock_path)
-    except OSError:
-        _remove_retry(aside)
+        old = True
+        if judged is None:
+            try:
+                old = time.time() - os.path.getmtime(aside) > stale_after
+            except OSError:
+                old = False
+        if old:
+            _remove_retry(aside)
+            return
+    _put_back(aside, lock_path)
 
 
 def _read_holder(lock_path: str) -> "str | None":
@@ -370,6 +430,7 @@ def build_lock(
     that died never wedges every future caller.
     """
     lock_path = _lock_path(resource_key)
+    _sweep_asides(os.path.dirname(lock_path), stale_after)
     started = time.monotonic()
     acquired = False
     # "<pid> <own process start epoch, 0 if unknown> <unique token>"
@@ -401,8 +462,14 @@ def build_lock(
             # The recorded PID being dead (or reused by a younger process) also
             # reclaims at once, so a killed holder does not wedge waiters.
             judged = _read_holder(lock_path)
+            if judged is not None and (lock_path, judged) in _maybe_leaked:
+                # our own earlier release leaked this exact lock (unique token)
+                _maybe_leaked.discard((lock_path, judged))
+                _release(lock_path, judged)
+                continue
             if age > stale_after or _text_is_dead_holder(judged):
-                _try_reclaim(lock_path, judged, force=age > stale_after)
+                _try_reclaim(lock_path, judged, force=age > stale_after,
+                             stale_after=stale_after)
                 # No `continue`: fall through so the timeout is honoured and
                 # we never busy-spin when the reclaim declines.
             waited = time.monotonic() - started
@@ -436,6 +503,7 @@ def _release(lock_path: str, my_text: str) -> None:
         print(f"buildlock: LEAKED LOCK -- could not rename {lock_path} aside after "
               f"400 attempts; later builds on this directory will wait until the "
               f"server restarts or the file is deleted", file=sys.stderr, flush=True)
+        _maybe_leaked.add((lock_path, my_text))
         return
     held = _read_holder(aside)
     for _ in range(4):
@@ -447,11 +515,14 @@ def _release(lock_path: str, my_text: str) -> None:
         _remove_retry(aside)
         return
     if held is None:
+        restored = _put_back(aside, lock_path)
+        if restored:
+            _maybe_leaked.add((lock_path, my_text))
         print(f"buildlock: LEAKED LOCK? could not read {aside} after retries; "
-              f"restored it to {lock_path}. If it was this server's own lock it "
-              f"stays held until the server restarts or {lock_path} is deleted",
+              + (f"restored it to {lock_path}. If it was this server's own lock, "
+                 f"the next contention in this process frees it"
+                 if restored else
+                 f"could NOT restore it to {lock_path}; the grabbed file may be lost"),
               file=sys.stderr, flush=True)
-    try:
-        os.rename(aside, lock_path)
-    except OSError:
-        _remove_retry(aside)
+        return
+    _put_back(aside, lock_path)
