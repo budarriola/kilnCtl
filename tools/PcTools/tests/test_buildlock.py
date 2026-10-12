@@ -261,6 +261,15 @@ class BuildLockReclaimStress(unittest.TestCase):
         self.assertEqual(entered.value, workers * rounds)
 
 
+try:
+    import pytest as _pytest
+    _timeout30 = _pytest.mark.timeout(30)
+except ImportError:  # pragma: no cover
+    def _timeout30(cls):
+        return cls
+
+
+@_timeout30
 class BuildLockReviewFixes(unittest.TestCase):
     def _key(self):
         return f"fx5-{os.getpid()}-{time.time_ns()}"
@@ -337,6 +346,23 @@ class BuildLockReviewFixes(unittest.TestCase):
         with build_lock(key, wait_timeout=5, poll_interval=0.05):
             pass
         self.assertFalse(os.path.exists(side))
+
+    def test_sidecar_break_restores_a_live_sidecar_grabbed_in_the_race(self):
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        side = _lock_path(self._key()) + ".reclaim"
+        with open(side, "w") as f:
+            f.write("x")
+        try:
+            # First stat says old (we decide to break); by the time we have
+            # renamed it aside the file is fresh: a new reclaimer's sidecar.
+            with mock.patch.object(bl.os.path, "getmtime",
+                                   side_effect=[time.time() - 600, time.time()]):
+                bl._break_stale_sidecar(side)
+            self.assertTrue(os.path.exists(side), "deleted a live sidecar")
+        finally:
+            if os.path.exists(side):
+                os.remove(side)
 
     def test_release_puts_back_a_lock_it_does_not_own(self):
         import mcpkit.buildlock as bl
