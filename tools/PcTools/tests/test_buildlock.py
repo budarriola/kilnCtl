@@ -1079,8 +1079,11 @@ class BuildLockBuildFx8(unittest.TestCase):
         open(path, "w").close()
         old = time.time() - 600
         os.utime(path, (old, old))
-        with build_lock(key, wait_timeout=5.0, stale_after=60.0, poll_interval=0.01):
-            pass
+        try:
+            with build_lock(key, wait_timeout=3.0, stale_after=60.0, poll_interval=0.01):
+                pass
+        except BuildLockTimeout:
+            self.fail("empty stale lock was never reclaimed")
 
     def test_fresh_empty_lock_is_not_reclaimed_by_judged_none(self):
         import mcpkit.buildlock as bl
