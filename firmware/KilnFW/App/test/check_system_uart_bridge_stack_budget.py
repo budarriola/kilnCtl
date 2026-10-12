@@ -51,13 +51,40 @@ placeholder above) -- an UNDER-estimate of true worst-case depth.
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
 import check_main_task_stack_budget as base  # noqa: E402
 
 ROOT = "system_bridge_task"
-CONFIGURED_STACK_BYTES = 4096  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
+BRIDGE_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drivers", "bridge", "uart_bridge_system.c")
+
+
+def read_configured_stack(path=BRIDGE_SOURCE):
+    """Derive the task stack from the C source (REVIEW_DEVBREAK4 LOW-4): the literal passed to
+    xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", N, ...) and the one passed to
+    stack_margin_register("system_uart_bridge", ..., N) must both exist, be unique and agree.
+    Returns (bytes, error_message)."""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            src = fh.read()
+    except OSError as exc:
+        return None, f"cannot read {path}: {exc}"
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"//[^\n]*", "", src)
+    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(\d+)\s*,', src)
+    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(\d+)\s*\)\s*;', src)
+    if len(created) != 1 or len(regd) != 1:
+        return None, (f"expected exactly one xTaskCreatePinnedToCore(system_bridge_task, ...) literal and one "
+                      f"stack_margin_register(\"system_uart_bridge\", ...) literal in {path}; found {len(created)} and {len(regd)}")
+    if created[0] != regd[0]:
+        return None, (f"{path}: task created with stack {created[0]} B but stack_margin_register() reports against "
+                      f"{regd[0]} B -- the margin is graded against the wrong denominator")
+    return int(created[0]), None
+
+
+CONFIGURED_STACK_BYTES, _STACK_ERR = read_configured_stack()
 
 # Measured 2026-09-08 against KilnCtrl.elf as built that day -- see this
 # module's docstring for the "TODO.md section 13" unresized-stack context.
@@ -94,6 +121,10 @@ def main():
                      help="override CEILING_BYTES (used by the negative test)")
     args = ap.parse_args()
     ceiling = args.ceiling_bytes if args.ceiling_bytes is not None else CEILING_BYTES
+
+    if CONFIGURED_STACK_BYTES is None:
+        print(f"check_system_uart_bridge_stack_budget: FAIL -- {_STACK_ERR}")
+        return 1
 
     if not os.path.isfile(args.elf):
         print(f"check_system_uart_bridge_stack_budget: SKIP: no ELF at {args.elf}.")

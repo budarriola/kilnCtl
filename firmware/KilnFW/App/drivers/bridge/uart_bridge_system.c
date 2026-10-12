@@ -217,6 +217,6 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
     /* TODO.md section 13: internal-only (plain xTaskCreatePinnedToCore(), no
      * MALLOC_CAP_SPIRAM) -- one of the six candidate stacks left unresized
      * pending a real uxTaskGetStackHighWaterMark() reading. */
-    stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 3072);
+    stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 4096);
     return ESP_OK;
 }

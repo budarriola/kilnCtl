@@ -12,9 +12,14 @@
 # (ea86f4d43: the same reset-in-flight predicate, true only when the reset erases kiln_nvs; so the
 # reset job's own task stays exempt).
 #
-# This check fails when main.c stops making any of those four calls (comments are stripped first, so a
-# commented-out install does not count), or when the kiln_nvs predicate's return is not exactly the three-term expression ending in the
-# relay_authority predicate, or that predicate's body in relay_authority.c is edited (semantics: test_link_watchdog.c). Self-tested by tools\negtest.ps1 (see the mutations in this check's own history).
+# This check fails when main.c stops making any of those four calls as an unconditional statement of its own
+# (backslash continuations are joined, comments and `#if 0` regions are stripped first, so a commented-out,
+# preprocessor-dead or `if (0)`-wrapped install does not count; each setter may appear exactly ONCE, so a later
+# NULL re-install fails too), or when the kiln_nvs predicate's return is not exactly the three-term expression
+# ending in the relay_authority predicate, or when the body of EITHER relay_authority predicate (kiln_nvs and the
+# general writer) is edited -- each must be defined exactly once, with an exactly pinned prologue, expression and
+# epilogue. Task-identity semantics (another task IS refused while the reset job runs) are pinned by
+# test_link_watchdog.c via stub_set_current_task(). Self-tested by tools\negtest.ps1 (REVIEW_DEVBREAK4 R1-R10).
 #
 # Usage: powershell -File tools\check_reset_fence_hooks.ps1 [-MainFile <path to main.c>]
 param(
@@ -41,9 +46,50 @@ if (-not (Test-Path -LiteralPath $RelayAuthorityFile)) {
 $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $MainFile).Path)
 $raText = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $RelayAuthorityFile).Path)
 
-# Strip block and line comments (string literals in main.c never contain comment openers around these calls).
-$stripped = [regex]::Replace($text, '/\*.*?\*/', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-$stripped = [regex]::Replace($stripped, '//[^\r\n]*', '')
+# C pre-pass: splice backslash-newline continuations, strip block and line comments, then drop preprocessor-dead
+# regions (`#if 0`, `#if (0)`, the else of `#if 1`). Unknown conditions (#ifdef X, #if CONFIG_Y) stay live in
+# every branch, so a duplicate inside one trips the exactly-once counts below instead of being silently trusted.
+function Get-LiveC([string]$raw) {
+    $t = [regex]::Replace($raw, '\\\r?\n', '')
+    $t = [regex]::Replace($t, '/\*.*?\*/', ' ', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $t = [regex]::Replace($t, '//[^\r\n]*', '')
+    $out = New-Object System.Collections.Generic.List[string]
+    $stack = New-Object System.Collections.Generic.List[object]   # each: @{ Parent; Cond ('false'|'true'|'unknown') }
+    $live = $true
+    foreach ($ln in ($t -split '\r?\n')) {
+        if ($ln -match '^\s*#\s*(?<d>ifdef|ifndef|if)\b(?<c>.*)$') {
+            $c = $Matches['c'].Trim()
+            $kind = 'unknown'
+            if ($Matches['d'] -eq 'if' -and $c -match '^\(?\s*0\s*\)?$') { $kind = 'false' }
+            elseif ($Matches['d'] -eq 'if' -and $c -match '^\(?\s*1\s*\)?$') { $kind = 'true' }
+            $stack.Add(@{ Parent = $live; Cond = $kind })
+            $live = $live -and ($kind -ne 'false')
+            continue
+        }
+        if ($ln -match '^\s*#\s*elif\b(?<c>.*)$' -and $stack.Count -gt 0) {
+            $top = $stack[$stack.Count - 1]
+            $kind = 'unknown'
+            if ($Matches['c'].Trim() -match '^\(?\s*0\s*\)?$') { $kind = 'false' }
+            $top.Cond = $kind
+            $live = $top.Parent -and ($kind -ne 'false')
+            continue
+        }
+        if ($ln -match '^\s*#\s*else\b' -and $stack.Count -gt 0) {
+            $top = $stack[$stack.Count - 1]
+            $live = $top.Parent -and ($top.Cond -ne 'true')
+            continue
+        }
+        if ($ln -match '^\s*#\s*endif\b' -and $stack.Count -gt 0) {
+            $live = $stack[$stack.Count - 1].Parent
+            $stack.RemoveAt($stack.Count - 1)
+            continue
+        }
+        if ($live) { $out.Add($ln) }
+    }
+    return ($out -join "`n")
+}
+
+$stripped = Get-LiveC $text
 
 $required = @(
     @{ Name = 'pref_cfg_fs_set_reset_refuse_hook'; Arg = 'relay_authority_reset_refuses_writer' },
@@ -54,51 +100,63 @@ $required = @(
 
 $fail = 0
 foreach ($r in $required) {
-    $pat = '(?<![A-Za-z0-9_])' + [regex]::Escape($r.Name) + '\s*\(\s*' + [regex]::Escape($r.Arg) + '\s*\)'
-    if ($stripped -notmatch $pat) {
-        Write-Host "FAIL: main.c no longer installs $($r.Name)($($r.Arg)) -- the factory-reset writer fence it carries is off"
+    $esc = [regex]::Escape($r.Name)
+    # Exactly one mention of the setter (a later NULL re-install, a decoy, or a second call all add a mention) ...
+    $all = [regex]::Matches($stripped, '(?<![A-Za-z0-9_])' + $esc + '(?![A-Za-z0-9_])').Count
+    # ... and it must be an unconditional statement of its own: first token on its line, exact argument, `;`.
+    $stmt = [regex]::Matches($stripped, '(?m)^[ \t]*' + $esc + '\s*\(\s*' + [regex]::Escape($r.Arg) + '\s*\)\s*;').Count
+    if ($stmt -ne 1 -or $all -ne 1) {
+        Write-Host "FAIL: main.c must call $($r.Name)($($r.Arg)); exactly once as its own statement (found $stmt such statement(s), $all mention(s)) -- the factory-reset writer fence it carries is off or overridden"
         $fail++
     }
 }
 
-# Macros must not shadow the predicate, its callee, or the helpers it uses (a function-like or object-like
+# Macros must not shadow the predicates, their callee, the setters or the helpers used (a function-like or object-like
 # `#define` makes the real body irrelevant); main.c is not compiled into any host test, so this check is its only guard.
-if ($stripped -match '(?m)^\s*#\s*(define|undef)\s+(relay_authority_reset_refuses_kiln_nvs_writer|kiln_nvs_reset_refuses_write|strcmp|NULL)\b') {
-    Write-Host 'FAIL: main.c #defines/#undefs the kiln_nvs reset predicate, its relay_authority callee, strcmp or NULL -- the predicate body is shadowed'
+$mainNames = @('relay_authority_reset_refuses_kiln_nvs_writer', 'relay_authority_reset_refuses_writer', 'kiln_nvs_reset_refuses_write', 'strcmp', 'NULL') + @($required | ForEach-Object { $_.Name })
+$mainMacro = '(?m)^\s*#\s*(define|undef)\s+(' + (($mainNames | ForEach-Object { [regex]::Escape($_) }) -join '|') + ')\b'
+if ($stripped -match $mainMacro) {
+    Write-Host 'FAIL: main.c #defines/#undefs a reset-fence predicate, setter, its relay_authority callee, strcmp or NULL -- the fence is shadowed'
     $fail++
 }
 
 # The kiln_nvs predicate's whole body must be a single return of partition != NULL && strcmp(partition, "kiln_nvs") == 0
 # && relay_authority_reset_refuses_kiln_nvs_writer(). The parameter name is free (a rename is harmless), but every use
-# must be the same identifier (backreference). Anything appended or inserted fails. (Strings kept; comments stripped.)
+# must be the same identifier (backreference). Anything appended or inserted fails. It must be defined exactly once.
 $predPat = 'static\s+bool\s+kiln_nvs_reset_refuses_write\s*\(\s*const\s+char\s*\*\s*(?<p>[A-Za-z_]\w*)\s*\)\s*\{\s*return\s+\k<p>\s*!=\s*NULL\s*&&\s*strcmp\s*\(\s*\k<p>\s*,\s*"kiln_nvs"\s*\)\s*==\s*0\s*&&\s*relay_authority_reset_refuses_kiln_nvs_writer\s*\(\s*\)\s*;\s*\}'
-if ($stripped -notmatch $predPat) {
-    Write-Host 'FAIL: kiln_nvs_reset_refuses_write() is missing or its body is no longer exactly one return of: <arg> != NULL && strcmp(<arg>, "kiln_nvs") == 0 && relay_authority_reset_refuses_kiln_nvs_writer()'
+$predDefs = [regex]::Matches($stripped, '(?<![A-Za-z0-9_])bool\s+kiln_nvs_reset_refuses_write\s*\(').Count
+if ($predDefs -ne 1 -or $stripped -notmatch $predPat) {
+    Write-Host "FAIL: kiln_nvs_reset_refuses_write() must be defined exactly once (found $predDefs) with a body that is exactly one return of: <arg> != NULL && strcmp(<arg>, `"kiln_nvs`") == 0 && relay_authority_reset_refuses_kiln_nvs_writer()"
     $fail++
 }
 
-# The shared predicate in relay_authority.c: semantics are pinned by test_link_watchdog.c; this only keeps the
-# three terms, forbids any return before the assignment or any statement between it and `return refuse;`, and
-# forbids macros shadowing the state it reads.
-$raStripped = [regex]::Replace($raText, '/\*.*?\*/', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-$raStripped = [regex]::Replace($raStripped, '//[^\r\n]*', '')
-if ($raStripped -match '(?m)^\s*#\s*(define|undef)\s+(s_reset_in_flight_depth|s_reset_erases_kiln_nvs|s_reset_job_task|relay_authority_reset_refuses_kiln_nvs_writer)\b') {
-    Write-Host 'FAIL: relay_authority.c #defines/#undefs reset state or the kiln_nvs reset predicate -- its body is shadowed'
+# The shared predicates in relay_authority.c: both bodies are pinned token for token (prologue, expression, epilogue),
+# each defined exactly once outside any dead region. Semantics (another task is refused) live in test_link_watchdog.c.
+$raStripped = Get-LiveC $raText
+$raNames = @('s_reset_in_flight_depth', 's_reset_erases_kiln_nvs', 's_reset_job_task', 's_heat_claim_mux', 'xTaskGetCurrentTaskHandle', 'portENTER_CRITICAL', 'portEXIT_CRITICAL', 'relay_authority_reset_refuses_kiln_nvs_writer', 'relay_authority_reset_refuses_writer')
+if ($raStripped -match ('(?m)^\s*#\s*(define|undef)\s+(' + ($raNames -join '|') + ')\b')) {
+    Write-Host 'FAIL: relay_authority.c #defines/#undefs reset state, the critical-section/task-handle primitives or a reset predicate -- a body is shadowed'
     $fail++
 }
-$bodyPat = 'bool\s+relay_authority_reset_refuses_kiln_nvs_writer\s*\(\s*void\s*\)\s*\{(?<pre>[^{}]*?)bool\s+refuse\s*=\s*\(\s*s_reset_in_flight_depth\s*!=\s*0\s*\)\s*&&\s*s_reset_erases_kiln_nvs\s*&&\s*\(\s*s_reset_job_task\s*==\s*NULL\s*\|\|\s*s_reset_job_task\s*!=\s*me\s*\)\s*;(?<post>[^{}]*?)return\s+refuse\s*;\s*\}'
-$bm = [regex]::Match($raStripped, $bodyPat)
-# post may hold only the matching portEXIT_CRITICAL(...); call, so strip it before testing for other statements.
-$postTxt = if ($bm.Success) { ($bm.Groups['post'].Value -replace 'portEXIT_CRITICAL\s*\(\s*&s_heat_claim_mux\s*\)\s*;', '').Trim() } else { '' }
-$preOk = $bm.Success -and ($bm.Groups['pre'].Value -notmatch '\breturn\b|\bgoto\b')
-if (-not $bm.Success -or $postTxt -ne '' -or -not $preOk) {
-    Write-Host 'FAIL: relay_authority_reset_refuses_kiln_nvs_writer() body in relay_authority.c no longer computes (s_reset_in_flight_depth != 0) && s_reset_erases_kiln_nvs && (s_reset_job_task == NULL || s_reset_job_task != me) and returns it with no early return / reassignment of refuse'
-    $fail++
+$prologue = '\{\s*void\s*\*\s*me\s*=\s*\(\s*void\s*\*\s*\)\s*xTaskGetCurrentTaskHandle\s*\(\s*\)\s*;\s*portENTER_CRITICAL\s*\(\s*&s_heat_claim_mux\s*\)\s*;\s*'
+$epilogue = '\s*;\s*portEXIT_CRITICAL\s*\(\s*&s_heat_claim_mux\s*\)\s*;\s*return\s+refuse\s*;\s*\}'
+$jobTerm = '\(\s*s_reset_job_task\s*==\s*NULL\s*\|\|\s*s_reset_job_task\s*!=\s*me\s*\)'
+$bodies = @(
+    @{ Fn = 'relay_authority_reset_refuses_kiln_nvs_writer'; Expr = 'bool\s+refuse\s*=\s*\(\s*s_reset_in_flight_depth\s*!=\s*0\s*\)\s*&&\s*s_reset_erases_kiln_nvs\s*&&\s*' + $jobTerm; Shape = '(s_reset_in_flight_depth != 0) && s_reset_erases_kiln_nvs && (s_reset_job_task == NULL || s_reset_job_task != me)' },
+    @{ Fn = 'relay_authority_reset_refuses_writer'; Expr = 'bool\s+refuse\s*=\s*\(\s*s_reset_in_flight_depth\s*!=\s*0\s*\)\s*&&\s*' + $jobTerm; Shape = '(s_reset_in_flight_depth != 0) && (s_reset_job_task == NULL || s_reset_job_task != me)' }
+)
+foreach ($b in $bodies) {
+    $defs = [regex]::Matches($raStripped, '(?<![A-Za-z0-9_])bool\s+' + $b.Fn + '\s*\(').Count
+    $pat = 'bool\s+' + $b.Fn + '\s*\(\s*void\s*\)\s*' + $prologue + $b.Expr + $epilogue
+    if ($defs -ne 1 -or $raStripped -notmatch $pat) {
+        Write-Host "FAIL: $($b.Fn)() in relay_authority.c must be defined exactly once (found $defs) and be exactly: void *me = (void *)xTaskGetCurrentTaskHandle(); portENTER_CRITICAL(&s_heat_claim_mux); bool refuse = $($b.Shape); portEXIT_CRITICAL(&s_heat_claim_mux); return refuse; -- no early return, local shadow or reassignment"
+        $fail++
+    }
 }
 
 if ($fail -gt 0) {
     Write-Host "check_reset_fence_hooks: $fail problem(s)"
     exit 1
 }
-Write-Host "PASS: check_reset_fence_hooks (all 4 reset-fence hooks installed by main.c)"
+Write-Host "PASS: check_reset_fence_hooks (all 4 reset-fence hooks installed by main.c; both relay_authority predicates pinned)"
 exit 0

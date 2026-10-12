@@ -49,7 +49,11 @@ static inline void vTaskDelete(TaskHandle_t task) { (void)task; }
  * (on target, "no task" is never a real return value here). A fixed
  * non-NULL sentinel keeps "current task == sender_task" false, matching
  * every real caller before the sender task exists. */
-static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
+/* 2026-10-11 (REVIEW_DEVBREAK4 MED-1): the current-task handle is settable so a test can prove a DIFFERENT task is
+ * refused by task-identity predicates (relay_authority reset fence). Default 1 keeps every existing test unchanged. */
+__declspec(selectany) TaskHandle_t g_test_stub_current_task = (TaskHandle_t)1;
+static inline void stub_set_current_task(TaskHandle_t t) { g_test_stub_current_task = t; }
+static inline TaskHandle_t xTaskGetCurrentTaskHandle(void) { return g_test_stub_current_task; }
 
 /* 2026-08-22: added for profile_executor.c's/autotune_engine.c's host tests,
  * which #include those .c files directly (same convention as the functions

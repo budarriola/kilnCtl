@@ -22,8 +22,12 @@ $seen = 0
 # Matched by repo-relative path (forward slashes), never the bare file name.
 $deliberateMisuse = @('tools/check_build_gate_reentrant.ps1')
 $innerBad = 'Start-Sleep|Enter-BuildLock|vcvarsall|Import-KilnVcvarsEnv|Enter-KilnBuildGate|&\s*\$\w*[Ee]xe\b|&\s*["''][^"'']*\.exe["'']'
-$files = Get-ChildItem -LiteralPath $Root -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue |
-    Where-Object { (($_.FullName.Substring($Root.TrimEnd('\','/').Length + 1) -replace '\\', '/') -notmatch '(^|/)(\.git|node_modules|\.venv|build|build_agent|build_sim_[A-Za-z0-9_]*_obj|checkbuild_[0-9a-f]+)/') -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' -and (($_.FullName.Substring($Root.TrimEnd('\','/').Length + 1) -replace '\\', '/') -notin $deliberateMisuse) }
+# Enumerate with git so ignore rules (not path-segment names) decide what is skipped: ignored build output drops out,
+# every tracked or untracked-but-not-ignored script is linted (tools/build/, docs/build/ included).
+$listed = @(& git -C $Root ls-files -co --exclude-standard -- '*.ps1' 2>$null)
+if ($LASTEXITCODE -ne 0 -or $listed.Count -eq 0) { Write-Host "FAIL: git ls-files -co --exclude-standard failed under $Root -- cannot enumerate scripts"; exit 1 }
+$files = $listed | Sort-Object -Unique | ForEach-Object { Get-Item -LiteralPath (Join-Path $Root $_) -ErrorAction SilentlyContinue } |
+    Where-Object { $_ -and -not $_.PSIsContainer -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' -and (($_.FullName.Substring($Root.TrimEnd('\','/').Length + 1) -replace '\\', '/') -notin $deliberateMisuse) }
 foreach ($f in $files) {
     $lines = @(Get-Content -LiteralPath $f.FullName)
     $code = @()

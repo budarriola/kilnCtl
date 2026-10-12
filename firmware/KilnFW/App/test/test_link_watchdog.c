@@ -225,6 +225,10 @@ static void test_reset_refuses_writer_exempts_reset_job_task(void)
     TEST_CHECK(relay_authority_reset_refuses_writer(), "mark set, no job registered: refused");
     relay_authority_reset_job_enter();
     TEST_CHECK(!relay_authority_reset_refuses_writer(), "the registered reset-job task itself is exempt");
+    stub_set_current_task((TaskHandle_t)2); // REVIEW_DEVBREAK4 MED-1: a DIFFERENT task is refused while the job runs
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "another task is refused while the reset job is registered");
+    stub_set_current_task((TaskHandle_t)1);
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "switching back to the job task is exempt again");
     relay_authority_reset_job_exit();
     TEST_CHECK(relay_authority_reset_refuses_writer(), "after the job exits the exemption is gone");
     relay_authority_reset_in_flight_end();
@@ -243,6 +247,9 @@ static void test_kiln_nvs_fence_only_when_scope_erases_it(void)
     TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "kiln/all scope: other-task kiln_nvs write refused");
     relay_authority_reset_job_enter();
     TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "the reset job's own task is exempt");
+    stub_set_current_task((TaskHandle_t)2); // REVIEW_DEVBREAK4 MED-1
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "another task is refused while the reset job is registered");
+    stub_set_current_task((TaskHandle_t)1);
     relay_authority_reset_job_exit();
     relay_authority_reset_in_flight_end();
     TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "mark cleared: nothing refused, flag cleared");
