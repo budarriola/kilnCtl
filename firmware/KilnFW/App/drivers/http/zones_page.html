@@ -2706,8 +2706,9 @@ document.getElementById('relayCount').addEventListener('change', renderZones);
    firmware's range parse with a misleading 400, so a blank optional field is left out of the POST.
    Omitting a field is "keep the stored value" only for the keys zones_http_post_parse.c omit-PRESERVES
    (guard thresholds, xzone, tc/relay/zone type, failsafe, hystc/minons/minoffs, coilpower, model
-   k/tau/deadtime, fuzzy strength, the bands and caps, coupling cells); ZONE_OPTIONAL_KEY_RE lists exactly
-   the ones a blank input may drop, and test_zone_omit_preserved_drift.py pins the firmware side. Of those,
+   k/tau/deadtime, fuzzy strength, the bands and caps, coupling cells); ZONE_OPTIONAL_KEY_RE lists a
+   SUBSET of those (never an omit-defaulted key such as ct_mask/thermo_mask, never a required one), and
+   test_zone_omit_preserved_drift.py pins the regex to the firmware's omit-preserved set. Of those,
    the 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
    refused client-side when blank (blankGuardKeys), never dropped, so a cleared field is shown to
    the operator and can never silently disable a thermal guard. */

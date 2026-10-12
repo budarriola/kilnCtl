@@ -1,6 +1,12 @@
 """Drift test: zones_http_client's omit-preserved key lists must match what
 firmware/KilnFW/App/drivers/http/zones_http_post_parse.c really treats as
-omit-preserves-current (review BENCHFX2 LOW-1)."""
+omit-preserves-current (review BENCHFX2 LOW-1).
+
+The later-override scan is a cheap second line, not a C parser. It covers plain and compound
+assignment (spaced `z -> f`, `(z)->f`, `(*z).f`), ++/-- and memset with or without `&`. It does
+NOT see writes through a macro, memcpy/helper calls, or a conditional default nested inside the
+omit `else` itself; those are covered by the KilnFW host tests in
+firmware/KilnFW/App/test/test_zones_http.c (BENCHFX7 review LOW-1)."""
 import re
 import unittest
 from pathlib import Path
@@ -67,8 +73,10 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
             violations.append(f"{name}: `else if` in the omit branch chain")
         fields_to_check.append((name, field, span, block_start))
     for name, field, span, bstart in fields_to_check:
-        lhs = r"(?:\bz->|\(\*z\)\.)" + re.escape(field) + r"(?:\[[^\]]*\])?"
-        pat = re.compile(lhs + r"\s*([-+*/|&^%<>]*)=(?!=)\s*([^;]*);")
+        lhs = r"(?:\bz\s*->|\(\s*z\s*\)\s*->|\(\*z\)\s*\.)\s*" + re.escape(field) + r"(?:\[[^\]]*\])?"
+        # Real compound operators only: `>=` / `<=` comparisons are not assignments (LOW-2).
+        pat = re.compile(lhs + r"\s*((?:<<|>>|[-+*/%&|^])?)=(?!=)\s*([^;]*);")
+        incdec = re.compile(r"(?:\+\+|--)\s*" + lhs + "|" + lhs + r"\s*(?:\+\+|--)")
         for m in pat.finditer(whole):
             if span[0] <= m.start() < span[1]:
                 continue
@@ -85,7 +93,10 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
                 continue
             kind = "compound assignment" if m.group(1) else "assignment"
             violations.append(f"{name}: {kind} to z->{field} {where} the omit branch (rhs {rhs!r})")
-        for m in re.finditer(r"\bmemset\(\s*&\s*" + lhs, whole):
+        for m in incdec.finditer(whole):
+            if not (span[0] <= m.start() < span[1]):
+                violations.append(f"{name}: ++/-- on z->{field} outside the omit branch")
+        for m in re.finditer(r"\bmemset\(\s*&?\s*" + lhs, whole):
             if not (span[0] <= m.start() < span[1]):
                 violations.append(f"{name}: memset of z->{field} outside the omit branch")
     return preserved, defaulted, violations
@@ -191,6 +202,26 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type *= preserved_tc_type;")[2]), 1)  # P1
         self.assertEqual(len(_classify_full("z->foo = 0.0f;" + chr(10) + blk("foo", ok))[2]), 1)  # P4 outside own block
         self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = other_ident;")[2]), 1)  # P6
+        # BENCHFX7 LOW-2: comparisons are not compound assignments
+        self.assertEqual(cls(ok + chr(10) + "if (!(z->foo == 0.0f || z->foo >= 1.0f)) { y = 1; }")[2], [])
+        self.assertEqual(cls(ok + chr(10) + "if (z->foo <= 1.0f) { y = 1; }")[2], [])
+        # BENCHFX7 LOW-3 S1: every real compound operator (the old class missed ^= %= <<= >>=)
+        for op in ("^=", "%=", "<<=", ">>=", "|=", "&="):
+            self.assertEqual(len(cls(ok + chr(10) + f"z->foo {op} 1u;")[2]), 1, op)
+        # BENCHFX7 LOW-3 S6: a non-conditioned present-branch write to an exempt field still needs its allowed RHS
+        self.assertEqual(len(_classify_full(chr(10).join(
+            ['snprintf(key, sizeof(key), "z%u_tc_type", i);', "z->tc_type = other;",
+             "if (zones_config_json_field_present(body, key)) { x = 1; }",
+             "else { z->tc_type = current_z->tc_type; }"]))[2]), 1)
+        # BENCHFX7 LOW-3 S11: an else-if arm on a non-exempt field is a violation even for have_legacy
+        self.assertEqual(len(_classify_full(chr(10).join(
+            ['snprintf(key, sizeof(key), "z%u_foo", i);',
+             "if (zones_config_json_field_present(body, key)) { x = 1; }",
+             "else if (have_legacy) { y = 1; }", "else { z->foo = current_z->foo; }"]))[2]), 1)
+        # BENCHFX7 LOW-1: ++/--, spaced and parenthesised deref, memset without &
+        for stmt in ("z->foo++;", "--z->foo;", "z -> foo = 0.0f;", "(z)->foo = 0.0f;",
+                     "memset(z->foo, 0, sizeof(z->foo));", "memset(&z->foo, 0, 4);"):
+            self.assertEqual(len(cls(ok + chr(10) + stmt)[2]), 1, stmt)
         # indexed form must match on both sides
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[k]; }")[1], {"foo"})
@@ -222,6 +253,19 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         for k in ("kp", "ki", "kd", "maxtemp", "mintemp", "relay_mask", "cal", "ramp", "sanity",
                   "mode", "window", "minon", "minoff", "timingprofile", "name"):
             self.assertFalse(zhc.ZONE_OMIT_PRESERVED_KEY_RE.match(f"z1_{k}"), k)
+
+    def test_page_optional_key_regex_pinned_to_preserved_keys(self):
+        """zones_page.html's ZONE_OPTIONAL_KEY_RE may only drop a blank for keys the firmware
+        omit-PRESERVES (BENCHFX7 LOW-4). Adding an omit-defaulted (ct_mask, thermo_mask) or a
+        required key must fail here."""
+        page = (_SRC.parent / "zones_page.html").read_text(encoding="utf-8")
+        m = re.search(r"var ZONE_OPTIONAL_KEY_RE = /\^z\\d\+_\((.*?)\)=\\s\*\$/;", page)
+        self.assertIsNotNone(m, "ZONE_OPTIONAL_KEY_RE not found in zones_page.html")
+        keys = {("coupling_c" if k.startswith("coupling_c") else k) for k in m.group(1).split("|")}
+        self.assertGreater(len(keys), 15)
+        fw = firmware_omit_preserved_keys(_SRC.read_text(encoding="utf-8"))
+        self.assertEqual(keys - fw, set(), "page drops a blank for a key the firmware does not omit-preserve")
+        self.assertEqual(keys & set(zhc.ZONE_OMIT_DEFAULTED_KEYS), set())
 
     def test_guard_keys_stripped_from_body(self):
         body = "z0_runawaymargin=12.2&z0_xzone=5.0&z0_debounce=3&z0_kp=1&z0_zonetype=1"
