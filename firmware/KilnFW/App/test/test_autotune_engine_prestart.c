@@ -283,18 +283,20 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     (void)link;
     /* LOW-1 (REVIEW_LD01_WWFIX): like the real function, leave *out as garbage that LOOKS link-up on an
      * error return, so a caller that ignores the return code reads link_up and starts. */
-    if (s_stub_link_mode >= 2) {
+    if (s_stub_link_mode >= 2 && s_stub_link_mode != 5) {
         if (out) memset(out, 0xFF, sizeof(*out));
         return s_stub_link_mode == 2 ? ESP_ERR_INVALID_STATE : ESP_FAIL;
     }
     if (out) memset(out, 0, sizeof(*out));
-    if (out) out->link_up = (s_stub_link_mode == 0);
+    if (out) out->link_up = (s_stub_link_mode == 0 || s_stub_link_mode == 5);
     /* F5HOLDERFX4: start also needs a DIAG received since the Pico's last reboot and fresh; a link-up board
      * in this stub has one (state 0 is not TRIPPED). */
-    if (out && s_stub_link_mode == 0) {
+    if (out && (s_stub_link_mode == 0 || s_stub_link_mode == 5)) {
         out->diag_ever_received = true;
         out->diag_since_reboot = true;
-        out->diag_frame_age_ms = 0;
+        out->diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+        /* mode 5: link up but the DIAG is one tick past fresh -> start must refuse. */
+        out->diag_frame_age_ms = (s_stub_link_mode == 5) ? (SAFETY_LINK_DIAG_FRESH_MS + 1u) : 0u;
     }
     return ESP_OK;
 }
@@ -3879,6 +3881,35 @@ static void test_begin_run_refuses_unlatched_link_down(void)
         TEST_CHECK(mode == 4 || strstr(errbuf, "safety link is down") != NULL, "refusal names the safety link");
         TEST_CHECK(strstr(errbuf, "0x") == NULL, "decoded, not hex");
     }
+}
+
+/* MED-1 (REVIEW_SAFETYFX7): link up and ARMED but the DIAG is stale -> start refuses and requests no heat. */
+static void test_begin_run_refuses_stale_diag(void)
+{
+    TEST_SECTION("autotune begin-run: link up but Pico DIAG stale -- refuses, no heat (F5HOLDERFX4)");
+    static MAX31856BusClass bus;
+    static SafetyLinkClass safety;
+    reset_heat_enable_recorder(false);
+    memset(&s_at, 0, sizeof(s_at));
+    memset(&bus, 0, sizeof(bus));
+    memset(&safety, 0, sizeof(safety));
+    bus.initialized = true;
+    safety.initialized = true;
+    s_at.thermo_bus = &bus;
+    s_at.safety = &safety;
+    s_at.lock = xSemaphoreCreateMutex();
+    s_stub_max_temp_c = 0.0f;
+    s_stub_min_temp_c = 0.0f;
+    s_stub_ch0_ok = true;
+    s_stub_blocked_real_semantics = true;
+    s_stub_link_mode = 5;
+    char errbuf[128] = {0};
+    bool ok = autotune_engine_run(0, 1.0f, AUTOTUNE_RULE_SIMC, errbuf, sizeof(errbuf));
+    s_stub_blocked_real_semantics = false;
+    s_stub_link_mode = 0;
+    TEST_CHECK(!ok, "start refused while the DIAG is stale");
+    TEST_CHECK(s_req_enable_true_calls == 0, "no heat-enable request");
+    TEST_CHECK(strstr(errbuf, "status report") != NULL, "refusal says it is waiting for the safety processor status report");
 }
 
 static void test_autotune_start_on_a_down_link_does_not_claim_heat(void)
@@ -7535,6 +7566,7 @@ void run_test_autotune_engine_prestart(void)
     test_autotune_start_on_a_down_link_does_not_claim_heat();
     test_begin_run_refuses_on_down_link_with_latched_link_source();
     test_begin_run_refuses_unlatched_link_down();
+    test_begin_run_refuses_stale_diag();
 
     // Target-temperature step mode (slice 1) -- order-independent, each
     // re-zeroes s_at via its own helper.
