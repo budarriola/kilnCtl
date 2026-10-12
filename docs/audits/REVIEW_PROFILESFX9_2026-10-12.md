@@ -247,3 +247,22 @@ trap.
 | P2 client: "factory_reset scope=profiles (or scope=all)" -> "factory_reset (scope=all)" | CAUGHT | same |
 
 Logs: `%TEMP%\negtest_logs\20261012_091334_jp08` (firmware), `%TEMP%\negtest_logs\20261012_091345_rlb3` (pytest).
+
+## Fix status (PROFILESFX10)
+
+- MED-1 FIXED. `profiles_http_save_impl` refuses a rev-unknown target slot before any RAM assignment, returning
+  `false` with `err_msg == PROFILES_SAVE_ERR_STORE_UNREADABLE` (`profiles_store.h`). Every caller sees the failure:
+  the import route answers 409 with the profile remedy; backup import reports `rejected at commit: <that text>`; the
+  LCD builder and the UART bridge show the text. Tests: `test_profiles_http.c`
+  `test_save_refuses_rev_unknown_slot_without_mutating_ram` (save, save_expect_rev, save_ex; RAM and used bit
+  unchanged), `test_profile_export_import.c` `test_store_unreadable_save_refusal_is_409_with_remedy`. Two older tests
+  that relied on a rev-unknown save landing in RAM and rolling back were updated to the refuse-up-front behaviour.
+- LOW-1 FIXED. `LIVE_DECIDE_STORE_UNREADABLE` (409, profile remedy) for save_as and overwrite; the pending edit is
+  kept. Test: `test_profiles_live_http.c` `test_decide_store_unreadable_is_409_with_remedy`.
+- LOW-2 FIXED. `test_profile_routes_use_profile_409_text` pins the profile text on save, hide and restore (M4-M6).
+- LOW-3 FIXED. `zones_http_pid.c` and `iter_tune_http.c` answer the zones-undecided 409 (body moved to
+  `cfg_fs_http_send_zones_undecided_409` in `cfg_fs_refusal_http.h`) when `zones_config_is_undecided()`. Tests in
+  `test_zones_http.c` and `test_iter_tune_http.c`.
+- INFO-1 not fixed (rolls back safely; cheap-only scope).
+- INFO-2 FIXED (wording "a stored profile (or the hidden built-in list)").
+- INFO-3 FIXED (captures raised to 1024 B in the three tests).

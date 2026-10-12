@@ -2396,6 +2396,31 @@ static void test_zones_pid_post_refused_while_profile_running(void)
     TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd must be untouched by a refused submit");
 }
 
+/* PROFILESFX10 LOW-3: the narrow PID writer answers the zones 409 (with the recovery routes), not a bare 500, when
+ * the stored zones config was unreadable at boot. */
+static void test_zones_pid_post_undecided_is_409_with_remedy(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- undecided zones config answers 409 zones_config_undecided, gains unchanged (PROFILESFX10 LOW-3)");
+    seed_two_zone_pid_baseline();
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp_before, &ki_before, &kd_before), "baseline gains readable");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided PID POST answered 409, not 500");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "body names the cause");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL, "body names the recovery route");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL, "no success reported");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "gains still readable");
+    TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp untouched");
+    TEST_CHECK_NEAR(ki, ki_before, 1e-9, "ki untouched");
+    TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd untouched");
+    zones_config_load_fault_reset_for_test();
+    s_zones_cfg_undecided = false;
+    s_zones_config_valid = true;
+}
+
 static void test_zones_pid_post_refused_while_autotune_running(void)
 {
     TEST_SECTION("POST /api/zones/pid -- REFUSED by system_mode_gate while autotune reports active");
@@ -17135,6 +17160,7 @@ void run_test_zones_http(void)
 
     test_zones_pid_post_refused_while_profile_running();
     test_zones_pid_post_refused_while_autotune_running();
+    test_zones_pid_post_undecided_is_409_with_remedy();
     test_zones_setters_refuse_busy_running_inside_the_lock();
     test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();

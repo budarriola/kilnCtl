@@ -306,7 +306,7 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 }
 
 static int s_last_status = 200;
-static char s_last_resp_body[512];
+static char s_last_resp_body[1024];
 static bool s_test_ok_called = false;
 
 esp_err_t httpd_resp_send_err(httpd_req_t *req, httpd_err_code_t error, const char *msg)

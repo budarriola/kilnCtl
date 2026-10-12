@@ -2020,6 +2020,14 @@ static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candi
         target_id = (uint8_t)free_slot;
     }
 
+    /* PROFILESFX10 MED-1: a slot whose stored profile was unreadable at boot cannot be persisted (the rev floor is
+     * unknown), and "applied live, reverts at reboot" is a silent lie. Refuse BEFORE any RAM mutation. */
+    if (s_profile_rev_unknown[target_id]) {
+        profiles_save_unlock();
+        snprintf(err_msg, err_cap, "%s", PROFILES_SAVE_ERR_STORE_UNREADABLE);
+        return false;
+    }
+
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
      * duplicate name. Reuses live_edit_name_collides_ex() (live_profile.c),
      * same case/whitespace normalization as the live-edit SAVE_AS path.

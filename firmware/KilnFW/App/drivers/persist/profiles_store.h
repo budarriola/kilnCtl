@@ -57,6 +57,10 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
  * expected_rev. The compare runs under the profiles save lock, so it cannot race another save. */
 /* REVIEW_PROFILESFX3 LOW-1: the LCD save dialog shows the refusal text verbatim; its buffer must hold the longest one. */
 #define PROFILES_SAVE_ERR_MSG_LEN 192
+/* PROFILESFX10 MED-1: the exact err_msg every save entry point returns (with false, RAM untouched) when the target
+ * slot's stored profile was unreadable at boot (rev-unknown, sticky for the whole boot). Callers compare with
+ * strcmp() to pick their remedy text; HTTP routes answer 409 with the profile store-unreadable reason. */
+#define PROFILES_SAVE_ERR_STORE_UNREADABLE "profile store unreadable at boot; reboot, or factory reset scope=profiles"
 bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
                                    uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap);
 

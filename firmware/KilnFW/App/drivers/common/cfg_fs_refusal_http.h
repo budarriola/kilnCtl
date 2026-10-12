@@ -44,7 +44,7 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
  * refusal only when the profile FILE is unreadable; an unreadable rev-floor blob in profiles_nvs survives it and is
  * cleared only by factory_reset scope=profiles (or all). */
 #define CFG_FS_PROFILES_UNREADABLE_REASON \
-    "a stored profile could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the " \
+    "a stored profile (or the hidden built-in list) could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the " \
     "controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded); factory_reset scope=profiles " \
     "(or scope=all) clears it and ERASES every user profile; a cfg format (POST /api/cfgfs/format_confirm?force_healthy=1, " \
     "then reboot) clears it only when the profile file itself is unreadable, and ERASES ALL cfg-stored settings: every " \
@@ -112,6 +112,21 @@ static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool 
                                                          int adopted)
 {
     return cfg_fs_http_persist_failed_state_impl(req, store_refused, err, adopted, false);
+}
+
+/* PROFILESFX10 LOW-3: the single 409 body for "the stored zones config could not be read this boot" (moved here from
+ * zones_http_post.c so every zones writer answers the same text). Names the actual recovery routes -- a reboot alone
+ * retries the same unreadable file. String literal only, no buffer. */
+static inline void cfg_fs_http_send_zones_undecided_409(httpd_req_t *req)
+{
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req,
+                       "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config "
+                       "could not be read at boot, so a save would be lost or overwrite it; a reboot retries the read, "
+                       "and if it stays unreadable use the recovery routes: factory reset with scope kiln, or a cfgfs "
+                       "format (POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL "
+                       "cfg-stored settings: every user profile, the zones config and preferences\"}");
 }
 
 /* Profile routes: same, with the profile-specific 409 reason (PROFILESFX9 MED-1). */

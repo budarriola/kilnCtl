@@ -14,6 +14,7 @@
 #include "esp_http_server.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
+#include "cfg_fs_refusal_http.h"
 #include "profiles_http.h"
 #include "profiles_http_internal.h" // PROFILE_TARGET_C_MIN/MAX, PROFILE_ON_OFF_RULE_JSON_MAX,
                                      // profiles_http_json_escape() -- Opus review of 5dd23944, finding 3
@@ -473,6 +474,10 @@ static esp_err_t import_post_handler(httpd_req_t *req)
         profiles_http_json_escape(err_msg, err_escaped, sizeof(err_escaped));
         char errjson[192 + sizeof(err_escaped)];
         int en = snprintf(errjson, sizeof(errjson), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+        if (strcmp(err_msg, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0) {
+            /* PROFILESFX10 MED-1: the save was refused (nothing changed); give the profile remedy, not a bare 400. */
+            return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
+        }
         /* "busy:" = a zone conversion holds the profile store; a conflict, not a bad body. */
         httpd_resp_set_status(req, strncmp(err_msg, "busy:", 5) == 0 ? "409 Conflict" : "400 Bad Request");
         httpd_resp_set_type(req, "application/json");

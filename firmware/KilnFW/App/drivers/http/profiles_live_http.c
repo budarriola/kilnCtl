@@ -661,6 +661,15 @@ static profiles_live_decide_result_t decide_finish_clear(uint32_t work_gen, uint
     return LIVE_DECIDE_OK;
 }
 
+/* PROFILESFX10 LOW-1: a rev-unknown target slot is a sticky 409 with a remedy, not a retryable error. */
+static profiles_live_decide_result_t decide_save_refusal(const char *err)
+{
+    if (strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0) {
+        return LIVE_DECIDE_STORE_UNREADABLE;
+    }
+    return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+}
+
 static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind_t kind, const char *name, bool confirm,
                                                           uint8_t *out_id, char *err, size_t err_cap)
 {
@@ -709,7 +718,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
                                            &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+            return decide_save_refusal(err);
         }
         if (!persisted) {
             /* S5: the slot is live in RAM but not in storage; keep the working copy (do NOT clear it) so the
@@ -749,7 +758,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         bool saved = profiles_http_save_ex(rec.origin_id, working, &id, &warn_count, &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+            return decide_save_refusal(err);
         }
         if (!persisted) {
             snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
@@ -786,6 +795,8 @@ static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_resu
         return send_conflict(req, err);
     case LIVE_DECIDE_SAVED_BUT_EDITED:
         return send_err_json_saved(req, "409 Conflict", err, id);
+    case LIVE_DECIDE_STORE_UNREADABLE:
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     case LIVE_DECIDE_FORBIDDEN:
         return send_forbidden(req, err);
     case LIVE_DECIDE_SERVER_ERROR:

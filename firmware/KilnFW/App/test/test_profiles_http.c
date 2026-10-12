@@ -606,17 +606,18 @@ bool profiles_builtin_is_hidden(uint8_t id)
     (void)id;
     return false;
 }
+static esp_err_t s_fake_hidden_err = ESP_OK; /* PROFILESFX10 LOW-2: lets a test refuse the hidden.json writers */
 esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
 {
     (void)id;
     (void)hidden;
     s_fake_hide_calls++;
-    return ESP_OK;
+    return s_fake_hidden_err;
 }
 esp_err_t profiles_builtin_restore_all(void)
 {
     s_fake_restore_calls++;
-    return ESP_OK;
+    return s_fake_hidden_err;
 }
 
 // PROFILE_SLOTS_100.md section 7 task 8: fake for the narrow accessor
@@ -2851,7 +2852,9 @@ static void test_rvfx_rollback_keeps_unexamined_file(void)
     bool persisted = true;
     char err[128];
     bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
-    TEST_CHECK(ok && !persisted && out_id == 0, "save landed on slot 0 and was refused");
+    /* PROFILESFX10 MED-1: the refusal now happens before any RAM assignment, so there is nothing to roll back. */
+    TEST_CHECK(!ok && strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "save onto the rev-unknown slot 0 is refused up front");
+    TEST_CHECK(!profiles_slot_used(0), "slot 0 stays unused (no RAM mutation)");
     TEST_CHECK(rvfx_slot0_file_valid(), "slot 0's unexamined file survived the rollback");
     s_profile_rev_unknown[0] = false;
 }
@@ -2932,8 +2935,9 @@ static void test_profiles_slot_gen_seqlock(void)
     s_profile_rev_unknown[4] = true;
     (void)profiles_http_save(4, &p, &out_id, NULL, err, sizeof(err));
     s_profile_rev_unknown[4] = false;
-    TEST_CHECK(!profiles_http_slot_runnable_rev(4, cap), "failed save after capture: old copy refused");
-    TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh capture runnable after failed save");
+    /* PROFILESFX10 MED-1: a save refused for an unreadable store mutates nothing, so the capture stays valid. */
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, cap), "refused save after capture: RAM untouched, old copy still runnable");
+    TEST_CHECK(profiles_http_slot_runnable_rev(4, profiles_http_slot_rev(4)), "fresh capture runnable after refused save");
 
     /* Assign in flight. */
     uint32_t cap2 = profiles_http_slot_rev(4);
@@ -6204,6 +6208,80 @@ static void test_delete_rev_unknown_is_409(void)
     s_profile_rev_unknown[8] = false;
 }
 
+/* PROFILESFX10 LOW-2: the save, hide and restore routes each answer the PROFILE 409 text, not the generic one. */
+static void check_profile_409(const char *what)
+{
+    char m[160];
+    snprintf(m, sizeof(m), "%s: status is 409", what);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, m);
+    snprintf(m, sizeof(m), "%s: body names store_unreadable_at_boot", what);
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, m);
+    snprintf(m, sizeof(m), "%s: profile text (scope=profiles, scope kiln does not clear it)", what);
+    TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL &&
+                   strstr(s_last_sendstr, "does not clear it\"}") != NULL, m);
+}
+
+static void test_profile_routes_use_profile_409_text(void)
+{
+    TEST_SECTION("PROFILESFX10 LOW-2: save / hide / restore on an unreadable store answer the profile 409");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    const char *sb = "id=8&name=SgRevUnk&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
+    (void)fuzz_post(profile_post_handler, sb, (long long)strlen(sb), (size_t)-1, 0);
+    check_profile_409("save");
+    s_profile_rev_unknown[8] = false;
+
+    cfg_fs_degraded_set("profiles/hidden.json", true);
+    s_fake_hidden_err = ESP_ERR_INVALID_STATE;
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(builtin_hide_post_handler, "id=128", 6, (size_t)-1, 0);
+    check_profile_409("hide");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(builtin_restore_post_handler, "", 0, (size_t)-1, 0);
+    check_profile_409("restore");
+    s_fake_hidden_err = ESP_OK;
+    cfg_fs_degraded_clear_for_test();
+}
+
+/* PROFILESFX10 MED-1: the shared save path refuses a rev-unknown slot and mutates no RAM, for every caller. */
+static void test_save_refuses_rev_unknown_slot_without_mutating_ram(void)
+{
+    TEST_SECTION("PROFILESFX10 MED-1: profiles_http_save / _expect_rev / _ex on a rev-unknown slot fail and leave RAM untouched");
+    fuzz_small_setup();
+    s_profile_rev_unknown[8] = true;
+    profile_t before = s_profiles.profiles[8];
+    profile_t cand = make_stored_profile();
+    strncpy(cand.name, "Changed", sizeof(cand.name) - 1);
+    uint8_t out_id = 0xEE;
+    char err[PROFILES_SAVE_ERR_MSG_LEN] = {0};
+    TEST_CHECK(profiles_slot_used(8), "precondition: slot 8 used");
+    /* UART bridge / backup import / import route entry point */
+    TEST_CHECK(!profiles_http_save(8, &cand, &out_id, NULL, err, sizeof(err)), "save into a rev-unknown slot fails");
+    TEST_CHECK(strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "err_msg is the store-unreadable constant");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged");
+    TEST_CHECK(profiles_slot_used(8), "used bit unchanged");
+    /* LCD builder entry point */
+    err[0] = '\0';
+    TEST_CHECK(!profiles_http_save_expect_rev(8, &cand, profiles_http_slot_rev(8), &out_id, NULL, err, sizeof(err)),
+               "expect_rev save into a rev-unknown slot fails");
+    TEST_CHECK(strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0, "expect_rev err_msg is the constant");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged (expect_rev)");
+    /* live-edit style (out_persisted) */
+    bool persisted = true;
+    err[0] = '\0';
+    TEST_CHECK(!profiles_http_save_ex(8, &cand, &out_id, NULL, &persisted, err, sizeof(err)), "save_ex fails too");
+    TEST_CHECK(memcmp(&before, &s_profiles.profiles[8], sizeof(before)) == 0, "RAM slot unchanged (save_ex)");
+    s_profile_rev_unknown[8] = false;
+    /* a healthy slot still saves */
+    err[0] = '\0';
+    TEST_CHECK(profiles_http_save(8, &cand, &out_id, NULL, err, sizeof(err)), "a healthy slot still saves");
+    memset(s_profile_rev_unknown, 0, sizeof(s_profile_rev_unknown));
+}
+
 static void test_fuzz_small_body_handlers(void)
 {
     TEST_SECTION("delete/hide/restore/favorite fuzz -- hostile bodies change nothing");
@@ -6370,6 +6448,8 @@ void run_test_profiles_http(void)
     test_profile_favorite_empty_slot_refused();
     test_fuzz_small_body_handlers();
     test_delete_rev_unknown_is_409();
+    test_profile_routes_use_profile_409_text();
+    test_save_refuses_rev_unknown_slot_without_mutating_ram();
     test_profile_detail_long_query();
     test_profile_post_handler_collision_response_is_well_formed_json();
     test_profile_post_handler_collision_response_escapes_quote_in_name();

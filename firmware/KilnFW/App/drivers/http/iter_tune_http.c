@@ -226,6 +226,11 @@ static esp_err_t iter_tune_restore_post_handler(httpd_req_t *req)
         // record is left completely untouched (not even the OFF/status
         // fields), so a retried restore still sees the original anchor.
         autotune_engine_release_zone_for_external_write((uint8_t)zone);
+        if (zones_config_is_undecided()) {
+            /* PROFILESFX10 LOW-3: refused because the stored zones config was unreadable at boot. */
+            cfg_fs_http_send_zones_undecided_409(req);
+            return ESP_OK;
+        }
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"zones_config_set_pid refused\"}");
         httpd_resp_set_status(req, "500 Internal Server Error");
         httpd_resp_set_type(req, "application/json");
