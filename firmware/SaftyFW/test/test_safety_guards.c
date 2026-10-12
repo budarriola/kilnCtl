@@ -5039,6 +5039,93 @@ static void test_test_clear_s8_late_rise(void)
     }
 }
 
+/* saftyfx4 LOW-1/LOW-2: pin each post-window check on its own. */
+static void test_test_clear_s8_post_window_checks(void)
+{
+    TEST_SECTION("TEST clear S8 post windows: completed-window refusal and cooling (saftyfx4 LOW-1/2)");
+    /* LOW-1: 590 s flat before the latch dilutes the whole-hold average; the rise sits
+     * inside the FIRST post window (windows_done == 1 at rollover). A clear 2 s after the
+     * rollover (partial check skipped, < S8_POST_MIN_S) is refused only by the completed
+     * window check. One quiet window later it clears. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 1.0f;
+        cfg.rate_window_s = 600.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        for (int i = 0; i < 590; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 1u; i++) {
+            if (i == 570) {
+                in.tc_c = 35.0f; /* +15 C inside the first 600 s window = 1.5 C/min */
+            }
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "LOW-1 sanity: TEST latched");
+        TEST_CHECK(s.s8_post_windows_done == 1u, "LOW-1 sanity: exactly one post window completed");
+        TEST_CHECK(s.s8_post_last_rate_c_per_min > 1.0f, "LOW-1 sanity: completed window is over the rate");
+        for (int i = 0; i < 2; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_elapsed_s < 5.0f, "LOW-1 sanity: partial check is skipped");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = 35.0f;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c),
+                   "LOW-1: rise inside one window, clear 2 s after rollover refuses");
+        for (int i = 0; i < 600; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "LOW-1: one quiet window later it clears");
+    }
+    /* LOW-2: cooling at -20 C/min (limit 10) clears in the completed and partial states. */
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 100.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        float t = 100.0f;
+        int n = 0;
+        while (s.s8_post_windows_done < 1u && n < 200) {
+            t -= 20.0f / 60.0f;
+            in.tc_c = t;
+            (void)safety_guards_tick(&s, &cfg, &in);
+            n++;
+        }
+        TEST_CHECK(s.s8_post_windows_done == 1u && s.s8_post_last_rate_c_per_min < -15.0f,
+                   "LOW-2 sanity: completed window reads about -20 C/min");
+        int extra = (k == 0) ? 2 : 12;
+        for (int i = 0; i < extra; i++) {
+            t -= 20.0f / 60.0f;
+            in.tc_c = t;
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK((k == 0) == (s.s8_post_elapsed_s < 5.0f), "LOW-2 sanity: completed vs partial state");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = t;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c),
+                   k == 0 ? "LOW-2: cooling faster than the limit clears (completed window)"
+                          : "LOW-2: cooling faster than the limit clears (partial window)");
+    }
+}
+
 /* review s8clrfx2 LOW-1/2/3 */
 static void test_s8_clear_followups(void)
 {
@@ -5131,6 +5218,7 @@ void run_test_safety_guards(void)
     test_test_trip_clear_refuses_real_conditions();
     test_test_clear_s8_streak_zero_elapsed();
     test_test_clear_s8_late_rise();
+    test_test_clear_s8_post_window_checks();
     test_test_clear_s8_divisor();
     test_test_trip_loses_to_every_real_guard();
     test_test_clear_s8_tiny_window();

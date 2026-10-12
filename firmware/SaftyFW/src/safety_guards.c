@@ -137,8 +137,9 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
 }
 
 /* S8 clear test. strict=true: a RATE trip is latched (post-trip window state valid).
- * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1) -- no post state exists,
- * only the last pre-latch tripping window, if any, is a usable basis. */
+ * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1). The s8_post_* windows are
+ * tracked for TEST latches too (saftyfx3 LOW-1) and are checked here, in addition to the
+ * last pre-latch tripping window and the whole-hold average. */
 static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
                             const safety_guard_state_t *state, bool strict)
 {
@@ -180,8 +181,15 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
     /* saftyfx3 LOW-1: the whole-hold average below dilutes a late rise, so also test the
      * sliding post-latch windows (tracked for TEST latches too, see safety_guards_tick()).
      * Refuse while the latest completed post window, or the current partial window once
-     * it is S8_POST_MIN_S long, is over the rate. Windows slide, so a kiln that warmed
-     * slowly and then cools (K4 open) still clears. Additive: only more refusals. */
+     * it is S8_POST_MIN_S long, is over the rate. The windows are TUMBLING (fixed, back to
+     * back from the first tripped tick), not sliding. Rates are signed, so a kiln that
+     * warmed slowly and then cools (K4 open) still clears. Additive: only more refusals.
+     * Known gaps, at the same resolution as S8's own trip (which needs two consecutive
+     * windows), so the TEST clear is no weaker than the guard it stands in for:
+     * (1) a burst of up to 2x max_rate that straddles a window boundary evenly reads at or
+     * under the limit in both windows; (2) a rise in the first S8_POST_MIN_S seconds after
+     * a rollover is seen only by the whole-hold average. The window algorithm is a safety
+     * design and is unchanged; see REVIEW_SAFTYFX4 INFO-2 for the owner question. */
     if (state->s8_post_active) {
         if (state->s8_post_windows_done >= 1u &&
             state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {

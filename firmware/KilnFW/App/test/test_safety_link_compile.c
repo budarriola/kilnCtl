@@ -3205,6 +3205,8 @@ static void test_send_test_trip(void)
     tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT, 0u);
     TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK &&
                    oc == SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, "rate-limit outcome passed through");
+    TEST_CHECK(s_stub_broadcast_last_payload[2] == 0x42u,
+               "second request_id is 0x42: the seed is consumed once per boot, not re-rolled per call");
 
     fake_inbox_reset();
     fake_time_reset_all();
