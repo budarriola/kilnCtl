@@ -29,10 +29,12 @@ created it. No extra dependency (no ``msvcrt.locking``, no third-party
 ``portalocker``): the stdlib primitive already does the job and is what
 those wrap internally.
 
-The lock file's content is ``"<pid> <acquired-unix-time>"`` purely for a
-human debugging a stuck lock; staleness is judged from the file's mtime, not
-its content, so a lock file created by a process that got killed before it
-finished the write is still reclaimable.
+The lock file's content is ``"<pid> <holder start epoch> <token>"``. Age
+staleness is judged from the file's mtime, so a lock created by a process
+killed before it finished the write is still reclaimable; a dead or reused
+PID reclaims at once. Every reclaim goes through an O_EXCL ``.reclaim``
+sidecar that re-reads the lock, and release removes the lock only if the
+token is still the holder's own.
 
 Stale-lock timeout: a lock older than ``stale_after`` seconds is assumed to
 belong to a dead holder (crashed process, killed MCP server, rebooted box)
@@ -55,6 +57,7 @@ import os
 import re
 import tempfile
 import time
+import uuid
 from typing import Iterator
 
 
@@ -86,17 +89,23 @@ def _lock_path(resource_key: str) -> str:
     return os.path.join(_lock_dir(), f"{safe}.lock")
 
 
-def _parse_holder(text: "str | None") -> "tuple[int, float] | None":
-    """(pid, acquired unix time) from a lock file's content, or None."""
+def _parse_holder(text: "str | None") -> "tuple[int, float, str | None] | None":
+    """(pid, second field, token or None) from a lock file's content, or None.
+
+    New format: ``<pid> <holder process start epoch> <token>``. Legacy format
+    ``<pid> <acquired time>`` has no token, and its second field is NOT a
+    process start time, so callers only use it for the dead-PID test.
+    """
     if not text:
         return None
     parts = text.split()
     if len(parts) < 2:
         return None
     try:
-        return int(parts[0]), float(parts[1])
+        pid, second = int(parts[0]), float(parts[1])
     except ValueError:
         return None
+    return pid, second, (parts[2] if len(parts) >= 3 else None)
 
 
 def _pid_info(pid: int) -> "tuple[bool, float | None]":
@@ -106,8 +115,8 @@ def _pid_info(pid: int) -> "tuple[bool, float | None]":
     if os.name == "nt":
         import ctypes
         from ctypes import wintypes
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.OpenProcess.restype = wintypes.HANDLE
+        # buildgate declares argtypes/restype for these calls.
+        from .buildgate import _kernel32 as k32
         handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
         if not handle:
             # 5 = access denied: the process exists. Anything else: gone.
@@ -135,21 +144,71 @@ def _pid_info(pid: int) -> "tuple[bool, float | None]":
     return True, None
 
 
-# A process that started this much after the lock was written cannot be its holder.
-_PID_REUSE_SLACK_S = 5.0
+# Same tolerance as buildgate.pid_alive(pid, start_epoch).
+_START_SLACK_S = 2.0
 
 
-def _holder_is_dead(lock_path: str) -> bool:
-    """True when the lock file names a PID that is gone, or alive but started
-    after the lock was written (PID reuse). Unparseable content: False."""
-    parsed = _parse_holder(_read_holder(lock_path))
+def _text_is_dead_holder(text: "str | None") -> bool:
+    """True when the lock content names a PID that is gone, or alive with a
+    process start time different from the one the holder recorded (PID
+    reuse). Unparseable content, or an unknown start time: False."""
+    parsed = _parse_holder(text)
     if parsed is None:
         return False
-    pid, acquired = parsed
+    pid, second, token = parsed
     alive, started = _pid_info(pid)
     if not alive:
         return True
-    return started is not None and started > acquired + _PID_REUSE_SLACK_S
+    if token is None or second <= 0 or started is None:
+        return False
+    return abs(started - second) > _START_SLACK_S
+
+
+_RECLAIM_SIDECAR_STALE_S = 30.0
+
+
+def _remove_retry(path: str, attempts: int = 400) -> bool:
+    """os.remove that rides out Windows sharing violations: a waiter reading
+    the file at that instant makes the delete fail with PermissionError, and a
+    silently skipped delete would leak the lock. True when the file is gone."""
+    for _ in range(attempts):
+        try:
+            os.remove(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            time.sleep(0.005)
+    return False
+
+
+def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
+    """Remove ``lock_path`` only if it still holds the content that was judged
+    dead/stale. Serialized through an O_EXCL sidecar so no two waiters can
+    both remove, and a freshly created live lock is never deleted
+    (REVIEW_BUILDFX3 MED-1). ``force`` is the age-based path."""
+    sidecar = lock_path + ".reclaim"
+    try:
+        fd = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            if time.time() - os.path.getmtime(sidecar) > _RECLAIM_SIDECAR_STALE_S:
+                os.remove(sidecar)  # a reclaimer died holding it
+        except OSError:
+            pass
+        return
+    except OSError:
+        return
+    os.close(fd)
+    try:
+        current = _read_holder(lock_path)
+        if current != judged:
+            return  # replaced by someone else's lock since we judged
+        if not force and not _text_is_dead_holder(current):
+            return
+        _remove_retry(lock_path)
+    finally:
+        _remove_retry(sidecar)
 
 
 def _read_holder(lock_path: str) -> "str | None":
@@ -181,33 +240,37 @@ def build_lock(
     lock_path = _lock_path(resource_key)
     started = time.monotonic()
     acquired = False
+    # "<pid> <own process start epoch, 0 if unknown> <unique token>"
+    _alive, own_start = _pid_info(os.getpid())
+    my_text = f"{os.getpid()} {int(own_start) if own_start else 0} {uuid.uuid4().hex}"
     while True:
         try:
             fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             try:
-                os.write(fd, f"{os.getpid()} {time.time():.0f}\n".encode("ascii"))
+                os.write(fd, f"{my_text}\n".encode("ascii"))
             finally:
                 os.close(fd)
             acquired = True
             break
-        except FileExistsError:
+        except (FileExistsError, PermissionError):
+            # PermissionError: Windows refuses CREATE_NEW while another process
+            # has the file open or pending delete -- contention, not a failure.
             try:
                 age = time.time() - os.path.getmtime(lock_path)
             except OSError:
                 # Lock vanished between our failed open() and this stat --
                 # the holder just released it. Retry immediately, no sleep,
-                # no timeout charged.
+                # no timeout charged (bounded below for a PermissionError that
+                # is not contention).
+                if time.monotonic() - started >= wait_timeout:
+                    raise BuildLockTimeout(resource_key, wait_timeout, None)
+                time.sleep(0.001)
                 continue
             # The recorded PID being dead (or reused by a younger process) also
             # reclaims at once, so a killed holder does not wedge waiters.
-            if age > stale_after or _holder_is_dead(lock_path):
-                # Holder is presumed dead. Best-effort reclaim: if another
-                # waiter wins the race to remove+recreate it first, our next
-                # open() attempt just loops back into ordinary contention.
-                try:
-                    os.remove(lock_path)
-                except OSError:
-                    pass
+            judged = _read_holder(lock_path)
+            if age > stale_after or _text_is_dead_holder(judged):
+                _try_reclaim(lock_path, judged, force=age > stale_after)
                 continue
             waited = time.monotonic() - started
             if waited >= wait_timeout:
@@ -217,7 +280,7 @@ def build_lock(
         yield
     finally:
         if acquired:
-            try:
-                os.remove(lock_path)
-            except OSError:
-                pass  # already gone (e.g. reclaimed as stale) -- fine
+            # Only remove the lock if it is still ours: a stale reclaim may
+            # have replaced it with another holder's file.
+            if _read_holder(lock_path) == my_text:
+                _remove_retry(lock_path)

@@ -134,10 +134,6 @@ class BuildLockSerializesConcurrentProcesses(unittest.TestCase):
         self.assertLess(elapsed, 1.0, "a different resource key waited on an unrelated lock")
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
-
-
 class BuildLockDeadHolder(unittest.TestCase):
     """Reclaim by recorded PID, not only by age."""
 
@@ -172,13 +168,247 @@ class BuildLockDeadHolder(unittest.TestCase):
     def test_reused_pid_started_after_lock_is_reclaimed(self):
         from unittest import mock
         import mcpkit.buildlock as bl
-        key = self._plant(f"{os.getpid()} {time.time() - 1000:.0f}\n")
+        # Holder recorded its own start time; the live PID now started 1000 s later.
+        key = self._plant(f"{os.getpid()} {time.time() - 1000:.0f} tok\n")
         with mock.patch.object(bl, "_pid_info", return_value=(True, time.time())):
             with build_lock(key, wait_timeout=5.0, stale_after=3600.0, poll_interval=0.05):
                 pass
+
+    def test_clock_step_does_not_reclaim_live_holder(self):
+        """LOW-1: the guard compares recorded vs actual PROCESS start, so a
+        wall-clock step cannot make a live holder look reused."""
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        key = self._plant(f"{os.getpid()} {int(start)} tok\n")
+        with self.assertRaises(BuildLockTimeout):
+            with build_lock(key, wait_timeout=0.4, stale_after=3600.0, poll_interval=0.05):
+                self.fail("reclaimed a live holder")
+
+    def test_lock_records_holders_own_process_start(self):
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        key = f"test-recstart-{os.getpid()}-{time.time_ns()}"
+        with build_lock(key, wait_timeout=2.0):
+            parsed = bl._parse_holder(bl._read_holder(_lock_path(key)))
+        self.assertEqual(parsed[0], os.getpid())
+        self.assertLessEqual(abs(parsed[1] - start), 2.0)
+        self.assertIsNotNone(parsed[2])
+
+    def test_start_within_slack_is_same_process(self):
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        self.assertFalse(bl._text_is_dead_holder(f"{os.getpid()} {int(start) + 1} tok"))
+        self.assertTrue(bl._text_is_dead_holder(f"{os.getpid()} {int(start) + 10} tok"))
 
     def test_unparseable_holder_is_not_treated_as_dead(self):
         key = self._plant("")
         with self.assertRaises(BuildLockTimeout):
             with build_lock(key, wait_timeout=0.4, stale_after=3600.0, poll_interval=0.05):
                 self.fail("reclaimed an empty (being-written) lock")
+
+
+def _stress_worker(barrier, key_fmt, rounds, overlaps, entered):
+    for r in range(rounds):
+        barrier.wait(60)  # main has planted the dead lock for this round
+        key = key_fmt.format(r)
+        with build_lock(key, wait_timeout=60.0, stale_after=3600.0, poll_interval=0.002):
+            marker = _lock_path(key) + ".inside"
+            try:
+                fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                with overlaps.get_lock():
+                    overlaps.value += 1
+            else:
+                os.close(fd)
+                with entered.get_lock():
+                    entered.value += 1
+                time.sleep(0.01)
+                os.remove(marker)
+        barrier.wait(60)
+
+
+class BuildLockReclaimStress(unittest.TestCase):
+    """REVIEW_BUILDFX3 MED-1: many waiters on a dead-PID lock, never two inside."""
+
+    def test_eight_processes_dead_pid_lock_never_overlap(self):
+        import subprocess
+        ctx = multiprocessing.get_context("spawn")
+        workers, rounds = 8, 20
+        barrier = ctx.Barrier(workers + 1)
+        overlaps = ctx.Value("i", 0)
+        entered = ctx.Value("i", 0)
+        key_fmt = f"test-stress-{os.getpid()}-{time.time_ns()}-{{}}"
+        procs = [ctx.Process(target=_stress_worker,
+                             args=(barrier, key_fmt, rounds, overlaps, entered))
+                 for _ in range(workers)]
+        for p in procs:
+            p.start()
+        try:
+            for r in range(rounds):
+                dead = subprocess.Popen([sys.executable, "-c", "pass"])
+                dead.wait()
+                path = _lock_path(key_fmt.format(r))
+                with open(path, "w", encoding="ascii") as handle:
+                    handle.write(f"{dead.pid} 0 deadtoken\n")
+                barrier.wait(60)  # release the waiters
+                barrier.wait(60)  # all finished the round
+        finally:
+            for p in procs:
+                p.join(timeout=30)
+                if p.is_alive():
+                    p.terminate()
+        self.assertEqual(overlaps.value, 0, "two waiters held the lock at once")
+        self.assertEqual(entered.value, workers * rounds)
+
+
+class BuildLockReleaseAndReclaimGuards(unittest.TestCase):
+    def test_release_does_not_remove_a_lock_it_no_longer_owns(self):
+        key = f"test-token-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        with build_lock(key, wait_timeout=2.0):
+            with open(path, "w", encoding="ascii") as handle:  # someone else's lock
+                handle.write("1 0 othertoken\n")
+        self.assertTrue(os.path.exists(path), "released a lock owned by another holder")
+        os.remove(path)
+
+    def test_reclaim_leaves_a_lock_replaced_since_it_was_judged(self):
+        import mcpkit.buildlock as bl
+        key = f"test-recheck-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(f"{os.getpid()} 0 livetoken\n")
+        try:
+            bl._try_reclaim(path, "99999999 0 deadtoken", force=False)
+            self.assertTrue(os.path.exists(path), "removed a lock whose content changed")
+            bl._try_reclaim(path, f"{os.getpid()} 0 livetoken", force=False)
+            self.assertTrue(os.path.exists(path), "removed a live (not dead) holder's lock")
+        finally:
+            os.remove(path)
+        self.assertFalse(os.path.exists(path + ".reclaim"), "sidecar leaked")
+
+    def test_reclaim_sidecar_held_by_another_blocks_removal(self):
+        import mcpkit.buildlock as bl
+        key = f"test-sidecar-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        text = "99999999 0 deadtoken"
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+        with open(path + ".reclaim", "w") as handle:
+            handle.write("")
+        try:
+            bl._try_reclaim(path, text, force=True)
+            self.assertTrue(os.path.exists(path), "reclaimed without owning the sidecar")
+        finally:
+            os.remove(path)
+            os.remove(path + ".reclaim")
+
+
+@unittest.skipUnless(os.name == "nt", "Windows kernel32 paths")
+class PidInfoBranches(unittest.TestCase):
+    """REVIEW_BUILDFX3 LOW-2: each _pid_info branch, with kernel32 mocked."""
+
+    def _call(self, k32, last_error=0):
+        from unittest import mock
+        import ctypes
+        import mcpkit.buildgate as bg
+        import mcpkit.buildlock as bl
+        with mock.patch.object(bg, "_kernel32", k32), \
+                mock.patch.object(ctypes, "get_last_error", return_value=last_error):
+            return bl._pid_info(4242)
+
+    def _k32(self, handle=1, exit_ok=True, code=259, times_ok=True):
+        from unittest import mock
+        k32 = mock.Mock()
+        k32.OpenProcess.return_value = handle
+
+        def exit_code(_h, ref):
+            ref._obj.value = code
+            return exit_ok
+
+        def times(_h, c, *_rest):
+            c._obj.dwHighDateTime = 0x01D00000
+            c._obj.dwLowDateTime = 0
+            return times_ok
+        k32.GetExitCodeProcess.side_effect = exit_code
+        k32.GetProcessTimes.side_effect = times
+        return k32
+
+    def test_access_denied_means_alive(self):
+        self.assertEqual(self._call(self._k32(handle=0), last_error=5), (True, None))
+
+    def test_other_open_failure_means_gone(self):
+        self.assertEqual(self._call(self._k32(handle=0), last_error=87), (False, None))
+
+    def test_exited_process_with_open_handle_is_dead(self):
+        self.assertEqual(self._call(self._k32(code=1)), (False, None))
+
+    def test_exit_code_query_failure_means_alive(self):
+        self.assertEqual(self._call(self._k32(exit_ok=False)), (True, None))
+
+    def test_get_process_times_failure_means_alive_unknown_start(self):
+        self.assertEqual(self._call(self._k32(times_ok=False)), (True, None))
+
+    def test_running_process_reports_start_time(self):
+        alive, started = self._call(self._k32())
+        self.assertTrue(alive)
+        self.assertIsNotNone(started)
+
+
+_HOLDER_SCRIPT = r"""
+import sys
+sys.path.insert(0, sys.argv[1])
+from mcpkit import workbench
+workbench._run("holder", [sys.executable, "-c",
+    "import os,sys,time; open(sys.argv[1],'w').write(str(os.getpid())); time.sleep(120)",
+    sys.argv[2]], timeout=300)
+"""
+
+
+@unittest.skipUnless(os.name == "nt", "Windows Job objects")
+class BuildTreeDiesWithServer(unittest.TestCase):
+    """REVIEW_BUILDFX3 MED-2: killing the process that runs the build must
+    take the build child with it (Job object, KILL_ON_JOB_CLOSE)."""
+
+    def test_child_dies_when_holder_is_killed(self):
+        import subprocess
+        import tempfile
+        import mcpkit.buildlock as bl
+        src = os.path.join(os.path.dirname(__file__), "..", "src")
+        with tempfile.TemporaryDirectory() as tmp:
+            pidfile = os.path.join(tmp, "child.pid")
+            holder = subprocess.Popen([sys.executable, "-c", _HOLDER_SCRIPT,
+                                       os.path.abspath(src), pidfile])
+            child_pid = None
+            try:
+                deadline = time.monotonic() + 30
+                while time.monotonic() < deadline and child_pid is None:
+                    try:
+                        child_pid = int(open(pidfile).read().strip())
+                    except (OSError, ValueError):
+                        time.sleep(0.1)
+                self.assertIsNotNone(child_pid, "build child never started")
+                self.assertTrue(bl._pid_info(child_pid)[0])
+                holder.kill()  # TerminateProcess: no cleanup runs in the holder
+                holder.wait(10)
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and bl._pid_info(child_pid)[0]:
+                    time.sleep(0.1)
+                self.assertFalse(bl._pid_info(child_pid)[0],
+                                 "orphaned build child survived its server")
+            finally:
+                holder.kill()
+                if child_pid:
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(child_pid)],
+                                   capture_output=True)
+
+    def test_run_assigns_every_child_to_the_job(self):
+        from unittest import mock
+        from mcpkit import workbench
+        import mcpkit.jobtree as jt
+        with mock.patch.object(jt, "assign_to_kill_on_close_job", return_value=True) as m:
+            workbench._run("t", [sys.executable, "-c", "pass"], timeout=60)
+        m.assert_called_once()
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

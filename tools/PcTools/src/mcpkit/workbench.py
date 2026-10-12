@@ -197,6 +197,13 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
             # spaces, and a shell would be one more quoting layer to get wrong.
             shell=False,
         )
+        # Tie the build tree to this process's life (REVIEW_BUILDFX3 MED-2):
+        # a server restart mid-build must not leave an orphan writing build/.
+        try:
+            from .jobtree import assign_to_kill_on_close_job
+            assign_to_kill_on_close_job(proc.pid)
+        except Exception:  # pragma: no cover - best effort
+            pass
         # If a build-gate slot is held by this thread, tell it which process
         # is the compile so a max-hold expiry kills only this tree.
         try:

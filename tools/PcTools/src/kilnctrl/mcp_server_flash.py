@@ -2032,6 +2032,10 @@ def fixture_flash(
     missing = [p for p, _off in images if not os.path.isfile(p)]
     if missing:
         return "error: missing build output(s): " + ", ".join(missing)
+    empty = [p for p, _off in images if os.path.getsize(p) <= 0]
+    if empty:
+        return ("error: refusing to flash -- empty (0 bytes) image(s): "
+                + ", ".join(empty) + ". Rebuild first.")
 
     adapter_refusal = _refuse_if_adapter_absent(FIXTURE_JTAG_SERIAL, "UnitTestFixture board")
     if adapter_refusal:
