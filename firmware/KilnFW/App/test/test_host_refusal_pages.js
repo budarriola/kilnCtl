@@ -54,8 +54,11 @@ assert(out.join(',') === 'z0_kp=,z0_driftperiod=30,z0_name=,thermo_count=',
 assert(omit(['z0_coilpower=','z1_hystc= ','z0_minons=','z0_minoffs=','z0_coilpower=5']).join(',') === 'z0_coilpower=5',
   'blank coilpower/hystc/minons/minoffs dropped (keep stored), set value kept');
 // BENCHFX9 LOW-1 / BENCHFX10 LOW-2: exhaustive, independent of ZONE_OPTIONAL_KEY_RE. The firmware
-// omit-PRESERVES exactly these keys (zones_http_client.ZONE_OMIT_PRESERVED_*), so a blank for one may be
-// dropped; every other blank (ct_mask/thermo_mask are omit-DEFAULTED, the rest required) must be KEPT.
+// omit-PRESERVES these keys AND xzone, tctype, zonetype, failsafe, settings_source and relaytype
+// (firmware_omit_preserved_keys() in zones_http_post_parse.c). The page deliberately drops a blank only for
+// FW_DROPPABLE (= the page's ZONE_OPTIONAL_KEY_RE set, a subset) and KEEPS every other blank
+// (ct_mask/thermo_mask are omit-DEFAULTED, the rest required). A regex key listed in neither array fails
+// the coverage assert below, so drift is loud.
 const FW_DROPPABLE = ['wrongdirwindow', 'wrongdirrate', 'offsettle', 'runawayrate', 'runawaymargin', 'driftperiod',
   'debounce', 'frozenwindow', 'fuzzy_strength', 'coupling_diag_k_dc', 'easeoffmult', 'approachratecap', 'errorband',
   'rateband', 'progressband', 'coilpower', 'hystc', 'minons', 'minoffs', 'k', 'tau', 'deadtime',
@@ -63,6 +66,14 @@ const FW_DROPPABLE = ['wrongdirwindow', 'wrongdirrate', 'offsettle', 'runawayrat
 const MUST_KEEP = ['ct_mask', 'thermo_mask', 'kp', 'ki', 'kd', 'name', 'relay_mask', 'xzone', 'maxtemp', 'mintemp',
   'cal', 'ramp', 'sanity', 'mode', 'window', 'minon', 'minoff', 'timingprofile', 'zonetype', 'tctype', 'failsafe',
   'settings_source', 'driftperiodx', 'kk', 'coupling_c', 'coupling_cx'];
+{
+  const rk = (/\^z\\d\+_\(([^)]*)\)/.exec(m[0]) || [])[1];
+  assert(!!rk, 'parsed the key set out of ZONE_OPTIONAL_KEY_RE');
+  (rk || '').split('|').forEach(function (k) {
+    if (k === 'coupling_c\\d+') k = 'coupling_c0'; // generic form covers coupling_c0..2 (listed individually)
+    assert(FW_DROPPABLE.indexOf(k) >= 0 || MUST_KEEP.indexOf(k) >= 0, 'ZONE_OPTIONAL_KEY_RE key is in FW_DROPPABLE or MUST_KEEP: ' + k);
+  });
+}
 const gen = [];
 for (let z = 0; z < 3; z++) {
   FW_DROPPABLE.concat(MUST_KEEP).forEach(function (k) {
@@ -86,12 +97,15 @@ const sIdx = ZONES.indexOf('  var savedZonesEditSeq');
 const eIdx = ZONES.indexOf('}).then(function (r) {', sIdx);
 assert(sIdx > 0 && eIdx > sIdx, 'found the Save handler fetch tail');
 let posted = null;
+let tail = null;
 const mockFetch = function (url, opts) { posted = { url: url, opts: opts }; return {}; };
-const tail = new Function('params', 'current', 'saveBtnEl', 'zonesEditSeq', 'msg', 'fetch', 'omitBlankOptionalParams',
-  ZONES.slice(sIdx, eIdx) + '});');
+try {
+  tail = new Function('params', 'current', 'saveBtnEl', 'zonesEditSeq', 'msg', 'fetch', 'omitBlankOptionalParams',
+    ZONES.slice(sIdx, eIdx) + '});');
+} catch (e) { assert(false, 'Save handler fetch tail parses: ' + e.message); }
 const saveParams = [];
 for (let z = 0; z < 3; z++) saveParams.push('z' + z + '_thermo_mask=', 'z' + z + '_ct_mask=', 'z' + z + '_kp=1', 'z' + z + '_driftperiod=');
-tail(saveParams.slice(), { generation: 7 }, { disabled: false }, 0, {}, mockFetch, omit);
+if (tail) tail(saveParams.slice(),{ generation: 7 }, { disabled: false }, 0, {}, mockFetch, omit);
 const bodyParts = posted ? posted.opts.body.split('&') : [];
 assert(!!posted && posted.url === '/api/zones' && posted.opts.method === 'POST', 'Save posts to /api/zones');
 for (let z = 0; z < 3; z++) {
@@ -100,6 +114,19 @@ for (let z = 0; z < 3; z++) {
   assert(bodyParts.indexOf('z' + z + '_driftperiod=') < 0 && bodyParts.indexOf('z' + z + '_kp=1') >= 0,
     'POST body drops blank optional, keeps set value for zone ' + z);
 }
+// BENCHFX11 LOW-2: the mask pushes in the zone loop must be unconditional so every zone always sends
+// thermo_mask and ct_mask (even 0): the firmware omit-DEFAULTS an absent mask.
+['thermo', 'ct'].forEach(function (w) {
+  const stmt = "params.push('z' + i + '_" + w + "_mask=' + " + w + "Mask);";
+  const lines = ZONES.split(/\r?\n/);
+  const at = [];
+  lines.forEach(function (l, n) { if (l.indexOf(stmt) >= 0) at.push(n); });
+  assert(at.length === 1, 'exactly one push of ' + w + '_mask (found ' + at.length + ')');
+  if (at.length === 1) {
+    assert(lines[at[0]].trim() === stmt, w + '_mask push is a bare statement, not conditional: ' + lines[at[0]].trim());
+    assert(/[;{}]\s*$/.test(lines[at[0] - 1]), w + '_mask push follows a complete statement, not a bare if/else');
+  }
+});
 assert(bodyParts[bodyParts.length - 1] === 'expected_generation=7', 'POST body carries expected_generation');
 assert(/saveBtnEl\.disabled = true;[\s\S]*?omitBlankOptionalParams\(params\)[\s\S]*?fetch\('\/api\/zones'/.test(ZONES),
   'Save disables the button and filters params before the POST');
@@ -108,7 +135,24 @@ assert(/\.catch\(function \(e\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);
 assert(/new AbortController\(\)[\s\S]*?setTimeout\(function \(\) \{ ac\.abort\(\); \}, 30000\)[\s\S]*?signal: armSaveTimer\(\)/.test(ZONES), 'save has an AbortController timeout');
 const g1 = ZONES.match(/var ZONE_GUARD_BLANK_RE = [^\n]*\n/), g2 = ZONES.match(/function blankGuardKeys\(params\) \{[\s\S]*?\r?\n\}\r?\n/);
 assert(!!g1 && !!g2, 'found blankGuardKeys');
+const g3 = ZONES.match(/var ZONE_GUARD_LABELS = \{[\s\S]*?\};\r?\n/);
+const g4 = ZONES.match(/function blankGuardLabels\(params, isHidden\) \{[\s\S]*?\r?\n\}\r?\n/);
+assert(!!g3 && !!g4, 'found blankGuardLabels');
 const bg = new Function(g1[0] + g2[0] + '; return blankGuardKeys;')();
+// BENCHFX11 LOW-1: the Save handler hands blankGuardLabels/blankGuardKeys the LIVE params array, so they
+// must be pure: run both on a frozen array (any splice/push/sort throws) and check it is unchanged.
+if (g3 && g4) {
+  const live = ['z0_ct_mask=', 'z0_thermo_mask=', 'z0_driftperiod=', 'z1_xzone=', 'z0_kp=1'];
+  const frozen = Object.freeze(live.slice());
+  let threw = null, labels = null;
+  try {
+    const f = new Function('"use strict";' + g1[0] + g2[0] + g3[0] + g4[0] + '; return [blankGuardKeys, blankGuardLabels];')();
+    f[0](frozen); labels = f[1](frozen, null);
+  } catch (e) { threw = e; }
+  assert(!threw, 'blankGuardKeys/blankGuardLabels do not mutate their params argument: ' + (threw && threw.message));
+  assert(frozen.join(',') === live.join(','), 'params unchanged after blankGuard helpers');
+  assert(!threw && labels.join(',') === 'Zone 1 Drift period,Zone 2 Cross-zone limit', 'blankGuardLabels result');
+}
 assert(bg(['z0_driftperiod=', 'z1_runawaymargin= ', 'z0_kp=', 'z0_k=', 'z0_debounce=5']).join(',') === 'z0_driftperiod,z1_runawaymargin',
   'blank guard thresholds detected, other blanks and set values not');
 
