@@ -55,6 +55,9 @@ if ($DryRun) {
     # Credentials are read from the environment by the Python module itself
     # (KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD, User scope) -- never passed
     # on this command line, per docs/agent_rules/COMMON.md.
+    # Backstop (testnetfx7 LOW-3): never load User-scope credentials while the test probe is set,
+    # even if the probe above regressed.
+    if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('GUARD-PROBE-CRED-BACKSTOP'); exit 87 }
     $env:KILNCTL_WEB_USERNAME = [Environment]::GetEnvironmentVariable('KILNCTL_WEB_USERNAME', 'User')
     $env:KILNCTL_WEB_PASSWORD = [Environment]::GetEnvironmentVariable('KILNCTL_WEB_PASSWORD', 'User')
 }

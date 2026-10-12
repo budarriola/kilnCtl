@@ -278,15 +278,41 @@ def _repo_file(*parts):
 
 
 _PROBE = "GUARD-PROBE-PAST-GUARD"
+_BACKSTOP = "GUARD-PROBE-CRED-BACKSTOP"
 
 
-# Controls never reach real network/credentials even if a probe is dead: web_commission_row
-# targets a closed localhost port (dummy credentials), make_release uses -SkipBuild and an
-# origin URL overridden (GIT_CONFIG_*) to a nonexistent local path.
-_NOFETCH_ENV = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "remote.origin.url",
-                "GIT_CONFIG_VALUE_0": "file:///nonexistent/kilnctl-test-no-fetch",
-                "GIT_TERMINAL_PROMPT": "0"}
-_DUMMY_CREDS = {"KILNCTL_WEB_USERNAME": "dummy-user", "KILNCTL_WEB_PASSWORD": "dummy-pass"}
+def _exec_lines(text):
+    """Lines of a PowerShell file with <# #> block comments blanked (line numbers preserved)
+    and quotes normalised; full-line # comments are kept for callers to skip."""
+    import re
+    text = re.sub(r"<#.*?#>", lambda m: "\n" * m.group().count("\n"), text, flags=re.S)
+    return [l.strip().replace('"', "'") for l in text.splitlines()]
+
+
+def test_nofetch_env_is_network_dead():
+    """testnetfx7 MED-1: under _NOFETCH_ENV git resolves origin to a local file URL (never
+    github.com) and only the file protocol is allowed. ls-remote --get-url is purely local."""
+    import os, subprocess
+    protos = _NOFETCH_ENV["GIT_ALLOW_PROTOCOL"].split(":")
+    assert protos == ["file"] and not {"https", "http", "ssh", "git"} & set(protos)
+    env = {**os.environ, **_NOFETCH_ENV}
+    r = subprocess.run(["git", "-C", _repo_file(), "ls-remote", "--get-url", "origin"],
+                       capture_output=True, text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert "github.com" not in r.stdout and r.stdout.strip().startswith("file://"), r.stdout
+
+
+# Controls never reach real network even if a probe is dead: -SkipBuild, and git is made
+# network-dead (testnetfx7 MED-1): remote.origin.url is multi-valued so a command-line value
+# is APPENDED; an empty value first resets the list, and GIT_ALLOW_PROTOCOL=file refuses every
+# non-file transport regardless. The web control's credentials are protected by the script's
+# own CRED-BACKSTOP (the script overwrites env credentials, so dummies would be dead config).
+_NOFETCH_ENV = {"GIT_CONFIG_COUNT": "2",
+                "GIT_CONFIG_KEY_0": "remote.origin.url", "GIT_CONFIG_VALUE_0": "",
+                "GIT_CONFIG_KEY_1": "remote.origin.url",
+                "GIT_CONFIG_VALUE_1": "file:///nonexistent/kilnctl-test-no-fetch",
+                "GIT_ALLOW_PROTOCOL": "file",
+                "GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
 _HS = ("tools", "PcTools", "scripts", "bench_hotspot.ps1")
 _WEB = ("tools", "PcTools", "scripts", "web_commission_row.ps1")
 _MR = ("tools", "make_release.ps1")
@@ -297,7 +323,7 @@ _NH = "KILNCTL_TEST_NO_HUB"
 _CASES = [
     ("web", _WEB, ["-Row", "W28", "-BoardHost", "127.0.0.1:1", "-ScreenshotDir", "unused"],
      "live mode refused", "if (-not $DryRun -and $env:" + _NH + " -eq '1') {",
-     "$repoRoot = Resolve-Path", _PROBE, _DUMMY_CREDS),
+     "$repoRoot = Resolve-Path", _PROBE, {}),
     ("hs-start", _HS, ["-Action", "start"], "start refused", "if ($env:" + _NH + " -eq '1') {",
      "switch ($Action)", _PROBE, {}),
     ("hs-stop", _HS, ["-Action", "stop"], "stop refused", "if ($env:" + _NH + " -eq '1') {",
@@ -350,6 +376,7 @@ def test_guard_probe_reaches_past_guard_without_no_hub(cid, script_parts, args, 
     r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args], capture_output=True, text=True,
                        env=env, timeout=120)
+    assert _BACKSTOP not in r.stderr, r.stdout + r.stderr
     assert r.returncode == _PROBE_RC and marker in r.stderr.strip().splitlines(), r.stdout + r.stderr
 
 
@@ -359,9 +386,11 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     the guard's with NO_HUB -> GUARD_PROBE (so not commented, no `$false -and` prefix), then
     only blanks/comments, then the executable anchor line. The probe writes the marker to
     stderr and exits 86."""
+    import re
     with open(_repo_file(*script_parts), encoding="utf-8") as fh:
-        lines = fh.read().splitlines()
-    norm = [l.strip().replace('"', "'") for l in lines]
+        text = fh.read()
+    lines = text.splitlines()
+    norm = _exec_lines(text)
     gs = [n for n, l in enumerate(norm) if l == guard]
     assert len(gs) == 1, ("guard line not found exactly once", guard, gs)
     want = guard.replace(_NH, "KILNCTL_TEST_GUARD_PROBE")
@@ -371,10 +400,37 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     pn = probes[0]
     assert "[Console]::Error.WriteLine('" + marker + "')" in norm[pn] and ("exit %d" % _PROBE_RC) in norm[pn], lines[pn]
     assert gs[0] < pn, ("guard must precede probe", gs[0], pn)
+    # testnetfx7 LOW-1: guard..probe holds only the refusal body and its closing brace; no
+    # disarm of the probe variable and no network command in that executable span.
+    span = [(n, norm[n]) for n in range(gs[0] + 1, pn) if norm[n] and not norm[n].startswith("#")]
+    assert span and span[-1][1] == "}", ("guard block must close with } right before the probe", span)
+    bad = re.compile(r"GUARD_PROBE|Remove-Item|Set-Item|Clear-Item|\bgit\b|ls-remote|\bfetch\b|\bpush\b|"
+                     r"Invoke-WebRequest|Invoke-RestMethod|\biwr\b|\birm\b|\bcurl\b|\bgh\b|Start-Process|"
+                     r"WebClient|Start-Job|SetEnvironmentVariable|\bEnv:", re.I)
+    for n, l in span:
+        assert not bad.search(re.sub(r"'[^']*'", "''", l)), ("disarm or network command between guard and probe", lines[n])
+    for n, l in enumerate(norm):
+        if n != pn and not l.startswith("#") and re.search(r"GUARD_PROBE", l) and "-eq" not in l \
+                and "-not" not in l and "$env:" + "KILNCTL_TEST_GUARD_PROBE)" not in l:
+            assert False, ("probe variable assigned/cleared elsewhere", lines[n])
     later = [n for n, l in enumerate(norm) if n > pn and l.startswith(anchor)]
     assert later, ("executable anchor not found after the probe", anchor)
     for n in range(pn + 1, later[0]):
         assert norm[n] == "" or norm[n].startswith("#"), ("executable line between probe and anchor", lines[n])
+
+
+def test_web_credential_backstop_precedes_credential_load():
+    """testnetfx7 LOW-3: web_commission_row.ps1 refuses (exit 87) while the test probe variable
+    is set, as one executable line BEFORE the first credential read."""
+    with open(_repo_file(*_WEB), encoding="utf-8") as fh:
+        norm = _exec_lines(fh.read())
+    want = ("if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('" + _BACKSTOP + "'); exit 87 }")
+    bs = [n for n, l in enumerate(norm) if l == want]
+    assert len(bs) == 1, ("backstop must appear exactly once as an executable line", bs)
+    creds = [n for n, l in enumerate(norm) if "GetEnvironmentVariable" in l and not l.startswith("#")]
+    assert creds and bs[0] < min(creds), (bs, creds)
+    for n in range(bs[0] + 1, min(creds)):
+        assert norm[n] == "" or norm[n].startswith("#"), norm[n]
 
 
 def test_settings_override_prints_notice():
@@ -436,15 +492,30 @@ def test_scrub_keep_prefix_boundary():
     assert env == {"KILNCTL_TEST_FLAG": "1", "KILNCTL_BUILD_FLAG": "1"}
 
 
-@pytest.mark.parametrize("host,port", [("127.0.0.1", 8765), ("127.0.0.1", 8766), ("127.0.0.1", 8767),
-                                       ("192.0.2.1", 80)])
-def test_guard_refuses_asyncio_connections(host, port, _no_outbound_network):
+@pytest.fixture
+def _own_refused_port(monkeypatch):
+    """INFO-1: a loopback TCP listener this test binds itself, its port registered as refused
+    (an MCP-server port). If a guard regresses the connection lands on OUR listener only."""
+    import conftest
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+    assert port not in (8765, 8766, 8767)
+    monkeypatch.setattr(conftest, "_MCP_SERVER_PORTS", (port,))
+    yield srv, port
+    srv.close()
+
+
+def test_guard_refuses_asyncio_connections(_own_refused_port, _no_outbound_network):
     """oldpoolb MED-1: asyncio (ProactorEventLoop on Windows) bypasses socket.socket.connect.
-    Only refused targets are used, so the test can never reach a live server."""
+    The target is a loopback listener the test bound itself and registered as refused, so a
+    regressed guard connects only to that listener."""
     import asyncio
+    srv, port = _own_refused_port
 
     async def go():
-        await asyncio.open_connection(host, port)
+        await asyncio.open_connection("127.0.0.1", port)
 
     with pytest.raises(NetworkGuardError):
         asyncio.run(go())
@@ -452,16 +523,47 @@ def test_guard_refuses_asyncio_connections(host, port, _no_outbound_network):
     _no_outbound_network.clear()
 
 
-@pytest.mark.parametrize("host,port", [("127.0.0.1", 8767), ("192.0.2.1", 80)])
-def test_guard_refuses_selector_loop_connections(host, port, _no_outbound_network):
-    """oldpoolb MED-1: the selector loop's sock_connect (the non-Windows default) is guarded
-    too. Refused targets only."""
+def test_guard_refuses_selector_loop_connections(_own_refused_port, _no_outbound_network):
+    """oldpoolb MED-1: the selector loop's sock_connect is guarded too (own refused port)."""
     import asyncio
+    srv, port = _own_refused_port
     loop = asyncio.SelectorEventLoop()
     try:
         with pytest.raises(NetworkGuardError):
-            loop.run_until_complete(loop.create_connection(asyncio.Protocol, host, port))
+            loop.run_until_complete(loop.create_connection(asyncio.Protocol, "127.0.0.1", port))
     finally:
         loop.close()
     assert len(_no_outbound_network) == 1, _no_outbound_network
     _no_outbound_network.clear()
+
+
+def test_guard_refuses_asyncio_udp_sendto(monkeypatch, _no_outbound_network):
+    """testnetfx7 LOW-2: Proactor UDP sendto (loop.sock_sendto -> IocpProactor.sendto) is
+    guarded. The target is a UDP socket this test bound itself, registered as refused."""
+    import asyncio, conftest
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    rx.setblocking(False)
+    port = rx.getsockname()[1]
+    assert port not in (8765, 8766, 8767)
+    monkeypatch.setattr(conftest, "_MCP_SERVER_PORTS", (port,))
+
+    async def go():
+        loop = asyncio.get_running_loop()
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        tx.bind(("127.0.0.1", 0))
+        tx.setblocking(False)
+        try:
+            with pytest.raises(NetworkGuardError):
+                await loop.sock_sendto(tx, b"x", ("127.0.0.1", port))
+        finally:
+            tx.close()
+
+    try:
+        asyncio.run(go())
+        assert len(_no_outbound_network) == 1, _no_outbound_network
+        _no_outbound_network.clear()
+        with pytest.raises(BlockingIOError):
+            rx.recv(10)
+    finally:
+        rx.close()

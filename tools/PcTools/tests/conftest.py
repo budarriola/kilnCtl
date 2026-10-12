@@ -440,6 +440,17 @@ def _no_outbound_network(request, monkeypatch):
             return real_iocp_connect(self, conn, address)
 
         monkeypatch.setattr(_awe.IocpProactor, "connect", guarded_iocp_connect)
+
+        # testnetfx7 LOW-2: Proactor UDP (datagram transport sendto, loop.sock_sendto) calls
+        # IocpProactor.sendto -> WSASendTo on the raw fd, never socket.socket.sendto.
+        real_iocp_sendto = _awe.IocpProactor.sendto
+
+        def guarded_iocp_sendto(self, conn, buf, flags=0, addr=None):
+            if addr is not None and (not _is_loopback_addr(addr) or _is_hub_addr(addr)):
+                _refuse(addr)
+            return real_iocp_sendto(self, conn, buf, flags, addr)
+
+        monkeypatch.setattr(_awe.IocpProactor, "sendto", guarded_iocp_sendto)
     yield attempts
     if attempts:
         pytest.fail(f"test attempted real outbound network connection(s): {attempts}",
