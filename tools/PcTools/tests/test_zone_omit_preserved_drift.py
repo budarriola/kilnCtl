@@ -187,6 +187,9 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertEqual(cls("z->foo = parsed;" + chr(10) + ok)[2], [])  # the present branch is fine
         self.assertEqual(len(cls("z->foo *= 0.0f;" + chr(10) + ok)[2]), 1)  # P1 compound before span
         self.assertEqual(len(_classify_full("z->tc_type = other;" + chr(10) + tc)[2]), 1)  # P4
+        self.assertEqual(len(_classify_full("z->tc_type *= preserved_tc_type;" + chr(10) + tc)[2]), 1)  # P1
+        self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type *= preserved_tc_type;")[2]), 1)  # P1
+        self.assertEqual(len(_classify_full("z->foo = 0.0f;" + chr(10) + blk("foo", ok))[2]), 1)  # P4 outside own block
         self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = other_ident;")[2]), 1)  # P6
         # indexed form must match on both sides
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
