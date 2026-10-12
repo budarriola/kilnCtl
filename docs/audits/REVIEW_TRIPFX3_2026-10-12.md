@@ -31,6 +31,25 @@ measured against the STATUS frame clock (LOW-B).
 | INFO-D | INFO | The `/api/status` worst case is 5792 / 5888 B, leaving 96 B of headroom. `trip_is_test` moved, so nothing grew, but the margin is thin |
 | INFO-E | INFO | The test_trip handler's frame grew: `json[256]` plus a `safety_link_status_t` held across the send chain. The INFO-4 stack measurement is still outstanding |
 
+## Fix status
+
+Fixed in `9f311dfd9` (rebased sha in the landing note). Negtest: `tools/negtest.ps1 -Preset kilnfw-host`, targeted `-Only "test_safety_link_compile|test_dashboard_status_http|test_dashboard_exec_http_handlers"`, 8 mutations, all CAUGHT, baseline PASS. Full KilnFW host suite: 98/98 pass. `check_00_kilnfw_target_build.ps1`: PASS.
+
+| Item | Status | Fix | Mutation |
+|------|--------|-----|----------|
+| LOW-A | fixed | V3 boot-id branch clears `reboot_noted_by_uptime`; test `test_tripfx3_lowa_second_quick_reboot_within_note_window_counted` (the reviewer's probe) | M1 drop the clear: CAUGHT |
+| LOW-B | fixed | new `diag_tick` stamped in `safety_apply_diag`, exported as `diag_frame_age_ms`; `trip_is_test` bounded by it (`SAFETY_LINK_DIAG_FRESH_MS` 4500) | M2 use `diag_age_ms`: CAUGHT; M8 drop the stamp: CAUGHT |
+| LOW-C | fixed | `trip_is_test` and the test_trip readback require `diag_since_reboot` | M4 (status) and M5 (readback): CAUGHT |
+| INFO-A | fixed | readback requires `diag_trip_seq_known && diag_trip_seq == trip_seq` | M6 drop the bind: CAUGHT |
+| M3 gap | fixed | boundary tests at `FRESH_MS-1` (true) and `FRESH_MS` (false) | M3 `<` to `<=`: CAUGHT |
+| M4 gap | fixed | `link_up=false` readback case | M7 drop `st.link_up`: CAUGHT |
+| INFO-C | fixed | orphaned comment removed | n/a |
+| INFO-D | unchanged | JSON key set unchanged; worst-case mirror in `test_dashboard_json.c` still within 5888 B (host suite passes) | n/a |
+| INFO-E | measured | `check_httpd_task_stack_budget` against the fresh target ELF: OK, deepest handler is `autotune_start_post_handler` at 4528 B (ceiling 4528 B of 8192 B); the test_trip handler is not among the deepest 5 | n/a |
+| INFO-B | left | Pico design decision, out of scope | n/a |
+
+Disclosure: the plumbing `safety_link_get_status` -> `diag_frame_age_ms` has no host-test pin of its own; M8 pins the `diag_tick` stamp and the status/readback tests pin the consumers.
+
 ### LOW-A -- the second reboot inside the note window goes uncounted
 
 `firmware/KilnFW/App/drivers/safety/safety_link_frames.c:1150-1161`. `counted_by_uptime` is
