@@ -151,3 +151,12 @@ is the one that catches it.
   extracted from the commit, in Node.
 - Read `safety_cfg_http.c` (the `%.6g` ceiling print) and `safety_ceiling_policy.c`
   (`SAFETY_CEILING_EPSILON_C`) to judge the full-precision ceiling interaction.
+
+## Fix status
+
+| Finding | Status |
+|---|---|
+| MED-1 | Fixed: the wizard has `kgRawAttrs`/`kgPost` (copies of the zones page helpers); `.s3cal`, `.s6maxtemp`, `.s6ramp`, `.s6mintemp` carry `data-raw`/`data-disp` and are read through `kgPost`. `readLiveZones` and `step6RevertInputs` are now top-level `step6ReadLiveZones`/`step6RevertInputsOn` so they are testable. An unedited step 6 gives zero confirm lines and posts the raw value. |
+| LOW-1 | Fixed: `test_setup_wizard.js` covers null/NaN, `formatZoneLimitC`, unedited vs edited posting, revert, step 3 read-back, and a drift pin on the three helper lines. The 5 listed mutations (plus 2 more) are CAUGHT by failing assertions. |
+| LOW-2 | Fixed: `sanity_rate_c_per_min` test value is 0.000100027195f (needs all 9 digits, still below 0.0005). |
+| INFO-4 | Fixed: the LOW-4 note in REVIEW_ZONESPREC_2026-10-12.md is corrected. |
