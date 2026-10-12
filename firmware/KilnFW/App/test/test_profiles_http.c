@@ -87,6 +87,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 // logic anymore.
 // ---------------------------------------------------------------------------
 #include "hal_kv.h"
+#include "fake_sysinfo.h"
 #include "fake_kv.h"
 
 typedef hal_kv_handle_t *nvs_handle_t;
@@ -2627,10 +2628,34 @@ static void test_save_expect_rev_under_lock(void)
     TEST_CHECK(!profiles_http_save_expect_rev(4, &p, loaded_rev, &out_id, &warn, err, sizeof(err)),
                "stale expected rev is refused");
     TEST_CHECK(strstr(err, "changed") != NULL, "refusal names the change");
+    TEST_CHECK(strstr(err, "Reopen") != NULL && strstr(err, "Pick the slot again") == NULL,
+               "REVIEW_PROFILESFX LOW-3: refusal says reopen / other slot, not 'pick again' (which is refused every time)");
+    TEST_CHECK(strlen(err) < 192 - 9, "refusal fits the LCD 192-byte message buffer after 'Refused: '");
     TEST_CHECK(profiles_http_slot_rev(4) == before, "refused save wrote nothing");
     TEST_CHECK(profiles_http_save_expect_rev(4, &p, before, &out_id, &warn, err, sizeof(err)),
                "current expected rev saves");
     TEST_CHECK(profiles_http_slot_rev(4) != before, "accepted save bumped the rev");
+}
+
+/* REVIEW_WEBGENFX H7: the boot seed must be EVEN for every slot (odd = "write in flight"). Script an ODD seed
+ * explicitly rather than lean on the fake RNG's odd fallback. */
+static void test_boot_seed_is_even_parity(void)
+{
+    TEST_SECTION("REVIEW_WEBGENFX H7: profiles_http_start seeds every user slot's rev even");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    const uint32_t seeds[4] = {0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu};
+    fake_sysinfo_script_random_sequence(seeds, 4);
+    (void)profiles_http_start(); /* stub returns INVALID_STATE after the seed and boot load */
+    fake_sysinfo_script_random_sequence(NULL, 0);
+    bool all_even = true;
+    for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+        if ((profiles_http_slot_rev(i) & 1u) != 0u) {
+            all_even = false;
+        }
+    }
+    TEST_CHECK(all_even, "every slot rev is even after boot even when the RNG returns an odd word");
 }
 
 static void rvfx_prepare_free_slot0_with_file(uint32_t file_rev)
@@ -6170,6 +6195,7 @@ void run_test_profiles_http(void)
     test_save_ex_rollback_unlinks_written_file();
     test_save_ex_rollback_delete_failure_logs_reappear();
     test_save_expect_rev_under_lock();
+    test_boot_seed_is_even_parity();
     test_rvfx_rollback_keeps_unexamined_file();
     test_rvfx_rollback_keeps_file_with_other_rev();
     test_save_ex_fresh_slot_rolled_back_in_lock();

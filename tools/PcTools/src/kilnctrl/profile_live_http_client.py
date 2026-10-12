@@ -105,10 +105,14 @@ class ProfileLiveHttpError(Exception):
     window violation, "fork before editing", ...) rather than a generic
     failure string."""
 
-    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+    def __init__(self, message: str, status: Optional[int] = None, detail: str = "",
+                 saved: bool = False, saved_id: Optional[int] = None):
         super().__init__(message)
         self.status = status
         self.detail = detail
+        # REVIEW_PROFILESFX LOW-2: a decide refusal body may carry "saved":true,"id":N -- the slot WAS saved.
+        self.saved = saved
+        self.saved_id = saved_id
 
 
 def _url(host: str, path: str) -> str:
@@ -138,6 +142,20 @@ def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
     return None, str(exc)
 
 
+def _error_saved(exc: Exception) -> tuple[bool, Optional[int]]:
+    """(saved, id) from an HTTPError JSON body's "saved"/"id" fields; (False, None) when absent."""
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            exc.fp.seek(0)
+            obj = json.loads(exc.fp.read().decode("utf-8", errors="replace"))
+        except Exception:
+            return False, None
+        if isinstance(obj, dict) and obj.get("saved") is True:
+            i = obj.get("id")
+            return True, (i if isinstance(i, int) and not isinstance(i, bool) else None)
+    return False, None
+
+
 def _get_json(host: str, path: str, timeout: float) -> dict:
     req = urllib.request.Request(_url(host, path), method="GET")
     try:
@@ -165,7 +183,8 @@ def _post_form(host: str, path: str, fields: dict, timeout: float) -> dict:
             body = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001 - normalized below
         status, detail = _error_detail(exc)
-        raise ProfileLiveHttpError(f"POST {path} failed: {detail}", status, detail) from exc
+        saved, saved_id = _error_saved(exc)
+        raise ProfileLiveHttpError(f"POST {path} failed: {detail}", status, detail, saved, saved_id) from exc
     try:
         return json.loads(body)
     except Exception as exc:

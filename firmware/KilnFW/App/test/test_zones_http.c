@@ -3410,6 +3410,16 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
                                    0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
         fake_sysinfo_script_random_sequence(seeds, 8);
     }
+    {
+        /* REVIEW_WEBGENFX H3b: a RNG word of 0 must still give a NONZERO generation (the `| 1`). */
+        const uint32_t zero_seed[1] = {0u};
+        fake_sysinfo_script_random_sequence(zero_seed, 1);
+        (void)zones_http_start();
+        TEST_CHECK(zones_config_generation() != 0u, "zero RNG seed still yields a nonzero zones generation");
+        const uint32_t seeds2[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
+                                    0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds2, 8);
+    }
     (void)zones_http_start();
     TEST_CHECK((uint32_t)(zones_config_generation() - ((0x2a5c1e76u & 0x3fffffffu) | 1u)) < 64u,
                "zones generation is seeded from hal_sysinfo_random_u32() at start");

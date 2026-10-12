@@ -102,7 +102,7 @@ static void do_save_apply(void *user_data)
         s_pick_slot = 0xFF;
         ui_confirm_params_t stale = {
             .title = "Cannot Save",
-            .body = "That slot changed since you picked it. Pick the slot again.",
+            .body = "That slot changed since you opened this draft. Reopen the profile, or save to a different slot.",
             .confirm_label = "OK",
             .confirm_color = UI_THEME_COLOR_CARD,
             .on_confirm = NULL,

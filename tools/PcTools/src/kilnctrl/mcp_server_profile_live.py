@@ -225,6 +225,11 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
         else:
             obj = profile_live_http.decide_live_overwrite(resolved, generation=generation)
     except profile_live_http.ProfileLiveHttpError as exc:
+        if getattr(exc, "saved", False):
+            slot = f"slot {exc.saved_id}" if exc.saved_id is not None else "a slot (id not reported)"
+            return (f"SAVED to {slot}, but the decide did not finish: {exc.detail} (HTTP {exc.status}). "
+                    f"The profile exists; do not retry save_as (duplicate). Re-read with profile_live_get "
+                    f"(host={resolved})")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"

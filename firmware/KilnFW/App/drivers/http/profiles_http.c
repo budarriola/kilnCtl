@@ -1998,7 +1998,7 @@ static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candi
          * same place the web path (profiles_edit_http.c) does it, so no save can slip in between check and write. */
         if (check_rev && profiles_http_slot_rev(target_id) != expected_rev) {
             profiles_save_unlock();
-            snprintf(err_msg, err_cap, "That slot changed since you opened it. Pick the slot again.");
+            snprintf(err_msg, err_cap, "This profile was changed since you opened it. Reopen it to edit, or save to a different slot.");
             return false;
         }
     } else {

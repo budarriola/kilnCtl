@@ -171,6 +171,24 @@ class GenerationQueryTest(unittest.TestCase):
         self.assertIn("changed elsewhere", ctx.exception.detail)
 
 
+class DecideSavedFieldsTest(unittest.TestCase):
+    def test_saved_and_id_reach_the_exception(self):
+        err = _fake_http_error(409, b'{"ok":false,"saved":true,"id":7,"error":"saved to slot 7; edited during save"}')
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(plive.ProfileLiveHttpError) as ctx:
+                plive.decide_live_save_as("h", "n")
+        self.assertTrue(ctx.exception.saved)
+        self.assertEqual(ctx.exception.saved_id, 7)
+
+    def test_plain_refusal_is_not_saved(self):
+        err = _fake_http_error(409, b'{"ok":false,"error":"nope"}')
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(plive.ProfileLiveHttpError) as ctx:
+                plive.decide_live_discard("h")
+        self.assertFalse(ctx.exception.saved)
+        self.assertIsNone(ctx.exception.saved_id)
+
+
 class EditLiveTest(unittest.TestCase):
     def test_builds_zone_ramp_segment_fields(self):
         captured = {}

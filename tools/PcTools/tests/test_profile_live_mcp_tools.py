@@ -146,6 +146,13 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
         self.assertTrue(result.startswith("ok"))
         m.assert_called_once_with("10.0.0.5", generation=None)
 
+    def test_saved_true_failure_is_reported_as_saved_not_error(self):
+        exc = mpl.profile_live_http.ProfileLiveHttpError("POST failed", 409, "saved to slot 7; edited", True, 7)
+        with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_save_as", side_effect=exc):
+            result = mpl.profile_live_decide("save_as", name="n", confirm=True, host="10.0.0.5")
+        self.assertTrue(result.startswith("SAVED to slot 7"), result)
+        self.assertNotIn("error:", result)
+
     def test_save_as_without_name_refuses_without_sending_request(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_save_as") as m:
             result = mpl.profile_live_decide("save_as", confirm=True, host="10.0.0.5")
