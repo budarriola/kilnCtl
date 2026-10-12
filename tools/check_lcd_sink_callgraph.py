@@ -31,20 +31,29 @@ NON_UI_ALLOW = [
 OBJDUMP_GLOB = r"C:\Espressif\tools\xtensa-esp-elf\*\xtensa-esp-elf\bin\xtensa-esp32s3-elf-objdump.exe"
 SEC = re.compile(r"^RELOCATION RECORDS FOR \[(\.[^\]]+)\]:")
 KIND_PFX = re.compile(r"^\.(?:text|literal|rodata|data|bss|sdata|srodata|iram\d*|dram\d*|flash\.text|flash\.rodata|rtc\.\w+)\.(.+)$")
-SYM = re.compile(r"^[0-9a-fA-F]+\s+.*?\s(\.\S+)\s+[0-9a-fA-F]+\s+(\S+)$")
+SYM = re.compile(r"^([0-9a-fA-F]+)\s+.*?\s(\.\S+)\s+([0-9a-fA-F]+)\s+(\S+)$")
+CLONE_SFX = r"(?:\.(?:constprop|isra|part|cold|lto_priv)(?:\.\d+)*)"
 REL = re.compile(r"^[0-9a-fA-F]+\s+\S+\s+(\S+?)(?:[+-]0x[0-9a-fA-F]+)?\s*$")
 LOCAL_SEC = re.compile(r"^\.(?:text|literal|rodata|data|bss|sdata|srodata)\.(.+?)(?:\.\d+)?$")
 
 
+class SymMap(dict):
+    """section -> [symbols]; .info[(section, symbol)] = (address, size) for the INFO-2 identical-code test."""
+    def __init__(self):
+        super().__init__()
+        self.info = {}
+
+
 def parse_syms(sym_text):
     """objdump -t text -> {section name: function/object symbol defined in it}."""
-    m = {}
+    m = SymMap()
     for line in sym_text.splitlines():
         sm = SYM.match(line.strip())
-        if sm and not sm.group(2).startswith("."):
-            lst = m.setdefault(sm.group(1), [])  # REVIEW_LCDFX11 LOW-2: keep every symbol of the section
-            if sm.group(2) not in lst:
-                lst.append(sm.group(2))
+        if sm and not sm.group(4).startswith("."):
+            lst = m.setdefault(sm.group(2), [])  # REVIEW_LCDFX11 LOW-2: keep every symbol of the section
+            if sm.group(4) not in lst:
+                lst.append(sm.group(4))
+            m.info[(sm.group(2), sm.group(4))] = (int(sm.group(1), 16), int(sm.group(3), 16))
     return m
 
 
@@ -52,13 +61,17 @@ def node_name(sec, secmap, unattrib, strict=False, objkey=None, aliases=None):
     """Section name -> node name. A symbol-table hit wins (e.g. .iram1.5 -> the function)."""
     if secmap and sec in secmap:
         names = secmap[sec]
-        if strict and len(names) > 1:
+        info = getattr(secmap, "info", {})
+        # REVIEW_LCDFX13 INFO-2: symbols of one UI section with the SAME address and size are IPA-ICF-merged identical code
+        # (true aliases); only differing address/size means a hidden second function.
+        distinct = {info.get((sec, n), (n, None)) for n in names}
+        if strict and len(names) > 1 and len(distinct) > 1:
             # Only for UI objects (non-UI objects legitimately share sections: aliases, $part$0 clones, ICF).
             # Two symbols share one section (e.g. -fno-toplevel-reorder, hand-written section attributes): relocations
             # cannot be split between them, so a hidden second function would inherit the first one's edges. Fail closed.
             unattrib.append(sec + " (shared by " + ", ".join(names) + ")")
         elif len(names) > 1 and aliases is not None and objkey is not None:
-            # REVIEW_LCDFX12 LOW-3: a non-UI section holding several symbols: a caller of ANY alias reaches this node.
+            # REVIEW_LCDFX12 LOW-3: a section holding several (identical or non-UI) symbols: a caller of ANY alias reaches this node.
             aliases.setdefault(f"{objkey}::{names[0]}", set()).update(names[1:])
         return names[0]
     lm = LOCAL_SEC.match(sec)
@@ -129,12 +142,32 @@ def analyse(rev, defined=None, aliases=None):
     if not any(any(r.partition("::")[2] == GATE_FN and os.path.basename(r.partition("::")[0]) == GATE_OBJ
                    for r in rev.get(s, ())) for s in SINKS):
         fails.append(f"{GATE_OBJ}::{GATE_FN} does not reference a trip-clear sink (gate renamed?)")
+    # REVIEW_LCDFX13 LOW-3: start from each sink's own definition. A defining node is a sink node when any of its names (its
+    # section's symbols, aliases included) is a sink or a .constprop/.isra/.part/.cold/.lto_priv clone of one.
+    clone_rx = re.compile("^(?:" + "|".join(re.escape(x) for x in SINKS) + ")" + CLONE_SFX + "?$")
+    sink_nodes, sink_names = [], set(SINKS)
+    for n in (defined or ()):
+        names = {n.partition("::")[2]} | set(aliases.get(n, ()))
+        if any(clone_rx.match(x) for x in names):
+            sink_nodes.append(n)
+            sink_names |= names
+    # clone sections are named after the symbol but node_name strips a trailing '.N' ('.constprop.0' -> '.constprop')
+    for r in list(rev):
+        b = r.partition("::")[2] or r
+        if re.match("^(?:" + "|".join(re.escape(x) for x in SINKS) + ")" + CLONE_SFX + "$", b):
+            sink_names.add(b)
     seen, work = set(), []
-    for s in SINKS:
+    for s in sink_names:
         for c in rev.get(s, ()):
             work.append((c, s))
+    for n in sink_nodes:
+        work.append((n, "sink definition"))
+    for o in {x.partition("::")[0] for x in sink_nodes}:
+        for s in sink_names:
+            for c in rev.get(f"{o}::{s}", ()):
+                work.append((c, s))
     # direct-caller allowlist outside ui
-    for s in SINKS:
+    for s in sink_names:
         for c in rev.get(s, ()):
             if not is_ui(c):
                 f = os.path.basename(c.split("::")[0])

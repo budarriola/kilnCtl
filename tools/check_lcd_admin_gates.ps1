@@ -508,6 +508,15 @@ if (Test-Path $drvCmake) {
     }
     if ($dct -match '(?i)-Wno-shadow|-Wno-error=shadow') { Write-Host "FAIL: L-shadow: App/drivers/CMakeLists.txt turns shadow warnings off"; $fail++ }
 }
+# REVIEW_LCDFX13 LOW-2: -w / -Wno-error / -Wno-shadow in ANY KilnFW CMake file (outside components/, managed_components/, build
+# output) can silence -Werror=shadow for the UI sources, in either option order (an idf_build_set_property in another file too).
+$kilnCmakeAll = @(Get-ChildItem -Path $kilnRoot -Recurse -File -Include CMakeLists.txt, *.cmake -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName.Substring($kilnRoot.Length) -notmatch '(?i)[\\/](components|managed_components|build[^\\/]*|\.git)[\\/]' })
+foreach ($cf in $kilnCmakeAll) {
+    $cft = (Get-Content -Raw -Path $cf.FullName) -replace '(?m)^\s*#[^\n]*', ''
+    $wm = [regex]::Match($cft, '(?i)(?<![\w-])-w(?![\w-])|-Wno-shadow|-Wno-error\b')
+    if ($wm.Success) { Write-Host "FAIL: L-shadow: $($cf.FullName.Substring($kilnRoot.Length)) contains compile option '$($wm.Value)' (it can silence -Werror=shadow for drivers/ui sources)"; $fail++ }
+}
 # LOW-1 / REVIEW_LCDFX10 LOW-5: nothing in drivers/ui may be weak (a strong definition elsewhere would silently replace it at link time).
 foreach ($wf in $uiAll) {
     if ((Remove-CComments ((Get-Content -Raw -Path $wf.FullName) -replace "`r", '')) -match '\bweak\b|__weak__|__attribute__\s*\(\(\s*(?:__)?weak') { Write-Host "FAIL: L-weak: $($wf.Name) mentions weak (a weak gate/page function can be overridden by a strong definition in another file at link time)"; $fail++ }
@@ -518,7 +527,16 @@ foreach ($wf in $uiAll) {
 # source #includes by quoted name (a header outside drivers/ui is compiled into the same -Werror=shadow translation unit).
 $hdrIndex = @{}
 # REVIEW_LCDFX12 INFO-3: App/test stub headers repeat real header names (lvgl_port.h, nvs.h); never index them.
-foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\/]test[\/]' })) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
+foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\\/]test[\\/]' })) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
+# REVIEW_LCDFX13 LOW-2: UI translation units also reach first-party headers outside App: the drivers component's INCLUDE_DIRS
+# include ../../../hwAbstraction/interface, and hwAbstraction/esp + CommonFW/include (kilnlink) are reached through them.
+$fwRoot = Split-Path $kilnRoot
+foreach ($extra in 'hwAbstraction', 'CommonFW') {
+    $er = Join-Path $fwRoot $extra
+    if (Test-Path $er) {
+        foreach ($hf in (Get-ChildItem -Path $er -Recurse -File -Filter *.h -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\\/](test|tests|host|pico|build[^\\/]*)[\\/]' })) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
+    }
+}
 $pragmaScan = @{}
 $pragmaText = @{}
 function Get-PragmaText([string]$path) {
@@ -531,7 +549,7 @@ foreach ($pf in $uiAll) { $pragmaScan[$pf.FullName] = $pf.Name; $pragQ.Enqueue(@
 while ($pragQ.Count -gt 0) {
     $cur = $pragQ.Dequeue()
     if ($cur[2] -ge 12) { continue }
-    foreach ($im in [regex]::Matches((Get-PragmaText $cur[0]), '(?m)^\s*#\s*include\s*"([^"]+)"')) {
+    foreach ($im in [regex]::Matches((Get-PragmaText $cur[0]), '(?m)^\s*#\s*include\s*[<"]([^">]+)[">]')) {
         $hn = [IO.Path]::GetFileName($im.Groups[1].Value)
         if ($hdrIndex.ContainsKey($hn) -and -not $pragmaScan.ContainsKey($hdrIndex[$hn])) {
             $pragmaScan[$hdrIndex[$hn]] = "$hn (included via $($cur[1]))"
@@ -542,6 +560,14 @@ while ($pragQ.Count -gt 0) {
 foreach ($pk in $pragmaScan.Keys) {
     $praw = (Get-Content -Raw -Path $pk) -replace '\\\r?\n', ''
     if ($praw -match '(?is)#\s*pragma\s+(GCC|clang)\s+diagnostic[^\r\n]*shadow|_Pragma\s*\(|__pragma|#\s*pragma\s+GCC\s+(?:system_header|poison|optimize)') { Write-Host "FAIL: L-shadow: $($pragmaScan[$pk]) has a diagnostic pragma naming shadow, a _Pragma, or a GCC system_header/poison/optimize pragma; it can switch -Werror=shadow off"; $fail++ }
+}
+# REVIEW_LCDFX13 LOW-1: no #define/#undef of an LVGL name or of the QR/secret helpers in a UI file or any header a UI file
+# reaches: a selective macro such as lv_obj_add_flag(o,f) ((o)==s_ap_qr ? (void)0 : ...) neutralises the masked block.
+foreach ($pk in $pragmaScan.Keys) {
+    $mraw = (Get-Content -Raw -Path $pk) -replace '\\\r?\n', ''
+    foreach ($dm in [regex]::Matches($mraw, '(?m)^[ \t]*(?:#|%:)[ \t]*(?:define|undef)[ \t]+(lv_\w+|LV_OBJ_FLAG_\w+|update_qr_if_changed|build_wifi_qr_uri|s_ap_\w+|ui_page_network_secret_wipe)\b')) {
+        Write-Host "FAIL: L-macro: $($pragmaScan[$pk]) defines/undefines '$($dm.Groups[1].Value)' (a macro over an LVGL call or a secret helper can neutralise the masked block; this check reads source text, not preprocessed code)"; $fail++
+    }
 }
 # MED-2: the AP password is revealed only in refresh_cb's unmasked ADMIN branch (and the ADMIN-gated editor prefill; both
 # are sink rows above, so Home or any other page reading it fails the inventory). The masked branch (all a USER sees)
@@ -575,6 +601,7 @@ else {
         $mbRaw = $rcb.body.Substring($ob + 1, $cb - $ob - 1)
         $mbBlank = $rb.Substring($ob + 1, $cb - $ob - 1)
         $mb = [regex]::Replace($mbRaw, $exRx, '')
+        $mb = $mb.Replace('ui_page_network_secret_wipe(s_ap_qr_uri, sizeof(s_ap_qr_uri), s_ap_qr_last, sizeof(s_ap_qr_last))', '')  # INFO-1 wipe: pinned exactly below
         if ($mb -match "\b$pw\b|\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
         # REVIEW_LCDFX12 MED-1: allowlist. The masked block is exactly these four statements, in order (labels keep the previous
         # refresh's text, so the masked-label write and the QR hide are required; nothing else may be read or shown).
@@ -585,11 +612,15 @@ else {
         $wantStmts = @(
             ('lv_label_set_text(s_ap_password_label, ' + $pwNames[0] + '[0] ? "******** (admin)" : "(open network)")'),
             'lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN)',
-            "s_ap_qr_last[0] = '\0'",
+            'ui_page_network_secret_wipe(s_ap_qr_uri, sizeof(s_ap_qr_uri), s_ap_qr_last, sizeof(s_ap_qr_last))',
+            'lv_qrcode_update(s_ap_qr, UI_PAGE_NETWORK_AP_QR_BLANK, sizeof(UI_PAGE_NETWORK_AP_QR_BLANK) - 1)',
             'return')
         $okShape = ($tail -eq '' -and $stmtsRaw.Count -eq $wantStmts.Count)
         if ($okShape) { for ($wi = 0; $wi -lt $wantStmts.Count; $wi++) { if ($stmtsRaw[$wi] -ne $wantStmts[$wi]) { $okShape = $false } } }
-        if (-not $okShape) { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block must be exactly: the masked password-label write with the two literals keyed on $($pwNames[0])[0], lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN), s_ap_qr_last[0] = '\0', return; (found: $(($stmtsRaw -join '; ')))"; $fail++ }
+        if (-not $okShape) { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block must be exactly: the masked password-label write with the two literals keyed on $($pwNames[0])[0], lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN), ui_page_network_secret_wipe() of both buffers, lv_qrcode_update to the non-secret blank payload, return; (found: $(($stmtsRaw -join '; ')))"; $fail++ }
+        # REVIEW_LCDFX13 MED-1: the QR may be un-hidden only once, after the masked block (the admin branch).
+        $unhide = @([regex]::Matches($rb, '\blv_obj_(?:remove|clear|set)_flag\s*\(\s*s_ap_qr\b'))
+        if ($unhide.Count -ne 1 -or $unhide[0].Index -lt ($cb + 1) -or $unhide[0].Value -notmatch 'remove_flag') { Write-Host "FAIL: L-secret: refresh_cb must un-hide s_ap_qr exactly once, with lv_obj_remove_flag, after the masked '!show_secret' block (found $($unhide.Count))"; $fail++ }
         # REVIEW_LCDFX10 MED-4 (P2) / REVIEW_LCDFX11 MED-2: the last statement must be a bare, unconditional return;.
         $stmts = @($mbRaw -split ';')
         $lastIdx = -1
@@ -605,6 +636,36 @@ else {
         $pre = [regex]::Replace($pre, $exRx, '')
         if ($pre -match "\b$pw\b|\bap_password\b|\bs_ap_qr_uri\b|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb uses '$($Matches[0])' before the show_secret gate (only the single fetch declaration is allowed there)"; $fail++ }
     }
+    }
+}
+
+# REVIEW_LCDFX13 MED-1: whole-file inventory of every secret-bearing name in ui_page_network.c (like L-sink's use counts). Each
+# mention is attributed to its enclosing top-level function (or <file-scope>); only the reviewed sites exist. A second label or
+# caption, a timer callback, a file-scope alias or any other reader of the AP secret changes a count and fails.
+# 'build' is whichever single function calls lv_qrcode_create(s_ap_section).
+$nwb = Blank-Strings $nw
+$nwRanges = @(Get-TopFuncRanges $nwb)
+$bqm = [regex]::Match($nwb, '\blv_qrcode_create\s*\(\s*s_ap_section')
+$buildFn = ''
+if ($bqm.Success) { foreach ($rg in $nwRanges) { if ($bqm.Index -ge $rg.start -and $bqm.Index -lt $rg.end) { $buildFn = $rg.name; break } } }
+if (-not $buildFn) { Write-Host "FAIL: L-secret: ui_page_network.c: the function calling lv_qrcode_create(s_ap_section) was not found"; $fail++ }
+$invWant = [ordered]@{
+    's_ap_qr_uri'         = @{ '<file-scope>' = 1; 'refresh_cb' = 5; 'ui_page_network_relock_close' = 2 }
+    's_ap_qr_last'        = @{ '<file-scope>' = 1; 'refresh_cb' = 4; 'ui_page_network_relock_close' = 2; 'build' = 1 }
+    's_ap_qr'             = @{ '<file-scope>' = 1; 'refresh_cb' = 4; 'ui_page_network_relock_close' = 3; 'build' = 2 }
+    's_ap_password_label' = @{ '<file-scope>' = 1; 'refresh_cb' = 2; 'build' = 1 }
+}
+foreach ($nm in $invWant.Keys) {
+    $got = @{}
+    foreach ($im in [regex]::Matches($nwb, '\b' + $nm + '\b')) {
+        $fn = '<file-scope>'
+        foreach ($rg in $nwRanges) { if ($im.Index -ge $rg.start -and $im.Index -lt $rg.end) { $fn = $rg.name; break } }
+        if ($buildFn -and $fn -eq $buildFn) { $fn = 'build' }
+        $got[$fn] = 1 + [int]$got[$fn]
+    }
+    $want = $invWant[$nm]
+    foreach ($k in (@($got.Keys) + @($want.Keys) | Select-Object -Unique)) {
+        if ([int]$got[$k] -ne [int]$want[$k]) { Write-Host "FAIL: L-secret: '$nm' is mentioned $([int]$got[$k]) time(s) in $k, reviewed count is $([int]$want[$k]) (a new reader/alias/caption/timer of the AP secret must be reviewed; update `$invWant only after review)"; $fail++ }
     }
 }
 

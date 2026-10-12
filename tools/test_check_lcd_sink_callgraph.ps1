@@ -15,6 +15,9 @@
 #   O: gate clear_action no longer references any sink (gate renamed/hollowed)  -> exit 1
 #   P: two symbols share one section in a ui object (hidden 2nd function)        -> exit 1
 #   Q: non-ui alias shares a section with an allowlisted sink caller; a ui function calls the alias -> exit 1 (R: alias unused -> exit 0)
+#   S: alias of a sink (own section symbol) called from ui                      -> exit 1 (REVIEW_LCDFX13 LOW-3)
+#   T: .constprop clone of a sink reached via a wrapper called from ui          -> exit 1
+#   U: two IPA-ICF-identical (same addr+size) ui symbols share a section        -> exit 0 (INFO-2)
 #   K: unattributable numeric section without a symbol-table entry             -> exit 1
 # -ScriptUnderTest lets negtest.ps1 point this at a mutated copy (must live in tools\).
 # checkcache: ok
@@ -134,6 +137,22 @@ try {
     $qh2 = Dump "qh2.txt" (Sec ".text.home_cb" @("memcpy"))
     $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$qh2")) @("drivers/http/dashboard_exec_http.c.obj=$qs")
     Check ($r.Code -eq 0) "R unused non-ui alias passes (no false positive): $($r.Out)"
+
+    # S (REVIEW_LCDFX13 LOW-3): an alias of the sink, in the sink's own section; ui calls the alias.
+    $ss = Dump "ss.txt" ("SYMBOL TABLE:`n00000000 g     F .text.safety_link_send_clear_trip`t0000000e safety_link_send_clear_trip`n00000000 g     F .text.safety_link_send_clear_trip`t0000000e sink_alias`n")
+    $sh = Dump "sh.txt" (Sec ".text.home_cb" @("sink_alias"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$sh")) @("drivers/safety/safety_link_tx.c.obj=$ss")
+    Check ($r.Code -eq 1 -and $r.Out -match 'home_cb') "S ui call to an alias of a sink fails"
+    # T: a .constprop clone of the sink, called by a global wrapper in the same object; ui calls the wrapper.
+    $tl = Dump "tl.txt" ((Sec ".text.safety_link_send_clear_trip.constprop.0" @("memcpy")) + (Sec ".text.sink_wrapper" @(".text.safety_link_send_clear_trip.constprop.0")))
+    $th = Dump "th.txt" (Sec ".text.home_cb" @("sink_wrapper"))
+    $r = Run @("drivers/http/dashboard_exec_http.c.obj=$dash", "drivers/safety/safety_link_tx.c.obj=$tl", "drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$th")
+    Check ($r.Code -eq 1 -and $r.Out -match 'home_cb') "T ui call reaching a sink clone via a wrapper fails"
+    # U (INFO-2): identical code (same address and size) sharing a ui section is not a hidden function.
+    $us = Dump "us.txt" ("SYMBOL TABLE:`n00000000 l     F .text.cb_a`t0000000e cb_a`n00000000 l     F .text.cb_a`t0000000e cb_b`n")
+    $uh = Dump "uh.txt" (Sec ".text.cb_a" @("memcpy"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$uh")) @("drivers/ui/ui_page_home.c.obj=$us")
+    Check ($r.Code -eq 0) "U identical ICF-merged ui symbols are not 'cannot be attributed': $($r.Out)"
 
     $nb = Join-Path $d "nobuild"
     New-Item -ItemType Directory -Force -Path $nb | Out-Null
