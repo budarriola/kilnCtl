@@ -171,3 +171,5 @@ cannot block a clear.
   so it is noted only.
 - **I-6. Stack unmeasured.** See Evidence. There is no target ELF of `580a848ac`. The static call-graph argument
   says no added depth.
+
+Fix landed on origin/dev as e02630df4 (code, tests) and 61a68d24f (run-start re-arm test), safetyfx10.
