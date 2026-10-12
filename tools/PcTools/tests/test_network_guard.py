@@ -69,3 +69,59 @@ def test_loopback_still_allowed():
         c.close()
     finally:
         srv.close()
+
+
+def test_guard_refuses_link_hub_port_on_loopback(_no_outbound_network):
+    from kilnctrl.link_hub import HUB_PORT
+    with pytest.raises(NetworkGuardError):
+        socket.create_connection(("127.0.0.1", HUB_PORT), timeout=0.2)
+    assert len(_no_outbound_network) == 1
+    _no_outbound_network.clear()
+
+
+def test_get_shared_link_disabled_under_pytest():
+    from kilnctrl import link_hub
+    with pytest.raises(link_hub.LinkHubDisabled):
+        link_hub.get_shared_link()
+
+
+def test_mcp_server_import_link_is_null_link():
+    from kilnctrl import mcp_server
+    assert mcp_server._link is not None
+    assert not mcp_server._link.is_connected
+
+
+def test_guard_refuses_udp_sendto(_no_outbound_network):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        with pytest.raises(NetworkGuardError):
+            s.sendto(b"x", ("192.0.2.1", 9))
+    finally:
+        s.close()
+    _no_outbound_network.clear()
+
+
+def test_udp_sendto_loopback_allowed():
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.sendto(b"x", ("127.0.0.1", 9))
+    finally:
+        s.close()
+
+
+def test_proxy_env_removed_and_no_proxy_star():
+    import os
+    for v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        assert v not in os.environ
+    assert os.environ.get("NO_PROXY") == "*"
+
+
+@pytest.mark.live_bench
+def test_live_bench_marker_alone_does_not_exempt(_no_outbound_network):
+    """LOW-2: without KILNCTRL_BENCH_HOST the marker grants nothing."""
+    import os
+    if os.environ.get("KILNCTRL_BENCH_HOST"):
+        pytest.skip("bench host selected: exemption legitimately applies")
+    with pytest.raises(NetworkGuardError):
+        socket.create_connection(("192.0.2.1", 80), timeout=0.2)
+    _no_outbound_network.clear()

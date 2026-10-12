@@ -430,5 +430,57 @@ class ReadbackContentTest(unittest.TestCase):
         self.assertIn("missing", self._problem(got))
 
 
+class BackupImportSnapshotTest(_Base):
+    """Review testnet MED-B/MED-C/LOW-3/LOW-4: the pre-import snapshot wiring."""
+
+    P = {"name": "n", "zone_mask": 1, "segments": []}
+
+    def _run(self, backup_profiles, export, dry_run=False):
+        doc = dict(_GOOD_DOC, profiles=backup_profiles)
+        path = os.path.join(self._tmpdir, "backup.json")
+        with open(path, "w") as f:
+            f.write(json.dumps(doc))
+        with self._resolve_host_patch(),              unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK),              unittest.mock.patch.object(backup_export_http_client, "get_export", side_effect=export) as ge,              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
+            out = msi.backup_import(path, confirm=True, dry_run=dry_run)
+        return out, ge
+
+    def test_snapshot_failure_with_idless_profile_is_unverified(self):  # MED-B
+        after = ("", dict(_GOOD_DOC, profiles=[dict(self.P, id=1)]))
+        err = backup_export_http_client.BackupExportHttpError("snapshot down")
+        out, _ = self._run([dict(self.P)], [err, after])
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertIn("snapshot unavailable", out)
+        self.assertNotIn("ok - restored", out)
+
+    def test_preexisting_identical_profile_is_unverified_via_tool(self):  # MED-C
+        same = dict(self.P, id=1)
+        out, ge = self._run([dict(self.P)], [("", {"profiles": [same]}), ("", {
+            "kind": "kilnctl_backup", "profiles": [same], "zones": [{"id": 0}]})])
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+        self.assertEqual(ge.call_count, 2)
+
+    def test_new_slot_next_to_preexisting_is_ok_via_tool(self):  # MED-C control
+        old = dict(self.P, id=1)
+        out, _ = self._run([dict(self.P)], [("", {"profiles": [old]}), ("", {
+            "kind": "kilnctl_backup", "profiles": [old, dict(self.P, id=2)], "zones": [{"id": 0}]})])
+        self.assertIn("ok - restored", out)
+
+    def test_snapshot_skipped_when_every_profile_has_id(self):  # LOW-3
+        profs = [dict(self.P, id=1)]
+        out, ge = self._run(profs, [("", dict(_GOOD_DOC, profiles=profs))])
+        self.assertIn("ok - restored", out)
+        self.assertEqual(ge.call_count, 1)
+
+    def test_snapshot_skipped_on_dry_run(self):  # LOW-3
+        out, ge = self._run([dict(self.P)], [AssertionError("no export on dry run")], dry_run=True)
+        self.assertIn("dry run only", out)
+        ge.assert_not_called()
+
+    def test_idless_before_idcarrying_does_not_reuse_its_slot(self):  # LOW-4
+        P = self.P
+        self.assertIsNotNone(ReadbackContentTest._idless(
+            ReadbackContentTest, [dict(P), dict(P, id=1)], [dict(P, id=1)]))
+
+
 if __name__ == "__main__":
     unittest.main()

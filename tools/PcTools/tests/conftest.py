@@ -30,6 +30,12 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Review testnet MED-A: mcp_server.py connects to the link hub at import time
+# (bridged to the real bench board by the running kilnctrl MCP server). Disable
+# the hub for the whole run unless a bench host is deliberately selected.
+if not os.environ.get("KILNCTRL_BENCH_HOST"):
+    os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,
     BenchSession,
@@ -274,6 +280,16 @@ class NetworkGuardError(RuntimeError):
     """Raised (and recorded) when a test tries to reach a non-loopback address."""
 
 
+def _is_hub_addr(address) -> bool:
+    """True for a loopback address on the shared link hub's port."""
+    from kilnctrl.link_hub import HUB_PORT
+    return (isinstance(address, tuple) and len(address) >= 2 and address[1] == HUB_PORT
+            and _is_loopback_addr(address))
+
+
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
+
+
 def _is_loopback_addr(address) -> bool:
     """True for AF_UNIX paths, loopback IPs and 'localhost'; False otherwise."""
     if not isinstance(address, tuple) or not address:
@@ -300,10 +316,17 @@ def _no_outbound_network(request, monkeypatch):
     exception (``except Exception``) cannot hide it. Loopback stays open for
     local test servers; ``live_bench`` tests opt out.
     """
-    if request.node.get_closest_marker("live_bench"):
+    # LOW-2: the exemption needs the marker AND a selected bench host.
+    if request.node.get_closest_marker("live_bench") and os.environ.get("KILNCTRL_BENCH_HOST"):
         yield
         return
+    # LOW-1: a proxy variable would send "direct" HTTP through a loopback listener.
+    for _v in _PROXY_VARS + tuple(v.lower() for v in _PROXY_VARS):
+        monkeypatch.delenv(_v, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
     attempts = []
+    real_sendto = socket.socket.sendto
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_create = socket.create_connection
@@ -318,20 +341,27 @@ def _no_outbound_network(request, monkeypatch):
             "client (conftest _no_outbound_network)")
 
     def guarded_connect(self, address):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_connect(self, address)
 
     def guarded_connect_ex(self, address):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_connect_ex(self, address)
 
     def guarded_create(address, *a, **k):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_create(address, *a, **k)
 
+    def guarded_sendto(self, data, *a):
+        address = a[-1] if a else None
+        if address is not None and (not _is_loopback_addr(address) or _is_hub_addr(address)):
+            _refuse(address)
+        return real_sendto(self, data, *a)
+
+    monkeypatch.setattr(socket.socket, "sendto", guarded_sendto)
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "create_connection", guarded_create)
