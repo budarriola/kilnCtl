@@ -175,3 +175,7 @@ Method:
 - Host: `build_host_tests.ps1 -OutDir {OUT} -Only "profiles_http|zones_http"`
   with `-ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD FAILURES"`
   and no `-RequireAssertion`.
+
+## Fix status
+
+Fixed in `9099f81bc` (rebased SHA recorded by the landing commit): MED-1 (steps 6 and 7 compare with 0.01 slack, matching `SAFETY_CEILING_EPSILON_C`; step 7 had the same class, REVIEW_ZPRECFX2 INFO-1; tests for 1260.30005 vs 1260.3 accepted and 1260.5 / 1260.1 refused), LOW-1 (ramp revert asserted), LOW-2 (bool id test), INFO-1 (`PROFILES_SAVE_ERR_MSG_LEN` 128 -> 192, host test requires >= 16 bytes margin on the longest io-segment refusals). Negtests all CAUGHT: step6/step7 slack removal, slack too loose, ramp revert without kgR6, bool id accepted, LEN back to 128, padded aux message (host ones confirmed as `test_profiles_http.c:4497` assertions on a successful compile).
