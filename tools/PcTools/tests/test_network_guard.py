@@ -160,7 +160,7 @@ def _run_child_pytest(code, extra_env, drop=()):
         shutil.copy(os.path.join(here, "bench_fixture_session.py"), d)
         open(os.path.join(d, "test_x.py"), "w").write(code)
         env = {k: v for k, v in os.environ.items()
-               if k not in drop and k != "KILNCTRL_BENCH_HOST"}
+               if k not in drop and k not in ("KILNCTRL_BENCH_HOST", "KILNCTL_TEST_NO_HUB")}
         env.update(extra_env)
         env["PYTHONPATH"] = os.path.join(here, "..", "src")
         return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
