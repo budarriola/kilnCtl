@@ -201,8 +201,8 @@ Mutation JSON:
 
 | id | status | fix |
 |----|--------|-----|
-| L1 | open | |
-| L2 | open | |
-| L3 | open | |
+| L1 | fixed | `KILNCTL_TEST_SETTINGS_PATH` override in `settings.py`; `conftest.py` points it at a temp file before kilnctrl imports; in-process and subprocess tests |
+| L2 | fixed | scripts exit just past their guard under `KILNCTL_TEST_GUARD_PROBE=1`, so a regressed guard cannot act; vacuous sentinel assertion dropped (registry, not env) |
+| L3 | fixed | `bench_hotspot.ps1` refuses every action; `make_release.ps1` refuses fetch/ls-remote path; `check_release_manifest.ps1` clears the vars |
 | I1 | open | |
-| I2 | open | |
+| I2 | fixed | `test_scrub_keep_prefix_boundary` | |
