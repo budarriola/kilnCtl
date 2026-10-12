@@ -376,6 +376,7 @@ try {
     $mainSha = Rev $seed HEAD
     $lc = Join-Path $tmp "lclone"
     git clone $origin $lc *>$null
+    Set-Content -LiteralPath (Join-Path (Join-Path $lc '.git') 'kilnctl_scratch_repo') -Value 'scratch' -Encoding ascii   # land.ps1 test-seam marker
     Commit-File $lc "mine.txt" "x" "mine"
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
         -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output "x" -ExitCode 1) }, (Row "tools\check_ok.ps1" "PASS")))

@@ -2034,7 +2034,11 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
                 bool file_valid = false;
                 profiles_cfg_fs_load_raw(target_id, chk, &file_rev, &file_valid);
                 if (file_valid && file_rev == s_profile_rev[target_id] + 1) {
-                    (void)profiles_cfg_fs_delete(target_id);
+                    esp_err_t derr = profiles_cfg_fs_delete(target_id);
+                    if (derr != ESP_OK && derr != ESP_ERR_NOT_FOUND) {
+                        ESP_LOGE(PROFILES_TAG, "save rollback: slot %u phantom cfg file delete failed: %s -- slot may reappear at next boot",
+                                 (unsigned)target_id, esp_err_to_name(derr));
+                    }
                 }
                 free(chk);
             }
