@@ -2339,8 +2339,30 @@ static void test_resume_refuses_unless_link_positively_up(void)
         TEST_CHECK(s_exec.state == PROFILE_EXEC_PAUSED, "run stays PAUSED after a refused resume");
         TEST_CHECK(g_request_enable_true_calls == 0, "no heat-enable request on a refused resume");
     }
+    {
+        /* F5HOLDERFX4 LOW-1: a TRIPPED refusal carries its reason; a stale DIAG says to wait. */
+        char why[128] = {0};
+        reset_relay_claim_test_state();
+        s_exec.lock = xSemaphoreCreateMutex();
+        s_exec.safety = NULL;
+        s_exec.state = PROFILE_EXEC_PAUSED;
+        s_exec.claimed_relay_mask = 0x05;
+        s_test_relay_authority_blocked = false;
+        g_stub_link_mode = 0;
+        g_stub_diag_tripped = true;
+        TEST_CHECK(!profile_executor_resume(), "resume refused while the Pico is TRIPPED");
+        TEST_CHECK(profile_executor_resume_refusal(why, sizeof(why)) && strstr(why, "tripped") != NULL,
+                   "refusal reason names the trip");
+        g_stub_diag_tripped = false;
+        g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+        TEST_CHECK(!profile_executor_resume(), "resume refused on a stale DIAG");
+        TEST_CHECK(profile_executor_resume_refusal(why, sizeof(why)) && strstr(why, "waiting for the safety processor") != NULL,
+                   "stale-DIAG reason says to wait");
+        g_stub_diag_frame_age_ms = 0;
+    }
     g_stub_link_mode = 0;
     TEST_CHECK(profile_executor_resume(), "resume succeeds once the link is up");
+    TEST_CHECK(!profile_executor_resume_refusal((char[8]){0}, 8), "a successful resume leaves no refusal reason");
     TEST_CHECK(s_exec.state == PROFILE_EXEC_RUNNING, "state is RUNNING after the link-up resume");
 }
 
