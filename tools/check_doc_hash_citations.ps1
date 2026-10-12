@@ -334,7 +334,7 @@ function Invoke-BatchCheck {
     # answer, so every real expression is read exactly as written.
     $p.StandardInput.Write(('HEAD' + [char]10 + ($Exprs -join [string][char]10) + [char]10))
     $p.StandardInput.Close()
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(120000)) { try { & taskkill /T /F /PID $p.Id | Out-Null } catch { }; throw "git cat-file --batch-check did not exit within 120 s (repo: '$RepoDir')" }
     $out = @($stdoutTask.Result -split "`r?`n" | Where-Object { $_ -ne '' })
     $out = @($out | Select-Object -Skip 1)
     if ($out.Count -ne $Exprs.Count) {

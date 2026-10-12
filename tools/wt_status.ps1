@@ -92,9 +92,17 @@ public static class WtStatusWalk {
             using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi)) {
                 p.StandardInput.Close();
                 System.Threading.Tasks.Task<string> err = p.StandardError.ReadToEndAsync();
-                string line;
-                while ((line = p.StandardOutput.ReadLine()) != null) r.Lines.Add(line);
-                p.WaitForExit();
+                System.Threading.Tasks.Task<string> outT = p.StandardOutput.ReadToEndAsync();
+                if (!outT.Wait(120000) || !p.WaitForExit(120000)) {
+                    try {
+                        System.Diagnostics.ProcessStartInfo tk = new System.Diagnostics.ProcessStartInfo("taskkill", "/T /F /PID " + p.Id);
+                        tk.UseShellExecute = false; tk.CreateNoWindow = true;
+                        using (System.Diagnostics.Process k = System.Diagnostics.Process.Start(tk)) { k.WaitForExit(15000); }
+                    } catch (Exception) { }
+                    r.ExitCode = -1;
+                    return r;
+                }
+                using (System.IO.StringReader sr = new System.IO.StringReader(outT.Result)) { string line; while ((line = sr.ReadLine()) != null) r.Lines.Add(line); }
                 err.Wait();
                 r.ExitCode = p.ExitCode;
             }

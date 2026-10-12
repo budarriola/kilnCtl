@@ -37,9 +37,9 @@ $proc = [System.Diagnostics.Process]::Start($psi)
 # Start the async read first (a full pipe cannot deadlock the child), then bound the read itself: an unbounded
 # ReadToEnd() would hang here if git never closes stdout (REVIEW_DOCFX3 LOW-1).
 $gitOutTask = $proc.StandardOutput.ReadToEndAsync()
-if (-not $gitOutTask.Wait(120000)) { try { $proc.Kill() } catch { }; Write-Host 'FAIL: git ls-files did not exit within 120 s'; exit 1 }
+if (-not $gitOutTask.Wait(120000)) { try { & taskkill /T /F /PID $proc.Id | Out-Null } catch { }; Write-Host 'FAIL: git ls-files stdout not closed within 120 s'; exit 1 }
 $gitOut = $gitOutTask.Result
-if (-not $proc.WaitForExit(120000)) { try { $proc.Kill() } catch { }; Write-Host 'FAIL: git ls-files did not exit within 120 s'; exit 1 }
+if (-not $proc.WaitForExit(120000)) { try { & taskkill /T /F /PID $proc.Id | Out-Null } catch { }; Write-Host 'FAIL: git ls-files closed stdout but did not exit within 120 s'; exit 1 }
 $listed = @($gitOut -split "`0" | Where-Object { $_ -ne '' })
 if ($proc.ExitCode -ne 0 -or $listed.Count -eq 0) { Write-Host "FAIL: git ls-files -co --exclude-standard failed under $Root -- cannot enumerate scripts"; exit 1 }
 $unresolved = @()
