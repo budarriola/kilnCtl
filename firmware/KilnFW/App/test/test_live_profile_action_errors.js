@@ -44,10 +44,12 @@ async function scenario(btnId, resp, setup, confirmAnswer, noGen) {
   await flush(5);
   if (!noGen) sandbox.lastGen = 1; // A2: Save needs a known generation
   if (setup) setup(els);
+  if (sandbox_dirty) { sandbox.dirty = true; sandbox_dirty = false; }
   els[btnId].fire('click');
   await flush();
   return { els, posts, confirms, listeners, sandbox };
 }
+let sandbox_dirty = false;
 const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
 
 (async () => {
@@ -102,9 +104,9 @@ const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
   // REVIEW_PROFILESFX LOW-1: a failed decide must not null lastGen (false "Changed elsewhere" over unsaved edits).
   scenario.live = { active: true, working_id: 3, generation: 1, pending_decision: true, editable_from_segment: 0 };
   r = await scenario('overwriteBtn', { status: 403, json: { ok: false, error: 'origin is a built-in schedule' } },
-    (e) => { e.overwriteConfirm.checked = true; });
+    (e) => { e.overwriteConfirm.checked = true; sandbox_dirty = true; });
   scenario.live = null;
-  ok(r.sandbox.lastGen === 1 && !/Changed elsewhere/.test(txt(r.els.refusalBanner) + txt(r.els.statusText)), 'failed decide keeps lastGen (got ' + r.sandbox.lastGen + ')');
+  ok(r.sandbox.lastGen === 1 && !/Changed elsewhere/.test(txt(r.els.saveMsg) + txt(r.els.statusText)), 'failed decide keeps lastGen (got ' + r.sandbox.lastGen + ')');
 
   // D6: no mojibake in the page source, progress text is plain.
   ok(HTML.indexOf(String.fromCharCode(0xe2, 0x20ac)) < 0, 'page source has no double-encoded UTF-8 (mojibake)');
