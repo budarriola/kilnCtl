@@ -19,16 +19,17 @@ FAKE_IDF = r"""
 import os, sys
 mode = sys.argv[1]
 build = sys.argv[2]
-if mode == "msys":
-    print("MSys/Mingw is no longer supported"); sys.exit(0)
-if mode == "nobin":
-    print("done"); sys.exit(0)
-if mode == "bins":
+if mode in ("msys", "bins"):
     for parts in (("KilnCtrl.bin",), ("bootloader", "bootloader.bin"),
                   ("partition_table", "partition-table.bin")):
         p = os.path.join(build, *parts)
         os.makedirs(os.path.dirname(p), exist_ok=True)
         open(p, "wb").write(b"x")
+if mode == "msys":
+    print("MSys/Mingw is no longer supported"); sys.exit(0)
+if mode == "nobin":
+    print("done"); sys.exit(0)
+if mode == "bins":
     print("built"); sys.exit(0)
 if mode == "env":
     print("MSYSTEM=" + repr(os.environ.get("MSYSTEM"))); sys.exit(0)
