@@ -1,5 +1,5 @@
 // test_system_mode_gate.c -- host tests for App/drivers/safety/system_mode_gate.c.
-// docs/SYSTEM_MODE_GATE_PLAN.md is the design doc; section 5 records the
+// docs/SYSTEM_MODE_GATE.md is the design doc; section 5 records the
 // owner's 2026-09-25 decisions this table encodes. No ESP-IDF dependency --
 // system_mode_gate.c is pure (snapshot in, verdict out, no I/O, no locks).
 #include <stdio.h>
@@ -149,7 +149,7 @@ static void test_start_actions_refuse_only_on_recovery_mode(void)
 {
     TEST_SECTION("SYS_ACTION_START_PROFILE / SYS_ACTION_START_AUTOTUNE -- recovery-mode rule (slice 2, 2026-09-27)");
 
-    // docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 2: these two actions
+    // docs/SYSTEM_MODE_GATE.md section 3.6 slice 2: these two actions
     // are wired for recovery_mode ONLY -- every other start-refusal reason
     // (safety trip, unacknowledged crash, E-stop unverified, ...) stays owned
     // by readiness_gate.h, unchanged. A worst-case snapshot that ALSO sets
@@ -422,8 +422,25 @@ static void test_reason_truncation_is_safe(void)
     TEST_CHECK(strlen(tiny) < sizeof(tiny), "reason is NUL-terminated within the small buffer");
 }
 
+static void test_start_danger_mode(void)
+{
+    TEST_SECTION("SYS_ACTION_START_PROFILE -- danger mode refuses profile and autotune (LCD review N2/R1)");
+    sys_mode_snapshot_t snap = good_snapshot();
+    char reason[SYSTEM_MODE_GATE_REASON_MAX] = { 0 };
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason)) == false,
+               "danger mode off: start allowed");
+    snap.danger_mode_active = true;
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_PROFILE, &snap, reason, sizeof(reason)) == true,
+               "danger mode on: profile start refused");
+    TEST_CHECK(strstr(reason, "danger mode is active") != NULL, "reason names danger mode");
+    TEST_CHECK(system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &snap, reason, sizeof(reason)) == true,
+               "danger mode on: autotune start refused too (LCD review R1)");
+    TEST_CHECK(strstr(reason, "danger mode is active") != NULL, "autotune reason names danger mode");
+}
+
 int main(void)
 {
+    test_start_danger_mode();
     test_null_snapshot_refuses();
     test_relay_write_allowed_when_idle();
     test_relay_write_refused_cross_product();

@@ -7,6 +7,8 @@ here). Never edit a past line by hand -- append only. A line never carries a
 credential; anything that looks like one is `***` before it is written, same
 as `transcript.md`/`summary.json` (`_redact()`).
 
+**Factory resets.** Log every board factory reset (any scope, any path: `System: Factory Reset`, `factory_default_then_load_preset`, GUI Danger Zone, HTTP/LCD) here with its UTC time and reason, and take a backup first. PcTools paths now export one to `logs/backup_export/` automatically and refuse to reset if that fails (`skip_backup=True` overrides); cite the backup file in the entry. (docs/audits/KILN_NVS_LOSS_2026-10-09.md)
+
 - `20260921T004103Z_smoke` suite=`smoke` exit_code=2 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=36 SKIP=0 esp_fw=unknown pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T004103Z_smoke/`
 - `20260921T004457Z_smoke` suite=`smoke` exit_code=1 PASS=6 FAIL=27 INCONCLUSIVE=2 NOT_RUN=1 SKIP=0 esp_fw=Sep 20 2026 17:38:28 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T004457Z_smoke/`
 - `20260921T010207Z_smoke` suite=`smoke` exit_code=1 PASS=8 FAIL=24 INCONCLUSIVE=3 NOT_RUN=1 SKIP=0 esp_fw=Sep 20 2026 17:38:28 pico_fw=error: SafetyQueryError: SAFETY request 0x0B not delivered: no serial port open - connect first log=`logs/bench_test/20260921T010207Z_smoke/`
@@ -2681,7 +2683,7 @@ Board: link up before and after, no reboot during the run (uptime 19 s to 645 s 
 ## 2026-10-03 Flash of 4a4b7594 and recovery image, recovery entry/exit, S7 guard, OT-B01, host 192.168.1.156
 
 Flash: KilnFW app `4a4b7594` (built 2026-10-03 15:40:39Z from clean worktree C:\wt\flash1003_uwu9lb) via `flash_firmware(kiln_fw_root=...)`; verified running `app`, boot_guard persisted 0 before and after. The tool noted "no embedded SaftyFW identity record found in app binary" (this app was built without embedded Pico images). Recovery image `recovery.bin` (765488 B, sha256 prefix ba4c18bd, app_desc build Oct 3 2026 08:42:30) flashed with `flash_recovery` into partition `recovery` at 0xa10000, size 0x1e0000, read-back verified. No S6a after either flash (Pico not reset).
-Pico NOT flashed: `debug_program(peer="pico")` failed "unable to find a matching CMSIS-DAP device"; USB enumeration shows no VID_2E8A device, so the SaftyFW debug probe (serial E66540F0A36C6E21) is disconnected. Pico stays on SaftyFW 405d3c54 (2026-09-25). Owner action: reconnect the probe. PICO_AUTO_UPDATE_PLAN section 11 and OT-P* stay blocked on this (and on `pico_update` being deliberately off: no update-capable bootloader).
+Pico NOT flashed: `debug_program(peer="pico")` failed "unable to find a matching CMSIS-DAP device"; USB enumeration shows no VID_2E8A device, so the SaftyFW debug probe (serial E66540F0A36C6E21) is disconnected. Pico stays on SaftyFW 405d3c54 (2026-09-25). Owner action: reconnect the probe. PICO_AUTO_UPDATE section 11 and OT-P* stay blocked on this (and on `pico_update` being deliberately off: no update-capable bootloader).
 
 Recovery entry and exit, first hardware run of the 2026-10-02 unauthenticated LCD-passphrase design: `recovery_enter(confirm=True)` answered 200 and the board rebooted into the recovery image. Webcam capture of the LCD showed the RECOVERY MODE page: "KilnFW recovery image", boot guard count 0, reset reason SW, crash dump none, Heat OFF, "Join Wi-Fi network: kilnctl-recovery", a 12-character uppercase alphanumeric password in large orange text, "IP: 192.168.4.1", "Open http://192.168.4.1/ to upload", "New password each boot". The page fits 480x320 with no scrolling. A Wi-Fi scan showed SSID `kilnctl-recovery`, WPA2-Personal, BSSID 1c:db:d4:92:f4:7d (the board's AP MAC). The PC joined with the LCD passphrase and got 192.168.4.2.
 `GET /api/recovery/status` over the AP: 200, auth_mode "lcd_passphrase", error null, running "recovery", app_present/app_valid true (app_size 8388608), otadata_blank true (expected after a recovery select), relays_verified_off true, relay_hold_task true, relay_hold_fault false, relay_hold_stack_free 1952 B (first measurement of the hold-watchdog task margin; 3072 B stack), heap_internal_min_free 247296, ap_start_count 1, ap_stop_count 0, ap_stations 1. The passphrase does not appear anywhere in the status JSON (substring check).
@@ -2708,8 +2710,8 @@ WEB-ZONE-14 (`cceabd17`), 2026-10-03: its judge was run by hand against the live
 ## 2026-10-03 -- OTA OT-E01 push to the running app: HTTP 500 plus TASK_WDT panic, fix and re-run (firmware 4a4b7594, host 192.168.1.156)
 
 Run `20261003T195937Z_ota_ot_4a4b7594` (`logs/bench_test/`, gitignored). OT-E01 (push an ESP image to the RUNNING app over `POST /api/ota/esp`) returned HTTP 500 and the board then reset with a task-watchdog panic: exc_task `esp_timer`, `IllegalInstruction`, crash_uptime_s 4256, dump_id 2515012780, fw_build "Oct  3 2026 08:44:31". Coredump archived at `firmware/KilnFW/coredump_archive/coredump-f074e62a3a69.bin`, matching ELF `firmware/KilnFW/elf_archive/KilnCtrl-c194704e23e1.elf`.
-Root cause: the single-slot OTA design (`docs/OTA_SINGLE_SLOT_PLAN.md`) means `esp_ota_get_next_update_partition(NULL)` returns the running `ota_0` `app` partition, so `esp_ota_begin` fails with `ESP_ERR_OTA_PARTITION_CONFLICT`. The handler returned non-ESP_OK with the multi-MB body unread; esp_http_server (IDF v6.0.2, `httpd_sess.c`/`httpd_main.c`) then deleted the session and did a plain `close()`, which lwIP turned into a TCP RST toward the client, while the purge path and the stalled socket starved the IDLE task long enough for the task watchdog (`CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`) to fire. The firmware's own refusal path, not the push, caused the panic.
-Firmware fix, two commits (worktree `C:\wt\otafix_r2i1yr`, reviewed SHIP, push to origin/main pending an owner step): `eefbbd6c` makes `ota_http_esp.c` answer 409 when the target equals `esp_ota_get_running_partition()`, before the size check and before `esp_ota_begin`, with a message naming the single-slot design and pointing at `recovery_enter` / the recovery image (helper `ota_http_esp_target_usable()` in `ota_http_util.c/.h`, host test `test_esp_target_usable_refuses_running_partition`, docs `OTA_SINGLE_SLOT_PLAN.md` and `CommonFW/docs/UPDATE_PROTOCOL.md`). `4c64bfc8` (formerly `a4836187`) adds `ota_http_refusal_drain()` in `ota_http.c`, which reads and discards the remaining body into the existing static chunk buffers with `vTaskDelay(1)` between reads and a 30 s cap so the client sees the 409 instead of a RST, makes `http_auth_refusal_should_close()` in `http_auth_enforce.c` close 401/403 refusals only when content_len exceeds 4096 B, and adds `tools/check_ota_esp_refuses_running_target.ps1` (5 mutation negatives verified). 67 host-test executables pass.
+Root cause: the single-slot OTA design (`docs/OTA_SINGLE_SLOT.md`) means `esp_ota_get_next_update_partition(NULL)` returns the running `ota_0` `app` partition, so `esp_ota_begin` fails with `ESP_ERR_OTA_PARTITION_CONFLICT`. The handler returned non-ESP_OK with the multi-MB body unread; esp_http_server (IDF v6.0.2, `httpd_sess.c`/`httpd_main.c`) then deleted the session and did a plain `close()`, which lwIP turned into a TCP RST toward the client, while the purge path and the stalled socket starved the IDLE task long enough for the task watchdog (`CONFIG_ESP_TASK_WDT_TIMEOUT_S=5`) to fire. The firmware's own refusal path, not the push, caused the panic.
+Firmware fix, two commits (worktree `C:\wt\otafix_r2i1yr`, reviewed SHIP, push to origin/main pending an owner step): `eefbbd6c` makes `ota_http_esp.c` answer 409 when the target equals `esp_ota_get_running_partition()`, before the size check and before `esp_ota_begin`, with a message naming the single-slot design and pointing at `recovery_enter` / the recovery image (helper `ota_http_esp_target_usable()` in `ota_http_util.c/.h`, host test `test_esp_target_usable_refuses_running_partition`, docs `OTA_SINGLE_SLOT.md` and `CommonFW/docs/UPDATE_PROTOCOL.md`). `4c64bfc8` (formerly `a4836187`) adds `ota_http_refusal_drain()` in `ota_http.c`, which reads and discards the remaining body into the existing static chunk buffers with `vTaskDelay(1)` between reads and a 30 s cap so the client sees the 409 instead of a RST, makes `http_auth_refusal_should_close()` in `http_auth_enforce.c` close 401/403 refusals only when content_len exceeds 4096 B, and adds `tools/check_ota_esp_refuses_running_target.ps1` (5 mutation negatives verified). 67 host-test executables pass.
 Bench harness rework already on origin/main (`ead6d90e`, `1cfa1677`, `13bb1981`, `65cef4df`): OT-E01 is now "Push to running app refused (409)", OT-E02 is NOT_RUN, OT-E10 accepts ok/409 with continuous uptime (225 PcTools tests).
 Re-run result, same day, on the fixed build (board reports a4836187, built 2026-10-03 20:55:02Z, flashed via `flash_firmware(kiln_fw_root=C:\wt\otabuild_a483irmware\KilnFW)`, verified running `app`, boot_guard persisted count 0): OT-E01 run directly (the running MCP server still carries the pre-rework case code, so the matrix was not used): POST of the board's own 2,569,952-byte KilnCtrl.bin to `/api/ota/esp` with an admin session answered HTTP 409 with the body `this image runs from the only OTA slot (single-slot design); ...` in 0.3 s, no TCP reset, `/api/status` uptime continuous (46 s -> 53 s), `/api/crash_report` byte-identical before and after, `/api/ota/esp/status` phase `failed` with that reason as `last_update` -- PASS. OT-E09 run directly: an unauthenticated POST with a 1 KB body answered 401 `authentication required`; the same POST with the full 2.5 MB body was closed by the board (ConnectionResetError), which is the `http_auth_refusal_should_close()` rule for refusals over 4096 B of unread body, uptime continuous -- PASS by design. OT-E10 (admin session, 409 or ok) is the OT-E01 result above -- PASS. OT-E12 (otadata state): post-flash verification and `/api/ota/esp/status` both report `active_slot` `app`, `recovery_mode` false -- PASS. OT-E02 NOT_RUN by design (single slot). The pre-existing crash report (dump_id 2515012780) was acknowledged after this entry was written.
 
@@ -3102,3 +3104,158 @@ Preflight: no unacknowledged crash, link up/armed/no trip, readiness 20 ok / 1 n
 - Step 7 PASS (ESP path only): profile (rule ON while TC<50) running, R4 ON; `profiles_pause` (state=2, no heat) -> R4 stayed ON at 0 s and 20 s after pause. Not the external supply wiring. Note: with the executor paused, zone 0 actual reads 0.0 C (invalid) in exec status while the rule still held R4.
 - Restore: profiles_stop after each run (relays 1-3 off, R4 off), profile 1 deleted after `profiles_get` confirmed name, relay 4 disabled (enabled_mask 0), profile list back to #0 M18C_TEST + 28 built-ins, link up/armed/no trip, uptime 40167 s.
 - Other pending BENCH_TEST_LOG rows: none attempted (all remaining rows are forbidden-action, operator-gated or need newer firmware/flash).
+
+## 2026-10-09 bench agent: dev 8fcd3237 flash and bench queue (main board, 192.168.1.156)
+
+Flashed origin/dev 8fcd3237 on both processors from worktree `C:\wt\benchflash_cccw9z`. Firmware was not changed. A stale tls_spike crash report (dump_id 448121097, crash_uptime 17157 s, re-stamped with the new fw_build) stays unacknowledged per the bench rules. The firmware, `capability_preflight`, `bench_test` and `ota_matrix` all refuse to start while it is stored, so every item that needs a firing or a suite run is BLOCKED. 8838dea7 (the SaftyFW peer-protocol reset defect) is not in this image.
+
+- Flash PASS: ESP commit 8fcd3237, fw_build "Oct  9 2026 20:34:10", running `app`, boot_guard cleared. Pico reports b475e7d7 (the last SaftyFW/CommonFW commit in 8fcd3237), built 2026-10-10 03:25:34Z, boot_id 106, kilnlink v17, config_crc 0xC950.
+- Internal heap PASS against the 8192 B floor: min_free 15799 B on first boot, 11699 B after the maximal backup import, and 15819 B on the current boot. Concerns:
+  - heap_dma min fell to 3911 B after the import (8031 B on the current boot).
+  - largest_free_block low-water was 7936 B at uptime 7 s, below SK-04's 8704 B. dram_watch shows the http_async_job create dropping it from 10752 B.
+  - The boot log prints "BELOW THE 20K DRAM FLOOR dram_free=15819".
+- Kilnlink boot S6a PASS: TRIPPED reason 6 seq 1 at 9578 ms, link compatible at 9918 ms. `clear_trip` mask 0x0020 seq=1 at 11078 ms, sent only after a seq-bearing DIAG.
+- Pico reboot mid-idle PASS: no stale clear, and the Pico re-armed at about 80 s with trip 0. Observability gap: the ESP logged only "break condition on uart1" at 32398 ms. The boot_id-change path (`safety_note_pico_reboot_locked`, safety_link_frames.c around lines 336-370) logs nothing; only the uptime-regress path (line ~1136) does.
+- Pico RELAY_STACK SKIP: this is the recovery image's rec_pico task (recovery_pico.c:48, 6144 B). It only logs during a `recovery_pico_upload` of a slot image, which the owner has gated off.
+- HTTP L5 after the maximal backup import PASS: httpd_worker had 3272/8192 B stack free (39.9%). `check_task_liveness` showed 31/41 ok; backlight_pwm 900/3072 B [LOW].
+- Spare relay step 5 PASS, with a plan/firmware mismatch (the plan says 400, the firmware answers 409):
+  - POST /api/aux_outputs on relay 1 returned 409 "that relay is claimed by a zone relay_mask".
+  - With aux 4 enabled, a zone 2 relay_mask of 0x0C returned 409 "a zone relay_mask claims a relay an aux (spare-relay) output already owns".
+  - Restored: aux 4 disabled, zones_relay_mask 7.
+- ON_OFF step 9 BLOCKED:
+  - Set zone 2 to zone_type 1 and saved profile #2 BENCH_ONOFF9 (900 C/hr to 60 C, DWELL-phase rule BELOW 33 C on zone 2).
+  - `profiles_start` was refused because an unacknowledged crash report is stored.
+  - Restored: profile #2 deleted and zone 2 back to zone_type 0, both read back.
+  - Doc gap: quasi_dwell/effective_dwell are not exposed over HTTP, although ON_OFF_ZONE.md sec 7 says /api/status gains them. Only the device log's "onoff zN DECIDE ... dwell=" lines show them.
+- kiln_config_apply PASS:
+  - Only config id 1 exists, so there was nothing to swap to; re-applied id 1.
+  - apply_status confirmed the apply and the board rebooted (SW reset).
+  - A before/after backup diff shows only kiln_configs[0].is_active false -> true. Zones are identical and the Pico is armed with no trip.
+  - Side effect: active_id went from null to 1, and no route can undo that.
+- GitHub update FAIL:
+  - `update_status`: staged, verified, 1.0.0-pre.1, commit bf9ddea2, source github.
+  - `update_check` failed twice with error=low_heap: free internal 29815 B < FETCH_HEAP_PRECHECK_MIN 30836 B (update_fetch_heap.h:24-27, 65). The header comment puts the idle board at 29647-31123 B, so an idle board is refused most of the time.
+  - `update_stage_release` was not attempted (same fetch path).
+  - OT-G06 via `ota_matrix_start` (job 0083a5fe) was refused at run-level preflight because of the crash report. Nothing was applied.
+- Zone graphic PASS (render only): a node render of zones_page.html's `renderKilnGraphicHtml` against live /api/zones and /api/status showed:
+  - 3 rings and 3 ports, with no fail-closed panel;
+  - labels z0..z2 in order;
+  - 3 "Heater load check is DORMANT" unknown badges, which the plan expects on the bench.
+  - A real-browser look is still not done.
+- Camera PASS: `capture_lcd -Full` sharpness 4.03, crop 6.57.
+  - Panel samples: (580,360) RGB 50,118,186; (300,150) 186,224,251; (850,550) 71,107,98; (450,500) 100,169,234. Bezel (100,100) 12,5,6.
+  - The dashboard shows zone temps 28.3/28.3/28.1, matching `thermo_read`.
+- bench_test web BLOCKED: job 576164c7, run `logs/bench_test/20261010T040027Z_web_benchflash_8fcd3237/` exited 2 with PREFLIGHT FAILED (crash report); all 120 cases NOT_RUN.
+- bench_test lcd BLOCKED: not started, because the same preflight applies.
+- TOTP PASS: `totp_enroll_status` reports enrolled=False, sntp_synced=True.
+- WP5 power-cut SKIP: needs a human to cut power.
+- Other defects seen this session:
+  - `backup_import` cannot restore onto a board whose zones config has a count of 0 and gives a 500 partial write (backup_import.c:990, 1338, 1433, 3619).
+  - `load_config_preset` cannot seed such a board ("no timing_profiles").
+  - The config wipe found before this flash has an unknown origin.
+  - The boot log shows "prof1 file/NVS DIVERGED (file rev 41, NVS rev 40)".
+  - z0 tuning_valid=no after the restore.
+  - relay_cycles read 0 because the v5 backup carries none.
+- Final state: aux outputs disabled, zone 2 zone_type 0, test profile deleted, kiln config 1 active (was null), link up, armed, no trip.
+
+## 2026-10-10 bench agent: crash review and blocked-item rerun on dev 8fcd3237
+
+Board: origin/dev 8fcd3237 on both processors, host 192.168.1.156. Firmware was not changed. `update_check` was not repeated.
+
+- Crash report review: OLD, cleared.
+  - Record: dump_id 448121097, exc_task `tls_spike`, exc_pc 0x400559dd, crash_uptime 17157 s, fw_build "Oct  9 2026 20:34:10" (the running 8fcd3237 build).
+  - The coredump image is byte-identical (sha256 9ba85c50...) to `firmware/KilnFW/coredump_archive/coredump-9ba85c503229.json`, fetched 2026-10-05T06:57:07Z with fw_build "Oct  4 2026 23:44:01".
+  - Symbolized with `find_crash_elf`. It matches the WP7 TLS spike build `elf_archive/KilnCtrl-2162cf7c31dd.elf`. Neither the running app ELF (`KilnCtrl-d28019a44fa3.elf`) nor any recovery-archive ELF has `spike_task`, and `KILNCTL_TLS_SPIKE` defaults to n.
+  - Backtrace: `spike_task` (tls_spike.c:146) -> `mbedtls_ssl_handshake` -> `mbedtls_ssl_handshake_client_step` -> `mbedtls_psa_key_agreement_ecdh` -> `mbedtls_ecp_mul_restartable` -> `ecp_mul_restartable_internal` -> `mbedtls_mpi_mul_mod`/`mbedtls_mpi_mul_mpi`. This is the 2026-10-04 task-watchdog trip on IDLE0 during the ECDH handshake to api.github.com in the spike build.
+  - `crash_report_clear(confirm=True, allow_unacknowledged=True)`, then read-back: no record, coredump present=False.
+  - After the clear: `heap_internal` free 29815 B, min_free 14371 B (above the 8192 B floor); link up, ARMED, no trip.
+- Firmware defect: a recaptured old coredump is stamped with the capturing boot's identity.
+  - `crash_report.c:480` recaptures whenever the NVS record is missing or its dump_id differs; the coredump partition still holds the old image.
+  - The capture path calls `hal_sysinfo_get_build_info()` for the running app (`crash_report.c:510-512`), and `fill_v3_fields()` writes it into fw_build (`crash_report.c:300`).
+  - `crash_uptime` comes from the previous boot's uptime beacon, and `reset_reason` is the current boot's.
+  - Result: a months-old dump reads as a crash of the current firmware. The coredump summary's own `app_elf_sha256` is not used to cross-check or fill fw_build.
+  - Likely trigger this time: the NVS record was lost (see the kiln_nvs note below) while the coredump partition kept the image, since `crash_report_ack` never erases it. Not fixed here.
+- E-stop interlock: NOT VERIFIED, and it blocks everything below.
+  - `get_readiness` reports `estop_verified: not_done -- never confirmed`. It was ok on 2026-09-21 (C5), and since then no session called `estop_verify`.
+  - The record (`kiln_cfg/estop_verif` in the `kiln_nvs` partition) is erased by `factory_reset` kiln/all (whole-partition erase). It is also cleared by any committed `estop_active_level` safety param (`safety_cfg_write.c:529`, by design).
+  - Hypothesis, not proven: the unexplained config wipe noted in the previous section (zones count 0) was a `kiln_nvs` loss. That would also explain the lost crash record (recaptured above) and the lost E-stop record.
+  - `estop_verify` is human-only (needs physical verification), so it was not called. An operator must run the E-stop bench procedure in `firmware/SaftyFW/README.md`, then call `estop_verify`.
+- ON_OFF step 9 (quasi-dwell rule): BLOCKED.
+  - Zone 2 was set to zone_type 1, and profile `BENCH_ONOFF9` was saved as id 2 (45 C at 900 C/h with a 15 min dwell; rule: zone 2, DWELL phase, BELOW 50 C). The save returned "too_fast" feasibility warnings.
+  - `profiles_start(2)` was refused: "the E-STOP INTERLOCK has not been verified on this board".
+  - Restored: profile 2 deleted, zone 2 zone_type 0 (confirmed by read-back); aux outputs untouched (enabled_mask 0).
+  - Design finding from code reading: `on_off_trigger_decide.c` (~105-118) resets `lock_true_s` to 0 on every tick that is not ramp-locked. The ramp lock toggles at the band edge (`profile_executor.c` ~915-959, band `exec_threshold(zi,3)`), so the 120 s quasi-dwell entry only happens for a zone that is fully stalled inside the band, not for one crawling along its edge. Step 9 needs a profile that holds the zone deep inside the lock band for 120 s.
+- bench_test web: BLOCKED. Job 2a7329d3, run `logs/bench_test/20261010T041932Z_web_dev8fcd3237_rerun/`, exit 2, "PREFLIGHT FAILED: readiness gate blocks: estop_verified"; all 120 cases NOT_RUN.
+- bench_test lcd: BLOCKED. Job ce86c26b, run `logs/bench_test/20261010T041938Z_lcd_dev8fcd3237_rerun/`, same preflight failure; all 26 cases NOT_RUN.
+- OT-G06: BLOCKED. `ota_matrix_start(confirm=True, cases="OT-G06")`, job b63c1a21, was refused at the run-level precondition ("readiness gate blocks: estop_verified"). Nothing was applied.
+- Final state:
+  - 8fcd3237 on both processors; link up, ARMED, no trip, executor idle.
+  - Crash report cleared, coredump erased.
+  - Zones all zone_type 0; profiles #0 M18C_TEST and #1 B1_THROWAWAY only; aux disabled.
+  - Readiness: 19 ok; not_done: safety_commissioned (3 of 68) and estop_verified; cannot_yet: ct_attribution.
+
+## 2026-10-09 -- Zones restore attempt after suspected wipe (no write needed)
+
+Task: restore zones config after the suspected untraced factory reset. Pre-wipe reference `logs/backup_export/kilnctl_backup_20261008T220350Z.json` (version 5; 3 zones, relay_mask/thermo_mask 1/2/4, tc_type 3, control_mode 3, 0..80 C, zone_type 0).
+
+- `backup_export` of current state first: `logs/backup_export/kilnctl_backup_20261010T043611Z.json` (version 6).
+- Found the board already at the pre-wipe state: `control_get_zones` reports 3 thermocouples / 4 relays and PID, plant model, coupling cells, limits, zone types all equal to the 20261008 backup. A key-by-key diff of the two backups shows zones, profiles (2), timing profile, kiln_configs and aux_outputs identical. Differences are only fields newer than backup v5 (display_power, relay_cycles, relay_names, tz, unit, ramp_assist, hidden_builtin_profiles, io_* segment fields, on_off_rules), i.e. new-format defaults, not data loss.
+- Therefore no topology write and no `backup_import` was performed; the board was not modified.
+- Readback: z0 `tuning_valid=no` (the backup carries no tuning_* block for z0 either), z1/z2 yes. Aux outputs: all four disabled (matches backup). `get_readiness`: 19 ok, 2 not_done (`safety_commissioned`: 3 of 68 params unset; `estop_verified`), 3 other (`guard_cross_zone` and `calibration` deliberately off, `ct_attribution` cannot_yet). Safety link up, armed, no trip.
+- Open: whoever restored the zones before this run is unrecorded; the 3 unset safety params were not compared to a pre-wipe state (`safety_get_unset_commissioning_params` would name them).
+
+## 2026-10-09 commissioning gap (read-only)
+
+- `get_readiness`: `safety_commissioned` not_done, "3 of 68 applicable safety parameters still have no value". `safety_get_unset_commissioning_params` names exactly `i_normal_a[0..2]` (ids 0x031A/B/C, f32). `safety_get_commissioning` was unreachable (ECONNREFUSED) during this check.
+- Meaning: S14 per-channel over-current baseline (measured normal CT current per channel, `config_params.c`); until set, S14 reports ch0..2 DORMANT. Accepts any value >= 0.
+- Settable from a measurement on the bench: yes in principle (zones-page "record normal current" button, M12), but the 4 W fixture draws far below the CT's useful range, so a value would not represent a real kiln. Recommendation: leave unset on the bench; record on the real kiln with CT calibrated. Not an owner decision, not "not applicable" (ct_installed applies). No param written.
+- Also still not_done: `estop_verified` (human-only, never automated).
+
+## 2026-10-09 bench campaign of origin/dev 0dd056c6 (benchdev worktree) -- BLOCKED by estop_verified
+
+Firmware under test: origin/dev `0dd056c6` plus TWO bench-local, uncommitted build workarounds (findings 1 and 2 in `docs/audits/BENCH_FINDINGS_2026-10-09.md`; dev tip does not build as committed). KilnFW ELF archive file `KilnCtrl-1a0ec1e32f2f.elf` (SHA256-keyed archive entry, not a git commit); SaftyFW identity `e6a0ff34_2026-10-10_04:59:54Z`. Backup taken first: `logs/backup_export/kilnctl_backup_20261010T050050Z.json`. Flash: Pico via `debug_program`, ESP via `flash_firmware(kiln_fw_root=worktree)`, verified running `app`, boot_guard cleared. No trip latched after the dual reflash (S6a did not appear).
+
+| Item | Result |
+|---|---|
+| build_saftyfw (worktree) | OK |
+| build_kilnfw dev tip as committed | FAIL x2 (findings 1, 2) |
+| flash both + verify | OK |
+| get_heap_status after boot | no crash report; internal min_free 22607 B (>= 8192 B floor) |
+| get_readiness | 19 ok, 2 not_done (safety_commissioned, estop_verified), 3 other |
+| check_task_liveness | RESULT ok, 31/41 alive, the rest by design |
+| get_stack_margin | 5 ok / 0 failed; lowest headroom wifi_prov_owner 1536/4096 B free, backlight_pwm 1152/3072 B, info_uart_bridge 1496/4096 B, safety_uart_bridge 1692/4096 B |
+| update_check (WP8 gate b) | state=failed http 404 "no release published"; internal min_free 22607 B before and after (no new low-water), free 37903 -> 37667 B; the 29556 B figure was NOT exercised (no release found) |
+| latency_soak 120 s | 250 samples, 0 errors, 0 clustered stalls; p95 <= 392 ms, max 600 ms (status) |
+| autotune_start zone 0 step 0.2 | refused by the E-stop interlock (correct); message truncated, finding 4 |
+| bench_test smoke / aux / web / lcd / static / ota / safety | NOT_RUN: run 20261010T053127Z_smoke_benchdev, "PREFLIGHT FAILED: readiness gate blocks: estop_verified", all 36 cases NOT_RUN; the same gate blocks every suite (runner.py preflight) |
+| ota_matrix, autotune, heat | not attempted: same gate (autotune and firing refused firmware-side) |
+
+Board left running dev firmware, safety link up and ARMED, no trip. The campaign is gated on a human running the E-stop verification (`estop_verify` was deliberately not called).
+
+## 2026-10-10 bench1 run (firmware d93cf774a, ESP flashed; Pico not reflashed, left as is)
+
+Built origin/dev d93cf774a from a clean worktree, flashed with flash_firmware (verified, boot_guard cleared). get_readiness: estop_verified ok; safety_commissioned not_done (3 of 68), unchanged.
+
+- heat (run 20261010T171928Z_heat_bench1): 7 PASS, 1 FAIL. HP-05 FAIL: profiles_ack_last_run() did not clear the last-run card. HP-01/02/03/04/06/07/08 PASS.
+- aux: not run. AX-C01 SKIP, rest NOT_RUN/SKIP: KILNCTL_AUX_BENCH_CONFIRM=1 not set in the MCP server environment; setting it needs an MCP server restart, which the permission system denied. SPARE_RELAY_ONOFF_PLAN step 9 still open.
+- web (20261010T180157Z_web_bench1): FAIL overall. Many `GET <page> failed (status=406)` on /settings/display, /safety, /settings/commissioning, /readiness, /setup, /settings (WEB-DISP-03/04, SAF-02/03, COMM-02/03/05/06, RDY-03, WIZ-02/04/05/06/08, SET-02/03). Other FAILs: ZONE-03 (failsafe_state missing), ZONE-05 (another config field changed across identity PID write), OTA-03/04 (/ota HTML lacks espPicker/espRollback, retired buttons; judge stale), WIFI-03 (renderApQr literal), SEC-06 (literal 'clear_credentials' in cases_web_misc.py), BAK-04 (missing 'refused while a profile is running' text). INCONCLUSIVE: DASH-02, DASH-07, ZONE-13. SKIP: PROF-11, WIFI-06. Many NOT_RUN depend on HP/AT/OT cases not in this invocation.
+- lcd (20261010T180431Z_lcd_bench1): PASS LCD-06,08,09,14,16,21; FAIL LCD-05 (luminance dropped only -19.8% at 50% brightness, need >= 25%); INCONCLUSIVE LCD-01 (camera chroma), LCD-13 (profile '04DSDH' row not on picker), LCD-19, LCD-26; rest NOT_RUN (not_implemented or lcd_edit_heat off).
+- OT-G06: not run (needs ota_image_path of the running image and bench_test_start does not take it; bench_test_start/ota_matrix paths not exercised).
+- zone 0 autotune (step, duty 0.5): engine aborted in settling at 180 s: "zone 0 is still drifting -0.0179C/s (above 0.0030C/s) -- not settled yet" (zone was cooling from the heat suite). No heat applied.
+- update_check: FAILED http 404 (no release published in budarriola/kilnCtl). Heap was not sampled during it.
+
+After runs: executor idle, link up, no trip, heap_internal min_free 14383 B (floor 8192 ok), uptime 3318 s. Stack worst headroom: backlight_pwm 29.2% (LOW flag, 896 B free), lvgl 30.0%, httpd_worker 32.3%, info_uart_bridge 33.5%, touch_uart_bridge 35.6%; none within 10%. profile_exec_wdt 3880 B free of 6144.
+
+## 2026-10-10 -- spare-relay aux suite (bench2)
+
+Board dev firmware d93cf774a, MCP server fresh at 129586d4f with KILNCTL_AUX_BENCH_CONFIRM=1. Run `20261010T184800Z_aux_bench2` (bench_test_start suite aux), preflight OK (link up, armed, no trip, no crash report).
+
+- AX-C01 PASS (relay 4 aux configure, read-back)
+- AX-C02 PASS (aux on zone-owned relay refused)
+- AX-C03 SKIP (no zone relay_mask writer injected; no narrow tool exists)
+- AX-T01 PASS (rule toggles relay 4, min on/off honoured)
+- AX-K01 PASS (ESP path only; proves nothing about external supply wiring)
+- AX-T02 SKIP (requires --attended; trip-drops-relay case not run)
+- AX-R01 PASS (restore)
+
+Plan step 9 (convert ON_OFF zones to aux) is a one-way owner-offered conversion, not a bench step; not run. End state: idle, link up, armed, no trip; no BENCH_AUX_RULE slot (profiles_list shows only M18C_TEST, B1_THROWAWAY); aux enabled_mask 0.

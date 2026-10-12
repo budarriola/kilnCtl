@@ -46,6 +46,16 @@ bool profiles_http_get(uint8_t id, profile_t *out);
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                         uint8_t *out_warning_count, char *err_msg, size_t err_cap);
 
+/* Same as profiles_http_save(), plus *out_persisted (may be NULL): false when the slot was applied in RAM but
+ * the storage save failed ("applied live, will not survive a reboot"). Callers that discard their only copy of
+ * the data on success (live-edit save_as / overwrite) must check it and keep that copy when false. */
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
+
+/* With out_persisted != NULL and requested_id >= PROFILES_MAX_COUNT (fresh slot), a failed storage save rolls the
+ * new slot back inside save_ex's own critical section, so no phantom RAM-only profile remains (*out_persisted is
+ * false, *out_id still names the rolled-back slot). */
+
 /* Same erase-and-clear profile_delete_post_handler() runs. Returns false
  * (no-op) for an out-of-range or already-unused id. Pure storage, but kept
  * here alongside get/save (rather than only in profiles_http.h) because a
@@ -55,6 +65,40 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
  * a future control/persist caller does not have to reach for the http
  * header for it. */
 bool profiles_http_delete(uint8_t id);
+
+/* Run-start re-check for profile_executor_run() (HTTP input parsing audit L23).
+ * Called with s_exec.lock held, so it is lock-free on purpose: an atomic load
+ * and a RAM bitmap read, never the profiles save lock (save lock ->
+ * s_exec.lock is the established order, cfg_save_lock.h) and never the flash
+ * worker. False when a delete of user slot `id` is in flight, or the slot was
+ * deleted after the caller copied it with profiles_http_get(). Builtin ids are
+ * always runnable (they cannot be deleted). */
+bool profiles_http_slot_runnable(uint8_t id);
+
+/* L23 residual: a slot deleted and re-saved under the same id between the
+ * caller's profiles_http_get() copy and its s_exec.lock section is "used"
+ * again but holds different content. Call profiles_http_slot_rev() BEFORE
+ * profiles_http_get(), then profiles_http_slot_runnable_rev() under s_exec.lock:
+ * it is profiles_http_slot_runnable() plus "the slot generation (a seqlock
+ * counter, not the persisted save revision) is unchanged and even".
+ * Lock-free (atomic load). A spurious refusal (save landed mid-copy) is safe. */
+uint32_t profiles_http_slot_rev(uint8_t id);
+/* Seqlock bracket around every RAM assign of a user slot (call under the save
+ * lock): begin makes the per-slot generation odd, end makes it even again after
+ * the persist attempt, success or failure. profiles_http_slot_rev() is that
+ * generation; an odd or changed value refuses a start. */
+void profiles_slot_gen_begin(uint8_t id);
+void profiles_slot_gen_end(uint8_t id);
+/* Host-test seam: fn(id, is_begin) runs right after each bump; pass NULL to clear. */
+typedef void (*profiles_slot_gen_hook_t)(uint8_t id, bool is_begin);
+void profiles_slot_gen_set_hook_for_test(profiles_slot_gen_hook_t fn);
+/* Host-test hook: force the "boot load finished" flag profiles_http_slot_runnable() checks. */
+bool profiles_http_loaded(void); /* true once the boot load published its slots */
+#ifdef KILNCTL_PROFILES_LOADED_TEST_HOOK
+void profiles_http_test_set_loaded(bool v);
+void profiles_http_test_set_boot_loading(bool v);
+#endif
+bool profiles_http_slot_runnable_rev(uint8_t id, uint32_t captured_rev);
 
 /* ---- Zone -> aux rule retarget (docs/SPARE_RELAY_ONOFF_PLAN.md section 10) ----
  *

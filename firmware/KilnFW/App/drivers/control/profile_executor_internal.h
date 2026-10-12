@@ -592,7 +592,7 @@ typedef struct {
     char     fault_reason[96];
     thermal_guard_trip_t fault_guard;
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 3/4 -- on_off_trigger_decide.h's
+    /* docs/ON_OFF_ZONE.md sec 3/4 -- on_off_trigger_decide.h's
      * feature-local per-zone state (quasi_dwell timers, commanded_on, hold
      * timer). Deliberately NOT read by, or derived from, any other field in
      * this struct (see that header's top comment on why quasi_dwell must
@@ -603,7 +603,7 @@ typedef struct {
      * from anything derived from it. */
     on_off_trigger_state_t on_off_trigger_state;
 
-    /* Plan step 8 (docs/ON_OFF_ZONE_PLAN.md sec 3/6): ACTUATION-layer
+    /* Plan step 8 (docs/ON_OFF_ZONE.md sec 3/6): ACTUATION-layer
      * min_on_s/min_off_s enforcement, deliberately separate state from
      * on_off_trigger_state.commanded_on/held_s above. Requirement: "a
      * decision-core bug cannot chatter a physical relay" -- if
@@ -749,7 +749,7 @@ typedef struct {
     SemaphoreHandle_t lock;
     TaskHandle_t task;
     TaskHandle_t watchdog_task;
-    TickType_t   last_tick_tick; /* updated every control-task iteration, regardless of run state -- guard 9 reads this */
+    volatile TickType_t last_tick_tick; /* updated every control-task iteration, regardless of run state -- guard 9 reads this */
 
     profile_exec_state_t state;
     profile_t profile; /* copy taken at profile_executor_run(); the saved
@@ -763,6 +763,12 @@ typedef struct {
     bool dwelling;
     float target_c;              /* shared setpoint, stepped incrementally each tick */
     uint32_t segment_elapsed_s;  /* shared; only advances while ramp-lock is satisfied */
+    /* Sub-second carry (0..999 ms) behind segment_elapsed_s/total_elapsed_s: the whole-second
+     * fields stay the wire/persist unit, but every tick's measured dt is accumulated in ms so
+     * per-tick rounding no longer drifts them (firing review 2026-10-09 item 3). Not persisted:
+     * a resume loses under 1 s. */
+    uint16_t segment_elapsed_rem_ms;
+    uint16_t total_elapsed_rem_ms;
     TickType_t prev_control_tick; /* for the *measured* dt_s pid.c/heater_output.c want */
 
     /* The rate the profile is COMMANDING the setpoint to move at, degC/s,
@@ -915,7 +921,7 @@ typedef struct {
     uint32_t config_generation;
 
     /* live_profile_generation() as of the last time this run polled the
-     * live-edit working slot (docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section
+     * live-edit working slot (docs/LIVE_PROFILE_EDIT.md pass 1, section
      * 3) -- same one-counter-per-tick poll shape as config_generation just
      * above, so an unedited run pays nothing beyond the comparison. Zeroed by
      * profile_executor_run() like the rest of this struct's per-run state;
@@ -964,6 +970,13 @@ typedef struct {
      * why start forces every claimed aux OFF before the first decision. */
     uint8_t aux_claim_mask;
     bool aux_off_pending;
+    /* Firing review item 4: zone relay bits whose OFF write failed (or whose
+     * mask could not be read). Retried every non-RUNNING tick until a write
+     * lands. */
+    uint8_t zone_off_pending_mask;
+    /* Review-2 MEDIUM-1: cadence latch for the RUNNING-state retry of pending OFF bits. */
+    bool zone_off_pending_retry_seen;
+    TickType_t zone_off_pending_retry_tick;
     struct {
         on_off_trigger_state_t trigger;
         bool actuated_on;
@@ -990,6 +1003,10 @@ typedef struct {
      * exactly that and nothing another caller may have separately asserted. */
     uint32_t global_fault_source; /* 0 = none asserted by this run */
     char     fault_reason[96];
+    /* Safety-link fix batch 2 (MED-1/MED-2): why the executor paused ITSELF
+     * (not an operator pause). Empty for an operator pause. Cleared on
+     * resume/halt/start. Points at string literals only. */
+    char     pause_reason[48];
     thermal_guard_trip_t fault_guard;
 
     /* Warm-start (PROFILES.md, owner request 2026-08-30) -- mirrors
@@ -1174,7 +1191,7 @@ bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bo
                                             bool bypass_hold, uint16_t min_on_s, uint16_t min_off_s,
                                             float dt_s);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 6: whether an on/off zone's already-gated ON
+/* docs/ON_OFF_ZONE.md sec 6: whether an on/off zone's already-gated ON
  * verdict must be suppressed by max_simultaneous_relays THIS tick.
  * relays_on_count is how many relays the tick has already committed to ON
  * before this zone is considered -- the caller seeds it from the (already
@@ -1186,7 +1203,7 @@ bool profile_executor_on_off_actuation_gate(bool *actuated_on, float *held_s, bo
  * logged rather than deferred." */
 bool profile_executor_on_off_cap_denies(uint8_t relays_on_count, uint8_t cap);
 
-/* docs/ON_OFF_ZONE_PLAN.md sec 3/4/6/8 -- the ENTIRE per-zone, per-tick
+/* docs/ON_OFF_ZONE.md sec 3/4/6/8 -- the ENTIRE per-zone, per-tick
  * on/off decision chain as one production function: on_off_trigger_decide()
  * (precedence, hysteresis, quasi-dwell) -> profile_executor_on_off_
  * actuation_gate() (independent actuation-layer min_on_s/min_off_s hold,
@@ -1280,6 +1297,9 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
                                                           float dt_s, bool *bypass_hold_out);
 void force_zone_relay_off(uint8_t zi);
 void force_all_relays_off(void);
+void zone_off_pending_retry(void);
+void zone_off_pending_retry_running(TickType_t now);
+uint8_t exec_io_segment_relay_mask(void);
 /* Spare-relay WP-3. aux_apply_relay() is the aux twin of apply_relay(): same
  * claim-before-gate, same authorized kiln_io_owner write, but gated by the
  * global relay_authority_on_blocked() (an aux has no zone). force_aux_relays_off()
@@ -1296,6 +1316,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);
 void io_seg_start(uint8_t idx, const profile_segment_t *seg);
+void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since);
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);
@@ -1308,6 +1329,9 @@ void io_segs_tick(float dt_s);
 void exec_enter_terminal_state(profile_exec_state_t st);
 bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *detail);
 void guard9_assert_stale_tick_fault(void);
+/* K7 review F5: per-owner tracking for the shared SAFETY_FAULT_SRC_APP link bit (profile_executor.c). */
+extern bool pe_app_owner_foreign;
+bool pe_app_owner_relay_unknown(void);
 void clear_this_runs_faults(void);
 /* Run-START counterpart to clear_this_runs_faults() (run-HALT): releases
  * relay_authority's per-zone latch for every zone this NEW run activates,
@@ -1573,7 +1597,7 @@ void history_unpack(const history_slot_t *slot, profile_history_entry_t *out);
 /* ---- run() feasibility/warm-start helpers (profile_executor_start.c) ----- */
 bool profile_zones_have_ceiling(const profile_t *p, uint8_t *out_missing_zone);
 
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5, sec 3 -- looks up the stored
+/* docs/ON_OFF_ZONE.md plan step 5, sec 3 -- looks up the stored
  * profile_on_off_rule_t (if any) for (zone_index, segment_index) in `p` and
  * translates it into on_off_trigger_decide.h's on_off_trigger_rule_t, the
  * exact shape that module's `.rule` input field expects. Pure function

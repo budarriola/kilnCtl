@@ -132,6 +132,15 @@ _CRASH_UNACK_BODY = json.dumps({
     "crash_uptime_s": 42, "crash_uptime_known": True,
 }).encode("utf-8")
 
+_CRASH_STALE_BODY = json.dumps({
+    "present": True, "acknowledged": False, "exc_cause": 6, "exc_cause_str": "IllegalInstruction",
+    "exc_task": "old_task", "found_on_boot_reset_reason": "UNKNOWN",
+    "backtrace": [], "backtrace_corrupted": False,
+    "dump_id": 1, "fw_build": "unknown (dump from other image)",
+    "crash_uptime_s": 0, "crash_uptime_known": False,
+    "image_match": "mismatch", "stale_image": True, "dump_elf_sha": "abcdef012",
+}).encode("utf-8")
+
 _CRASH_NONE_BODY = json.dumps({"present": False}).encode("utf-8")
 
 
@@ -172,6 +181,20 @@ class UnacknowledgedCrashSurfacingTest(unittest.TestCase):
         self.assertIn("Sep 22 2026 09:00:00", result)
         self.assertIn("crash_uptime_s=42", result)
         self.assertIn("dump_id=3735928559", result)
+
+    def test_stale_image_dump_says_so_plainly(self):
+        from kilnctrl import mcp_server as m
+
+        responses = {
+            "/api/status": json.dumps(_sample_status(reset_reason="power-on")).encode(),
+            "/api/crash_report": _CRASH_STALE_BODY,
+        }
+        with unittest.mock.patch("urllib.request.urlopen", side_effect=_urlopen_router(responses)):
+            result = m.get_heap_status(host="10.0.0.5")
+        self.assertIn("STALE IMAGE", result)
+        self.assertIn("abcdef012", result)
+        self.assertIn("not a crash of the running firmware", result)
+        self.assertIn("UNACKNOWLEDGED CRASH REPORT", result)
 
     def test_clean_board_reports_no_crash(self):
         """PROOF a clean board passes: reset_reason is a normal boot reason

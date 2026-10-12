@@ -31,7 +31,7 @@ menu "KilnCtrl Application"
         bool "Mount the `logs` partition as LittleFS instead of SPIFFS"
         default n
         help
-            docs/FILESYSTEM_PLAN.md step 2. When off (default), log_store_
+            docs/FILESYSTEM.md step 2. When off (default), log_store_
             mount.c mounts the `logs` partition with esp_vfs_spiffs_register()
             as before -- the bench keeps SPIFFS until step 3 flips this
             default and step 4 changes partitions.csv's `logs` subtype from

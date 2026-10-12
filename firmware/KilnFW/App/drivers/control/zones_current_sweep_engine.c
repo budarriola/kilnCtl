@@ -275,7 +275,7 @@ bool zone_sweep_derive_ct_channel(const float *per_ch_a, uint8_t *out_ch)
  * provenance. */
 /* ZONE_SWEEP_NORMAL_NOISE_FLOOR_REF_K_CT (1.0f): see ct_noise_floor.h. */
 
-/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md)
+/* ---- CT attribution verification (docs/CT_ATTRIBUTION_VERIFICATION.md)
  *
  * The verdict is deliberately SEPARATE from zone_sweep_derive_ct_channel()
  * above. That function's job is coarse and unchanged: "did anything conduct,
@@ -711,6 +711,8 @@ const char *zone_sweep_refusal_str(zone_sweep_refusal_t r)
         return "a backup restore is in progress; wait for it to finish before starting";
     case ZONE_SWEEP_REFUSE_CONFIG_WRITER_BUSY:
         return "another commissioning operation is running; wait for it to finish before starting";
+    case ZONE_SWEEP_REFUSE_FACTORY_RESET:
+        return "a factory reset is in progress -- the controller reboots when it finishes";
     default: return "unknown refusal";
     }
 }
@@ -1303,7 +1305,7 @@ void zone_sweep_run_all_zones(uint8_t zones_total, const zone_sweep_zone_deps_t 
                 snprintf(out->reason, sizeof(out->reason),
                          "zone %u energize refused: firmware update in progress", zi);
             } else if (refused_result == KILN_IO_OWNER_RELAY_ERR_RUNNING) {
-                /* docs/SYSTEM_MODE_GATE_PLAN.md review, 2026-09-25: not
+                /* docs/SYSTEM_MODE_GATE.md review, 2026-09-25: not
                  * expected in practice -- relay_authority_heat_sweep_claim_
                  * begin() already refuses to start a sweep while a profile/
                  * autotune run holds the shared heat claim (B2's forward

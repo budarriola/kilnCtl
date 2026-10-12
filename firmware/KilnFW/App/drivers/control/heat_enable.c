@@ -65,6 +65,12 @@ static const char *TAG = "heat_enable";
  * remainder. */
 #define HE_FLUSH_MAX_ATTEMPTS 20
 #define HE_FLUSH_RETRY_MS     10
+/* F1: K4 must read closed within this long of an ARMED, fresh status, else re-request. */
+#define HE_K4_CONFIRM_MS      3000u
+#define HE_K4_MAX_RESENDS     4
+/* Safety-link fix batch 2, MED-1: a Pico reboot is classified from the DIAG
+ * frame of the NEW boot. Until one arrives the cause is undecided and heat is
+ * withheld (no timeout fallback: a late fatal DIAG must still hold). */
 
 typedef struct {
     SemaphoreHandle_t lock;
@@ -74,6 +80,29 @@ typedef struct {
     bool              pending;     /* someone holds a claim but the request did not land */
     uint32_t          enable_sends;
     uint32_t          release_sends;
+    /* F1 (safety link review 2026-10-09): K4 reconcile. REQUEST_ENABLE is a
+     * fire-and-forget broadcast, so `granted` only means the local UART took
+     * the bytes. These fields compare it with the Pico's reported K4 state. */
+    uint32_t          k4_open_since_ms;   /* 0 = no mismatch being timed */
+    uint32_t          k4_next_resend_ms;
+    uint8_t           k4_resends;         /* re-requests spent on this episode */
+    bool              k4_unconfirmed;     /* retries exhausted, Pico still reports K4 open */
+    /* Safety-link fix batch 2, MED-1: Pico reboot handling. */
+    bool              reboot_seq_known;      /* seen_reboot_seq is valid */
+    uint32_t          seen_reboot_seq;       /* safety_link pico_reboot_seq last observed */
+    bool              reboot_classify_pending; /* reboot seen with a claim held, cause not yet known */
+    uint32_t          reboot_classify_since_ms;
+    bool              reboot_hold;           /* fatal-cause reboot: do NOT re-request heat */
+    bool              last_pico_tripped;     /* last fresh DIAG said TRIPPED (T3: the Pico's trip latch
+                                              * does not survive a non-watchdog reboot) */
+    bool              reboot_was_tripped;    /* the reboot being classified followed a TRIPPED DIAG */
+    /* Firing audit 2026-10-10 MED-5: the reboot VERDICT outlives the claim. reboot_classify_pending is
+     * per-claim (cleared by the last release); these two are per-reboot-seq. verdict_pending: a reboot
+     * was seen and no DIAG of the new boot has arrived yet, claim or not. fatal_latched: that DIAG
+     * arrived while nobody held a claim and reported a fatal cause; the next acquire starts in
+     * reboot_hold. Cleared only when an acquire consumes it, or by init (never by a newer reboot). */
+    bool              reboot_verdict_pending;
+    bool              reboot_fatal_latched;
     bool              warned_pending; /* throttles the reconcile-retry warning */
     bool              release_pending; /* a REQUEST_ENABLE(false) is owed to the wire -- set the
                                          * instant the last claimant lets go, cleared ONLY once a
@@ -146,6 +175,14 @@ static void he_unlock(bool taken)
     }
 }
 
+static void he_k4_reset_locked(void)
+{
+    s_he.k4_open_since_ms = 0u;
+    s_he.k4_next_resend_ms = 0u;
+    s_he.k4_resends = 0u;
+    s_he.k4_unconfirmed = false;
+}
+
 void heat_enable_init(SafetyLinkClass *safety_or_null)
 {
     if (!s_he.lock) {
@@ -165,6 +202,16 @@ void heat_enable_init(SafetyLinkClass *safety_or_null)
     s_he.warned_pending = false;
     s_he.release_pending = false;
     s_he.release_inflight = false;
+    he_k4_reset_locked();
+    s_he.reboot_seq_known = false;
+    s_he.seen_reboot_seq = 0u;
+    s_he.reboot_classify_pending = false;
+    s_he.reboot_classify_since_ms = 0u;
+    s_he.reboot_hold = false;
+    s_he.last_pico_tripped = false;
+    s_he.reboot_was_tripped = false;
+    s_he.reboot_verdict_pending = false;
+    s_he.reboot_fatal_latched = false;
     for (unsigned i = 0; i < (unsigned)HEAT_ENABLE_CLAIMANT_COUNT; i++) {
         s_he.release_epoch[i] = 0u;
     }
@@ -271,7 +318,17 @@ static bool send_enable(const char *why)
 
     bool taken = he_lock();
     bool warn_failure = false;
-    if (err == ESP_OK) {
+    if (err == ESP_OK && (s_he.reboot_hold || s_he.reboot_classify_pending)) {
+        /* SL3-R2 A3: also covers a reboot noticed (classification pending) while this send was in flight.
+         * Review-2 LOW-1: a fatal-reboot hold was set while this send was in flight; the Pico now holds
+         * an enable we must not keep. Record nothing as granted and owe the wire a release. */
+        s_he.granted = false;
+        s_he.pending = false;
+        s_he.warned_pending = false;
+        s_he.release_pending = true;
+        s_he.enable_sends++;
+        ESP_LOGW(TAG, "heat-enable request (%s) landed under a reboot hold -- release queued", why);
+    } else if (err == ESP_OK) {
         s_he.granted = true;
         s_he.pending = false;
         s_he.warned_pending = false;
@@ -402,8 +459,28 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
     bool taken = he_lock();
     uint32_t now_epoch = s_he.release_epoch[who];
     bool stale = (now_epoch != epoch);
+    bool withheld = false;
     if (!stale) {
+        bool was_empty = (s_he.held_mask == 0u);
         s_he.held_mask |= bit;
+        if (was_empty) {
+            /* MED-5: a verdict that was pending (or fatal) when the previous claim ended is
+             * re-armed for this one, so resume/start cannot launder an undecided reboot. */
+            if (s_he.reboot_verdict_pending) {
+                s_he.reboot_classify_pending = true;
+                if (s_he.reboot_classify_since_ms == 0u) {
+                    s_he.reboot_classify_since_ms = 1u;
+                }
+            }
+            if (s_he.reboot_fatal_latched) {
+                s_he.reboot_fatal_latched = false;
+                s_he.reboot_hold = true;
+            }
+        }
+        withheld = s_he.reboot_classify_pending || s_he.reboot_hold;
+        if (withheld && !s_he.granted) {
+            s_he.pending = true; /* reconcile re-requests once the verdict is benign */
+        }
     }
     bool already_granted = s_he.granted;
     he_unlock(taken);
@@ -423,6 +500,11 @@ bool heat_enable_acquire_since(heat_enable_claimant_t who, uint32_t epoch)
         return false;
     }
 
+    if (withheld && !already_granted) {
+        ESP_LOGW(TAG, "heat-enable acquire (%s) WITHHELD: Pico reboot verdict pending or fatal",
+                 who == HEAT_ENABLE_CLAIMANT_PROFILE ? "firing" : "autotune");
+        return false;
+    }
     if (already_granted) {
         /* Nothing to send: the request is standing. This is the branch that
          * keeps a control loop calling acquire() every tick from putting a
@@ -489,6 +571,11 @@ static void he_release_common(heat_enable_claimant_t who, uint32_t bit, bool sto
         s_he.granted = false;
         s_he.pending = false;
         s_he.warned_pending = false;
+        he_k4_reset_locked();
+        s_he.reboot_classify_pending = false;
+        s_he.reboot_hold = false;
+        /* reboot_verdict_pending / reboot_fatal_latched / reboot_was_tripped deliberately
+         * survive (MED-5, review saftyfx6 F8). */
         if (had_request) {
             s_he.release_pending = true;
         }
@@ -630,7 +717,9 @@ bool heat_enable_is_held(heat_enable_claimant_t who)
 bool heat_enable_is_granted(void)
 {
     bool taken = he_lock();
-    bool granted = s_he.granted && s_he.held_mask != 0u;
+    /* Never claim heat is enabled while the Pico reports K4 open past the
+     * bounded re-request budget (F1). */
+    bool granted = s_he.granted && s_he.held_mask != 0u && !s_he.k4_unconfirmed;
     he_unlock(taken);
     return granted;
 }
@@ -638,9 +727,195 @@ bool heat_enable_is_granted(void)
 bool heat_enable_retry_pending(void)
 {
     bool taken = he_lock();
-    bool pending = s_he.pending && s_he.held_mask != 0u;
+    bool pending = (s_he.pending || s_he.k4_unconfirmed) && s_he.held_mask != 0u;
     he_unlock(taken);
     return pending;
+}
+
+bool heat_enable_grant_unconfirmed(void)
+{
+    bool taken = he_lock();
+    bool u = s_he.k4_unconfirmed && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return u;
+}
+
+void heat_enable_note_pico_boot(uint32_t reboot_seq, bool diag_since_reboot, uint8_t boot_reason,
+                                uint32_t now_ms)
+{
+    bool taken = he_lock();
+    bool log_hold = false;
+    bool log_benign = false;
+    bool log_lost_trip = false;
+    bool log_claimless_lost_trip = false;
+    if (!s_he.reboot_seq_known) {
+        s_he.reboot_seq_known = true;
+        s_he.seen_reboot_seq = reboot_seq;
+    } else if (reboot_seq != s_he.seen_reboot_seq) {
+        s_he.seen_reboot_seq = reboot_seq;
+        /* The new boot starts a new episode: counters from the old boot say
+         * nothing about it (reset-one-side class: the Pico side restarted). */
+        he_k4_reset_locked();
+        /* Review saftyfx6 F3/F8: snapshot the TRIPPED state on EVERY reboot, claim or not, and
+         * OR it into a still-unresolved earlier snapshot (a second reboot before the first
+         * boot's DIAG, with an INIT-substituted last_pico_tripped, must not erase it). Cleared
+         * only when a verdict resolves, never by a claim release. */
+        s_he.reboot_was_tripped = (s_he.reboot_verdict_pending && s_he.reboot_was_tripped) ||
+                                  s_he.last_pico_tripped;
+        s_he.reboot_verdict_pending = true;  /* MED-5: survives release/pause */
+        /* Firing audit 2 MED-1: an unconsumed fatal_latched is NOT downgraded by a newer reboot (a
+         * double count of one reboot, or a fatal reboot followed by a benign one, must not erase it);
+         * only an acquire consumes it (heat_enable_acquire) or init clears it. */
+        s_he.reboot_classify_since_ms = now_ms ? now_ms : 1u;
+        if (s_he.held_mask != 0u) {
+            s_he.reboot_classify_pending = true;
+        }
+    }
+    if (s_he.held_mask == 0u) {
+        s_he.reboot_classify_pending = false;
+        s_he.reboot_hold = false;
+        if (s_he.reboot_verdict_pending && diag_since_reboot) {
+            const uint8_t fatal_u = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
+                                    SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
+                                    SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
+                                    SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
+            s_he.reboot_verdict_pending = false;
+            log_claimless_lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal_u) == 0u;
+            s_he.reboot_fatal_latched = (boot_reason & fatal_u) != 0u || s_he.reboot_was_tripped ||
+                                          s_he.reboot_fatal_latched;
+            s_he.reboot_was_tripped = false;
+        }
+    } else if (s_he.reboot_classify_pending) {
+        if (diag_since_reboot) {
+            s_he.reboot_classify_pending = false;
+            s_he.reboot_verdict_pending = false;
+            const uint8_t fatal = SAFETY_LINK_DIAG_BOOT_WATCHDOG | SAFETY_LINK_DIAG_BOOT_BROWNOUT |
+                                  SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW |
+                                  SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED |
+                                  SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED;
+            /* T3 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): the Pico's trip latch is RAM-only
+             * and does not survive a non-watchdog reset, so a reboot that followed a
+             * TRIPPED DIAG is treated as fatal whatever its boot reason says: the
+             * latched trip was lost, not cleared by an operator. Withholds heat only. */
+            bool lost_trip = s_he.reboot_was_tripped && (boot_reason & fatal) == 0u;
+            s_he.reboot_was_tripped = false;
+            if ((boot_reason & fatal) != 0u || lost_trip) {
+                s_he.reboot_hold = true;
+                log_lost_trip = lost_trip;
+                /* Withdraw any queued or standing re-request. K4 stays open. */
+                if (s_he.granted || s_he.pending) {
+                    /* A false reboot detection must not leave the Pico grant standing:
+                     * owe the wire a REQUEST_ENABLE(false). */
+                    s_he.release_pending = true;
+                }
+                s_he.granted = false;
+                s_he.pending = false;
+                s_he.warned_pending = false;
+                log_hold = true;
+            } else {
+                log_benign = true;
+            }
+        }
+        /* No timeout fallback (Opus review MED): until a DIAG of the NEW boot arrives the
+         * cause is unknown, and a late WATCHDOG/BROWNOUT DIAG must still hold. Staying
+         * undecided only withholds heat (fail safe); the profile executor shows the
+         * condition and the operator resumes or stops. */
+    }
+    he_unlock(taken);
+    if (log_claimless_lost_trip) {
+        ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x), no heat claim held "
+                      "-- latching the reboot fatal; heat stays withheld until an operator clears it",
+                 (unsigned)boot_reason);
+    }
+    if (log_hold && log_lost_trip) {
+        ESP_LOGE(TAG, "Pico rebooted after a TRIPPED DIAG (trip latch lost, boot_reason 0x%02x) during a "
+                      "heat claim -- NOT re-requesting heat; K4 stays open until an operator resumes",
+                 (unsigned)boot_reason);
+    } else if (log_hold) {
+        ESP_LOGE(TAG, "Pico rebooted with a fatal cause (boot_reason 0x%02x) during a heat claim -- "
+                      "NOT re-requesting heat; K4 stays open until an operator resumes",
+                 (unsigned)boot_reason);
+    }
+    if (log_benign) {
+        /* Owner decision 2026-10-10: a benign Pico reboot (power-on / unknown
+         * cause) mid-firing auto-resumes heat -- F1 re-requests once the Pico is
+         * ARMED. A fatal cause (handled above) pauses instead. */
+        ESP_LOGW(TAG, "Pico rebooted during a heat claim (benign cause) -- F1 will re-request heat");
+    }
+}
+
+bool heat_enable_reboot_undecided(void)
+{
+    bool taken = he_lock();
+    bool u = s_he.reboot_classify_pending && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return u;
+}
+
+bool heat_enable_reboot_hold(void)
+{
+    bool taken = he_lock();
+    bool h = s_he.reboot_hold && s_he.held_mask != 0u;
+    he_unlock(taken);
+    return h;
+}
+
+void heat_enable_note_pico_state(bool fresh, uint8_t diag_state, bool k4_closed, uint32_t now_ms)
+{
+    bool taken = he_lock();
+    bool log_giveup = false;
+    bool log_resend = false;
+    bool armed_or_warn = diag_state == SAFETY_LINK_DIAG_STATE_ARMED ||
+                         diag_state == SAFETY_LINK_DIAG_STATE_WARN;
+    if (fresh) {
+        s_he.last_pico_tripped = (diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED);
+    }
+    if (s_he.held_mask == 0u) {
+        he_k4_reset_locked();
+    } else if (s_he.reboot_hold) {
+        /* MED-1: a fatal-cause Pico reboot -- never re-request; nothing to time. */
+        s_he.k4_open_since_ms = 0u;
+    } else if (!s_he.granted) {
+        /* Nothing to compare (a send or a re-request is outstanding). */
+    } else if (!fresh) {
+        /* Stale: keep the episode counters, just stop timing. */
+        s_he.k4_open_since_ms = 0u;
+    } else if (!armed_or_warn) {
+        /* GRACE/INIT/TRIPPED: K4 cannot be expected closed, so do not time it
+         * AND (LOW-1) end the episode: the retry budget and the unconfirmed
+         * latch belong to one ARMED stretch, so they restart with the next. A
+         * GRACE->ARMED transition restarts the clock below. */
+        he_k4_reset_locked();
+    } else if (k4_closed) {
+        he_k4_reset_locked();
+    } else if (s_he.k4_open_since_ms == 0u) {
+        s_he.k4_open_since_ms = now_ms ? now_ms : 1u;
+        s_he.k4_next_resend_ms = s_he.k4_open_since_ms + HE_K4_CONFIRM_MS;
+    } else if ((int32_t)(now_ms - s_he.k4_next_resend_ms) >= 0 && !s_he.k4_unconfirmed) {
+        if (s_he.k4_resends >= HE_K4_MAX_RESENDS) {
+            s_he.k4_unconfirmed = true;
+            log_giveup = true;
+        } else {
+            /* Exponential backoff: first re-request 3 s after K4 first read
+             * open, then 6, 12, 24 and 48 s between the following checks. */
+            s_he.k4_resends++;
+            s_he.k4_next_resend_ms = now_ms + (HE_K4_CONFIRM_MS << s_he.k4_resends);
+            s_he.granted = false;  /* not claimed until the re-request lands */
+            s_he.pending = true;
+            s_he.warned_pending = false;
+            log_resend = true;
+        }
+    }
+    uint8_t n = s_he.k4_resends;
+    he_unlock(taken);
+    if (log_resend) {
+        ESP_LOGW(TAG, "Pico is ARMED but reports K4 open while a heat grant is held -- "
+                      "re-requesting (attempt %u of %d)", (unsigned)n, HE_K4_MAX_RESENDS);
+    }
+    if (log_giveup) {
+        ESP_LOGE(TAG, "heat grant could not be obtained: Pico ARMED, K4 still open after %d "
+                      "re-requests -- heat is NOT enabled (reported as not granted)", HE_K4_MAX_RESENDS);
+    }
 }
 
 void heat_enable_reconcile(void)
@@ -671,7 +946,8 @@ void heat_enable_reconcile(void)
      * 2026-09-15.md finding HIGH-2. */
 
     bool taken = he_lock();
-    bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted;
+    bool want_retry = s_he.pending && s_he.held_mask != 0u && !s_he.granted &&
+                      !s_he.reboot_hold && !s_he.reboot_classify_pending;
     he_unlock(taken);
 
     if (!want_retry) {

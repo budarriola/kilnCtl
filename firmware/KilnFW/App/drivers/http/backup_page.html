@@ -110,8 +110,9 @@
   individually on that page instead, if you only need one. The web login
   password is never included, on either side.</p>
   <div class="action-row">
-    <a class="button" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
+    <a class="button" id="backupDownload" href="/api/backup/export" download="kilnctl_backup.json">Download backup</a>
   </div>
+  <p id="downloadStatus"></p>
 </div>
 
 <div class="card">
@@ -157,6 +158,33 @@
   <p id="restoreStatus"></p>
 </div>
 
+<script>
+/* L-15: download via fetch + blob so an expired session shows the login modal / an error instead
+ * of saving the 401 text as kilnctl_backup.json. The href stays as the no-JS fallback. */
+(function () {
+  var a = document.getElementById('backupDownload');
+  var st = document.getElementById('downloadStatus');
+  if (!a) return;
+  a.addEventListener('click', function (ev) {
+    ev.preventDefault();
+    st.textContent = 'Preparing backup...';
+    fetch('/api/backup/export').then(function (r) {
+      if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+      return r.blob();
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      var l = document.createElement('a');
+      l.href = url; l.download = 'kilnctl_backup.json';
+      document.body.appendChild(l); l.click(); l.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      st.textContent = 'Downloaded.';
+    }).catch(function (e) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) { st.textContent = ''; return; }
+      st.textContent = 'Backup download failed: ' + (e && e.message ? e.message : 'error');
+    });
+  });
+})();
+</script>
 <script>
 (function () {
   var btn = document.getElementById('themeBtn');
@@ -238,16 +266,21 @@ document.getElementById('restoreBtn').addEventListener('click', function () {
           headers: headers,
           body: body,
         }).then(function (r) {
-          return r.text().then(function (t) { return { ok: r.ok, text: t }; });
+          var partial = !!(r.headers && r.headers.get && r.headers.get('X-Kiln-Partial-Write') === '1');
+          return r.text().then(function (t) { return { ok: r.ok, status: r.status, text: t, partial: partial }; });
         }).then(function (res) {
-          status.textContent = res.ok ? 'Restore complete.' : ('Restore refused: ' + res.text);
+          status.textContent = res.ok ? 'Restore complete.' : (res.status === 500
+            ? (res.partial
+              ? ('Restore failed partway -- some settings may have changed: ' + res.text)
+              : ('Restore failed before anything was written (board error): ' + res.text))
+            : ('Restore refused: ' + res.text));
         }).catch(function (authErr) {
           // Quiet note, never a stale "Uploading...".
           if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) {
             status.textContent = 'Sign-in cancelled -- nothing was restored.';
             return;
           }
-          status.textContent = 'Upload failed -- check the connection and try again.';
+          status.textContent = 'Connection lost -- the restore result is unknown (it may have been applied in full or in part). Check the settings, then re-run the same file if unsure.';
         });
       });
     }).catch(function (authErr) {

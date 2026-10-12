@@ -1,4 +1,5 @@
 #include "setup_wizard_progress.h"
+#include "cfgfs_file_validators.h"
 
 #include <stddef.h>
 #include <stdlib.h>
@@ -11,7 +12,9 @@
 #include "hal_time.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
+#include "http_form.h" /* http_form_find_field() -- note_from_form */
 
 static const char *TAG = "setup_wiz_progress";
 
@@ -467,7 +470,7 @@ static void steps_to_blob(setup_wizard_progress_blob_t *blob)
     }
 }
 
-static bool cfg_blob_validate(const void *bytes, size_t len)
+bool setup_wizard_progress_file_validate(const void *bytes, size_t len)
 {
     if (!bytes || len != sizeof(setup_wizard_progress_blob_t)) {
         return false;
@@ -498,7 +501,7 @@ esp_err_t setup_wizard_progress_start(void)
     uint32_t rev = 0;
     bool used_file = false;
     if (pref_cfg_fs_resolve(SETUP_WIZARD_PROGRESS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, 0,
-                            cfg_blob_validate, &resolved, &rev, &used_file)) {
+                            setup_wizard_progress_file_validate, &resolved, &rev, &used_file)) {
         if (used_file) {
             adopt_v5(&resolved);
         }
@@ -526,7 +529,7 @@ void setup_wizard_progress_get_dualwrite_status(bool *file_valid, uint32_t *file
     bool n_valid = false;
     bool content_equal = false;
     if (w != NULL) {
-        pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(w->f), cfg_blob_validate, &w->f, &f_rev,
+        pref_cfg_fs_load_raw_quiet(SETUP_WIZARD_PROGRESS_FILE_PATH, sizeof(w->f), setup_wizard_progress_file_validate, &w->f, &f_rev,
                                    &f_valid);
         memset(&w->n, 0, sizeof(w->n));
         n_valid = nvs_v5_read_quiet(&w->n, &w->raw);
@@ -572,12 +575,49 @@ static esp_err_t persist_all(void)
     setup_wizard_progress_blob_t blob;
     steps_to_blob(&blob);
     uint32_t new_rev = s_rev + 1;
-    esp_err_t err = pref_cfg_fs_commit(SETUP_WIZARD_PROGRESS_FILE_PATH, &blob, sizeof(blob), new_rev,
-                                       "setup wizard progress");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(SETUP_WIZARD_PROGRESS_FILE_PATH, &blob, sizeof(blob), new_rev,
+                                 "setup wizard progress");
+    }
     if (err == ESP_OK) {
         s_rev = new_rev;
     }
     return err;
+}
+
+/* Bytes to keep when cutting `full_len` bytes of `s` down to `n`: backs up
+ * over UTF-8 continuation bytes so a multi-byte sequence is never split. */
+static size_t utf8_safe_len(const char *s, size_t n, size_t full_len)
+{
+    if (n >= full_len) {
+        return full_len;
+    }
+    while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80) {
+        n--;
+    }
+    return n;
+}
+
+bool setup_wizard_progress_note_from_form(const char *body, char *out, size_t out_cap)
+{
+    char tmp[SETUP_WIZARD_NOTE_FORM_MAX];
+    int len = http_form_find_field(body, "note", tmp, sizeof(tmp));
+    if (len == -2) {
+        return false; /* only when the whole body cap is exceeded; the caller bounds the body */
+    }
+    if (out_cap == 0) {
+        return false;
+    }
+    out[0] = '\0';
+    if (len > 0) {
+        size_t n = utf8_safe_len(tmp, out_cap - 1, (size_t)len);
+        memcpy(out, tmp, n);
+        out[n] = '\0';
+    }
+    return true;
 }
 
 esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_state_t state, const char *note)
@@ -586,14 +626,22 @@ esp_err_t setup_wizard_progress_set_step(uint8_t step_index, setup_wizard_step_s
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* LOW-3 (review 10): refuse before mutating RAM while a factory reset is in flight, so a reset that is
+     * then refused at its re-check (nothing erased, no reboot) leaves live == stored. */
+    if (relay_authority_reset_in_flight()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
     /* In-RAM truth first -- live immediately regardless of whether the cfg
      * write below succeeds, same ordering as display_power_cfg_set()/
      * touch_cal_store_save(). */
     s_steps[step_index].state = state;
     s_steps[step_index].ts = (uint32_t)(hal_time_now_us() / 1000000ULL);
     if (note && note[0] != '\0') {
-        strncpy(s_steps[step_index].note, note, SETUP_WIZARD_NOTE_MAX - 1);
-        s_steps[step_index].note[SETUP_WIZARD_NOTE_MAX - 1] = '\0';
+        size_t n = strnlen(note, SETUP_WIZARD_NOTE_MAX - 1);
+        n = utf8_safe_len(note, n, strlen(note));
+        memset(s_steps[step_index].note, 0, SETUP_WIZARD_NOTE_MAX);
+        memcpy(s_steps[step_index].note, note, n);
     } else {
         s_steps[step_index].note[0] = '\0';
     }

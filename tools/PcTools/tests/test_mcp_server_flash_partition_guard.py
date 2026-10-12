@@ -4,7 +4,7 @@ the refuse-rather-than-guess guard for the app-image write target.
 
 2026-09-17 fix: flash_firmware() used to write the app image to a hardcoded
 offset (APP_FLASH_OFFSET). That offset silently went wrong when
-docs/OTA_SINGLE_SLOT_PLAN.md's partitions.csv redesign landed (the app
+docs/OTA_SINGLE_SLOT.md's partitions.csv redesign landed (the app
 image ended up written into the small `recovery` partition and overflowed
 it). The fix resolves the write target dynamically from partitions.csv
 (`_resolve_app_flash_target()`) and matches the board's own live table BY
@@ -54,7 +54,7 @@ def _fake_partitions_fn(entries):
     return _fn
 
 
-# The CURRENT single-slot table (docs/OTA_SINGLE_SLOT_PLAN.md step 3):
+# The CURRENT single-slot table (docs/OTA_SINGLE_SLOT.md step 3):
 # app/ota_0 named "app" at 0x210000, matching the resolved target.
 _CURRENT_TABLE_MATCHING = [
     ("nvs", 0x01, 0x02, 0x9000, 0x6000),

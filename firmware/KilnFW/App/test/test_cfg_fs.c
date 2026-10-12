@@ -1,5 +1,5 @@
 // Host tests for cfg_fs.c -- the foundation storage module for the `cfg`
-// LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md sections 3/5, step
+// LittleFS partition (docs/FILESYSTEM_USER_DATA.md sections 3/5, step
 // 1-2). Same reasoning as test_log_store.c: cfg_fs.c is pure stdio with no
 // ESP-IDF/FreeRTOS dependency, so these tests run it against a REAL temp
 // directory on disk -- no filesystem stub needed, and this is exactly the
@@ -28,6 +28,7 @@
 #include "test_common.h"
 
 #include "../drivers/persist/cfg_fs.h"
+#include "../drivers/persist/kiln_cfg_store_cfg_fs.h"
 
 /* Wipes and recreates a scratch base directory (plus its .tmp/ subdir, plus
  * one optional data subdirectory) before a test case starts -- same
@@ -161,7 +162,7 @@ static void test_overwrite_replaces_old_content(void)
 //    still read back correctly, byte for byte, and cfg_fs_init()'s .tmp/
 //    sweep must remove the orphaned temp file and report it reaped.
 //
-//    This is the test the FILESYSTEM_USER_DATA_PLAN.md task explicitly
+//    This is the test the FILESYSTEM_USER_DATA.md task explicitly
 //    calls out to run against a DELIBERATELY BROKEN cfg_fs_write_atomic()
 //    (see the accompanying negative-test note in the commit/report) --
 //    the assertions below are written against the real production
@@ -486,8 +487,41 @@ static void test_write_atomic_rejections_leave_existing_file_untouched(void)
                "exactly one file exists -- no rejected write created or orphaned anything");
 }
 
+static bool s_tcf_refuse = false;
+static bool tcf_refuse_hook(void) { return s_tcf_refuse; }
+
+// MED-1 (rstfence review): cfg_fs_write_atomic() itself honours the factory-reset fence, so the raw writers
+// (kiln_cfg_store, firing_stats, the cfgfs restore job) cannot persist while a reset runs.
+static void test_write_atomic_refused_by_reset_fence(void)
+{
+    TEST_SECTION("cfg_fs: write_atomic() refuses under the factory-reset fence (and the kiln_cfg_store writer too)");
+    const char *base = "cfg_fs_test_fence";
+    remove("cfg_fs_test_fence/fence.json");
+    reset_scratch(base, NULL);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "init succeeds");
+    cfg_fs_set_write_refuse_hook(tcf_refuse_hook);
+
+    s_tcf_refuse = true;
+    TEST_CHECK(cfg_fs_write_atomic("fence.json", "abc", 3) == ESP_ERR_INVALID_STATE, "refused under the fence");
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists("fence.json", &exists) == ESP_OK && !exists, "nothing written");
+    kiln_cfg_store_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(kiln_cfg_store_cfg_fs_get_write_fn()("kcfg_fence.dat", "x", 1) == ESP_ERR_INVALID_STATE,
+               "kiln_cfg_store's default writer is refused too");
+    TEST_CHECK(cfg_fs_exists("kcfg_fence.dat", &exists) == ESP_OK && !exists, "no kiln_cfg file written");
+
+    s_tcf_refuse = false;
+    TEST_CHECK(cfg_fs_write_atomic("fence.json", "abc", 3) == ESP_OK, "allowed with the fence down (reset job exempt)");
+    cfg_fs_set_write_refuse_hook(NULL);
+    cfg_fs_deinit();
+    remove("cfg_fs_test_fence/fence.json");
+    TCF_RMDIR("cfg_fs_test_fence/.tmp");
+    TCF_RMDIR("cfg_fs_test_fence");
+}
+
 void run_test_cfg_fs(void)
 {
+    test_write_atomic_refused_by_reset_fence();
     test_mount_and_round_trip();
     test_overwrite_replaces_old_content();
     test_interrupted_write_never_corrupts_old_file();

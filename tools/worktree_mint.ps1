@@ -46,7 +46,9 @@
 #       Removes a worktree cleanly (git worktree remove), but refuses if it
 #       has uncommitted changes (tracked modifications, staged changes, or
 #       untracked files) -- exactly the situation where a careless remove
-#       would silently discard real work.  Pass -Force together with
+#       would silently discard real work.
+#   -ForceUnverifiable: when git rev-list itself fails (corrupt ref), proceed anyway with a loud
+#       warning. Only pass it after reading git's message in the REFUSED line.  Pass -Force together with
 #       -Remove only when you have already confirmed (by hand) that the
 #       dirty state is disposable; the script never assumes that on its own.
 #
@@ -65,6 +67,7 @@ param(
     [switch]$Remove,
     [string]$Path,
     [switch]$Force,
+    [switch]$ForceUnverifiable,
     [string]$WtRoot = "C:\wt",
     [switch]$RunSetup,
     [switch]$NoSubmodules,
@@ -126,9 +129,25 @@ if ($Remove) {
         exit 1
     }
     $repoRoot = Get-RepoRoot
-    $full = [System.IO.Path]::GetFullPath($Path)
-    if (-not (Test-Path $full)) {
-        Write-Host "ERROR: '$full' does not exist -- nothing to remove." -ForegroundColor Red
+    # F14: resolve against PowerShell's location (not the process cwd), literal paths only.
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Host "ERROR: '$Path' does not exist -- nothing to remove." -ForegroundColor Red
+        exit 1
+    }
+    $full = (Resolve-Path -LiteralPath $Path).ProviderPath.TrimEnd('\')
+    # F14: git must confirm this is a LINKED worktree (not the main tree) before anything is touched.
+    $isLinked = $false
+    $wtLines = git -C $repoRoot worktree list --porcelain 2>$null
+    $idx = 0
+    foreach ($ln in $wtLines) {
+        if ($ln -like 'worktree *') {
+            $wp = ($ln.Substring(9) -replace '/', '\').TrimEnd('\')
+            if ($idx -gt 0 -and [string]::Equals($wp, $full, [StringComparison]::OrdinalIgnoreCase)) { $isLinked = $true }
+            $idx++
+        }
+    }
+    if (-not $isLinked) {
+        Write-Host "ERROR: '$full' is not a linked worktree of this repository (git worktree list); refusing." -ForegroundColor Red
         exit 1
     }
 
@@ -148,6 +167,74 @@ if ($Remove) {
     if ($porcelain -and $Force) {
         Write-Host "WARNING: removing '$full' with uncommitted changes present (-Force):" -ForegroundColor Yellow
         Write-Host $porcelain
+    }
+
+    # F4: a detached worktree's unlanded commits die with its reflog. Refuse unless -Force.
+    $unlanded = @()
+    git -C $full rev-parse --verify -q HEAD *>$null
+    $headRc = $LASTEXITCODE
+    $unborn = $false
+    if ($headRc -ne 0) {
+        # Only a GENUINELY unborn HEAD may skip the unlanded check (sweepfx2 LOW-B): HEAD
+        # names a branch ref (symbolic-ref), that ref is absent everywhere (show-ref exit 1,
+        # no loose file) and HEAD's reflog is empty. A deleted branch ref, an unreadable
+        # (e.g. zero-byte) ref or a detached HEAD that fails to resolve falls through to the
+        # fail-closed path below.
+        $symRef = (git -C $full symbolic-ref -q HEAD 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $symRef) {
+            git -C $full show-ref --verify -q "$symRef" *>$null
+            $showRc = $LASTEXITCODE
+            $common = (git -C $full rev-parse --git-common-dir 2>$null)
+            if ($common -and -not [IO.Path]::IsPathRooted($common)) { $common = Join-Path $full $common }
+            $looseExists = $common -and (Test-Path -LiteralPath (Join-Path $common $symRef))
+            # `git reflog show HEAD` errors on an unresolvable HEAD, so read the worktree's own log file.
+            $gitDir = (git -C $full rev-parse --absolute-git-dir 2>$null)
+            $logFile = if ($gitDir) { Join-Path $gitDir "logs/HEAD" } else { $null }
+            $hasReflog = $logFile -and (Test-Path -LiteralPath $logFile) -and ((Get-Item -LiteralPath $logFile).Length -gt 0)
+            if ($showRc -eq 1 -and -not $looseExists -and -not $hasReflog) { $unborn = $true }
+        }
+    }
+    if ($unborn) {
+        # Unborn HEAD (orphan worktree, no commits): nothing can be lost.
+        Write-Host "note: '$full' has an unborn HEAD (no commits); nothing unlanded to lose." -ForegroundColor Yellow
+    } elseif ($headRc -ne 0) {
+        if ($ForceUnverifiable) {
+            Write-Host "WARNING: HEAD of '$full' does not resolve and is not a genuinely unborn branch (deleted/unreadable ref?); unlanded commits could NOT be checked. Proceeding because -ForceUnverifiable was given." -ForegroundColor Yellow
+        } else {
+            Write-Host "REFUSED: HEAD of '$full' does not resolve but is not a genuinely unborn branch (deleted or unreadable ref?); unlanded commits cannot be checked, not removing, even with -Force." -ForegroundColor Red
+            Write-Host "git said: HEAD does not resolve (rev-parse --verify HEAD failed)" -ForegroundColor Red
+            Write-Host "Restore the ref, or pass -ForceUnverifiable to remove anyway (unlanded commits, if any, are lost)." -ForegroundColor Red
+            exit 1
+        }
+    } else {
+        $errFile = [IO.Path]::GetTempFileName()
+        try {
+            $unlanded = @(git -C $full rev-list HEAD --not --remotes --branches 2>$errFile)
+            $revRc = $LASTEXITCODE
+            $revErr = (Get-Content -LiteralPath $errFile -Raw -ErrorAction SilentlyContinue)
+        } finally { Remove-Item -LiteralPath $errFile -Force -ErrorAction SilentlyContinue }
+        if ($revRc -ne 0) {
+            if ($ForceUnverifiable) {
+                Write-Host "WARNING: git rev-list failed in '$full'; unlanded commits could NOT be checked. Proceeding because -ForceUnverifiable was given:" -ForegroundColor Yellow
+                Write-Host "$revErr" -ForegroundColor Yellow
+                $unlanded = @()
+            } else {
+                # Fail closed (sweep INFO-6): an errored rev-list says nothing about unlanded commits.
+                Write-Host "REFUSED: could not list unlanded commits in '$full' (git rev-list failed); not removing, even with -Force." -ForegroundColor Red
+                Write-Host "git said: $revErr" -ForegroundColor Red
+                Write-Host "Fix the ref it names, or pass -ForceUnverifiable to remove anyway (unlanded commits, if any, are lost)." -ForegroundColor Red
+                exit 1
+            }
+        }
+    }
+    if ($unlanded.Count -gt 0) {
+        Write-Host "commits reachable only from this worktree ($($unlanded.Count)):" -ForegroundColor Yellow
+        $unlanded | ForEach-Object { Write-Host "  $_" }
+        if (-not $Force) {
+            Write-Host "REFUSED: worktree '$full' holds commits that exist nowhere else. Push or branch them, or pass -Force to drop them." -ForegroundColor Red
+            exit 1
+        }
+        Write-Host "WARNING: dropping the commits above (-Force)." -ForegroundColor Yellow
     }
 
     # Strip junctions/symlinks (e.g. a .venv junction into the main tree) as links

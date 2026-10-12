@@ -13,6 +13,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "http_body_recv.h"
 #include "http_form.h"
 #include "uart_task_ids.h" /* THERMO_FAULT_* */
 #include "wifi_provision_state.h" /* wifi_provision_get_httpd_handle() -- item 13 */
@@ -268,11 +269,9 @@ static esp_err_t sim_post_handler(httpd_req_t *req)
     }
 
     char buf[SIM_MAX_BODY];
-    int received = httpd_req_recv(req, buf, req->content_len);
-    if (received <= 0) {
+    if (!http_body_recv_full(req, buf, (size_t)req->content_len)) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "read failed");
     }
-    buf[received] = '\0';
 
     /* Connector swap: `swap=a,b` exchanges which physical thermocouple two
      * zones read, which is what a miswired kiln actually looks like and the
@@ -280,9 +279,13 @@ static esp_err_t sim_post_handler(httpd_req_t *req)
      * per-zone faults below cannot express it. Deliberately separate from
      * `fault` because it is a property of the wiring, not of a sensor. */
     char swap_str[16];
-    if (http_form_find_field(buf, "swap", swap_str, sizeof(swap_str)) >= 0) {
-        int a = -1, b = -1;
-        if (sscanf(swap_str, "%d,%d", &a, &b) != 2) {
+    int swap_len = http_form_find_field(buf, "swap", swap_str, sizeof(swap_str));
+    if (swap_len == -2) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "swap value too long");
+    }
+    if (swap_len >= 0) {
+        int a = -1, b = -1, consumed = 0;
+        if (sscanf(swap_str, "%d,%d%n", &a, &b, &consumed) != 2 || swap_str[consumed] != '\0') {
             return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "swap must be \"a,b\" (two zone indices)");
         }
         xSemaphoreTake(s_sim.lock, portMAX_DELAY);

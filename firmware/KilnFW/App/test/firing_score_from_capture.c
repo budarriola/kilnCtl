@@ -2,7 +2,7 @@
 // real per-tick data into the PRODUCTION firing_score.c / firing_compare.c
 // (linked as-is, never a Python or test-local mirror), so ITER_TUNE's Bar 2
 // noise floor can be measured from an actual matched-condition pair instead
-// of guessed. See docs/ITER_TUNE_REDESIGN_PLAN.md sec 3.1/3.1.1 and the task
+// of guessed. See docs/ITER_TUNE_REDESIGN.md sec 3.1/3.1.1 and the task
 // that produced this file (2026-09-10).
 //
 // WHAT THIS IS NOT: it does not reimplement firing_score's scoring logic --

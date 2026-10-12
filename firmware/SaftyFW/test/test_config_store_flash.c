@@ -22,6 +22,9 @@
 // combination. Own main(), own g_test_failures/g_test_count, own exit code,
 // folded into build_host_tests.ps1's overall exit code same as the
 // hal_spi_pico executable is.
+#include <stddef.h>
+#include <stdlib.h>
+#include <math.h>
 #include <string.h>
 #include <windows.h>
 
@@ -29,6 +32,7 @@
 
 #include "config_store.h"
 #include "config_store_flash_host_stubs.h"
+#include "config_params.h"
 #include "discrete_pin_policy.h"
 #include "fake_flash.h"
 // The production decision -> wire-reason mapping, exercised here against a
@@ -65,6 +69,7 @@ static void reset_all(void)
     // they would otherwise carry state across every test case (see
     // config_store_test_reset_fallback_state()'s own comment).
     config_store_test_reset_fallback_state();
+    config_store_set_heat_possible_probe(NULL);
 }
 
 static void test_boot_load_blank_sector_is_default(void)
@@ -164,6 +169,36 @@ static void test_fallback_seeded_at_boot_before_any_write(void)
     TEST_CHECK(snap.calibration_missing == false,
                "the fallback path returns the persisted calibration_missing, not the fail-safe "
                "'true' every getter falls back to when config_store_seqlock_read() returns false");
+}
+
+static void test_boot_load_reports_clamped_tc_offset(void)
+{
+    TEST_SECTION("config_store_flash: an out-of-range committed tc_offset_c is clamped at boot and "
+                 "config_store_tc_offset_was_clamped() reports it (guard-fix3 review LOW-A1)");
+    reset_all();
+    config_store_boot_load();
+    TEST_CHECK(!config_store_tc_offset_was_clamped(), "blank flash: not clamped");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.tc_offset_c = 12.5f;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: in-range commit");
+    config_store_test_reset_fallback_state();
+    config_store_boot_load();
+    TEST_CHECK(!config_store_tc_offset_was_clamped(), "in-range offset: not reported clamped");
+
+    rec.tc_offset_c = 80.0f; /* beyond CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C */
+    bool wrote = config_store_write(&rec, &reason);
+    config_store_test_reset_fallback_state();
+    config_store_boot_load();
+    if (wrote) {
+        TEST_CHECK(config_store_tc_offset_was_clamped(), "out-of-range committed offset is reported clamped");
+        TEST_CHECK(config_store_get_tc_offset_c() == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "and the value is clamped");
+    } else {
+        TEST_CHECK(false, "fixture: the store accepted an out-of-range offset commit");
+    }
 }
 
 static void test_write_refused_while_armed(void)
@@ -1717,11 +1752,490 @@ static void test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a
                "as a repair source must not itself change anything");
 }
 
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: a write whose record is
+// byte-identical to the stored slot is answered without touching flash. The
+// fake is scripted to fail the next safe_execute AND the next program, so a
+// write that reaches either one returns false; the identical write must still
+// succeed, and the stored seq (config_version) must not move.
+static void test_identical_write_skips_flash(void)
+{
+    TEST_SECTION("config_store_flash: byte-identical write is not written again (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    const char *reason = NULL;
+    TEST_CHECK(config_store_write(&rec, &reason) == true, "fixture: first write lands");
+    uint8_t version_after_first = config_store_get_config_version();
+    uint32_t erases_a = fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET / HAL_FLASH_ERASE_SIZE);
+    uint32_t erases_b = fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B / HAL_FLASH_ERASE_SIZE);
+
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_IO);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_PROGRAM, HAL_IO);
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_REFUSED_ARMED;
+    reason = NULL;
+    bool ok = config_store_write_ex(&rec, false, &reason, &decision);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_OK);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_PROGRAM, HAL_OK);
+
+    TEST_CHECK(ok == true, "identical write succeeds without reaching safe_execute or program");
+    TEST_CHECK(decision == CONFIG_STORE_WRITE_OK, "identical write reports WRITE_OK");
+    TEST_CHECK(reason != NULL && strncmp(reason, "ok", 2) == 0, "identical write reason starts with 'ok'");
+    TEST_CHECK(config_store_get_config_version() == version_after_first,
+               "identical write does not bump the stored seq / config_version");
+    TEST_CHECK(fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET / HAL_FLASH_ERASE_SIZE) == erases_a &&
+                   fake_flash_get_erase_count(SAFTYFW_CONFIG_STORE_FLASH_OFFSET_B / HAL_FLASH_ERASE_SIZE) == erases_b,
+               "identical write erases nothing");
+
+    config_store_boot_load();
+    TEST_CHECK(config_store_get_tc_type() == 0x07u && config_store_get_config_version() == version_after_first,
+               "a reload still finds the original slot, unchanged");
+
+    // Control: a CHANGED record under the same scripted failure must fail,
+    // proving the scripting above would have caught a real write.
+    rec.tc_type = 0x03u;
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_IO);
+    ok = config_store_write(&rec, NULL);
+    fake_flash_script_next_op_status(FAKE_FLASH_OP_SAFE_EXECUTE, HAL_OK);
+    TEST_CHECK(ok == false, "control: a changed record does reach safe_execute and fails there");
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "a changed record still writes normally");
+    TEST_CHECK(config_store_get_config_version() != version_after_first, "a real write bumps the seq");
+}
+
+// L3: an identical durable commit after a volatile install must still drop
+// the volatile install (the cache becomes flash truth again), exactly as a
+// real write of the same content would.
+static void test_identical_write_after_volatile_clears_dirty(void)
+{
+    TEST_SECTION("config_store_flash: identical commit after a volatile install clears dirty (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "fixture: committed");
+    uint8_t persisted = config_store_get_persisted_config_version();
+
+    config_store_record_t vol = rec;
+    vol.tc_type = 0x03u;
+    TEST_CHECK(config_store_write_volatile(&vol, NULL) == true, "fixture: volatile install accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == true, "fixture: cache is ahead of flash");
+    TEST_CHECK(config_store_get_tc_type() == 0x03u, "fixture: volatile value is live");
+
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "identical durable commit accepted");
+    TEST_CHECK(config_store_is_volatile_dirty() == false, "identical commit clears volatile-dirty");
+    TEST_CHECK(config_store_get_tc_type() == 0x07u, "the committed value is live again");
+    TEST_CHECK(config_store_get_persisted_config_version() == persisted,
+               "no flash write: the persisted version did not move");
+    TEST_CHECK(config_store_get_config_version() == persisted, "cache and flash versions agree");
+}
+
+// L3 never turns a refusal into a success: an identical record is still a
+// full-record write and is refused while ARMED, before the skip is reached.
+static void test_identical_write_still_refused_while_armed(void)
+{
+    TEST_SECTION("config_store_flash: identical write is still refused while ARMED (audit L3)");
+    reset_all();
+    config_store_boot_load();
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_type = 0x07u;
+    rec.calibration_missing = false;
+    TEST_CHECK(config_store_write(&rec, NULL) == true, "fixture: committed while idle");
+
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_write_decision_t decision = CONFIG_STORE_WRITE_OK;
+    bool ok = config_store_write_ex(&rec, false, NULL, &decision);
+    TEST_CHECK(ok == false, "identical write refused while ARMED");
+    TEST_CHECK(decision != CONFIG_STORE_WRITE_OK, "decision is a refusal, not WRITE_OK");
+}
+
+// 2026-10-09 guard-fixes review HIGH-1 / MED-1 / INFO / LOW-3.
+//
+// The volatile-install gate is fail-closed: while heat is possible, ANY
+// trip-relevant field that differs from the running record is refused, except
+// an explicit allowlist of non-safety fields (kind ALLOWED below) and the
+// provable tightenings (abs_max_temp_c / max_rate_c_per_min / tc_type, kind
+// SKIP here, covered by test_write_volatile_refuses_loosening_while_armed).
+// The table below classifies EVERY byte of config_store_record_t: the
+// coverage check fails when a field is added (or carved out of `reserved`)
+// without being classified here, which is the "unclassified new field fails
+// the test" requirement.
+enum { K_SAFETY = 0, K_ALLOWED = 1, K_SKIP = 2 };
+typedef struct {
+    const char *name;
+    size_t off;
+    size_t size;
+    int kind;
+} f1_field_t;
+#define F1(member, kind_) { #member, offsetof(config_store_record_t, member), sizeof(((config_store_record_t *)0)->member), kind_ }
+static const f1_field_t k_f1_fields[] = {
+    F1(format_version, K_ALLOWED), F1(seq, K_ALLOWED), F1(fields_set, K_SKIP),
+    F1(tc_source, K_SAFETY), F1(borrowed_zone_index, K_SAFETY), F1(tc_placement_mode, K_SAFETY),
+    F1(abs_max_temp_c, K_SKIP), F1(tc_type, K_SKIP), F1(ct_channel_map, K_SAFETY),
+    F1(ct_installed, K_SAFETY), F1(safety_tc_installed, K_SAFETY), F1(calibration_missing, K_ALLOWED),
+    F1(firing_margin_c, K_SAFETY), F1(overshoot_margin_c, K_SAFETY), F1(overshoot_time_s, K_SAFETY),
+    F1(max_rate_c_per_min, K_SKIP), F1(rate_window_s, K_SAFETY), F1(blind_grace_s, K_SAFETY),
+    F1(frozen_window_s, K_SAFETY), F1(tc_disagreement_c, K_SAFETY), F1(tc_disagreement_time_s, K_SAFETY),
+    F1(tc_expected_offset_c, K_SAFETY), F1(cj_warn_c, K_SAFETY), F1(cj_max_c, K_SAFETY),
+    F1(cj_time_s, K_SAFETY), F1(borrowed_stale_s, K_SAFETY), F1(borrowed_stale_trip_s, K_SAFETY),
+    F1(borrowed_type_expected, K_SAFETY), F1(i_present_a, K_SAFETY), F1(zero_counts, K_SAFETY),
+    F1(correlation_window_s, K_SAFETY), F1(stuck_on_time_s, K_SAFETY), F1(trip_verify_s, K_SAFETY),
+    F1(k_ct_v_per_a, K_SAFETY), F1(gain, K_SAFETY), F1(mains_voltage_v, K_ALLOWED),
+    F1(power_window_s, K_ALLOWED), F1(context_max_age_s, K_SAFETY), F1(link_timeout_s, K_SAFETY),
+    F1(link_dead_hard_s, K_SAFETY), F1(mainfault_debounce_ms, K_SAFETY), F1(telemetry_period_ms, K_ALLOWED),
+    F1(startup_grace_s, K_SAFETY), F1(estop_debounce_ms, K_SAFETY), F1(watchdog_timeout_ms, K_SAFETY),
+    F1(config_check_period_s, K_SAFETY), F1(ct_cal, K_SAFETY), F1(max_expected_power_w, K_ALLOWED),
+    F1(i_normal_a, K_SAFETY), F1(overcurrent_pct, K_SAFETY), F1(overcurrent_time_s, K_SAFETY),
+    F1(ct_topology, K_SAFETY), F1(zone_ct_channel, K_SAFETY), F1(i_present_a_manual, K_ALLOWED),
+    F1(tc_offset_c, K_SAFETY), F1(estop_active_level, K_SAFETY), F1(reserved, K_ALLOWED),
+};
+#undef F1
+// Bytes of config_store_record_t that belong to no member (compiler padding).
+// A NEW member that is not in the table raises the uncovered count above this
+// and fails the coverage test -- classify it in the table, do not bump this.
+#define F1_EXPECTED_PADDING_BYTES 17u // measured: MSVC alignment padding between members
+
+static void test_volatile_gate_classifies_every_record_byte(void)
+{
+    TEST_SECTION("config_store_flash: every record byte is classified (new field fails here)");
+    unsigned char *probe = (unsigned char *)malloc(sizeof(config_store_record_t));
+    TEST_CHECK(probe != NULL, "alloc");
+    if (probe == NULL) {
+        return;
+    }
+    memset(probe, 0xAA, sizeof(config_store_record_t));
+    for (size_t i = 0; i < sizeof k_f1_fields / sizeof k_f1_fields[0]; i++) {
+        memset(probe + k_f1_fields[i].off, 0x00, k_f1_fields[i].size);
+    }
+    size_t uncovered = 0;
+    for (size_t b = 0; b < sizeof(config_store_record_t); b++) {
+        if (probe[b] == 0xAA) {
+            uncovered++;
+        }
+    }
+    printf("  uncovered (padding) bytes: %u\n", (unsigned)uncovered);
+    TEST_CHECK(uncovered == F1_EXPECTED_PADDING_BYTES,
+               "config_store_record_t has a byte that no table entry classifies: add the new field to "
+               "k_f1_fields as K_SAFETY (default) or, only if provably non-safety, K_ALLOWED and to the "
+               "allowlist in config_store_volatile_would_loosen_safety()");
+    free(probe);
+}
+
+static bool f1_flip_and_try(size_t byte_off, bool heat_possible, int mode)
+{
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+    config_store_record_t base;
+    config_store_default(&base);
+    TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: unarmed baseline install");
+    config_store_flash_host_stub_set_relay_state(heat_possible ? RELAY_OWNER_STATE_ARMED : RELAY_OWNER_STATE_GRACE);
+    config_store_record_t next;
+    config_store_get_full_record(&next); // the running record, as installed
+    if (mode == 0) {
+        ((unsigned char *)&next)[byte_off] ^= 0x01u;
+    }
+    return config_store_write_volatile(&next, NULL);
+}
+
+static void test_volatile_gate_is_fail_closed_per_field(void)
+{
+    TEST_SECTION("config_store_flash: heat possible refuses a change to every non-allowlisted field "
+                 "(HIGH-1), allowlisted fields pass");
+    for (size_t i = 0; i < sizeof k_f1_fields / sizeof k_f1_fields[0]; i++) {
+        const f1_field_t *f = &k_f1_fields[i];
+        if (f->kind == K_SKIP) {
+            continue;
+        }
+        const size_t offs[2] = { f->off, f->off + f->size - 1u };
+        for (int which = 0; which < 2; which++) {
+            if (which == 1 && f->size == 1u) {
+                continue;
+            }
+            bool ok = f1_flip_and_try(offs[which], true, 0);
+            printf("  %-24s byte %u -> %s\n", f->name, (unsigned)(offs[which] - f->off), ok ? "ACCEPTED" : "refused");
+            if (f->kind == K_SAFETY) {
+                TEST_CHECK(ok == false, "a change to this trip-relevant field is refused while heat is possible");
+            } else {
+                TEST_CHECK(ok == true, "a change to this allowlisted non-safety field is accepted");
+            }
+        }
+    }
+}
+
+static void test_volatile_gate_identical_resend_and_idle_accept(void)
+{
+    TEST_SECTION("config_store_flash: identical resend accepted; idle installs of any field accepted (MED-1)");
+    TEST_CHECK(f1_flip_and_try(0, true, 1) == true, "heat possible: identical resend is not a change");
+    for (size_t i = 0; i < sizeof k_f1_fields / sizeof k_f1_fields[0]; i++) {
+        const f1_field_t *f = &k_f1_fields[i];
+        if (f->kind == K_SKIP) {
+            continue;
+        }
+        TEST_CHECK(f1_flip_and_try(f->off, false, 0) == true,
+                   "idle and de-energized: a change to any field installs (GRACE state, no heat possible)");
+    }
+}
+
+static bool s_probe_heat = true;
+static bool probe_fn(void) { return s_probe_heat; }
+
+static void test_volatile_gate_follows_heat_probe_not_armed(void)
+{
+    TEST_SECTION("config_store_flash: gate follows the registered heat-possible probe, not relay ARMED (MED-1)");
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t base;
+    config_store_default(&base);
+    config_store_set_heat_possible_probe(probe_fn);
+
+    config_store_record_t next = base;
+    next.link_dead_hard_s += 5u; // trip-relevant
+    s_probe_heat = false;
+    TEST_CHECK(config_store_write_volatile(&next, NULL) == true,
+               "ARMED but idle/de-energized per the probe: a trip-field change installs");
+    config_store_record_t more = next;
+    more.link_timeout_s += 1u;
+    s_probe_heat = true;
+    TEST_CHECK(config_store_write_volatile(&more, NULL) == false,
+               "ARMED and heat possible per the probe: a trip-field change is refused");
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+    TEST_CHECK(config_store_write_volatile(&more, NULL) == false,
+               "probe says heat possible: refused regardless of relay state (probe is authoritative)");
+    config_store_set_heat_possible_probe(NULL);
+}
+
+// INFO: a stale legacy ct_topology byte in the pushed record must not be
+// refused spuriously -- the backfill runs before the comparison.
+static void test_volatile_gate_backfills_before_compare(void)
+{
+    TEST_SECTION("config_store_flash: legacy ct_topology backfill runs before the heat-possible comparison (INFO)");
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+    config_store_record_t base;
+    config_store_default(&base);
+    base.fields_set |= CONFIG_STORE_SET_ZONE_CT_CHANNEL;
+    base.zone_ct_channel[0] = 2u;
+    base.zone_ct_channel[1] = 2u;
+    base.zone_ct_channel[2] = 2u;
+    base.ct_topology = CONFIG_STORE_CT_TOPOLOGY_PER_ZONE; // stale: zone map says summed
+    TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: install (backfills ct_topology)");
+    {
+        config_store_record_t running;
+        config_store_get_full_record(&running);
+        TEST_CHECK(running.ct_topology == CONFIG_STORE_CT_TOPOLOGY_SUMMED, "fixture: installed ct_topology was backfilled to SUMMED");
+    }
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t resend = base; // still carries the stale legacy byte
+    TEST_CHECK(config_store_write_volatile(&resend, NULL) == true,
+               "heat possible: resend with a stale legacy ct_topology is not refused");
+}
+
+// LOW-3: fields_set differences alone (value bytes identical) are a change
+// to what the guards treat as commissioned. Heat possible refuses both
+// directions; the allowlisted mains/power bits stay accepted.
+static void test_volatile_gate_refuses_fields_set_only_changes(void)
+{
+    TEST_SECTION("config_store_flash: heat possible refuses a fields_set-only change, either direction (LOW-3)");
+    const uint32_t bits[] = {
+        CONFIG_STORE_SET_TC_SOURCE, CONFIG_STORE_SET_BORROWED_ZONE_INDEX, CONFIG_STORE_SET_TC_PLACEMENT_MODE,
+        CONFIG_STORE_SET_CT_CHANNEL_MAP, CONFIG_STORE_SET_CT_CHANNEL_MAP_0, CONFIG_STORE_SET_CT_CHANNEL_MAP_1,
+        CONFIG_STORE_SET_CT_CHANNEL_MAP_2, CONFIG_STORE_SET_I_NORMAL_A_0, CONFIG_STORE_SET_I_NORMAL_A_1,
+        CONFIG_STORE_SET_I_NORMAL_A_2, CONFIG_STORE_SET_CT_INSTALLED, CONFIG_STORE_SET_ZONE_CT_CHANNEL_0,
+        CONFIG_STORE_SET_ZONE_CT_CHANNEL_1, CONFIG_STORE_SET_ZONE_CT_CHANNEL_2,
+    };
+    for (size_t i = 0; i < sizeof bits / sizeof bits[0]; i++) {
+        for (int dir = 0; dir < 2; dir++) {
+            reset_all();
+            config_store_boot_load();
+            config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_GRACE);
+            config_store_record_t base;
+            config_store_default(&base);
+            if (dir == 0) {
+                base.fields_set &= ~bits[i];
+            } else {
+                base.fields_set |= bits[i];
+            }
+            TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture: idle install");
+            config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+            config_store_record_t next;
+            config_store_get_full_record(&next);
+            next.fields_set ^= bits[i];
+            printf("  fields_set bit 0x%08X dir %d\n", (unsigned)bits[i], dir);
+            TEST_CHECK(config_store_write_volatile(&next, NULL) == false,
+                       "a fields_set-only change is refused while heat is possible");
+        }
+    }
+    reset_all();
+    config_store_boot_load();
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    config_store_record_t cur;
+    config_store_get_full_record(&cur);
+    cur.fields_set ^= CONFIG_STORE_SET_MAINS_VOLTAGE_V;
+    TEST_CHECK(config_store_write_volatile(&cur, NULL) == true, "the mains_voltage set-bit is allowlisted");
+}
+// 2026-10-10 review (HIGH-A, HIGH-B, MED-A, LOW-C): the gate's tightening
+// rule must judge DIRECTION and "does the guard run", itself and not via the
+// caller's validate_ex. S1 runs only when abs_max > 0, S8 only when
+// max_rate > 0, so 0 / negative / NaN are the LOOSEST values.
+static float gate_nan_f(void) { union { uint32_t u; float f; } x; x.u = 0x7FC00000u; return x.f; }
+static float gate_inf_f(void) { union { uint32_t u; float f; } x; x.u = 0x7F800000u; return x.f; }
+
+static void gate_setup_baseline(config_store_record_t *baseline)
+{
+    reset_all();
+    config_store_boot_load();
+    config_store_default(baseline);
+    baseline->fields_set |= (uint32_t)(CONFIG_STORE_SET_ABS_MAX_TEMP_C | CONFIG_STORE_SET_MAX_RATE_C_PER_MIN |
+                                       CONFIG_STORE_SET_TC_TYPE);
+    baseline->abs_max_temp_c = 1100.0f;
+    baseline->max_rate_c_per_min = 20.0f;
+    baseline->tc_type = 0x03u;
+    baseline->k_ct_v_per_a[1] = 0.0333f;
+}
+
+// Installs `base` while de-energized, then arms and tries `next`.
+static bool gate_try_from(const config_store_record_t *base, const config_store_record_t *next)
+{
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_INIT);
+    TEST_CHECK(config_store_write_volatile(base, NULL) == true, "fixture: baseline installs while idle");
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_ARMED);
+    return config_store_write_volatile(next, NULL);
+}
+
+static void test_volatile_gate_tightening_direction_and_off_values(void)
+{
+    TEST_SECTION("config_store_flash: heat possible: abs_max/max_rate tightening judged by direction and "
+                 "'guard runs' (HIGH-A, MED-A, LOW-C)");
+    config_store_record_t base;
+    config_store_record_t n;
+
+    // --- abs_max_temp_c (S1) ---
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 1101.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1101 refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = nextafterf(base.abs_max_temp_c, INFINITY);
+    TEST_CHECK(n.abs_max_temp_c > base.abs_max_temp_c, "fixture: one-ulp raise is really larger");
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise by ONE ulp refused (pins <= exactly, INFO-1)");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 1150.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max raise 1100 -> 1150 refused");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max equal resend accepted");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 900.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max lowered 1100 -> 900 accepted");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> 0 (S1 off) refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = -5.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> negative (S1 off) refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = gate_nan_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> NaN refused");
+    gate_setup_baseline(&base);
+    n = base; n.abs_max_temp_c = gate_inf_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max 1100 -> +inf refused");
+    // MED-A: unset -> set is a tightening only for an enabled (>0, finite) value.
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max unset -> set-to-0 refused (gate does not trust validate_ex)");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = -3.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "abs_max unset -> set-to-negative refused");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_ABS_MAX_TEMP_C; base.abs_max_temp_c = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C; n.abs_max_temp_c = 800.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "abs_max unset -> set-to-800 accepted (first commissioning)");
+
+    // --- max_rate_c_per_min (S8) ---
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 20.5f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 20.5 refused");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = nextafterf(base.max_rate_c_per_min, INFINITY);
+    TEST_CHECK(n.max_rate_c_per_min > base.max_rate_c_per_min, "fixture: one-ulp raise is really larger");
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise by ONE ulp refused (pins <= exactly, INFO-1)");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 30.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate raise 20 -> 30 refused");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate equal resend accepted");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 10.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate lowered 20 -> 10 accepted");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> 0 (S8 off) refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = -1.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> negative (S8 off) refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    n = base; n.max_rate_c_per_min = gate_nan_f();
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate 20 -> NaN refused (HIGH-A)");
+    gate_setup_baseline(&base);
+    base.fields_set &= ~(uint32_t)CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; base.max_rate_c_per_min = 0.0f;
+    n = base; n.fields_set |= CONFIG_STORE_SET_MAX_RATE_C_PER_MIN; n.max_rate_c_per_min = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate unset -> set-to-0 refused (MED-A)");
+    gate_setup_baseline(&base);
+    base.max_rate_c_per_min = 0.0f; // committed as 0 = S8 off
+    n = base; n.max_rate_c_per_min = 15.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "max_rate off (0) -> enabled 15 is a tightening, accepted");
+    gate_setup_baseline(&base);
+    base.max_rate_c_per_min = 0.0f;
+    n = base; n.max_rate_c_per_min = -4.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "max_rate off (0) -> negative refused");
+}
+
+static void test_volatile_gate_refuses_k_ct_change_but_accepts_resend(void)
+{
+    TEST_SECTION("config_store_flash: heat possible refuses a k_ct_v_per_a change (HIGH-B), resend accepted");
+    config_store_record_t base;
+    config_store_record_t n;
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = base.k_ct_v_per_a[1] * 1000.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct x1000 refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = -0.0333f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "negative k_ct refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = 0.0f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct -> 0 refused while heat possible");
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[0] = 0.05f;
+    TEST_CHECK(gate_try_from(&base, &n) == false, "k_ct on another channel refused too");
+    gate_setup_baseline(&base);
+    n = base;
+    TEST_CHECK(gate_try_from(&base, &n) == true, "identical k_ct resend accepted");
+    // idle: a k_ct change installs (no heat possible)
+    gate_setup_baseline(&base);
+    n = base; n.k_ct_v_per_a[1] = 0.05f;
+    config_store_flash_host_stub_set_relay_state(RELAY_OWNER_STATE_INIT);
+    TEST_CHECK(config_store_write_volatile(&base, NULL) == true, "fixture");
+    TEST_CHECK(config_store_write_volatile(&n, NULL) == true, "idle: k_ct change installs");
+}
+
 int main(void)
 {
     test_boot_load_blank_sector_is_default();
     test_write_then_reload_round_trips();
     test_fallback_seeded_at_boot_before_any_write();
+    test_boot_load_reports_clamped_tc_offset();
     test_write_refused_while_armed();
     test_write_volatile_installs_while_armed_and_bumps_identity();
     test_write_volatile_repeated_then_flash_commit_still_gated();
@@ -1750,6 +2264,17 @@ int main(void)
     test_ram_integrity_repair_discards_live_volatile_install();
     test_ram_integrity_both_copies_corrupted_requests_trip_no_repair();
     test_ram_integrity_persisted_only_corruption_with_healthy_cache_is_a_no_op();
+    test_identical_write_skips_flash();
+    test_identical_write_after_volatile_clears_dirty();
+    test_identical_write_still_refused_while_armed();
+    test_volatile_gate_classifies_every_record_byte();
+    test_volatile_gate_is_fail_closed_per_field();
+    test_volatile_gate_identical_resend_and_idle_accept();
+    test_volatile_gate_follows_heat_probe_not_armed();
+    test_volatile_gate_backfills_before_compare();
+    test_volatile_gate_refuses_fields_set_only_changes();
+    test_volatile_gate_tightening_direction_and_off_values();
+    test_volatile_gate_refuses_k_ct_change_but_accepts_resend();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

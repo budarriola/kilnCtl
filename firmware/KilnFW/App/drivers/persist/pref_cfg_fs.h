@@ -1,7 +1,7 @@
 // pref_cfg_fs -- generic read-through/dual-write bridge between a small
 // scalar/struct NVS preference (unit_pref.c, control/ramp_assist_cfg.c,
 // display_power_cfg.c today) and the `cfg` LittleFS partition
-// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA.md section 5
 // step 3 ("Migrate prefs (10,11,12,14) -- the lowest-stakes items").
 //
 // WHY GENERIC: unlike zones config (zones_config_cfg_fs.c/.h, a single
@@ -52,7 +52,7 @@ extern "C" {
 #endif
 
 // Generous upper bound on any one preference item's raw byte size --
-// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA_PLAN.md item 3, 1 + 4*16 + 4
+// relay_names_cfg_t (docs/FILESYSTEM_USER_DATA.md item 3, 1 + 4*16 + 4
 // types + 4 crc = 73 bytes of fields, 76 with alignment padding as of
 // RELAY_NAMES_CFG_VERSION 2; it was 69/72 at v1) is the largest today,
 // previously display_power_cfg_blob_t
@@ -76,6 +76,12 @@ extern "C" {
 // validation: the caller decodes/validates the bytes itself. Written back with
 // pref_cfg_fs_save()/pref_cfg_fs_commit() using the actual length.
 bool pref_cfg_fs_load_var(const char *rel_path, void *out, size_t cap, size_t *out_len, uint32_t *out_rev);
+
+// Checked twin of pref_cfg_fs_load_var(): ESP_OK = loaded; ESP_ERR_NOT_FOUND = no usable file (unmounted,
+// absent, too short, over cap); ESP_ERR_NO_MEM or an I/O code = the file's state could NOT be determined,
+// which is NOT "absent" (K10-09b): a caller deciding whether to overwrite must refuse on that.
+esp_err_t pref_cfg_fs_load_var_checked(const char *rel_path, void *out, size_t cap, size_t *out_len,
+                                       uint32_t *out_rev);
 
 // Deletes the file at rel_path. ESP_OK when it did not exist either;
 // ESP_ERR_INVALID_STATE when cfg is not mounted.
@@ -102,6 +108,51 @@ void pref_cfg_fs_reset_write_fn_for_test(void);
  * section 1). */
 pref_cfg_fs_write_fn_t pref_cfg_fs_get_write_fn(void);
 
+/* SAVE-SECTION HOOKS (2026-10-09, docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md
+ * "Save mutex vs. flash worker"). Every cfg store save lock (cfg_save_lock.h,
+ * and through it zones_config_store.c's and profiles_http.c's) calls
+ * pref_cfg_fs_save_section_enter() BEFORE taking its mutex and
+ * pref_cfg_fs_save_section_exit() with that call's result AFTER giving it.
+ * On the device uart_bridge_ext.c installs hooks (from
+ * uart_bridge_ext_save_reservation_init(), first thing in app_main, so
+ * before any saver task and before the worker exists) that reserve the flash
+ * worker for the section when the caller is not the worker, so a save mutex
+ * is never held off the worker while the worker runs a job that could need
+ * the same mutex. Without installed hooks both calls are no-ops (enter
+ * returns false). Lives here, not in uart_bridge_ext.c, because every host
+ * test that links a saver already links this file and none links the bridge.
+ * Lock order: reservation OUTER, save mutex INNER, never the other way. */
+typedef bool (*pref_cfg_fs_save_enter_fn_t)(void);
+typedef void (*pref_cfg_fs_save_exit_fn_t)(bool reserved);
+void pref_cfg_fs_set_save_section_hooks(pref_cfg_fs_save_enter_fn_t enter, pref_cfg_fs_save_exit_fn_t exit_fn);
+bool pref_cfg_fs_save_section_enter(void);
+void pref_cfg_fs_save_section_exit(bool reserved);
+
+/* FACTORY-RESET WRITER FENCE (2026-10-09, HTTP input audit L37 follow-up). factory_reset.c sets a
+ * "reset in flight" mark (relay_authority_reset_in_flight()) and then erases storage without taking
+ * any writer's save lock, so a writer that checked the mark just before it was set could still save
+ * after the erase. Two pieces close that, both living here because every host test that links a
+ * saver already links this file:
+ *  - REFUSAL: the device installs a predicate (pref_cfg_fs_set_reset_refuse_hook(); main.c, next to the
+ *    save-section hooks) that is true while the mark is set, except on the reset job's own task (its
+ *    profiles_builtin_restore_all() must still write). A writer calls cfg_save_lock_reset_refused()
+ *    INSIDE its save lock, immediately before the persist, and returns ESP_ERR_INVALID_STATE; every
+ *    pref_cfg_fs_save()/_commit() caller is covered centrally. Without a hook nothing is refused.
+ *  - BARRIER: every cfg_save_lock_take() registers its lock here once (pref_cfg_fs_lock_registry_*);
+ *    cfg_save_barrier.c's persist_reset_barrier() takes and gives each registered lock once, AFTER the
+ *    mark is set and BEFORE the erase. A writer already inside finishes before the erase; a writer
+ *    entering later sees the mark under the lock. A lock never registered has had no writer enter it
+ *    before the mark (register precedes take), so a later first take sees the mark too.
+ * Lock order used by the barrier: caller holds nothing; each lock is taken then given before the next
+ * (no nesting), reservation outer / mutex inner as always. Never called from the flash worker. */
+typedef bool (*pref_cfg_fs_reset_refuse_fn_t)(void);
+void pref_cfg_fs_set_reset_refuse_hook(pref_cfg_fs_reset_refuse_fn_t fn);
+bool pref_cfg_fs_reset_refuses_write(void);
+#define PREF_CFG_FS_LOCK_REGISTRY_MAX 32
+void pref_cfg_fs_lock_registry_add(void *lock);       /* caller guarantees at most one add per lock */
+size_t pref_cfg_fs_lock_registry_count(void);
+void *pref_cfg_fs_lock_registry_get(size_t i);
+
 // Returns true if `bytes` (exactly `len` bytes, always == the call site's
 // item_size) is a value this build considers valid and safe to adopt --
 // same discipline as unit_pref_start()'s range check, ramp_assist_cfg_start()'s
@@ -122,6 +173,14 @@ typedef bool (*pref_cfg_fs_validate_fn_t)(const void *bytes, size_t len);
 void pref_cfg_fs_load_raw(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
                            void *out_bytes, uint32_t *out_rev, bool *out_valid);
 
+// Checked twin of pref_cfg_fs_load_raw() (K10-09): same outputs, plus a return code. ESP_OK = the read
+// completed (*out_valid says whether the file held a usable item; absent, wrong-size, over-size and
+// validator-rejected files are ESP_OK / valid=false). ESP_ERR_NO_MEM (scratch allocation failed) or an I/O
+// code = the file's state is UNKNOWN: it may hold a newer value, so a caller that would overwrite the
+// file on "absent" must refuse instead. ESP_ERR_INVALID_ARG for bad arguments.
+esp_err_t pref_cfg_fs_load_raw_checked(const char *rel_path, size_t item_size, pref_cfg_fs_validate_fn_t validate,
+                                       void *out_bytes, uint32_t *out_rev, bool *out_valid);
+
 // Identical to pref_cfg_fs_load_raw() in every result, but logs nothing for a
 // wrong-size or validator-rejected file. For read-only status polls (GET
 // /api/cfgfs) that must not repeat a boot-time warning on every request.
@@ -136,7 +195,9 @@ void pref_cfg_fs_load_raw_quiet(const char *rel_path, size_t item_size, pref_cfg
 // and that byte (at item offset `version_offset`) is above `current_version`;
 // *out_version then holds it. Read-only: never writes or erases. A wrong-size
 // file at current-or-older version, an exact-size file, an absent file or an
-// unmounted cfg all return false (corruption/normal paths unchanged).
+// unmounted cfg all return false (corruption/normal paths unchanged). When the file cannot be read
+// (scratch allocation failure or an I/O error) the answer is "cannot decide" and the function returns
+// TRUE with *out_version 0xFF, so the caller keeps the file untouched (K10-11).
 // Callers that get true must not let pref_cfg_fs_resolve() run, since its
 // NVS->file migration would overwrite the newer file.
 bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, size_t version_offset,
@@ -148,6 +209,10 @@ bool pref_cfg_fs_probe_newer_wrong_size(const char *rel_path, size_t item_size, 
 // inputs plus whatever is on the file. `out_bytes` (capacity `item_size`)
 // and `out_rev` are always written; `out_used_file` says which side won
 // (informational).
+//
+// Returns false (out_bytes zeroed) WITHOUT writing either side when the file's state cannot be
+// determined (scratch allocation or I/O failure, K10-10): the file may hold a newer value, and
+// adopting the NVS candidate would overwrite it.
 //
 // Returns true if `out_bytes` is trustworthy, false if neither side
 // produced anything valid (out_bytes zeroed, out_rev 0, out_used_file
@@ -162,12 +227,26 @@ bool pref_cfg_fs_resolve(const char *rel_path, const void *nvs_bytes, size_t ite
                           uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes, uint32_t *out_rev,
                           bool *out_used_file);
 
+// persfx3 MED-3: the frozen NVS copy is NEVER a source for these stores. A valid file wins outright (no rev
+// tie-break); an absent, unreadable, wrong-size or invalid file, or an unmounted cfg, returns false with out_bytes
+// zeroed (caller uses its safe defaults) and nothing is migrated into a file. The store erases its legacy NVS keys
+// once used_file is true (legacy_nvs_erase.h). Unreadable files are still marked rev-unknown (persfx MED-3).
+// Older text follows.
+// persfx MED-3: same as pref_cfg_fs_resolve(), except that when the cfg file is present but UNREADABLE the NVS copy
+// is NOT adopted (the path is still marked rev-unknown and out_bytes is zeroed, return false => caller uses its safe
+// defaults). For control/safety-relevant stores whose NVS writer was retired (aux_outputs, ramp_assist, ki_base,
+// iter_tune, ct_verify): their surviving NVS copy is frozen at the 2026-10-06 dual-write close and may be stale-unsafe
+// (e.g. an aux rule the operator has since disabled). Stores where stale is harmless keep pref_cfg_fs_resolve().
+bool pref_cfg_fs_resolve_nvs_retired(const char *rel_path, const void *nvs_bytes, size_t item_size, bool nvs_valid,
+                                     uint32_t nvs_rev, pref_cfg_fs_validate_fn_t validate, void *out_bytes,
+                                     uint32_t *out_rev, bool *out_used_file);
+
 // Writes `bytes` (`item_size` bytes, must already be validated -- this
 // function does not call `validate`) to the file at `rel_path`, at `rev`.
 // No-op returning ESP_ERR_INVALID_STATE if cfg_fs never mounted -- callers
 // must treat that as expected on every board today, not a surfaced error
 // beyond a debug log (mount-failure contract,
-// docs/FILESYSTEM_USER_DATA_PLAN.md). ESP_ERR_INVALID_SIZE if item_size
+// docs/FILESYSTEM_USER_DATA.md). ESP_ERR_INVALID_SIZE if item_size
 // exceeds PREF_CFG_FS_MAX_ITEM.
 esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev);
 
@@ -183,6 +262,16 @@ esp_err_t pref_cfg_fs_save(const char *rel_path, const void *bytes, size_t item_
 // failure.
 esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t item_size, uint32_t rev,
                              const char *what);
+
+// M1 (review 2026-10-10): when pref_cfg_fs_resolve() finds the cfg file present but UNREADABLE (I/O error,
+// allocation failure), it keeps a valid NVS candidate in RAM (returns true with the NVS bytes and rev) instead of
+// dropping it for defaults, and marks the path "rev unknown": the file may hold a higher rev. While marked,
+// pref_cfg_fs_save()/_commit() for that path return ESP_ERR_INVALID_STATE (loudly), so neither an operator edit
+// nor an automatic writer can build on a stale baseline or be superseded by the unread file. A later resolve of
+// the same path that reads cleanly clears the mark. With no valid NVS candidate resolve still returns false
+// (defaults), and saves are refused the same way.
+bool pref_cfg_fs_rev_unknown(const char *rel_path);
+void pref_cfg_fs_clear_rev_unknown_for_test(void);
 
 #ifdef __cplusplus
 }

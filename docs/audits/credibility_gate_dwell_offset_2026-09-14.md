@@ -36,7 +36,7 @@ only as the answer key. Dwell offset is the steady-state mean error over
 each capture's dwell segments (`kind=2`, temp_bucket ∈ {1,2}).
 
 The ±1.5 °C bar is **not a guess re-derived here** — it is quoted verbatim
-from `ITER_TUNE_REDESIGN_PLAN.md` sec 6.5 (`docs/audits/
+from `ITER_TUNE_REDESIGN.md` sec 6.5 (`docs/audits/
 sim_credibility_gate_2026-09-09.md`'s "Pass criterion" section, itself
 citing the plan), alongside the standing owner rule that sub-0.5 °C
 differences are not worth chasing (`feedback_ignore_sub_half_degree_effects.md`)
@@ -198,7 +198,7 @@ constants are adjacent but not in this pass's assigned files).
 The dwell-offset bar's cause is understood, quantified, and independently
 corroborated, but **not fixed in the checked-in model** — this pass changed
 no constant. `sim_credibility_gate` still FAILS overall (dwell offset 5/6,
-z2 ramp MAE 1/2), so per `ITER_TUNE_REDESIGN_PLAN.md` sec 6.5's own stated
+z2 ramp MAE 1/2), so per `ITER_TUNE_REDESIGN.md` sec 6.5's own stated
 consequence, `sim_iter_tune.c`/`sim_wide_temp_sweep.c` results remain
 internal-consistency checks only, and `iter_tune` steps 6-9 remain gated.
 Adopting the forward-gain fix (owned by whichever session next touches

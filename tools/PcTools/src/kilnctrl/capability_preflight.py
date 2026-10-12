@@ -217,6 +217,15 @@ READINESS_BLOCKING_KEYS = frozenset(
     {"recovery_mode", "safety_trip", "crash_report", "estop_verified"}
 )
 
+# Subset of READINESS_BLOCKING_KEYS that only matters to a run that STARTS a
+# firing or autotune (heat). The firmware still refuses heat starts on it
+# (readiness_gate.h, unchanged); PC-side, a non-heat run proceeds past it and
+# heat cases SKIP (reason ``estop_unverified``) instead. Owner decision
+# 2026-10-10: bench testing must not wait on the physical E-stop check, which
+# is NEVER marked verified from tooling.
+HEAT_ONLY_BLOCKING_KEYS = frozenset({"estop_verified"})
+ESTOP_UNVERIFIED_LINE = "E-stop not physically verified: heat cases skipped"
+
 
 @dataclass(frozen=True)
 class BoardInfo:
@@ -255,6 +264,16 @@ class BoardInfo:
     # this build predates) leaves this empty and changes nothing -- same
     # tolerance get_board_info() already applies to /api/crash_report.
     readiness_blocked: "tuple[tuple[str, str, str], ...]" = ()
+    # Same shape, but only the HEAT_ONLY_BLOCKING_KEYS items (estop_verified):
+    # these do NOT make PreflightReport.ok False; they make ok_for_heat False.
+    heat_blocked: "tuple[tuple[str, str, str], ...]" = ()
+    # Safety reads (/api/crash_report, /api/readiness) that got NO usable answer
+    # -- 401 (both routes are admin tier), 5xx, timeout, non-JSON. That is
+    # "could not determine", never "no crash"/"not blocked": PreflightReport.ok
+    # refuses on it unless the caller passes the explicit allow_undetermined
+    # override. A board whose firmware predates a route answers the exact
+    # "no such endpoint" shape, which is NOT undetermined (see _get_json).
+    undetermined: "tuple[str, ...]" = ()
 
 
 @dataclass(frozen=True)
@@ -272,6 +291,18 @@ class PreflightReport:
     # ``allow_missing_tasks`` is set.
     task_liveness: "object" = None
     allow_missing_tasks: bool = False
+    # Non-empty when the caller TRIED the task-liveness check and could not
+    # read it (no link, malformed reply, unparseable script): the reason.
+    # Refuses like an undetermined board read unless allow_undetermined.
+    task_liveness_unavailable: str = ""
+    allow_undetermined: bool = False
+
+    @property
+    def undetermined_reads(self) -> "tuple[str, ...]":
+        out = list(self.board.undetermined)
+        if self.task_liveness_unavailable:
+            out.append(f"task_liveness ({self.task_liveness_unavailable})")
+        return tuple(out)
 
     @property
     def ok(self) -> bool:
@@ -294,6 +325,8 @@ class PreflightReport:
             return False
         if self.board.readiness_blocked:
             return False
+        if self.undetermined_reads and not self.allow_undetermined:
+            return False
         if (
             self.task_liveness is not None
             and not self.task_liveness.ok
@@ -301,6 +334,12 @@ class PreflightReport:
         ):
             return False
         return not any(c.fatal for c in self.checks)
+
+    @property
+    def ok_for_heat(self) -> bool:
+        """``ok`` AND no heat-only readiness item (estop_verified) is red.
+        Anything that starts a firing/autotune must use this, not ``ok``."""
+        return self.ok and not self.board.heat_blocked
 
     @property
     def fatal_checks(self) -> "list[CapabilityCheck]":
@@ -334,6 +373,9 @@ class PreflightReport:
                 "this run would repeat. REMEDY: investigate, then "
                 "POST /api/crash_report/ack once reviewed."
             )
+        if self.board.heat_blocked:
+            lines.append(f"  [WARN]   {ESTOP_UNVERIFIED_LINE} "
+                         "(firmware still refuses firing/autotune starts; non-heat runs proceed).")
         for key, label, detail in self.board.readiness_blocked:
             lines.append(
                 f"  [FATAL]  READINESS ITEM BLOCKS FIRING: {label} ({key}) -- {detail} "
@@ -401,11 +443,22 @@ class PreflightReport:
             and not self.task_liveness.ok
             and not self.allow_missing_tasks
         )
+        if self.undetermined_reads:
+            lines.append(
+                "  [UNDETERMINED] could not read: " + ", ".join(self.undetermined_reads)
+                + " -- a failed read is NOT treated as a clean board."
+            )
         if self.board.readiness_blocked:
             names = ", ".join(k for k, _l, _d in self.board.readiness_blocked)
             lines.append(
                 f"  RESULT: the board's firing interlock blocks on {names} -- "
                 "this run would be refused; do not start it."
+            )
+        elif self.undetermined_reads and not self.allow_undetermined:
+            lines.append(
+                "  RESULT: safety state could not be determined -- do not start this run. "
+                "Fix the read (a 401 means no admin session: set KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD and log in; "
+                "otherwise board health) or pass allow_undetermined=True once reviewed."
             )
         elif task_liveness_blocks:
             lines.append(
@@ -451,9 +504,10 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
 
     crash_unacknowledged = False
     crash_summary = None
+    undetermined: "list[str]" = []
     try:
         crash, _raw2 = _get_json(host, "/api/crash_report", timeout)
-    except PreflightTransportError:
+    except PreflightTransportError as exc:
         # Board answered /api/status but not /api/crash_report -- older
         # firmware without this endpoint, most likely. Not fatal on its
         # own: there is no crash data to act on, so this preflight has
@@ -461,13 +515,26 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
         # but too old to report it is not a case any client-side check can
         # detect.)
         crash = None
-    if isinstance(crash, dict) and crash.get("present") and not crash.get("acknowledged", True):
+        undetermined.append(f"crash_report ({exc})")
+    else:
+        if not isinstance(crash, dict):
+            undetermined.append("crash_report (response was not a JSON object)")
+    # A missing `acknowledged` on a present record is NOT acknowledged.
+    if isinstance(crash, dict) and crash.get("present") and crash.get("acknowledged") is not True:
         crash_unacknowledged = True
         crash_summary = (
             f"exc_task={crash.get('exc_task')!r} "
             f"exc_cause_str={crash.get('exc_cause_str')!r} "
             f"reset_reason={crash.get('found_on_boot_reset_reason')!r}"
         )
+        if crash.get("stale_image") is True or crash.get("image_match") == "mismatch":
+            # Old dump from another image: still unacknowledged (so still blocks until a
+            # human acks/clears it) but never described as a crash of the running build.
+            crash_summary += (
+                " [STALE IMAGE: coredump is from a different firmware image, not the running one"
+                + (f"; dump elf sha256 prefix {crash.get('dump_elf_sha')}" if crash.get("dump_elf_sha") else "")
+                + "]"
+            )
 
     # THE READINESS FIRING INTERLOCK (see BoardInfo.readiness_blocked).
     # One more GET, tolerated absent exactly like /api/crash_report above.
@@ -480,10 +547,15 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
     # pins those key strings on the firmware side, and a rename has to go
     # through it.
     readiness_blocked = []
+    heat_blocked = []
     try:
         readiness, _raw3 = _get_json(host, "/api/readiness", timeout)
-    except PreflightTransportError:
+    except PreflightTransportError as exc:
         readiness = None
+        undetermined.append(f"readiness ({exc})")
+    else:
+        if not isinstance(readiness, dict):
+            undetermined.append("readiness (response was not a JSON object)")
     if isinstance(readiness, dict):
         for item in readiness.get("items") or []:
             if not isinstance(item, dict):
@@ -492,7 +564,8 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
                 continue
             if item.get("status") != "not_done":
                 continue
-            readiness_blocked.append(
+            (heat_blocked if item.get("key") in HEAT_ONLY_BLOCKING_KEYS
+             else readiness_blocked).append(
                 (
                     str(item.get("key")),
                     str(item.get("label") or item.get("key")),
@@ -503,6 +576,7 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
     return BoardInfo(
         reachable=True,
         readiness_blocked=tuple(readiness_blocked),
+        heat_blocked=tuple(heat_blocked),
         fw_version=data.get("fw_version") or None,
         fw_build=data.get("fw_build") or None,
         self_protocol_version=data.get("self_protocol_version"),
@@ -510,6 +584,7 @@ def get_board_info(host: str, timeout: float = PREFLIGHT_HTTP_TIMEOUT_S) -> Boar
         uptime_s=data.get("uptime_s"),
         crash_unacknowledged=crash_unacknowledged,
         crash_summary=crash_summary,
+        undetermined=tuple(undetermined),
     )
 
 
@@ -542,6 +617,8 @@ def run_preflight(
     timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
     task_liveness: "object" = None,
     allow_missing_tasks: bool = False,
+    task_liveness_unavailable: str = "",
+    allow_undetermined: bool = False,
 ) -> PreflightReport:
     """The main entry point. Probes ``host`` once for board identity and
     once per required capability, and returns a :class:`PreflightReport`.
@@ -568,7 +645,9 @@ def run_preflight(
         return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
                                 board=board, checks=checks,
                                 task_liveness=task_liveness,
-                                allow_missing_tasks=allow_missing_tasks)
+                                allow_missing_tasks=allow_missing_tasks,
+                                task_liveness_unavailable=task_liveness_unavailable,
+                                allow_undetermined=allow_undetermined)
 
     for capability, preset_value in required:
         try:
@@ -600,7 +679,9 @@ def run_preflight(
     return PreflightReport(preset_name=preset.get("name", preset_name), host=host,
                             board=board, checks=checks,
                             task_liveness=task_liveness,
-                            allow_missing_tasks=allow_missing_tasks)
+                            allow_missing_tasks=allow_missing_tasks,
+                            task_liveness_unavailable=task_liveness_unavailable,
+                            allow_undetermined=allow_undetermined)
 
 
 class PreflightFailed(Exception):
@@ -624,6 +705,8 @@ def preflight_or_raise(
     timeout: float = PREFLIGHT_HTTP_TIMEOUT_S,
     task_liveness: "object" = None,
     allow_missing_tasks: bool = False,
+    task_liveness_unavailable: str = "",
+    allow_undetermined: bool = False,
 ) -> PreflightReport:
     """Same as :func:`run_preflight`, but raises :class:`PreflightFailed`
     when ``report.ok`` is False (board unreachable, or any fatal capability
@@ -633,7 +716,9 @@ def preflight_or_raise(
     report = run_preflight(preset, host, zones_host=zones_host, safety_host=safety_host,
                             preset_name=preset_name, timeout=timeout,
                             task_liveness=task_liveness,
-                            allow_missing_tasks=allow_missing_tasks)
+                            allow_missing_tasks=allow_missing_tasks,
+                            task_liveness_unavailable=task_liveness_unavailable,
+                            allow_undetermined=allow_undetermined)
     if not report.ok:
         _module_log.error("capability preflight failed:\n%s", report.describe())
         raise PreflightFailed(report)

@@ -414,6 +414,9 @@ typedef struct {
     uint32_t total_elapsed_s;
 
     char     fault_reason[96];   /* only meaningful when state == PROFILE_EXEC_FAULTED (a GLOBAL trip) */
+    char     pause_reason[48];   /* only meaningful when state == PROFILE_EXEC_PAUSED: non-empty when the
+                                  * executor paused itself (e.g. "pico_fatal_reboot",
+                                  * "heat_grant_unconfirmed"), empty for an operator pause */
 
     /* docs/audits/profile_executor_panic_2026-09-24.md: true when THIS run's
      * FAULTED state (fault_reason/fault_guard above) came from

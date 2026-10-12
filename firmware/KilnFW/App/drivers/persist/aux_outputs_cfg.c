@@ -1,4 +1,5 @@
 #include "aux_outputs_cfg.h"
+#include "cfgfs_file_validators.h"
 
 #include <math.h>
 #include <stddef.h>
@@ -6,6 +7,7 @@
 
 #include "MAX31856.h"
 #include "cfg_fs_status.h"
+#include "cfg_save_lock.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -14,7 +16,9 @@
 #include "hal_kv.h"
 #include "kiln_io.h"
 #include "nvs_key_check.h"
+#include "legacy_nvs_erase.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- aux_outputs_cfg_set() */
 
 static const char *TAG = "aux_outputs_cfg";
 
@@ -27,7 +31,6 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_AUX_OUT);
 NVS_KEY_LEN_CHECK(NVS_KEY_AUX_OUT_REV);
 
-#define AUX_OUTPUTS_CFG_VERSION 1
 
 typedef struct {
     uint8_t version;
@@ -52,10 +55,14 @@ static uint32_t s_rev = 0;
 /* s_lock guards the RAM globals above (short critical sections only, never
  * across flash I/O or another module's calls). s_set_lock serializes whole
  * set() calls so the unlocked save in the middle cannot interleave with another
- * writer. Created in start() (idempotent); NULL (prestart) = no locking, never a
- * hang. Lock order: s_set_lock -> s_lock. */
+ * writer. s_lock is created in start() (idempotent); NULL (prestart) = no
+ * locking, never a hang. s_set_lock is a cfg_save_lock_t (created lazily): it
+ * is held across pref_cfg_fs_commit(), which waits on the flash worker, so it
+ * must reserve the worker first (cfg_save_lock.h,
+ * docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md "Save mutex vs. flash worker").
+ * Lock order: s_set_lock -> s_lock. */
 static SemaphoreHandle_t s_lock = NULL;
-static SemaphoreHandle_t s_set_lock = NULL;
+static cfg_save_lock_t s_set_lock = CFG_SAVE_LOCK_INIT;
 
 static void ao_lock(SemaphoreHandle_t l)
 {
@@ -100,7 +107,7 @@ static bool entry_valid(const aux_output_entry_t *e)
 /* pref_cfg_fs validator: exact size + CRC; a CURRENT-version blob also needs
  * every entry in range. A NEWER version passes (its entries are not ours to
  * judge) so start() can quarantine it instead of silently defaulting. */
-static bool aux_validate(const void *bytes, size_t len)
+bool aux_outputs_cfg_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(aux_outputs_blob_t)) {
         return false;
@@ -139,9 +146,6 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     if (!s_lock) {
         s_lock = xSemaphoreCreateMutex();
     }
-    if (!s_set_lock) {
-        s_set_lock = xSemaphoreCreateMutex();
-    }
     /* All NVS / cfg-fs I/O below runs into locals; s_lock is taken only to publish. */
     aux_outputs_blob_t nvs_blob;
     memset(&nvs_blob, 0, sizeof(nvs_blob));
@@ -167,7 +171,7 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
             } else if (len > 0 && len <= sizeof(raw)) {
                 size_t rl = len;
                 if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, raw, &rl) == HAL_OK && rl > 0) {
-                    if (rl == sizeof(nvs_blob) && aux_validate(raw, rl)) {
+                    if (rl == sizeof(nvs_blob) && aux_outputs_cfg_file_validate(raw, rl)) {
                         memcpy(&nvs_blob, raw, sizeof(nvs_blob));
                         nvs_valid = true;
                     } else if (raw[0] > AUX_OUTPUTS_CFG_VERSION) {
@@ -190,8 +194,14 @@ esp_err_t aux_outputs_cfg_start(uint8_t zones_relay_union)
     aux_outputs_blob_t resolved = nvs_blob;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
-                                          aux_validate, &resolved, &resolved_rev, &used_file);
+    bool have_value = pref_cfg_fs_resolve_nvs_retired(AUX_OUTPUTS_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
+                                          aux_outputs_cfg_file_validate, &resolved, &resolved_rev, &used_file);
+    if (used_file && !nvs_newer) {
+        /* persfx3 MED-3: the file is authoritative; retire the frozen NVS copy so no later file loss can
+         * resurrect a rule the operator has since disabled. Retried next boot on failure. */
+        static const char *const k_legacy[] = {NVS_KEY_AUX_OUT, NVS_KEY_AUX_OUT_REV};
+        (void)legacy_nvs_erase_keys(TAG, KILN_NVS_PARTITION, NVS_NAMESPACE, k_legacy, 2);
+    }
     ao_lock(s_lock);
     apply_defaults();
     if (nvs_newer) {
@@ -264,13 +274,13 @@ bool aux_outputs_cfg_verify_persisted(void)
     memset(&blob, 0, sizeof(blob));
     uint32_t rev = 0;
     bool valid = false;
-    ao_lock(s_set_lock); /* no set() in flight: RAM and file are consistent */
-    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_validate, &blob, &rev, &valid);
+    cfg_save_lock_take(&s_set_lock); /* no set() in flight: RAM and file are consistent */
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(blob), aux_outputs_cfg_file_validate, &blob, &rev, &valid);
     ao_lock(s_lock);
     bool same = valid && rev == s_rev && blob.version == AUX_OUTPUTS_CFG_VERSION &&
                 memcmp(blob.entries, s_entries, sizeof(s_entries)) == 0;
     ao_unlock(s_lock);
-    ao_unlock(s_set_lock);
+    cfg_save_lock_give(&s_set_lock);
     return same;
 }
 
@@ -312,7 +322,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
         return ESP_ERR_INVALID_STATE;
     }
 
-    ao_lock(s_set_lock); /* one writer at a time; readers are not blocked by the save */
+    cfg_save_lock_take(&s_set_lock); /* one writer at a time; readers are not blocked by the save */
 
     /* Snapshot under the short lock. The OTHER entries' persisted state is
      * carried through unchanged (a start()-time conflicted one stays persisted
@@ -326,7 +336,14 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
     uint32_t new_rev = s_rev + 1;
     ao_unlock(s_lock);
     if (quarantined) {
-        ao_unlock(s_set_lock);
+        cfg_save_lock_give(&s_set_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    /* HTTP audit L37 follow-up (MED-2): no save while a factory reset is in flight -- the file would be
+     * written back over storage the reset is erasing. Checked under s_set_lock, just before the commit.
+     * Narrows the window only (the erase does not take s_set_lock). */
+    if (relay_authority_reset_in_flight()) {
+        cfg_save_lock_give(&s_set_lock);
         return ESP_ERR_INVALID_STATE;
     }
     blob.entries[relay - 1] = *entry;
@@ -348,7 +365,7 @@ esp_err_t aux_outputs_cfg_set(uint8_t relay, const aux_output_entry_t *entry, ui
         s_rev = new_rev;
         ao_unlock(s_lock);
     }
-    ao_unlock(s_set_lock);
+    cfg_save_lock_give(&s_set_lock);
     return err;
 }
 
@@ -389,6 +406,10 @@ bool aux_convert_journal_read(aux_convert_journal_t *out)
 
 bool aux_convert_journal_write(const aux_convert_journal_t *j)
 {
+    /* Factory-reset writer fence: do not lazily re-init and write kiln_nvs after the reset erased it. */
+    if (relay_authority_reset_refuses_writer()) {
+        return false;
+    }
     if (j == NULL || nvs_partition_init(KILN_NVS_PARTITION) != HAL_OK) {
         return false;
     }
@@ -443,7 +464,7 @@ void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(f_blob), aux_validate, &f_blob, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(AUX_OUTPUTS_FILE_PATH, sizeof(f_blob), aux_outputs_cfg_file_validate, &f_blob, &f_rev, &f_valid);
 
     bool n_valid = false;
     aux_outputs_blob_t n_blob;
@@ -455,7 +476,7 @@ void aux_outputs_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, 
             aux_outputs_blob_t blob;
             memset(&blob, 0, sizeof(blob));
             size_t len = sizeof(blob);
-            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_validate(&blob, len)) {
+            if (hal_kv_get_blob(&h, NVS_KEY_AUX_OUT, &blob, &len) == HAL_OK && aux_outputs_cfg_file_validate(&blob, len)) {
                 n_valid = true;
                 n_blob = blob;
                 uint32_t rev = 0;

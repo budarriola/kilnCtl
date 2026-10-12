@@ -40,6 +40,7 @@
 // boot-time reads (adaptive_tune_init()) run once from app_main's task,
 // which is not PSRAM-stacked.
 #include "adaptive_tune_internal.h"
+#include "cfgfs_file_validators.h"
 
 #include <assert.h>
 #include <math.h>
@@ -64,10 +65,11 @@
 #include "hal_kv.h"
 #include "hal_esp_common.h" /* hal_status_to_esp_err() -- preserve the specific esp_err_t
                               * save_kibase_job()'s caller (the flash worker) already branches on */
+#include "legacy_nvs_erase.h"
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- adaptive_tune_get_kibase_dualwrite_status() below */
 #include "flash_worker_wait.h" /* bounded wait for the flash-safe worker -- see adaptive_tune_init()'s
                                  * kibase resolve call site below and flash_worker_wait.h's header comment */
-#include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA_PLAN.md
+#include "pref_cfg_fs.h" /* cfg-filesystem dual-write bridge, docs/FILESYSTEM_USER_DATA.md
                              section 5 item 9 -- see adaptive_tune_internal.h's
                              ADAPTIVE_TUNE_KIBASE_FILE_PATH comment for the simplified
                              (re-derivable) treatment this item gets. */
@@ -604,7 +606,7 @@ static uint32_t s_kibase_rev = 0;
 // not have -- everything else (a garbage baseline value for a zone whose
 // bit IS set) is exactly as trusted as the NVS blob always was, since this
 // item's whole point is that losing/re-deriving it is cheap.
-static bool kibase_file_validate(const void *bytes, size_t len)
+bool adaptive_tune_kibase_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(adaptive_tune_kibase_blob_t)) {
         return false;
@@ -625,6 +627,8 @@ static void save_kibase_job(void *arg)
                                      "adaptive-tune ki baseline");
 }
 
+uint32_t adaptive_tune_ki_clear_gen[MAX31856_CHANNEL_COUNT];
+
 void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
 {
     if (!rec) {
@@ -641,6 +645,12 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
     // still holding the lock, so the dispatch below is a plain memcpy-then-
     // write with no second lock acquisition needed.
     bool baseline_newly_latched = false;
+    bool zone_active[MAX31856_CHANNEL_COUNT] = {false};
+    bool zone_planned[MAX31856_CHANNEL_COUNT] = {false};
+    bool baseline_was_valid_a[MAX31856_CHANNEL_COUNT] = {false};
+    float baseline_before_a[MAX31856_CHANNEL_COUNT] = {0};
+    adaptive_tune_zone_plan_t zone_plans[MAX31856_CHANNEL_COUNT];
+    adaptive_tune_coupled_plan_t coupled_plans[MAX31856_CHANNEL_COUNT];
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
         adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
         const profile_firing_zone_record_t *zr = &rec->zones[zi];
@@ -657,6 +667,11 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
             // says nothing about its plant model; the masked (all-zero)
             // coupling row must not be blended into the stored one either.
             skip_reason = "monitor-only zone (no heater relay) -- not used as training data";
+        } else if (z->write_in_flight) {
+            // F3 follow-up: adaptive_tune_revert() is writing this zone's gains
+            // with the lock released; planning against them now would capture a
+            // revert snapshot and commit a result its write then undoes.
+            skip_reason = "a revert of this zone was in progress at run end -- not used as training data";
         } else if (!zr->active) {
             skip_reason = "zone not active in this profile's zone mask -- not used as training data";
         } else if (!clean) {
@@ -708,10 +723,42 @@ void adaptive_tune_run_end(const profile_firing_run_record_t *rec, bool clean)
         // watch for a VALUE change, not only a false->true valid transition
         // (the transition alone was already sufficient before Q4, when
         // adaptive_tune_refine_ki_locked() was the only writer).
-        bool baseline_was_valid = z->ki_baseline_valid;
-        float baseline_before = z->ki_baseline;
-        bool model_refined = adaptive_tune_refine_zone_locked(zi, rec->profile_id);
-        adaptive_tune_refine_coupled_locked(zi);
+        // F3: plan only (no zones setter) while the lock is held; the setters run
+        // in the unlocked pass below and their outcome is committed in the third.
+        zone_active[zi] = true;
+        baseline_was_valid_a[zi] = z->ki_baseline_valid;
+        baseline_before_a[zi] = z->ki_baseline;
+        zone_planned[zi] = adaptive_tune_plan_zone_locked(zi, rec->profile_id, &zone_plans[zi]);
+        adaptive_tune_plan_coupled_locked(zi, &coupled_plans[zi]);
+        z->write_in_flight = true; // F3 follow-up: a revert refuses until the commit pass clears this
+    }
+
+    // F3: the zones setters end in the zones NVS save, which dispatches onto the
+    // flash worker; the worker takes adaptive_tune_lock (UART Accept ->
+    // adaptive_tune_clear_ki_baseline()). Never hold the lock across them.
+    xSemaphoreGive(adaptive_tune_lock);
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!zone_active[zi]) {
+            continue;
+        }
+        if (zone_planned[zi] || zone_plans[zi].bootstrap_baseline) {
+            adaptive_tune_apply_zone_plan(zi, &zone_plans[zi]);
+        }
+        adaptive_tune_apply_coupled_plan(zi, &coupled_plans[zi]);
+    }
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (!zone_active[zi]) {
+            continue;
+        }
+        adaptive_tune_zone_t *z = &adaptive_tune_zones[zi];
+        const profile_firing_zone_record_t *zr = &rec->zones[zi];
+        bool baseline_was_valid = baseline_was_valid_a[zi];
+        float baseline_before = baseline_before_a[zi];
+        z->write_in_flight = false;
+        bool model_refined = adaptive_tune_commit_zone_locked(zi, &zone_plans[zi]);
+        adaptive_tune_commit_coupled_locked(zi, &coupled_plans[zi]);
         if (!model_refined) {
             adaptive_tune_refine_ki_locked(zi, &zr->stats);
         } else {
@@ -1006,6 +1053,20 @@ void adaptive_tune_load_enable_flags(void)
 //      is already the worker task" and runs a dispatched fn() inline rather
 //      than deadlocking -- a second, generic backstop for any OTHER re-
 //      entrant caller this audit did not know to name explicitly.
+bool adaptive_tune_any_write_in_flight(void)
+{
+    adaptive_tune_ensure_lock();
+    xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    bool busy = false;
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        if (adaptive_tune_zones[zi].write_in_flight) {
+            busy = true;
+        }
+    }
+    xSemaphoreGive(adaptive_tune_lock);
+    return busy;
+}
+
 void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
 {
     if (zone_index >= MAX31856_CHANNEL_COUNT) {
@@ -1015,6 +1076,7 @@ void adaptive_tune_clear_ki_baseline(uint8_t zone_index)
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zones[zone_index].ki_baseline_valid = false;
     adaptive_tune_zones[zone_index].ki_baseline = 0.0f;
+    adaptive_tune_ki_clear_gen[zone_index]++; // F3: invalidates an in-flight run_end plan's re-latch for this zone
 
     kibase_job_t job = {.result = ESP_FAIL};
     for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -1168,7 +1230,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // never nested the other way, same order every other call site in this
     // module keeps.
     /* Only state (RUNNING/PAUSED) is needed here -- use the narrow accessor
-     * profile_executor.h recommends rather than a 1464-byte profile_exec_
+     * profile_executor.h recommends rather than a 1512-byte profile_exec_
      * status_t stack local. This is reachable from the httpd task
      * (adaptive_tune_http.c's revert POST handler calls straight into this
      * function on its own 8192-byte stack). */
@@ -1183,6 +1245,16 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     adaptive_tune_ensure_lock();
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
     adaptive_tune_zone_t *z = &adaptive_tune_zones[zone_index];
+    if (z->write_in_flight) {
+        // F3 follow-up: run_end's apply pass (or another revert) is writing this
+        // zone with the lock released. Its snapshot may describe a change that
+        // has not landed yet; reverting now would be overwritten by it.
+        xSemaphoreGive(adaptive_tune_lock);
+        if (reason) {
+            snprintf(reason, reason_cap, "an adaptive-tune write to this zone is in progress -- retry");
+        }
+        return ADAPTIVE_TUNE_REVERT_BUSY;
+    }
     if (!z->revert_available) {
         xSemaphoreGive(adaptive_tune_lock);
         if (reason) {
@@ -1190,10 +1262,32 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
         }
         return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
     }
+    {
+        // F2: the snapshot only applies while the live zone still holds exactly what the adaptive
+        // commit left. Any other writer since (Accept, PID POST, UART, iter_tune restore, backup
+        // import, kiln_cfg apply) makes it stale; reverting would overwrite their newer values.
+        float lkp, lki, lkd, lk, lt, ld;
+        const bool have = zones_config_get_pid(zone_index, &lkp, &lki, &lkd) &&
+                          zones_config_get_model(zone_index, &lk, &lt, &ld);
+        if (!have || lkp != z->revert_expect_kp || lki != z->revert_expect_ki || lkd != z->revert_expect_kd ||
+            lk != z->revert_expect_k_dc || lt != z->revert_expect_tau_s || ld != z->revert_expect_dead_time_s) {
+            z->revert_available = false; // F2 precheck
+            z->has_applied = false;
+            xSemaphoreGive(adaptive_tune_lock);
+            if (reason) {
+                snprintf(reason, reason_cap,
+                         "zone gains or model were changed by another writer since the adaptive change -- "
+                         "nothing to revert");
+            }
+            return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
+        }
+    }
+    z->write_in_flight = true;
     float kp = z->revert_kp, ki = z->revert_ki, kd = z->revert_kd;
     float k_dc = z->revert_k_dc, tau_s = z->revert_tau_s, dead_time_s = z->revert_dead_time_s;
     bool base_valid = z->revert_ki_baseline_valid;
     float base_val = z->revert_ki_baseline;
+    const float expect[3] = {z->revert_expect_kp, z->revert_expect_ki, z->revert_expect_kd};
     xSemaphoreGive(adaptive_tune_lock); // never hold this lock across the zone-config write below
 
     // Direct, unwrapped zones_config_set_*() calls -- this function's only
@@ -1202,9 +1296,31 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     // handler()/adaptive_tune_set_enabled() above already write zones_
     // config from directly, unwrapped -- see either's own comment for the
     // evidence this rests on.
-    bool ok = zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) &&
-              zones_config_set_pid(zone_index, kp, ki, kd);
+    // F1/F3: one atomic model + gains write (single claim check, single lock section). The expected
+    // prior is the adaptive-applied pair, so a writer landing since the check above is detected.
+    zones_set_result_t wr = zones_config_set_model_and_pid_checked(zone_index, k_dc, tau_s, dead_time_s, kp, ki, kd,
+                                                                   expect);
+    bool ok = (wr == ZONES_SET_OK || wr == ZONES_SET_SAVE_FAILED);
     if (!ok) {
+        xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+        z->write_in_flight = false;
+        if (wr == ZONES_SET_STALE_PRIOR) {
+            z->revert_available = false; // F2 stale
+            z->has_applied = false;
+        }
+        xSemaphoreGive(adaptive_tune_lock);
+        if (wr == ZONES_SET_BUSY_RUNNING) {
+            if (reason) {
+                snprintf(reason, reason_cap, "a profile or autotune run is active -- zone writes refused");
+            }
+            return ADAPTIVE_TUNE_REVERT_FIRING_ACTIVE;
+        }
+        if (wr == ZONES_SET_STALE_PRIOR) {
+            if (reason) {
+                snprintf(reason, reason_cap, "zone gains were changed by another writer -- nothing to revert");
+            }
+            return ADAPTIVE_TUNE_REVERT_NOTHING_TO_REVERT;
+        }
         if (reason) {
             snprintf(reason, reason_cap, "zone config write rejected the reverted gains");
         }
@@ -1212,6 +1328,7 @@ adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *rea
     }
 
     xSemaphoreTake(adaptive_tune_lock, portMAX_DELAY);
+    z->write_in_flight = false;
     // One-shot: consume the snapshot so a second press without a fresh
     // applied change in between reports NOTHING_TO_REVERT honestly, rather
     // than silently reapplying the same old values again.
@@ -1332,7 +1449,7 @@ void adaptive_tune_init(void)
     // to whatever the file alone can offer (a fresh board with no NVS
     // namespace yet can still have a valid file from a prior boot's save).
 
-    // cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+    // cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA.md section
     // 5 item 9) -- see adaptive_tune_internal.h's ADAPTIVE_TUNE_KIBASE_FILE_PATH
     // comment for why this item gets the simplified generic-bridge treatment
     // rather than zones config's bespoke divergence forensics.
@@ -1352,8 +1469,14 @@ void adaptive_tune_init(void)
     adaptive_tune_kibase_blob_t resolved;
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
-    bool have_value = pref_cfg_fs_resolve(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
-                                           kibase_file_validate, &resolved, &resolved_rev, &used_file);
+    bool have_value = pref_cfg_fs_resolve_nvs_retired(ADAPTIVE_TUNE_KIBASE_FILE_PATH, &kb, sizeof(kb), nvs_valid, nvs_rev,
+                                           adaptive_tune_kibase_file_validate, &resolved, &resolved_rev, &used_file);
+    if (used_file) {
+        /* persfx3 MED-3: retire the frozen NVS ki_baseline copy once the file is the adopted source. */
+        static const char *const k_legacy[] = {ADAPTIVE_TUNE_NVS_KEY_KIBASE, ADAPTIVE_TUNE_NVS_KEY_KIBASE_REV};
+        (void)legacy_nvs_erase_keys(ADAPTIVE_TUNE_TAG, ADAPTIVE_TUNE_NVS_PARTITION, ADAPTIVE_TUNE_NVS_NAMESPACE,
+                                    k_legacy, 2);
+    }
     if (have_value) {
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             if (resolved.mask & (1u << zi)) {
@@ -1407,7 +1530,7 @@ bool adaptive_tune_kibase_migration_worker_wait_deferred(void)
 
 // GET /api/cfgfs dual-write picture for the Ki-baseline blob -- 2026-09-08,
 // moving this item's reporting out of cfg_fs_status.c's stale "nvs_only"
-// hardcoded list (docs/FILESYSTEM_USER_DATA_PLAN.md's Ki-baseline bridge,
+// hardcoded list (docs/FILESYSTEM_USER_DATA.md's Ki-baseline bridge,
 // step 9, landed in 762bb29e). Read-only: unlike adaptive_tune_init()'s
 // boot-time load, this does NOT call pref_cfg_fs_resolve() (no resync
 // write) -- same "a status GET must never heal or mask a divergence"
@@ -1440,7 +1563,7 @@ void adaptive_tune_get_kibase_dualwrite_status(bool *file_valid, uint32_t *file_
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(f_blob), kibase_file_validate, &f_blob, &f_rev,
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(f_blob), adaptive_tune_kibase_file_validate, &f_blob, &f_rev,
                           &f_valid);
 
     adaptive_tune_kibase_blob_t n_blob;

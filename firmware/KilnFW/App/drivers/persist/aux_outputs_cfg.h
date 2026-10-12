@@ -42,6 +42,9 @@
 
 #include "aux_outputs_conflict.h"
 
+/* Blob version this build writes and fully understands (also used by the POST /api/cfgfs/file rule). */
+#define AUX_OUTPUTS_CFG_VERSION 1
+
 /* cfg_fs relative path of this item's dual-write mirror (NVS side lives in kiln_nvs). */
 #define AUX_OUTPUTS_FILE_PATH "aux_out.dat"
 

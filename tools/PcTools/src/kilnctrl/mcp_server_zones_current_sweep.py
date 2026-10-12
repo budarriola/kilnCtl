@@ -134,7 +134,7 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
     `host`: board IP or hostname. Defaults to the board's current station IP
     if connected, else the fallback-AP address 192.168.4.1.
     """
-    if not confirm:
+    if confirm is not True:
         return (
             "error: current sweep refused without confirm=True -- this ENERGIZES HEATER "
             "RELAYS one zone at a time (see this tool's own docstring for the sequence, "
@@ -150,8 +150,14 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
             "refusing to start a sweep. Review and acknowledge via GET/POST /api/crash_report "
             f"before energizing relays (host={resolved})."
         )
-    if board.readiness_blocked:
-        names = ", ".join(f"{label} ({key}): {detail}" for key, label, detail in board.readiness_blocked)
+    if board.undetermined:
+        return (
+            f"error: could not read the board's safety state ({'; '.join(board.undetermined)}) -- a failed "
+            f"read is not a clean board; refusing to start a sweep (host={resolved})"
+        )
+    if board.readiness_blocked or board.heat_blocked:
+        names = ", ".join(f"{label} ({key}): {detail}"
+                          for key, label, detail in (*board.readiness_blocked, *board.heat_blocked))
         return f"error: readiness firing interlock blocks on {names} -- refusing to start a sweep (host={resolved})"
     try:
         result = sweep_http.start(resolved)
@@ -159,8 +165,16 @@ def zone_current_sweep_start(confirm: bool = False, host: Optional[str] = None) 
         return f"error: {exc} (host={resolved})"
     if not result.get("ok"):
         return f"refused by firmware: {result.get('reason', '(no reason given)')} (host={resolved})"
+    try:
+        st = sweep_http.status(resolved)
+    except sweep_http.ZoneSweepHttpError as exc:
+        return (f"UNVERIFIED - current sweep start accepted but the status read-back failed ({exc}); "
+                f"state UNKNOWN, poll zone_current_sweep_status() (host={resolved})")
+    if st.get("state") not in ("running", "done"):
+        return (f"UNVERIFIED - current sweep start accepted but status reads state={st.get('state')!r} "
+                f"reason={st.get('reason')!r}; state UNKNOWN (host={resolved})")
     return (
-        f"ok - current sweep started (host={resolved}); energizing relays one zone at a time, "
+        f"ok - current sweep started, status state={st.get('state')} (host={resolved}); energizing relays one zone at a time, "
         "roughly 5s/zone -- poll zone_current_sweep_status() for progress"
     )
 
@@ -205,6 +219,12 @@ def zone_current_sweep_status(host: Optional[str] = None) -> str:
             "note: unmeasured zones are EXPECTED on this project's ~4 W bench fixture -- "
             "its currents (~70 mA all zones, ~23 mA/zone alone) sit below the firmware's "
             "0.045 A noise floor; this is not a failure to retry."
+        )
+    if st.get("esp_persist_failed"):
+        lines.append(
+            "WARNING: esp_persist_failed=true -- an ESP-side save of the CT provenance records "
+            "(normals/ct map/k_ct) failed this run; the Pico values are unaffected but the "
+            "ESP record may be stale or missing after reboot. Re-run the sweep."
         )
     lines.append(f"(host={resolved})")
     return "\n".join(lines)

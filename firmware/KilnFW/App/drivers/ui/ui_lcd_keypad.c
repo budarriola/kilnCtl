@@ -285,6 +285,14 @@ static void build_overlay(void)
 
 void ui_lcd_keypad_show(const char *prompt, ui_lcd_keypad_done_cb_t on_done, void *user_data)
 {
+    /* Already open: finish THIS request as cancelled and leave the first one's
+     * pending callback intact (audit L19). */
+    if (ui_lcd_keypad_is_open()) {
+        if (on_done) {
+            on_done(false, LCD_PIN_ROLE_NONE, user_data);
+        }
+        return;
+    }
     if (!s_mbox) {
         build_overlay();
     }

@@ -31,19 +31,21 @@ _Static_assert(sizeof(fake_kv_tag_t) <= HAL_KV_HANDLE_STORAGE_BYTES,
 _Static_assert(FAKE_KV_MAX_KEYS_PER_NS >= FAKE_KV_KNOWN_WORST_CASE_KILN_CFG_KEYS,
                "FAKE_KV_MAX_KEYS_PER_NS must cover kiln_cfg's known worst case (103 keys) -- see the comment above");
 
+typedef enum { FAKE_KV_KIND_BLOB = 0, FAKE_KV_KIND_STR, FAKE_KV_KIND_U8, FAKE_KV_KIND_U32 } fake_kv_kind_t;
+
 typedef struct {
     bool     in_use;
     char     name[FAKE_KV_MAX_KEY_LEN];
 
     bool     committed_valid;
-    bool     committed_is_str;
+    uint8_t  committed_kind;  /* fake_kv_kind_t: NVS keys are typed (blob/str/u8/u32) */
     bool     committed_corrupted;
     uint8_t  committed_data[FAKE_KV_MAX_VALUE_BYTES];
     size_t   committed_len;
 
     bool     pending_set;      /* a pending write (or tombstone) exists */
     bool     pending_tombstone;
-    bool     pending_is_str;
+    uint8_t  pending_kind;
     uint8_t  pending_data[FAKE_KV_MAX_VALUE_BYTES];
     size_t   pending_len;
 } fake_kv_key_slot_t;
@@ -89,6 +91,7 @@ static bool take_write_fail(void)
 static bool                   s_lossy_uncommitted = false;
 static unsigned               s_silent_erase_noops = 0u;
 static unsigned               s_silent_set_noops = 0u;
+static bool                   s_blob_get_misses_size1 = false;
 /* One-shot hal_kv_open() failure injection, scoped to a single namespace
  * name so scripting a failure for one namespace (e.g. the boot_guard legacy
  * namespace) can't accidentally also fail an unrelated open the same test
@@ -171,9 +174,13 @@ static bool key_logically_present(const fake_kv_key_slot_t *k)
  * of do_get() and fake_kv_reset_all(), both below) since this file has no
  * header of its own for internal statics and forward declarations. */
 static unsigned s_get_call_count = 0;
+/* Probe-error injection for hal_kv_key_exists(): the next `s_key_exists_fail_count` probes return the status. */
+static unsigned s_key_exists_fail_count = 0;
+static hal_status_t s_key_exists_fail_status = HAL_OK;
 
 void fake_kv_reset_all(void)
 {
+    hal_kv_set_write_refuse_hook(NULL);
     memset(s_partitions, 0, sizeof(s_partitions));
     memset(s_handles, 0, sizeof(s_handles));
     s_write_safe_here = true;
@@ -183,7 +190,9 @@ void fake_kv_reset_all(void)
     s_lossy_uncommitted = false;
     s_silent_erase_noops = 0u;
     s_silent_set_noops = 0u;
+    s_blob_get_misses_size1 = false;
     s_get_call_count = 0u;
+    s_key_exists_fail_count = 0u;
     s_next_open_fail_armed = false;
     s_next_open_fail_status = HAL_OK;
     s_next_open_fail_namespace[0] = '\0';
@@ -256,7 +265,7 @@ void fake_kv_simulate_power_loss(void)
                     ks->committed_corrupted = false;
                 } else {
                     ks->committed_valid = true;
-                    ks->committed_is_str = ks->pending_is_str;
+                    ks->committed_kind = ks->pending_kind;
                     ks->committed_len = ks->pending_len;
                     memcpy(ks->committed_data, ks->pending_data, ks->pending_len);
                     ks->committed_corrupted = false;
@@ -316,6 +325,22 @@ void fake_kv_set_write_safe_here(bool safe)
 }
 
 /* --- hal_kv.h implementation --- */
+
+/* Mutation fence mirror of hal_kv_esp.c (hal_kv.h "Mutation fence"). */
+static hal_kv_write_refuse_fn_t s_write_refuse_fn = NULL;
+
+void hal_kv_set_write_refuse_hook(hal_kv_write_refuse_fn_t fn)
+{
+    s_write_refuse_fn = fn;
+}
+
+static bool write_refused(const fake_kv_handle_slot_t *hs)
+{
+    if (!s_write_refuse_fn) return false;
+    const char *name = s_partitions[hs->partition_slot].name;
+    return s_write_refuse_fn(name[0] ? name : NULL);
+}
+
 
 hal_status_t hal_kv_open(hal_kv_handle_t *h, const char *namespace_name,
                           hal_kv_mode_t mode, const char *partition)
@@ -398,6 +423,8 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
     fake_kv_handle_slot_t *hs = get_handle(h);
     if (!hs) return HAL_NOT_READY;
 
+    if (write_refused(hs)) return HAL_NOT_READY;
+
     if (take_write_fail()) {
         s_next_write_fail_armed = false;
         return s_next_write_fail_status;
@@ -417,7 +444,7 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
                 ks->committed_corrupted = false;
             } else {
                 ks->committed_valid = true;
-                ks->committed_is_str = ks->pending_is_str;
+                ks->committed_kind = ks->pending_kind;
                 ks->committed_len = ks->pending_len;
                 memcpy(ks->committed_data, ks->pending_data, ks->pending_len);
                 ks->committed_corrupted = false;
@@ -430,7 +457,7 @@ hal_status_t hal_kv_commit(hal_kv_handle_t *h)
     return HAL_OK;
 }
 
-static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want_str,
+static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, fake_kv_kind_t want_kind,
                             void *buf, size_t *out_len)
 {
     s_get_call_count++;
@@ -449,21 +476,24 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
     fake_kv_key_slot_t *k = find_key(ns, key, false);
     if (!k || !key_logically_present(k)) return HAL_NOT_FOUND;
 
-    bool is_str;
+    uint8_t kind;
     const uint8_t *data;
     size_t len;
     if (k->pending_set) {
-        is_str = k->pending_is_str;
+        kind = k->pending_kind;
         data = k->pending_data;
         len = k->pending_len;
     } else {
         if (k->committed_corrupted) return HAL_IO;
-        is_str = k->committed_is_str;
+        kind = k->committed_kind;
         data = k->committed_data;
         len = k->committed_len;
     }
 
-    if (want_str && !is_str) return HAL_INVALID_ARG; /* wrong-type injection case */
+    /* Matches ESP-IDF 6.0.2: Storage::findItem keeps scanning past a page
+     * TYPE_MISMATCH and ends in NOT_FOUND, so a typed read of a key stored
+     * with another type is NOT_FOUND on target, not a type error. */
+    if ((uint8_t)want_kind != kind) return HAL_NOT_FOUND;
 
     if (buf == NULL) { /* size probe */
         *out_len = len;
@@ -475,17 +505,29 @@ static hal_status_t do_get(fake_kv_handle_slot_t *hs, const char *key, bool want
     return HAL_OK;
 }
 
+void fake_kv_script_blob_get_misses_size1(bool on)
+{
+    s_blob_get_misses_size1 = on;
+}
+
 hal_status_t hal_kv_get_blob(hal_kv_handle_t *h, const char *key, void *buf, size_t *out_len)
 {
-    return do_get(get_handle(h), key, false, buf, out_len);
+    if (s_blob_get_misses_size1) {
+        size_t probe = 0;
+        hal_status_t pe = do_get(get_handle(h), key, FAKE_KV_KIND_BLOB, NULL, &probe);
+        if (pe == HAL_OK && probe == 1u) {
+            return HAL_NOT_FOUND;
+        }
+    }
+    return do_get(get_handle(h), key, FAKE_KV_KIND_BLOB, buf, out_len);
 }
 
 hal_status_t hal_kv_get_str(hal_kv_handle_t *h, const char *key, char *buf, size_t *out_len)
 {
-    return do_get(get_handle(h), key, true, buf, out_len);
+    return do_get(get_handle(h), key, FAKE_KV_KIND_STR, buf, out_len);
 }
 
-static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_str,
+static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, fake_kv_kind_t kind,
                             const void *buf, size_t len)
 {
     if (!hs) return HAL_NOT_READY;
@@ -494,6 +536,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
     if (buf == NULL && len > 0) return HAL_INVALID_ARG;
     if (len > FAKE_KV_MAX_VALUE_BYTES) return HAL_INVALID_SIZE;
+    if (write_refused(hs)) return HAL_NOT_READY;
 
     if (take_write_fail()) {
         s_next_write_fail_armed = false;
@@ -521,7 +564,7 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
 
     k->pending_set = true;
     k->pending_tombstone = false;
-    k->pending_is_str = is_str;
+    k->pending_kind = (uint8_t)kind;
     k->pending_len = len;
     if (len) memcpy(k->pending_data, buf, len);
     return HAL_OK;
@@ -529,13 +572,13 @@ static hal_status_t do_set(fake_kv_handle_slot_t *hs, const char *key, bool is_s
 
 hal_status_t hal_kv_set_blob(hal_kv_handle_t *h, const char *key, const void *buf, size_t len)
 {
-    return do_set(get_handle(h), key, false, buf, len);
+    return do_set(get_handle(h), key, FAKE_KV_KIND_BLOB, buf, len);
 }
 
 hal_status_t hal_kv_set_str(hal_kv_handle_t *h, const char *key, const char *value)
 {
     if (value == NULL) return HAL_INVALID_ARG;
-    return do_set(get_handle(h), key, true, value, strlen(value) + 1);
+    return do_set(get_handle(h), key, FAKE_KV_KIND_STR, value, strlen(value) + 1);
 }
 
 hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out)
@@ -550,28 +593,43 @@ hal_status_t hal_kv_get_u32(hal_kv_handle_t *h, const char *key, uint32_t *out)
      * length re-check below additionally rejects a stored value SMALLER
      * than 4 bytes, which do_get() would otherwise report as a successful
      * short read. */
-    hal_status_t err = do_get(get_handle(h), key, false, out, &len);
-    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    hal_status_t err = do_get(get_handle(h), key, FAKE_KV_KIND_U32, out, &len);
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_NOT_FOUND; /* wrong type: NOT_FOUND on target */
     return err;
 }
 
 hal_status_t hal_kv_set_u32(hal_kv_handle_t *h, const char *key, uint32_t value)
 {
-    return do_set(get_handle(h), key, false, &value, sizeof(value));
+    return do_set(get_handle(h), key, FAKE_KV_KIND_U32, &value, sizeof(value));
 }
 
 hal_status_t hal_kv_get_u8(hal_kv_handle_t *h, const char *key, uint8_t *out)
 {
     if (out == NULL) return HAL_INVALID_ARG;
     size_t len = sizeof(*out);
-    hal_status_t err = do_get(get_handle(h), key, false, out, &len);
-    if (err == HAL_OK && len != sizeof(*out)) return HAL_INVALID_ARG; /* wrong-type injection case */
+    hal_status_t err = do_get(get_handle(h), key, FAKE_KV_KIND_U8, out, &len);
+    if (err == HAL_OK && len != sizeof(*out)) return HAL_NOT_FOUND; /* wrong type: NOT_FOUND on target */
     return err;
 }
 
 hal_status_t hal_kv_set_u8(hal_kv_handle_t *h, const char *key, uint8_t value)
 {
-    return do_set(get_handle(h), key, false, &value, sizeof(value));
+    return do_set(get_handle(h), key, FAKE_KV_KIND_U8, &value, sizeof(value));
+}
+
+hal_status_t hal_kv_key_exists(hal_kv_handle_t *h, const char *key)
+{
+    fake_kv_handle_slot_t *hs = get_handle(h);
+    if (!hs) return HAL_NOT_READY;
+    if (key == NULL) return HAL_INVALID_ARG;
+    if (s_key_exists_fail_count > 0u) {
+        s_key_exists_fail_count--;
+        return s_key_exists_fail_status;
+    }
+    if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO;
+    fake_kv_namespace_t *ns = &s_partitions[hs->partition_slot].namespaces[hs->ns_slot];
+    fake_kv_key_slot_t *k = find_key(ns, key, false);
+    return (k && key_logically_present(k)) ? HAL_OK : HAL_NOT_FOUND;
 }
 
 hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
@@ -581,6 +639,8 @@ hal_status_t hal_kv_erase_key(hal_kv_handle_t *h, const char *key)
     if (hs->mode != HAL_KV_MODE_READ_WRITE) return HAL_INVALID_ARG;
     if (key == NULL) return HAL_INVALID_ARG;
     if (strlen(key) >= FAKE_KV_MAX_KEY_LEN) return HAL_IO; /* see do_get()'s comment */
+
+    if (write_refused(hs)) return HAL_NOT_READY;
 
     if (take_write_fail()) {
         s_next_write_fail_armed = false;
@@ -680,4 +740,10 @@ void fake_kv_script_write_status_after(unsigned skip, hal_status_t status)
     s_next_write_fail_armed = true;
     s_next_write_fail_skip = skip;
     s_next_write_fail_status = status;
+}
+
+void fake_kv_script_key_exists_status(unsigned count, hal_status_t status)
+{
+    s_key_exists_fail_count = count;
+    s_key_exists_fail_status = status;
 }

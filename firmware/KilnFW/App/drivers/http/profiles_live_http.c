@@ -1,4 +1,4 @@
-// docs/LIVE_PROFILE_EDIT_PLAN.md pass 2 -- section 10's five-route HTTP surface
+// docs/LIVE_PROFILE_EDIT.md pass 2 -- section 10's five-route HTTP surface
 // over pass 1's live_profile.c/profile_executor_live_pickup.c backend.
 //
 // Window-check caveat: live_edit_check_window() needs a "running" profile_t
@@ -233,6 +233,52 @@ static esp_err_t live_send_working_content(httpd_req_t *req)
 #undef LIVE_CONTENT_CAP
 }
 
+/* M1 (REVIEW_D7GUARD): optimistic concurrency for the working copy. The
+ * client echoes the "generation" it last read (GET /api/profile/live, or the
+ * POST edit / fork response) as query parameter gen=N on POST edit and POST
+ * decide. A mismatch means the working copy changed (another tab, the LCD, a
+ * discard + re-fork) since that read: 409, nothing written. An ABSENT gen is
+ * accepted (compatible with clients that predate this field): the PcTools
+ * `generation` parameter is optional and the GET ?content=1 carries none, so
+ * a caller that omits gen is ungated. POST edit does the check, the verified
+ * save and the bump atomically (live_profile_save_working_if_gen); decide
+ * still pre-checks only. The generation is RAM-only and restarts at 0 on
+ * reboot. */
+/* Parses gen=N. Returns false when absent (*present=false) or valid; true when malformed. */
+static bool live_gen_parse(httpd_req_t *req, bool *present, uint32_t *out)
+{
+    *present = false;
+    *out = 0;
+    char query[48];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        return false;
+    }
+    char val[16];
+    if (httpd_query_key_value(query, "gen", val, sizeof(val)) != ESP_OK) {
+        return false;
+    }
+    char *end = NULL;
+    unsigned long g = strtoul(val, &end, 10);
+    if (end == val || *end != '\0') {
+        return true; /* malformed gen is never silently ignored */
+    }
+    *present = true;
+    *out = (uint32_t)g;
+    return false;
+}
+
+static bool live_gen_stale(httpd_req_t *req)
+{
+    bool present;
+    uint32_t g;
+    if (live_gen_parse(req, &present, &g)) {
+        return true;
+    }
+    return present && g != live_profile_generation();
+}
+
+#define LIVE_GEN_STALE_MSG "working copy changed elsewhere -- reload and re-apply your edit"
+
 static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
 {
     char query[64];
@@ -300,11 +346,11 @@ static esp_err_t api_profile_live_get_handler(httpd_req_t *req)
     char json[640];
     int n = snprintf(json, sizeof(json),
                      "{\"active\":%s,\"origin_id\":%u,\"origin_is_builtin\":%s,"
-                     "\"working_id\":%d,\"editable_from_segment\":%u,"
+                     "\"working_id\":%d,\"generation\":%u,\"editable_from_segment\":%u,"
                      "\"pending_decision\":%s,\"last_refusal\":%s}",
                      st.active ? "true" : "false", (unsigned)(st.active ? st.profile_id : 0),
                      (have_rec && rec.origin_is_builtin) ? "true" : "false", working_id,
-                     (unsigned)(st.active ? st.segment_index : 0), pending_decision ? "true" : "false",
+                     (unsigned)live_profile_generation(), (unsigned)(st.active ? st.segment_index : 0), pending_decision ? "true" : "false",
                      refbuf);
     if (n < 0 || (size_t)n >= sizeof(json)) {
         return send_server_error(req, "status response did not fit");
@@ -362,8 +408,8 @@ static esp_err_t api_profile_live_fork_post_handler(httpd_req_t *req)
     }
 
     char json[160];
-    snprintf(json, sizeof(json), "{\"ok\":true,\"origin_id\":%u,\"working_id\":%u}", (unsigned)st.profile_id,
-             (unsigned)rec.working_id);
+    snprintf(json, sizeof(json), "{\"ok\":true,\"origin_id\":%u,\"working_id\":%u,\"generation\":%u}",
+             (unsigned)st.profile_id, (unsigned)rec.working_id, (unsigned)live_profile_generation());
     return send_json(req, json);
 }
 
@@ -460,9 +506,21 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
     }
     heap_caps_free(running);
 
-    bool saved = live_profile_save_working(candidate, err, sizeof(err));
+    bool gen_present;
+    uint32_t gen_val;
+    if (live_gen_parse(req, &gen_present, &gen_val)) {
+        heap_caps_free(warn_json);
+        heap_caps_free(candidate);
+        return send_conflict(req, LIVE_GEN_STALE_MSG);
+    }
+    uint32_t saved_gen = 0;
+    live_save_result_t sr = live_profile_save_working_if_gen(candidate, gen_present, gen_val, &saved_gen, err, sizeof(err));
     heap_caps_free(candidate);
-    if (!saved) {
+    if (sr == LIVE_SAVE_STALE) {
+        heap_caps_free(warn_json);
+        return send_conflict(req, LIVE_GEN_STALE_MSG);
+    }
+    if (sr != LIVE_SAVE_OK) {
         heap_caps_free(warn_json);
         /* Review fix: this used to be a bare httpd_resp_sendstr(), whose
          * default status is 200 OK -- a failed working-slot write reported
@@ -470,13 +528,14 @@ static esp_err_t api_profile_live_post_handler(httpd_req_t *req)
         return send_server_error(req, err);
     }
 
-    size_t resp_cap = warn_json_cap + 48;
+    size_t resp_cap = warn_json_cap + 80;
     char *json = heap_caps_malloc(resp_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         heap_caps_free(warn_json);
         return send_server_error(req, "out of memory");
     }
-    int rn = snprintf(json, resp_cap, "{\"ok\":true,\"warnings\":%s}", warn_json[0] ? warn_json : "[]");
+    int rn = snprintf(json, resp_cap, "{\"ok\":true,\"generation\":%u,\"warnings\":%s}",
+                      (unsigned)saved_gen, warn_json[0] ? warn_json : "[]");
     heap_caps_free(warn_json);
     if (rn < 0 || (size_t)rn >= resp_cap) {
         heap_caps_free(json);
@@ -566,6 +625,28 @@ static void decide_lock_init(void)
     }
 }
 
+/* REVIEW_WEBFX7 MED-1: after the slot save (no lock held across it) clear only if the working copy is still the
+ * one that was saved. An edit applied meanwhile (LCD Apply) keeps its working copy and pending record. */
+static profiles_live_decide_result_t decide_finish_clear(uint32_t work_gen, uint8_t id, uint8_t *out_id, char *err,
+                                                          size_t err_cap)
+{
+    if (out_id) {
+        *out_id = id;
+    }
+    char clear_err[64] = {0};
+    live_clear_result_t c = live_profile_clear_if_gen(work_gen, clear_err, sizeof(clear_err));
+    if (c == LIVE_CLEAR_STALE) {
+        snprintf(err, err_cap, "saved to slot %u; working copy edited during save, decide again", (unsigned)id);
+        return LIVE_DECIDE_SAVED_BUT_EDITED;
+    }
+    if (c != LIVE_CLEAR_OK) {
+        snprintf(err, err_cap, "saved to slot %u; clearing the working copy failed: %s", (unsigned)id,
+                 clear_err[0] ? clear_err : "failed");
+        return LIVE_DECIDE_SERVER_ERROR;
+    }
+    return LIVE_DECIDE_OK;
+}
+
 static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind_t kind, const char *name, bool confirm,
                                                           uint8_t *out_id, char *err, size_t err_cap)
 {
@@ -599,7 +680,8 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        if (!live_profile_load_working(working)) {
+        uint32_t work_gen = 0;
+        if (!live_profile_load_working_gen(working, &work_gen)) {
             heap_caps_free(working);
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
@@ -608,17 +690,21 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         working->name[sizeof(working->name) - 1] = '\0';
         uint8_t id = 0;
         uint8_t warn_count = 0;
-        bool saved = profiles_http_save(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count, err, err_cap);
+        bool persisted = true;
+        bool saved = profiles_http_save_ex(PROFILES_MAX_COUNT /* first free */, working, &id, &warn_count,
+                                           &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
             return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
         }
-        char clear_err[64];
-        live_profile_clear(clear_err, sizeof(clear_err));
-        if (out_id) {
-            *out_id = id;
+        if (!persisted) {
+            /* S5: the slot is live in RAM but not in storage; keep the working copy (do NOT clear it) so the
+             * edit is not lost, and do not report success. */
+            /* review L1 / fwlow16 LOW-1: save_ex already rolled the fresh slot back under its lock */
+            snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
+            return LIVE_DECIDE_SERVER_ERROR;
         }
-        return LIVE_DECIDE_OK;
+        return decide_finish_clear(work_gen, id, out_id, err, err_cap);
     }
 
     if (kind == LIVE_EDIT_DECISION_OVERWRITE) {
@@ -637,24 +723,25 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
         }
-        if (!live_profile_load_working(working)) {
+        uint32_t work_gen = 0;
+        if (!live_profile_load_working_gen(working, &work_gen)) {
             heap_caps_free(working);
             snprintf(err, err_cap, "out of memory");
             return LIVE_DECIDE_SERVER_ERROR;
         }
         uint8_t id = 0;
         uint8_t warn_count = 0;
-        bool saved = profiles_http_save(rec.origin_id, working, &id, &warn_count, err, err_cap);
+        bool persisted = true;
+        bool saved = profiles_http_save_ex(rec.origin_id, working, &id, &warn_count, &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
             return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
         }
-        char clear_err[64];
-        live_profile_clear(clear_err, sizeof(clear_err));
-        if (out_id) {
-            *out_id = id;
+        if (!persisted) {
+            snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
+            return LIVE_DECIDE_SERVER_ERROR;
         }
-        return LIVE_DECIDE_OK;
+        return decide_finish_clear(work_gen, id, out_id, err, err_cap);
     }
 
     snprintf(err, err_cap, "unknown action");
@@ -682,6 +769,7 @@ static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_resu
     switch (r) {
     case LIVE_DECIDE_NOTHING_PENDING:
     case LIVE_DECIDE_BUSY:
+    case LIVE_DECIDE_SAVED_BUT_EDITED:
         return send_conflict(req, err);
     case LIVE_DECIDE_FORBIDDEN:
         return send_forbidden(req, err);
@@ -726,10 +814,21 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
     }
 
     char name[PROFILE_NAME_MAX_LEN + 1] = {0};
-    bool have_name = http_form_find_field(body, "name", name, sizeof(name)) > 0;
+    int name_len = http_form_find_field(body, "name", name, sizeof(name));
+    if (name_len > 0 && http_form_value_has_ctl(name, name_len)) {
+        return send_bad_request(req, "name contains a control character");
+    }
+    bool have_name = name_len > 0;
     char confirm[4];
     bool confirmed = http_form_find_field(body, "confirm", confirm, sizeof(confirm)) > 0 && strcmp(confirm, "1") == 0;
 
+    if (live_gen_stale(req)) {
+        profiles_live_decide_status_t gst;
+        profiles_live_decide_status(&gst);
+        if (gst.record_pending) {
+            return send_conflict(req, LIVE_GEN_STALE_MSG);
+        }
+    }
     uint8_t out_id = 0;
     profiles_live_decide_result_t r =
         profiles_live_decide_apply(kind, have_name ? name : NULL, confirmed, &out_id, err, sizeof(err));

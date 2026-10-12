@@ -16,7 +16,10 @@ $tools = $PSScriptRoot
 . (Join-Path $tools "checkcache_lib.ps1")
 . (Join-Path $tools "main_baseline_lib.ps1")
 $script:fails = 0
+$script:asserts = 0
+$script:ExpectedAssertions = 81   # measured 2026-10-10; a skipped/aborted block must fail, raise when adding cases
 function Assert([bool]$cond, [string]$what) {
+    $script:asserts++
     if ($cond) { Write-Host "  ok: $what" } else { Write-Host "  FAIL: $what" -ForegroundColor Red; $script:fails++ }
 }
 function Same($a, $b) { return ((@($a) -join '|') -ceq (@($b) -join '|')) }
@@ -168,6 +171,99 @@ try {
     $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $repo
     Assert ($null -eq $sel.Baseline) "missing directory -> none"
 
+    Write-Host "case: squash-promoted main (dev flow): tree match, review F6"
+    $dv = Join-Path $tmp "devrepo"
+    git init -b main $dv *>$null
+    Commit-File $dv "f.txt" "0" "root"
+    $P0 = Rev $dv HEAD
+    git -C $dv checkout -b dev *>$null
+    Commit-File $dv "f.txt" "1" "D1"
+    Commit-File $dv "g.txt" "2" "D2"
+    $D2 = Rev $dv HEAD
+    $P1 = (git -C $dv commit-tree "$D2^{tree}" -p $P0 -m "Promote dev ${D2}: squash").Trim()   # never an ancestor of dev
+    git -C $dv update-ref refs/remotes/origin/main $P1
+    Commit-File $dv "h.txt" "3" "D3"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+    $rp = @((Row "tools\check_b.ps1" "FAIL"))
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $P1 -Tree (Tree $dv $P1) -Results $rp)
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dv
+    Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $P1) "promote-commit baseline is usable through its tree"
+    Assert ($sel.Exact -and -not $sel.Warning) "tree equal to origin/main's tree in HEAD history -> Exact (KNOWN works)"
+    $cmpP = Compare-MainBaseline -Current @((Row "tools\check_b.ps1" "FAIL")) -Baseline $sel.Baseline -Exact:$sel.Exact
+    Assert (Same $cmpP.Known @("tools\check_b.ps1")) "same failure is KNOWN under the dev flow"
+    Remove-Item -LiteralPath $bdir -Recurse -Force
+    $P9 = (git -C $dv commit-tree "$P0^{tree}" -p $P0 -m "Promote dev ${P0}: unrelated tree").Trim()
+    Commit-File $dv "z.txt" "z" "off history"
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $P9 -Tree ("c" * 40) -Results $rp)
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dv
+    Assert ($null -eq $sel.Baseline) "a non-ancestor baseline whose tree is not in HEAD's history is still ignored"
+    Remove-Item -LiteralPath $bdir -Recurse -Force
+
+    Write-Host "case: dev-tip baseline recorded on clean dev, compared against later dev commits"
+    $dd = Join-Path $tmp "devtip"
+    git init -b main $dd *>$null
+    Commit-File $dd "f.txt" "0" "root"
+    git -C $dd checkout -b dev *>$null
+    Commit-File $dd "f.txt" "1" "D1"
+    Commit-File $dd "g.txt" "2" "D2"
+    $DT = Rev $dd HEAD
+    git -C $dd update-ref refs/remotes/origin/main (Rev $dd main)
+    git -C $dd update-ref refs/remotes/origin/dev $DT
+    $recD = Test-MainBaselineRecordable -RepoRoot $dd
+    Assert ($recD.Ok -and $recD.Ref -ceq "origin/dev") "clean HEAD == origin/dev records, with ref origin/dev"
+    Assert (-not (Test-MainBaselineRecordable -RepoRoot $dd -DevRef "").Ok) "without a dev ref the old main-only rule still refuses a dev tip"
+    $rd = @((Row "tools\check_b.ps1" "FAIL"))
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $recD.Commit -Tree $recD.Tree -Results $rd -Ref $recD.Ref)
+    Commit-File $dd "h.txt" "3" "D3 (branch commit ahead of origin/dev)"
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dd
+    Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $DT) "dev-tip baseline is an ancestor of a later dev commit, so usable"
+    Assert ($sel.Exact) "baseline at the merge-base with origin/dev is Exact"
+    $cmpD = Compare-MainBaseline -Current @((Row "tools\check_b.ps1" "FAIL")) -Baseline $sel.Baseline -Exact:$sel.Exact
+    Assert (Same $cmpD.Known @("tools\check_b.ps1")) "same failure is KNOWN against the dev-tip baseline"
+    git -C $dd update-ref refs/remotes/origin/dev (Rev $dd HEAD)
+    $sel = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $dd
+    Assert ($null -ne $sel.Baseline -and $sel.Baseline.commit -ceq $DT) "after dev advances the older dev-tip baseline is still found (as an ancestor)"
+    Assert (-not $sel.Exact -and $sel.Warning) "but it is no longer Exact once dev moved past it"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
+
+    Write-Host "case: B2 fork-point baseline vs main-side and dev-side HEAD"
+    $bb = Join-Path $tmp "b2repo"
+    git init -b main $bb *>$null
+    Commit-File $bb "f.txt" "r" "R"
+    # F gets a far-future committer date so a commit-time-only ordering would wrongly prefer the fork-point baseline (B2b).
+    $env:GIT_COMMITTER_DATE = "2099-01-01T00:00:00"
+    Commit-File $bb "f.txt" "f" "F"
+    Remove-Item Env:\GIT_COMMITTER_DATE
+    $FP = Rev $bb HEAD
+    git -C $bb checkout -b dev *>$null
+    Commit-File $bb "d.txt" "1" "D1"
+    Commit-File $bb "d.txt" "2" "D2"
+    $DD2 = Rev $bb HEAD
+    git -C $bb checkout main *>$null
+    $PP = (git -C $bb commit-tree "$DD2^{tree}" -p $FP -m "Promote dev ${DD2}: squash").Trim()
+    git -C $bb reset -q --hard $PP *>$null
+    Commit-File $bb "m.txt" "m2" "M2"
+    git -C $bb update-ref refs/remotes/origin/main (Rev $bb HEAD)
+    git -C $bb update-ref refs/remotes/origin/dev $DD2
+    Commit-File $bb "m.txt" "m3" "main-side work"
+    $rf = @((Row "tools\check_x.ps1" "FAIL"))
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $FP -Tree (Tree $bb $FP) -Results $rf)
+    $selA = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $bb
+    Assert ($null -ne $selA.Baseline -and $selA.Baseline.commit -ceq $FP) "B2a: fork-point baseline is found for a main-side HEAD"
+    Assert (-not $selA.Exact) "B2a: fork-point baseline is NOT Exact for a main-side HEAD (mbDev clause must not apply)"
+    Assert ((Compare-MainBaseline -Current $rf -Baseline $selA.Baseline -Exact:$selA.Exact).Known.Count -eq 0) "B2a: the failure is not KNOWN"
+    Remove-Item -LiteralPath $bdir -Recurse -Force
+    git -C $bb checkout -q $DD2 *>$null
+    Commit-File $bb "d.txt" "3" "dev-side work"
+    $rpass = @((Row "tools\check_x.ps1" "PASS"))
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $FP -Tree (Tree $bb $FP) -Results $rf)
+    [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $DD2 -Tree (Tree $bb $DD2) -Results $rpass)
+    $selB = Select-MainBaseline -Dir $bdir -Mode "fast" -RepoRoot $bb
+    Assert ($null -ne $selB.Baseline -and $selB.Baseline.commit -ceq $DD2 -and $selB.Exact) "B2b: dev-tip baseline beats the fork-point baseline for a dev-side HEAD"
+    $cmpB = Compare-MainBaseline -Current $rf -Baseline $selB.Baseline -Exact:$selB.Exact
+    Assert ((Same $cmpB.New @("tools\check_x.ps1")) -and $cmpB.Known.Count -eq 0) "B2b: failing at HEAD while passing at the dev tip is NEW"
+    Remove-Item -LiteralPath $bdir -Recurse -Force -ErrorAction SilentlyContinue
     # ---------------------------------------------------------------- 4
     Write-Host "case: recordable only at a clean HEAD == origin/main"
     Assert ((Test-MainBaselineRecordable -RepoRoot $repo).Ok) "clean HEAD == origin/main records"
@@ -230,7 +326,7 @@ try {
     $st = @{}; foreach ($x in $b.results) { $st[[string]$x.check] = [string]$x.status }
     Assert ($st["tools\check_ok.ps1"] -ceq "PASS" -and $st["tools\check_known.ps1"] -ceq "FAIL") "recorded PASS and FAIL per check"
     $r = Run-Checks @("-Only", "check_known")
-    Assert ($r.Out -match 'Main baseline not recorded: -Only') "a filtered run does not record"
+    Assert ($r.Out -match 'not recorded as a new main baseline: -Only') "a filtered run does not record"
 
     Set-Content -LiteralPath (ScTool "check_new.ps1") -Value "exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m addnew *>$null
@@ -280,25 +376,27 @@ try {
     $mainSha = Rev $seed HEAD
     $lc = Join-Path $tmp "lclone"
     git clone $origin $lc *>$null
+    Set-Content -LiteralPath (Join-Path (Join-Path $lc '.git') 'kilnctl_scratch_repo') -Value 'scratch' -Encoding ascii   # land.ps1 test-seam marker
     Commit-File $lc "mine.txt" "x" "mine"
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
         -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output "x" -ExitCode 1) }, (Row "tools\check_ok.ps1" "PASS")))
     $log = Join-Path $tmp "run.log"
+    function Write-RunLog { param([Parameter(ValueFromPipeline)]$l) begin{$acc=@()} process{$acc+=$l} end{ $tr = (git -C $lc rev-parse "HEAD^{tree}"); @("Run tree: $tr dirty=0 partial=0") + $acc | Set-Content -LiteralPath $log -Encoding Unicode } }
     function Run-Land([string[]]$more) {
         Push-Location $lc
         try {
-            $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -AllowStandaloneClone -DryRun -CheckLog $log @more 2>&1 | Out-String
+            $o = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -Coordinator -AllowStandaloneClone -DryRun -CheckLog $log @more 2>&1 | Out-String
             $line = ($o -split "`r?`n" | Where-Object { $_.Trim().StartsWith("{") } | Select-Object -Last 1)
             $j = $null; if ($line) { try { $j = $line | ConvertFrom-Json } catch {} }
             return [pscustomobject]@{ Code = $LASTEXITCODE; Json = $j; Out = $o }
         } finally { Pop-Location }
     }
-    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "1 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @()
     Assert ($r.Code -eq 1) "KNOWN failure is refused without -AllowKnownFailures"
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1') -and @($r.Json.new_fails).Count -eq 0) "KNOWN failure accepted and listed in known_fails"
-    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "  FAIL  tools\check_new.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 2 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "  FAIL  tools\check_new.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 2 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1 -and ($r.Json.new_fails -contains 'tools\check_new.ps1')) "a NEW failure still refuses and is listed in new_fails"
     # CHANGED signature (finding 2): same check fails on main but for a different reason.
@@ -306,17 +404,17 @@ try {
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $mainSha -Tree (Tree $lc "origin/main") `
         -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = $sigMain }))
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: original reason", "",
-      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1')) "same failure signature as main stays KNOWN in land"
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: a brand new reason", "",
-      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1) "a different failure signature is not excused by land"
     # Non-exact baseline (finding 1): ancestor of HEAD, not the merge-base.
     Remove-Item -LiteralPath $bdir -Recurse -Force
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit (Rev $lc HEAD) -Tree (Tree $lc HEAD) -Results @((Row "tools\check_known.ps1" "FAIL")))
-    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1) "a non-merge-base baseline excuses nothing in land"
     # Other lineage: a baseline whose commit is not an ancestor of HEAD is ignored.
@@ -325,7 +423,7 @@ try {
     git init -b main $other *>$null
     Commit-File $other "z.txt" "z" "unrelated"
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit (Rev $other HEAD) -Tree (Tree $other HEAD) -Results @((Row "tools\check_known.ps1" "FAIL")))
-    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+    @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 1) "a baseline from another lineage excuses nothing"
 
@@ -345,22 +443,27 @@ try {
     [void](Write-MainBaseline -Dir $bdir -Mode "fast" -Commit $m1 -Tree (Tree $lc $m1) `
         -Results @([pscustomobject]@{ Path = "tools\check_known.ps1"; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output "FAIL: r" -ExitCode 1) }))
     @("Run mode: fast", "  FAIL  tools\check_known.ps1 (exit 1)", "", "--- tools\check_known.ps1 (exit 1) ---", "FAIL: r", "",
-      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Set-Content -LiteralPath $log -Encoding Unicode
+      "0 passed, 0 skipped (0 due to -Fast), 1 failed.") | Write-RunLog
     $r = Run-Land @("-AllowKnownFailures")
     Assert ($r.Code -eq 0 -and ($r.Json.known_fails -contains 'tools\check_known.ps1')) "known failure matched against the FETCHED origin/main (stale ref refreshed first)"
     $argsFile = Join-Path $tmp "stub_args.txt"
     $stub = [IO.Path]::Combine($tmp, "stub_checks.ps1")   # scratch file; not a repo path (source_path_drift)
     Set-Content -LiteralPath $stub -Encoding ascii -Value @("param([string]`$Only,[switch]`$AllowFewerChecks,[switch]`$FailOnlyOnNew)", "Add-Content -LiteralPath '$argsFile' -Value ('ONLY=' + `$Only + ' FOON=' + `$FailOnlyOnNew)", "exit 0")
     Push-Location $lc
-    try { $lo = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -AllowStandaloneClone -CheckLog $log -AllowKnownFailures -ChecksScript $stub 2>&1 | Out-String; $lcode = $LASTEXITCODE } finally { Pop-Location }
+    try { $lo = & powershell -NoProfile -ExecutionPolicy Bypass -File $land -Target main -Coordinator -AllowStandaloneClone -CheckLog $log -AllowKnownFailures -ChecksScript $stub 2>&1 | Out-String; $lcode = $LASTEXITCODE } finally { Pop-Location }
     $sa = if (Test-Path $argsFile) { Get-Content -Raw $argsFile } else { "" }
     Assert ($lcode -eq 0) "land with a known failure lands (exit $lcode)"
     Assert ($sa -match 'check_known' -and $sa -match 'FOON=True') "post-rebase run re-runs the known-failing check under -FailOnlyOnNew (stub saw: $($sa.Trim()))"
+} catch {
+    Write-Host "  FAIL: uncaught error: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)" -ForegroundColor Red
+    $script:fails++
 } finally {
     $env:KILNCTL_MAINBASELINE_DIR = $savedDir
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 
+Write-Host "assertions run: $($script:asserts)"
+if ($script:asserts -lt $script:ExpectedAssertions) { Write-Host "check_main_baseline: only $($script:asserts) of $($script:ExpectedAssertions) assertions ran (a block was skipped)" -ForegroundColor Red; exit 1 }
 if ($script:fails -gt 0) { Write-Host "check_main_baseline: $($script:fails) FAILED" -ForegroundColor Red; exit 1 }
 Write-Host "check_main_baseline: all cases passed" -ForegroundColor Green
 exit 0

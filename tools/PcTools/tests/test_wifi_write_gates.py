@@ -1,0 +1,220 @@
+"""wifi_add_network/set_mode/forget: confirm gate, mid-run gate, read-back."""
+from __future__ import annotations
+
+import os
+import sys
+import types
+import unittest
+import unittest.mock as um
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from kilnctrl import mcp_server_wifi as w  # noqa: E402
+
+
+def _res(ok=True, reason=""):
+    return types.SimpleNamespace(ok=ok, reason=reason)
+
+
+class _Fake:
+    def __init__(self, nets=(), mode="home", ok=True):
+        self.nets = list(nets)
+        self.mode = mode
+        self.ok = ok
+        self.calls = []
+
+    def add_network(self, ssid, pw):
+        self.calls.append(("add", ssid))
+        if self.ok:
+            self.nets.append(ssid)
+        return _res(self.ok)
+
+    def forget(self, ssid):
+        self.calls.append(("forget", ssid))
+        if self.ok and ssid in self.nets:
+            self.nets.remove(ssid)
+        return _res(self.ok)
+
+    def set_mode(self, m):
+        self.calls.append(("mode", m))
+        return _res(self.ok)
+
+    def get_networks(self):
+        return [types.SimpleNamespace(ssid=s) for s in self.nets], False
+
+    def set_ap_identity(self, ssid, pw):
+        self.calls.append(("ap", ssid))
+        if self.ok:
+            self.ap_ssid = ssid if ssid is not None else self.ap_ssid
+            self.ap_pw = pw if pw is not None else self.ap_pw
+        return _res(self.ok)
+
+    ap_ssid = "old"
+    ap_pw = "oldpassword"
+
+    def get_status(self):
+        return types.SimpleNamespace(mode_name=self.mode, ap_ssid=self.ap_ssid, ap_password="[set]" if self.ap_pw else "")
+
+
+class WifiGateTests(unittest.TestCase):
+    def _srv(self, fake, state=0):
+        prof = types.SimpleNamespace(get_exec_status=lambda timeout=2.0: types.SimpleNamespace(
+            state=state, state_name="RUNNING"))
+        return um.patch.multiple(w._srv, _wifi=fake, _profiles=prof, create=True)
+
+    def test_unconfirmed_refused_no_call(self):
+        f = _Fake()
+        with self._srv(f):
+            for out in (w.wifi_add_network("a", "p"), w.wifi_set_mode("ap"), w.wifi_forget("a"),
+                        w.wifi_forget("a", confirm="yes")):
+                self.assertIn("confirm=True", out)
+        self.assertEqual(f.calls, [])
+
+    def test_refused_while_running_override(self):
+        f = _Fake(nets=["a"])
+        with self._srv(f, state=1):
+            self.assertIn("while a profile", w.wifi_forget("a", confirm=True))
+            self.assertEqual(f.calls, [])
+            self.assertTrue(w.wifi_forget("a", confirm=True, allow_running=True).startswith("ok"))
+
+    def test_add_readback(self):
+        f = _Fake()
+        with self._srv(f):
+            self.assertTrue(w.wifi_add_network("a", "p", confirm=True).startswith("ok"))
+        f2 = _Fake()
+        f2.add_network = lambda s, p: _res(True)  # board lies: never stored
+        with self._srv(f2):
+            self.assertIn("FAILED", w.wifi_add_network("a", "p", confirm=True))
+
+    def test_mode_readback_mismatch(self):
+        f = _Fake(mode="home")
+        with self._srv(f):
+            self.assertIn("FAILED", w.wifi_set_mode("ap", confirm=True))
+
+    def test_forget_refusal_not_mislabelled(self):
+        f = _Fake(ok=False)
+        with self._srv(f):
+            out = w.wifi_forget("a", confirm=True)
+        self.assertTrue(out.startswith("refused"))
+        self.assertNotIn("no such saved network", out)
+
+    def test_unreadable_executor_refuses_and_override_works(self):
+        f = _Fake(nets=["a"])
+        def boom(timeout=2.0):
+            raise OSError("down")
+        with um.patch.multiple(w._srv, _wifi=f, _profiles=types.SimpleNamespace(get_exec_status=boom),
+                               create=True):
+            self.assertIn("could not be read", w.wifi_forget("a", confirm=True))
+            self.assertEqual(f.calls, [])
+            self.assertTrue(w.wifi_forget("a", confirm=True, allow_running=True).startswith("ok"))
+
+    def test_executor_no_answer_refuses(self):
+        f = _Fake(nets=["a"])
+        with um.patch.multiple(w._srv, _wifi=f, _profiles=types.SimpleNamespace(
+                get_exec_status=lambda timeout=2.0: None), create=True):
+            self.assertIn("could not be read", w.wifi_forget("a", confirm=True))
+        self.assertEqual(f.calls, [])
+
+    def test_forget_unreadable_readback_fails(self):
+        f = _Fake(nets=["a"])
+        f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            self.assertIn("FAILED", w.wifi_forget("a", confirm=True))
+
+    def test_saved_network_path_rejects_password_from_env_clearly(self):
+        f = _Fake()
+        with self._srv(f):
+            out = w.wifi_add_network(None, None, confirm=True, password_from_env=True)
+        self.assertIn("explicit ssid", out)
+        self.assertNotIn("not both", out)
+
+    def test_add_unreadable_readback_fails(self):
+        f = _Fake()
+        f.get_networks = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            out = w.wifi_add_network("a", "p", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_mode_unreadable_readback_fails(self):
+        f = _Fake(mode="ap")
+        f.get_status = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f):
+            out = w.wifi_set_mode("ap", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_ap_identity_gates_and_readback(self):
+        f = _Fake()
+        with self._srv(f):
+            self.assertIn("confirm=True", w.wifi_set_ap_identity("n"))
+            self.assertIn("confirm=True", w.wifi_set_ap_identity("n", confirm="yes"))
+        self.assertEqual(f.calls, [])
+        with self._srv(f, state=1):
+            self.assertIn("while a profile", w.wifi_set_ap_identity("n", confirm=True))
+        self.assertEqual(f.calls, [])
+        with self._srv(f):
+            out = w.wifi_set_ap_identity("newssid", "secretpass1", confirm=True)
+        self.assertTrue(out.startswith("ok"), out)
+        self.assertNotIn("secretpass1", out)
+
+    def test_ap_identity_mismatch_and_unreadable_fail(self):
+        f = _Fake()
+        f.set_ap_identity = lambda s, p: _res(True)  # board lies
+        with self._srv(f):
+            out = w.wifi_set_ap_identity("newssid", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        f2 = _Fake()
+        f2.get_status = lambda: (_ for _ in ()).throw(OSError("x"))
+        with self._srv(f2):
+            self.assertTrue(w.wifi_set_ap_identity("n", confirm=True).startswith("FAILED"))
+
+    def test_env_passwords_used_when_arg_unset(self):
+        seen = []
+        f = _Fake()
+        f.add_network = lambda s, p: (seen.append(p), f.nets.append(s), _res(True))[2]
+        with self._srv(f), um.patch.dict(os.environ, {"KILNCTL_WIFI_PASSWORD": "envpw123"}):
+            out = w.wifi_add_network("a", confirm=True, password_from_env=True)
+        self.assertEqual(seen, ["envpw123"])
+        self.assertNotIn("envpw123", out)
+        f2 = _Fake()
+        with self._srv(f2), um.patch.dict(os.environ, {"KILNCTL_WIFI_AP_PASSWORD": "apenv1234"}):
+            self.assertTrue(w.wifi_set_ap_identity(confirm=True, ap_password_from_env=True).startswith("ok"))
+        self.assertEqual(f2.ap_pw, "apenv1234")
+
+    def test_env_never_implicit(self):
+        f = _Fake()
+        env = {"KILNCTL_WIFI_AP_PASSWORD": "apenv1234", "KILNCTL_WIFI_PASSWORD": "envpw123"}
+        with self._srv(f), um.patch.dict(os.environ, env):
+            self.assertTrue(w.wifi_set_ap_identity("kiln2", confirm=True).startswith("ok"))
+            self.assertEqual(f.ap_pw, "oldpassword")
+            seen = []
+            f.add_network = lambda s, p: (seen.append(p), f.nets.append(s), _res(True))[2]
+            w.wifi_add_network("open", confirm=True)
+        self.assertEqual(seen, [""])
+
+    def test_env_flag_unset_or_both_refused(self):
+        f = _Fake()
+        with self._srv(f), um.patch.dict(os.environ, {}, clear=True):
+            self.assertIn("unset", w.wifi_set_ap_identity(confirm=True, ap_password_from_env=True))
+            self.assertIn("unset", w.wifi_add_network("a", confirm=True, password_from_env=True))
+            self.assertIn("not both", w.wifi_add_network("a", "p", confirm=True, password_from_env=True))
+        self.assertEqual(f.calls, [])
+
+    def test_ap_password_marker_mismatch_fails(self):
+        f = _Fake()
+        f.set_ap_identity = lambda s, p: _res(True)  # ok but marker stays set / empty
+        f.ap_pw = ""
+        with self._srv(f):
+            out = w.wifi_set_ap_identity(None, "newpass123", confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+
+    def test_status_explicit_host_untrusted(self):
+        st = types.SimpleNamespace(ap_password="", mode_name="home", state_name="x", sta_connected=False,
+                                   ssid="", ap_ssid="", sta_ip="", sta_rssi=0, ap_clients=0)
+        with um.patch.multiple(w._srv, _wifi=types.SimpleNamespace(get_status=lambda: st), create=True), \
+                um.patch.object(w.wifi_prov_http_client, "get_status", return_value={}) as g:
+            w.wifi_get_status(host="1.2.3.4")
+        self.assertIs(g.call_args.kwargs["trusted"], False)
+
+
+if __name__ == "__main__":
+    unittest.main()

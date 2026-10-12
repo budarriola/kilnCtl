@@ -1,4 +1,4 @@
-/* Node-only test for zones_page.html's ON_OFF_ZONE_PLAN.md step 6 UI gating:
+/* Node-only test for zones_page.html's ON_OFF_ZONE.md step 6 UI gating:
  * toggleZoneTypeUi() must hide every field that does nothing for the zone
  * type currently selected, and must NOT hide anything that still applies.
  *

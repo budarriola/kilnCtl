@@ -22,7 +22,7 @@ try {
     $devSha = (git -C $work rev-parse HEAD).Trim(); $mainSha = (git -C $work rev-parse main).Trim()
     function Mint([string[]]$more) {
         Push-Location $work
-        try { $o = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label t -WtRoot $wtroot -NoSubmodules @more 2>&1 | Out-String } finally { Pop-Location }
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label t -WtRoot $wtroot -NoSubmodules @more 2>&1 | Out-String } finally { Pop-Location }
         $m = [regex]::Match($o, '(?m)^WORKTREE:\s*(.+?)\s*$')
         if (-not $m.Success) { Write-Host $o; return $null }
         return (git -C $m.Groups[1].Value rev-parse HEAD).Trim()
@@ -40,6 +40,93 @@ try {
     $newDev = (git -C $other rev-parse HEAD).Trim()
     Assert ($newDev -ne $devSha) "scratch origin dev advanced"
     Assert ((Mint @()) -eq $newDev) "mint lands on the advanced origin/dev tip"
+    Write-Host "case: -Remove (F4/F14)"
+    function MintPath() {
+        Push-Location $work
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Label r -WtRoot $wtroot -NoSubmodules 2>&1 | Out-String } finally { Pop-Location }
+        return ([regex]::Match($o, '(?m)^WORKTREE:\s*(.+?)\s*$')).Groups[1].Value
+    }
+    function Run-MintRemove([string[]]$more, [string]$cwd = $work) {
+        Push-Location $cwd
+        try { $o = & powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File (Join-Path $here "worktree_mint.ps1") -Remove @more 2>&1 | Out-String; $rc = $LASTEXITCODE } finally { Pop-Location }
+        return [pscustomobject]@{ Rc = $rc; Out = $o }
+    }
+    # clean worktree at origin/dev: removed
+    $w1 = MintPath
+    $r = Run-MintRemove @("-Path", $w1)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w1)) "clean worktree is removed"
+    # unlanded detached commit: refused, kept; -Force removes
+    $w2 = MintPath
+    Set-Content -LiteralPath (Join-Path $w2 "u.txt") -Value "u" -Encoding ascii
+    git -C $w2 add u.txt *>$null; git -C $w2 commit -m unlanded *>$null
+    $r = Run-MintRemove @("-Path", $w2)
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w2) -and $r.Out -match "REFUSED") "unlanded detached commit: -Remove refused and worktree kept"
+    $r = Run-MintRemove @("-Path", $w2, "-Force")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w2)) "unlanded detached commit: -Remove -Force removes"
+    # commit that is on a branch: allowed
+    $w3 = MintPath
+    git -C $w3 checkout -b keepme *>$null
+    Set-Content -LiteralPath (Join-Path $w3 "k.txt") -Value "k" -Encoding ascii
+    git -C $w3 add k.txt *>$null; git -C $w3 commit -m onbranch *>$null
+    $r = Run-MintRemove @("-Path", $w3)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w3)) "commit reachable from a branch: -Remove allowed"
+    # rev-list error (a branch ref pointing at a missing object): fail closed, even with -Force
+    $w5 = MintPath
+    $gc = (git -C $work rev-parse --git-common-dir).Trim()
+    if (-not [System.IO.Path]::IsPathRooted($gc)) { $gc = Join-Path $work $gc }
+    $badRef = Join-Path $gc "refs/heads/brokenref"
+    Set-Content -LiteralPath $badRef -Value "1111111111111111111111111111111111111111" -Encoding ascii
+    $r = Run-MintRemove @("-Path", $w5, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w5) -and $r.Out -match "REFUSED") "rev-list error: -Remove -Force refused (fail closed) and worktree kept"
+    Remove-Item -LiteralPath $badRef -Force
+    $r = Run-MintRemove @("-Path", $w5)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w5)) "after the bad ref is gone: -Remove allowed"
+    # zero-byte loose ref: rev-list fails; REFUSED shows git's message; -ForceUnverifiable proceeds
+    $w6 = MintPath
+    $zeroRef = Join-Path $gc "refs/heads/zerobyte"
+    New-Item -ItemType File -Path $zeroRef -Force | Out-Null
+    $r = Run-MintRemove @("-Path", $w6, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w6) -and $r.Out -match "REFUSED" -and $r.Out -match "git said: \S") "zero-byte ref: refused with git's stderr shown"
+    $r = Run-MintRemove @("-Path", $w6, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w6) -and $r.Out -match "WARNING.*-ForceUnverifiable") "zero-byte ref: -ForceUnverifiable removes with a warning"
+    Remove-Item -LiteralPath $zeroRef -Force
+    # remote ref pointing at a missing object
+    $w7 = MintPath
+    $remRef = Join-Path $gc "refs/remotes/origin/ghost"
+    New-Item -ItemType Directory -Path (Split-Path -Parent $remRef) -Force | Out-Null
+    Set-Content -LiteralPath $remRef -Value "2222222222222222222222222222222222222222" -Encoding ascii
+    $r = Run-MintRemove @("-Path", $w7, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w7) -and $r.Out -match "REFUSED" -and $r.Out -match "git said: \S") "remote ref at missing object: refused with git's stderr shown"
+    $r = Run-MintRemove @("-Path", $w7, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w7)) "remote ref at missing object: -ForceUnverifiable removes"
+    Remove-Item -LiteralPath $remRef -Force
+    # orphan worktree (unborn HEAD): nothing to lose, removable without any override
+    $w8 = Join-Path $wtroot "orphan_wt"
+    git -C $work worktree add --orphan -b orphanbr $w8 *>$null
+    Assert (Test-Path -LiteralPath $w8) "orphan worktree created"
+    $r = Run-MintRemove @("-Path", $w8)
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w8)) "orphan worktree (unborn HEAD): -Remove allowed"
+    # deleted branch ref with an unlanded commit (sweepfx2 LOW-B): HEAD does not resolve but is NOT
+    # a genuinely unborn branch -> -Force alone must refuse; -ForceUnverifiable proceeds
+    $w9 = MintPath
+    git -C $w9 checkout -b delme *>$null
+    Set-Content -LiteralPath (Join-Path $w9 "d.txt") -Value "d" -Encoding ascii
+    git -C $w9 add d.txt *>$null; git -C $w9 commit -m unlanded_delme *>$null
+    git -C $work update-ref -d refs/heads/delme *>$null
+    $r = Run-MintRemove @("-Path", $w9, "-Force")
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w9) -and $r.Out -match "REFUSED" -and $r.Out -match "not a genuinely unborn") "deleted branch ref: -Remove -Force refused (not treated as unborn)"
+    $r = Run-MintRemove @("-Path", $w9, "-Force", "-ForceUnverifiable")
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w9)) "deleted branch ref: -ForceUnverifiable removes"
+    # main tree refused, and nothing in it touched
+    $r = Run-MintRemove @("-Path", $work)
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath (Join-Path $work "a.txt")) -and $r.Out -match "not a linked worktree") "main tree is refused"
+    # relative path resolves against PowerShell location
+    $w4 = MintPath
+    $r = Run-MintRemove @("-Path", ("..\wt\" + (Split-Path -Leaf $w4)))
+    Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w4)) "relative -Path resolves against the caller's location"
+    # nonexistent / wildcard path
+    $r = Run-MintRemove @("-Path", (Join-Path $wtroot "no[x]such"))
+    Assert ($r.Rc -ne 0) "nonexistent path refused"
     Write-Host "case: guard defaults"
     foreach ($f in "commit_guard.ps1", "push_verify.ps1", "wt_status.ps1") {
         $t = Get-Content -Raw -LiteralPath (Join-Path $here $f)

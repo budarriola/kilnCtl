@@ -21,6 +21,8 @@
 // doc comment on that section, and reboot_announce.h's comment two lines up
 // for the precedent this follows.
 #include "safety_core.h"
+#include "trip_seq.h" // trip_seq_next(), F4 (link-free header; link_frame.h is off limits here)
+#include "hal_barrier.h" // HAL_DMB(): publish/acquire of the trip-event fields across cores, F5
 
 #include <math.h>
 #include <stdio.h> // snprintf -- clear-trip outcome log line, see safety_core_task()
@@ -292,6 +294,10 @@ static bool    s_borrowed_sample_counter_known[CONTEXT_SNAPSHOT_MAX_ZONES];
 // (this file's own comments elsewhere on log_task_log() cost), and a
 // standing mismatch is exactly as true on tick 2 as it was on tick 1.
 static bool s_borrowed_type_mismatch_warned;
+// T2: last-good-config bookkeeping for a failed config_store read (see the
+// cfg_read_ok block in the tick). Reset with the guards at task start.
+static bool s_have_good_guard_cfg;
+static bool s_last_good_tc_not_installed_declared;
 
 // KILN_PROFILES_PLAN.md item 16 -- same "log once on the transition, not
 // every tick" idiom as s_borrowed_type_mismatch_warned just above, for the
@@ -510,12 +516,22 @@ static void safety_core_load_guard_cfg(const config_store_record_t *rec)
 // second CLEAR_TRIP arriving in the same 100ms window as the first (e.g. a
 // GUI double-click) is a real, if unlikely, case worth not silently
 // dropping; there is no legitimate reason for a third to queue up before
-// the tick drains the first two. The queue holds a one-byte token with no
-// payload -- link_task has already validated trip_mask
+// the tick drains the first two. link_task has already validated trip_mask
 // (link_frame_decide_clear_trip()) before ever calling
-// safety_core_request_clear_trip(), so there is nothing left to carry.
+// safety_core_request_clear_trip(). Since kilnlink audit 2026-10-09 M4 each
+// item is a uint16_t carrying the request's trip occurrence:
+// CLEAR_TRIP_TOKEN_BOUND | trip_seq for a 4-byte (protocol >= 17) frame, 0
+// for a legacy unbound one.
 #define SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN 2
+#define CLEAR_TRIP_TOKEN_BOUND 0x100u
 static QueueHandle_t s_clear_trip_queue = NULL;
+
+// TEST_TRIP (docs/TEST_TRIP_PLAN.md section 4.2): depth-1 queue of "latch a
+// test trip on the next tick" tokens. link_task posts with a 0-tick send
+// (safety_core_request_test_trip()); safety_core_build_input() drains it into
+// safety_guard_input_t::test_trip_requested for exactly one tick. Depth 1: a
+// second request while one is pending is dropped (refused to the caller).
+static QueueHandle_t s_test_trip_queue = NULL;
 
 // Single-writer statics backing safety_core_get_clear_trip_stats() --
 // s_clear_trip_requested written only inside safety_core_request_clear_trip()
@@ -562,12 +578,9 @@ static safety_clear_trip_outcome_t s_clear_trip_last_outcome = SAFETY_CLEAR_TRIP
 // this codebase's existing pattern for the same class of counter.
 // s_trip_seq == 0 means "no trip yet this boot" (matches
 // safety_core_get_trip_event()'s documented return-false contract); the
-// first real trip makes it 1, wrapping uint8_t thereafter -- 255 trips in one
-// boot without a reboot in between is not a case this needs to handle
-// specially, wrapping back to 0 just means the 256th event reports the same
-// sequence number the "never tripped" state would have, which is an
-// acceptable, undocumented edge this shares with any other wrapping counter
-// in this codebase (e.g. link_task's own s_msg_index).
+// first real trip makes it 1, wrapping uint8_t 255 -> 1 thereafter (never back
+// to 0: trip_seq_next(), safety link review 2026-10-09 F4 -- a wrap
+// to 0 made the 256th trip read as "never tripped" and go unreported).
 // 2026-08-27 audit: relay_owner_command_trip() posts to a 4-deep queue and
 // never blocks (relay_owner must never block -- ARCHITECTURE.md section 1),
 // so a full queue silently drops the trip command: K4 stays energized and
@@ -604,7 +617,13 @@ static bool s_trip_command_owed = false;
 // which is what keeps the two flags from ever being able to deadlock or
 // oscillate against each other.
 static bool s_clear_command_owed = false;
-static uint8_t s_trip_seq = 0;
+// LOW-6 (safety-link fix batch 2): both are written by safety_core_task (core 1)
+// and read lock-free by the link task on the other core, so they are volatile:
+// without it the compiler may hoist/merge the reader's loads. s_trip_gen is a
+// real seqlock generation (odd while a capture is in flight); s_trip_seq is the
+// protocol-visible trip number (wraps 255->1, never usable as the generation).
+static volatile uint8_t s_trip_seq = 0;
+static volatile uint32_t s_trip_gen = 0;
 static safety_trip_t s_trip_reason = SAFETY_TRIP_NONE;
 static uint32_t s_trip_uptime_ms = 0;
 static float s_trip_tc_c = 0.0f; // meaningless while s_trip_seq == 0 -- the getter
@@ -711,6 +730,12 @@ static volatile uint8_t  s_clear_trip_pre_spi_failed = 0;
 // Defined below, next to safety_core.h's outcome enum -- forward-declared
 // here because safety_core_task()'s log line above uses it before that point.
 static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome);
+
+static bool safety_core_test_trip_take(void)
+{
+    uint8_t token = 0;
+    return s_test_trip_queue != NULL && xQueueReceive(s_test_trip_queue, &token, 0) == pdTRUE;
+}
 
 static safety_guard_input_t safety_core_build_input(void)
 {
@@ -873,8 +898,14 @@ static safety_guard_input_t safety_core_build_input(void)
         // correctly in uint32_t arithmetic regardless of which side is
         // numerically larger, identical to how link_task.c already reasons
         // about its own tick-based age calculations.
-        uint32_t age_ms = now_ms - announced_at_ms;
-        reboot_grace_active = age_ms < REBOOT_GRACE_WINDOW_MS;
+        // F7 (guard review 2026-10-09): expire-once so the 32-bit tick wrap
+        // cannot re-arm an old announcement's grace window.
+        static bool     s_grace_expired_valid = false;
+        static uint32_t s_grace_expired_at_ms = 0u;
+        reboot_grace_active = reboot_grace_evaluate(true, announced_at_ms, now_ms,
+                                                    REBOOT_GRACE_WINDOW_MS,
+                                                    &s_grace_expired_valid,
+                                                    &s_grace_expired_at_ms);
     }
 
     // --- Context from link_task (SAFETY_MODEL.md section 5) ----------------
@@ -1051,7 +1082,18 @@ static safety_guard_input_t safety_core_build_input(void)
     // to config_store_default() either way, so ignoring it for them is
     // correct, not an oversight.
     bool cfg_read_ok = config_store_get_full_record(&cfg_rec);
+    // T2 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): a failed read yields the default
+    // record (fields_set == 0), which would zero S1/S8/S2/S14 config and flip
+    // the S5 "declared not installed" suppression for one tick. Keep the last
+    // GOOD values instead. Until a first good read exists (s_have_good_guard_cfg
+    // false) behaviour is unchanged: the default record is used, as at boot.
     bool safety_tc_not_installed_declared = (cfg_rec.safety_tc_installed == 0u);
+    if (cfg_read_ok) {
+        s_have_good_guard_cfg = true;
+        s_last_good_tc_not_installed_declared = safety_tc_not_installed_declared;
+    } else if (s_have_good_guard_cfg) {
+        safety_tc_not_installed_declared = s_last_good_tc_not_installed_declared;
+    }
 
     // S13's sample_counter_advancing. GUARD_TEST_MATRIX.md section 6 (row
     // S13) found the actual gap: `borrowed_zone_index` IS a real config_store
@@ -1097,7 +1139,9 @@ static safety_guard_input_t safety_core_build_input(void)
     // against. Before this call existed, none of them ever arrived and S1
     // could not fire at any temperature -- see
     // safety_core_load_guard_cfg()'s own doc comment.
-    safety_core_load_guard_cfg(&cfg_rec);
+    if (cfg_read_ok || !s_have_good_guard_cfg) {
+        safety_core_load_guard_cfg(&cfg_rec);
+    }
 
     // KILN_PROFILES_PLAN.md item 16, defence in depth -- NOT the primary
     // interlock. The primary refusal already lives in safety_core_request_
@@ -1329,6 +1373,7 @@ static safety_guard_input_t safety_core_build_input(void)
         .tc_valid = thermo.valid && thermo_fresh,
         .tc_c = thermo.tc_c,
         .cj_c = thermo.cj_c,
+        .cj_invalid = !thermo.cj_valid || !thermo_fresh, // review saftyfx6 F5
         .fault_bits = thermo.fault_bits,
         .spi_failed = thermo.spi_failed,
         .safety_tc_not_installed_declared = safety_tc_not_installed_declared,
@@ -1390,6 +1435,8 @@ static safety_guard_input_t safety_core_build_input(void)
         // plain read of that cross-core flag, no debounce or gating of its
         // own needed here -- see safety_guards.h's field comment.
         .config_integrity_trip = config_store_ram_integrity_recurrence_pending(),
+        // Admin test trip: one-tick request drained from the depth-1 queue.
+        .test_trip_requested = safety_core_test_trip_take(),
         // 2026-08-27 audit item 1: measured (clamped, fallback-safe) dt_s,
         // computed above via tick_dt_compute_s() -- no longer the raw
         // compile-time SAFTYFW_PERIOD_SAFETY_CORE_MS constant. See that call
@@ -1403,6 +1450,8 @@ static void safety_core_task(void *arg)
     (void)arg;
 
     safety_guards_reset(&s_guard_state);
+    s_have_good_guard_cfg = false;
+    s_last_good_tc_not_installed_declared = false;
 
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -1439,12 +1488,22 @@ static void safety_core_task(void *arg)
             // safety_core_get_trip_event() is lock-free, so a reader must
             // never be able to observe the new seq before the fields it
             // describes are already written.
+            // Seqlock write side: odd generation while the fields change, so a
+            // reader that overlaps a SECOND trip's capture (old seq, half-new
+            // fields) sees the generation move and retries instead of
+            // returning a torn mix. The seq itself is bumped after the fields.
+            s_trip_gen++;
+            HAL_DMB();
             s_trip_reason = s_guard_state.reason;
             s_trip_uptime_ms = (uint32_t)to_ms_since_boot(get_absolute_time());
             s_trip_tc_c = input.tc_valid ? input.tc_c : NAN;
             s_trip_deciding_threshold = safety_guards_deciding_threshold_c(s_guard_state.reason,
                                                                             &s_guard_cfg);
-            s_trip_seq++; // wraps uint8_t -- see the variable's own doc comment
+            // F5: release -- every field above must be visible to the other core before the seq is.
+            HAL_DMB();
+            s_trip_seq = trip_seq_next(s_trip_seq); // wraps 255 -> 1, never 0 (F4); INSIDE the odd window
+            HAL_DMB();
+            s_trip_gen++; // even again: capture complete
 
             // Step 4 of SAFETY_MODEL.md section 6's 4-step trip order:
             // log the trip itself. The log_task call below is a 0-tick
@@ -1500,9 +1559,17 @@ static void safety_core_task(void *arg)
         // the queue is picked up on the very next 100ms tick, never held up
         // by, and never itself holding up, anything link_task or the link
         // is doing.
-        uint8_t clear_trip_token;
+        uint16_t clear_trip_token;
         if (xQueueReceive(s_clear_trip_queue, &clear_trip_token, 0) == pdTRUE) {
-            (void)clear_trip_token; // no payload, see s_clear_trip_queue's doc comment
+            // kilnlink audit 2026-10-09 M4: the request's trip occurrence,
+            // compared against s_trip_seq HERE, on the task that bumps it,
+            // so a trip that latched after the ESP read DIAG (or between
+            // link_task's screen and this dequeue) cannot be cleared by a
+            // request for the earlier occurrence.
+            bool clear_trip_bound = (clear_trip_token & CLEAR_TRIP_TOKEN_BOUND) != 0u;
+            uint8_t clear_trip_seq = (uint8_t)(clear_trip_token & 0xFFu);
+            bool occurrence_matches = safety_guards_clear_trip_occurrence_matches(
+                clear_trip_bound, clear_trip_seq, s_trip_seq);
 
             // link_task already screened the "nothing tripped" case before
             // enqueuing (link_frame_decide_clear_trip(), against a
@@ -1532,7 +1599,7 @@ static void safety_core_task(void *arg)
             bool tc_valid_snapshot = false;
             bool spi_failed_snapshot = false;
             bool tc_c_is_nan_snapshot = false;
-            if (was_tripped) {
+            if (was_tripped && occurrence_matches) {
                 reason_u8 = (uint8_t)s_guard_state.reason;
                 fault_bits_u8 = input.fault_bits;
                 tc_valid_snapshot = input.tc_valid;
@@ -1565,8 +1632,8 @@ static void safety_core_task(void *arg)
                                       tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                       0u);
             }
-            safety_clear_trip_outcome_t outcome =
-                safety_guards_decide_clear_trip_outcome(was_tripped, try_clear_result);
+            safety_clear_trip_outcome_t outcome = safety_guards_decide_clear_trip_outcome(
+                was_tripped, occurrence_matches, try_clear_result);
             if (outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED) {
                 // Latch "a clear command is owed" unconditionally, the same
                 // instant the acceptance is decided -- see s_clear_command_
@@ -1585,10 +1652,17 @@ static void safety_core_task(void *arg)
                                   tc_valid_snapshot, spi_failed_snapshot, tc_c_is_nan_snapshot,
                                   (uint8_t)outcome);
 
-            char msg[64];
-            snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s",
-                     (unsigned long)s_clear_trip_requested, (unsigned long)s_clear_trip_processed,
-                     clear_trip_outcome_str(outcome));
+            char msg[96];
+            if (clear_trip_bound) {
+                snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s seq=%u cur=%u",
+                         (unsigned long)s_clear_trip_requested,
+                         (unsigned long)s_clear_trip_processed, clear_trip_outcome_str(outcome),
+                         (unsigned)clear_trip_seq, (unsigned)s_trip_seq);
+            } else {
+                snprintf(msg, sizeof(msg), "req=%lu proc=%lu outcome=%s unbound",
+                         (unsigned long)s_clear_trip_requested,
+                         (unsigned long)s_clear_trip_processed, clear_trip_outcome_str(outcome));
+            }
             log_task_log(outcome == SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED ? LOG_LEVEL_INFO : LOG_LEVEL_WARN,
                          "clear_trip", msg);
 
@@ -1696,24 +1770,41 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
                                  uint32_t *out_uptime_ms, float *out_tc_c,
                                  float *out_deciding_threshold)
 {
-    // Read s_trip_seq FIRST, matching the write-order comment at the capture
-    // site in safety_core_task() above -- if a trip lands between this read
-    // and the field reads below, the caller sees either the old, fully
-    // consistent set (this seq, these fields) or -- at worst -- reports one
-    // trip event a poll cycle later than it happened. It can never observe a
-    // torn mix of one trip's seq with another trip's fields, because the
-    // writer always finishes writing every field before bumping the seq.
-    uint8_t seq = s_trip_seq;
+    // Lock-free reader of the trip-event snapshot written by safety_core_task().
+    // The seq/fields consistency rule is the seqlock below (s_trip_gen); the
+    // writer also bumps s_trip_seq LAST so a new seq implies complete fields.
+    // LOW-6: a real seqlock read. The writer holds s_trip_gen odd while it
+    // rewrites the fields; re-read the generation after the fields and retry if
+    // it was odd or moved. Bounded (the capture is a few stores), so a wedged
+    // writer cannot hang the link task: after the bound the last snapshot is
+    // returned as-is (at worst one poll sees a torn second trip; the next poll
+    // sees the new seq and a consistent set).
+    uint8_t seq = 0;
+    safety_trip_t reason = SAFETY_TRIP_NONE;
+    uint32_t uptime_ms = 0;
+    float tc_c = NAN;
+    float threshold = NAN;
+    for (int attempt = 0; attempt < 64; attempt++) {
+        uint32_t g1 = s_trip_gen;
+        HAL_DMB(); // F5: acquire -- the fields below are read only after the generation/seq
+        seq = s_trip_seq;
+        reason = s_trip_reason;
+        uptime_ms = s_trip_uptime_ms;
+        tc_c = s_trip_tc_c;
+        threshold = s_trip_deciding_threshold;
+        HAL_DMB();
+        uint32_t g2 = s_trip_gen;
+        if ((g1 & 1u) == 0u && g1 == g2) {
+            break;
+        }
+    }
 
     if (out_trip_seq) {
         *out_trip_seq = seq;
     }
     if (seq == 0) {
         // No trip yet this boot -- every other output is meaningless
-        // (matches the header comment's documented "false, everything
-        // zeroed" contract) rather than whatever s_trip_* happen to hold
-        // (their static-storage zero-init, in this case, but that is an
-        // implementation detail the caller must not rely on).
+        // (the documented "false, everything zeroed" contract).
         if (out_trip_reason) {
             *out_trip_reason = SAFETY_TRIP_NONE;
         }
@@ -1730,16 +1821,16 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
     }
 
     if (out_trip_reason) {
-        *out_trip_reason = s_trip_reason;
+        *out_trip_reason = reason;
     }
     if (out_uptime_ms) {
-        *out_uptime_ms = s_trip_uptime_ms;
+        *out_uptime_ms = uptime_ms;
     }
     if (out_tc_c) {
-        *out_tc_c = s_trip_tc_c;
+        *out_tc_c = tc_c;
     }
     if (out_deciding_threshold) {
-        *out_deciding_threshold = s_trip_deciding_threshold;
+        *out_deciding_threshold = threshold;
     }
     return true;
 }
@@ -1748,21 +1839,30 @@ bool safety_core_get_trip_event(uint8_t *out_trip_seq, safety_trip_t *out_trip_r
 // queue, not a direct call" history -- this is now purely an enqueue, never
 // a direct touch of s_guard_state. safety_core_task() (below) is the only
 // code that actually runs safety_guards_try_clear().
-bool safety_core_request_clear_trip(void)
+bool safety_core_request_clear_trip(bool bound, uint8_t trip_seq)
 {
     if (s_clear_trip_queue == NULL) {
         return false;
     }
 
-    // Content unused -- see s_clear_trip_queue's own doc comment: this is a
-    // pure "a request is pending" signal, link_task already validated
-    // trip_mask before ever calling this function.
-    uint8_t token = 0;
+    // See s_clear_trip_queue's own doc comment: link_task already validated
+    // trip_mask; the token carries only the request's trip occurrence
+    // (kilnlink audit 2026-10-09 M4), checked at dequeue.
+    uint16_t token = bound ? (uint16_t)(CLEAR_TRIP_TOKEN_BOUND | trip_seq) : 0u;
     if (xQueueSend(s_clear_trip_queue, &token, 0) != pdTRUE) {
         return false;
     }
     s_clear_trip_requested++;
     return true;
+}
+
+bool safety_core_request_test_trip(void)
+{
+    if (s_test_trip_queue == NULL) {
+        return false;
+    }
+    uint8_t token = 1;
+    return xQueueSend(s_test_trip_queue, &token, 0) == pdTRUE;
 }
 
 // String form of safety_clear_trip_outcome_t for the log line
@@ -1778,6 +1878,8 @@ static const char *clear_trip_outcome_str(safety_clear_trip_outcome_t outcome)
         return "refused-still-tripped";
     case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED:
         return "refused-nothing-latched";
+    case SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE:
+        return "refused-stale-occurrence";
     case SAFETY_CLEAR_TRIP_OUTCOME_NONE:
     default:
         return "none";
@@ -1916,8 +2018,12 @@ bool safety_core_start(void)
     // (callable from link_task the instant this returns true) must never
     // observe a NULL queue that safety_core_task would have created for
     // itself a moment later.
-    s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint8_t));
+    s_clear_trip_queue = xQueueCreate(SAFETY_CORE_CLEAR_TRIP_QUEUE_LEN, sizeof(uint16_t));
     if (s_clear_trip_queue == NULL) {
+        return false;
+    }
+    s_test_trip_queue = xQueueCreate(1, sizeof(uint8_t));
+    if (s_test_trip_queue == NULL) {
         return false;
     }
 

@@ -45,7 +45,7 @@ static const char *TAG = "rec_pico";
 #define PICO_RX_GPIO 4
 #define PICO_BAUD 230400
 #define PICO_RX_BUF 2048
-#define RELAY_STACK 4096
+#define RELAY_STACK 6144
 #define RELAY_PRIO 4
 // Internal heap kept free after this module's own allocations (owner decision
 // 2026-10-01: heap_internal min_free >= 8192 B). The headroom covers the task

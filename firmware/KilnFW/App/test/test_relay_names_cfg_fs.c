@@ -1,5 +1,5 @@
 // Host tests for relay names' cfg_fs dual-write bridge -- item 3,
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5 close-out. Unlike zones
+// docs/FILESYSTEM_USER_DATA.md section 5 step 5 close-out. Unlike zones
 // config (a bespoke 22-version migration chain), relay names is a small
 // fixed-size struct with no migration chain, so it reuses the SAME generic
 // pref_cfg_fs.h bridge unit_pref.c/time_sync.c share -- see

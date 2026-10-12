@@ -70,7 +70,7 @@ esp_err_t httpd_resp_sendstr_chunk(httpd_req_t *r, const char *str);
 esp_err_t httpd_req_get_url_query_str(httpd_req_t *r, char *buf, size_t buf_len);
 esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size_t val_size);
 
-// system_mode_gate wiring (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slice-3-
+// system_mode_gate wiring (docs/SYSTEM_MODE_GATE.md, gate-slice-3-
 // followup, 2026-09-25): iter_tune_restore_post_handler() now gates
 // restore_commissioned on SYS_ACTION_WRITE_ZONES_CONFIG. Fakes default idle
 // so every pre-existing test in this file keeps exercising exactly the
@@ -196,7 +196,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     return s_set_pid_result;
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8: iter_tune_status_get_handler() now
+// ITER_TUNE_REDESIGN.md step 8: iter_tune_status_get_handler() now
 // calls firing_shadow_get_status(), and firing_shadow.c is linked into this
 // executable for real (build_host_tests.ps1's $cmdIth) -- but firing_shadow.c
 // itself calls zone_model_at()/zones_config_get_progress_band_c() (real
@@ -620,6 +620,25 @@ static void test_never_commissioned_zone_refuses_409(void)
     TEST_CHECK(s_reserve_calls == 0, "the zone is never reserved for a never-commissioned zone -- refused before that point");
 }
 
+// e7c98209: ?zone= is parsed strictly (whole string, 0..255) -- malformed values are a 400,
+// never "zone 0" (the old strtol read "abc" as 0 and "1abc" as 1).
+static void test_malformed_zone_query_refuses_400(void)
+{
+    static const char *const bad[] = { "zone=abc", "zone=1abc", "zone=", "zone=-1", "zone=256",
+                                       "zone=9999999", "zone=%201", "zone=0x1", "zone=2.5" };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_capture();
+        s_fake_present[0] = true;
+        s_fake_store[0] = make_commissioned_zone(12.0f, 99.0f);
+        s_fake_query = bad[i];
+        httpd_req_t req = {0};
+        esp_err_t err = iter_tune_restore_post_handler(&req);
+        TEST_CHECK(err == ESP_OK, "handler returns ESP_OK on a malformed zone param");
+        TEST_CHECK(s_resp_status == 400, bad[i]);
+        TEST_CHECK(s_set_pid_calls == 0 && s_reserve_calls == 0, "nothing written or reserved for a malformed zone");
+    }
+}
+
 // Advisory finding 10 (step 7 review, 2026-09-23): GET /api/iter_tune/status
 // must surface a refused newer-than-known schema version as
 // "schema_refused_version" in its JSON preamble, not silently.
@@ -642,7 +661,7 @@ static void test_status_reports_schema_refused_version(void)
                "status JSON omits schema_refused_version entirely when nothing was refused");
 }
 
-// ITER_TUNE_REDESIGN_PLAN.md step 8: the status body opens with a top-level
+// ITER_TUNE_REDESIGN.md step 8: the status body opens with a top-level
 // "shadow" object -- null until firing_shadow_store_start() has run (the
 // handler never loads it lazily from the httpd task), the counters after.
 // Both shapes must still be one well-formed object continuing into "zones".
@@ -716,6 +735,7 @@ int main(void)
     test_reservation_brackets_entire_write_and_pairs_exactly();
     test_missing_zone_query_refuses_400();
     test_never_commissioned_zone_refuses_409();
+    test_malformed_zone_query_refuses_400();
     test_status_reports_schema_refused_version();
     test_status_reports_shadow_summary();
 

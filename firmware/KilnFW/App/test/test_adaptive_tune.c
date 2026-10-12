@@ -95,6 +95,32 @@ bool zone_is_monitor_only(uint8_t zone_index)
     return s_stub_zone_is_monitor_only[zone_index];
 }
 
+// F3 (FLASH_WORKER_LOCK_INVERSION_AUDIT): the real zones setters end in the zones
+// NVS save and reach the flash worker, which itself takes adaptive_tune_lock. The
+// semphr stub counts every held lock in g_test_stub_lock_depth and the only lock
+// this module takes is adaptive_tune_lock, so a nonzero depth inside a setter
+// means run_end called it with that lock held.
+static int g_setter_calls = 0;
+static int g_setter_max_lock_depth = 0;
+#define SETTER_LOCK_PROBE()     do {         g_setter_calls++;         if (g_test_stub_lock_depth > g_setter_max_lock_depth) g_setter_max_lock_depth = g_test_stub_lock_depth;     } while (0)
+
+// F3 follow-up race tests: a one-shot hook run AFTER a successful
+// zones_config_set_model()/set_pid() write, i.e. inside the window where the
+// caller has adaptive_tune_lock released. Cleared before it runs, so a hook
+// that re-enters a setter cannot recurse.
+static void (*s_set_model_hook)(void) = NULL;
+static void (*s_set_pid_hook)(void) = NULL;
+// Dev review 9 L1: fires on the first zones_config_get_pid() of a zone whose write_in_flight is set,
+// i.e. run_end's apply phase before its first write (between plan and apply).
+static void (*s_get_pid_in_flight_hook)(void) = NULL;
+static bool zone_write_in_flight_unlocked(uint8_t zone_index); // defined after the adaptive_tune .c includes
+static void run_setter_hook(void (**hook)(void))
+{
+    void (*h)(void) = *hook;
+    *hook = NULL;
+    if (h) h();
+}
+
 bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_s, float *out_dead_time_s)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
@@ -105,10 +131,12 @@ bool zones_config_get_model(uint8_t zone_index, float *out_k_dc, float *out_tau_
 }
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     s_fake_zone_cfg[zone_index].k_dc = k_dc;
     s_fake_zone_cfg[zone_index].tau_s = tau_s;
     s_fake_zone_cfg[zone_index].dead_time_s = dead_time_s;
+    run_setter_hook(&s_set_model_hook);
     return true;
 }
 // docs/audits/adaptive_tune_vs_owner_requirements_2026-09-11.md's fix: the
@@ -127,6 +155,7 @@ bool zones_config_get_autotune_baseline_k_dc(uint8_t zone_index, float *out_k_dc
 }
 bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     s_fake_zone_cfg[zone_index].autotune_baseline_k_dc = k_dc;
     return true;
@@ -135,6 +164,9 @@ bool zones_config_set_autotune_baseline_k_dc(uint8_t zone_index, float k_dc)
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (zone_index >= TEST_MAX_ZONES) return false;
+    if (s_get_pid_in_flight_hook && zone_write_in_flight_unlocked(zone_index)) {
+        run_setter_hook(&s_get_pid_in_flight_hook);
+    }
     *out_kp = s_fake_zone_cfg[zone_index].kp;
     *out_ki = s_fake_zone_cfg[zone_index].ki;
     *out_kd = s_fake_zone_cfg[zone_index].kd;
@@ -154,6 +186,7 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
                                         // file does not include zones_http.h (see its own #include list)
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES) return false;
     if (!isfinite(kp) || !isfinite(ki) || !isfinite(kd) || kp < 0.0f || ki < 0.0f || kd < 0.0f ||
         kp > TEST_ZONE_PID_GAIN_MAX || ki > TEST_ZONE_PID_GAIN_MAX || kd > TEST_ZONE_PID_GAIN_MAX) {
@@ -162,6 +195,7 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_fake_zone_cfg[zone_index].kp = kp;
     s_fake_zone_cfg[zone_index].ki = ki;
     s_fake_zone_cfg[zone_index].kd = kd;
+    run_setter_hook(&s_set_pid_hook);
     return true;
 }
 
@@ -243,6 +277,7 @@ bool zones_config_get_coupling_dead_time(uint8_t zone_index, float out_row[MAX31
 bool zones_config_set_coupling_cell(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
                                      float dead_time_s)
 {
+    SETTER_LOCK_PROBE(); // F3: adaptive_tune_lock must not be held here
     if (zone_index >= TEST_MAX_ZONES || neighbor_index >= TEST_MAX_ZONES) return false;
     s_fake_coupling[zone_index][neighbor_index] = coeff;
     s_fake_coupling_tau[zone_index][neighbor_index] = tau_s;
@@ -314,6 +349,10 @@ bool profile_executor_get_active_id(uint8_t *out_id)
 #include "../drivers/control/adaptive_tune.c"
 #include "../drivers/control/adaptive_tune_model.c"
 #include "../drivers/control/adaptive_tune_ki.c"
+static bool zone_write_in_flight_unlocked(uint8_t zone_index)
+{
+    return adaptive_tune_zones[zone_index].write_in_flight; // test-only raw read: the caller already holds what it needs
+}
 
 #ifdef _WIN32
 #include <direct.h>
@@ -398,6 +437,10 @@ static void reset_module_state(void)
     s_fake_fuzzy_pct_fail = false;
     memset(s_stub_zone_is_on_off, 0, sizeof(s_stub_zone_is_on_off));
     memset(s_stub_zone_is_monitor_only, 0, sizeof(s_stub_zone_is_monitor_only));
+    memset(adaptive_tune_ki_clear_gen, 0, sizeof(adaptive_tune_ki_clear_gen));
+    s_set_model_hook = NULL;
+    s_set_pid_hook = NULL;
+    s_get_pid_in_flight_hook = NULL;
 }
 
 // Ticks a single settled dwell into zone zi: `ticks` ticks of dt_s seconds
@@ -502,6 +545,7 @@ static profile_firing_run_record_t make_clean_record(uint8_t profile_id, uint8_t
 // no production code touched. See each file's own header comment for what
 // it covers and why that's the seam.
 // ---------------------------------------------------------------------
+static bool s_stub_claim_busy; // defined at the end of this file (models the setter's in-lock claim check)
 #include "test_adaptive_tune_dwell.c"
 #include "test_adaptive_tune_model.c"
 #include "test_adaptive_tune_coupled.c"
@@ -533,6 +577,7 @@ void run_test_adaptive_tune(void)
 
     TEST_SECTION("adaptive_tune: guards");
     test_min_observations_guard_rejects_too_few();
+    test_run_end_holds_no_lock_across_zones_setters(); // F3
     test_duty_spread_guard_rejects_clustered_observations();
     test_duty_spread_guard_pins_exact_threshold(); // P4
     test_implausible_jump_guard_rejects_far_off_fit();
@@ -628,11 +673,24 @@ void run_test_adaptive_tune(void)
     test_revert_restores_exact_prior_gains_and_ki_baseline();
     test_revert_refuses_when_nothing_to_revert();
     test_revert_refuses_while_firing_active();
+
+    TEST_SECTION("adaptive_tune: F3 follow-up -- revert vs run_end's unlocked apply window");
+    test_revert_during_run_end_apply_is_refused_busy();
+    test_fix_review9_busy_defers_without_mixed_state();
+    test_r2_commit_zone_failure_paths_record_nothing();
+    test_r2_commit_zone_success_and_save_failed_record_applied();
+    test_r2_commit_zone_detects_writer_after_apply();
+    test_fix_review9_revert_cleared_by_external_writer();
+    test_fix_review9_revert_busy_reports_firing_active();
+    test_run_end_during_revert_write_skips_the_zone();
+    test_ki_clear_gen_is_per_zone();
+    test_any_write_in_flight_covers_the_apply_window();
+    test_apply_skips_zone_whose_gains_changed_since_plan();
 }
 
 // ---------------------------------------------------------------------
 // cfg-filesystem dual-write bridge for the Ki baseline blob
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 -- "adaptive-tune
+// (docs/FILESYSTEM_USER_DATA.md section 5, item 9 -- "adaptive-tune
 // state", the simplified/re-derivable treatment). Uses the real
 // adaptive_tune_init()/adaptive_tune_clear_ki_baseline() public entry
 // points plus a real cfg_fs.c against a temp directory.
@@ -660,7 +718,7 @@ static void reset_all_cfg_fs_at(void)
 
 static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
 {
-    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- a legacy NVS copy still loads, a save "
+    TEST_SECTION("adaptive_tune ki-baseline cfg_fs: partition absent -- a frozen legacy NVS copy is not adopted, a save "
                  "fails loud and never falls back to NVS");
     reset_all_cfg_fs_at();
     TEST_CHECK(!cfg_fs_is_available(), "cfg_fs never mounted in this test");
@@ -671,8 +729,8 @@ static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
     legacy.vals[1] = 3.5f;
     at_stage_legacy_kibase(&legacy, 1);
     adaptive_tune_init();
-    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
-               "a legacy NVS-only board still loads its baseline");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
+               "persfx3 MED-3: a frozen legacy NVS-only baseline is NOT adopted (default: no baseline)");
 
     adaptive_tune_zones[1].ki_baseline = 4.5f;
     kibase_job_t job = {.result = ESP_OK};
@@ -685,8 +743,49 @@ static void test_kibase_cfg_fs_partition_absent_behaves_like_before(void)
 
     memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
     adaptive_tune_init();
-    TEST_CHECK(adaptive_tune_zones[1].ki_baseline_valid && adaptive_tune_zones[1].ki_baseline == 3.5f,
-               "the NVS copy was NOT overwritten by the failed save (no fallback)");
+    TEST_CHECK(!adaptive_tune_zones[1].ki_baseline_valid,
+               "the failed save left no baseline anywhere (no NVS fallback write)");
+}
+
+static bool at_kibase_nvs_key_exists(void)
+{
+    hal_kv_handle_t h;
+    if (hal_kv_open(&h, ADAPTIVE_TUNE_NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, ADAPTIVE_TUNE_NVS_PARTITION) != HAL_OK) {
+        return false;
+    }
+    bool e = hal_kv_key_exists(&h, ADAPTIVE_TUNE_NVS_KEY_KIBASE) == HAL_OK;
+    hal_kv_close(&h);
+    return e;
+}
+
+static void test_kibase_legacy_nvs_retired_only_once_file_adopted(void)
+{
+    TEST_SECTION("adaptive_tune ki-baseline: frozen NVS copy kept without a file, erased once the file is adopted");
+    reset_all_cfg_fs_at();
+    TEST_CHECK(cfg_fs_init(AT_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+
+    adaptive_tune_kibase_blob_t legacy;
+    memset(&legacy, 0, sizeof(legacy));
+    legacy.mask = 0x02;
+    legacy.vals[1] = 3.5f;
+    at_stage_legacy_kibase(&legacy, 1);
+    adaptive_tune_init();
+    TEST_CHECK(at_kibase_nvs_key_exists(), "persfx3 MED-3: no cfg file adopted -> frozen NVS copy is kept");
+
+    adaptive_tune_zones[2].ki_baseline_valid = true;
+    adaptive_tune_zones[2].ki_baseline = 7.25f;
+    kibase_job_t job = {.result = ESP_FAIL};
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        job.blob.vals[zi] = adaptive_tune_zones[zi].ki_baseline;
+        if (adaptive_tune_zones[zi].ki_baseline_valid) job.blob.mask |= (uint8_t)(1u << zi);
+    }
+    save_kibase_job(&job);
+    TEST_CHECK(job.result == ESP_OK, "cfg file saved");
+    TEST_CHECK(at_kibase_nvs_key_exists(), "the file save leaves the frozen NVS key alone");
+    memset(adaptive_tune_zones, 0, sizeof(adaptive_tune_zones));
+    adaptive_tune_init();
+    TEST_CHECK(adaptive_tune_zones[2].ki_baseline_valid, "file baseline adopted");
+    TEST_CHECK(!at_kibase_nvs_key_exists(), "persfx3 MED-3: adopting the file erases the frozen NVS copy");
 }
 
 static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
@@ -717,7 +816,7 @@ static void test_kibase_cfg_fs_migrates_then_prefers_file(void)
     adaptive_tune_kibase_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), adaptive_tune_kibase_file_validate, &raw, &rev, &valid);
     TEST_CHECK(valid && rev == 1, "the file holds a rev-1 copy after one save");
 }
 
@@ -753,7 +852,7 @@ static void test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_u
     adaptive_tune_kibase_blob_t raw;
     uint32_t rev = 0;
     bool valid = false;
-    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), kibase_file_validate, &raw, &rev, &valid);
+    pref_cfg_fs_load_raw(ADAPTIVE_TUNE_KIBASE_FILE_PATH, sizeof(raw), adaptive_tune_kibase_file_validate, &raw, &rev, &valid);
     TEST_CHECK(!valid, "with the file write skipped there is no file, and no NVS copy was written either");
 }
 
@@ -801,6 +900,7 @@ int main(void)
 {
     run_test_adaptive_tune();
     test_kibase_cfg_fs_partition_absent_behaves_like_before();
+    test_kibase_legacy_nvs_retired_only_once_file_adopted();
     test_kibase_cfg_fs_migrates_then_prefers_file();
     test_kibase_cfg_fs_negative_no_file_write_means_file_never_catches_up();
     test_kibase_status_padding_is_not_data();
@@ -812,4 +912,36 @@ int main(void)
     }
     printf("all passed\n");
     return 0;
+}
+
+/* Dev review 9 fix review (F1/F3/F5): stand-ins for the atomic model+PID setter and the idle-only
+ * coupling-cell setter. Composed from this file's existing fakes so their hooks/probes still fire. */
+static bool s_stub_claim_busy = false; /* models the real setter's in-lock heat-claim re-check */
+zones_set_result_t zones_config_set_model_and_pid_checked(uint8_t zone_index, float k_dc, float tau_s,
+                                                          float dead_time_s, float kp, float ki, float kd,
+                                                          const float *expect_prior_pid)
+{
+    if (s_stub_claim_busy) {
+        return ZONES_SET_BUSY_RUNNING;
+    }
+    float a, b, c;
+    if (expect_prior_pid != NULL && zones_config_get_pid(zone_index, &a, &b, &c) &&
+        (a != expect_prior_pid[0] || b != expect_prior_pid[1] || c != expect_prior_pid[2])) {
+        return ZONES_SET_STALE_PRIOR;
+    }
+    if (!zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s)) {
+        return ZONES_SET_REJECTED;
+    }
+    if (!zones_config_set_pid(zone_index, kp, ki, kd)) {
+        return ZONES_SET_REJECTED;
+    }
+    return ZONES_SET_OK;
+}
+bool zones_config_set_coupling_cell_if_idle(uint8_t zone_index, uint8_t neighbor_index, float coeff, float tau_s,
+                                            float dead_time_s)
+{
+    if (s_stub_claim_busy) {
+        return false;
+    }
+    return zones_config_set_coupling_cell(zone_index, neighbor_index, coeff, tau_s, dead_time_s);
 }

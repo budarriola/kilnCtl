@@ -58,6 +58,7 @@
 #include "recovery_upload.h"
 #include "recovery_wifi.h"
 #include "stage_header.h"
+#include "recovery_http_policy.h"
 
 static const char *TAG = "recovery_http";
 
@@ -150,6 +151,8 @@ static uint32_t app_image_len(void)
 }
 
 static bool clear_boot_guard(char *msg, size_t cap);
+static bool boot_guard_clear_or_na(char *msg, size_t cap);
+static esp_err_t stage_clear_after_upload(void);
 
 static void restart_task(void *arg)
 {
@@ -197,6 +200,20 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL; // body unread: close the socket rather than drain it
     }
 
+    // R2-I1: clear the counter BEFORE `app` is overwritten (before the write,
+    // like /api/recovery/exit; recovery_apply clears again just before set_boot): a failed clear refuses with `app`
+    // untouched, body unread, rather than leaving a new image unselectable. A
+    // count at or above the threshold would bounce the new app straight back to
+    // recovery. (A rejected upload leaves the cleared counter cleared, which is
+    // harmless: this image is already running.)
+    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_hdr(req, "Connection", "close");
+        httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
+        return ESP_FAIL; // body unread: close the socket rather than drain it
+    }
+
     recovery_upload_cfg_t cfg = {
         .max_len = target->size,
         .validate = recovery_upload_validate_esp,
@@ -224,14 +241,14 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    // Full success: the new image is the boot target, so the next boot must
-    // not be counted toward recovery. Verified clear, reported either way.
-    char bg_msg[96];
-    bool bg_ok = clear_boot_guard(bg_msg, sizeof(bg_msg));
-    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s)", bg_msg);
-    char body[192];
-    snprintf(body, sizeof(body), "ok, rebooting into new application image; boot_guard %s",
-             bg_ok ? "cleared and verified" : bg_msg);
+    // L3: a staged image of a different version must not stay installable
+    // behind the image just pushed. Best effort: reported, never fatal.
+    esp_err_t stage_err = stage_clear_after_upload();
+    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s)",
+             bg_msg, esp_err_to_name(stage_err));
+    char body[224];
+    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s", bg_msg,
+             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)");
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
@@ -255,7 +272,8 @@ static esp_err_t origin_guard(httpd_req_t *req)
 {
     esp_err_t (*real)(httpd_req_t *) = (esp_err_t (*)(httpd_req_t *))req->user_ctx;
     if (req->method != HTTP_GET && req->method != HTTP_HEAD) {
-        if (http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
+        if (http_origin_request_host_refused(req, origin_hdr_len, origin_hdr_str, NULL) ||
+            http_origin_request_is_cross_origin(req, origin_hdr_len, origin_hdr_str)) {
             ESP_LOGW(TAG, "cross-origin refused: method=%d uri=%s", (int)req->method, req->uri);
             httpd_resp_set_status(req, "403 Forbidden");
             httpd_resp_set_type(req, "application/json");
@@ -270,6 +288,8 @@ static esp_err_t root_get(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "text/html");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    httpd_resp_set_hdr(req, "Content-Security-Policy", "frame-ancestors 'none'");
     size_t len = (size_t)(recovery_page_html_end - recovery_page_html_start);
     return httpd_resp_send(req, (const char *)recovery_page_html_start, (ssize_t)len);
 }
@@ -588,14 +608,30 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-// Erase one key; ESP_ERR_NVS_NOT_FOUND (key or namespace) counts as success.
+// Erase one key; a missing namespace or key counts as success. Opens READONLY
+// first so a missing namespace is never created (READWRITE would create it and
+// can fail NOT_ENOUGH_SPACE on a full partition); READWRITE only for a key that
+// exists.
 static esp_err_t erase_key_in(const char *ns, const char *key)
 {
     nvs_handle_t h;
-    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READONLY, &h);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return ESP_OK;
     }
+    if (err != ESP_OK) {
+        return err;
+    }
+    nvs_type_t type;
+    err = nvs_find_key(h, key, &type);
+    nvs_close(h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return ESP_OK;
+    }
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_open_from_partition(KILN_NVS_PARTITION, ns, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         return err;
     }
@@ -652,6 +688,20 @@ static bool clear_boot_guard(char *msg, size_t cap)
     return true;
 }
 
+// Pre-flight clear for the routes that write or select `app`. A kiln_nvs that
+// failed to initialise at boot counts as "nothing to clear" (the application
+// treats an unusable kiln_nvs as count 0 too), so it must not block the apply.
+static bool boot_guard_clear_or_na(char *msg, size_t cap)
+{
+    /* mcp_server_recovery.py matches "not applicable" in the text below (a test pins it). */
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_KILN) {
+        snprintf(msg, cap, "boot_guard not applicable (kiln_nvs unavailable)");
+        ESP_LOGW(TAG, "%s", msg);
+        return true;
+    }
+    return clear_boot_guard(msg, cap);
+}
+
 // POST /api/ota/esp/boot_guard_reset
 static esp_err_t boot_guard_reset_post(httpd_req_t *req)
 {
@@ -659,7 +709,7 @@ static esp_err_t boot_guard_reset_post(httpd_req_t *req)
         return refuse_while_applying(req);
     }
     char bg_msg[96];
-    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
@@ -687,7 +737,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     // fails the exit (500) with nothing changed, instead of booting the app
     // into a counter that walks the board straight back into recovery.
     char bg_msg[96];
-    if (!clear_boot_guard(bg_msg, sizeof(bg_msg))) {
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
@@ -707,6 +757,40 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
+}
+
+// Erases the app's legacy wifi_cfg copy in the DEFAULT `nvs` partition, which
+// wifi_prov_migrate_from_default_partition() re-adopts once saved_nets is gone.
+// Returns 0 when it is gone or unreachable (namespace absent, or the default
+// partition never initialised so the app cannot read it either), else an
+// esp_err_t. The namespace holds only the legacy Wi-Fi keys.
+static int erase_legacy_default_wifi(bool *skipped)
+{
+    *skipped = false;
+    if (recovery_io_nvs_failed_mask() & RECOVERY_NVS_FAIL_DEFAULT) {
+        ESP_LOGW(TAG, "wifi_reset: default nvs unavailable, legacy copy not erased");
+        *skipped = true;
+        return 0;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return 0;
+    }
+    if (err != ESP_OK) {
+        return (int)err;
+    }
+    nvs_close(h);
+    err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return (int)err;
+    }
+    err = nvs_erase_all(h);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return (int)err;
 }
 
 // POST /api/recovery/wifi_reset -- forget the HOME network credentials
@@ -741,6 +825,13 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
     }
     err = nvs_commit(h);
     nvs_close(h);
+    bool legacy_skipped = false;
+    int legacy_rc = erase_legacy_default_wifi(&legacy_skipped);
+    if (!rhp_wifi_reset_ok(erase_failed, (int)err, legacy_rc) && erase_failed == 0 && err == ESP_OK) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, "Wi-Fi settings cleared, but the legacy copy in the default NVS partition could not be erased",
+                               HTTPD_RESP_USE_STRLEN);
+    }
     if (erase_failed > 0) {
         char fmsg[96];
         snprintf(fmsg, sizeof(fmsg), "Wi-Fi settings erase failed for %u key(s), first: %s",
@@ -752,7 +843,9 @@ static esp_err_t wifi_reset_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, "Wi-Fi settings commit failed", HTTPD_RESP_USE_STRLEN);
     }
-    esp_err_t sent = httpd_resp_sendstr(req, "ok, Wi-Fi settings cleared, restarting");
+    esp_err_t sent = httpd_resp_sendstr(req, legacy_skipped
+                                                 ? "ok, Wi-Fi settings cleared, restarting (legacy copy not checked: default NVS unavailable)"
+                                                 : "ok, Wi-Fi settings cleared, restarting");
     restart_soon(500);
     return sent;
 }
@@ -787,16 +880,28 @@ static esp_err_t sw_reset_post(httpd_req_t *req)
     return ESP_OK;
 }
 
+#define BODY_STALL_LIMIT_MS 15000
+
 // Reads exactly `want` body bytes into buf. Returns bytes read (less on a dead
 // or stalled connection).
-static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
+static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want, bool *too_slow)
 {
     size_t got = 0;
-    int timeouts = 0;
+    // Overall cap on top of the no-progress stall limit: 60 s + want at 2 KB/s.
+    const int64_t deadline_us = esp_timer_get_time() + recovery_upload_budget_us(want);
+    // Wall-clock deadline with no progress: one stalled client must not hold
+    // the single httpd task (status, abort) for ~100 s.
+    int64_t last_progress_us = esp_timer_get_time();
     while (got < want) {
+        if (esp_timer_get_time() > deadline_us) {
+            *too_slow = true;
+            break;
+        }
         int n = httpd_req_recv(req, (char *)buf + got, want - got);
         if (n == HTTPD_SOCK_ERR_TIMEOUT) {
-            if (++timeouts > 20) {
+            if (esp_timer_get_time() - last_progress_us > (int64_t)BODY_STALL_LIMIT_MS * 1000) {
+                // No-progress stall = lost connection (400, like recovery_upload.c read_exact);
+                // too_slow is reserved for the overall deadline above (504).
                 break;
             }
             continue;
@@ -804,7 +909,7 @@ static size_t read_body_exact(httpd_req_t *req, uint8_t *buf, size_t want)
         if (n <= 0) {
             break;
         }
-        timeouts = 0;
+        last_progress_us = esp_timer_get_time();
         got += (size_t)n;
     }
     return got;
@@ -867,8 +972,12 @@ static esp_err_t pico_upload_post(httpd_req_t *req)
     if (!buf) {
         return recovery_upload_send_error(req, http_status, why);
     }
-    if (read_body_exact(req, buf, len) != len) {
+    bool too_slow = false;
+    if (read_body_exact(req, buf, len, &too_slow) != len) {
         recovery_pico_release();
+        if (too_slow) {
+            return recovery_upload_send_error(req, 504, "upload too slow: deadline passed before the whole image arrived");
+        }
         return recovery_upload_send_error(req, 400,
                                           "upload interrupted before the whole image arrived");
     }
@@ -917,7 +1026,19 @@ static esp_err_t pico_abort_post(httpd_req_t *req)
 static int apply_pre_boot(void)
 {
     char msg[96];
-    return clear_boot_guard(msg, sizeof(msg)) ? 0 : -1;
+    return boot_guard_clear_or_na(msg, sizeof(msg)) ? 0 : -1;
+}
+
+// Erases the stage header sector (what a finished apply does) so the stage is
+// blank and not installable. ESP_OK also when there is no stage partition.
+static esp_err_t stage_clear_after_upload(void)
+{
+    const esp_partition_t *stage =
+        esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "stage");
+    if (!stage) {
+        return ESP_OK;
+    }
+    return esp_partition_erase_range(stage, 0, STAGE_HEADER_SECTOR);
 }
 
 static const char *stage_source_str(stage_source_t s)
@@ -951,6 +1072,14 @@ static esp_err_t apply_staged_post(httpd_req_t *req)
         httpd_resp_set_status(req, "409 Conflict");
         return httpd_resp_send(req, hs == STAGE_HDR_BLANK ? "nothing is staged" : "no installable staged image",
                                HTTPD_RESP_USE_STRLEN);
+    }
+    // Prove the boot_guard clear works BEFORE the first erase of `app`: a clear
+    // that fails after the copy would leave `app` rewritten but never selected.
+    // Idempotent; the apply task clears again just before set_boot.
+    char bg_msg[96];
+    if (!boot_guard_clear_or_na(bg_msg, sizeof(bg_msg))) {
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
     app_verify_invalidate(); // `app` is about to be erased
     esp_err_t e = recovery_apply_esp_start(app, apply_pre_boot);

@@ -15,6 +15,7 @@
 #include "esp_crc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "hal_sysinfo.h" /* hal_sysinfo_random_u32() -- boot seed of s_config_generation */
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/portmacro.h" /* portMUX_TYPE -- s_zones_cfg_mux */
@@ -539,13 +540,14 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
                      "\"reason\":\"%s\",\"ct_map_derived_mask\":%u,\"ct_map_reason\":\"%s\","
                      "\"k_ct_derived_mask\":%u,\"k_ct_reason\":\"%s\","
                      "\"i_normal_pushed_mask\":%u,\"i_normal_reason\":\"%s\","
-                     "\"summed_unmeasured_mask\":%u,"
+                     "\"summed_unmeasured_mask\":%u,\"esp_persist_failed\":%s,"
                      "\"nameplate_mismatch_mask\":%u,\"nameplate_reason\":\"%s\","
                      "\"ct_installed\":%s}",
                      zone_sweep_state_str(st.state), st.zone_index, st.zones_done, st.zones_total,
                      s->reason_escaped, st.ct_map_derived_mask, s->ct_reason_escaped,
                      st.k_ct_derived_mask, s->k_reason_escaped,
                      st.i_normal_pushed_mask, s->i_normal_reason_escaped, st.summed_unmeasured_mask,
+                     st.esp_persist_failed ? "true" : "false",
                      st.nameplate_mismatch_mask, s->nameplate_reason_escaped,
                      st.ct_installed ? "true" : "false");
     httpd_resp_set_type(req, "application/json");
@@ -713,6 +715,9 @@ static esp_err_t tuning_rec_get_handler(httpd_req_t *req)
 
 esp_err_t zones_http_start(void)
 {
+    /* Review web7 LOW-4: the generation is RAM-only and restarts every boot; a random boot seed keeps a pre-reboot
+     * page's expected_generation from matching a post-reboot count. Never 0 (a zero-initialised cache must differ). */
+    s_config_generation = (hal_sysinfo_random_u32() & 0x3fffffffu) | 1u;
     /* kiln_nvs is shared by zones/rules/relay_cycles/run_state, and each
      * module brings it up independently rather than assuming another module
      * already has -- nvs_flash_init_partition() on an already-initialized

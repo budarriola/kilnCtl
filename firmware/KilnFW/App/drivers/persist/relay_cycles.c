@@ -1,4 +1,5 @@
 #include "relay_cycles.h"
+#include "cfgfs_file_validators.h"
 #include "legacy_default_nvs.h"
 
 #include <string.h>
@@ -62,7 +63,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_CYCLES);
 #define KILN_NVS_PARTITION "kiln_nvs"
 NVS_KEY_LEN_CHECK(KILN_NVS_PARTITION);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 6 (relay cycle counters,
+/* docs/FILESYSTEM_USER_DATA.md section 5 step 6 (relay cycle counters,
  * scheduled LAST -- "MOVE, but last, after everything else has flown"): the
  * cfg-filesystem dual-write bridge for this module. Same generic bridge
  * unit_pref.c/ramp_assist_cfg.c/display_power_cfg.c/relay_names use
@@ -134,7 +135,7 @@ static relay_cycles_t s_rc;
  * valid" here, exactly like relay_cycles_init() treats such an NVS blob,
  * falling back to whichever side (NVS in practice, since a cfg-file can only
  * ever have been written by firmware at or after this pass) is trustworthy. */
-static bool relay_cycles_file_validate(const void *bytes, size_t len)
+bool relay_cycles_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(relay_cycles_blob_t)) {
         return false;
@@ -340,10 +341,17 @@ esp_err_t relay_cycles_init(void)
                  KILN_NVS_PARTITION, hal_status_to_name(part_err));
     }
 
-    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
-    memset(s_rc.counts, 0, sizeof(s_rc.counts));
-    memset(s_rc.types, RELAY_TYPE_SSR, sizeof(s_rc.types));
-    memset(s_rc.rated_overrides, 0, sizeof(s_rc.rated_overrides));
+    /* LOCK-INVERSION AUDIT F5: load into locals and hold s_rc.lock only to
+     * publish at the end. migrate_from_default_partition() and
+     * pref_cfg_fs_resolve() can write (cfg_fs write dispatches to the flash
+     * worker), and the worker takes s_rc.lock (note_safety_edge, set_type). */
+    uint32_t l_counts[RELAY_CYCLES_COUNT];
+    uint8_t  l_types[RELAY_CYCLES_COUNT];
+    uint32_t l_over[RELAY_CYCLES_COUNT];
+    uint32_t l_rev = 0;
+    memset(l_counts, 0, sizeof(l_counts));
+    memset(l_types, RELAY_TYPE_SSR, sizeof(l_types));
+    memset(l_over, 0, sizeof(l_over));
 
     /* Migrate before the real load so a pre-split board's counts show up on
      * the very first boot after the update, not one boot late. */
@@ -379,9 +387,9 @@ esp_err_t relay_cycles_init(void)
             if (len != sizeof(blob)) {
                 ESP_LOGW(TAG, "relay cycle blob claims current version but is the wrong size -- starting at zero");
             } else {
-                memcpy(s_rc.counts, blob.counts, sizeof(s_rc.counts));
-                memcpy(s_rc.types, blob.types, sizeof(s_rc.types));
-                memcpy(s_rc.rated_overrides, blob.rated_overrides, sizeof(s_rc.rated_overrides));
+                memcpy(l_counts, blob.counts, sizeof(l_counts));
+                memcpy(l_types, blob.types, sizeof(l_types));
+                memcpy(l_over, blob.rated_overrides, sizeof(l_over));
                 nvs_have_value = true;
             }
         } else if (err == HAL_OK && blob.version > RELAY_CYCLES_VERSION) {
@@ -404,7 +412,7 @@ esp_err_t relay_cycles_init(void)
              * depending on that. */
             relay_cycles_blob_v1_t v1;
             memcpy(&v1, &blob, sizeof(v1));
-            memcpy(s_rc.counts, v1.counts, sizeof(v1.counts));
+            memcpy(l_counts, v1.counts, sizeof(v1.counts));
             /* Fifth slot (safety relay) starts at 0; types/overrides already
              * memset to RELAY_TYPE_SSR/0 above. */
             ESP_LOGI(TAG, "migrated relay cycle blob v1 -> v%u (fifth slot + types added, "
@@ -419,7 +427,7 @@ esp_err_t relay_cycles_init(void)
              * only case treated identically to "start at zero" without a
              * warning; anything else (unreadable) is logged as corrupt
              * data. */
-            memset(s_rc.counts, 0, sizeof(s_rc.counts));
+            memset(l_counts, 0, sizeof(l_counts));
             ESP_LOGW(TAG, "relay cycle blob load failed (%s) -- starting at zero",
                      hal_status_to_name(err));
         }
@@ -432,7 +440,7 @@ esp_err_t relay_cycles_init(void)
         hal_kv_close(&h);
     }
 
-    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA_PLAN.md section
+    /* cfg-filesystem read-through (docs/FILESYSTEM_USER_DATA.md section
      * 5 step 6): build the NVS candidate blob s_rc currently holds (zeroed
      * if nvs_have_value is false) and let pref_cfg_fs_resolve() decide
      * whether the file or the NVS side wins -- same policy every other
@@ -449,9 +457,9 @@ esp_err_t relay_cycles_init(void)
      * file_rev == nvs_rev). */
     memset(&nvs_candidate, 0, sizeof(nvs_candidate));
     nvs_candidate.version = RELAY_CYCLES_VERSION;
-    memcpy(nvs_candidate.counts, s_rc.counts, sizeof(nvs_candidate.counts));
-    memcpy(nvs_candidate.types, s_rc.types, sizeof(nvs_candidate.types));
-    memcpy(nvs_candidate.rated_overrides, s_rc.rated_overrides, sizeof(nvs_candidate.rated_overrides));
+    memcpy(nvs_candidate.counts, l_counts, sizeof(nvs_candidate.counts));
+    memcpy(nvs_candidate.types, l_types, sizeof(nvs_candidate.types));
+    memcpy(nvs_candidate.rated_overrides, l_over, sizeof(nvs_candidate.rated_overrides));
 
     /* relay_cycles_init() runs from main_control_bringup.c, BEFORE
      * uart_bridge_ext_start_flash_worker() is called later in that same
@@ -478,18 +486,23 @@ esp_err_t relay_cycles_init(void)
                                            nvs_have_value, nvs_rev, relay_cycles_file_validate, &resolved,
                                            &resolved_rev, &used_file);
     if (have_value) {
-        memcpy(s_rc.counts, resolved.counts, sizeof(s_rc.counts));
-        memcpy(s_rc.types, resolved.types, sizeof(s_rc.types));
-        memcpy(s_rc.rated_overrides, resolved.rated_overrides, sizeof(s_rc.rated_overrides));
-        s_rc.rev = resolved_rev;
+        memcpy(l_counts, resolved.counts, sizeof(l_counts));
+        memcpy(l_types, resolved.types, sizeof(l_types));
+        memcpy(l_over, resolved.rated_overrides, sizeof(l_over));
+        l_rev = resolved_rev;
         if (used_file) {
             ESP_LOGI(TAG, "relay cycle counts loaded from cfg filesystem (rev=%lu)",
                      (unsigned long)resolved_rev);
         }
     } else {
-        s_rc.rev = 0;
+        l_rev = 0;
     }
 
+    xSemaphoreTake(s_rc.lock, portMAX_DELAY);
+    memcpy(s_rc.counts, l_counts, sizeof(s_rc.counts));
+    memcpy(s_rc.types, l_types, sizeof(s_rc.types));
+    memcpy(s_rc.rated_overrides, l_over, sizeof(s_rc.rated_overrides));
+    s_rc.rev = l_rev;
     s_rc.dirty = false;
     s_rc.last_persist_us = (int64_t)hal_time_now_us();
     s_rc.initialized = true;
@@ -1172,6 +1185,9 @@ static hal_status_t persist_snapshot_now(TickType_t persist_lock_wait_ticks)
     } else {
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.dirty = true;
+        /* persfx LOW-1: back off. Without this a failing persist stays "due" and is retried (and logged) every
+         * tick of a firing; stamping the attempt time makes the retry wait a full persist interval. */
+        s_rc.last_persist_us = (int64_t)hal_time_now_us();
         xSemaphoreGive(s_rc.lock);
     }
 

@@ -19,14 +19,18 @@
 #include "nvs_flash.h"
 
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "cfg_save_lock.h" /* s_zcfg_save_mutex */
 #include "freertos/task.h" /* xTaskGetCurrentTaskHandle() -- autosave dispatcher identity, 2026-09-16 */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_zone_edits_at_risk() -- review 12 LOW-1 */
 #include "kiln_cfg_store.h" /* kiln_cfg_store_autosave_from_live() -- docs/KILN_PROFILES_PLAN.md
                              * section 2.4, item 13. */
 #include "kiln_io.h"
 #include "relay_cycles.h" /* RELAY_LIFE_BUDGET.md: relay_cycles_set_type() push
                             * on load, zones_config_push_relay_type()/_push_all_relay_types()
                             * below. */
-#include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5:
+#include "cfg_fs.h"
+#include "zones_config_cfg_fs.h" /* docs/FILESYSTEM_USER_DATA.md section 5 step 5:
                             * read-through/dual-write bridge to the `cfg` LittleFS
                             * partition -- see that header for the full design. */
 #include "cfg_fs_status.h" /* cfg_fs_status_item_diverged() -- zone_normals_get_dualwrite_status() */
@@ -50,6 +54,34 @@ NVS_KEY_LEN_CHECK(NVS_KEY_ZONES_REV);
 
 static uint32_t s_zones_cfg_rev = 0;
 
+/* SAVE MUTEX (dev review 5 L5, modeled on profiles_http.c's profiles_save_lock()).
+ * nvs_save(), relay_names_save() and zone_normals_save_locked() each compute rev+1 from a
+ * file-scope counter, write the cfg file, then publish the counter; callers span httpd,
+ * the profile executor and adaptive tune, so two concurrent saves could both stamp the
+ * same rev. One static mutex makes rev read + write + rev bump one critical section per
+ * store (a single mutex covers all three: they are short and never nest).
+ * LOCK ORDER: s_zcfg_save_mutex is the OUTER lock; zones_cfg_lock() (portMUX critical
+ * section, copy-only) is taken INSIDE it and never the other way round -- no code may
+ * call these savers, or take the save mutex, while holding zones_cfg_lock().
+ * Held across the module's own cfg-file I/O only, never across a producer call
+ * (the kiln-config autosave dispatch in nvs_save() runs after the unlock). Created on
+ * first use under a claim flag so every take sees a non-NULL handle.
+ * cfg_save_lock_t since 2026-10-09: the take also reserves the flash worker when the
+ * caller is not the worker -- these savers run as worker jobs too (CONTROL
+ * SET_ZONE_PID/SET_ZONE_MODEL, AUTOTUNE ACCEPT) while their own cfg write dispatches
+ * onto the worker; see cfg_save_lock.h. */
+static cfg_save_lock_t s_zcfg_save_mutex = CFG_SAVE_LOCK_INIT;
+
+static void zcfg_save_lock(void) { cfg_save_lock_take(&s_zcfg_save_mutex); }
+
+static void zcfg_save_unlock(void) { cfg_save_lock_give(&s_zcfg_save_mutex); }
+
+/* For the relay-name setters in zones_config_accessors.c (CFG_STORE_SAVE_RACE
+ * audit MED-1): RAM edit and save in one section under the same mutex. */
+void zones_cfg_save_section_lock(void) { zcfg_save_lock(); }
+
+void zones_cfg_save_section_unlock(void) { zcfg_save_unlock(); }
+
 /* CLAUDE.md's ota_rollback_esp() hazard, closed 2026-09-16 -- see
  * zones_cfg_load_fault_t's own doc comment (zones_config_accessors.h) for
  * the full rule. Latched below, in nvs_load_from_decode(), the one place a
@@ -61,6 +93,45 @@ static uint32_t s_zones_cfg_rev = 0;
  * separate, older concern, not "this boot is running on defaults instead of
  * its own tuned config." */
 static zones_cfg_load_fault_t s_zones_cfg_load_fault = {0};
+
+/* Review 2026-10-10 L1: set when nvs_load() could not DECIDE (the cfg file was present but unreadable, or a
+ * decode/scratch allocation failed), so this boot's RAM config is zeroed while a higher-rev file may hold the real
+ * tuning. nvs_save() refuses (409 at the HTTP writers) until a later nvs_load() decides cleanly (a reboot), so a
+ * near-empty config is never written over that file. Distinct from s_zones_cfg_load_fault, which
+ * zones_config_load_fault_clear() may reset after a successful POST; this one is only ever cleared by a clean load. */
+static bool s_zones_cfg_undecided = false;
+static void zones_cfg_load_fault_latch(zones_cfg_load_fault_kind_t kind, uint8_t on_disk_version, const char *reason);
+
+static void zones_cfg_mark_undecided(const char *why, bool latch_fault)
+{
+    s_zones_cfg_undecided = true;
+    cfg_fs_degraded_set("zones.json", true); /* persfx MED-1 */
+    if (latch_fault && !s_zones_cfg_load_fault.occurred) {
+        zones_cfg_load_fault_latch(ZONES_CFG_LOAD_FAULT_UNREADABLE, 0, why);
+    }
+}
+
+void zones_config_load_fault_reset_for_test(void)
+{
+    memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
+    s_zones_cfg_undecided = false;
+    cfg_fs_degraded_set("zones.json", false);
+}
+
+bool zones_config_is_undecided(void)
+{
+    return s_zones_cfg_undecided;
+}
+
+uint32_t zones_config_rev_for_test(void)
+{
+    return s_zones_cfg_rev;
+}
+
+void zones_config_load_fault_clear(void)
+{
+    memset(&s_zones_cfg_load_fault, 0, sizeof(s_zones_cfg_load_fault));
+}
 
 bool zones_config_get_load_fault(zones_cfg_load_fault_t *out)
 {
@@ -327,7 +398,7 @@ static esp_err_t nvs_load_from_decode_buf(const char *partition, zones_cfg_t *ou
          * Nothing worth protecting was found here, so a caller (the
          * legacy-partition migration) is free to look elsewhere. This bucket
          * also covers a version this firmware's migration chain does not
-         * reach back far enough to consume (docs/CONFIG_MIGRATION_CHAIN_PLAN.md's
+         * reach back far enough to consume (docs/CONFIG_MIGRATION_CHAIN.md's
          * one-step-at-a-time policy) -- there is no separate decode outcome
          * for that case today, so it is reported as UNREADABLE, same as any
          * other undecodable blob. */
@@ -394,6 +465,15 @@ void migrate_from_default_partition(void)
     if (err != ESP_OK || !found_in_default) {
         return; /* nothing to migrate */
     }
+    /* Review 11 MED-1: a zones.json from NEWER firmware (latched by nvs_load) must not be
+     * overwritten by an older legacy copy, nor a rejected file with no .bad copy. */
+    if (s_zones_cfg_undecided ||
+        (s_zones_cfg_load_fault.occurred &&
+         (s_zones_cfg_load_fault.kind == ZONES_CFG_LOAD_FAULT_NEWER || s_zones_cfg_load_fault.bad_copy_failed))) {
+        ESP_LOGE(ZONES_HTTP_TAG, "legacy default-partition zones_cfg NOT migrated: it would overwrite a rejected "
+                      "zones.json that is newer or has no %s copy", ZONES_CFG_BAD_FILE_PATH);
+        return;
+    }
     if (!valid_in_default) {
         /* found_in_default is true for two different reasons now (see FIX 1
          * in nvs_load_from()): a refused newer-than-firmware blob, or a
@@ -419,6 +499,8 @@ void migrate_from_default_partition(void)
      * successfully migrated -- so this is always something ready to run a
      * kiln against, never a corrupt or refused blob (both return above). */
     s_zones_config_valid = valid_in_default;
+    /* A legacy copy was adopted: no longer 'no trustworthy copy' (review 11 MED-2). */
+    zones_config_load_fault_clear();
     /* RELAY_LIFE_BUDGET.md, "on load": this IS a load into
      * s_zones.cfg, same as nvs_load()'s own -- a board migrating forward
      * from the default partition must not run with relay_cycles.c still
@@ -527,6 +609,8 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     bool migrated_from_nvs = false;
     uint8_t on_disk_version_before = 0;
     bool nvs_refused_as_newer = false;
+    s_zones_cfg_undecided = false;
+    cfg_fs_degraded_set("zones.json", false); /* re-evaluated by this load; set again below on any cannot-decide exit */
     esp_err_t err = nvs_load_from_with_migration_info(KILN_NVS_PARTITION, &s_zones.cfg, out_found, out_valid,
                                                         &migrated_from_nvs, &on_disk_version_before,
                                                         &nvs_refused_as_newer);
@@ -534,6 +618,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
         /* Decode OOM: could not judge the NVS bytes. Do not resolve (the file would
          * be compared against nothing), keep the rev floor, fail the load. */
         s_zones_cfg_rev = zones_cfg_rev_load();
+        zones_cfg_mark_undecided("cannot decide: NVS decode ran out of memory", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -544,7 +629,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
         return err;
     }
 
-    /* docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5: read-through
+    /* docs/FILESYSTEM_USER_DATA.md section 5 step 5: read-through
      * against the `cfg` file on top of whatever nvs_load_from() just
      * decoded. zones_config_cfg_fs_resolve() never touches NVS itself -- it
      * only decides whether the file or the NVS candidate above wins, per
@@ -560,6 +645,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     zones_cfg_t *resolved = persist_scratch_alloc(sizeof(*resolved));
     if (!resolved) {
         s_zones_cfg_rev = nvs_rev; /* rev floor: a later save must not restamp rev 1 */
+        zones_cfg_mark_undecided("cannot decide: scratch allocation failed", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -572,14 +658,58 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     uint8_t file_on_disk_version = 0;
+    /* Review 11 LOW-1: resolve may write zones.json.bad (and a resync copy); run it inside the save section so
+     * those writes are ordered against every other zones writer and the factory-reset barrier. */
+    zcfg_save_lock();
     bool trustworthy = zones_config_cfg_fs_resolve(&s_zones.cfg, nvs_valid, nvs_rev, resolved, &resolved_rev,
                                                     &used_file, &file_on_disk_version);
+    zcfg_save_unlock();
+    zones_cfg_fs_reject_t file_reject;
+    bool file_rejected = zones_config_cfg_fs_get_last_reject(&file_reject);
+    /* Review 11 MED-2: latch only when NO trustworthy copy was adopted. A rejected file that fell back
+     * to a trustworthy NVS copy is a logged warning, not a firing-refusing fault. (A later legacy
+     * migration that adopts a copy clears the latch again.) */
+    if (file_rejected && !trustworthy && !s_zones_cfg_load_fault.occurred) {
+        zones_cfg_load_fault_latch(file_reject.newer ? ZONES_CFG_LOAD_FAULT_NEWER : ZONES_CFG_LOAD_FAULT_UNREADABLE,
+                                   file_reject.on_disk_version, file_reject.reason);
+        s_zones_cfg_load_fault.file_rejected = true;
+        s_zones_cfg_load_fault.bad_copy_failed = !file_reject.preserved;
+    } else if (file_rejected && trustworthy) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zones config: cfg file %s REJECTED (%s) but a trustworthy %s copy was adopted; "
+                      "rejected file kept as %s: %s",
+                 ZONES_CFG_FILE_PATH, file_reject.reason, used_file ? "file" : "NVS", ZONES_CFG_BAD_FILE_PATH,
+                 file_reject.preserved ? "yes" : "NO (copy failed)");
+    }
+    if (!trustworthy && nvs_valid && file_rejected && file_reject.newer) {
+        /* The NVS copy was valid but deliberately NOT adopted over a newer-version file. */
+        memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+        if (out_valid) {
+            *out_valid = false;
+        }
+    }
+    if (!trustworthy && !used_file && file_on_disk_version != ZONES_CFG_RESOLVE_OOM_VERSION) {
+        /* Audit (c) fix 4: name the path in the boot log. No copy adopted YET: a legacy default-partition
+         * copy may still be adopted later this boot (migrate_from_default_partition). */
+        if (file_rejected) {
+            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s REJECTED (%s), NVS blob %s -- no "
+                          "trustworthy copy adopted (config zeroed unless a legacy copy is adopted later this "
+                          "boot); the rejected file is kept as %s",
+                     ZONES_CFG_FILE_PATH, file_reject.reason, nvs_valid ? "usable but not adopted" : "absent/invalid",
+                     ZONES_CFG_BAD_FILE_PATH);
+        } else {
+            ESP_LOGE(ZONES_HTTP_TAG, "zones config UNTRUSTWORTHY: cfg file %s %s and NVS blob absent/invalid -- "
+                          "no trustworthy copy adopted",
+                     ZONES_CFG_FILE_PATH,
+                     cfg_fs_is_available() ? "missing/unreadable" : "unavailable (cfg not mounted)");
+        }
+    }
     if (file_on_disk_version == ZONES_CFG_RESOLVE_OOM_VERSION && !trustworthy && !used_file) {
         /* Resolve could not allocate: keep the rev floor and fail the load so the
          * legacy NVS copy is not adopted as valid (a later save would overwrite
          * the newer authoritative file). */
         s_zones_cfg_rev = nvs_rev;
         free(resolved);
+        zones_cfg_mark_undecided("cfg file: unreadable or out of memory -- cannot decide", true);
         memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
         if (out_found) {
             *out_found = false;
@@ -708,6 +838,7 @@ esp_err_t nvs_load(bool *out_found, bool *out_valid)
  * doc comment) -- avoids pulling in the whole UART bridge API for one call.
  */
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
+bool uart_bridge_ext_is_on_flash_worker(void);
 
 /* Job body for nvs_save()'s auto-save dispatch, immediately below --
  * `arg` is unused (kiln_cfg_store_autosave_from_live() reads the live
@@ -768,6 +899,20 @@ bool zones_config_persisted_equals_ram(void)
 
 esp_err_t nvs_save(void)
 {
+    /* Review 12 LOW-1: ONE shared gate for every zones_config BLOB writer (POST /api/zones, /pid, adaptive tune, autotune
+     * finalize, UART bridge, accessors, backup import ...). NOT covered: relay_names_save*() and
+     * zone_normals_save_locked() write their own keys without calling nvs_save(), so this gate does not apply
+     * to them (harmless while the kiln-config rollback journal never restores relay names or zone normals). While a kept rollback journal would re-import or
+     * fault over a zones edit at the next boot, refuse the save; HTTP writers map this to 409. */
+    if (kiln_cfg_swap_zone_edits_at_risk()) {
+        ESP_LOGW(ZONES_HTTP_TAG, "zones config NOT saved: a kiln-config rollback journal is pending");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_zones_cfg_undecided) {
+        ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT saved: this boot could not read the stored config (load fault "
+                                 "latched), a save would overwrite a possibly higher-rev file with defaults -- reboot");
+        return ESP_ERR_INVALID_STATE;
+    }
     /* Persist a SNAPSHOT, never the live struct: copy s_zones.cfg and read the rev under
      * zones_cfg_lock() (portMUX: copy only, no I/O/alloc/log inside), stamp version/CRC
      * on the copy (last, after every other field is final -- see
@@ -777,6 +922,12 @@ esp_err_t nvs_save(void)
     if (snap == NULL) {
         ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: no memory for the snapshot");
         return ESP_ERR_NO_MEM;
+    }
+    zcfg_save_lock(); /* outer lock; rev read .. rev bump below; see s_zcfg_save_mutex */
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        zcfg_save_unlock();
+        free(snap);
+        return ESP_ERR_INVALID_STATE;
     }
     zones_cfg_lock();
     s_zones.cfg.version = ZONES_CFG_VERSION;
@@ -806,7 +957,9 @@ esp_err_t nvs_save(void)
         zones_cfg_lock();
         s_zones_cfg_rev = new_zones_rev;
         zones_cfg_unlock();
+        zcfg_save_unlock();
     } else {
+        zcfg_save_unlock();
         ESP_LOGE(ZONES_HTTP_TAG, "zones config NOT persisted: %s -- NVS is no longer written, the change "
                                  "lives in RAM until reboot",
                  esp_err_to_name(err));
@@ -832,17 +985,31 @@ esp_err_t nvs_save(void)
      * moves that frame onto the flash worker's OWN dedicated stack instead
      * -- invisible to every caller's static stack-depth measurement, the
      * same reason relay_cycles.c's own persist path uses this pattern.
-     * uart_bridge_ext_run_on_flash_worker() is not reachable on-worker from
-     * here: nvs_save() is called from ordinary httpd/executor/adaptive-tune
-     * contexts, never from a job already running on the flash worker
-     * itself, so no is_on_flash_worker() re-entrancy guard is needed (see
-     * flash_worker_lint.py's own header comment for this justification
-     * phrase's precedent). Best-effort: a dispatch/autosave failure is
-     * logged, never turned into this function's own return value -- the
-     * zones write ITSELF already fully succeeded by this point. */
-    esp_err_t autosave_dispatch_err =
-        (err == ESP_OK) ? uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle())
-                        : ESP_OK; /* nothing was saved, so there is nothing to autosave */
+     *
+     * nvs_save() IS reached on the flash worker: CONTROL SET_ZONE_PID/MODEL
+     * and AUTOTUNE_CMD_ACCEPT run as worker jobs (corrected 2026-10-09; an
+     * earlier comment here said it never was). On the worker the job runs
+     * inline (the worker's own stack is the one the dispatch targets anyway),
+     * but ONLY through a volatile function pointer, never a direct call: the
+     * static stack analyser counts a direct call on every path, worker or
+     * not, and the direct call 4271767d added put the ~2.8 KB autosave frame
+     * back into executor_task_entry's worst case (2816 B against its 1936 B
+     * ceiling, check_executor_task_stack_budget, 2026-10-09 on 047844c5).
+     * The volatile load stops GCC from folding the pointer back into a direct
+     * call. Do not "simplify" it to zones_autosave_job(...). Best-effort:
+     * a dispatch/autosave failure is logged, never turned into this
+     * function's own return value -- the zones write ITSELF already fully
+     * succeeded by this point. */
+    esp_err_t autosave_dispatch_err = ESP_OK; /* nothing saved: nothing to autosave */
+    if (err == ESP_OK) {
+        if (uart_bridge_ext_is_on_flash_worker()) {
+            void (*volatile job)(void *arg) = zones_autosave_job;
+            job((void *)xTaskGetCurrentTaskHandle());
+        } else {
+            autosave_dispatch_err =
+                uart_bridge_ext_run_on_flash_worker(zones_autosave_job, (void *)xTaskGetCurrentTaskHandle());
+        }
+    }
     if (autosave_dispatch_err != ESP_OK) {
         ESP_LOGW(ZONES_HTTP_TAG, "kiln config autosave could not be dispatched: %s -- the active kiln "
                       "package was NOT updated with this change, though the change itself was saved",
@@ -1264,18 +1431,36 @@ void relay_names_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, bool
     }
 }
 
-esp_err_t relay_names_save(void)
+/* Caller holds zones_cfg_save_section_lock(). Commits a snapshot taken under
+ * zones_cfg_lock(): zones_http_post.c assigns s_relay_names.cfg under that
+ * lock, so the file is never a torn mix of two writers' names. */
+esp_err_t relay_names_save_locked(void)
 {
-    s_relay_names.cfg.version = RELAY_NAMES_CFG_VERSION;
-    s_relay_names.cfg.crc32 = compute_relay_names_crc(&s_relay_names.cfg);
+    relay_names_cfg_t snap;
+    zones_cfg_lock();
+    snap = s_relay_names.cfg;
+    zones_cfg_unlock();
+    snap.version = RELAY_NAMES_CFG_VERSION;
+    snap.crc32 = compute_relay_names_crc(&snap);
     uint32_t new_rev = s_relay_names_rev + 1;
 
     /* cfg file ONLY -- docs/CONFIG_FILESYSTEM.md, "Dual-write window: closed". */
-    esp_err_t err = pref_cfg_fs_commit(RELAY_NAMES_FILE_PATH, &s_relay_names.cfg, sizeof(s_relay_names.cfg), new_rev,
-                                       "relay names");
+    esp_err_t err = pref_cfg_fs_commit(RELAY_NAMES_FILE_PATH, &snap, sizeof(snap), new_rev, "relay names");
     if (err == ESP_OK) {
         s_relay_names_rev = new_rev;
     }
+    return err;
+}
+
+esp_err_t relay_names_save(void)
+{
+    zcfg_save_lock(); /* rev read .. rev bump; see s_zcfg_save_mutex */
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        zcfg_save_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = relay_names_save_locked();
+    zcfg_save_unlock();
     return err;
 }
 
@@ -1321,9 +1506,9 @@ esp_err_t relay_names_save(void)
  * commissioning page reporting writes that never landed") and was invisible
  * because the pre-migration host stub (stubs/nvs.h) modeled ONE shared blob
  * slot with no key-length check of any kind, and the board's own
- * zone_normals_save() logged nothing on a non-OK return (unlike every
+ * zone_normals_save_locked() logged nothing on a non-OK return (unlike every
  * sibling setter in this file) -- fixed in the 2026-09-07 persist-logging
- * audit (docs/audits/persist_save_logging_2026-09-07.md), zone_normals_save()
+ * audit (docs/audits/persist_save_logging_2026-09-07.md), zone_normals_save_locked()
  * now logs an ESP_LOGW naming the module and esp_err_to_name() on failure.
  * At the time the key-length bug was live, EVERY zone_normals_set()/
  * zone_ct_map_set()/zone_k_ct_set() write since that commit has silently
@@ -1435,8 +1620,15 @@ void zone_normals_load(void)
              (unsigned long)s_zone_normals_rev);
 }
 
-static esp_err_t zone_normals_save(void)
+/* Caller holds zcfg_save_lock() across its RAM edit AND this save
+ * (CFG_STORE_SAVE_RACE audit MED-1): every setter below mutates
+ * s_zone_normals.cfg only inside that section, so a concurrent setter can
+ * neither interleave its edit into this commit nor publish a rev for it. */
+static esp_err_t zone_normals_save_locked(void)
 {
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight (pref_cfg_fs.h writer fence) */
+        return ESP_ERR_INVALID_STATE;
+    }
     s_zone_normals.cfg.version = ZONE_NORMALS_CFG_VERSION;
     s_zone_normals.cfg.crc32 = compute_zone_normals_crc(&s_zone_normals.cfg);
     uint32_t new_rev = s_zone_normals_rev + 1;
@@ -1527,9 +1719,12 @@ bool zone_normals_set(uint8_t zone_index, float amps)
     if (zone_index >= MAX31856_CHANNEL_COUNT || !isfinite(amps) || amps < 0.0f) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.normal_current_a[zone_index] = amps;
     s_zone_normals.cfg.measured_mask |= (uint8_t)(1u << zone_index);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* 2026-09-10: originally written to clear a zone's measured normal current
@@ -1561,7 +1756,9 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
         return true;
     }
     zone_mask &= (uint8_t)((1u << MAX31856_CHANNEL_COUNT) - 1u);
+    zcfg_save_lock();
     if ((s_zone_normals.cfg.measured_mask & zone_mask) == 0) {
+        zcfg_save_unlock();
         return true; /* nothing measured in the affected set -- nothing to invalidate */
     }
     s_zone_normals.cfg.measured_mask &= (uint8_t)~zone_mask;
@@ -1570,7 +1767,9 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
             s_zone_normals.cfg.normal_current_a[zi] = 0.0f;
         }
     }
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* Same "the sweep is the only legitimate writer" rule zone_normals_set()
@@ -1580,17 +1779,19 @@ bool zone_normals_invalidate_mask(uint8_t zone_mask)
  * the whole record at the START of a sweep is deliberate -- a re-sweep of
  * rewired hardware must not leave a channel's stale "derived" claim behind
  * to be shown as current. */
-void zone_ct_map_clear(void)
+bool zone_ct_map_clear(void)
 {
+    zcfg_save_lock();
     s_zone_normals.cfg.ct_map_derived_mask = 0;
     memset(s_zone_normals.cfg.ct_map_zone, 0, sizeof(s_zone_normals.cfg.ct_map_zone));
     /* Persisted immediately, not left for the first zone_ct_map_set() to
      * flush: a sweep that clears the map and then fails outright never
      * reaches a set(), and leaving the old map in NVS would resurrect it on
      * the next boot as though it were still current. Failure is already
-     * logged inside zone_normals_save() itself. */
-    esp_err_t clear_err = zone_normals_save();
-    (void)clear_err;
+     * logged inside zone_normals_save_locked() itself. */
+    esp_err_t clear_err = zone_normals_save_locked();
+    zcfg_save_unlock();
+    return clear_err == ESP_OK;
 }
 
 bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
@@ -1598,9 +1799,12 @@ bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
     if (ct_channel >= ZONE_CT_CHANNEL_COUNT || zone_index >= MAX31856_CHANNEL_COUNT) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.ct_map_zone[ct_channel] = zone_index;
     s_zone_normals.cfg.ct_map_derived_mask |= (uint8_t)(1u << ct_channel);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 /* M12b: same discipline as zone_ct_map_clear()/zone_ct_map_set() just above
@@ -1608,13 +1812,15 @@ bool zone_ct_map_set(uint8_t ct_channel, uint8_t zone_index)
  * estimate actually use lives on the Pico and is written by
  * zone_sweep_push_k_ct_v_per_a(); nothing here is ever read back as a
  * calibration. */
-void zone_k_ct_clear(void)
+bool zone_k_ct_clear(void)
 {
+    zcfg_save_lock();
     s_zone_normals.cfg.k_ct_derived_mask = 0;
     memset(s_zone_normals.cfg.k_ct_v_per_a, 0, sizeof(s_zone_normals.cfg.k_ct_v_per_a));
-    /* Failure is already logged inside zone_normals_save() itself. */
-    esp_err_t clear_err = zone_normals_save();
-    (void)clear_err;
+    /* Failure is already logged inside zone_normals_save_locked() itself. */
+    esp_err_t clear_err = zone_normals_save_locked();
+    zcfg_save_unlock();
+    return clear_err == ESP_OK;
 }
 
 bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)
@@ -1622,9 +1828,12 @@ bool zone_k_ct_set(uint8_t ct_channel, float k_v_per_a)
     if (ct_channel >= ZONE_CT_CHANNEL_COUNT || !isfinite(k_v_per_a) || k_v_per_a <= 0.0f) {
         return false;
     }
+    zcfg_save_lock();
     s_zone_normals.cfg.k_ct_v_per_a[ct_channel] = k_v_per_a;
     s_zone_normals.cfg.k_ct_derived_mask |= (uint8_t)(1u << ct_channel);
-    return zone_normals_save() == ESP_OK;
+    bool ok = zone_normals_save_locked() == ESP_OK;
+    zcfg_save_unlock();
+    return ok;
 }
 
 void zones_ct_k_v_per_a_derived(uint8_t *out_derived_mask, float *out_k_v_per_a)

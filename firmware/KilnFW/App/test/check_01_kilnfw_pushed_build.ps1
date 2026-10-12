@@ -312,7 +312,7 @@ try {
     # BUILD THE SAFTYFW SLOT A/B IMAGES THE EMBED_FILES GUARD REQUIRES
     # (2026-09-20). App/drivers/CMakeLists.txt FATAL_ERRORs at configure time
     # if firmware\SaftyFW\build\SaftyFW_slotA.bin / SaftyFW_slotB.bin are
-    # missing -- introduced by the Pico embedded auto-update chain (docs/PICO_AUTO_UPDATE_PLAN.md).
+    # missing -- introduced by the Pico embedded auto-update chain (docs/PICO_AUTO_UPDATE.md).
     # This worktree is a PRISTINE `git worktree add` of origin/main (see the
     # header comment above) with no prior SaftyFW build ever run in it, so
     # without this step the very next `idf.py build` below would fail

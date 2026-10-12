@@ -859,7 +859,7 @@ the bench to observe `relay_authority_on_blocked()` holding through the link-los
 window. **Premise checked read-only, verdict SKIP -- no update can be pushed on this
 fixture today:**
 
-- `docs/PICO_AUTO_UPDATE_PLAN.md` section 1's review is **NO-GO** for installing the
+- `docs/PICO_AUTO_UPDATE.md` section 1's review is **NO-GO** for installing the
   two-slot bootloader on the bench Pico (unverified metadata seeding, unverified restore
   path, no atomic multi-image flash tool) -- matches the standing owner-gated NO-GO in
   memory (`project_pico_bootloader_install_no_go.md`). A separate 2026-09-18/2026-09-20
@@ -875,7 +875,7 @@ fixture today:**
   `last_update: processor='pico' success=False reason="Pico refused: update would
   overwrite its running flat image; re[flash via SWD]"` -- the exact
   `SAFETY_LINK_UPDATE_STATE_REFUSED_RUNNING_IMAGE_OVERLAP` (state 9) refusal
-  `docs/PICO_AUTO_UPDATE_PLAN.md` section 2 describes for a flat-image Pico, confirming
+  `docs/PICO_AUTO_UPDATE.md` section 2 describes for a flat-image Pico, confirming
   from the board's own history that a relay is structurally refused before the data
   phase ever starts, with no interlock/heating exposure to observe. Current phase at
   read time: `pico relay: phase='idle' percent=0`.

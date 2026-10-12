@@ -6,6 +6,7 @@
 // zones_http.c's route table and zones_http_post_parse.c's
 // zones_json_escape() caller keep reaching them the same way.
 
+#include "../common/json_escape_ctl.h"
 #include "zones_http_internal.h"
 
 #include <math.h>
@@ -58,17 +59,7 @@ esp_err_t page_get_handler(httpd_req_t *req)
  * collide at link time. */
 void zones_json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 esp_err_t safety_config_page_get_handler(httpd_req_t *req)
@@ -285,7 +276,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
            "\"thermo_count\":%u,\"relay_count\":%u,\"max_simultaneous_relays\":%u,"
            "\"continue_on_zone_trip\":%s,\"safety_tc_type\":%u,\"safety_tc_type_known\":%s,"
            "\"pc_link_abort_silence_ms\":%.0f,"
-           /* docs/ON_OFF_ZONE_PLAN.md step 6: the resolved-default numbers
+           /* docs/ON_OFF_ZONE.md step 6: the resolved-default numbers
             * zones_config_get_hyst_c()/_min_on_s()/_min_off_s() substitute
             * for a stored 0, derived from the SAME ZONE_HYST_C_DEFAULT/
             * ZONE_MIN_ON_OFF_S_DEFAULT macros those getters use
@@ -510,7 +501,7 @@ esp_err_t zones_get_handler(httpd_req_t *req)
             (double)z->model_tau_s, (double)z->model_dead_time_s, z->tc_type, z->ct_mask,
             z->timing_profile, normal_measured ? "true" : "false", (double)normal_a,
             z->relay_type, (double)z->fuzzy_strength_pct, fuzzy_model_valid ? "true" : "false");
-        /* docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23's
+        /* docs/ON_OFF_ZONE.md step 6 (ZONES_CFG_VERSION 22->23's
          * zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, unused by any
          * consumer until this pass): always emitted, same always-emit/
          * read-back-and-repost reasoning as relay_type/fuzzy_strength_pct

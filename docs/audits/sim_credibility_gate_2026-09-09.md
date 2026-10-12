@@ -1,6 +1,6 @@
 # §6.5 credibility gate — first run, 2026-09-09
 
-Evidence record for `docs/ITER_TUNE_REDESIGN_PLAN.md` sec 6.5. Harness:
+Evidence record for `docs/ITER_TUNE_REDESIGN.md` sec 6.5. Harness:
 `firmware/KilnFW/App/test/sim_credibility_gate.c`, a new standalone
 data-generating harness (same convention as `sim_iter_tune.c` /
 `sim_wide_temp_sweep.c` — not wired into `build_host_tests.ps1` or

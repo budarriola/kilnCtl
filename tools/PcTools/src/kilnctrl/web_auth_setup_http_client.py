@@ -53,10 +53,14 @@ class WebAuthSetupHttpError(Exception):
     status when known (409/500/etc from the board's own handlers), never a
     credential value."""
 
-    def __init__(self, message: str, status: Optional[int] = None, detail: str = ""):
+    def __init__(self, message: str, status: Optional[int] = None, detail: str = "",
+                 unreachable: bool = False):
         super().__init__(message)
         self.status = status
         self.detail = detail
+        #: True when the board did not answer at all (URLError); callers test this
+        #: instead of matching message text.
+        self.unreachable = unreachable
 
 
 def _url(host: str, path: str) -> str:
@@ -98,7 +102,7 @@ def get_auth_config(host: str, timeout: float = WEB_AUTH_SETUP_HTTP_TIMEOUT_S) -
                                      status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
-        raise WebAuthSetupHttpError(f"GET {_CONFIG_PATH} unreachable: {detail}") from exc
+        raise WebAuthSetupHttpError(f"GET {_CONFIG_PATH} unreachable: {detail}", unreachable=True) from exc
     except http_auth.HttpAuthError as exc:
         raise WebAuthSetupHttpError(f"GET {_CONFIG_PATH}: {exc}") from exc
     return _decode_json(_CONFIG_PATH, text)
@@ -126,7 +130,7 @@ def post_bootstrap_password(host: str, username: str, password: str,
                                      status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
-        raise WebAuthSetupHttpError(f"POST {_BOOTSTRAP_PATH} unreachable: {detail}") from exc
+        raise WebAuthSetupHttpError(f"POST {_BOOTSTRAP_PATH} unreachable: {detail}", unreachable=True) from exc
     return _decode_json(_BOOTSTRAP_PATH, text)
 
 
@@ -158,7 +162,7 @@ def post_security(host: str, fields: "dict[str, str]",
                                      status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
-        raise WebAuthSetupHttpError(f"POST {_SECURITY_PATH} unreachable: {detail}") from exc
+        raise WebAuthSetupHttpError(f"POST {_SECURITY_PATH} unreachable: {detail}", unreachable=True) from exc
     except http_auth.HttpAuthError as exc:
         raise WebAuthSetupHttpError(f"POST {_SECURITY_PATH}: {exc}") from exc
     return _decode_json(_SECURITY_PATH, text)
@@ -201,4 +205,4 @@ def try_login(host: str, username: str, password: str,
                                      status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
-        raise WebAuthSetupHttpError(f"POST {_LOGIN_PATH} unreachable: {detail}") from exc
+        raise WebAuthSetupHttpError(f"POST {_LOGIN_PATH} unreachable: {detail}", unreachable=True) from exc

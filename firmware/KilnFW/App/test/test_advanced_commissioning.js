@@ -373,7 +373,7 @@ function clickSave(ctx) {
 })();
 
 // ---- Tests 9-12: the operator-entered CT scale trim
-// (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md owner decision 3). These drive
+// (docs/CT_ATTRIBUTION_VERIFICATION.md owner decision 3). These drive
 // ctTrimRowHtml()/wireCtTrimButtons() directly rather than through a full
 // render, because this harness's stub DOM has no real element tree for the
 // ct_cal rows to be rendered into.

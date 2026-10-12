@@ -50,7 +50,7 @@ class FakeBoard:
         if path == "/api/profiles":
             return self.listing()
         pid = int(path.split("id=")[1])
-        return self.profiles[pid]
+        return copy.deepcopy(self.profiles[pid])
 
     def post_profile(self, host, profile_id, name, zone_mask, segments, on_off_rules=None, timeout=8.0):
         self.posts.append((profile_id, name, zone_mask, segments, on_off_rules))
@@ -101,6 +101,35 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         self.assertEqual(rules[0].temp_cmp, pehc.ON_OFF_TEMP_CMP_BELOW)
         self.assertEqual(rules[0].temp_source, 1)
         self.assertEqual(board.profiles[0]["name"], "MY_BISQUE")
+
+    def test_other_profile_segment_content_change_fails(self):
+        # name, zone_mask and segment_count unchanged, but a segment value moved:
+        # the old name/mask/count comparison missed this (review 2026-10-10 MED).
+        board = FakeBoard({0: _user_profile("MY_BISQUE")})
+        orig = board.post_profile
+
+        def post(*a, **k):
+            r = orig(*a, **k)
+            board.profiles[0]["segments"][0]["target_c"] = 999.0
+            return r
+        board.post_profile = post
+        r = self._run(board)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("content changed", r)
+
+    def test_other_profile_derived_field_change_is_not_a_failure(self):
+        # A concurrent zone-limit change flips derived feasibility fields on another profile; not a content change.
+        board = FakeBoard({0: _user_profile("MY_BISQUE")})
+        orig = board.post_profile
+
+        def post(*a, **k):
+            r = orig(*a, **k)
+            board.profiles[0]["feasibility"] = "infeasible"
+            board.profiles[0]["segments"][0]["feasibility"] = "bad"
+            return r
+        board.post_profile = post
+        r = self._run(board)
+        self.assertTrue(r.startswith("ok"), r)
 
     def test_reuses_only_its_own_named_slot(self):
         board = FakeBoard({0: _user_profile("MY_BISQUE"), 1: _user_profile(NAME)})
@@ -175,9 +204,28 @@ class SaveBenchAuxRuleTest(unittest.TestCase):
         with unittest.mock.patch.object(ahc, "_get_json", side_effect=board.get_json), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()), \
              unittest.mock.patch.object(pehc, "post_profile",
-                                        side_effect=pehc.ProfileEditHttpError("HTTP 400: rule 0: bad")):
+                                        side_effect=pehc.ProfileEditHttpError("HTTP 400: rule 0: bad", 400, {})):
             r = ma.profile_save_bench_aux_rule(target_c=30.0, threshold_c=28.0, confirm=True)
         self.assertTrue(r.startswith("refused"), r)
+
+
+class StoredFieldsTest(unittest.TestCase):
+    """mcpfx2 L5: derived feasibility fields never count as another profile changing."""
+
+    BASE = {"name": "p", "zone_mask": 1, "segments": [{"target_c": 100.0, "feasibility": "ok"}],
+            "on_off_rules": [], "feasibility": "ok", "exceeds_ceiling": False, "ceiling_note": ""}
+
+    def test_derived_fields_ignored(self):
+        other = copy.deepcopy(self.BASE)
+        other["feasibility"] = "infeasible"
+        other["exceeds_ceiling"] = True
+        other["segments"][0]["feasibility"] = "bad"
+        self.assertEqual(ma._stored_profile_fields(self.BASE), ma._stored_profile_fields(other))
+
+    def test_stored_fields_still_compared(self):
+        other = copy.deepcopy(self.BASE)
+        other["segments"][0]["target_c"] = 200.0
+        self.assertNotEqual(ma._stored_profile_fields(self.BASE), ma._stored_profile_fields(other))
 
 
 if __name__ == "__main__":

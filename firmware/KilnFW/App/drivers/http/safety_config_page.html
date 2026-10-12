@@ -288,6 +288,7 @@ function loadCurrent() {
     current = d;
     document.getElementById('pcLink').value = d.pc_link_abort_silence_ms || 0;
     render();
+    kcDirty = false;
     msg.textContent = '';
   }).catch(function (e) {
     /* Never swallow this: an empty catch here is what turns a failed fetch
@@ -300,6 +301,22 @@ function loadCurrent() {
     msg.textContent = 'Could not load the current settings: ' + e.message;
   });
 }
+
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real user edit,
+// cleared once a save succeeds or the form is re-rendered from the board.
+var kcDirty = false;
+var kcEditSeq = 0; // a save clears the guard / re-renders only if nothing was typed after it was sent
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+['profiles', 'zones', 'pcLink'].forEach(function (id) {
+  var el = document.getElementById(id);
+  el.addEventListener('input', function () { kcDirty = true; kcEditSeq++; });
+  el.addEventListener('change', function () { kcDirty = true; kcEditSeq++; });
+});
 
 document.getElementById('save').addEventListener('click', function () {
   if (!current) { msg.textContent = 'Nothing loaded yet.'; return; }
@@ -314,7 +331,8 @@ document.getElementById('save').addEventListener('click', function () {
      dead weight that could also mislead a reader of this page's source
      into thinking a POST from here could ever change it. */
   if (current.continue_on_zone_trip) params.push('continue_on_zone_trip=1');
-  params.push('pc_link_abort_silence_ms=' + document.getElementById('pcLink').value);
+  var pcLinkVal = document.getElementById('pcLink').value;
+  if (pcLinkVal !== '') params.push('pc_link_abort_silence_ms=' + pcLinkVal);
   /* 2026-08-27+1, owner report ("name relays not assigned to a zone"):
      relay<N>_name lives in the same whole-page record this endpoint edits.
      This page has no UI for it -- naming an unassigned relay is
@@ -357,12 +375,23 @@ document.getElementById('save').addEventListener('click', function () {
   if (!ok) { msg.textContent = 'Every timing box must be a number of 0 or more.'; return; }
 
   msg.textContent = 'Saving…';
+  /* WEB_UI_JS_AUDIT M-1: refuse (409) if the zones config changed elsewhere since this page loaded it. */
+  if (current && current.generation !== undefined && current.generation !== null) {
+    params.push('expected_generation=' + current.generation);
+  }
+  var savedEditSeq = kcEditSeq;
   fetch('/api/zones', {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: params.join('&'),
   }).then(function (r) {
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
+    if (kcEditSeq !== savedEditSeq) {
+      /* Typed while the save was in flight: a re-render would overwrite it. Keep it, keep the guard. */
+      msg.textContent = 'Saved. You made further edits while saving -- they are not saved yet.';
+      return;
+    }
+    kcDirty = false;
     msg.textContent = 'Saved.';
     loadCurrent();
   }).catch(function (e) {
@@ -370,7 +399,17 @@ document.getElementById('save').addEventListener('click', function () {
       msg.textContent = 'Sign-in cancelled -- not saved.';
       return;
     }
-    msg.textContent = 'Save failed: ' + e.message;
+    var text = e.message;
+    try {
+      var parsed = JSON.parse(text);
+      if (parsed && parsed.error === 'zones_config_stale') {
+        text = 'the zone settings changed elsewhere (autotune, another page or a tool) since this page loaded. ' +
+          'Nothing was saved. Reload the page and redo your edit.';
+      } else if (parsed && parsed.reason) {
+        text = parsed.reason;
+      }
+    } catch (parseErr) { /* plain-text refusal -- show as-is */ }
+    msg.textContent = 'Save failed: ' + text;
   });
 });
 

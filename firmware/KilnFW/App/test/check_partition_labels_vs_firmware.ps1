@@ -42,7 +42,7 @@
 # allowlist entry removed. All four failed with the specific diagnostic.
 #
 # 2026-09-22 addition: a file that textually contains BOTH the SPIFFS and
-# LittleFS mount branches behind an #if (docs/FILESYSTEM_PLAN.md step 2's
+# LittleFS mount branches behind an #if (docs/FILESYSTEM.md step 2's
 # log_store_mount.c pattern) resolves $want to $null in cases 2/3 above,
 # purely because the ambiguity-detection logic can't tell which branch is
 # actually compiled in from source text alone -- which means the `logs` row's
@@ -116,7 +116,7 @@ $logsWantSubType = if ($logsLittlefsFlag) { 'littlefs' } else { 'spiffs' }
 $DeclaredButUnused = @{
     'nvs' = 'The stock default NVS partition, kept unresized on purpose so pre-2026-08-13 firmware still finds working data there and the one-time split migration has somewhere to read from (see partitions.csv). Current firmware never opens it by name. Do not remove the partition; this entry stays until that rollback window is closed.'
 }
-# 'cfg' entry removed 2026-09-07: FILESYSTEM_USER_DATA_PLAN.md section 5 step
+# 'cfg' entry removed 2026-09-07: FILESYSTEM_USER_DATA.md section 5 step
 # 1's cfg_fs_mount_device() (App/drivers/persist/cfg_fs_mount.c) now names
 # the partition_label "cfg" for real, exactly the step this reminder called
 # out. The mount call fails gracefully (esp_vfs_littlefs_register with
@@ -207,7 +207,7 @@ foreach ($file in $sourceFiles) {
     # 3. esp_spiffs_info("label" / esp_littlefs_info("label" -- same same-file
     #    ambiguity handling as case 2 above: a file that #if-guards between
     #    esp_vfs_spiffs_register()/esp_vfs_littlefs_register() (docs/
-    #    FILESYSTEM_PLAN.md step 2's log_store_mount.c pattern) textually
+    #    FILESYSTEM.md step 2's log_store_mount.c pattern) textually
     #    contains BOTH info calls even though only one is ever compiled in,
     #    so this cannot assume a mismatch from raw text alone -- it would
     #    always disagree with whichever subtype the CSV currently declares.

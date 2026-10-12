@@ -132,6 +132,45 @@ class ForkLiveTest(unittest.TestCase):
         self.assertEqual(captured["method"], "POST")
 
 
+class GenerationQueryTest(unittest.TestCase):
+    """M1: generation is sent as ?gen=N on edit and every decide; omitted = no query."""
+
+    def _urls(self, call):
+        seen = []
+
+        def _capture(req, timeout=None):
+            seen.append(req.full_url)
+            return _fake_response(json.dumps({"ok": True}).encode())
+
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=_capture):
+            call()
+        return seen
+
+    def test_edit_sends_gen(self):
+        seg = [{"target": 100, "ramp": 50, "dwell": 1}]
+        u = self._urls(lambda: plive.edit_live("h", "n", 1, seg, generation=7))
+        self.assertTrue(u[0].endswith("/api/profile/live?gen=7"), u)
+
+    def test_edit_without_gen_has_no_query(self):
+        seg = [{"target": 100, "ramp": 50, "dwell": 1}]
+        u = self._urls(lambda: plive.edit_live("h", "n", 1, seg))
+        self.assertTrue(u[0].endswith("/api/profile/live"), u)
+
+    def test_decide_variants_send_gen(self):
+        for fn, args in ((plive.decide_live_discard, ()), (plive.decide_live_save_as, ("x",)),
+                         (plive.decide_live_overwrite, ())):
+            u = self._urls(lambda fn=fn, args=args: fn("h", *args, generation=3))
+            self.assertTrue(u[0].endswith("/api/profile/live/decide?gen=3"), (fn.__name__, u))
+
+    def test_stale_gen_409_surfaces_board_text(self):
+        err = _fake_http_error(409, b'{"ok":false,"error":"working copy changed elsewhere -- reload"}')
+        with unittest.mock.patch.object(plive.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(plive.ProfileLiveHttpError) as ctx:
+                plive.decide_live_discard("h", generation=1)
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("changed elsewhere", ctx.exception.detail)
+
+
 class EditLiveTest(unittest.TestCase):
     def test_builds_zone_ramp_segment_fields(self):
         captured = {}

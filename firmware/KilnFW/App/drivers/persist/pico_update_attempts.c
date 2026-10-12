@@ -27,7 +27,7 @@ NVS_KEY_LEN_CHECK(NVS_KEY_REC);
  * to mis-parse an old layout.
  *
  * v2 (2026-09-20): added last_slot, the persisted embedded-slot alternation
- * for docs/PICO_AUTO_UPDATE_PLAN.md's embedded-image work -- see
+ * for docs/PICO_AUTO_UPDATE.md's embedded-image work -- see
  * pico_update_attempts_next_slot(). A v1 record on flash simply fails
  * record_is_valid() and is discarded (fresh budget), same as any other
  * corruption -- there is no v1->v2 migration here, matching this module's
@@ -273,7 +273,7 @@ bool pico_update_attempts_record_failure(uint32_t pair_hash)
  * that rejects a write for a reason unrelated to slot linkage silently
  * leaves this side's `last_slot` stale.
  *
- * Owner decision 2026-10-02 (docs/PICO_AUTO_UPDATE_PLAN.md sec 12): the
+ * Owner decision 2026-10-02 (docs/PICO_AUTO_UPDATE.md sec 12): the
  * Pico's own report wins. When the wire slot is known (safety_link.h's
  * `pico_active_slot_known`/`pico_active_slot_is_b`) the next slot is the
  * opposite of the reported active slot; the persisted `last_slot` guess is

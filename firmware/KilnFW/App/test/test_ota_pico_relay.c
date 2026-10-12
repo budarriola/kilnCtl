@@ -1,6 +1,6 @@
 // test_ota_pico_relay.c -- host test for ota_pico_relay.c's state machine.
 //
-// docs/PICO_AUTO_UPDATE_PLAN.md used to flag this: "ota_pico_relay.c's own
+// docs/PICO_AUTO_UPDATE.md used to flag this: "ota_pico_relay.c's own
 // state machine has no host test today (only its terminal-state recognition
 // is exercised indirectly)." This closes that gap.
 //

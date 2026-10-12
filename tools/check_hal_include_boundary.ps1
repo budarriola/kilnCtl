@@ -186,6 +186,7 @@ $WifiAllowlist = @(
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_api.c";      Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_link.c";     Header = "esp_wifi.h";  Reason = "wifi_prov family"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/net/wifi_prov_internal.h"; Header = "esp_netif.h"; Reason = "wifi_prov family -- shared internal header"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
+    @{ RelPath = "firmware/KilnFW/App/drivers/http/wifi_provision_http.c"; Header = "esp_netif.h"; Reason = "captive-portal 302 reads the SoftAP netif IP (esp_netif_get_ip_info on WIFI_AP_DEF) so the redirect Location is absolute to the AP address (commit 2d1f637d, host allow-list F4); wifi_prov family HTTP front end, read-only netif query, no wifi_prov accessor exists for it"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
     @{ RelPath = "firmware/KilnFW/App/drivers/http/factory_reset.c";     Header = "esp_wifi.h";  Reason = "calls esp_wifi_set_storage()/esp_wifi_restore() to clear the IDF Wi-Fi driver's own persisted config on wifi/all scope resets -- docs/audits/wifi_factory_reset_driver_storage_2026-09-21.md"; ExpiresAtPhase = "n/a (out of scope: Wi-Fi portability, see plan)" }
 )
 

@@ -102,7 +102,7 @@
  * convention backup_import_post_handler already uses for its own `body`
  * buffer just below) via the backup_import_apply() wrapper: it allocates
  * both, calls the actual two-pass validate-then-commit logic (renamed
- * backup_import_apply_locked(), otherwise byte-for-byte identical, EVERY
+ * backup_import_apply_two_pass(), otherwise byte-for-byte identical, EVERY
  * `return false`/`return true` untouched), then frees both on every path.
  * An allocation failure here happens strictly BEFORE either array is
  * touched or any profile/zone config is read -- it returns false with an
@@ -360,7 +360,7 @@ typedef struct {
 
 // ---- kiln_configs[] restore (KILN_PROFILES_PLAN.md item 17 follow-up) -----
 //
-// Deliberately NOT folded into backup_import_apply_locked()'s own two-pass
+// Deliberately NOT folded into backup_import_apply_two_pass()'s own two-pass
 // body above: kiln config slots are validated and committed via
 // kiln_cfg_store.h's own API (kiln_cfg_store_validate_package_json()/
 // kiln_cfg_store_import_package_json_as()/_rename()/_delete()/
@@ -368,10 +368,10 @@ typedef struct {
 // zones_config_set_*() calls that function's pass 2 uses -- a different
 // commit surface entirely. Kept as its own small pair of functions
 // (validate/plan-only vs. commit) called from backup_import_apply() around
-// backup_import_apply_locked(), same "validate everything, THEN apply"
+// backup_import_apply_two_pass(), same "validate everything, THEN apply"
 // discipline, just sequenced as its own step rather than interleaved with
 // the profile/zone candidate arrays. No httpd_req_t anywhere in this pair --
-// host-testable exactly like backup_import_apply_locked() itself.
+// host-testable exactly like backup_import_apply_two_pass() itself.
 //
 // Absent "kiln_configs" key entirely = pre-item-17 backup: do nothing, in
 // either mode, exactly today's behaviour (old backups must keep restoring
@@ -842,9 +842,9 @@ static bool backup_import_kiln_configs(const char *body, kiln_cfg_restore_mode_t
 }
 
 /* check_httpd_task_stack_budget.py: scratch for the profile-slot-simulation
- * block inside backup_import_apply_locked() below -- see that block's own
+ * block inside backup_import_apply_two_pass() below -- see that block's own
  * comment. Heap-allocated (PSRAM preferred) rather than a plain local so it
- * does not add to backup_import_apply_locked()'s own httpd_worker frame. */
+ * does not add to backup_import_apply_two_pass()'s own httpd_worker frame. */
 typedef struct {
     bool slot_used_sim[PROFILES_MAX_COUNT];
     bool write_ids[PROFILES_MAX_COUNT];
@@ -867,7 +867,7 @@ typedef struct {
 #endif
 
 /* One segment's seg_kind and RELAY_IO fields (io_target/io_state/io_blocking/io_leave_on_at_end), absent =
- * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_locked() and the pass-1
+ * ZONE_RAMP with all io_* zero. Shared by the profile parse in backup_import_apply_two_pass() and the pass-1
  * candidate-state check backup_import_profiles_precheck(), so both read the same fields the same way.
  * `entry` and `seg_i` are 0-based and only feed the error text. */
 static BACKUP_IMPORT_NOINLINE bool backup_import_parse_seg_kind_io(const char *se, size_t entry, uint8_t seg_i,
@@ -964,10 +964,61 @@ static bool backup_import_prefs(const char *body, bool commit, kiln_cfg_plan_t *
 static bool backup_import_aux_outputs_commit(const char *body, bool enable_phase, bool *wrote, char *err_msg,
                                              size_t err_cap);
 
-static bool backup_import_apply_locked(const char *body, char *err_msg, size_t err_cap,
+/* Board topology a restore works against (owner decision 2026-10-09: a one-file restore must work after a
+ * factory reset). A v7+ backup carries top-level thermo_count/relay_count. Onto an UNCONFIGURED board (live
+ * thermo_count 0) the restore sets them first (apply = true) and every later zone/profile check judges
+ * against them; a configured board must already match. A backup with neither key (v6 or older) leaves the
+ * live counts in force. Pass 1 only: reads and validates, writes nothing. */
+typedef struct {
+    uint8_t thermo;
+    uint8_t relay;
+    bool apply;
+} backup_topology_t;
+
+static BACKUP_IMPORT_NOINLINE bool backup_import_resolve_topology(const char *body, backup_topology_t *out,
+                                                                   char *err_msg, size_t err_cap)
+{
+    out->thermo = zones_config_get_thermo_count();
+    out->relay = zones_config_get_relay_count();
+    out->apply = false;
+    double dt = 0.0, dr = 0.0;
+    bool has_t = backup_json_field_num(body, "thermo_count", &dt);
+    bool has_r = backup_json_field_num(body, "relay_count", &dr);
+    if (!has_t && !has_r) {
+        return true; /* older backup: keep the live counts (and the zone-count refusal in the precheck) */
+    }
+    if (!has_t || !has_r || dt < 0 || dt > MAX31856_CHANNEL_COUNT || dt != (double)(int)dt || dr < 0 ||
+        dr > KILN_IO_RELAY_COUNT || dr != (double)(int)dr) {
+        snprintf(err_msg, err_cap,
+                 "backup thermo_count/relay_count must both be present integers (thermo 0-%u, relay 0-%u). "
+                 "Nothing was written.",
+                 (unsigned)MAX31856_CHANNEL_COUNT, (unsigned)KILN_IO_RELAY_COUNT);
+        return false;
+    }
+    uint8_t bt = (uint8_t)dt, br = (uint8_t)dr;
+    if (out->thermo == 0) {
+        if (bt > 0) {
+            out->thermo = bt;
+            out->relay = br;
+            out->apply = true;
+        }
+        return true;
+    }
+    if (bt != out->thermo || br != out->relay) {
+        snprintf(err_msg, err_cap,
+                 "backup board topology (thermo_count %u, relay_count %u) differs from this board's "
+                 "(thermo_count %u, relay_count %u). Nothing was written.",
+                 (unsigned)bt, (unsigned)br, (unsigned)out->thermo, (unsigned)out->relay);
+        return false;
+    }
+    return true;
+}
+
+static bool backup_import_apply_two_pass(const char *body, char *err_msg, size_t err_cap,
                                         profile_candidate_t *candidates, zone_candidate_t *zone_candidates,
                                         timing_profile_candidate_t *timing_profile_candidates,
-                                        bool *zones_landed_out, bool *aux_wrote_out)
+                                        bool *zones_landed_out, bool *aux_wrote_out, bool parse_only,
+                                        const backup_topology_t *resolved_topo)
 {
     *zones_landed_out = false;
     double dver;
@@ -987,7 +1038,10 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     uint32_t bound_dwell_max;
     profiles_http_get_bounds(&bound_target_min, &bound_target_max, &bound_ramp_min, &bound_ramp_max,
                              &bound_dwell_max);
-    uint8_t thermo_count = zones_config_get_thermo_count();
+    /* Resolved ONCE by backup_import_apply() (review 14 LOW-3) and passed down, so a concurrent change of the
+     * live thermo_count cannot make a later stage judge a different topology than pass 1 did. */
+    const backup_topology_t topo = *resolved_topo;
+    uint8_t thermo_count = topo.thermo;
     uint8_t valid_zone_bits = thermo_count >= 8 ? 0xFFu : (uint8_t)((1u << thermo_count) - 1u);
 
     /* ---- Pass 1a: profiles ---- */
@@ -1037,6 +1091,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
             }
             strncpy(c->p.name, name, PROFILE_NAME_MAX_LEN);
             c->p.name[PROFILE_NAME_MAX_LEN] = '\0';
+        } else if (backup_json_obj_find(pe, "name") != NULL) {
+            /* K10-01: backup_json_field_str() now FAILS on a present-but-unusable string (over-long for the
+             * buffer, unterminated, bad escape) instead of truncating it. */
+            snprintf(err_msg, err_cap, "profile entry %u: name too long or malformed", (unsigned)candidate_count);
+            return false;
         }
 
         double dmask;
@@ -1188,7 +1247,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
          * bool arrays plus the per-candidate coll_err[128] below used to be
          * plain locals of this block, contributing to this function's own
          * frame on the httpd_worker path (backup_import_post_handler ->
-         * backup_import_apply_locked). Bundled into one heap allocation,
+         * backup_import_apply_two_pass). Bundled into one heap allocation,
          * freed on every return out of this block, same "malloc + free on
          * every return path, 500-equivalent refusal on OOM" convention this
          * file already uses for candidates/zone_candidates/
@@ -1350,6 +1409,14 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                     (unsigned)zone_candidate_count);
             return false;
         }
+        /* Mirror zones_config_set_pid_no_save(): finite float, <= ZONE_PID_GAIN_MAX, so
+         * pass 2 can never fail on a gain after other stores are committed. */
+        if (!isfinite(dkp) || !isfinite(dki) || !isfinite(dkd) || dkp > (double)ZONE_PID_GAIN_MAX ||
+            dki > (double)ZONE_PID_GAIN_MAX || dkd > (double)ZONE_PID_GAIN_MAX) {
+            snprintf(err_msg, err_cap, "zone tuning entry %u: pid_kp/pid_ki/pid_kd exceed the gain ceiling",
+                    (unsigned)zone_candidate_count);
+            return false;
+        }
         zc->kp = (float)dkp;
         zc->ki = (float)dki;
         zc->kd = (float)dkd;
@@ -1406,6 +1473,11 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 return false;
             }
             zc->has_name = true;
+        } else if (backup_json_obj_find(ze, "name") != NULL) {
+            /* K10-01: present-but-unusable name (over-long, unterminated, bad escape) is a rejection. */
+            snprintf(err_msg, err_cap, "zone tuning entry %u: name too long or malformed",
+                     (unsigned)zone_candidate_count);
+            return false;
         }
 
         double drelay;
@@ -1422,7 +1494,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
              * config via zones_config_get_relay_count() (added this pass for
              * exactly this check), same as thermo_count already was for the
              * zone_mask/thermo_mask checks elsewhere in this function. */
-            uint8_t relay_count = zones_config_get_relay_count();
+            uint8_t relay_count = topo.relay;
             uint8_t valid_relay_bits = relay_count >= 8 ? 0xFFu : (uint8_t)((1u << relay_count) - 1u);
             if ((zc->relay_mask & ~valid_relay_bits) != 0) {
                 snprintf(err_msg, err_cap,
@@ -1919,6 +1991,13 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                         (unsigned)zone_candidate_count);
                 return false;
             }
+            if (!isfinite(dfittemp) || !isfinite(dfitambient) || fabs(dfittemp) > 1e6 || fabs(dfitambient) > 1e6 ||
+                !zones_config_model_fit_temp_valid((float)dfittemp) ||
+                !zones_config_model_fit_temp_valid((float)dfitambient)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: model_fit_temp_c/model_fit_ambient_c out of range",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
             zc->has_model_fit_context = true;
             zc->model_fit_temp_c = (float)dfittemp;
             zc->model_fit_ambient_c = (float)dfitambient;
@@ -1975,6 +2054,14 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 !backup_json_field_num(ze, "tuning_rise_inf_c", &dtriseinf)) {
                 snprintf(err_msg, err_cap,
                         "zone tuning entry %u: tuning_valid present but one or more tuning_* fields missing",
+                        (unsigned)zone_candidate_count);
+                return false;
+            }
+            if (!(dtmethod >= 0 && dtmethod <= 1) || !(dtrule >= 0 && dtrule <= 3) || fabs(dtbaseline) > 1e6 ||
+                fabs(dtstepamb) > 1e6 || fabs(dtrawrise) > 1e6 || fabs(dtriseinf) > 1e6 ||
+                !zones_config_tuning_quality_fields_valid((unsigned)dtmethod, (unsigned)dtrule, (float)dtbaseline,
+                                                          (float)dtstepamb, (float)dtrawrise, (float)dtriseinf)) {
+                snprintf(err_msg, err_cap, "zone tuning entry %u: tuning_* field out of range",
                         (unsigned)zone_candidate_count);
                 return false;
             }
@@ -2218,6 +2305,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         snprintf(err_msg, err_cap, "safety_tc_type out of range (0-7)");
         return false;
     }
+    if (parse_only) {
+        return true; /* DEV_REVIEW_13 F8: every parse/validate refusal above happens before any write */
+    }
 
     /* opus review finding (LOW-MEDIUM), originally closed with a narrow
      * settings_source[]-only snapshot/restore here: superseded below by
@@ -2244,6 +2334,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
         for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
             float cur_max = 0.0f, cur_min = 0.0f;
             zones_config_get_temp_limits(zi, &cur_max, &cur_min);
+            if (topo.apply && zi < topo.thermo) {
+                cur_max = zones_config_peek_slot_max_temp_c(zi); /* slot goes live with the topology */
+            }
             new_max_temp_c[zi] = cur_max;
         }
         for (size_t i = 0; i < zone_candidate_count; i++) {
@@ -2377,6 +2470,14 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * restore it first. */
     zones_cfg_t zones_snapshot;
     zones_config_get_full_copy(&zones_snapshot);
+    /* Topology first (unconfigured board only, planned in pass 1): the per-zone setters below refuse any
+     * index >= thermo_count and any relay_mask past relay_count. RAM only; the batch's single save persists
+     * it, and the snapshot above restores it on a mid-batch failure. */
+    if (topo.apply && !zones_config_set_topology_no_save(topo.thermo, topo.relay)) {
+        snprintf(err_msg, err_cap, "could not apply the backup's board topology (thermo_count %u, relay_count %u)",
+                 (unsigned)topo.thermo, (unsigned)topo.relay);
+        return false;
+    }
     /* Judge "does the file's tuning record equal the live one" NOW, before
      * the loop below runs. zones_config_set_pid_no_save() invalidates the
      * zone's tuning record (tuning_valid = 0) when a gain changes beyond
@@ -2412,7 +2513,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
     for (size_t i = 0; i < zone_candidate_count; i++) {
         zone_candidate_t *zc = &zone_candidates[i];
         if (!zones_config_set_pid_no_save(zc->index, zc->kp, zc->ki, zc->kd)) {
-            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting PID gains",
+            snprintf(err_msg, err_cap, "zone tuning entry %u (channel %u) rejected at commit setting PID gains (invalid value, or a profile/autotune run was starting -- retry in a moment)",
                     (unsigned)i, zc->index);
             zones_config_restore_snapshot_no_save(&zones_snapshot);
             return false;
@@ -2559,7 +2660,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
                 /* _raw, not the masking zones_config_get_coupling(): this
                  * value is written straight back to storage below, and the
                  * masked getter reads 0.0 for any cell touching an on/off
-                 * zone (docs/ON_OFF_ZONE_PLAN.md sec 1) -- an import that
+                 * zone (docs/ON_OFF_ZONE.md sec 1) -- an import that
                  * supplies only tau/dead_time for such a cell would then
                  * commit that 0.0 over the real stored coefficient, the same
                  * loss the export-side fix (bench A4, 2026-09-28) closed. */
@@ -2867,8 +2968,9 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
      * change. Only actually saves when this batch touched anything: a
      * no-op/empty import (candidate_count == 0 for both arrays) must not
      * pay for a flash write it has no reason to make, same as the old
-     * settings_source_dirty gate this replaces. */
-    if (timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
+     * settings_source_dirty gate this replaces. A topology-only v7 restore (topo.apply set, no zones or timing
+     * profiles) must still save: zones_config_set_topology_no_save() only changed RAM (review 14 LOW-2). */
+    if (topo.apply || timing_profile_candidate_count > 0 || zone_candidate_count > 0) {
         uint64_t save_start_us = hal_time_now_us();
         bool save_ok = zones_config_save_now();
         long long save_elapsed_ms = (long long)((hal_time_now_us() - save_start_us) / 1000u);
@@ -2945,7 +3047,7 @@ static bool backup_import_apply_locked(const char *body, char *err_msg, size_t e
  * zones_http_post.c's post-commit apply_lower block. NOINLINE: inlined, its
  * locals (the reason buffer and the per-zone array) land in
  * backup_import_apply()'s own frame, which sits under the much deeper
- * backup_import_apply_locked() chain, and push http_async_job's measured
+ * backup_import_apply_two_pass() chain, and push http_async_job's measured
  * depth over its check_all_task_stack_budgets.py ceiling (4784 B vs 4528 B,
  * measured). Kept out of line its frame is a sibling of that chain, not
  * stacked under it. */
@@ -3146,13 +3248,21 @@ static bool backup_prefs_int(const char *v, double lo, double hi, double *out)
     return true;
 }
 
+/* v points into raw JSON, so the literal is followed by a delimiter, never more
+ * identifier characters ("trueXYZ" is not true). */
+static bool backup_prefs_literal(const char *v, const char *lit)
+{
+    size_t n = strlen(lit);
+    return strncmp(v, lit, n) == 0 && !isalnum((unsigned char)v[n]) && v[n] != '_';
+}
+
 static bool backup_prefs_bool(const char *v, bool *out)
 {
-    if (v != NULL && strncmp(v, "true", 4) == 0) {
+    if (v != NULL && backup_prefs_literal(v, "true")) {
         *out = true;
         return true;
     }
-    if (v != NULL && strncmp(v, "false", 5) == 0) {
+    if (v != NULL && backup_prefs_literal(v, "false")) {
         *out = false;
         return true;
     }
@@ -3539,6 +3649,35 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_aux_outputs_validate(const char
     return true;
 }
 
+/* Pass 1 for the zone tuning entries' board topology: every entry's "index" must be a configured zone on
+ * THIS board. A v7 backup carries thermo_count/relay_count: it is applied (backup_import_resolve_topology())
+ * onto an empty board (thermo_count 0) and refused as a mismatch on a configured board whose topology differs;
+ * an older backup without them leaves the live counts in force, so an empty board refuses its zone entries.
+ * backup_import_apply_two_pass() rejects such an entry too, but only AFTER kiln_configs[] has been committed,
+ * which made the refusal a 500 partial write (bench 2026-10-09). Refuse here, before anything is written. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_zone_topology_precheck(const char *body,
+                                                                         const backup_topology_t *resolved_topo,
+                                                                         char *err_msg, size_t err_cap)
+{
+    const char *zones_arr = backup_json_obj_find(body, "zones");
+    const backup_topology_t topo = *resolved_topo;
+    uint8_t thermo_count = topo.thermo;
+    for (const char *ze = backup_json_arr_first(zones_arr); ze; ze = backup_json_arr_next(ze)) {
+        double didx;
+        if (!backup_json_field_num(ze, "index", &didx) || didx < 0) {
+            continue; /* malformed entries get their specific message from the main parse */
+        }
+        if (didx >= thermo_count) {
+            snprintf(err_msg, err_cap,
+                     "zone %u in the backup is not a configured zone on this board (%u configured); set the "
+                     "zone count under Thermocouples & Zones first. Nothing was written.",
+                     (unsigned)didx, (unsigned)thermo_count);
+            return false;
+        }
+    }
+    return true;
+}
+
 /* Pass 1 for the profiles' RELAY_IO segments and on_off_rules: run the REAL save-time validators
  * (validate_io_segment_in_state()/validate_on_off_rules_in_state(), profiles_validate.c) against the
  * configuration this import WILL produce -- candidate zone_type and relay_mask per zone, and the aux
@@ -3571,7 +3710,9 @@ static void backup_import_prefix_entry(char *err_msg, size_t err_cap, unsigned e
     err_msg[(size_t)n + len] = '\0';
 }
 
-static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body, char *err_msg, size_t err_cap)
+static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *body,
+                                                                    const backup_topology_t *resolved_topo,
+                                                                    char *err_msg, size_t err_cap)
 {
     const char *profiles_arr = backup_json_obj_find(body, "profiles");
     if (profiles_arr == NULL || backup_json_arr_first(profiles_arr) == NULL) {
@@ -3585,7 +3726,10 @@ static BACKUP_IMPORT_NOINLINE bool backup_import_profiles_precheck(const char *b
     memset(sc, 0, sizeof(*sc));
     bool ok = false;
     profile_validate_state_t *st = &sc->st;
-    st->zone_count = zones_config_get_thermo_count();
+    /* Effective topology (review L6, superseded 2026-10-09): the live count, or the backup's own
+     * thermo_count when this restore is about to set it on an unconfigured board. */
+    const backup_topology_t topo = *resolved_topo;
+    st->zone_count = topo.thermo;
     if (st->zone_count > MAX31856_CHANNEL_COUNT) {
         st->zone_count = MAX31856_CHANNEL_COUNT;
     }
@@ -3785,9 +3929,32 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
     s_aux_undo.written = 0;
 }
 
+/* DEV_REVIEW_13 F8: run the whole pass-1 parse (profiles, zones, timing profiles) into scratch candidate arrays
+ * BEFORE anything is committed, so a parse/validate refusal is a 4xx with nothing written. */
+static BACKUP_IMPORT_NOINLINE bool backup_import_parse_only(const char *body, const backup_topology_t *resolved_topo,
+                                                             char *err_msg, size_t err_cap)
+{
+    profile_candidate_t *candidates = heap_caps_malloc(sizeof(profile_candidate_t) * PROFILES_MAX_COUNT,
+                                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    zone_candidate_t *zone_candidates = persist_scratch_alloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
+    timing_profile_candidate_t *tp = persist_scratch_alloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
+    bool ok = false;
+    if (!candidates || !zone_candidates || !tp) {
+        snprintf(err_msg, err_cap, "out of memory validating the backup -- nothing was changed");
+    } else {
+        bool zl = false, aw = false;
+        ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates, tp, &zl, &aw, true,
+                                     resolved_topo);
+    }
+    free(tp);
+    free(zone_candidates);
+    free(candidates);
+    return ok;
+}
+
 /* Wrapper: heap-allocates the two big candidate arrays (PSRAM preferred, see
  * this file's header comment above profile_candidate_t) and hands them to
- * backup_import_apply_locked(), which is otherwise byte-for-byte the
+ * backup_import_apply_two_pass(), which is otherwise byte-for-byte the
  * previous backup_import_apply() body. An allocation failure here is
  * reported exactly like any other pass-1 validation failure -- false plus an
  * err_msg, nothing touched -- so backup_import_post_handler's existing
@@ -3805,8 +3972,8 @@ static BACKUP_IMPORT_NOINLINE void backup_import_aux_outputs_revert_phase1(void)
  * *partial_write_out = true and the caller reports a distinct 500 naming
  * what landed rather than a 400 implying nothing did. Always set on entry;
  * never left indeterminate on any return path. */
-static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
-                                 int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
+static BACKUP_IMPORT_NOINLINE bool backup_import_apply_body(const char *body, const backup_topology_t *resolved_topo,
+                                 kiln_cfg_restore_mode_t mode, bool dry_run, int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
                                  bool *partial_write_out, char *err_msg, size_t err_cap)
 {
     *partial_write_out = false;
@@ -3834,8 +4001,14 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     if (!backup_import_aux_outputs_validate(body, plan, err_msg, err_cap)) {
         return false; // pass 1: malformed/conflicting aux_outputs refuses the WHOLE restore, nothing written
     }
-    if (!backup_import_profiles_precheck(body, err_msg, err_cap)) {
+    if (!backup_import_profiles_precheck(body, resolved_topo, err_msg, err_cap)) {
         return false; // pass 1: a profile the post-import config would refuse; nothing written
+    }
+    if (!backup_import_zone_topology_precheck(body, resolved_topo, err_msg, err_cap)) {
+        return false; // pass 1: zone entry for a zone this board lacks; nothing written (400, not a partial write)
+    }
+    if (!backup_import_parse_only(body, resolved_topo, err_msg, err_cap)) {
+        return false; // pass 1: profile/zone/timing-profile parse refusal; nothing written (400, not a partial write)
     }
     if (dry_run) {
         return true; // plan filled above; nothing written anywhere, profiles/zones untouched
@@ -3888,11 +4061,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         *partial_write_out = true;
         return false;
     }
-    zone_candidate_t *zone_candidates = heap_caps_malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT,
-                                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!zone_candidates) {
-        zone_candidates = malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
+    zone_candidate_t *zone_candidates = persist_scratch_alloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT);
     if (!zone_candidates) {
         free(candidates);
         snprintf(err_msg, err_cap, "out of memory (zone candidates) -- kiln configs were already restored");
@@ -3901,12 +4070,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
 
-    timing_profile_candidate_t *timing_profile_candidates =
-        heap_caps_malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT,
-                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!timing_profile_candidates) {
-        timing_profile_candidates = malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
-    }
+    timing_profile_candidate_t *timing_profile_candidates = persist_scratch_alloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT);
     if (!timing_profile_candidates) {
         free(zone_candidates);
         free(candidates);
@@ -3917,10 +4081,11 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     }
 
     bool zones_landed = false;
-    bool ok = backup_import_apply_locked(body, err_msg, err_cap, candidates, zone_candidates,
-                                         timing_profile_candidates, &zones_landed, &aux_wrote);
+    bool ok = backup_import_apply_two_pass(body, err_msg, err_cap, candidates, zone_candidates,
+                                         timing_profile_candidates, &zones_landed, &aux_wrote, false,
+                                         resolved_topo);
     /* Pico ceiling LOWERING direction (review of 34a2da1b): run on EVERY
-     * exit from backup_import_apply_locked(), success or failure. Two cases
+     * exit from backup_import_apply_two_pass(), success or failure. Two cases
      * need it. (1) A successful import that lowered a zone max_temp_c --
      * zones_http_post.c's POST handler already tracks that with
      * safety_ceiling_sync_apply_lower() after its commit, and this path
@@ -3949,7 +4114,7 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
     free(zone_candidates);
     free(candidates);
     // update_repo and aux_outputs phase 2 (the entries that ENABLE a relay) now run inside
-    // backup_import_apply_locked(), after the zones landed and before the profiles are committed.
+    // backup_import_apply_two_pass(), after the zones landed and before the profiles are committed.
     if (!ok) {
         // kiln_configs[] already committed above -- this restore is a
         // partial write, not the clean "nothing changed" a 400 implies.
@@ -3957,6 +4122,41 @@ static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, 
         return false;
     }
     return true;
+}
+
+/* Resolves the backup's board topology (pass 1, nothing written) and, for the length of the restore, tells
+ * kiln_cfg_store to judge kiln_configs[] packages against it instead of the still-empty live zones config.
+ * The system-mode gate and the factory-reset mark are re-checked by backup_import_job() before this runs. */
+static bool backup_import_apply(const char *body, kiln_cfg_restore_mode_t mode, bool dry_run,
+                                 int32_t ack_delete_count, bool ack_no_safety_processor, kiln_cfg_plan_t *plan,
+                                 bool *partial_write_out, char *err_msg, size_t err_cap)
+{
+    *partial_write_out = false;
+    /* HTTP fuzz F4/F5/F6: one complete, well-formed JSON object with no repeated top-level key, and array-typed
+     * collections, before any scanner runs. */
+    if (!backup_json_validate_document(body, err_msg, err_cap)) {
+        return false;
+    }
+    static const char *const k_array_keys[] = {"profiles", "zones", "kiln_configs", "timing_profiles"};
+    for (size_t ki = 0; ki < sizeof(k_array_keys) / sizeof(k_array_keys[0]); ki++) {
+        if (backup_json_key_present_not_array(body, k_array_keys[ki])) {
+            snprintf(err_msg, err_cap, "\"%s\" must be an array", k_array_keys[ki]);
+            return false;
+        }
+    }
+    backup_topology_t topo;
+    if (!backup_import_resolve_topology(body, &topo, err_msg, err_cap)) {
+        return false;
+    }
+    if (topo.apply && plan != NULL) {
+        kiln_cfg_plan_add(plan, "board topology: set thermo_count %u, relay_count %u first", (unsigned)topo.thermo,
+                          (unsigned)topo.relay);
+    }
+    kiln_cfg_store_restore_topology_override(topo.apply, topo.thermo, topo.relay);
+    bool ok = backup_import_apply_body(body, &topo, mode, dry_run, ack_delete_count, ack_no_safety_processor, plan,
+                                       partial_write_out, err_msg, err_cap);
+    kiln_cfg_store_restore_topology_override(false, 0, 0);
+    return ok;
 }
 
 /* Restore-in-flight flag (2026-09-28, A4 review follow-up A) -- see
@@ -4010,6 +4210,18 @@ typedef struct {
  * sent. */
 static BACKUP_IMPORT_NOINLINE bool backup_import_job_recheck_refused(httpd_req_t *async_req, bool ack_no_safety)
 {
+    /* Factory-reset mark, read AFTER backup_import_job() published
+     * s_backup_restore_in_flight (store-then-read, same pairing as the heat
+     * sweep): a reset whose mark landed before this read is refused here
+     * (flag cleared by the wrapper); a reset that sets its mark later sees
+     * the restore's savers refuse under their save locks. Both orders covered. */
+    if (relay_authority_reset_in_flight()) {
+        ESP_LOGW(BACKUP_TAG, "backup import refused: factory reset in flight (job re-check)");
+        httpd_resp_set_status(async_req, "409 Conflict");
+        httpd_resp_set_type(async_req, "text/plain");
+        httpd_resp_sendstr(async_req, "factory reset in progress");
+        return true;
+    }
     sys_mode_snapshot_t mode_snap = { 0 };
     relay_authority_heat_run_active(&mode_snap.profile_running, &mode_snap.autotune_running);
     char mode_reason[SYSTEM_MODE_GATE_REASON_MAX];
@@ -4122,6 +4334,9 @@ static void backup_import_job_inner(httpd_req_t *async_req, void *arg)
 
     if (!ok) {
         httpd_resp_set_status(async_req, partial_write ? "500 Internal Server Error" : "400 Bad Request");
+        /* Webfix review L2: the page tells a real partial write from an earlier 500 (OOM before
+         * any write, httpd's own) by this header, set only where backup_import_apply reports it. */
+        if (partial_write) httpd_resp_set_hdr(async_req, "X-Kiln-Partial-Write", "1");
         httpd_resp_set_type(async_req, "text/plain");
         httpd_resp_send(async_req, err_msg, strlen(err_msg));
         free(plan);
@@ -4201,7 +4416,7 @@ static void backup_import_job(httpd_req_t *async_req, void *arg)
 
 esp_err_t backup_import_post_handler(httpd_req_t *req)
 {
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * restoring a backup is exactly that -- while a firing or autotune run
      * is active, PAUSED included. Checked HERE, at the very top of the
@@ -4294,15 +4509,28 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
      * a real restore would do before they commit to it. */
     kiln_cfg_restore_mode_t mode = KILN_CFG_RESTORE_MERGE;
     char mode_val[8];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val)) == ESP_OK &&
-        backup_names_equal_ci(mode_val, "mirror")) {
+    esp_err_t mode_err = httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Mode", mode_val, sizeof(mode_val));
+    if (mode_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Mode value too long");
+        return ESP_OK;
+    }
+    if (mode_err == ESP_OK && backup_names_equal_ci(mode_val, "mirror")) {
         mode = KILN_CFG_RESTORE_MIRROR;
     }
     bool dry_run = false;
     char dry_run_val[8];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Dry-Run", dry_run_val, sizeof(dry_run_val)) == ESP_OK &&
-        dry_run_val[0] == '1') {
-        dry_run = true;
+    esp_err_t dry_err = httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Dry-Run", dry_run_val, sizeof(dry_run_val));
+    if (dry_err == ESP_OK) {
+        if (strcmp(dry_run_val, "1") == 0) {
+            dry_run = true;
+        } else if (strcmp(dry_run_val, "0") != 0) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run must be 1 or 0");
+            return ESP_OK;
+        }
+    } else if (dry_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        /* fail closed: a truncated value must never fall through to a real import */
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Dry-Run value too long");
+        return ESP_OK;
     }
 
     /* X-Kiln-Config-Ack-Delete: <count> (task 8/11): a non-dry-run MIRROR
@@ -4316,13 +4544,17 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
      * missing value. */
     int32_t ack_delete_count = -1;
     char ack_delete_val[16];
-    if (httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Ack-Delete", ack_delete_val, sizeof(ack_delete_val)) ==
-        ESP_OK) {
+    esp_err_t ack_err =
+        httpd_req_get_hdr_value_str(req, "X-Kiln-Config-Ack-Delete", ack_delete_val, sizeof(ack_delete_val));
+    if (ack_err == ESP_OK) {
         char *endp = NULL;
         long parsed = strtol(ack_delete_val, &endp, 10);
-        if (endp != ack_delete_val && parsed >= 0 && parsed <= INT32_MAX) {
+        if (endp != ack_delete_val && *endp == '\0' && parsed >= 0 && parsed <= INT32_MAX) {
             ack_delete_count = (int32_t)parsed;
         }
+    } else if (ack_err == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "X-Kiln-Config-Ack-Delete value too long");
+        return ESP_OK;
     }
 
     /* Task 4 (docs/HTTP_POST_OWNER_MIGRATION.md slice A4): hand the body
@@ -4350,7 +4582,7 @@ esp_err_t backup_import_post_handler(httpd_req_t *req)
     ctx->content_len = (size_t)req->content_len;
 
     http_async_job_start_result_t start_result =
-        http_async_job_try_start(req, "http_async_job", 8192, backup_import_job, ctx);
+        http_async_job_try_start(req, "http_async_job", 10240, backup_import_job, ctx);
     if (start_result == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }

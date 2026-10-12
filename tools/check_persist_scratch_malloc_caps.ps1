@@ -67,7 +67,11 @@ $extraFiles = @(
     "firmware/KilnFW/App/drivers/http/profiles_http.c",
     "firmware/KilnFW/App/drivers/http/zones_http_post.c",
     "firmware/KilnFW/App/drivers/http/zone_aux_convert_http.c",
-    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c"
+    "firmware/KilnFW/App/drivers/http/zones_http_post_parse.c",
+    "firmware/KilnFW/App/drivers/http/wifi_provision_http.c",
+    "firmware/KilnFW/App/drivers/http/kiln_cfg_http.c",
+    "firmware/KilnFW/App/drivers/control/profile_executor_firing_stats.c",
+    "firmware/KilnFW/App/drivers/control/adaptive_tune_model.c"
 )
 $persistRoot = Join-Path $RepoRoot $persistDir
 if (-not (Test-Path $persistRoot)) { Write-Host "FAIL: $persistDir not found -- moved/renamed? update this script"; exit 1 }
@@ -106,10 +110,6 @@ $allow = @(
     ,@("firmware/KilnFW/App/drivers/persist/kiln_cfg_store.c", "malloc(sizeof(*v2))", 2,
       "v2 migration buffer (two sites): bounded legacy schema struct, once-per-board migration at boot, never on the import path")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(*scratch))", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
-    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(zone_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
-      "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
-    ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(timing_profile_candidate_t) * MAX31856_CHANNEL_COUNT)", 1,
       "internal fallback after a heap_caps_malloc(SPIRAM) attempt")
     ,@("firmware/KilnFW/App/drivers/http/backup_import.c", "malloc(sizeof(backup_import_job_ctx_t))", 1,
       "24-byte job context handed to the async task, not scratch")

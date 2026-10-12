@@ -56,6 +56,53 @@ class _FakeHttpResponse:
         return False
 
 
+class DecodeBodyTest(unittest.TestCase):
+    def test_bad_gzip_raises_typed_error(self):
+        with self.assertRaises(C.BodyDecodeError):
+            C._decode_body(b"not gzip", {"Content-Encoding": "gzip"})
+
+    def test_authed_get_maps_bad_gzip_to_no_status(self):
+        resp = _FakeHttpResponse(200, b"not gzip", {"Content-Encoding": "gzip"})
+        with mock.patch.object(C.http_auth, "urlopen", return_value=resp):
+            status, text = C._http_get_raw_authed("1.2.3.4", "/x")
+        self.assertIsNone(status)
+        self.assertIn("gzip decode failed", text)
+
+    def test_good_gzip_still_decodes(self):
+        self.assertEqual(C._decode_body(gzip.compress(b"hi"), {"Content-Encoding": "gzip"}), "hi")
+
+
+def _truncated_gzip():
+    return gzip.compress(b"hello world " * 50)[:-12]
+
+
+def _corrupt_deflate_gzip():
+    good = bytearray(gzip.compress(b"hello world " * 50))
+    good[10] = 0xFF  # invalid deflate block -> zlib.error, not OSError
+    return bytes(good)
+
+
+class BadGzipStatusTest(unittest.TestCase):
+    def test_authed_get_http_error_with_bad_gzip_keeps_status(self):
+        headers = _FakeHeaders({"Content-Encoding": "gzip"})
+        err = urllib.error.HTTPError(
+            url="http://1.2.3.4/x", code=409, msg="Conflict", hdrs=headers,
+            fp=io.BytesIO(_truncated_gzip()))
+        with mock.patch.object(C.http_auth, "urlopen", side_effect=err):
+            status, text = C._http_get_raw_authed("1.2.3.4", "/x")
+        self.assertEqual(status, 409)
+        self.assertIsNone(text)
+
+    def test_cases_web_get_raw_maps_zlib_error_to_no_status(self):
+        from kilnctrl.bench_test import cases_web as W
+        for body in (_truncated_gzip(), _corrupt_deflate_gzip()):
+            resp = _FakeHttpResponse(200, body, {"Content-Encoding": "gzip"})
+            with mock.patch.object(W._NO_REDIRECT_OPENER, "open", return_value=resp):
+                status, text = W._http_get_raw("1.2.3.4", "/nav.js")
+            self.assertIsNone(status)
+            self.assertTrue(text)
+
+
 class SecHttpClientGetTest(unittest.TestCase):
     def test_sends_accept_encoding_gzip(self):
         client = C._SecHttpClient("1.2.3.4")
@@ -84,8 +131,9 @@ class SecHttpClientGetTest(unittest.TestCase):
         self.assertEqual(text, "<html>hello</html>")
 
     def test_malformed_gzip_body_does_not_crash_and_returns_no_body(self):
-        """Advisory fix: a Content-Encoding: gzip header on a body that
-        doesn't actually decompress must not raise out of _get()."""
+        """A Content-Encoding: gzip header on a body that doesn't actually
+        decompress must not raise out of _get(), and must NOT look like a
+        decisive 200: (None, reason) so the judge reports INCONCLUSIVE."""
         client = C._SecHttpClient("1.2.3.4")
 
         def fake_open(req, timeout=None):
@@ -93,8 +141,8 @@ class SecHttpClientGetTest(unittest.TestCase):
 
         with mock.patch.object(client._opener, "open", side_effect=fake_open):
             status, text, _headers = client._get("/")
-        self.assertEqual(status, 200)
-        self.assertIsNone(text)
+        self.assertIsNone(status)
+        self.assertIn("gzip decode failed", text)
 
     def test_http_error_branch_decodes_gzip_body_and_reports_status(self):
         client = C._SecHttpClient("1.2.3.4")
@@ -251,6 +299,10 @@ class FakeHttp:
     def get(self, path):
         q = self._get_queues.get(path)
         if not q:
+            if path == "/api/profile_exec":
+                return 200, {"state": "idle"}
+            if path == "/api/autotune":
+                return 200, {"state": "idle"}
             return 404, None
         return q.pop(0)
 
@@ -312,6 +364,8 @@ class Dash13Test(unittest.TestCase):
         calls = []
 
         def _get(path):
+            if path in ("/api/profile_exec", "/api/autotune"):
+                return 200, {"state": "idle"}
             return 200, {"temp_unit": "C"}
 
         def _post(path, fields):
@@ -327,7 +381,7 @@ class Dash13Test(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
     def test_initial_get_failure_fails(self):
-        ctx = {"suite": "web", "http_get_json": lambda path: (500, None), "http_post_json": lambda path, fields: (200, {"ok": True})}
+        ctx = {"suite": "web", "http_get_json": lambda path: (200, {"state": "idle"}) if path in ("/api/profile_exec", "/api/autotune") else (500, None), "http_post_json": lambda path, fields: (200, {"ok": True})}
         result = C._case_dash13(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
 
@@ -542,7 +596,9 @@ class WebSec04Test(unittest.TestCase):
         result = C._case_web_sec04(ctx)
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client.set_lcd_pin_calls, [])
-        self.assertEqual(ctx["_lcd_pin"]["right_pin"], self._PIN)
+        # A pre-existing PIN is handed on flagged unverified; LCD-19 proves it.
+        self.assertTrue(ctx["_lcd_pin"].get("unverified"))
+        self.assertTrue(result.observed.get("pin_unverified"))
 
     def test_happy_path_passes_and_restores(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
@@ -663,7 +719,7 @@ class WebSec04PinFormatAndLeakTest(unittest.TestCase):
 
     def test_never_timeout_passes_through_restore(self):
         os.environ[C._LCD_PIN_ENV] = self._PIN
-        client = FakeSec04Client(web_timeout_min=-1, lcd_timeout_min=-1)
+        client = FakeSec04Client(web_enabled=True, web_timeout_min=-1, lcd_timeout_min=-1)
         result = C._case_web_sec04({"suite": "web", "sec_client": client})
         self.assertEqual(result.verdict, Verdict.PASS)
         self.assertEqual(client._cfg["web_timeout_min"], -1)
@@ -778,6 +834,15 @@ class WebSec03Test(unittest.TestCase):
         restore set_policy(False) call from running."""
         client = FakeSecClient(login_raises=True)
         ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "secret"}
+        calls = {"n": 0}
+        real = client.login
+
+        def login(u, p):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return 200, "cookie123"  # M2 pre-login succeeds
+            return real(u, p)
+        client.login = login
         with self.assertRaises(RuntimeError):
             C._case_web_sec03(ctx)
         self.assertIn(False, client.set_policy_calls)
@@ -957,3 +1022,109 @@ class RegistryWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthedGetGzipTests(unittest.TestCase):
+    """_http_get_raw_authed must advertise gzip and decode a gzip body
+    (firmware answers 406 to Accept-Encoding: identity for embedded pages)."""
+
+    def test_sends_gzip_and_decodes(self):
+        import gzip as _gz
+        from unittest import mock
+        from kilnctrl.bench_test import cases_web_rw as R
+        seen = {}
+
+        class _Resp:
+            headers = {"Content-Encoding": "gzip"}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return _gz.compress(b"<html>ok</html>")
+
+        def fake(req, timeout=None):
+            seen["ae"] = req.get_header("Accept-encoding")
+            return _Resp()
+
+        with mock.patch.object(R.http_auth, "urlopen", fake):
+            st, text = R._http_get_raw_authed("h", "/safety")
+        self.assertEqual((st, text), (200, "<html>ok</html>"))
+        self.assertEqual(seen["ae"], "gzip")
+
+
+# ---------------------------------------------------------------------------
+# Web judge contract audit 2 (M1, M2, L1, L5, L6, L10).
+# ---------------------------------------------------------------------------
+
+class AuditTwoRwTest(unittest.TestCase):
+    def _dash(self, extra_get=None, post=None, status_first=None):
+        gets = {"/api/status": [(200, {"temp_unit": "C"}), (200, {"temp_unit": "F"}), (200, {"temp_unit": "C"})]}
+        gets.update(extra_get or {})
+        fake = FakeHttp(gets, {"/api/unit_pref": post or (200, {"ok": True})})
+        return fake, {"suite": "web", "http_get_json": fake.get, "http_post_json": fake.post}
+
+    def test_m1_unmounted_cfg_is_inconclusive_and_writes_nothing(self):
+        fake, ctx = self._dash({"/api/cfgfs": [(200, {"mounted": False})]})
+        r = C.cfg_guarded(C._case_dash13)(ctx)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(fake.post_calls, [])
+
+    def test_m1_post_503_is_inconclusive_not_fail(self):
+        fake, ctx = self._dash(post=(503, None))
+        r = C.cfg_guarded(C._case_dash13)(ctx)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertIn("503", r.reason)
+
+    def test_m1_plain_fail_without_503_stays_fail(self):
+        fake, ctx = self._dash(post=(200, {"ok": False}))
+        r = C.cfg_guarded(C._case_dash13)(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_l1_busy_executor_skips_without_write(self):
+        fake, ctx = self._dash({"/api/profile_exec": [(200, {"state": "running"})]})
+        r = C._case_dash13(ctx)
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(fake.post_calls, [])
+
+    def test_l1_active_autotune_skips_without_write(self):
+        fake, ctx = self._dash({"/api/autotune": [(200, {"state": "running"})]})
+        r = C._case_dash13(ctx)
+        self.assertEqual(r.verdict, Verdict.SKIP)
+        self.assertEqual(fake.post_calls, [])
+
+    def test_l5_unreachable_first_read_is_inconclusive(self):
+        fake, ctx = self._dash({"/api/status": [(None, None)]})
+        r = C._case_dash13(ctx)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(fake.post_calls, [])
+
+    def test_m2_failed_prelogin_refuses_password_write(self):
+        client = FakeSecClient(login_ok=False)
+        wrote = []
+        client.set_web_password = lambda u, p: wrote.append(p) or (200, {"ok": True})
+        ctx = {"suite": "web", "sec_client": client, "web_username": "admin", "web_password": "stale"}
+        r = C._case_web_sec03(ctx)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(wrote, [])
+        self.assertEqual(client.set_policy_calls, [])
+
+    def test_l10_unstored_policy_refuses_sec03_and_sec04(self):
+        c3 = FakeSecClient(web_timeout_min=-1, lcd_timeout_min=-1)
+        r = C._case_web_sec03({"suite": "web", "sec_client": c3, "web_username": "a", "web_password": "b"})
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(c3.set_policy_calls, [])
+        os.environ[C._LCD_PIN_ENV] = "2468"
+        try:
+            c4 = FakeSec04Client(web_timeout_min=-1, lcd_timeout_min=-1)
+            r = C._case_web_sec04({"suite": "web", "sec_client": c4})
+        finally:
+            os.environ.pop(C._LCD_PIN_ENV, None)
+        self.assertEqual(r.verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(c4.set_policy_calls, [])

@@ -19,7 +19,7 @@
 #include "config_divergence.h" /* CONFIG_DIVERGENCE_REASON_MAX */
 #include "zones_config_accessors.h" /* zones_config_get_load_fault() -- CLAUDE.md's
                                        * ota_rollback_esp() hazard, closed 2026-09-16 */
-#include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault() -- M13 fix */
+#include "kiln_cfg_swap.h" /* kiln_cfg_swap_get_boot_fault_kind() -- M13 fix */
 #include "live_profile.h" /* live_profile_load_record()/live_profile_generation() -- "Keep?" button */
 #include "hal_time.h" /* hal_time_now_us() -- auth_reset_gesture's now_ms argument */
 #include "ct_leak_alarm.h" /* H9 CT alarm -- trip-strip branch */
@@ -120,13 +120,19 @@ void ui_home_refresh_cb(lv_timer_t *timer)
     /* Same plain-C getters dashboard_http.c's GET /api/status and
      * GET /api/profile_exec handlers call -- TODO.md 10.1a's shared-backend
      * rule, not a reimplementation. */
+    /* Audit L21: the heavy producer reads below (SPI, queue wait, heap walks)
+     * are skipped while Home is not the active screen. The cheap RAM reads
+     * above (topbar warning tier, wifi text) stay live. */
+    if (lv_obj_get_screen(s_ui_home_status_label) != lv_screen_active()) {
+        return;
+    }
     dashboard_status_t ds;
     dashboard_get_status(&ds);
     /* ui_home_refresh_cb runs on the LVGL task's 1 Hz timer and is already
      * that task's deepest known dispatch target against the 4880 B
      * measured ceiling within its 8192 B stack (see this file's own header
      * comment above and check_all_task_stack_budgets.py) -- heap-allocate
-     * rather than add a 1464-byte profile_exec_status_t stack local here,
+     * rather than add a 1512-byte profile_exec_status_t stack local here,
      * same pattern as safety_cfg_http.c/dashboard_exec_http.c. */
     profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!st) {
@@ -288,27 +294,47 @@ void ui_home_refresh_cb(lv_timer_t *timer)
                     snprintf(fault_buf, sizeof(fault_buf),
                              "CONFIG QUARANTINED -- v%u newer than fw v%u, reflash",
                              (unsigned)fault.on_disk_version, (unsigned)fault.fw_version);
+                } else if (fault.file_rejected) {
+                    /* Damaged/invalid zones.json: not a version problem, so no "vN" and no reflash advice. */
+                    snprintf(fault_buf, sizeof(fault_buf), "CONFIG FILE REJECTED -- reconfigure zones");
                 } else {
                     snprintf(fault_buf, sizeof(fault_buf),
                              "CONFIG QUARANTINED -- v%u unreadable, reflash matching fw",
                              (unsigned)fault.on_disk_version);
                 }
+                if (kiln_cfg_swap_get_boot_fault_kind() != KILN_CFG_SWAP_BOOT_FAULT_NONE) {
+                    /* Do not hide the kiln-config swap fault behind this banner. */
+                    size_t fl = strlen(fault_buf);
+                    snprintf(fault_buf + fl, sizeof(fault_buf) - fl, " | +CFG SWAP FAULT");
+                }
                 lv_label_set_text(s_ui_home_trip_strip, fault_buf);
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
-            } else if (kiln_cfg_swap_get_boot_fault(NULL)) {
+            } else if (kiln_cfg_swap_get_boot_fault_kind() != KILN_CFG_SWAP_BOOT_FAULT_NONE) {
                 /* M13 fix: an interrupted two-processor kiln-config swap
-                 * could not be recovered at boot -- heaters are alarmed/
-                 * disabled the whole time this is true (kiln_cfg_swap.c's
-                 * own hooks into the divergence/ceiling gates it reuses).
-                 * Ranked above the migration-persist warning below (that one
-                 * is informational only; this one means heat is actively
-                 * refused right now), below a live safety trip (the
-                 * OTA-bypass banner once ranked here too, retired
-                 * 2026-09-29). Same 96-char/no-scroll strip; the full
-                 * reason (names the remedy) is on the web dashboard only --
-                 * this literal is the short form that fits here. */
+                 * could not be recovered at boot. For every kind but
+                 * ACTIVE_ID_UNSAVED the record is left pending and the
+                 * divergence/ceiling gates kiln_cfg_swap.c reuses are what
+                 * refuse heat while the two sides disagree; this strip only
+                 * says why. ACTIVE_ID_UNSAVED (LOW-1) is display-only: both
+                 * processors agree on the applied config, heat is not gated,
+                 * and only the saved "which kiln is active" marker failed --
+                 * boot retries it -- so it gets softer text that does not
+                 * claim anything is interrupted. Ranked above the
+                 * migration-persist warning below and below a live safety
+                 * trip (the OTA-bypass banner once ranked here too, retired
+                 * 2026-09-29). Same 96-char/no-scroll strip; the full reason
+                 * is on the web dashboard only -- these literals are the
+                 * short forms that fit here. Reads the kind only, not
+                 * kiln_cfg_swap_get_boot_fault()'s struct, so no second copy
+                 * of its 200-byte reason lands on this stack (ds already
+                 * carries one). */
+                kiln_cfg_swap_boot_fault_kind_t swap_kind = kiln_cfg_swap_get_boot_fault_kind();
                 lv_label_set_text(s_ui_home_trip_strip,
-                                   "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
+                                   swap_kind == KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED
+                                       ? "KILN APPLIED -- active kiln not saved, retried at boot"
+                                   : swap_kind == KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED
+                                       ? "KILN ROLLED BACK -- active kiln not saved, retried at boot"
+                                       : "CONFIG SWAP INTERRUPTED -- see dashboard, re-apply config");
                 lv_obj_remove_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN);
             } else {
                 /* M13 fix (2026-09-16): lowest priority of the branches
@@ -391,6 +417,18 @@ void ui_home_refresh_cb(lv_timer_t *timer)
             goto lag_notice_done;
         }
 
+        /* pause_reason (executor-initiated pause, or Pico-reboot heat withhold while RUNNING): shown in this
+         * same strip so a cold firing explains itself. Below the config-mismatch message, above the lag notice. */
+        {
+            char pause_buf[96];
+            if (ui_page_home_pause_reason_text(st->pause_reason, pause_buf, sizeof(pause_buf)) > 0) {
+                lv_label_set_text(s_ui_home_lag_notice, pause_buf);
+                lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
+                s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
+                goto lag_notice_done;
+            }
+        }
+
         s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);
 
         bool any_sustained = false;
@@ -466,6 +504,19 @@ void ui_home_refresh_cb(lv_timer_t *timer)
 lag_notice_done:;
     }
 
+    /* Audit L15 visibility rule (pinned by the _Static_asserts in
+     * ui_page_home.c): the lag notice yields to the trip strip, and the
+     * progress wrap hides while either strip shows, so the rail never shares
+     * the column with more than one extra block. */
+    if (s_ui_home_trip_strip != NULL && s_ui_home_lag_notice != NULL &&
+        !lv_obj_has_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
+    }
+    if ((s_ui_home_trip_strip != NULL && !lv_obj_has_flag(s_ui_home_trip_strip, LV_OBJ_FLAG_HIDDEN)) ||
+        (s_ui_home_lag_notice != NULL && !lv_obj_has_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN))) {
+        lv_obj_add_flag(s_ui_home_progress_wrap, LV_OBJ_FLAG_HIDDEN);
+    }
+
     /* Compact home chart -- see this file's header comment ("DESIRED SERIES
      * + PROGRESS BAR RETURN, part 2") for the idle-dot vs. whole-run-timeline
      * split. Same state==IDLE && history_count==0 gate ui_page_history.c
@@ -477,7 +528,15 @@ lag_notice_done:;
      * still needed for the chart's planned-ahead series and time-axis label,
      * so the call stays -- only its total-seconds return value is now
      * discarded. */
-    profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    /* static: LVGL-task-only, keeps the plan curve between ticks so it is
+     * rebuilt only when the run's segments change (LCD audit L27) and takes
+     * this callback's deepest-stack frame down by the array size. */
+    static profile_plan_point_t plan_pts[1 + 2 * PROFILE_MAX_SEGMENTS];
+    static size_t s_plan_cache_n = 0;
+    static uint32_t s_plan_cache_key = 0;
+    static bool s_plan_cache_valid = false;
+    static float s_hist_t[UI_PAGE_HOME_CHART_POINTS];
+    static float s_hist_c[UI_PAGE_HOME_CHART_POINTS];
     size_t plan_n = 0;
     if (st->state == PROFILE_EXEC_IDLE && profile_executor_get_history_count() == 0) {
         for (uint32_t i = 1; i < UI_PAGE_HOME_CHART_POINTS; i++) {
@@ -613,13 +672,28 @@ lag_notice_done:;
              * state != IDLE (profile_executor.h's own field comments) --
              * profile_feasibility_plan_curve() is pure math over that copy,
              * safe to call from this refresh timer every tick. */
-            (void)profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
-                                                  plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
-                                                  &plan_n);
-            horizon_s = (plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f;
-            if (horizon_s < 1.0f) {
-                horizon_s = 1.0f; /* guard div-by-zero below; a real profile always has segments */
+            uint32_t plan_key = 2166136261u; /* FNV-1a over the plan's inputs */
+            {
+                const uint8_t *kb = (const uint8_t *)st->segments;
+                size_t kn = (size_t)st->segment_count * sizeof(st->segments[0]);
+                for (size_t k = 0; k < kn; k++) { plan_key = (plan_key ^ kb[k]) * 16777619u; }
+                const uint8_t *rb = (const uint8_t *)&st->run_start_c;
+                for (size_t k = 0; k < sizeof(st->run_start_c); k++) { plan_key = (plan_key ^ rb[k]) * 16777619u; }
+                plan_key = (plan_key ^ (uint32_t)st->segment_count) * 16777619u;
             }
+            if (!s_plan_cache_valid || plan_key != s_plan_cache_key) {
+                s_plan_cache_n = 0;
+                (void)profile_feasibility_plan_curve(st->segments, st->segment_count, st->run_start_c,
+                                                      plan_pts, sizeof(plan_pts) / sizeof(plan_pts[0]),
+                                                      &s_plan_cache_n);
+                s_plan_cache_key = plan_key;
+                s_plan_cache_valid = true;
+            }
+            plan_n = s_plan_cache_n;
+            /* L26/L28: the axis follows a run that outlasts its plan, and is
+             * clamped so a tiny ramp rate cannot overflow the tick math. */
+            horizon_s = ui_page_home_active_horizon_s((plan_n > 0) ? plan_pts[plan_n - 1].t : 1.0f,
+                                                      (float)st->total_elapsed_s);
         } else {
             /* IDLE with leftover history (count>0 is guaranteed here -- the
              * outer gate that chose this else-branch already ruled out
@@ -646,12 +720,33 @@ lag_notice_done:;
          * chart -- see that function's header comment in
          * ui_page_home_graph.h). */
         size_t actual_point_count = 0;
+        /* L24/L27: one executor-lock acquisition for every bucket, matched by
+         * each entry's own elapsed_s (not ring index * period). Idle-with-
+         * history buckets are measured from the oldest retained sample. */
+        for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+            s_hist_t[i] = (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1);
+        }
+        if (!state_active && count > 0) {
+            profile_history_entry_t oldest_e;
+            if (profile_executor_get_history(&oldest_e, 0, 1) == 1) {
+                for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
+                    s_hist_t[i] += (float)oldest_e.elapsed_s;
+                }
+            }
+        }
+        (void)profile_executor_history_sample_actual(
+            hist_zone, s_hist_t, UI_PAGE_HOME_CHART_POINTS,
+            ui_page_home_history_tolerance_s(horizon_s, UI_PAGE_HOME_CHART_POINTS, (float)HISTORY_SAMPLE_PERIOD_S),
+            s_hist_c);
         for (uint32_t i = 0; i < UI_PAGE_HOME_CHART_POINTS; i++) {
             float t_i = (UI_PAGE_HOME_CHART_POINTS > 1)
                             ? (float)i * horizon_s / (float)(UI_PAGE_HOME_CHART_POINTS - 1)
                             : 0.0f;
 
             float planned_c = ui_home_plan_lookup(plan_pts, plan_n, t_i);
+            if (plan_n > 0 && t_i > plan_pts[plan_n - 1].t) {
+                planned_c = NAN; /* past the plan's end there is nothing planned (L26) */
+            }
             float planned_disp = unit_pref_convert(planned_c, unit, UNIT_PREF_KIND_ABSOLUTE);
             s_ui_home_chart_planned_pts[i] = isnan(planned_disp) ? LV_CHART_POINT_NONE : (int32_t)lroundf(planned_disp);
             if (!isnan(planned_disp)) {
@@ -671,16 +766,9 @@ lag_notice_done:;
             float actual_c = NAN;
             if (!state_active || t_i <= (float)st->total_elapsed_s + (float)HISTORY_SAMPLE_PERIOD_S / 2.0f) {
                 if (count > 0) {
-                    /* Samples are recorded every HISTORY_SAMPLE_PERIOD_S
-                     * seconds of real time, so ring index and elapsed time
-                     * are proportional -- this avoids paging the whole ring
-                     * (up to HISTORY_MAX_SAMPLES=2880 entries, far too big
-                     * for a local buffer here) for a single-entry lookup. */
-                    size_t idx = (size_t)lroundf(t_i / (float)HISTORY_SAMPLE_PERIOD_S);
-                    if (idx >= count) idx = count - 1;
-                    profile_history_entry_t entry;
-                    if (profile_executor_get_history(&entry, idx, 1) == 1) {
-                        actual_c = entry.actual_c[hist_zone];
+                    /* s_hist_c[] came from one locked, elapsed_s-keyed pass above. */
+                    if (!isnan(s_hist_c[i])) {
+                        actual_c = s_hist_c[i];
                         have_actual = true;
                     }
                 } else if (i == 0) {
@@ -992,6 +1080,9 @@ void ui_home_profile_label_refresh(const profile_exec_status_t *st)
  * this function's OWN small locals, not ui_home_refresh_cb()'s -- see this
  * function's prototype (ui_page_home_internal.h) for why it is kept
  * out-of-line rather than inlined into that callback's body. */
+_Static_assert(UI_PAGE_HOME_RAIL_AUX_CAPTION_COUNT == KILN_IO_RELAY_COUNT,
+               "aux caption table must cover every relay");
+
 void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_status_t *st)
 {
     for (uint32_t i = 0; i < KILN_IO_RELAY_COUNT; i++) {
@@ -1019,12 +1110,17 @@ void ui_home_rail_refresh(const dashboard_status_t *ds, const profile_exec_statu
         if (!zones_config_get_name((uint8_t)i, name_buf, sizeof(name_buf)) || name_buf[0] == '\0') {
             snprintf(name_buf, sizeof(name_buf), "Zone %u", (unsigned)(i + 1));
         }
-        lv_label_set_text(s_ui_home_rail_zone_name[i], name_buf);
+        if (ui_page_home_rail_text_changed(lv_label_get_text(s_ui_home_rail_zone_name[i]), name_buf)) {
+            lv_label_set_text(s_ui_home_rail_zone_name[i], name_buf);
+        }
 
         bool valid = (i < ds->channel_count) && ds->channels[i].valid;
         char temp_buf[16];
-        ui_page_home_rail_format_zone_temp(valid, ds->channels[i].temp_c, temp_buf, sizeof(temp_buf));
-        lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
+        ui_page_home_rail_format_zone_temp(valid, valid && ds->channels[i].stale, ds->channels[i].temp_c, ds->temp_unit,
+                                           temp_buf, sizeof(temp_buf));
+        if (ui_page_home_rail_text_changed(lv_label_get_text(s_ui_home_rail_zone_temp[i]), temp_buf)) {
+            lv_label_set_text(s_ui_home_rail_zone_temp[i], temp_buf);
+        }
 
         int pct = st->zones[i].active ? ui_page_home_rail_duty_pct(st->zones[i].duty) : 0;
         lv_bar_set_value(s_ui_home_rail_zone_bar[i], pct, LV_ANIM_OFF);

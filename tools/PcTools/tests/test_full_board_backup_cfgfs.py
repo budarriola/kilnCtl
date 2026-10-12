@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for full_board_backup.py's cfg-filesystem coverage (docs/FILESYSTEM_PLAN.md
+"""Tests for full_board_backup.py's cfg-filesystem coverage (docs/FILESYSTEM.md
 "Add filesystem coverage to the backup").
 
 Context: user data is moving from NVS to files on the `cfg` LittleFS
@@ -37,6 +37,7 @@ import base64
 import io
 import sys
 import unittest.mock
+import urllib.error
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -78,7 +79,7 @@ def _make_fake_urlopen(files: dict, post_log: list):
             method = req_or_url.get_method()
             body = req_or_url.data
         assert "/api/cfgfs/file?name=" in url, f"unexpected URL in test: {url}"
-        name = url.split("name=")[1]
+        name = url.split("name=")[1].split("&raw=1")[0]  # POST adds raw=1 except for zones.json (audit M7)
         import urllib.parse
 
         name = urllib.parse.unquote(name)
@@ -127,7 +128,7 @@ def test_capture_then_restore_round_trips_file_backed_board_byte_for_byte():
 
 
 def test_unmounted_cfg_partition_is_empty_not_an_error():
-    """Today's live-board reality (docs/FILESYSTEM_PLAN.md: `cfg` is
+    """Today's live-board reality (docs/FILESYSTEM.md: `cfg` is
     UNFORMATTED) -- must not be reported as a failure."""
     cfgfs_files, errors = fbb._capture_cfgfs_files("10.0.0.5", 5.0, {"mounted": False, "reason": "not mounted"})
     assert cfgfs_files == {}
@@ -197,3 +198,40 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_every_file_is_posted_with_raw_flag():
+    """The firmware enforces its validators regardless of raw=1, so every file carries it."""
+    urls: list = []
+
+    def fake_urlopen(req, timeout=None):
+        urls.append(req.full_url)
+        return _FakeResponse(b"{\"ok\":true}")
+
+    files = {n: {"size_bytes": 1, "data_base64": base64.b64encode(b"x").decode()}
+             for n in ("zones.json", "aux_out.dat", "unit_pref.dat", "relay_names.dat")}
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok, message, _ = fbb.restore_cfgfs_files("10.0.0.5", files, 5.0)
+    assert ok, message
+    assert len(urls) == len(files)
+    for u in urls:
+        assert u.endswith("&raw=1"), u
+
+
+def test_refused_file_does_not_abort_rest_of_restore():
+    """A 400 on one file is recorded, the rest are still written, result is a failure naming it."""
+    posted: list = []
+
+    def fake_urlopen(req, timeout=None):
+        url = req.full_url
+        if "name=b&" in url:
+            raise urllib.error.HTTPError(url, 400, "Bad Request", {}, io.BytesIO(b""))
+        posted.append(url)
+        return _FakeResponse(b"{\"ok\":true}")
+
+    files = {n: {"size_bytes": 1, "data_base64": base64.b64encode(b"x").decode()} for n in ("a", "b", "c")}
+    with unittest.mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        ok, message, _ = fbb.restore_cfgfs_files("10.0.0.5", files, 5.0)
+    assert ok is False
+    assert len(posted) == 2 and any("name=c&" in u for u in posted)
+    assert "b (HTTP 400)" in message and "2 of 3" in message

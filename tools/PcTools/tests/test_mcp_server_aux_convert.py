@@ -95,6 +95,7 @@ class ConvertTest(unittest.TestCase):
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=zs), \
              unittest.mock.patch.object(ahc, "get_aux_outputs", side_effect=ax), \
              unittest.mock.patch.object(ahc, "get_stored_profile_rules", side_effect=pr), \
+             unittest.mock.patch.object(ma.readiness_http_client, "get_readiness", return_value={"items": []}), \
              unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value=io_hits or {}), \
              unittest.mock.patch.object(ahc, "post_move_zone_to_aux",
                                         side_effect=ack if isinstance(ack, Exception) else None,
@@ -204,17 +205,56 @@ class ConvertTest(unittest.TestCase):
             p.assert_not_called()
             g.assert_not_called()
 
-    def test_resume_posts_resume_fields_only(self):
-        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p, \
-             unittest.mock.patch.object(zones_http_client, "get_zones") as g:
+    def _resume(self, zones_after=None, aux_after=None, readiness=None, zones_before=None, aux_before=None):
+        zs = [zones_before or _zones_after(), zones_after or _zones_after()]
+        ax = [aux_before or _aux_after(), aux_after or _aux_after()]
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", return_value={"ok": True}) as p,              unittest.mock.patch.object(zones_http_client, "get_zones",
+                                        side_effect=zs),              unittest.mock.patch.object(ahc, "get_aux_outputs", side_effect=ax),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value={0: []}),              unittest.mock.patch.object(ma.readiness_http_client, "get_readiness",
+                                        return_value=readiness or {"items": []}):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
+        return r, p
+
+    def test_resume_posts_resume_fields_only_and_reads_back(self):
+        r, p = self._resume()
         self.assertTrue(r.startswith("ok - resumed"), r)
         p.assert_called_once_with("10.0.0.5", ZONE, resume_relay=3)
-        g.assert_not_called()
+
+    def test_resume_readback_zone_unchanged_fails_loud(self):
+        r, _ = self._resume(zones_after=_zones())
+        self.assertTrue(r.startswith("FAILED"), r)
+
+    def test_resume_readback_aux_not_enabled_fails_loud(self):
+        r, _ = self._resume(aux_after=_aux())
+        self.assertTrue(r.startswith("FAILED"), r)
+
+    def test_resume_wrong_tc_zone_fails_loud(self):
+        r, _ = self._resume(aux_after=_aux_after(tc=2))
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("tc_zone", r)
+
+    def test_resume_marker_still_present_fails_loud(self):
+        r, _ = self._resume(readiness={"items": [{"key": "zone_aux_conversion", "detail": "stage 2"}]})
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("zone_aux_conversion", r)
+
+    def test_resume_other_zone_changed_fails_loud(self):
+        za = _zones_after()
+        za["zones"][2]["relay_mask"] = 0
+        r, _ = self._resume(zones_after=za)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("zone 2", r)
+
+    def test_resume_other_aux_changed_fails_loud(self):
+        aa = _aux({RELAY: {"enabled": True, "tc_zone": ZONE}, 1: {"enabled": True}})
+        r, _ = self._resume(aux_after=aa)
+        self.assertTrue(r.startswith("FAILED"), r)
+        self.assertIn("aux relay 1", r)
 
     def test_resume_409_is_a_refusal(self):
         exc = ahc.AuxHttpError("x", 409, "no interrupted conversion is recorded -- nothing to resume")
-        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", side_effect=exc):
+        with unittest.mock.patch.object(ahc, "post_move_zone_to_aux", side_effect=exc), \
+             unittest.mock.patch.object(zones_http_client, "get_zones", return_value=_zones()), \
+             unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()):
             r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True, resume_relay=3)
         self.assertTrue(r.startswith("refused"), r)
 
@@ -226,6 +266,27 @@ class ConvertTest(unittest.TestCase):
     def test_500_is_an_error(self):
         r, _ = self._run(post=ahc.AuxHttpError("x", 500, "ROLLBACK INCOMPLETE"))
         self.assertTrue(r.startswith("error"), r)
+
+    def test_500_reads_state_back_and_says_committed_or_not(self):
+        r, _ = self._run(post=ahc.AuxHttpError("x", 500, "ROLLBACK INCOMPLETE"))
+        self.assertIn("read-back after the failure", r)
+        self.assertIn("zone_type=0", r)
+
+    def test_timeout_reads_state_back(self):
+        r, _ = self._run(post=ahc.AuxHttpError("x", None, "timed out"))
+        self.assertIn("read-back after the failure", r)
+
+    def test_409_does_not_read_back(self):
+        exc = ahc.AuxHttpError("x", 409, "refused -- a firing or autotune run is active")
+        r, _ = self._run(post=exc)
+        self.assertNotIn("read-back after the failure", r)
+
+    def test_failed_readback_says_state_unknown(self):
+        with unittest.mock.patch.object(zones_http_client, "get_zones",
+                                        side_effect=[_zones(), zones_http_client.ZonesHttpError("down")]),              unittest.mock.patch.object(ahc, "get_aux_outputs", return_value=_aux()),              unittest.mock.patch.object(ahc, "get_stored_profile_rules", return_value=_profiles()),              unittest.mock.patch.object(ma.readiness_http_client, "get_readiness", return_value={"items": []}),              unittest.mock.patch.object(ahc, "get_stored_relay_io_hits", return_value={}),              unittest.mock.patch.object(ahc, "post_move_zone_to_aux",
+                                        side_effect=ahc.AuxHttpError("x", 500, "boom")):
+            r = ma.control_convert_onoff_zone_to_aux(zone=ZONE, confirm=True)
+        self.assertIn("state UNKNOWN", r)
 
     def test_readback_zone_unchanged_fails_loud(self):
         r, _ = self._run(after_zones=_zones())

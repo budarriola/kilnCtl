@@ -208,7 +208,7 @@ document, do not solve.
    Bench-gated, not software-gated: which channel each zone is actually read
    on is a fact about the wiring loom, so nothing in software can check the
    answer. A wrong answer points a guard at another zone's conductor —
-   `docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md` is the (still PLANNED)
+   `docs/CT_ATTRIBUTION_VERIFICATION.md` is the (still PLANNED)
    energize-one-zone-at-a-time check that would catch it.
 4. **Real-amps display: done (2026-09-06)**, ESP + web dashboard + LCD +
    PcTools (`safety_get_status`, `devices_safety.py`/`mcp_server_safety.py`,

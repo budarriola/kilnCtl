@@ -426,7 +426,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
                  esp_err_to_name(profiles_err));
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
-    // docs/LIVE_PROFILE_EDIT_PLAN.md pass 2: must run after profiles_http_start()
+    // docs/LIVE_PROFILE_EDIT.md pass 2: must run after profiles_http_start()
     // just above -- calls the same profiles_http_get()/profiles_http_save()
     // seam.
     esp_err_t profiles_live_err = profiles_live_http_start();
@@ -610,7 +610,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
-    // ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7: persistence + read/restore
+    // ITER_TUNE_REDESIGN.md sec 8 row 7: persistence + read/restore
     // surface for the iter_tune decision core. Same "no ordering
     // dependency" placement as everything else in this block -- iter_tune
     // itself stays unwired from profile_executor.c pending owner sign-off
@@ -623,7 +623,7 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
-    // FILESYSTEM_PLAN.md "Dual-write window" section: GET /api/dualwrite_window
+    // FILESYSTEM.md "Dual-write window" section: GET /api/dualwrite_window
     // reports progress toward the owner-approved dual-write closure criterion
     // (20 consecutive clean boots + one file-backed firing + one verified
     // restore round trip), and POST .../restore_verified lets PC-side backup

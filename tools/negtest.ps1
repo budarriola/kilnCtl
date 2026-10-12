@@ -50,6 +50,17 @@
 #      tree. (A status change in the shared main tree alone, when it is not the
 #      caller's tree, is only a warning: other sessions edit it concurrently.)
 #
+# DEFAULT VERDICT PATTERNS (used only when no -ExpectPattern is given; never pass a bare "FAIL" for the host
+# presets: passing test titles contain it and the baseline then errors out):
+#   kilnfw-host   'RUN FAILURES \(' (the script's own failure summary header)
+#   saftyfw-host  'SAFTYFW HOST TESTS: FAILED' (the script's own verdict line; BUILD FAILED is a compile error, never CAUGHT)
+#   pytest        '(?m)^FAILED \S+' (a failed assertion in the -rf summary; a collection/import crash prints ERROR
+#                 and is therefore MISSED with a note, not CAUGHT)
+# -RequireAssertion: for -Command runs (e.g. a node/JS test script) only; combining it with -ExpectPattern or a preset is refused.
+# CAUGHT requires a case-sensitive assertion-failure line (AssertionError / ERR_ASSERTION / assertion failed /
+# "FAIL:", or the KilnFW host-test form "  FAIL file:line: msg"), not merely a nonzero exit -- a mutation that makes the script crash (syntax error, ReferenceError)
+# exits nonzero but proves nothing about the assertions.
+#
 # COMMAND: exactly one of -Preset or -Command. -Command is PowerShell text run
 # with the copy as the current directory; `{OUT}` is replaced by a fresh empty
 # per-run output dir and `{ROOT}` by the copy root. Presets:
@@ -72,6 +83,19 @@
 # a slot here would hold one across their tests and lock waits. -Parallel N
 # (clamped to 1..4, the heavy slot count) runs N copies at once; their compiles
 # still queue on the gate.
+#
+# QUOTING (-Find/-Replace text with double quotes, $, backticks, backslashes):
+#   ROOT CAUSE: Windows PowerShell 5.1 re-joins native-command arguments into one
+#   command line WITHOUT escaping embedded double quotes, so
+#   `& powershell.exe -File negtest.ps1 -Find 'printf("x")'` delivers printf(x) --
+#   the quotes are gone before this script runs. This script cannot recover them.
+#   * From Bash, single-quote the text: -Find 'printf("x")' passes through intact.
+#   * From PowerShell, use -FindBase64/-ReplaceBase64 (UTF-8 base64; takes
+#     precedence over -Find/-Replace; byte-exact for any text):
+#       $b = { [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($args[0])) }
+#       powershell -File tools\negtest.ps1 ... -File x.c -FindBase64 (& $b 'puts("a");') -ReplaceBase64 (& $b 'puts("b");')
+#     or in Bash: -FindBase64 "$(printf '%s' 'puts("a");' | base64 -w0)"
+#   * Or use -Mutations <json>, which never touches the command line.
 #
 # MUTATIONS: one of
 #   -File <repo path> -Find <exact text> -Replace <text> [-Name <label>]
@@ -111,10 +135,13 @@ param(
     [string]$File,
     [string]$Find,
     [string]$Replace,
+    [string]$FindBase64,
+    [string]$ReplaceBase64,
     [string]$Diff,
     [string]$Name,
     [string]$Mutations,
     [string]$ExpectPattern,
+    [switch]$RequireAssertion,
     [switch]$NoBaseline,
     [switch]$IncludeDirty,
     [string]$Rev = 'HEAD',
@@ -301,7 +328,6 @@ function Set-Mutation([string]$copy, $mut) {
 
 # ---------------------------------------------------------------- running
 
-function Stop-Tree([int]$id) { & taskkill.exe /T /F /PID $id 2>&1 | Out-Null }
 
 # Win32 Job Object: kill is atomic for every descendant (taskkill /T only kills a
 # snapshot of the tree; a grandchild spawned after the snapshot escapes and keeps
@@ -316,6 +342,29 @@ public static class NegJob {
     [DllImport("kernel32.dll")] static extern bool AssignProcessToJobObject(IntPtr job, IntPtr proc);
     [DllImport("kernel32.dll")] static extern bool TerminateJobObject(IntPtr job, uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    [DllImport("kernel32.dll")] static extern bool IsProcessInJob(IntPtr proc, IntPtr job, out bool result);
+    [DllImport("kernel32.dll")] static extern bool QueryInformationJobObject(IntPtr job, int cls, IntPtr info, int len, IntPtr retLen);
+    // Live members of the job (JobObjectBasicProcessIdList = 3). Membership is a property of the
+    // process object, so a reused PID or a stale parent PID can never add a stranger.
+    public static int[] Members(IntPtr job) {
+        int max = 4096;
+        int size = 8 + max * IntPtr.Size;
+        IntPtr buf = Marshal.AllocHGlobal(size);
+        try {
+            for (int i = 0; i < size; i += 8) Marshal.WriteInt64(buf, i, 0);
+            if (!QueryInformationJobObject(job, 3, buf, size, IntPtr.Zero)) return new int[0];
+            int n = Marshal.ReadInt32(buf, 4);
+            int[] r = new int[n];
+            for (int i = 0; i < n; i++) r[i] = (int)Marshal.ReadIntPtr(buf, 8 + i * IntPtr.Size).ToInt64();
+            return r;
+        } finally { Marshal.FreeHGlobal(buf); }
+    }
+    // True only when the OPEN process handle is still a member of the job (re-check before a kill,
+    // so a member that exited and whose PID was reused is never killed).
+    public static bool InJob(IntPtr proc, IntPtr job) {
+        bool r;
+        return IsProcessInJob(proc, job, out r) && r;
+    }
     public static IntPtr Create() {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) return IntPtr.Zero;
@@ -346,15 +395,76 @@ public static class NegJob {
 "@
 }
 
+$script:SpareNames = @('mspdbsrv.exe', 'vctip.exe', 'conhost.exe', 'ccache.exe')
+# Kill every live member of the job except shared daemons, through a handle (Process.Kill), no taskkill /T.
+function Stop-JobMembers($job) {
+    if ($job -eq [IntPtr]::Zero) { return }
+    foreach ($id in [NegJob]::Members($job)) {
+        if ($id -eq $PID) { continue }
+        try {
+            $mp = [Diagnostics.Process]::GetProcessById($id)
+            $null = $mp.Handle   # open once; membership and Kill both go through THIS handle
+            if (-not [NegJob]::InJob($mp.Handle, $job)) { continue }
+            if ($script:SpareNames -contains ("$($mp.ProcessName).exe").ToLowerInvariant()) { continue }
+            $mp.Kill()
+        } catch { }
+    }
+}
+# Replacement for `taskkill /T`: job members when a job exists, else just the root (never a PPID walk).
+function Stop-Tree($proc, $job) {
+    if ($job -and $job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }
+    try { if (-not $proc.HasExited) { $proc.Kill() } } catch { }
+}
 function Stop-CopyProcesses([string]$copy) {
     # Belt and braces after the job kill: anything whose command line names the copy.
     $deadline = (Get-Date).AddSeconds(15)
     do {
         $left = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
                 $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine.IndexOf($copy, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
-        foreach ($l in $left) { & taskkill.exe /T /F /PID $l.ProcessId 2>&1 | Out-Null }
+        foreach ($l in $left) { if ($script:SpareNames -contains "$($l.Name)".ToLowerInvariant()) { continue }; & taskkill.exe /F /PID $l.ProcessId 2>&1 | Out-Null }
+        $left = @($left | Where-Object { $script:SpareNames -notcontains "$($_.Name)".ToLowerInvariant() })
         if ($left.Count -gt 0) { Start-Sleep -Milliseconds 500 }
     } while ($left.Count -gt 0 -and (Get-Date) -lt $deadline)
+}
+
+# Orphan tracking: host_build_worker.ps1 / kilnctl_host_tests_*.exe detach from the cmd tree and keep the
+# copy's directories busy. While the command runs we remember every descendant (pid + creation time); after
+# the run (any exit path) the ones still alive are killed. Shared per-user daemons are spared.
+# A real child is never older than its parent. Win32_Process.ParentProcessId is not updated when the parent
+# exits and PIDs get reused, so a stale parent PID can make an unrelated long-lived process look like a child.
+function Test-ChildAdoptable($child, $parentCreated) {
+    if ($null -eq $child.CreationDate -or $null -eq $parentCreated) { return $false }
+    return ([datetime]$child.CreationDate -ge [datetime]$parentCreated)
+}
+function Add-Descendants([int]$rootId, $tracked, $rootCreated = $null) {
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $kids = @{}
+    foreach ($q in $all) { if (-not $kids.ContainsKey([int]$q.ParentProcessId)) { $kids[[int]$q.ParentProcessId] = @() }; $kids[[int]$q.ParentProcessId] += $q }
+    $stack = New-Object System.Collections.Stack
+    $byId = @{}
+    foreach ($q in $all) { $byId[[int]$q.ProcessId] = $q }
+    # The root may already have exited (final scan): walk its direct children using the creation time
+    # the caller captured while holding the process handle (the PID cannot be reused meanwhile).
+    if (-not $byId.ContainsKey($rootId) -and $null -eq $rootCreated) { return }
+    $stack.Push($rootId)
+    while ($stack.Count -gt 0) {
+        $id = [int]$stack.Pop()
+        $parentCreated = if ($byId.ContainsKey($id)) { $byId[$id].CreationDate } elseif ($id -eq $rootId) { $rootCreated } else { $null }
+        foreach ($c in @($kids[$id])) {
+            if (-not $c -or $c.ProcessId -eq $PID) { continue }
+            if (-not (Test-ChildAdoptable $c $parentCreated)) { continue }
+            if (-not $tracked.ContainsKey([int]$c.ProcessId)) { $tracked[[int]$c.ProcessId] = "$($c.CreationDate)|$($c.Name)" }
+            $stack.Push([int]$c.ProcessId)
+        }
+    }
+}
+function Stop-Tracked($tracked) {
+    foreach ($k in @($tracked.Keys)) {
+        $cp, $nm = "$($tracked[$k])".Split('|', 2)
+        if ($script:SpareNames -contains $nm.ToLowerInvariant()) { continue }
+        $cur = Get-CimInstance Win32_Process -Filter "ProcessId = $k" -ErrorAction SilentlyContinue
+        if ($cur -and "$($cur.CreationDate)" -eq $cp) { & taskkill.exe /F /PID $k 2>&1 | Out-Null }
+    }
 }
 
 function Read-SharedText([string]$path) {
@@ -400,23 +510,33 @@ exit 0
     # it starts, so a grandchild spawned in that window escapes the job. Stop-CopyProcesses (command-line
     # match on the copy path) is the backstop; a suspended-create + resume needs CreateProcess P/Invoke.
     $job = [NegJob]::Create()
-    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; falling back to taskkill" Yellow } }
+    if ($job -ne [IntPtr]::Zero) { if (-not [NegJob]::Assign($job, $p.Handle)) { Write-Line "negtest: could not assign child to job object; job kill is a no-op, Stop-Tracked + command-line matches remain the backstop" Yellow } }
     $script:liveChild = $p
+    $script:liveJob = $job
+    $tracked = @{}
+    $script:liveTracked = $tracked
+    $nextScan = 0
     $limitMs = [long]($spec.timeout_min * 60000)
     $timedOut = $false
     while (-not $p.WaitForExit(500)) {
-        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p.Id; $p.WaitForExit(10000) | Out-Null; break }
+        if ($sw.ElapsedMilliseconds -ge $nextScan) { try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }; $nextScan = $sw.ElapsedMilliseconds + 1500 }
+        if ($sw.ElapsedMilliseconds -gt $limitMs) { $timedOut = $true; if ($job -ne [IntPtr]::Zero) { [NegJob]::Kill($job) | Out-Null }; Stop-Tree $p $job; $p.WaitForExit(10000) | Out-Null; break }
     }
+    try { Add-Descendants $p.Id $tracked $p.StartTime } catch { }
     if ($timedOut) { Stop-CopyProcesses $copy }
     # 4c: kill the job ONLY on timeout. After a normal exit, disarm kill-on-close and just close the
     # handle: killing the whole job would take down a shared mspdbsrv.exe (and ccache etc.) that other
     # sessions' builds use. Stragglers are handled by the targeted Stop-CopyProcesses below.
     if ($job -ne [IntPtr]::Zero) {
-        if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { [NegJob]::Disarm($job) | Out-Null }
+        if ($timedOut) { [NegJob]::Kill($job) | Out-Null } else { Stop-JobMembers $job; [NegJob]::Disarm($job) | Out-Null }
+        $script:liveJob = $null   # before Close: a throw after Close must not leave a stale handle value for the finally
         [NegJob]::Close($job)
     }
+    Stop-Tracked $tracked
     if (-not $timedOut) { Stop-CopyProcesses $copy }
     $script:liveChild = $null
+    $script:liveJob = $null
+    $script:liveTracked = $null
     if ($timedOut) { $script:lastTimedOut = $true }
     $exit = if ($timedOut) { -1 } else { $p.ExitCode }
     $text = ''
@@ -459,6 +579,11 @@ function Invoke-Chunk($spec) {
             $res.baseline = [ordered]@{ passed = $pass; exit = $r.Exit; timed_out = $r.TimedOut; seconds = $r.Seconds; log = $r.Log
                 lines = $(if ($hit.Count) { $hit } elseif (-not $pass) { Get-MatchLines $r.Text $script:FailRegex } else { @() }) }
             if (-not $pass) {
+                # B6: still list every mutation of this chunk (never run), so the report is complete.
+                foreach ($m in $spec.mutations) {
+                    $res.mutations += [ordered]@{ index = $m.index; name = $m.name; verdict = 'BASELINE-FAILED'; exit = $null
+                        note = "not run: baseline failed"; matched = @(); seconds = 0; log = $null }
+                }
                 $why = if ($r.TimedOut) { "timed out" } elseif ($r.Exit -ne 0) { "exit $($r.Exit)" } else { "expect pattern already present" }
                 throw "BASELINE FAILED ($why): the unmutated command does not pass, so no failure can be attributed to a mutation. Log: $($r.Log)"
             }
@@ -477,7 +602,8 @@ function Invoke-Chunk($spec) {
                 $verdict = 'TIMEOUT'; $note = "no result within $($spec.timeout_min) min; process tree killed"
             } elseif ($pat) {
                 $lines = Get-MatchLines $r.Text $pat
-                if ($lines.Count -gt 0) { $verdict = 'CAUGHT' }
+                if ($lines.Count -gt 0 -and (-not $RequireAssertion -or $r.Exit -ne 0)) { $verdict = 'CAUGHT' }
+                elseif ($lines.Count -gt 0) { $note = "-RequireAssertion: assertion text matched but the run exited 0 (non-gating output)" }
                 elseif ($r.Exit -ne 0) { $note = "exit $($r.Exit) but the expect pattern never appeared: failed for another reason (compile error?)"; $lines = Get-MatchLines $r.Text $script:FailRegex }
                 else { $note = "exit 0 and no expect-pattern match" }
             } else {
@@ -490,8 +616,10 @@ function Invoke-Chunk($spec) {
     } catch {
         $res.error = "$($_.Exception.Message)"
     } finally {
-        if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+        if ($script:liveChild) { try { Stop-Tree $script:liveChild $script:liveJob } catch { } }
+        if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
         if ($script:liveCopy) {
+            try { Stop-CopyProcesses $script:liveCopy } catch { }
             $res.copy_removed = Remove-Copy $spec.repo $script:liveCopy
             if (-not $res.copy_removed) { Write-Line "negtest: COPY NOT REMOVED: $($script:liveCopy)" Red }
             $script:liveCopy = $null
@@ -518,6 +646,16 @@ function Finish([int]$code, [string]$err) {
     if ($err) { $script:result.error = $err; Write-Line "NEGTEST ERROR: $err" Red }
     Write-Output ($script:result | ConvertTo-Json -Compress -Depth 8)
     exit $code
+}
+
+# ---- decode base64 find/replace (PS 5.1 strips embedded double quotes from native args)
+foreach ($pair in @(@('FindBase64','Find'), @('ReplaceBase64','Replace'))) {
+    $bv = (Get-Variable -Name $pair[0] -ValueOnly)
+    if ($PSBoundParameters.ContainsKey($pair[0])) {
+        try { Set-Variable -Name $pair[1] -Value ([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($bv))) }
+        catch { Finish 2 "-$($pair[0]) is not valid base64" }
+        $PSBoundParameters[$pair[1]] = (Get-Variable -Name $pair[1] -ValueOnly)
+    }
 }
 
 # ---- usage
@@ -560,18 +698,31 @@ foreach ($t in @($RepoRoot, $mainTree) | Where-Object { $_ }) {
 # ---- command
 $cmdText = $Command
 switch ($Preset) {
-    'kilnfw-host' { $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\build_host_tests.ps1 -OutDir "{OUT}"' }
+    'kilnfw-host' { $presetExpect = 'RUN FAILURES \('; $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\KilnFW\App\test\build_host_tests.ps1 -OutDir "{OUT}"' }
     'saftyfw-host' {
+        $presetExpect = 'SAFTYFW HOST TESTS: FAILED'
         if ($CopyRoot.Length -gt 8) { Write-Line "negtest: WARNING SaftyFW host tests need a short path; -CopyRoot $CopyRoot may overflow the MSVC command line" Yellow }
         $cmdText = 'powershell -NoProfile -ExecutionPolicy Bypass -File firmware\SaftyFW\test\build_host_tests.ps1 -OutDir "{OUT}"'
     }
     'check' {
         if (-not $PresetArg) { Finish 2 "-Preset check needs -PresetArg <repo-relative check script>" }
         if ([IO.Path]::IsPathRooted($PresetArg)) { Finish 2 "-PresetArg for -Preset check must be repo-relative (it runs the COPY's script)" }
-        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $PresetArg))) { Finish 2 "no such check: $PresetArg" }
+        if (-not (Test-Path -LiteralPath (Join-Path $RepoRoot $PresetArg))) {
+            # Accept a bare name (check_x.ps1) the way run_all_checks discovers checks: any
+            # check_*.ps1 in the tree, excluding build output, node_modules and dotted dirs.
+            $bare = [IO.Path]::GetFileName($PresetArg)
+            # TRACKED files only (git ls-files): untracked archived copies (logs/wt_archive_*) must not make a name ambiguous.
+            $tracked = @(& git -C $RepoRoot ls-files -- "*$bare" 2>$null)
+            $hits = @($tracked | Where-Object { ($_ -split '/')[-1] -eq $bare -and $_ -like '*check_*.ps1' -and $_ -notmatch '(^|/)(build|node_modules)/' -and $_ -notmatch '(^|/)\.[^/]+/' } |
+                ForEach-Object { Get-Item -LiteralPath (Join-Path $RepoRoot $_) -ErrorAction SilentlyContinue } | Where-Object { $_ })
+            if ($hits.Count -eq 0) { Finish 2 "no such check: $PresetArg" }
+            if ($hits.Count -gt 1) { Finish 2 "ambiguous check name $PresetArg matches: $(($hits | ForEach-Object { $_.FullName.Substring($RepoRoot.Length).TrimStart('\') }) -join ', ')" }
+            $PresetArg = $hits[0].FullName.Substring($RepoRoot.Length).TrimStart('\')
+        }
         $cmdText = "powershell -NoProfile -ExecutionPolicy Bypass -File `"$PresetArg`""
     }
     'pytest' {
+        $presetExpect = '(?m)^FAILED \S+'
         $py = $null
         foreach ($t in @($RepoRoot, $mainTree) | Where-Object { $_ }) {
             $c = Join-Path $t 'tools\PcTools\.venv\Scripts\python.exe'
@@ -581,6 +732,11 @@ switch ($Preset) {
         $pa = if ($PresetArg) { $PresetArg } else { 'tests' }
         $cmdText = "`$env:PYTHONPATH = (Join-Path '{ROOT}' 'tools\PcTools\src'); Set-Location -LiteralPath (Join-Path '{ROOT}' 'tools\PcTools'); & '$py' -m pytest $pa -p no:cacheprovider -rfE --basetemp `"{OUT}\pt`""
     }
+}
+if ($RequireAssertion -and ($ExpectPattern -or $presetExpect)) { Finish 2 "-RequireAssertion cannot be combined with -ExpectPattern or a -Preset (it would be silently ignored); drop one" }
+if (-not $ExpectPattern) {
+    if ($presetExpect) { $ExpectPattern = $presetExpect }
+    elseif ($RequireAssertion) { $ExpectPattern = '(?-i)(AssertionError|ERR_ASSERTION|assertion failed|\bFAIL:|(?m)^\s+FAIL \S+:\d+:)' }
 }
 if ($Command -and $Command -notmatch '\{OUT\}') {
     Write-Line "negtest: note: -Command has no {OUT}; every run still starts from a pristine copy (reset + clean -fdx), so no build output is reused" DarkGray
@@ -762,6 +918,13 @@ try {
 
     # ---- report
     Write-Line ""
+    # A failed baseline invalidates every per-mutation verdict (other -Parallel workers still ran theirs):
+    # report SKIPPED/BASELINE-FAILED, never CAUGHT/MISSED.
+    $baselineFailed = ($script:result.baseline -and (-not $script:result.baseline.passed))
+    if ($baselineFailed) {
+        foreach ($m in $script:result.mutations) { $m.verdict = 'BASELINE-FAILED' }
+        Write-Line "SKIPPED: baseline failed; per-mutation results below are not attributable (BASELINE-FAILED)" Red
+    }
     foreach ($m in $script:result.mutations) {
         $col = switch ($m.verdict) { 'CAUGHT' { 'Green' } 'MISSED' { 'Red' } default { 'Yellow' } }
         Write-Line ("{0,-7} {1}  (exit {2}, {3}s)" -f $m.verdict, $m.name, $m.exit, $m.seconds) $col
@@ -785,8 +948,9 @@ try {
     $script:result.error = "$($_.Exception.Message)"
     $exitCode = 2
 } finally {
-    foreach ($wk in $workers) { try { if (-not $wk.P.HasExited) { Stop-Tree $wk.P.Id } } catch { } }
-    if ($script:liveChild) { try { Stop-Tree $script:liveChild.Id } catch { } }
+    foreach ($wk in $workers) { try { if (-not $wk.P.HasExited) { Stop-Tree $wk.P $null } } catch { } }
+    if ($script:liveChild) { try { Stop-Tree $script:liveChild $script:liveJob } catch { } }
+    if ($script:liveTracked) { try { Stop-Tracked $script:liveTracked } catch { } }
     if ($script:liveCopy) { Remove-Copy $RepoRoot $script:liveCopy | Out-Null; $script:liveCopy = $null }
     if ($workers.Count -gt 0) { Start-Sleep -Seconds 1; Remove-StaleCopies $CopyRoot }
     try { Remove-TreeSafe -Path $stateDir } catch { }
@@ -801,7 +965,7 @@ foreach ($g in $guardRoots) {
         if ($a.Hashes[$f] -ne $b.Hashes[$f]) { $guardOk = $false; Write-Line "REAL TREE CHANGED: $g\$f content changed during the run" Red }
     }
     if ($a.Status -ne $b.Status) {
-        if ($strict) { $guardOk = $false; Write-Line "REAL TREE CHANGED: git status --porcelain of $g differs from before the run" Red }
+        if ($strict) { $guardOk = $false; Write-Line "REAL TREE CHANGED: git status --porcelain of $g differs from before the run (any file written in this tree during the run counts, tracked or not -- do not write notes into the worktree while negtest runs)" Red }
         else { Write-Line "negtest: warning: shared main tree $g status changed during the run (other sessions edit it; mutated files are unchanged)" Yellow }
     }
     if ($strict -and $a.Head -ne $b.Head) { $guardOk = $false; Write-Line "REAL TREE CHANGED: HEAD of $g moved during the run" Red }

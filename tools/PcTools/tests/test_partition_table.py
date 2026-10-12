@@ -148,7 +148,7 @@ class ParseCsvTests(unittest.TestCase):
         names = {e.name for e in entries}
         # A handful of partitions this doc/task cares about. 'ota_0'/'ota_1'/
         # 'factory' were replaced by 'app'/'recovery' 2026-09-16 (single
-        # application slot + recovery image, docs/OTA_SINGLE_SLOT_PLAN.md
+        # application slot + recovery image, docs/OTA_SINGLE_SLOT.md
         # section 1 / section 8 step 3) -- see partitions.csv's own header
         # block for that revision.
         for expected in ("pico_img", "wifi_nvs", "kiln_nvs", "profiles_nvs",

@@ -163,6 +163,25 @@ def is_system_mode_gate_refusal(detail: Optional[str]) -> bool:
     return bool(detail) and _SYSTEM_MODE_GATE_REFUSAL_MARKER in detail
 
 
+def unreadable_store_refusal(status: Optional[int], detail: Optional[str]) -> Optional[str]:
+    """persfx3 LOW-4: a specific operator message for the two firmware 409s that mean "the stored config could not
+    be read at boot, so this write was refused to avoid overwriting it" -- `zones_config_undecided` (the zones
+    config itself) and `store_unreadable_at_boot` (another cfg store). Neither is a mode-gate or ceiling refusal,
+    and a reboot alone only retries the same read. None for any other response."""
+    if status != 409 or not detail:
+        return None
+    if "zones_config_undecided" in detail:
+        which = "the stored zones config"
+    elif "store_unreadable_at_boot" in detail:
+        which = "a stored setting"
+    else:
+        return None
+    return (f"refused: {which} could not be read at boot, so the board refuses this write rather than overwrite "
+            f"it (HTTP 409): {detail} -- nothing was changed. Reboot to retry the read; if it persists, GET "
+            f"/api/cfgfs lists the degraded store, and the recovery routes are a factory reset with scope kiln or "
+            f"a cfgfs format_confirm with force_healthy")
+
+
 def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
@@ -326,11 +345,22 @@ def post_zones(host: str, body: str, timeout: float = ZONES_HTTP_TIMEOUT_S) -> s
             return resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as exc:
         status_code, detail = _http_error_detail(exc)
+        if status_code == 409 and "zones_config_stale" in (detail or ""):
+            # WEB_UI_JS_AUDIT M-1: expected_generation (from the GET this body was built from) was stale.
+            raise ZonesHttpError("POST /api/zones refused: the zones config changed on the board since it was "
+                                 "read (expected_generation stale); nothing was written -- re-read and retry. "
+                                 f"HTTP 409: {detail}", status_code, detail) from exc
         raise ZonesHttpError(f"POST /api/zones refused: HTTP {status_code}: {detail}",
                               status_code, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise ZonesHttpError(f"POST /api/zones timed out after {timeout:g}s: the board may have "
+                                 f"APPLIED it -- state UNKNOWN, read GET /api/zones back before retrying") from exc
         raise ZonesHttpError(f"POST /api/zones unreachable: {detail}") from exc
+    except OSError as exc:  # TimeoutError / ConnectionResetError mid-response: the POST may have landed
+        raise ZonesHttpError(f"POST /api/zones got no complete reply ({type(exc).__name__}: {exc}): the board "
+                             f"may have APPLIED it -- state UNKNOWN, read GET /api/zones back before retrying") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -468,7 +498,7 @@ _ZONE_FIELD_FORM_KEY = {
     # round-trip against a board with a non-default relay_type set.
     # zones_http_post_parse.c: snprintf(key, ..., "z%u_relaytype", i).
     "relay_type": "relaytype",
-    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE.md step 6, 2026-09-08):
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s, added alongside the
     # on/off zone UI pass. zones_http_post_parse.c: snprintf(key, ...,
     # "z%u_zonetype"/"z%u_failsafe"/"z%u_hystc"/"z%u_minons"/"z%u_minoffs",
@@ -639,6 +669,11 @@ _TOP_FIELD_FORM_KEY = {
     # apply -- to every zone, not silently dropped.
 }
 _TOP_INT_FIELDS = {"thermo_count", "relay_count", "max_simultaneous_relays"}
+#: Top-level POST-only control fields: the firmware's POST handler reads them but GET never emits them
+#: (so they are not in _TOP_FIELD_FORM_KEY, which GET echoes). build_post_body() sets
+#: expected_generation from GET's "generation" (WEB_UI_JS_AUDIT M-1).
+_EXPECTED_GENERATION_KEY = "expected_generation"
+_TOP_POST_ONLY_FORM_KEYS = {_EXPECTED_GENERATION_KEY}
 #: Top-level keys GET emits that this module deliberately never echoes back:
 #: relay_names/timing_profiles/zones are handled by their own dedicated
 #: logic below (not this scalar map), and the rest are read-only telemetry
@@ -682,7 +717,7 @@ _TOP_READONLY_OR_STRUCTURAL_KEYS = {
     # a top-level literal -- so it correctly does not appear in the POST
     # field table either.
     "relay_types",
-    # docs/ON_OFF_ZONE_PLAN.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
+    # docs/ON_OFF_ZONE.md step 6 (ZONES_CFG_VERSION 22->23, 2026-09-08):
     # the resolved on/off hysteresis/min-on-off-seconds DEFAULTS, emitted
     # top-level purely so zones_page.html's placeholder text can't drift
     # from the firmware default (see zones_http_get.c's own comment on the
@@ -724,6 +759,9 @@ def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
         # silently coercing True/False to 1.0/0.0.
         raise ZonesHttpError(f"field {key!r} is a bool but has no known bool encoding")
     if isinstance(value, str):
+        if value == "":
+            # Firmware treats a blank as omit-preserve; refuse here so a preset never relies on it.
+            raise ZonesHttpError(f"field {key!r} is an empty string -- refusing to send a blank value")
         return value
     return repr(float(value))
 
@@ -918,7 +956,7 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # counterpart is needed here, same as approach_rate_cap_c_per_hr's own
     # note just above.
     "error_band_c", "rate_band_c_per_s",
-    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE_PLAN.md step 6, 2026-09-08):
+    # ZONES_CFG_VERSION 22->23 (docs/ON_OFF_ZONE.md step 6, 2026-09-08):
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s. Found missing from
     # this set by bench_test's HP-03 (an on/off-zone preset naming zone_type
     # raised ZonesHttpUnknownFieldError) -- the same silent-drop-turned-
@@ -1180,6 +1218,12 @@ def build_post_body(current: dict, preset: dict) -> str:
                         "_PRESET_ZONE_OVERRIDE_FIELDS)")
         fields.update(_encode_zone(idx, merged))
 
+    # WEB_UI_JS_AUDIT M-1: pin the write to the generation of the GET it was merged from; the board answers
+    # 409 zones_config_stale (nothing written) if another writer committed in between. Older firmware ignores it.
+    gen = current.get("generation")
+    if isinstance(gen, int) and not isinstance(gen, bool) and gen >= 0:
+        fields[_EXPECTED_GENERATION_KEY] = str(gen)
+
     return urllib.parse.urlencode(fields)
 
 
@@ -1244,6 +1288,55 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
     return mismatches
 
 
+#: POST keys parse_zone_fields() (zones_http_post_parse.c) treats as
+#: omit-PRESERVES-current (`field_present ? parse : current_z->...`): the
+#: measured plant model, the coupling cells and diagonal gain, the fuzzy/
+#: easeoff/approach/band floats, hystc and coilpower. Re-posting them at
+#: GET's coarser print (%.1f/%.2f/%.3f/%.4f) would round them; leaving them
+#: out of the body makes the firmware keep them bit-exact. Nothing else is
+#: strippable: a required field left out would 400 or zero.
+ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
+    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
+    r"|approachratecap|errorband|rateband|progressband|hystc|coilpower)$")
+
+
+def strip_omit_preserved(body: str, keep_keys: "frozenset[str] | set[str]" = frozenset()) -> str:
+    """Drop every ZONE_OMIT_PRESERVED_KEY_RE key from a build_post_body()
+    form body except those in `keep_keys` (fields the caller deliberately
+    writes)."""
+    pairs = urllib.parse.parse_qsl(body, keep_blank_values=True)
+    kept = [(k, v) for k, v in pairs if k in keep_keys or not ZONE_OMIT_PRESERVED_KEY_RE.match(k)]
+    return urllib.parse.urlencode(kept)
+
+
+def _preset_named_omit_preserved_keys(preset: dict) -> "set[str]":
+    """Omit-preserved POST keys a preset explicitly names (any scalar field
+    in _ZONE_FIELD_FORM_KEY, coupling rows/cells), so apply_zone_preset()'s
+    strip keeps what the caller asked to change and drops only what it
+    merely echoed from GET."""
+    keep = set()
+    for z in preset.get("zones", []):
+        i = z.get("index")
+        if i is None:
+            continue
+        for key in z:
+            # Keep a key only when build_post_body() really takes its VALUE
+            # from the preset (_PRESET_ZONE_OVERRIDE_FIELDS). The GET/backup
+            # spellings (model_k_dc, coupling_cN, ...) are reference-only
+            # there: build_post_body() echoes GET's rounded print for them,
+            # so keeping them would re-post rounded values (review LOW-6).
+            if key not in _PRESET_ZONE_OVERRIDE_FIELDS:
+                continue
+            suffix = _ZONE_FIELD_FORM_KEY.get(key)
+            if suffix is not None:
+                keep.add(f"z{i}_{suffix}")
+        if _PRESET_ZONE_COUPLING_FIELD in z:
+            for j in range(len(z[_PRESET_ZONE_COUPLING_FIELD])):
+                if j != i:  # the diagonal is never overlaid
+                    keep.add(f"z{i}_coupling_c{j}")
+    return keep
+
+
 def apply_zone_preset(host: str, preset: dict, timeout: float = ZONES_HTTP_TIMEOUT_S,
                        verify: bool = True) -> ZonesApplyResult:
     """The whole GET-merge-POST-(verify) cycle for one preset, over
@@ -1272,7 +1365,7 @@ def apply_zone_preset(host: str, preset: dict, timeout: float = ZONES_HTTP_TIMEO
     # _TOP_FIELD_FORM_KEY any more) and silently report ok=True regardless
     # of whether the value actually landed.
     preset = _apply_legacy_top_level_ease_off_mult(current, preset)
-    body = build_post_body(current, preset)
+    body = strip_omit_preserved(build_post_body(current, preset), _preset_named_omit_preserved_keys(preset))
     response_text = post_zones(host, body, timeout)
     if response_text.strip() != "ok":
         raise ZonesHttpError(f"POST /api/zones returned 200 but body was {response_text!r}, not 'ok'")

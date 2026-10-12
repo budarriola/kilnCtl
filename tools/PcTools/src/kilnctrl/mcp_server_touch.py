@@ -63,11 +63,12 @@ from . import mcp_server_core as _core
 
 
 # ---------------------------------------------------------------------------
-# TOUCH -- NS2009 touch controller on the same J2 panel (task 13)
+# TOUCH -- capacitive FT6336U touch controller on the J2 panel (task 13;
+# the legacy resistive NS2009 path is inert on this board)
 #
 # touch_inject is what lets this side "send touches as if from the screen":
 # the firmware's screen_idle state machine treats it exactly like a real
-# NS2009 press, resetting the auto-blank idle timer and waking the panel if
+# real touch press, resetting the auto-blank idle timer and waking the panel if
 # it's currently blanked. touch_get_state is the query that shows the effect.
 # ---------------------------------------------------------------------------
 @_core._tool()
@@ -75,7 +76,7 @@ def touch_get_state() -> str:
     """Whether the panel is on right now, and how long it's been idle.
 
     A query answered from the firmware's in-memory screen_idle state, not a
-    touch-controller round trip -- fast even if no NS2009 ever came up.
+    touch-controller round trip -- fast even if no touch controller ever came up.
     """
     try:
         state = _srv._touch.get_state()
@@ -90,7 +91,7 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
 
     x/y are SCREEN PIXEL coordinates (0,0 at the top-left, same space every
     ui_page_*.c file lays widgets out in) -- the firmware applies them
-    directly to LVGL's input device, downstream of the NS2009 calibration
+    directly to LVGL's input device, downstream of any touch calibration
     transform, so this call hit-tests real buttons/containers exactly like a
     finger would, independent of whether this board has ever been
     touch-calibrated. It also resets the firmware's screen auto-blank idle
@@ -105,7 +106,7 @@ def touch_inject(x: int, y: int, pressed: bool = True) -> str:
     send one pressed=True call, then further pressed=True calls with updated
     (x, y) tracing the path, then a final pressed=False to release -- each
     call is one point along the gesture, there is no separate "move" verb.
-    An injected press takes priority over the physical NS2009 for as long as
+    An injected press takes priority over the physical touch controller for as long as
     it is held, so it will not race a stray touch on the bench.
     """
     from .mcp_server_io import _touch_mutating  # local import: avoids a circular import with mcp_server_io.py

@@ -1,6 +1,6 @@
 """check_python_zero_caller_sweep.py -- dead-code / no-caller sweep for
 tools/PcTools/src, run as a standing check instead of the one-off scripted
-pass docs/RELEASE_HARDENING_PLAN.md's item 1 acceptance criteria previously
+pass docs/RELEASE_HARDENING.md's item 1 acceptance criteria previously
 relied on (see that doc's "Python-side zero-production-caller sweep"
 status entries, 2026-09-17).
 
@@ -76,7 +76,7 @@ FUNC_DEF_RE = re.compile(r"^def ([A-Za-z][A-Za-z0-9_]*)\s*\(")
 # tree today.
 DECORATOR_WIRING_MARKERS = ("_tool(", ".tool(", ".route(", "app.get(", "app.post(")
 
-# Names already reviewed by hand (docs/RELEASE_HARDENING_PLAN.md item 1,
+# Names already reviewed by hand (docs/RELEASE_HARDENING.md item 1,
 # "Python-side zero-production-caller sweep", 2026-09-17 status) and
 # confirmed to be ad hoc, interactively-invoked research/analysis tooling
 # with no production caller by design -- not the web_auth_table_create_session
@@ -158,7 +158,7 @@ ZERO_CALLER_ALLOWLIST = {
     ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_get_fw_version"),
     ("tools/PcTools/src/kilnctrl/kilnlink_codec.py", "encode_set_clock"),
     # Below: owner review 2026-09-21 of the 23-entry PENDING_OWNER_REVIEW
-    # batch (docs/RELEASE_HARDENING_PLAN.md item 1) -- these 11 were kept,
+    # batch (docs/RELEASE_HARDENING.md item 1) -- these 11 were kept,
     # each for the reason given. The other 12 were deleted in the same pass
     # (see git history / commit message for the full keep/delete table).
     #
@@ -261,7 +261,7 @@ ZERO_CALLER_ALLOWLIST = {
 # a future reader of this file should not assume every entry below is fine.
 #
 # 2026-09-21: owner reviewed the batch of 23 that had accumulated here
-# (docs/RELEASE_HARDENING_PLAN.md item 1). 11 were kept (moved into
+# (docs/RELEASE_HARDENING.md item 1). 11 were kept (moved into
 # ZERO_CALLER_ALLOWLIST above, each with its own reason comment); the other
 # 12 -- confirmed genuinely dead, not just a blind-spot false positive --
 # were deleted from source along with their tests and doc mentions in the

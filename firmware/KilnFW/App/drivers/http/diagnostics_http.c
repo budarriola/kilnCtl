@@ -1,5 +1,7 @@
+#include "../common/json_escape_ctl.h"
 #include "diagnostics_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
+#include "http_num_strict.h" // http_num_parse_ulong() -- strict decimal (audit L7)
 
 #include <math.h>
 #include <stdint.h>
@@ -7,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "cfgfs_file_validate.h"
 #include "esp_heap_caps.h" /* heap_caps_malloc() -- cfgfs_file_get_handler()/cfgfs_file_post_handler() below */
 #include "esp_littlefs.h"
 #include "esp_log.h"
@@ -227,7 +230,10 @@ static esp_err_t thermo_faults_get_handler(httpd_req_t *req)
               "\"cj_c\":%s,\"age_ms\":%s,\"stale\":%s}",
               ch == 0 ? "" : ",", (unsigned)ch, state, (unsigned)reading.fault_status,
               reading.fault_pin_asserted ? "true" : "false", cj_buf, age_buf,
-              reading.stale ? "true" : "false");
+              /* User-facing freshness is the age against the shared threshold,
+               * not the driver's "no new conversion this poll" flag (which is
+               * true on a fraction-of-a-second-old value); see MAX31856.h. */
+              (reading.age_ms >= KILN_TEMP_STALE_AGE_MS) ? "true" : "false");
     }
     APPEND("]");
 
@@ -362,17 +368,7 @@ overflow:
  * for one tiny helper. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* True from the moment crash_report_clear_post_handler() admits a job until
@@ -395,16 +391,27 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     crash_report_record_t rec;
     bool present = crash_report_get(&rec);
 
-    char json[768];
+    /* HEAP, not stack (httpd_worker 8 KB, "httpd stack blob class"): freed on
+     * every return path below. */
+    const size_t json_cap = 1024;
+    char *json = heap_caps_malloc(json_cap, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "GET /api/crash_report: malloc(1024) failed for the response buffer");
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int n;
 
     if (!present) {
-        n = snprintf(json, sizeof(json), "{\"present\":false,\"clear_in_progress\":%s}",
+        n = snprintf(json, json_cap, "{\"present\":false,\"clear_in_progress\":%s}",
                      s_crash_clear_in_progress ? "true" : "false");
         o = (n > 0) ? (size_t)n : 0;
         httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, o);
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
     }
 
     char task_esc[sizeof(rec.exc_task) * 2 + 1];
@@ -415,11 +422,13 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     json_escape(rec.exc_cause_str, cause_str_esc, sizeof(cause_str_esc));
     json_escape(rec.reset_reason, reset_reason_esc, sizeof(reset_reason_esc));
     json_escape(rec.fw_build, fw_build_esc, sizeof(fw_build_esc));
+    char elf_sha_esc[sizeof(rec.dump_elf_sha) * 2 + 1];
+    json_escape(rec.dump_elf_sha, elf_sha_esc, sizeof(elf_sha_esc));
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        n = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                                   \
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {                                             \
+        n = snprintf(json + o, json_cap - o, __VA_ARGS__);                                       \
+        if (n < 0 || (size_t)n >= json_cap - o) {                                                 \
             goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)n;                                                                            \
@@ -434,13 +443,17 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
           "\"fw_build\":\"%s\","
           "\"crash_uptime_s\":%lu,"
           "\"crash_uptime_known\":%s,"
+          "\"image_match\":\"%s\",\"stale_image\":%s,\"dump_elf_sha\":\"%s\","
           "\"backtrace\":[",
           rec.acknowledged ? "true" : "false", (unsigned long)rec.exc_cause, cause_str_esc,
           (unsigned long)rec.exc_pc, (unsigned long)rec.exc_addr, (unsigned long)rec.exc_a0,
           (unsigned long)rec.exc_a1, task_esc, reset_reason_esc,
           crash_report_frame_trustworthy(&rec) ? "true" : "false",
           (unsigned long)rec.dump_id, fw_build_esc,
-          (unsigned long)rec.crash_uptime_s, rec.crash_uptime_known ? "true" : "false");
+          (unsigned long)rec.crash_uptime_s, rec.crash_uptime_known ? "true" : "false",
+          rec.image_match == CRASH_REPORT_IMAGE_MATCH ? "match"
+          : rec.image_match == CRASH_REPORT_IMAGE_MISMATCH ? "mismatch" : "unknown",
+          rec.image_match == CRASH_REPORT_IMAGE_MISMATCH ? "true" : "false", elf_sha_esc);
     for (uint8_t i = 0; i < rec.bt_count && i < CRASH_REPORT_BT_MAX; i++) {
         /* Hex strings, not JSON numbers: these are code addresses, and the
          * only thing anyone does with them is paste them into addr2line.
@@ -451,18 +464,22 @@ static esp_err_t crash_report_get_handler(httpd_req_t *req)
     APPEND("],\"backtrace_corrupted\":%s}", rec.bt_corrupted ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
+    }
 
 overflow:
     /* Buffer overflow while building the crash-report JSON: never send the
      * truncated, malformed partial body as a 200 -- that reads as success to
      * a caller that only checks the status code. Log once and fail loud with
-     * a 500 instead. json[] is 768 B and the margin after the v3 fields is
-     * only ~61 B, so this is meant to be reachable if the record grows again
-     * -- do not enlarge json[] to "fix" it (house rule: never enlarge httpd
-     * stack buffers). */
+     * a 500 instead. json is a 1024 B HEAP buffer (json_cap above), so the
+     * httpd-stack rule does not apply to it; the margin is small, so grow
+     * json_cap together with any new field rather than letting this fire. */
     ESP_LOGE(TAG, "crash_report JSON overflowed %u-byte buffer at o=%u",
-             (unsigned)sizeof(json), (unsigned)o);
+             (unsigned)json_cap, (unsigned)o);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":false,\"error\":\"crash report too large to encode\"}", HTTPD_RESP_USE_STRLEN);
@@ -554,15 +571,13 @@ static esp_err_t coredump_chunk_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset and len query params required");
         return ESP_FAIL;
     }
-    char *endp = NULL;
-    unsigned long offset_ul = strtoul(off_str, &endp, 10);
-    if (!endp || *endp != '\0') {
+    unsigned long offset_ul = 0;
+    if (!http_num_parse_ulong(off_str, &offset_ul)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "offset must be a decimal integer");
         return ESP_FAIL;
     }
-    endp = NULL;
-    unsigned long len_ul = strtoul(len_str, &endp, 10);
-    if (!endp || *endp != '\0' || len_ul == 0) {
+    unsigned long len_ul = 0;
+    if (!http_num_parse_ulong(len_str, &len_ul) || len_ul == 0) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "len must be a positive decimal integer");
         return ESP_FAIL;
     }
@@ -630,7 +645,7 @@ static esp_err_t crash_report_clear_post_handler(httpd_req_t *req)
     }
     s_crash_clear_in_progress = true;
     http_async_job_start_result_t r =
-        http_async_job_try_start(req, "http_async_job", 8192, crash_report_clear_job, NULL);
+        http_async_job_try_start(req, "http_async_job", 10240, crash_report_clear_job, NULL);
     if (r == HTTP_ASYNC_JOB_STARTED) {
         return ESP_OK;
     }
@@ -763,8 +778,8 @@ static esp_err_t watchdog_cfg_post_handler(httpd_req_t *req)
 
     char val[4];
     int val_len = http_form_find_field(body, "disabled", val, sizeof(val));
-    if (val_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"disabled\" field");
+    if (!http_form_is_bool01(val, val_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"disabled\" must be 0 or 1");
         return ESP_OK;
     }
     bool disabled = (val[0] == '1');
@@ -876,7 +891,7 @@ static esp_err_t relay_cycles_reset_post_handler(httpd_req_t *req)
 #undef RELAY_CYCLES_RESET_BODY_MAX
 
 /* POST /api/relay_cycles/restore c0=N&c1=N&c2=N&c3=N&c4=N[&allow_lower=M] --
- * backup-gate pass 2026-09-07 (docs/FILESYSTEM_PLAN.md runbook). full_board_
+ * backup-gate pass 2026-09-07 (docs/FILESYSTEM.md runbook). full_board_
  * backup.py already captures these five counts as /api/status's `relay_life`
  * array (NOT a `relay_counts` array -- there is no such key in that
  * response; this comment used to say otherwise, fixed 2026-09-20); this is
@@ -934,9 +949,8 @@ static esp_err_t relay_cycles_restore_post_handler(httpd_req_t *req)
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
             return ESP_OK;
         }
-        char *endp = NULL;
-        unsigned long v = strtoul(val, &endp, 10);
-        if (endp == val || *endp != '\0') {
+        unsigned long v = 0;
+        if (!http_num_parse_ulong(val, &v)) {
             char err[48];
             snprintf(err, sizeof(err), "field \"%s\" is not a valid number", field);
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, err);
@@ -1059,15 +1073,15 @@ static esp_err_t ramp_assist_post_handler(httpd_req_t *req)
 
     char val[4];
     int val_len = http_form_find_field(body, "enabled", val, sizeof(val));
-    if (val_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing \"enabled\" field");
+    if (!http_form_is_bool01(val, val_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "\"enabled\" must be 0 or 1");
         return ESP_OK;
     }
     bool enabled = (val[0] == '1');
 
     esp_err_t err = ramp_assist_cfg_set_enabled(enabled);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, RAMP_ASSIST_FILE_PATH, err);
     }
     char json[96];
     int n;
@@ -1270,12 +1284,12 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
     char on_val[4];
     int relay_len = http_form_find_field(body, "relay", relay_val, sizeof(relay_val));
     int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
-    if (relay_len <= 0 || on_len <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay/on missing");
+    if (relay_len <= 0 || !http_form_is_bool01(on_val, on_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay missing or on not 0/1");
         return ESP_OK;
     }
-    long relay = strtol(relay_val, NULL, 10);
-    if (relay < 1 || relay > KILN_IO_RELAY_COUNT) {
+    long relay = 0;
+    if (!http_form_parse_long(relay_val, relay_len, 1, KILN_IO_RELAY_COUNT, &relay)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "relay out of range");
         return ESP_OK;
     }
@@ -1286,7 +1300,7 @@ static esp_err_t danger_relay_post_handler(httpd_req_t *req)
     if (rr == DASHBOARD_RELAY_ERR_RUNNING) {
         /* review fix, 2026-09-25: NOT a "should not happen" case any more --
          * relay_on_blocked() deliberately does NOT let danger mode skip the
-         * system-mode gate (docs/SYSTEM_MODE_GATE_PLAN.md owner decision Q1),
+         * system-mode gate (docs/SYSTEM_MODE_GATE.md owner decision Q1),
          * so a firing or autotune run really can reach here now. 409, the
          * owner's Q4 decision for every new gate refusal. */
         httpd_resp_set_status(req, "409 Conflict");
@@ -1359,8 +1373,9 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
     body[received] = '\0';
 
     char on_val[4];
-    if (http_form_find_field(body, "on", on_val, sizeof(on_val)) <= 0) {
-        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on missing");
+    int on_len = http_form_find_field(body, "on", on_val, sizeof(on_val));
+    if (!http_form_is_bool01(on_val, on_len)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "on must be 0 or 1");
         return ESP_OK;
     }
     bool want_on = on_val[0] == '1';
@@ -1383,7 +1398,7 @@ static esp_err_t danger_enable_post_handler(httpd_req_t *req)
 #undef DANGER_ENABLE_BODY_MAX
 
 /* GET /api/cfgfs -- observability for the `cfg` LittleFS partition
- * (docs/FILESYSTEM_USER_DATA_PLAN.md). The `cfg` partition is invisible
+ * (docs/FILESYSTEM_USER_DATA.md). The `cfg` partition is invisible
  * otherwise: mounted or not, how full, what's on it, and whether the
  * zones-config dual-write's file and NVS copies agree are all things that
  * were previously only findable by grepping the boot log. Most of the work
@@ -1534,7 +1549,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
      * bridge (70ed6514 fixed /api/cfgfs's stale lists but left this detail
      * wired up for zones only -- widened here; 2026-09-08 widened again to
      * cover relay_cycles/adaptive_tune/firing_stats, the last three items
-     * docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked). Each bridge's
+     * docs/FILESYSTEM_USER_DATA.md section 5 tracked). Each bridge's
      * own module reads its OWN NVS rev key and computes `diverged` itself
      * via cfg_fs_status_item_diverged() (a real decoded-content compare, not
      * a rev-only guess) -- this handler just collects what they report. */
@@ -1761,7 +1776,7 @@ static esp_err_t cfgfs_status_get_handler(httpd_req_t *req)
 }
 
 /* GET /api/cfgfs/file?name=<name> and POST /api/cfgfs/file?name=<name> --
- * full_board_backup.py's filesystem-coverage addition (docs/FILESYSTEM_PLAN.md
+ * full_board_backup.py's filesystem-coverage addition (docs/FILESYSTEM.md
  * "Add filesystem coverage to the backup"). /api/cfgfs above already lists
  * every file cfg_fs holds, with sizes -- this pair is deliberately NOT a
  * second listing surface, just the one primitive that was missing: fetch (or
@@ -1850,6 +1865,21 @@ static void cfgfs_file_write_job(void *arg)
 extern esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg);
 extern bool uart_bridge_ext_is_on_flash_worker(void);
 
+/* POST /api/cfgfs/file?name=<file>[&raw=1] (ROUTE_TIER_ADMIN, restore primitive).
+ * Audit M7: the body is validated by the firmware's own loader for that file
+ * (cfgfs_file_check_write) BEFORE anything is written; a failure answers 400
+ * and writes nothing. A name with no validator is refused with 400 unless the
+ * request carries raw=1, which writes the bytes unchecked. full_board_backup.py
+ * always sends raw=1; the firmware still enforces every rule in cfgfs_file_validate.c
+ * (zones.json plus the flat pref files; aux_out.dat also refuses a newer
+ * version here), because raw=1 never waives a validator that exists. */
+static bool cfgfs_file_raw_flag(httpd_req_t *req)
+{
+    char query[96], v[4];
+    return httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+           httpd_query_key_value(query, "raw", v, sizeof(v)) == ESP_OK && strcmp(v, "1") == 0;
+}
+
 static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
 {
     char name[CFGFS_FILE_NAME_MAX];
@@ -1894,6 +1924,15 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
         received += (size_t)ret;
     }
 
+    const char *why = "";
+    cfgfs_file_check_t chk = cfgfs_file_check_write(name, cfgfs_file_raw_flag(req), body, received, &why);
+    if (chk != CFGFS_FILE_CHECK_OK) {
+        free(body);
+        httpd_resp_send_err(req, chk == CFGFS_FILE_CHECK_OOM ? HTTPD_500_INTERNAL_SERVER_ERROR : HTTPD_400_BAD_REQUEST,
+                            why);
+        return ESP_OK;
+    }
+
     /* Same flash-worker dispatch shape relay_cycles_reset()/factory_reset.c
      * use -- this httpd handler task's own stack is not the internal-SRAM
      * worker stack a flash write requires (see flash_worker.h's HAZARD
@@ -1912,10 +1951,12 @@ static esp_err_t cfgfs_file_post_handler(httpd_req_t *req)
     }
     free(body);
 
-    char json[128];
+    char json[2 * CFGFS_FILE_NAME_MAX + 96];
+    char name_esc[CFGFS_FILE_NAME_MAX * 2 + 1]; /* L6: name is client-supplied */
+    kiln_json_escape_ctl(name, name_esc, sizeof(name_esc));
     int n;
     if (job.result == ESP_OK) {
-        n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\",\"size_bytes\":%u}", name, (unsigned)received);
+        n = snprintf(json, sizeof(json), "{\"ok\":true,\"name\":\"%s\",\"size_bytes\":%u}", name_esc, (unsigned)received);
     } else {
         n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", esp_err_to_name(job.result));
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -1951,15 +1992,7 @@ static void nvs_keys_json_escape(const char *in, char *out, size_t out_cap)
      * '\\' possible in a valid NVS name), but this route echoes attacker-
      * controlled query values back into JSON, so escape defensively rather
      * than trust that constraint holds forever. */
-    size_t o = 0;
-    for (size_t i = 0; in[i] != '\0' && o + 2 < out_cap; ++i) {
-        char c = in[i];
-        if (c == '"' || c == '\\') {
-            out[o++] = '\\';
-        }
-        out[o++] = c;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(in, out, out_cap);
 }
 
 static const char *nvs_type_name(nvs_type_t t)

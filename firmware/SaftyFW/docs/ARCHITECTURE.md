@@ -573,7 +573,7 @@ typedef enum {
     SAFETY_TRIP_OVERTEMP        = 1,  /* S1  */
     SAFETY_TRIP_OVER_SETPOINT   = 2,  /* S2  */
     SAFETY_TRIP_LOAD_STUCK_ON   = 3,  /* S3  */
-    /* 4 reserved: S4 is WARN-only          */
+    SAFETY_TRIP_TEST            = 4,  /* admin test trip, TEST_TRIP 0x2E; S4 itself stays WARN-only */
     SAFETY_TRIP_SENSOR_INVALID  = 5,  /* S5, after blind_grace_s */
     SAFETY_TRIP_MAIN_FAULT      = 6,  /* S6a */
     SAFETY_TRIP_LINK_DEAD       = 7,  /* S6b */
@@ -589,8 +589,10 @@ typedef enum {
 } safety_trip_t;
 ```
 
-**The numbering follows the guard numbers and leaves gaps** — 4 and 11 are
-reserved, because S4 and S10 are WARN-only and can never produce a trip code.
+**The numbering follows the guard numbers and leaves gaps** — 11 is
+reserved because S10 is WARN-only and can never produce a trip code. 4 was a gap
+for S4 (WARN-only) and now carries `SAFETY_TRIP_TEST` (kilnlink 18, mask `0x0008`; bit 3 is S4 in `warn_mask`, TEST in `trip_mask`).
+TEST latches through the normal `trip()` path from a link command (`TEST_TRIP` 0x2E, `docs/TEST_TRIP_PLAN.md`), only after a real guard has had its turn that tick, and cannot be cleared until `trip_verify_s` has elapsed with K4 reported open. `CLEAR_TRIP` from an 18+ peer must carry the Pico boot_id (5-byte form); an unknown peer is refused until ANNOUNCE, with a legacy fallback after 30 s. DIAG V3 (32 bytes, boot_id) goes only to a peer that announced 18+.
 Once this ships, a trip code is a wire value that ends up in logs and
 screenshots; renumbering it later to close a gap silently reinterprets every
 historical record. Same reasoning `uart_task_ids.h` gives for never reusing a

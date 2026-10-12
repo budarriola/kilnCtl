@@ -646,7 +646,7 @@
             return;
           }
           return resp.text().then(function (text) {
-            loginErrorEl.textContent = text || 'Login failed.';
+            loginErrorEl.textContent = window.kcHostRefusalFromText(text) || text || 'Login failed.';
           });
         }).catch(function () {
           clearTimeout(timer);
@@ -924,6 +924,12 @@
             forgotErrorEl.textContent = kcForgotStatusMessage(429, text);
           });
         }
+        if (resp.status === 403) {
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            forgotErrorEl.textContent = window.kcHostRefusalFromText(text) || kcForgotStatusMessage(403, null);
+          });
+        }
         forgotErrorEl.textContent = kcForgotStatusMessage(resp.status, null);
       }).catch(function () {
         if (gen !== forgotGeneration) return;
@@ -942,6 +948,12 @@
         forgotErrorEl2.textContent = 'Passwords do not match.';
         return;
       }
+      // Weak password: refuse here, token still unspent, so the operator just retypes.
+      var pwProblem = window.kcResetPasswordProblem(forgotNewPassEl.value, forgotUserEl.value);
+      if (pwProblem) {
+        forgotErrorEl2.textContent = pwProblem;
+        return;
+      }
       if (!forgotResetToken) {
         // Token was discarded or already spent -- restart at step 1 rather
         // than POSTing a reset with nothing to authorize it.
@@ -952,6 +964,7 @@
       // Single use: the token leaves this closure exactly once, in this
       // request's body. Any retry has to go back through step 1.
       var token = forgotResetToken;
+      var retryToken = token; // restored only when the board refuses a weak password (it does not spend the token then)
       forgotResetToken = null;
       forgotSubmit2El.disabled = true;
       var body = 'username=' + encodeURIComponent(forgotUserEl.value) +
@@ -977,10 +990,39 @@
             forgotBackToStep1(KC_FORGOT_GENERIC_FAIL);
           });
         }
+        if (resp.status === 400) {
+          // F2: the firmware checks strength (including the AP SSID / AP password rule the
+          // client cannot see) BEFORE spending the token and says so with reason=weak_password.
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            var weak = false;
+            try { weak = JSON.parse(text).reason === 'weak_password'; } catch (e) { weak = false; }
+            if (weak && retryToken) {
+              forgotResetToken = retryToken;
+              forgotErrorEl2.textContent = 'The board refused that password (too weak, or it matches the Wi-Fi name or password). ' +
+                'Choose a different one; wait a few seconds if it says to try again later.';
+              return;
+            }
+            forgotBackToStep1(kcForgotStatusMessage(400, null));
+          });
+        }
         if (resp.status === 429) {
           return resp.text().then(function (text) {
             if (gen !== forgotGeneration) return;
+            // LOW-6: the 429 is refused before the token is looked up, so the token is still
+            // unspent -- keep it and stay on step 2 so the user can retry after the backoff.
+            if (retryToken) {
+              forgotResetToken = retryToken;
+              forgotErrorEl2.textContent = kcForgotStatusMessage(429, text);
+              return;
+            }
             forgotBackToStep1(kcForgotStatusMessage(429, text));
+          });
+        }
+        if (resp.status === 403) {
+          return resp.text().then(function (text) {
+            if (gen !== forgotGeneration) return;
+            forgotBackToStep1(window.kcHostRefusalFromText(text) || kcForgotStatusMessage(403, null));
           });
         }
         forgotBackToStep1(kcForgotStatusMessage(resp.status, null));
@@ -988,6 +1030,7 @@
         if (gen !== forgotGeneration) return;
         forgotBackToStep1('Network error.');
       }).then(function () {
+        retryToken = null;
         if (gen !== forgotGeneration) return;
         forgotSubmit2El.disabled = false;
       });
@@ -1128,6 +1171,42 @@
     return pendingLogin;
   }
 
+  var hostRefusalShown = false;
+  // Maps the firmware's 403 {"error":"cross_origin"|"bad_host"} bodies to one message
+  // (http_auth_http.c); null for any other body. Pure; unit-tested.
+  window.kcHostRefusalText = function (body) {
+    if (body && (body.error === 'cross_origin' || body.error === 'bad_host')) {
+      return 'The controller refused this request because of the address it was opened ' +
+        'from. Open the controller by its IP address or <name>.local and try again.';
+    }
+    return null;
+  };
+
+  // Same guidance for a refusal body that arrives as raw text (login/bootstrap/forgot/reset
+  // use nativeFetch and read text); null when it is not a host/origin refusal.
+  window.kcHostRefusalFromText = function (text) {
+    try { return window.kcHostRefusalText(JSON.parse(text)); } catch (e) { return null; }
+  };
+
+  // Client-side mirror of web_auth_password_check() (persist/web_auth_store.c) for the
+  // forgot-password flow: /api/auth/reset spends its one-time token on a request that passes
+  // the strength rule, and answers a weak password with the same generic 400 as a bad token,
+  // so the page must refuse a weak password BEFORE the POST to keep the token usable (web
+  // batch W1). Returns a message, or null when the password passes. The AP SSID/passphrase
+  // equality rule is board-side only. Length is UTF-8 bytes, like the firmware's strlen.
+  window.kcResetPasswordProblem = function (pw, username) {
+    var bytes = (typeof TextEncoder !== 'undefined') ? new TextEncoder().encode(pw).length : pw.length;
+    if (bytes < 10) return 'Password too short: use at least 10 characters.';
+    if (bytes > 64) return 'Password too long: use at most 64 characters.';
+    if (/^[a-z]+$/.test(pw)) return 'Password cannot be all lowercase letters: add a capital, digit or symbol.';
+    var low = pw.toLowerCase();
+    if (low.indexOf('password') >= 0 || low.indexOf('kiln') >= 0) {
+      return 'Password cannot contain "password" or "kiln".';
+    }
+    if (username && pw === username) return 'Password cannot be the same as the username.';
+    return null;
+  };
+
   window.fetch = function (input, init) {
     var url = (typeof input === 'string') ? input : (input && input.url) || '';
     if (isAuthExemptUrl(url)) {
@@ -1168,6 +1247,10 @@
         if (Object.prototype.hasOwnProperty.call(src, k)) retryInit[k] = src[k];
       }
       retryInit.__kcAuthRetried = true;
+      // The caller's own timeout (zones Save, 30 s) must not run while the login modal is
+      // open, and its original signal may already be aborted: a caller that supplies
+      // __kcAuthSignal() gets a freshly armed signal for the retry (dev web review LOW-1).
+      if (typeof src.__kcAuthSignal === 'function') retryInit.signal = src.__kcAuthSignal();
       return window.fetch(inputForRetry, retryInit);
     }
     function authCancelled(prompted) {
@@ -1187,6 +1270,7 @@
     }
     function promptThenRetry(titleText) {
       if (!authPromptAllowed(userInitiated)) return authCancelled(false);
+      if (init && typeof init.__kcOnAuthPrompt === 'function') init.__kcOnAuthPrompt();
       return ensureAdminLogin(titleText).then(function (ok) {
         if (!ok) {
           authPromptDeclined = true;
@@ -1240,6 +1324,19 @@
         // kcFetchWithSafetyAck inspects whatever response this wrapper's
         // promise resolves to, retry included.
         return promptThenRetry('Administrator login required');
+      }
+      // F4/MED-1 refusals (cross_origin, bad_host): a 403 JSON body, no auth-reason
+      // header. Tell the operator once what to do instead of a silent failed save.
+      if (resp.status === 403 && !alreadyRetried && typeof resp.clone === 'function') {
+        try {
+          resp.clone().json().then(function (b) {
+            var msg = window.kcHostRefusalText(b);
+            if (msg && !hostRefusalShown) {
+              hostRefusalShown = true;
+              window.kcAlert(msg, { title: 'Address not accepted' });
+            }
+          }, function () {});
+        } catch (e) { /* body unreadable: leave the raw 403 to the caller */ }
       }
       return resp;
     });
@@ -1380,16 +1477,27 @@
     // GET /api/status poll (via updateFromStatus above) is what would
     // correct `cached` back if the device actually rejected or failed to
     // persist it.
+    // L-9: a refused/failed POST puts the displayed unit back (only pages that
+    // never re-poll /api/status would otherwise keep showing the wrong unit).
+    function revert(prev) {
+      if (cached === prev) return;
+      cached = prev;
+      window.dispatchEvent(new Event('kcunitchange'));
+    }
     function set(u) {
       var next = u === 'f' ? 'f' : 'c';
+      var prev = cached;
       cached = next;
       window.dispatchEvent(new Event('kcunitchange'));
       fetch('/api/unit_pref', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'unit=' + (next === 'f' ? 'F' : 'C'),
+      }).then(function (r) {
+        if (r && r.ok === false) revert(prev);
       }).catch(function (err) {
-        console.warn('unit preference POST failed (will retry on next status poll):', err);
+        console.warn('unit preference POST failed; reverting display:', err);
+        revert(prev);
       });
     }
     // Celsius in, a plain number in the selected unit out. null/undefined/NaN
@@ -1644,7 +1752,7 @@
     // enforce is worse than no banner. Disable the control here, in
     // lockstep with the banner, rather than only warning about it; the
     // server-side enforcement is system_mode_gate.c's recovery-mode rule
-    // (docs/SYSTEM_MODE_GATE_PLAN.md slice 2, formerly recovery_start_
+    // (docs/SYSTEM_MODE_GATE.md slice 2, formerly recovery_start_
     // refusal.h). Tracked via a
     // dataset flag rather than driving runBtn.disabled directly so this
     // never fights with loadProfileList()'s own "no saved profiles" disable
@@ -1836,11 +1944,24 @@
   var ACK_STATES = { faulted: true, done: true };
   // Owner request: a button next to Start/Stop to adjust the CURRENTLY
   // RUNNING firing's dwell times/targets/ramp rates, reusing the existing
-  // /live_profile page (docs/LIVE_PROFILE_EDIT_PLAN.md) rather than a new
+  // /live_profile page (docs/LIVE_PROFILE_EDIT.md) rather than a new
   // editor. That plan's section 10/decision 4 allows editing in RUNNING,
   // PAUSED, *and* FAULTED alike (a fault freezes heat, not the schedule) --
   // deliberately not DONE, where there is no live run left to adjust.
   var EDITABLE_STATES = { running: true, paused: true, faulted: true };
+
+  // L-1: POST a firing control and tell the operator when it did not go through.
+  // AuthCancelled (declined sign-in) stays quiet; every other failure is shown.
+  function kcExecPost(path, btn, what) {
+    return fetch(path, { method: 'POST' }).then(function (r) {
+      btn.disabled = false;
+      if (!r.ok) window.kcAlert(what + ' was NOT sent (HTTP ' + r.status + '). Check the board.');
+    }).catch(function (err) {
+      btn.disabled = false;
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+      window.kcAlert(what + ' was NOT sent (network error). Check the board.');
+    });
+  }
 
   var stopBarEl = null;
   var pauseResumeBtnEl = null;
@@ -1862,9 +1983,7 @@
     pauseBtn.addEventListener('click', function () {
       var action = pauseBtn.textContent === 'Resume' ? 'resume' : 'pause';
       pauseBtn.disabled = true;
-      fetch('/api/profile_exec/' + action, { method: 'POST' })
-        .then(function () { pauseBtn.disabled = false; })
-        .catch(function () { pauseBtn.disabled = false; });
+      kcExecPost('/api/profile_exec/' + action, pauseBtn, action === 'resume' ? 'Resume' : 'Pause');
     });
     pauseResumeBtnEl = pauseBtn;
 
@@ -1877,9 +1996,7 @@
       kcConfirm('Stop this firing now? This aborts the run in progress and cannot be resumed.').then(function (ok) {
         if (!ok) return;
         btn.disabled = true;
-        fetch('/api/profile_exec/stop', { method: 'POST' })
-          .then(function () { btn.disabled = false; })
-          .catch(function () { btn.disabled = false; });
+        kcExecPost('/api/profile_exec/stop', btn, 'Stop');
       });
     });
 
@@ -1904,9 +2021,7 @@
       kcConfirm(msg).then(function (ok) {
         if (!ok) return;
         ackBtn.disabled = true;
-        fetch('/api/profile_exec/stop', { method: 'POST' })
-          .then(function () { ackBtn.disabled = false; })
-          .catch(function () { ackBtn.disabled = false; });
+        kcExecPost('/api/profile_exec/stop', ackBtn, 'Clear');
       });
     });
     ackBtnEl = ackBtn;

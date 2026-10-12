@@ -1,5 +1,5 @@
 #pragma once
-// firing_score.h -- ITER_TUNE_REDESIGN_PLAN.md sec 2.1-2.2, step 1.
+// firing_score.h -- ITER_TUNE_REDESIGN.md sec 2.1-2.2, step 1.
 //
 // Per-SEGMENT, per-zone tracking scoring. This replaces the whole-firing
 // normalized-IAE scalar the old iter_tune scored on, whose defect (plan

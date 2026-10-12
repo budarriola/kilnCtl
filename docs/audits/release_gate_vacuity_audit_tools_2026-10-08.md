@@ -1,6 +1,6 @@
 # Release gate vacuity audit: repo tooling checks, 2026-10-08
 
-Scope: `docs/RELEASE_HARDENING_PLAN.md` section 3 step 4, the non-firmware tools rows.
+Scope: `docs/RELEASE_HARDENING.md` section 3 step 4, the non-firmware tools rows.
 Method: `tools/negtest.ps1` applied the stated mutation in a throwaway worktree (baseline
 required green, real tree untouched). Every mutation went RED; no vacuous check was found.
 Three first-try mutations were wrong (word-boundary or wrong-file guards, GREEN by design)
@@ -17,12 +17,12 @@ Not covered here: `tools/PcTools/check_zones_per_zone_field_drift.ps1`, `tools/P
 | `tools/check_ct_cal_write_surface.ps1` | safety.py: reintroduced `def set_ct_cal(` | RED (CT_CAL WRITE SURFACE CHECK: FAILED) |
 | `tools/check_config_migration_steps.ps1` | zones_config_json.h: ZONES_CFG_VERSION 26 -> 27 with no step | RED (3 problems) |
 | `tools/check_disclosure_gate_call_sites.ps1` | wifi_provision_http.c and readiness_http.c: `may_disclose = true` (two mutations) | RED both |
-| `tools/check_doc_citations.ps1` | RELEASE_HARDENING_PLAN.md: added a citation to line 999999 of zones_config_json.h (past EOF) | RED (exit 1) |
+| `tools/check_doc_citations.ps1` | RELEASE_HARDENING.md: added a citation to line 999999 of zones_config_json.h (past EOF) | RED (exit 1) |
 | `tools/check_flash_partition_offset_guard.ps1` | mcp_server_flash.py: guard call result assignment replaced by None | RED (call site gone) |
 | `tools/check_host_embed_symbols_defined.ps1` | test_zones_http.c: removed tuning_recommendations_json_start definition | RED (HOST EMBED SYMBOLS CHECK FAILED) |
 | `tools/check_iter_tune_write_surface.ps1` | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both |
 | `tools/check_kiln_auth_config_isolation.ps1` | profile_executor.c: added identifier `web_auth` (a first try with web_auth_zz is GREEN by design, word-boundary match) | RED |
-| `tools/check_no_doubled_apostrophes.ps1` | RELEASE_HARDENING_PLAN.md: added `doesn''t` | RED (exit 1) |
+| `tools/check_no_doubled_apostrophes.ps1` | RELEASE_HARDENING.md: added `doesn''t` | RED (exit 1) |
 | `tools/check_nvs_write_guard_coverage.ps1` | kiln_cfg_store.c quarantine_clear: guard `if (caller_stack_is_external())` -> `if (0)` (a first try in relay_cycles.c persist_snapshot was GREEN: that function writes via cfg-fs, not NVS) | RED |
 | `tools/check_route_tier_coverage.ps1` | profile_executor.c: added `.uri = "/api/zz_new_route"` with no tier row | RED |
 | `tools/check_safety_trip_words_sync.ps1` | safety_page.html: S4 warn word text changed in the JS mirror | RED |

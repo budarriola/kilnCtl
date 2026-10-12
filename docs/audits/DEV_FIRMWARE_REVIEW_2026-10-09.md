@@ -139,6 +139,8 @@ zones, so a mismatch shows up as a profile-commit failure rather than a
 corrupt state. The name `backup_import_apply_locked` suggests a lock that does
 not exist. No lock is taken.
 
+**L6 resolved (commit titled "backup import L6"):** a backup import cannot change `thermo_count` (it restores per-zone tuning entries only, rejected when index >= live count), so the live count is right; comment added. Function renamed `backup_import_apply_two_pass` (it takes no lock).
+
 ## Checked and found clean
 
 - **4c1aebf1**: the header erase and `sha_start` moved into `flush_head()`

@@ -39,6 +39,7 @@ typedef struct httpd_req {
     // (httpd_sess_trigger_close() needs the owning handle, not just a
     // sockfd).
     httpd_handle_t handle;
+    char uri[256]; /* real httpd_req_t::uri (request-target incl. query); added for cfg_fs_format_http.c's ?force_healthy= parse */
 } httpd_req_t;
 
 #ifndef ESP_ERR_HTTPD_RESULT_TRUNC
@@ -54,6 +55,7 @@ typedef enum {
 typedef enum {
     HTTPD_400_BAD_REQUEST = 400,
     HTTPD_401_UNAUTHORIZED = 401, /* added for web_auth_login_http.c's host tests (Findings 4/5) */
+    HTTPD_408_REQ_TIMEOUT = 408, /* added for the overall upload deadline (ota_http_esp/pico) */
     HTTPD_403_FORBIDDEN = 403, /* added 2026-08-27 for ota_http.c's host tests */
     HTTPD_404_NOT_FOUND = 404, /* added 2026-09-27 for kiln_cfg_http.c's host tests (test_kiln_cfg_http.c) */
     HTTPD_500_INTERNAL_SERVER_ERROR = 500,
@@ -90,7 +92,9 @@ esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *valu
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len);
 esp_err_t httpd_resp_send_chunk(httpd_req_t *r, const char *buf, size_t buf_len);
 esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char *msg);
+esp_err_t httpd_resp_send_500(httpd_req_t *r);
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status);
+esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg);
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len);
 /* Added 2026-08-21 for zones_http.c's host test (test_zones_http.c) -- that
  * file's zones_post_handler() calls this on success. Declared here only;

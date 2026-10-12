@@ -1,7 +1,7 @@
 # Release-gate vacuity audit, 2026-09-17
 
 Continues the series started `docs/audits/release_gate_vacuity_audit_2026-09-16.md`,
-blocker 3 of `docs/RELEASE_HARDENING_PLAN.md`. This pass closes the one item
+blocker 3 of `docs/RELEASE_HARDENING.md`. This pass closes the one item
 explicitly carried forward, unexercised, across `...16e.md`, `...16f.md`, and
 `...16g.md`:
 
@@ -70,8 +70,8 @@ change the finding, which was that the restored file's hash matched its
 own pre-sabotage hash, not any particular fixed value. That refreshed
 citation is itself now superseded by a further unrelated edit, so it is
 refreshed again:
-blob:firmware/SaftyFW/src/tasks/link_frame.c`7bf1ad16` (citation refreshed
-2026-09-24).
+blob:firmware/SaftyFW/src/tasks/link_frame.c`e33e0f44` (citation refreshed
+2026-10-11 after a364d1703).
 
 **Forced full rebuild:** deleted `firmware/SaftyFW/build` entirely (not a
 reconfigure-in-place) and re-ran the check from scratch. **PASS**, exit 0,

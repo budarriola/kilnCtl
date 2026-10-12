@@ -250,6 +250,15 @@ static bool zone_sweep_shared_ch_for_zone(uint8_t zi, uint8_t *out_ch)
     return false;
 }
 
+/* L2 (UNCHECKED_PERSIST_RESULT_AUDIT): a failed ESP-side save of the CT
+ * provenance records is logged and surfaced as esp_persist_failed in the
+ * sweep status. The Pico values are unaffected. */
+static void zone_sweep_note_esp_persist_fail(const char *what)
+{
+    s_sweep.esp_persist_failed = true;
+    ESP_LOGE(ZONES_HTTP_TAG, "sweep: ESP-side %s failed to persist; provenance may be stale after reboot", what);
+}
+
 static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
 {
     (void)ctx;
@@ -262,7 +271,9 @@ static void zone_sweep_task_record_normal(void *ctx, uint8_t zi, float avg_a)
          * the right number for a zone whose current shares a CT. */
         return;
     }
-    zone_normals_set(zi, avg_a);
+    if (!zone_normals_set(zi, avg_a)) {
+        zone_sweep_note_esp_persist_fail("zone_normals_set");
+    }
 }
 
 /* ---- M12: the derived CT map, accumulated across one sweep run ------------
@@ -294,7 +305,7 @@ static struct {
      * path-specific masks (unresolved_zone_mask / summed_unmeasured_mask),
      * which between them cover the same ground but only one topology each. */
     uint8_t measured_zone_mask;
-    /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): every
+    /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION.md): every
      * zone's per-channel averages, kept because per_ch_avg_a is alive only
      * for the length of ONE zone_sweep_run_all_zones() iteration while the
      * verdict is only written once, after the whole run finishes. Held here
@@ -380,7 +391,9 @@ static void zone_sweep_task_record_ct_channels(void *ctx, uint8_t zi, uint8_t re
             float live_k_ct = 0.0f;
             (void)zone_cfg_committed_f32(ZONE_KCT_PARAM_ID(shared_ch), &live_k_ct);
             if (zone_sweep_summed_normal_a(with_on, s_ct_idle_a[shared_ch], live_k_ct, &normal_a)) {
-                zone_normals_set(zi, normal_a);
+                if (!zone_normals_set(zi, normal_a)) {
+                    zone_sweep_note_esp_persist_fail("zone_normals_set");
+                }
                 /* 2026-09-10 fix (finding A, s14_s15_ct_calibration_sweep
                  * audit): the shared channel absolutely DOES have a scale
                  * factor worth deriving in summed mode -- there is exactly
@@ -512,13 +525,16 @@ static bool zone_ct_map_committed_value(uint8_t ch, uint8_t *out)
 
 /* H3 fix (opus review, 2026-08-28): a SET_PARAM that fails PART WAY through
  * the three-channel push used to just `break`, which leaves the Pico's
- * link_task.c s_staged_config holding whatever channels DID stage. That
- * buffer is a persistent baseline -- seeded once from the committed record
- * and only re-seeded by a SUCCESSFUL COMMIT_CONFIG or a reboot
- * (link_task.c's s_staged_config_init, reset only at task start) -- so the
- * next unrelated COMMIT_CONFIG, e.g. the operator saving one field on the
- * commissioning page, would have carried this abandoned sweep's leftover
- * ct_channel_map[] into flash as though it had been commissioned.
+ * link_task.c staging area holding whatever channels DID stage. Those edits
+ * persist until a SUCCESSFUL COMMIT_CONFIG / APPLY_CONFIG_VOLATILE, a Pico
+ * reboot, or a new ESP session (KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 M3: the
+ * Pico discards staged edits when the ESP's PUSH_CONTEXT boot_id changes or
+ * PUSH_CONTEXT stops for its max age) -- so within this ESP boot, the next
+ * unrelated COMMIT_CONFIG, e.g. the operator saving one field on the
+ * commissioning page, would carry this abandoned sweep's leftover
+ * ct_channel_map[] into flash as though it had been commissioned. The
+ * Pico-side discard only covers the cross-boot case; this repair is still the
+ * only thing that covers the same-session one.
  *
  * The link protocol has no "discard staged config" command (uart_task_ids.h
  * enumerates every subcommand on this wire; SET_CONFIG/SET_CT_CAL/COMMIT are
@@ -715,7 +731,9 @@ static void zone_sweep_push_ct_channel_map(void)
         } else {
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
                 if ((s_ct_derive.derived_mask & (1u << c)) != 0) {
-                    zone_ct_map_set(c, s_ct_derive.zone_for_ch[c]);
+                    if (!zone_ct_map_set(c, s_ct_derive.zone_for_ch[c])) {
+                        zone_sweep_note_esp_persist_fail("zone_ct_map_set");
+                    }
                 }
             }
         }
@@ -1249,7 +1267,9 @@ static void zone_sweep_push_k_ct_v_per_a(void)
              * tests exercising a real derivation in isolation. */
             for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
                 if ((plan_mask & (1u << c)) != 0) {
-                    (void)zone_k_ct_set(c, k_new[c]);
+                    if (!zone_k_ct_set(c, k_new[c])) {
+ zone_sweep_note_esp_persist_fail("zone_k_ct_set");
+ }
                 }
             }
         }
@@ -1706,7 +1726,9 @@ static void zone_sweep_push_kct_and_inormal(void)
     } else {
         for (uint8_t c = 0; c < ZONE_CT_CHANNEL_COUNT; c++) {
             if (kct_plan_mask & (1u << c)) {
-                (void)zone_k_ct_set(c, k_new[c]);
+                if (!zone_k_ct_set(c, k_new[c])) {
+ zone_sweep_note_esp_persist_fail("zone_k_ct_set");
+ }
             }
         }
         bool esp_persist_ok = true;
@@ -1852,8 +1874,13 @@ static void zone_sweep_task(void *arg)
     };
 
     memset(&s_ct_derive, 0, sizeof(s_ct_derive));
-    zone_ct_map_clear(); /* a re-sweep must not leave a stale channel claim visible as current */
-    zone_k_ct_clear();   /* M12b: same reasoning, for the derived CT scale */
+    s_sweep.esp_persist_failed = false;
+    if (!zone_ct_map_clear()) { /* a re-sweep must not leave a stale channel claim visible as current */
+        zone_sweep_note_esp_persist_fail("zone_ct_map_clear");
+    }
+    if (!zone_k_ct_clear()) { /* M12b: same reasoning, for the derived CT scale */
+        zone_sweep_note_esp_persist_fail("zone_k_ct_clear");
+    }
 
     /* CT_COMMISSIONING_PLAN.md step 3 -- read fresh every run, never cached
      * across sweeps. zones_current_sweep_start() already refused to start
@@ -1936,7 +1963,7 @@ static void zone_sweep_task(void *arg)
          * ESP-local, no link traffic, runs after the push above purely to
          * keep every sweep-completion side effect together in one place. */
         zone_sweep_check_nameplate_all();
-        /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): last,
+        /* CT ATTRIBUTION (docs/CT_ATTRIBUTION_VERIFICATION.md): last,
          * and only on a run that completed every zone. It reads the derived
          * map, the conflict mask and the committed calibration that the two
          * pushes above have just finished writing, so it must run after
@@ -1983,7 +2010,7 @@ static void zone_sweep_task(void *arg)
 }
 
 /* ---- CT ATTRIBUTION VERIFICATION: the producer half -----------------------
- * docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md. The VERDICT is computed by the
+ * docs/CT_ATTRIBUTION_VERIFICATION.md. The VERDICT is computed by the
  * pure engine (zone_sweep_verify_ct_attribution(), zones_current_sweep_
  * engine.c); the STORE is dependency-free (ct_verify_store.c). This section
  * is the only place that knows both, and it lives here because gathering
@@ -2230,8 +2257,10 @@ static void zone_sweep_record_ct_attribution(void)
          * storing a value the validator would (correctly) throw away. */
         blob.zone[zi].responded_ch =
             (out.responded_ch < CT_VERIFY_CHANNELS) ? out.responded_ch : (uint8_t)CT_VERIFY_CHANNELS;
-        blob.zone[zi].measured_a = out.measured_a;
-        blob.zone[zi].threshold_a = out.threshold_a;
+        /* The engine reports "nothing resolved" as NaN; ct_verify_blob_validate() rejects non-finite floats
+         * (K10-12), so store 0.0 -- the verdict/reason already say no measurement was decided. */
+        blob.zone[zi].measured_a = isfinite(out.measured_a) ? out.measured_a : 0.0f;
+        blob.zone[zi].threshold_a = isfinite(out.threshold_a) ? out.threshold_a : 0.0f;
 
         ESP_LOGI(ZONES_HTTP_TAG, "zone %u CT attribution: %s (%s)", zi, zone_ct_verdict_str(out.verdict),
                  zone_ct_verify_reason_str(out.reason));
@@ -2249,7 +2278,7 @@ static void zone_sweep_record_ct_attribution(void)
     if (err != ESP_OK) {
         ESP_LOGE(ZONES_HTTP_TAG,
                  "CT attribution verdict NOT persisted (err %d: cfg file write failed or cfg not mounted, "
-                 "see POST /api/cfgfs/format_confirm) -- it holds for this boot only", (int)err);
+                 "see POST /api/cfgfs/format_confirm) -- the verdict is discarded, not served", (int)err);
     }
 }
 
@@ -2273,7 +2302,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
 
     /* Only state (RUNNING/PAUSED) is needed here -- profile_executor_get_
      * active_id() is the narrow sibling of profile_executor_get_status()
-     * profile_executor.h recommends for exactly this, avoiding a 1464-byte
+     * profile_executor.h recommends for exactly this, avoiding a 1512-byte
      * profile_exec_status_t stack local. This runs on the httpd task
      * (zones_http.c's sweep_start_post_handler()), same 8192-byte stack as
      * every other handler in this file's audit trail. */
@@ -2421,6 +2450,17 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
         return ZONE_SWEEP_REFUSE_RESTORE_IN_FLIGHT;
     }
 
+    /* Factory reset in flight (HTTP audit L37 follow-up, MED-1): same paired shape as the restore
+     * re-read above. factory_reset.c's execute_scope() sets relay_authority's reset mark and THEN reads
+     * relay_authority_heat_sweep_active(); this side published the sweep claim above and THEN reads the
+     * mark. Both under relay_authority's leaf spinlock, so at least one side refuses: a sweep can never
+     * start (and later write zone normals) against storage a reset is erasing. */
+    if (relay_authority_reset_in_flight()) {
+        s_sweep.active = false;
+        relay_authority_heat_sweep_claim_end();
+        return ZONE_SWEEP_REFUSE_FACTORY_RESET;
+    }
+
     /* Single-flight against every other Pico safety-config writer
      * (docs/HTTP_POST_OWNER_MIGRATION.md A2 gap): an http_async_job
      * (ct_auto_zero/bench_preset/backup_import), a kiln config swap, or the
@@ -2460,7 +2500,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
 
     dram_watch_log_task("zone_sweep", "before-create");
     BaseType_t created = dram_watch_task_after(
-        "zone_sweep", xTaskCreate(zone_sweep_task, "zone_sweep", 4096, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task));
+        "zone_sweep", xTaskCreate(zone_sweep_task, "zone_sweep", 5120, NULL, tskIDLE_PRIORITY + 2, &s_sweep.task));
     /* Registered unconditionally, success or not, same as recovery_exit/
      * ota_pico_rollback/ota_rollback_reboot (ota_http_*.c) -- stack_margin_
      * register() reads *task_handle_slot fresh at report time, so a creation
@@ -2517,6 +2557,7 @@ void zones_current_sweep_get_status(zone_sweep_status_t *out)
     strncpy(out->i_normal_reason, (const char *)s_sweep.i_normal_reason, sizeof(out->i_normal_reason) - 1);
     out->i_normal_reason[sizeof(out->i_normal_reason) - 1] = '\0';
     out->summed_unmeasured_mask = s_sweep.summed_unmeasured_mask;
+    out->esp_persist_failed = s_sweep.esp_persist_failed;
     out->nameplate_mismatch_mask = s_sweep.nameplate_mismatch_mask;
     strncpy(out->nameplate_reason, (const char *)s_sweep.nameplate_reason, sizeof(out->nameplate_reason) - 1);
     out->nameplate_reason[sizeof(out->nameplate_reason) - 1] = '\0';

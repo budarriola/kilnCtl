@@ -1,5 +1,5 @@
 #pragma once
-// firing_compare.h -- ITER_TUNE_REDESIGN_PLAN.md sec 2.3 + sec 3, step 2.
+// firing_compare.h -- ITER_TUNE_REDESIGN.md sec 2.3 + sec 3, step 2.
 //
 // Matched-pair comparator and the accept/reject rule. Takes two
 // firing_score_set_t (a BASELINE firing and a TRIAL firing, which may be

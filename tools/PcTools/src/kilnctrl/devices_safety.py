@@ -580,6 +580,7 @@ SAFETY_TRIP_NAMES: "dict[int, tuple[str, str]]" = {
     1: ("SAFETY_TRIP_OVERTEMP", "S1"),
     2: ("SAFETY_TRIP_OVER_SETPOINT", "S2"),
     3: ("SAFETY_TRIP_LOAD_STUCK_ON", "S3"),
+    4: ("SAFETY_TRIP_TEST", "-"),
     5: ("SAFETY_TRIP_SENSOR_INVALID", "S5"),
     6: ("SAFETY_TRIP_MAIN_FAULT", "S6a"),
     7: ("SAFETY_TRIP_LINK_DEAD", "S6b"),

@@ -177,7 +177,7 @@ class RunnerLifecycleTest(unittest.TestCase):
 
     def test_readiness_blocked_fails_preflight(self):
         self.cp_report = _FakeCapabilityPreflightReport(
-            ok=False, readiness_blocked=(("estop_verified", "E-stop", "not verified"),))
+            ok=False, readiness_blocked=(("safety_trip", "Safety trip", "latched"),))
         self.ctx["capability_preflight_run"] = lambda preset, host, **kw: self.cp_report
         runner = BenchTestRunner(self.ctx, logs_root=self.tmpdir)
         ok, reason, before = runner.preflight()

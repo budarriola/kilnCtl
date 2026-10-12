@@ -95,6 +95,18 @@ static void test_s9_contactor_welded_falls_back_on_nan_current(void)
                "S9 fallback text never contains a literal nan/NAN");
 }
 
+static void test_reason4_test_trip_words(void)
+{
+    // SAFETY_TRIP_TEST (TEST_TRIP_PLAN.md): an operator-requested trip must read as one, never as a guard fault.
+    TEST_CHECK(strstr(safety_trip_words_short(4), "TEST") != NULL, "reason 4 short label says TEST");
+    TEST_CHECK(strstr(safety_trip_words_cause(4), "test trip") != NULL, "reason 4 cause says test trip");
+    TEST_CHECK(strstr(safety_trip_words_cause(4), "No guard detected a fault") != NULL,
+               "reason 4 cause says no guard fired");
+    TEST_CHECK(strstr(safety_trip_words_remedy(4), "Clear the trip") != NULL, "reason 4 has its own remedy");
+    TEST_CHECK(strcmp(safety_trip_words_cause(4), safety_trip_words_cause(0)) != 0,
+               "reason 4 is not the unknown-reason fallback");
+}
+
 static void test_s6b_link_dead_reports_elapsed_time(void)
 {
     char buf[200];
@@ -212,6 +224,7 @@ int main(void)
     test_s3_load_stuck_on_falls_back_on_nan_current();
     test_s9_contactor_welded_reports_current();
     test_s9_contactor_welded_falls_back_on_nan_current();
+    test_reason4_test_trip_words();
     test_s6b_link_dead_reports_elapsed_time();
     test_s6b_link_dead_falls_back_on_sentinel();
     test_s12_enclosure_never_claims_wrong_sensor();

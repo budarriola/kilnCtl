@@ -239,7 +239,16 @@ def post_commissioning(host: str, body: str, timeout: float = SAFETY_CFG_HTTP_TI
                                   status, detail) from exc
     except urllib.error.URLError as exc:
         _, detail = _http_error_detail(exc)
+        if isinstance(getattr(exc, "reason", None), TimeoutError):
+            raise SafetyCfgHttpError(f"POST {_API_PATH} timed out -- the Pico may have APPLIED it; state UNKNOWN, "
+                                      f"read GET {_API_PATH} back before retrying") from exc
         raise SafetyCfgHttpError(f"POST {_API_PATH} unreachable: {detail}") from exc
+    except TimeoutError as exc:
+        raise SafetyCfgHttpError(f"POST {_API_PATH} timed out -- the Pico may have APPLIED it; state UNKNOWN, "
+                                  f"read GET {_API_PATH} back before retrying") from exc
+    except OSError as exc:  # reset / RemoteDisconnected mid-response: POST was sent
+        raise SafetyCfgHttpError(f"POST {_API_PATH} connection failed mid-response ({exc}) -- the Pico may have "
+                                  f"APPLIED it; state UNKNOWN, read GET {_API_PATH} back before retrying") from exc
     try:
         return json.loads(text)
     except Exception as exc:
@@ -486,7 +495,13 @@ def apply_safety_fields(host: str, fields: "dict[str, Any]",
     if not verify:
         return SafetyApplyResult(ok=bool(response.get("ok")), post_reason=reason)
 
-    after = get_commissioning(host, timeout)
+    try:
+        after = get_commissioning(host, timeout)
+    except SafetyCfgHttpError as exc:
+        raise SafetyCfgHttpError(
+            f"POST {_API_PATH} answered ok={bool(response.get('ok'))}, but the confirming read-back failed: "
+            f"{exc} -- state UNKNOWN, the Pico may have APPLIED the fields; re-read before retrying",
+            getattr(exc, "status", None), getattr(exc, "detail", "")) from exc
     confirmed, mismatches = verify_fields(after, fields)
     ok = bool(response.get("ok")) and not mismatches
     return SafetyApplyResult(

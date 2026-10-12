@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "danger_mode.h"
 #include "dashboard_json.h"
 #include "http_form.h"
 #include "profile_executor.h"
@@ -198,6 +199,34 @@ esp_err_t autotune_matrix_get_handler(httpd_req_t *req)
     return ret;
 }
 
+/* JSON refusal bodies of autotune_start_post_handler() live in noinline
+ * helpers so their snprintf buffers are not part of the handler's own frame
+ * on the shared 8 KB httpd stack (check_httpd_task_stack_budget). They run only
+ * on refusal paths, never under autotune_engine_run*(). */
+static __attribute__((noinline)) esp_err_t autotune_send_gate_refusal(httpd_req_t *req, const char *item_key,
+                                                                       const char *msg)
+{
+    char json[192 + 96];
+    int n = snprintf(json, sizeof(json),
+                     "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
+                     item_key ? item_key : "", msg);
+    httpd_resp_set_status(req, "409 Conflict");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
+static __attribute__((noinline)) esp_err_t autotune_send_run_failure(httpd_req_t *req, const char *err_msg)
+{
+    /* Longest readiness_gate refusal text is 167 chars (+NUL); sized so none is cut. */
+    char json[320];
+    char err_escaped[256];
+    json_escape(err_msg, err_escaped, sizeof(err_escaped));
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
+    httpd_resp_set_status(req, "400 Bad Request");
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 esp_err_t autotune_start_post_handler(httpd_req_t *req)
 {
     /* system_mode_gate (slice 2): same explicit recovery-mode enforcement as
@@ -214,15 +243,10 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     sys_mode_snapshot_t mode_snap;
     memset(&mode_snap, 0, sizeof(mode_snap));
     mode_snap.recovery_mode = facts.recovery_mode;
+    mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review R1/R3 */
     if (system_mode_gate_check(SYS_ACTION_START_AUTOTUNE, &mode_snap, recovery_err, sizeof(recovery_err))) {
-        ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode)");
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        ESP_LOGW(DASH_TAG, "autotune/start refused by the system mode gate (recovery mode or danger mode)");
+        return autotune_send_gate_refusal(req, READINESS_GATE_KEY_RECOVERY_MODE, recovery_err);
     }
 
     /* THE READINESS INTERLOCK (readiness_gate.h), extended to autotune the
@@ -263,13 +287,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
          * the same reason as there: readiness_gate_evaluate()'s messages are
          * compile-time constants proven free of '"'/'\\'
          * (test_readiness_gate.c's test_messages_are_json_safe()). */
-        char json[sizeof(recovery_err) + 96];
-        int n = snprintf(json, sizeof(json),
-                         "{\"ok\":false,\"readiness_item\":\"%s\",\"error\":\"%s\"}",
-                         item_key ? item_key : "", recovery_err);
-        httpd_resp_set_status(req, "409 Conflict");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return autotune_send_gate_refusal(req, item_key, recovery_err);
     }
 
     /* Raised from 64 when the relay method arrived: its form carries
@@ -294,10 +312,18 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     int zone_len = http_form_find_field(body, "zone", zone_val, sizeof(zone_val));
     int duty_len = http_form_find_field(body, "step_duty", duty_val, sizeof(duty_val));
     int method_len = http_form_find_field(body, "method", method_val, sizeof(method_val));
-    long zone = (zone_len > 0) ? strtol(zone_val, NULL, 10) : -1;
-    float step_duty = (duty_len > 0) ? strtof(duty_val, NULL) : 0.5f;
-    if (zone_len <= 0 || zone < 0 || zone > 255) {
+    long zone = -1;
+    float step_duty = 0.5f;
+    if (zone_len <= 0 || !http_form_parse_long(zone_val, zone_len, 0, 255, &zone)) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "zone missing or invalid");
+        return ESP_OK;
+    }
+    if (duty_len == -2 || duty_len == 0 || (duty_len > 0 && !http_form_parse_float(duty_val, duty_len, &step_duty))) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "step_duty invalid");
+        return ESP_OK;
+    }
+    if (method_len == -2) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "method invalid");
         return ESP_OK;
     }
 
@@ -311,7 +337,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
      * engine's own refusals do, rather than httpd_resp_send_err()'s HTML: the
      * page parses this response as JSON and shows `error` verbatim, so an
      * error sent the other way would reach the operator as a silent failure. */
-    char err_msg[128] = "";
+    char err_msg[READINESS_GATE_MSG_CAP] = "";
     bool params_ok = true;
     bool started = false;
     bool want_relay = false;
@@ -330,9 +356,14 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
         int h_len = http_form_find_field(body, "relay_h", h_val, sizeof(h_val));
         int rule_len = http_form_find_field(body, "rule", rule_val, sizeof(rule_val));
         /* 0 for d/h means "engine default" -- see autotune_engine.h. */
-        float setpoint_c = (sp_len > 0) ? strtof(sp_val, NULL) : 0.0f;
-        float relay_d = (d_len > 0) ? strtof(d_val, NULL) : 0.0f;
-        float relay_h = (h_len > 0) ? strtof(h_val, NULL) : 0.0f;
+        float setpoint_c = 0.0f, relay_d = 0.0f, relay_h = 0.0f;
+        if (sp_len == -2 || sp_len == 0 || (sp_len > 0 && !http_form_parse_float(sp_val, sp_len, &setpoint_c)) ||
+            d_len == -2 || d_len == 0 || (d_len > 0 && !http_form_parse_float(d_val, d_len, &relay_d)) ||
+            h_len == -2 || h_len == 0 || (h_len > 0 && !http_form_parse_float(h_val, h_len, &relay_h)) ||
+            rule_len == -2) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "setpoint_c/relay_d/relay_h/rule invalid");
+            return ESP_OK;
+        }
         /* Tyreus-Luyben is the default rule, not Ziegler-Nichols: ZN targets
          * quarter-amplitude decay, i.e. it is designed to leave the loop
          * oscillating (pid_autotune.h). TL is roughly half the gain with a far
@@ -367,6 +398,10 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
          * accepted -- see PID_EXPANSION_PLAN.md Phase 1 and §2a for why
          * Cohen-Coon must stay opt-in, never the default, on a kiln. */
         int step_rule_len = http_form_find_field(body, "rule", rule_val, sizeof(rule_val));
+        if (step_rule_len == -2) {
+            params_ok = false;
+            snprintf(err_msg, sizeof(err_msg), "rule invalid");
+        }
         autotune_rule_t step_rule = AUTOTUNE_RULE_SIMC;
         if (step_rule_len > 0 && strcmp(rule_val, "cohen-coon") == 0) {
             step_rule = AUTOTUNE_RULE_COHEN_COON;
@@ -381,13 +416,7 @@ esp_err_t autotune_start_post_handler(httpd_req_t *req)
     }
 
     if (!started) {
-        char json[192];
-        char err_escaped[128 * 2 + 1];
-        json_escape(err_msg, err_escaped, sizeof(err_escaped));
-        int n = snprintf(json, sizeof(json), "{\"ok\":false,\"error\":\"%s\"}", err_escaped);
-        httpd_resp_set_status(req, "400 Bad Request");
-        httpd_resp_set_type(req, "application/json");
-        return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+        return autotune_send_run_failure(req, err_msg);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -483,6 +512,7 @@ esp_err_t autotune_accept_post_handler(httpd_req_t *req)
     case AUTOTUNE_CEILING_REJECTED_OUT_OF_RANGE: outcome_name = "REJECTED_OUT_OF_RANGE"; break;
     case AUTOTUNE_CEILING_SKIPPED_READ_FAILED: outcome_name = "SKIPPED_READ_FAILED"; break;
     case AUTOTUNE_CEILING_FAILED_TO_PERSIST: outcome_name = "FAILED_TO_PERSIST"; break;
+    case AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN: outcome_name = "REFUSED_NOT_WRITTEN"; break;
     }
     /* Sized to the longest actual response rather than a round number (this
      * task stack has been within 64 B of overflow before -- see

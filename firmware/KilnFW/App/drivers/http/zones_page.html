@@ -1044,7 +1044,7 @@ function drawKilnGraphic() {
   } catch (err) {
     if (window.console) console.error('kiln graphic render failed', err);
     el.innerHTML = kgPanel('this page failed to draw it (' +
-      (err && err.message ? err.message : String(err)) +
+      kgEsc(err && err.message ? err.message : String(err)) +
       '). Your stored configuration has NOT been changed.');
   }
 }
@@ -1545,7 +1545,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '</details>' +
     '</details>';
 
-  /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
+  /* docs/ON_OFF_ZONE.md step 6: zone_type (ZONES_CFG_VERSION 22->23,
    * zone_cfg_t::zone_type/failsafe_state/hyst_c/min_on_s/min_off_s -- storage
    * landed in step 1, unused by any consumer until this pass). Requirement 2
    * ("make the consequences visible") is met by onoffWarnHtml below, which
@@ -2102,7 +2102,7 @@ function applyAllGroupFrames() {
   for (var k = 0; k < thermoCount; k++) applyGroupFrames(k);
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md step 6: shows/hides the same .heaterOnly/
+/* docs/ON_OFF_ZONE.md step 6: shows/hides the same .heaterOnly/
  * .onoffPanel/.onoffWarn elements zoneBlock() sets an initial inline style
  * for at render time -- kept as ONE function so "what a live edit does" and
  * "what a fresh load shows" cannot drift apart (the exact class of bug
@@ -2141,7 +2141,7 @@ document.getElementById('zones').addEventListener('change', function (e) {
   if (e.target.classList.contains('mode')) updateZonePanel(e.target.closest('.zone'));
   if (e.target.classList.contains('zonetype')) toggleZoneTypeUi(e.target.closest('.zone'));
   if (e.target.classList.contains('failsafestate')) {
-    /* Owner decision (ON_OFF_ZONE_PLAN.md sec 5/owner decisions): fail-safe
+    /* Owner decision (ON_OFF_ZONE.md sec 5/owner decisions): fail-safe
      * ON is confirm-gated because it energises a coil when things go wrong.
      * Revert to OFF if the operator declines -- this must be an actual
      * block, not a cosmetic warning, so a negative test removing this
@@ -2451,6 +2451,7 @@ function renderCtWarnings(ctWarnMask, zones) {
 }
 
 var sweepPollTimer = null;
+var sweepLastRunning = false; /* L-3: last known state, so a dropped poll keeps polling */
 
 // ROADMAP.md "Visually simplify the Thermocouples & Zones web page",
 // decision (a): each gate toggles a section's wrapper div and its paired
@@ -2556,6 +2557,7 @@ function renderSweepStatus(st) {
     if (st.nameplate_reason) text += ' (' + st.nameplate_reason + ')';
   }
   msg.textContent = text;
+  sweepLastRunning = !!running;
   if (running && !sweepPollTimer) {
     sweepPollTimer = setTimeout(pollSweepStatus, 1000);
   } else if (!running && sweepPollTimer) {
@@ -2563,15 +2565,20 @@ function renderSweepStatus(st) {
     sweepPollTimer = null;
     /* Sweep just finished -- reload the config so the freshly measured
        normal_current_a/measured fields (and any resulting ct_warn_mask
-       change) show up without a manual page refresh. */
-    loadCurrent();
+       change) show up without a manual page refresh -- unless the operator
+       has unsaved edits in the form, which a silent reload would discard. */
+    reloadUnlessDirty('The current sweep finished');
   }
 }
 
 function pollSweepStatus() {
   sweepPollTimer = null;
   fetch('/api/zones/current_sweep/status').then(function (r) { return r.json(); }).then(renderSweepStatus)
-    .catch(function () { /* transient -- next poll (or the next page load) will retry */ });
+    .catch(function () {
+      /* L-3: one dropped request must not freeze the status at "running": keep polling while the
+         last known state was running (renderSweepStatus clears the timer once it is not). */
+      if (sweepLastRunning && !sweepPollTimer) sweepPollTimer = setTimeout(pollSweepStatus, 3000);
+    });
 }
 
 document.getElementById('sweepStartBtn').addEventListener('click', function () {
@@ -2587,10 +2594,46 @@ document.getElementById('sweepStartBtn').addEventListener('click', function () {
   });
 });
 document.getElementById('sweepAbortBtn').addEventListener('click', function () {
-  fetch('/api/zones/current_sweep/abort', { method: 'POST' });
+  var st = document.getElementById('sweepStatus');
+  fetch('/api/zones/current_sweep/abort', { method: 'POST' }).then(function (r) {
+    if (!r.ok) st.textContent = 'Abort was NOT accepted (HTTP ' + r.status + '). Check the board.';
+    else pollSweepStatus();
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+    st.textContent = 'Abort was NOT sent (network error). Check the board.';
+  });
 });
 pollSweepStatus(); /* pick up a sweep already in progress from a previous page load */
 
+/* Unsaved-edit tracking (web batch W5): sweep completion and autotune Accept reload the
+   * form from the board, which silently discarded whatever the operator had typed. Any
+   * input/change inside the form sets the flag; a successful render of board data clears it. */
+var zonesFormDirty = false;
+var zonesEditSeq = 0; // a save clears the guard / re-renders only if nothing was typed after it was sent
+function markZonesFormDirty() { zonesFormDirty = true; zonesEditSeq++; }
+function reloadUnlessDirty(what) {
+  if (!zonesFormDirty) { loadCurrent(); return true; }
+  showDirtyReloadNotice(document.getElementById('msg'), what);
+  return false;
+}
+function showDirtyReloadNotice(msgEl, what) {
+  msgEl.textContent = what + ', but the form was NOT reloaded because it has unsaved edits. ' +
+    'The board now holds newer values than the form shows: Saving as-is would overwrite them with ' +
+    'the stale ones. ';
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = 'Reload from board (discards your edits)';
+  b.addEventListener('click', function () { loadCurrent(); });
+  msgEl.appendChild(b);
+}
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): reuses zonesFormDirty, which only
+// real input/change events set and a render from board data or a save clears.
+window.addEventListener('beforeunload', function (e) {
+  if (!zonesFormDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
 function loadCurrent() {
   /* The fetch/parse step and the render step are kept in SEPARATE catch
      scopes on purpose. They used to share one .catch(), which meant any
@@ -2613,6 +2656,7 @@ function loadCurrent() {
   }).then(function (data) {
     try {
       current = data;
+      zonesFormDirty = false;
       document.getElementById('thermoCount').value = data.thermo_count;
       document.getElementById('relayCount').value = data.relay_count;
       document.getElementById('maxSimultaneous').value = data.max_simultaneous_relays || 0;
@@ -2651,8 +2695,82 @@ function loadCurrent() {
 document.getElementById('thermoCount').addEventListener('change', renderZones);
 document.getElementById('relayCount').addEventListener('change', renderZones);
 
+/* Optional model/tuning fields: a blank value ("z0_driftperiod=") is "present" and used to fail the
+   firmware's range parse with a misleading 400, so a blank optional field is left out of the POST.
+   An omitted field is NOT generally "keep the stored value" (zones_post_apply_body starts from a
+   memset tmp); only the guard thresholds and xzone are keep-stored on omit AND blank in
+   zones_http_post_parse.c. The 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
+   refused client-side when blank (blankGuardKeys), never dropped, so a cleared field is shown to
+   the operator and can never silently disable a thermal guard. */
+var ZONE_GUARD_BLANK_RE = /^z\d+_(xzone|wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
+function blankGuardKeys(params) {
+  return params.filter(function (p) { return ZONE_GUARD_BLANK_RE.test(p); })
+    .map(function (p) { return p.slice(0, p.indexOf('=')); });
+}
+/* Operator-facing text for the blank-guard refusal (dev web review LOW-2): the page's own
+   labels and 1-based zone numbers, never wire keys. isHidden(zoneIdx0, suffix) lets the caller
+   skip a field the operator cannot see (heater-only rows of an on/off zone): a blank there is
+   dropped by omitBlankOptionalParams (stored value kept), not refused. */
+var ZONE_GUARD_LABELS = {
+  wrongdirwindow: 'Wrong-direction window', wrongdirrate: 'Wrong-direction rate',
+  offsettle: 'Runaway off-settle', runawayrate: 'Runaway rate', runawaymargin: 'Runaway margin',
+  driftperiod: 'Drift period', debounce: 'Sensor debounce', frozenwindow: 'Frozen-sensor window',
+  xzone: 'Cross-zone limit'
+};
+function blankGuardLabels(params, isHidden) {
+  var out = [];
+  blankGuardKeys(params).forEach(function (k) {
+    var m = /^z(\d+)_(.+)$/.exec(k);
+    if (!m || !ZONE_GUARD_LABELS[m[2]]) return;
+    var zi = parseInt(m[1], 10);
+    if (isHidden && isHidden(zi, m[2])) return;
+    out.push('Zone ' + (zi + 1) + ' ' + ZONE_GUARD_LABELS[m[2]]);
+  });
+  return out;
+}
+var ZONE_GUARD_INPUT_CLASS = {
+  wrongdirwindow: 'wdwindow', wrongdirrate: 'wdrate', offsettle: 'offsettle', runawayrate: 'runrate',
+  runawaymargin: 'runmargin', driftperiod: 'driftperiod', debounce: 'debounce', frozenwindow: 'frozenwindow'
+};
+function guardFieldHidden(zi, suffix) {
+  var zdiv = document.querySelector('#zones .zone[data-index="' + zi + '"]');
+  var el = zdiv && zdiv.querySelector('.' + ZONE_GUARD_INPUT_CLASS[suffix]);
+  var wrap = el && el.closest('.heaterOnly');
+  return !!(wrap && wrap.style.display === 'none');
+}
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+function omitBlankOptionalParams(params) {
+  return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
+}
+/* 30 s save timeout (dev web review LOW-5): the result is UNKNOWN. The form is left exactly as
+   the operator typed it; an explicit button reloads from the board (discarding the edits). */
+function showSaveTimeoutNotice(msgEl) {
+  msgEl.textContent = 'Save result unknown: no answer from the board after 30 s, so the save may or ' +
+    'may not have been applied. Your edits are still in the form. ';
+  var b = document.createElement('button');
+  b.type = 'button';
+  b.textContent = 'Reload from board (discards your edits)';
+  b.addEventListener('click', function () { loadCurrent(); });
+  msgEl.appendChild(b);
+}
+/* The abort may fire after the POST reached the board, so the save may or may not have
+   landed. Keep the operator's unsaved edits (dev web review LOW-5): say the result is
+   unknown and offer an explicit reload, never an automatic one. Returns true when handled. */
+function handleSaveAbort(e, msgEl) {
+  if (!(e && e.name === 'AbortError')) return false;
+  showSaveTimeoutNotice(msgEl);
+  return true;
+}
+['zones', 'relayNames', 'thermoCount', 'relayCount', 'maxSimultaneous', 'continueOnZoneTrip'].forEach(function (id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('input', markZonesFormDirty);
+  el.addEventListener('change', markZonesFormDirty);
+});
 document.getElementById('saveBtn').addEventListener('click', function () {
   var msg = document.getElementById('msg');
+  var saveBtnEl = document.getElementById('saveBtn');
+  if (saveBtnEl.disabled) return;
   var thermoCount = parseInt(document.getElementById('thermoCount').value, 10) || 0;
   var relayCount = parseInt(document.getElementById('relayCount').value, 10) || 0;
   var maxSimultaneous = parseInt(document.getElementById('maxSimultaneous').value, 10) || 0;
@@ -2719,7 +2837,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_thermo_mask=' + thermoMask);
     params.push('z' + i + '_ct_mask=' + ctMask);
 
-    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+    /* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/
        min_on_s/min_off_s are TOPOLOGY/device properties, same as relay_type
        just above -- never part of any inheritance group, always this zone's
        own div. */
@@ -2893,10 +3011,41 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     var tval = div.querySelector('.relaytypeinput').value;
     params.push('relay' + (r + 1) + '_type=' + encodeURIComponent(tval));
   });
+  var blankGuards = blankGuardLabels(params, guardFieldHidden);
+  if (blankGuards.length) {
+    msg.textContent = 'Not saved: guard threshold field(s) are blank or not a number (' +
+      blankGuards.join('; ') + '). Enter a value for each, then save again.';
+    return;
+  }
   msg.textContent = 'Saving…';
+  var savedZonesEditSeq = zonesEditSeq;
+  saveBtnEl.disabled = true;
+  params = omitBlankOptionalParams(params);
+  /* WEB_UI_JS_AUDIT M-1: refuse (409) if the zones config changed elsewhere since this page loaded it. */
+  if (current && current.generation !== undefined && current.generation !== null) {
+    params.push('expected_generation=' + current.generation);
+  }
+  /* A stalled connection must not leave Save disabled until the browser gives up. */
+  var saveTimer = null;
+  /* Arms a fresh 30 s timer + signal. app.js's fetch wrapper clears the timer while its login
+     modal is open (__kcOnAuthPrompt) and re-arms it for the post-login retry (__kcAuthSignal),
+     so time spent typing a password never counts against the board (dev web review LOW-1). */
+  function armSaveTimer() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    if (typeof AbortController !== 'function') return undefined;
+    var ac = new AbortController();
+    saveTimer = setTimeout(function () { ac.abort(); }, 30000);
+    return ac.signal;
+  }
   fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
+    signal: armSaveTimer(),
+    __kcOnAuthPrompt: function () { if (saveTimer) clearTimeout(saveTimer); saveTimer = null; },
+    __kcAuthSignal: armSaveTimer,
   }).then(function (r) {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveBtnEl.disabled = false;
     if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
     /* 3.5: an inheriting zone was just re-resolved from its source above,
        whether or not that source's own values changed this edit -- say so,
@@ -2906,8 +3055,17 @@ document.getElementById('saveBtn').addEventListener('click', function () {
       ? ' Also updated zone' + (dependents.length > 1 ? 's' : '') + ' ' + dependents.join(', ') +
         ' from ' + (dependents.length > 1 ? 'their' : 'its') + ' settings source.'
       : '');
+    if (zonesEditSeq !== savedZonesEditSeq) {
+      /* Typed while the save was in flight: a re-render would overwrite it. Keep it, keep the guard. */
+      msg.textContent += ' You made further edits while saving -- they are not saved yet.';
+      return;
+    }
+    zonesFormDirty = false;
     loadCurrent();
   }).catch(function (e) {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveBtnEl.disabled = false;
+    if (handleSaveAbort(e, msg)) return;
     /* POST /api/zones's safety-ceiling-raise refusal (owner request
        2026-09-10) answers 409 with a JSON body ({"ok":false,"reason":...})
        rather than the plain-text bodies most other refusals here use --
@@ -2918,7 +3076,14 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     try {
       var parsed = JSON.parse(text);
       if (parsed && parsed.reason) text = parsed.reason;
+      /* WEB_UI_JS_AUDIT M-1: the board refused because the config changed since this page loaded. */
+      if (parsed && parsed.error === 'zones_config_stale') {
+        text = 'the zone settings changed elsewhere (autotune, another page or a tool) since this page loaded. ' +
+          'Nothing was saved. Reload the page and redo your edit.';
+      }
     } catch (parseErr) { /* not JSON -- show as-is */ }
+    /* LOW-5: a bad_host / cross_origin refusal reads as guidance, not raw {"error":"bad_host"}. */
+    text = (window.kcHostRefusalFromText && window.kcHostRefusalFromText(e.message)) || text;
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
     msg.textContent = 'Save failed: ' + text;
   });
@@ -3151,7 +3316,7 @@ function populateAutotuneZones() {
   var prev = sel.value;
   sel.innerHTML = '';
   for (var i = 0; i < thermoCount; i++) {
-    /* docs/ON_OFF_ZONE_PLAN.md sec 1: "an on/off zone must never be excited
+    /* docs/ON_OFF_ZONE.md sec 1: "an on/off zone must never be excited
      * as the perturbing zone nor fitted as the responding zone" -- excluded
      * from the offer entirely rather than relying on the firmware's own
      * prestart refusal to be the only thing stopping an operator from
@@ -3214,8 +3379,8 @@ function pollAutotune() {
       refusalEl.textContent = '';
       refusalEl.style.display = 'none';
     }
-    var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + s.zone + ', ' + s.elapsed_s + 's elapsed, ' +
-               s.sample_count + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
+    var line = (AT_STATE_NAMES[s.state] || s.state) + ' zone ' + (Number(s.zone) || 0) + ', ' + (Number(s.elapsed_s) || 0) + 's elapsed, ' +
+               (Number(s.sample_count) || 0) + ' samples' + (s.actual_valid ? ', ' + window.kcUnit.fmt(s.actual_c) + ' now' : '') + '.';
     /* Cycle progress is the only honest progress bar a relay run has: the
        elapsed time says nothing about how far along it is, because how long a
        cycle takes is the quantity being measured. */
@@ -3316,7 +3481,7 @@ function pollAutotune() {
       // would need deg-per-deg math this page doesn't otherwise do).
       line += ' Measured Ku=' + s.relay_ku.toFixed(4) + ' duty/°C, Tu=' + s.relay_tu_s.toFixed(0) +
               's (' + (s.relay_tu_s / 60).toFixed(1) + ' min), amplitude ±' + s.relay_amplitude_c.toFixed(1) +
-              '°C over ' + s.relay_cycles_used + ' cycles. Proposed (' + s.rule + ') Kp=' +
+              '°C over ' + (Number(s.relay_cycles_used) || 0) + ' cycles. Proposed (' + window.kcEscapeHtml(String(s.rule)) + ') Kp=' +
               s.proposed_kp.toFixed(4) + ' Ki=' + s.proposed_ki.toFixed(5) + ' Kd=' + s.proposed_kd.toFixed(4) +
               '. No plant model measured -- accepting writes gains only. ' +
               '<a href="/api/autotune/trace.csv">Download trace CSV</a>';
@@ -3656,7 +3821,7 @@ function renderRga(rga) {
      * zones fully measured yet" (expected, just keep autotuning) from
      * "singular" (a real finding about the kiln), and paraphrasing it here
      * would give a second place for that distinction to be got wrong. */
-    el.innerHTML = '<p class="empty">Not computable: ' + rga.reason + '</p>';
+    el.innerHTML = '<p class="empty">Not computable: ' + kgEsc(rga.reason) + '</p>';
     return;
   }
 
@@ -3920,7 +4085,7 @@ function pollFiringStatsHistory() {
       records.forEach(function (rec) {
         var when = rec.run_started_unix_s ? new Date(rec.run_started_unix_s * 1000).toLocaleString()
           : 'start time unknown (clock never synced)';
-        var caption = rec.profile_name + ' -- ' + when + ', ' + fmtStatsElapsed(rec.duration_s);
+        var caption = kgEsc(rec.profile_name) + ' -- ' + kgEsc(when) + ', ' + kgEsc(fmtStatsElapsed(rec.duration_s));
         var rows = (rec.zones || []).filter(function (z) { return z.active; })
           .map(function (z) { return { zone: z.zone, stats: z.stats, gains: { kp: z.kp, ki: z.ki, kd: z.kd } }; });
         html += renderFiringStatsTable(rows, caption, true);
@@ -4052,7 +4217,7 @@ function pollAdaptiveTune() {
                '<th>Coupled solve</th><th>Ki diagnosis</th><th>Revert</th></tr>';
     for (var i = 0; i < thermoCount && i < s.zones.length; i++) {
       var z = s.zones[i];
-      var name = (current.zones[i] && current.zones[i].name) ? ' (' + current.zones[i].name + ')' : '';
+      var name = (current.zones[i] && current.zones[i].name) ? ' (' + kgEsc(current.zones[i].name) + ')' : '';
       var appliedHtml;
       if (z.has_applied) {
         var sign = z.delta_pct >= 0 ? '+' : '';
@@ -4102,6 +4267,8 @@ function pollAdaptiveTune() {
               window.kcAlert('Enable failed: ' + (body || ('HTTP ' + r.status)));
             });
           }
+          // Review web7 LOW-3: the board bumped its config generation; refresh ours so the next Save is not a 409.
+          reloadUnlessDirty('The continuous-tuning setting changed');
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });
     });
@@ -4129,7 +4296,9 @@ function pollAdaptiveTune() {
             });
           }
           return r.json().then(function (j) {
-            if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); }
+            if (!j.ok) { window.kcAlert('Revert failed: ' + (j.reason || 'unknown reason')); return; }
+            // Review web7 LOW-3: revert changed gains and the generation on the board.
+            reloadUnlessDirty('The tuned gains were reverted');
           });
         }).then(function () { pollAdaptiveTune(); }).catch(function () { pollAdaptiveTune(); });
       });
@@ -4160,11 +4329,20 @@ document.getElementById('atStartBtn').addEventListener('click', function () {
   if (zone === '') { document.getElementById('atStatus').textContent = 'No zone configured/selected.'; return; }
   fetch('/api/autotune/start', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'zone=' + zone + '&step_duty=' + duty + '&rule=' + encodeURIComponent(rule),
-  }).then(function (r) { return r.json(); }).then(function (j) {
-    if (!j.ok) document.getElementById('atStatus').textContent = 'Start failed: ' + j.error;
-    else pollAutotune();
-  }).catch(function () {});
+    body: 'zone=' + zone + (duty === '' ? '' : '&step_duty=' + duty) + '&rule=' + encodeURIComponent(rule),
+  }).then(function (r) {
+    return r.text().then(function (t) {
+      var j = null;
+      try { j = JSON.parse(t); } catch (e) { j = null; }
+      if (j && j.ok) { pollAutotune(); return; }
+      /* L-4: non-JSON 400s/403s must not look like a dead click */
+      document.getElementById('atStatus').textContent = 'Start failed: ' +
+        ((j && j.error) || ('HTTP ' + r.status + (t ? ' ' + t.slice(0, 120) : '')));
+    });
+  }).catch(function (err) {
+    if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+    document.getElementById('atStatus').textContent = 'Start failed: could not reach the board.';
+  });
 });
 
 // Relay-feedback (Åström–Hägglund) UI removed, ROADMAP.md decision (b).
@@ -4197,7 +4375,7 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
     body: 'ack_unsettled=' + (ackUnsettled ? '1' : '0') + '&adopt_ceiling=' + (adoptCeiling ? '1' : '0'),
   }).then(function (r) {
     if (!r.ok) { document.getElementById('atStatus').textContent = 'Accept failed.'; return; }
-    loadCurrent();
+    reloadUnlessDirty('The tuned gains were accepted');
     pollAutotune();
     // Review fix: surface the ceiling_adoption outcome the accept response
     // now carries (ADOPTED / SKIPPED_* / REJECTED_OUT_OF_RANGE) rather than
@@ -4205,29 +4383,38 @@ document.getElementById('atAcceptBtn').addEventListener('click', function () {
     // tell adoption from a silent skip or refusal before this.
     r.json().then(function (data) {
       if (!data || !data.ceiling_adoption) return;
-      var msgs = {
-        ADOPTED: 'Accepted. Ramp ceiling adopted: ' + data.ceiling_old_c_per_hr + ' -> ' +
-                 data.ceiling_new_c_per_hr + ' °C/hr.',
-        SKIPPED_NOT_REQUESTED: 'Accepted.',
-        SKIPPED_RELAY_METHOD: 'Accepted. Ceiling not adopted -- a relay test measures no plant model.',
-        SKIPPED_MODEL_NOT_PERSISTED: 'Accepted. Ceiling not adopted -- the plant model failed to persist.',
-        SKIPPED_ZERO: 'Accepted. Ceiling not adopted -- no ramp rate could be predicted.',
-        SKIPPED_WOULD_TIGHTEN: 'Accepted. Ceiling NOT adopted -- the new estimate is tighter than the ' +
-                                'stored ceiling (' + data.ceiling_old_c_per_hr + ' °C/hr); adopting it ' +
-                                'would silently restrict this zone further, so it was left unchanged.',
-        REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
-                                'was not adopted or clamped.',
-        SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
-                              'read, so a new one was not written over an unknown value.',
-        FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED to save -- new ceiling (' +
-                            data.ceiling_new_c_per_hr + ' °C/hr) is live in RAM for this boot but was ' +
-                            'not persisted; will revert to ' + data.ceiling_old_c_per_hr +
-                            ' °C/hr on reboot.',
-      };
-      document.getElementById('atStatus').textContent = msgs[data.ceiling_adoption] || 'Accepted.';
+      document.getElementById('atStatus').textContent = atCeilingMessage(data);
     }).catch(function () {});
   }).catch(function () {});
 });
+
+// Operator text for the accept response's ceiling_adoption. An unknown value must never read as
+// plain success (review 2026-10-10 L2: REFUSED_NOT_WRITTEN used to fall through to 'Accepted.').
+function atCeilingMessage(data) {
+  var msgs = {
+    ADOPTED: 'Accepted. Ramp ceiling adopted: ' + data.ceiling_old_c_per_hr + ' -> ' +
+             data.ceiling_new_c_per_hr + ' °C/hr.',
+    SKIPPED_NOT_REQUESTED: 'Accepted.',
+    SKIPPED_RELAY_METHOD: 'Accepted. Ceiling not adopted -- a relay test measures no plant model.',
+    SKIPPED_MODEL_NOT_PERSISTED: 'Accepted. Ceiling not adopted -- the plant model failed to persist.',
+    SKIPPED_ZERO: 'Accepted. Ceiling not adopted -- no ramp rate could be predicted.',
+    SKIPPED_WOULD_TIGHTEN: 'Accepted. Ceiling NOT adopted -- the new estimate is tighter than the ' +
+                            'stored ceiling (' + data.ceiling_old_c_per_hr + ' °C/hr); adopting it ' +
+                            'would silently restrict this zone further, so it was left unchanged.',
+    REFUSED_NOT_WRITTEN: 'Accepted. Ceiling NOT adopted -- the store refused the write, so nothing was ' +
+                        'written and the stored ceiling is unchanged.',
+    REJECTED_OUT_OF_RANGE: 'Accepted. Ceiling REJECTED -- the predicted rate is out of range and ' +
+                            'was not adopted or clamped.',
+    SKIPPED_READ_FAILED: 'Accepted. Ceiling NOT adopted -- the currently stored ceiling could not be ' +
+                          'read, so a new one was not written over an unknown value.',
+    FAILED_TO_PERSIST: 'Accepted. Ceiling adoption FAILED to save -- new ceiling (' +
+                        data.ceiling_new_c_per_hr + ' °C/hr) is live in RAM for this boot but was ' +
+                        'not persisted; will revert to ' + data.ceiling_old_c_per_hr +
+                        ' °C/hr on reboot.',
+  };
+  return msgs[data.ceiling_adoption] || ('Accepted, but the ceiling result is unknown (' +
+    data.ceiling_adoption + ') -- check the stored ceiling before relying on it.');
+}
 
 (function () {
   var btn = document.getElementById('themeBtn');

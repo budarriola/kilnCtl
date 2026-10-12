@@ -182,9 +182,10 @@ BOOT_GUARD_CLEARED_TEXT = "boot_guard cleared and verified"
 #: HTTP statuses the board can ONLY answer before the first esp_ota_write()
 #: touches `app`: Pico busy (409),
 #: recovery_upload_stream()'s length gate / first-chunk RIC_OVERSIZE (413), and
-#: its upload-buffer allocation failure (503). 400/422/500 are each emitted both
+#: its upload-buffer allocation failure (503). 400/422/500/504 are each emitted both
 #: before and after the erase starts ("connection lost mid-image", "image failed
-#: verification", "flash write failed"), so they still carry the erase warning.
+#: verification", "flash write failed", "upload too slow" before the first chunk or
+#: mid-image), so they still carry the erase warning.
 _PRE_ERASE_STATUSES = (409, 413, 503)
 
 
@@ -486,14 +487,16 @@ def recovery_wifi_reset(confirm: bool = False, host: Optional[str] = None, wait_
 def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None) -> str:
     """Clear the boot_guard counter from the recovery image (POST
     /api/ota/esp/boot_guard_reset on the RECOVERY image; not the main app's route of the same path). The board
-    erases the record in both locations and reads it back itself.
+    erases the record in both locations and reads it back itself, EXCEPT when its kiln_nvs failed to start:
+    it then answers 200 "boot_guard not applicable (kiln_nvs unavailable)" and clears nothing. That reply is
+    reported as NOT APPLICABLE / not cleared, never as ok.
 
     REFUSES unless ``confirm is True`` exactly. Reads recovery status first (``record_present``/
     ``boot_count``), then always POSTs: the status route reports only the
     CURRENT record location, while the board also erases the legacy
     "boot_guard"/"count" record that the main app's boot_guard.c still reads
     as a fallback, so an absent current record does not mean nothing is left.
-    The board answers 200 only after reading BOTH locations back absent.
+    A plain-success 200 means the board read BOTH locations back absent.
     Re-reads status afterward and FAILS LOUDLY if ``record_present`` is still
     not false -- a 200 reply is not trusted alone, and a lost reply is
     UNVERIFIED.
@@ -511,11 +514,19 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
             return _post_error("/api/ota/esp/boot_guard_reset", exc)
         return (f"UNVERIFIED: POST /api/ota/esp/boot_guard_reset was sent but the reply was lost ({exc}); "
                 f"the board may or may not have cleared it -- read recovery_status (host={resolved})")
+    # Wording is owned by recovery_http.c (boot_guard_clear_or_na); test_mcp_server_recovery pins it.
+    if "not applicable" in str(reply.get("text", "")).lower():
+        return (f"NOT APPLICABLE: board replied {reply['text']!r} -- its kiln_nvs is unavailable in the "
+                f"recovery image, so NOTHING was cleared (host={resolved}); the application will read "
+                f"the boot_guard counter itself")
     try:
         after = rhc.get_status(resolved)
     except rhc.RecoveryHttpError as exc:
         return (f"UNVERIFIED: board replied {reply['text']!r} but the confirming status read failed "
                 f"(host={resolved}): {exc}")
+    if after.get("boot_guard_record") == "unreadable":
+        return (f"UNVERIFIED: board replied {reply['text']!r} but status reports boot_guard_record="
+                f"'unreadable', so record_present=False proves nothing was cleared (host={resolved})")
     if after.get("record_present") is False:
         return (f"ok - board replied {reply['text']!r} (it erases and reads back both record locations) and "
                 f"status confirms: before record_present={before.get('record_present')!r} boot_count="
@@ -527,7 +538,7 @@ def recovery_boot_guard_reset(confirm: bool = False, host: Optional[str] = None)
 
 @_core._tool()
 def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[str] = None,
-                         host: Optional[str] = None, wait_s: float = 600.0) -> str:
+                         host: Optional[str] = None, wait_s: float = 240.0) -> str:
     """Flash a SaftyFW slot image (.bin) onto the RP2040 through the recovery
     image's UART relay (POST /api/recovery/pico/upload?crc=<hex>[&slot=A|B],
     -- the CRC32 is computed
@@ -551,9 +562,14 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
       upload reply lost (timeout/reset)        -> keeps polling so the relay
                          is not abandoned, then UNKNOWN (or FAILED if the
                          relay is idle, i.e. it never started)
+    `wait_s` is clamped to 240 s and measured from the start of the call (the
+    MCP client aborts a call after 300 s of silence). The relay aborts the
+    upload if nobody polls for 90 s, so after an UNKNOWN call recovery_status
+    within 90 s.
     "done" with bytes_sent short of the image is re-read up to DONE_REREADS
     times first (publish_done() updates the two fields non-atomically).
     """
+    t_start = _monotonic()
     if confirm is not True:
         return _refuse_unconfirmed("recovery_pico_upload (reflashes the safety processor)")
     if slot not in (None, "A", "B"):
@@ -597,7 +613,13 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
 
     lost = 0
     last: dict = {}
-    deadline = _monotonic() + wait_s
+    # The MCP client aborts a call after 300 s of silence while the relay keeps
+    # running: clamp the poll under that, and report UNKNOWN (never ok) if the
+    # relay is still going; read recovery_status / the pico status to continue.
+    wait_s = min(max(0.0, float(wait_s)), 240.0)
+    # Measured from the START of the call (preflight GETs and a lost 60 s POST count), so the whole
+    # call, lost polls included, stays under the client's 300 s abort.
+    deadline = t_start + wait_s
     while True:
         _sleep(1.0)
         try:
@@ -607,7 +629,10 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
             lost += 1
             if lost >= 5:
                 return (f"UNKNOWN: lost contact with the board while the relay was running ({exc}); "
-                        f"last status: {_fmt_pico(last) or 'none'} -- NOT success, re-check by hand")
+                        f"last status: {_fmt_pico(last) or 'none'} -- NOT success, re-check by hand; call recovery_status within 90 s")
+            if _monotonic() >= deadline:
+                return (f"UNKNOWN: relay status unreadable at the {wait_s:g}s limit ({exc}) -- NOT success; "
+                        f"call recovery_status within 90 s or the relay aborts the upload")
             continue
         phase = last.get("phase")
         if phase == "idle" and last.get("busy") is False:
@@ -622,7 +647,7 @@ def recovery_pico_upload(image_path: str, confirm: bool = False, slot: Optional[
             break
         if _monotonic() >= deadline:
             return (f"UNKNOWN: relay still running after {wait_s:g}s ({_fmt_pico(last)}) -- NOT success; "
-                    f"poll recovery_status")
+                    f"call recovery_status within 90 s or the relay aborts the upload (no poller for 90 s)")
     prefix = f"crc32={crc:08x} slot={slot or 'auto'} (host={resolved})"
     if lost_reply:
         return (f"UNKNOWN: the upload reply was lost ({lost_reply}); the relay then reported phase={phase!r}, "
@@ -941,8 +966,9 @@ def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wai
     keeps running). done -> ok, with the stack high-water; the board then
     reboots into the application, so losing the connection after done is
     EXPECTED. failed -> FAILED with the error name, app_modified and stack
-    high-water. A lost connection BEFORE done, or a timeout, is UNKNOWN/
-    UNVERIFIED, never ok. Success here means the copy was verified and `app`
+    high-water. A lost connection after the status reached "finalizing"
+    (the set_boot step) is PROBABLE-OK: confirm via the application. A lost
+    connection earlier than that, or a timeout, is UNKNOWN/UNVERIFIED, never ok. Success here means the copy was verified and `app`
     selected; it does not prove the new application booted healthy.
     """
     if confirm is not True:
@@ -985,20 +1011,35 @@ def recovery_apply_staged(confirm: bool = False, host: Optional[str] = None, wai
         return f"ok-started: {started}; not polling (wait_s={wait_s:g}); read recovery_apply_status"
     deadline = _monotonic() + wait_s
     last: Optional[dict] = None
+    lost_in_finalizing: Optional[dict] = None
     while True:
         _sleep(poll_interval_s)
         try:
             last = rhc.get_apply_status(resolved)
         except rhc.RecoveryHttpError as exc:
+            if last is not None and last.get("phase") == "finalizing":
+                lost_in_finalizing = last
+            if exc.status == 404 and lost_in_finalizing is not None:
+                return (f"PROBABLE-OK: {started}; apply_status now answers 404 after 'finalizing' (the "
+                        f"application is probably up; last: {_fmt_apply(lost_in_finalizing)}). Not confirmed: "
+                        f"check get_heap_status / fw_build")
             if exc.status == 404:
                 return (f"UNKNOWN: {started}; apply_status now answers 404 (the application may be up) but "
                         f"done was never observed (last: {_fmt_apply(last) if last else 'none'}) -- check "
                         f"by hand")
+            if _monotonic() >= deadline and lost_in_finalizing is not None:
+                # set_boot can still fail after 'finalizing' (set_boot_failed), so
+                # only contact staying lost through the whole deadline counts.
+                return (f"PROBABLE-OK: {started}; lost contact ({exc}) after the apply reached "
+                        f"'finalizing' and never regained it by the deadline (last: "
+                        f"{_fmt_apply(lost_in_finalizing)}), the expected restart window. Not confirmed: "
+                        f"check that the application came up (get_heap_status / fw_build) before relying on it")
             if _monotonic() >= deadline:
                 return (f"UNKNOWN: {started}; lost contact ({exc}) and done was never observed (last: "
                         f"{_fmt_apply(last) if last else 'none'}) -- the board may be rebooting or hung; "
                         f"check by hand")
             continue
+        lost_in_finalizing = None
         phase = last.get("phase")
         if phase == "done":
             return (f"ok - {started}; apply done: {_fmt_apply_final(last)}. The board now reboots into the "

@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "psa/crypto.h"
 
+#include "hal_time.h"
 #include "http_auth_http.h" /* kiln_http_register() */
 #include "ota_http.h"
 #include "ota_http_internal.h"
@@ -370,7 +371,16 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
         }
 
         size_t remaining = failed_mid_body ? 0 : req->content_len;
+        const uint64_t upload_start_ms = hal_time_now_us() / 1000u;
+        const uint64_t upload_budget_ms = ota_http_upload_budget_ms((size_t)req->content_len);
         while (!failed_mid_body && remaining > 0) {
+            if (ota_http_upload_deadline_passed(upload_start_ms, hal_time_now_us() / 1000u, upload_budget_ms)) {
+                ESP_LOGW(TAG, "stage upload from %s: overall deadline exceeded at %u/%u", ip,
+                         (unsigned)(req->content_len - remaining), (unsigned)req->content_len);
+                (void)send_error_json(req, OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, OTA_HTTP_UPLOAD_SLOW_ERROR);
+                failed_mid_body = true;
+                break;
+            }
             size_t want = remaining < buf_cap ? remaining : buf_cap;
             int r = httpd_req_recv(req, (char *)buf, want);
             if (r == HTTPD_SOCK_ERR_TIMEOUT) {
@@ -379,7 +389,8 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
             if (r <= 0) {
                 ESP_LOGW(TAG, "stage upload from %s: receive failed at %u/%u (%d)", ip,
                          (unsigned)(req->content_len - remaining), (unsigned)req->content_len, r);
-                update_stage_upload_abort(&s_stage);
+                (void)update_stage_upload_abort_owned(&s_stage, STAGE_SOURCE_UPLOAD);
+                update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
                 // Socket is dead; nothing to send and nothing to drain.
                 ota_http_update_end();
                 return ESP_FAIL;
@@ -410,7 +421,10 @@ static esp_err_t stage_upload_post_handler(httpd_req_t *req)
                 (void)httpd_resp_sendstr(req, "{\"ok\":true,\"staged\":true}");
             }
         } else {
-            update_stage_upload_abort(&s_stage); // idempotent
+            // Owner-scoped (as update_fetch.c's abandoned-op abort is): a refused begin means ANOTHER owner may hold
+            // the stage (a wedged fetch writer keeps it UPLOADING after the claim is released), and an unscoped
+            // abort here would reset that owner's phase under its still-running flash op.
+            (void)update_stage_upload_abort_owned(&s_stage, STAGE_SOURCE_UPLOAD);
         }
         update_stage_set_gate(&s_stage, NULL, NULL); // gate_ctx is on this stack frame
         ota_http_update_end();

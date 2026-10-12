@@ -794,7 +794,7 @@ here:</p>
         body: 'relay=' + encodeURIComponent(relay),
       }).then(function (r) {
         return r.json().catch(function () { return {}; }).then(function (j) {
-          if (!r.ok || j.ok === false) throw new Error(j.error || ('HTTP ' + r.status));
+          if (!r.ok || j.ok === false) throw new Error(j.reason || j.error || ('HTTP ' + r.status));
         });
       }).then(function () {
         poll();
@@ -846,9 +846,18 @@ here:</p>
         fetch('/api/watchdog_cfg', {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: 'disabled=' + (nextDisabled ? '1' : '0'),
-        }).then(function (r) { return r.json(); }).then(function (result) {
-          renderWatchdogCfg(!!result.panic_disabled);
-        }).catch(function () {});
+        }).then(function (r) {
+          /* L-7: a refused POST must not be rendered as "enabled" (the unsafe direction). */
+          if (!r.ok) throw new Error('watchdog_cfg refused: HTTP ' + r.status);
+          return r.json();
+        }).then(function (result) {
+          if (!result || typeof result.panic_disabled !== 'boolean') throw new Error('watchdog_cfg: no panic_disabled in reply');
+          renderWatchdogCfg(result.panic_disabled);
+        }).catch(function (err) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+          window.kcAlert('The watchdog setting was NOT changed: ' + String(err && err.message || err));
+          pollWatchdogCfg();
+        });
       });
     };
   }
@@ -997,11 +1006,24 @@ here:</p>
     var ackBtn = document.getElementById('crashAckBtn');
     if (ackBtn) {
       ackBtn.addEventListener('click', function () {
-        fetch('/api/crash_report/ack', { method: 'POST' }).then(pollCrash);
+        crashPost('/api/crash_report/ack', 'Acknowledge');
       });
     }
     document.getElementById('crashClearBtn').addEventListener('click', function () {
-      fetch('/api/crash_report/clear', { method: 'POST' }).then(pollCrash);
+      /* L-6: Clear erases the coredump irreversibly -- confirm first. */
+      window.kcConfirm('Clear the crash log? This also ERASES the saved coredump and cannot be undone. ' +
+        'Acknowledge first if you only want to mark it reviewed.').then(function (ok) {
+        if (ok) crashPost('/api/crash_report/clear', 'Clear');
+      });
+    });
+  }
+  function crashPost(path, what) {
+    return fetch(path, { method: 'POST' }).then(function (r) {
+      if (!r.ok) window.kcAlert(what + ' failed (HTTP ' + r.status + ').');
+      return pollCrash();
+    }).catch(function (err) {
+      if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) return;
+      window.kcAlert(what + ' failed (network error).');
     });
   }
   function pollCrash() {

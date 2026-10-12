@@ -303,10 +303,24 @@ void safety_reset_stale_peer_info_if_link_down(SafetyLinkClass *link)
     if (!link || !safety_lock(link)) {
         return;
     }
+    /* The clear keys on !safety_link_up_locked() alone. That window scales with poll_period_ms *
+     * SAFETY_LINK_UP_PERIODS BY DESIGN (review LOW-5: a slow poll keeps the boot id through one missed
+     * reply), so the fixed SAFETY_LINK_STALE_MS (1500 ms) bound is deliberately NOT applied here: any
+     * second stale test with a bound derived from the same period was redundant with !up (review 14 LOW-6). */
     if (!safety_link_up_locked(link)) {
         link->peer_version_known = false;
         link->pico_boot_id_known = false;
         link->peer_build_known = false;
+        /* Firing audit 2 MED-1: the DIAG uptime baseline is deliberately KEPT across a link-down. A real
+         * Pico reboot almost always spans a link-down, and the 8-bit boot_id repeats 1 boot in 256, so the
+         * first DIAG after relink must still be able to flag an uptime regression. A long outage in which
+         * the Pico kept running is on schedule against baseline + ESP elapsed time
+         * (safety_pico_uptime_behind_expected(), wrap-safe), so a long outage is not a reboot, while a
+         * reboot whose old boot was older than ~2 s is caught however long the outage. A false positive is
+         * a spurious reboot count (nuisance hold/pause when the last boot cause or DIAG was fatal). */
+        link->reboot_noted_by_uptime = false; /* in doubt, count: a later boot_id change counts again */
+        link->diag_reannounce_count = 0u;
+        link->diag_reannounce_last_ms = 0u;
     }
     safety_unlock(link);
 }
@@ -685,6 +699,27 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
      * out to) until trip_event_ever_received is true. */
     out->trip_event_age_ms =
         out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
+    safety_unlock(link);
+    return ESP_OK;
+}
+
+esp_err_t safety_link_get_diag_flags(SafetyLinkClass *link, bool *out_ever_received, uint8_t *out_flags,
+                                     uint32_t *out_diag_applied)
+{
+    if (!link || !out_ever_received || !out_flags) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!link->initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!safety_lock(link)) {
+        return ESP_FAIL;
+    }
+    *out_ever_received = link->cached.diag_ever_received;
+    *out_flags = link->cached.diag_flags;
+    if (out_diag_applied) {
+        *out_diag_applied = link->stats.diag_applied;
+    }
     safety_unlock(link);
     return ESP_OK;
 }

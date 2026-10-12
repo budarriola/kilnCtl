@@ -218,7 +218,7 @@ def test_cfgfs_restore_auth_failure_reports_partial_write(monkeypatch):
 
     def fake_urlopen(req_or_url, timeout=None):
         url = req_or_url.full_url
-        if url.endswith("name=a"):
+        if url.endswith("name=a&raw=1"):
             posted.append(url)
             return _FakeResponse(b"ok")
         raise urllib.error.HTTPError(url, 401, "Unauthorized", {}, io.BytesIO(b""))

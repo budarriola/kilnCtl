@@ -221,6 +221,28 @@ static void test_s1(void)
     }
 }
 
+static void test_s5_fault_bit_terms(void)
+{
+    TEST_SECTION("S5 -- each Fault Status bit alone (finite tc_c, tc_valid, no SPI failure) is a bad read");
+    struct { uint8_t bit; const char *name; } cases[] = {
+        { SAFETY_THERMO_FAULT_OPEN, "OPEN" },
+        { SAFETY_THERMO_FAULT_OVUV, "OVUV" },
+        { SAFETY_THERMO_FAULT_TCRANGE, "TCRANGE" },
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.fault_bits = cases[i].bit;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_bad_streak == 1, cases[i].name);
+        in.fault_bits = 0;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s5_bad_streak == 0, cases[i].name);  /* clean read after it resets the streak */
+    }
+}
+
 static void test_s5(void)
 {
     TEST_SECTION("S5 -- safety thermocouple invalid (graduated)");
@@ -3300,18 +3322,31 @@ static void test_try_clear(void)
         TEST_CHECK(!s.is_tripped, "successful clear: is_tripped false");
     }
 
-    /* A graduated guard (S1, 3-tick over-ceiling streak) still physically
-     * over-ceiling at clear time: this is the documented scope limit, not a
-     * bug. safety_guards_clear() (inside try_clear) resets
-     * s1_over_ceiling_streak to 0 along with everything else, so the single
-     * retick only brings the streak to 1 -- nowhere near
-     * S1_OVER_CEILING_STREAK_TO_TRIP (3) -- and try_clear reports success
-     * even though the underlying condition (reading still above the
-     * ceiling) has not gone away. S1 is not broken by this: left running,
-     * it will re-trip on its own normal timescale (3 more consecutive
-     * over-ceiling ticks) once safety_core keeps calling safety_guards_tick()
-     * afterward. This test documents that real, limited behaviour rather
-     * than asserting a stronger guarantee try_clear does not provide. */
+    /* S5 (guard_condition_still_immediate -> s5_bad_read_now): a latched S5
+     * trip with a fault-bit bad read still present refuses the clear; a clean
+     * read lets it hold. Covers the helper's try_clear path directly. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.fault_bits = SAFETY_THERMO_FAULT_OVUV;
+        for (int i = 0; i < 5000 && !s.is_tripped; i++) {
+            (void)safety_guards_tick(&s, &cfg, &bad);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_SENSOR_INVALID, "sanity: S5 tripped on OVUV");
+
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "S5: OVUV still present, try_clear refuses");
+        TEST_CHECK(s.is_tripped, "S5 refused clear: still tripped");
+
+        safety_guard_input_t clean = base_input();
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &clean), "S5: clean read, try_clear succeeds");
+        TEST_CHECK(!s.is_tripped, "S5 successful clear: is_tripped false");
+    }
+
+    /* T1 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10): S1 is refused while the reading
+     * is still above abs_max_temp_c (previously accepted, then re-tripped ~3
+     * ticks later), and accepted once it is back under the ceiling. */
     {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -3322,21 +3357,329 @@ static void test_try_clear(void)
         TEST_CHECK(s.is_tripped, "sanity: S1 tripped via 3 consecutive over-ceiling readings");
         TEST_CHECK(s.reason == SAFETY_TRIP_OVERTEMP, "sanity: reason is SAFETY_TRIP_OVERTEMP");
 
-        /* Still over-ceiling at clear time. */
         bool cleared = safety_guards_try_clear(&s, &cfg, &over);
-        TEST_CHECK(cleared, "scope limit: a single retick does not rebuild S1's 3-tick streak, clear holds");
-        TEST_CHECK(!s.is_tripped, "scope limit: is_tripped is false right after the clear, even though still over-ceiling");
-        TEST_CHECK(s.s1_over_ceiling_streak == 1, "scope limit: the retick brought the streak to exactly 1, not 3");
+        TEST_CHECK(!cleared, "T1: S1 clear refused while still above abs_max_temp_c");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVERTEMP, "T1: refused S1 clear leaves the latch untouched");
 
-        /* Left running against the same still-over-ceiling input, S1 does
-         * its job and re-trips on its own timescale -- proving this is a
-         * scope limit of try_clear's single retick, not a hole in S1
-         * itself. */
-        bool retripped = false;
-        for (int i = 0; i < 2 && !retripped; i++) {
-            retripped = safety_guards_tick(&s, &cfg, &over);
+        safety_guard_input_t at = base_input();
+        at.tc_c = 1300.0f; /* == ceiling is not over */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &at), "T1: S1 clear accepted once the reading is back at/under the ceiling");
+        TEST_CHECK(!s.is_tripped, "T1: S1 cleared");
+    }
+
+    /* T1: S8 -- refused while the tripping window measured against the current
+     * reading still exceeds max_rate_c_per_min; accepted once the kiln cooled. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "sanity: S8 tripped");
+
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "T1: S8 clear refused while still above the rate vs the tripping window");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_RATE, "T1: refused S8 clear leaves the latch untouched");
+
+        safety_guard_input_t cool = base_input();
+        cool.dt_s = 0.1f;
+        cool.tc_c = 30.0f; /* (30-40)/1min < 10 C/min */
+        /* review s8clrfx2 LOW-1: no grant before two full post-trip windows, even when cooled. */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &cool), "T1: cooled but no full post window yet: refused");
+        for (int i = 0; i < 1230; i++) safety_guards_tick(&s, &cfg, &cool); /* 123 s */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "T1: S8 clear accepted once two cooled post windows exist");
+        TEST_CHECK(!s.is_tripped, "T1: S8 cleared");
+    }
+
+    /* F2: S8 clear is bounded -- a plateau after the trip converges to rate 0. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F2 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 100; i++) safety_guards_tick(&s, &cfg, &in); /* 10 s plateau at 60 C */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in),
+                   "MED-1: no grant from a partial post window alone (frozen trip window still refuses)");
+        for (int i = 0; i < 510; i++) safety_guards_tick(&s, &cfg, &in); /* total 61 s: one full window */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "s8clrfx LOW-1: one full post window alone never grants");
+        for (int i = 0; i < 600; i++) safety_guards_tick(&s, &cfg, &in); /* total 121 s: two full windows */
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear granted on a plateau (two full windows ~0)");
+    }
+    /* MED-1: noisy still-fast rise (+12 C/min for ~5.1 s, then -0.15 C noise) must refuse. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "MED-1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 51; i++) { in.tc_c += 0.02f; safety_guards_tick(&s, &cfg, &in); }
+        in.tc_c -= 0.15f;
+        safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "MED-1: noisy fast rise at ~5 s must refuse the clear");
+    }
+    /* LOW-1: past 60 s post-trip, the last-full-post-window branch decides. */
+    for (int fast = 0; fast < 2; fast++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        /* 62 s: fast = +30 C/min (0.05 C/tick), plateau otherwise. Ends just after a window rolled. */
+        for (int i = 0; i < 1220; i++) { if (fast) in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); }
+        TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-1 sanity: two full post windows completed");
+        if (fast) {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: still-fast last full window refuses");
+            /* plateau for 6 s: partial window now reads ~0, but the last full window was fast -> EITHER refuses */
+            for (int i = 0; i < 60; i++) safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "MED-1: last full window fast refuses even when the partial window is flat");
+        } else {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &in), "LOW-1: plateau last full window grants");
         }
-        TEST_CHECK(retripped, "S1 re-trips on its own normal timescale once the streak rebuilds");
+    }
+    /* s8clrfx LOW-1 probe P1: 12 C/min rise, one +2.5 C outlier on the sample that
+     * closes post window 1 -> window 2 reads ~9.5 C/min, but window 1 (14.5) still refuses. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "P1 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        float trend = in.tc_c;
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 1u; i++) {
+            trend += 0.02f;
+            safety_guard_state_t probe = s;
+            in.tc_c = trend + 2.5f;
+            safety_guards_tick(&probe, &cfg, &in);
+            if (probe.s8_post_windows_done == 1u) { s = probe; break; } /* outlier closes window 1 */
+            in.tc_c = trend;
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_windows_done == 1u, "P1 sanity: window 1 closed on the outlier");
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 2u; i++) {
+            trend += 0.02f;
+            in.tc_c = trend;
+            safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_windows_done == 2u, "P1 sanity: two post windows rolled");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "P1: one outlier sample must not grant a clear on a fast rise");
+    }
+    /* s8clrfx LOW-2: flat full windows, then a fast rise >= 6 s -> partial window refuses. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-2 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 1220; i++) safety_guards_tick(&s, &cfg, &in); /* two flat windows */
+        TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-2 sanity: two flat windows done");
+        for (int i = 0; i < 70; i++) { in.tc_c += 0.05f; safety_guards_tick(&s, &cfg, &in); } /* 30 C/min for 7 s */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-2: fast partial window refuses despite flat full windows");
+    }
+    /* s8clrfx LOW-3: post window latched at trip and clamped to [60,600]; mid-trip cfg change ignored. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-3 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        safety_guards_tick(&s, &cfg, &in); /* latches the post window */
+        cfg.rate_window_s = 2.0f;          /* mid-trip change must not shorten it */
+        for (int i = 0; i < 100; i++) safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s8_post_windows_done == 0u, "LOW-3: short mid-trip rate_window_s does not shorten the latched window");
+        TEST_CHECK(s.s8_post_win_s >= 59.9f && s.s8_post_win_s <= 60.1f, "LOW-3: window latched at 60 s");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 30000.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 30000.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40000.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 80000.0f;
+        if (safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE) {
+            in.dt_s = 0.1f;
+            safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(s.s8_post_win_s <= 600.1f, "LOW-3: huge rate_window_s clamped to 600 s");
+        }
+    }
+    /* s8clrfx LOW-1: after exactly one full post window a cooled reading still refuses (two needed). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "one-window sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        in.tc_c = 30.0f;
+        for (int i = 0; i < 620 && s.s8_post_windows_done < 1u; i++) safety_guards_tick(&s, &cfg, &in);
+        TEST_CHECK(s.s8_post_windows_done == 1u, "one-window sanity: exactly one full window");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: a single full post window never grants, even when cooled");
+    }
+    /* F2: still rising fast after the trip -> still refused. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F2 sanity: S8 tripped");
+        in.dt_s = 1.0f;
+        for (int i = 0; i < 10; i++) { in.tc_c += 0.5f; safety_guards_tick(&s, &cfg, &in); } /* 30 C/min */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "F2: S8 clear refused while still rising fast");
+    }
+    /* F4: S1 and S8 clears refused on an unknown (bad) TC read. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t over = base_input();
+        over.tc_c = 1400.0f;
+        for (int i = 0; i < 3; i++) safety_guards_tick(&s, &cfg, &over);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_OVERTEMP, "F4 sanity: S1 tripped");
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F4: S1 clear refused on a bad TC read");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f;
+        safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "F4 sanity: S8 tripped");
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F4: S8 clear refused on a bad TC read");
+    }
+    /* F1: S12 clear refused with a hot CJ even when the TC read is bad. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_c = 90.0f;
+        bad.dt_s = 61.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &bad) && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "F1 sanity: S12 tripped");
+        bad.dt_s = 0.1f; /* a retest tick alone cannot re-trip: only the level check refuses */
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &bad), "F1: S12 clear refused with hot CJ and bad TC");
+    }
+
+    /* T4: S12 still runs on a bad TC read when the cold junction is valid. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t bad = base_input();
+        bad.tc_valid = false;
+        bad.cj_c = 90.0f; /* > cj_max_c default (85) */
+        bad.dt_s = 61.0f; /* > cj_time_s default (60) */
+        bool tripped = safety_guards_tick(&s, &cfg, &bad);
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP, "T4: S12 trips on a hot valid cold junction despite a bad TC read");
+
+        safety_guards_reset(&s);
+        bad.cj_invalid = true;
+        bad.cj_c = (float)NAN;
+        TEST_CHECK(!safety_guards_tick(&s, &cfg, &bad), "T4: bad TC read with an invalid cold junction does not run S12 (no new trip)");
     }
 
     /* 2026-08-23 hardware finding: S5 (and S12/S13/S6b below) are the four
@@ -3623,19 +3966,53 @@ static void test_decide_clear_trip_outcome(void)
 {
     TEST_SECTION("safety_guards_decide_clear_trip_outcome -- pure 3-way classification");
 
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, false) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true, false) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
                "was_tripped=false -> nothing-latched regardless of try_clear_result");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, true, true) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
                "was_tripped=false, try_clear_result=true -> still nothing-latched "
                "(try_clear must not even have run against nothing)");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true) ==
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(false, false, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED,
+               "was_tripped=false with a stale occurrence -> nothing-latched wins");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true, true) ==
                SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED,
-               "was_tripped=true, try_clear succeeded -> accepted");
-    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false) ==
+               "was_tripped=true, occurrence matches, try_clear succeeded -> accepted");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, true, false) ==
                SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED,
                "was_tripped=true, try_clear refused -> refused-still-tripped");
+    /* kilnlink audit 2026-10-09 M4: a request bound to an older trip
+     * occurrence never clears, even if try_clear would have succeeded. */
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false, true) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE,
+               "was_tripped=true, stale occurrence, try_clear_result=true -> refused-stale-occurrence");
+    TEST_CHECK(safety_guards_decide_clear_trip_outcome(true, false, false) ==
+               SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE,
+               "was_tripped=true, stale occurrence, try_clear_result=false -> refused-stale-occurrence");
+}
+
+/* kilnlink audit 2026-10-09 M4: the occurrence binding of a queued
+ * CLEAR_TRIP. A bound request must name exactly the latched trip_seq; an
+ * unbound (legacy, protocol < 17) one matches anything, as before. */
+static void test_clear_trip_occurrence_matches(void)
+{
+    TEST_SECTION("safety_guards_clear_trip_occurrence_matches -- M4 trip_seq binding");
+
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(true, 5u, 5u),
+               "bound, wire seq == latched seq -> matches");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 5u, 6u),
+               "bound, a later trip latched (seq 6) after the ESP read seq 5 -> stale, no match");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 6u, 5u),
+               "bound, wire seq ahead of latched seq -> no match");
+    TEST_CHECK(!safety_guards_clear_trip_occurrence_matches(true, 255u, 0u),
+               "bound, seq wrapped 255 -> 0 between read and dequeue -> no match");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(true, 0u, 0u),
+               "bound, both zero -> matches (pure equality)");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(false, 5u, 6u),
+               "unbound legacy request -> matches whatever is latched (pre-17 behaviour)");
+    TEST_CHECK(safety_guards_clear_trip_occurrence_matches(false, 0u, 200u),
+               "unbound legacy request, any seq -> matches");
 }
 
 /* GUARD_TEST_MATRIX.md: "Property tests: ceiling monotonicity over the float
@@ -4175,11 +4552,416 @@ static void test_warn_mask(void)
     }
 }
 
+/* Guard review 2026-10-09 F3/F4/F6. */
+static void test_guard_review_2026_10_09(void)
+{
+    TEST_SECTION("guard review F3 -- S9 runs without ESP context");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t estop = base_input();
+        estop.estop_pressed = true;
+        safety_guards_tick(&s, &cfg, &estop);
+        safety_guard_input_t verify = base_input();
+        verify.context_valid = false; /* ESP dead */
+        verify.relay_deenergized = true;
+        verify.any_current_present = true;
+        verify.dt_s = 3.0f;
+        bool escalated = false;
+        for (int i = 0; i < 8 && !escalated; i++) {
+            escalated = safety_guards_tick(&s, &cfg, &verify);
+        }
+        TEST_CHECK(escalated, "welded contactor escalates to S9 with context_valid=false");
+        TEST_CHECK(s.reason == SAFETY_TRIP_INEFFECTIVE, "reason is SAFETY_TRIP_INEFFECTIVE");
+    }
+
+    TEST_SECTION("guard review F4 -- unknown cold junction is never a pass");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t hot = base_input();
+        hot.cj_c = 90.0f;
+        hot.dt_s = 30.0f;
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        unk.dt_s = 30.0f;
+        safety_guards_tick(&s, &cfg, &hot);
+        bool t1 = safety_guards_tick(&s, &cfg, &unk);
+        TEST_CHECK(!t1 && s.s12_warn, "unknown cj raises the S12 WARN");
+        bool t2 = safety_guards_tick(&s, &cfg, &hot);
+        TEST_CHECK(t2 && s.reason == SAFETY_TRIP_ENCLOSURE_TEMP,
+                   "unknown cj holds (does not reset) the S12 accumulator: 30+30s trips");
+    }
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t hot = base_input();
+        hot.cj_c = 90.0f;
+        hot.dt_s = 61.0f;
+        safety_guards_tick(&s, &cfg, &hot);
+        TEST_CHECK(s.is_tripped, "sanity: S12 tripped");
+        safety_guard_input_t unk = base_input();
+        unk.cj_invalid = true;
+        unk.cj_c = (float)NAN;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &unk), "S12 clear refused while cj is unknown");
+        TEST_CHECK(s.is_tripped, "still latched");
+        safety_guard_input_t cool = base_input();
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &cool), "S12 clear succeeds once cj is known and cool");
+    }
+
+    TEST_SECTION("guard review F6 -- S5 bad read does not suspend TC-independent guards");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.stuck_on_time_s = 3.0f;
+        safety_guard_input_t in = base_input();
+        in.tc_valid = false;
+        in.tc_c = (float)NAN;
+        in.context_valid = true;
+        in.any_current_present = true;
+        in.relay_commanded_recently = false;
+        in.dt_s = 1.0f;
+        bool tripped = false;
+        for (int i = 0; i < 6 && !tripped; i++) {
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(tripped && s.reason == SAFETY_TRIP_LOAD_STUCK_ON,
+                   "S3 still trips during a continuous bad TC read");
+    }
+
+    TEST_SECTION("guard review F6 / LOW-3 -- S2 and S10 hold (do not reset) while the TC read is bad");
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.tc_placement_valid = true;
+        cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED;
+        cfg.overshoot_margin_c = 50.0f;
+        cfg.overshoot_time_s = 1000.0f;
+        cfg.tc_disagreement_c = 100.0f;
+        cfg.tc_disagreement_time_s = 2.0f;
+        safety_guard_input_t in = base_input();
+        in.context_valid = true;
+        in.zone_count = 1;
+        in.max_zone_setpoint_c = 900.0f;
+        in.tc_c = 1000.0f;                 /* 100 C over setpoint, 300 C from the zone TC */
+        in.nearest_zone_measured_c = 700.0f;
+        in.dt_s = 1.0f;
+        for (int i = 0; i < 5; i++) {
+            TEST_CHECK(!safety_guards_tick(&s, &cfg, &in), "good over-reads do not trip yet");
+        }
+        TEST_CHECK(s.s2_over_elapsed_s == 5.0f, "fixture: S2 accumulator is 5 s");
+        TEST_CHECK(s.s10_warn, "fixture: S10 warn is set");
+        const float s10_elapsed = s.s10_disagree_elapsed_s;
+
+        in.tc_valid = false;
+        in.tc_c = (float)NAN;
+        for (int i = 0; i < 3; i++) {
+            TEST_CHECK(!safety_guards_tick(&s, &cfg, &in), "short bad read does not trip");
+        }
+        TEST_CHECK(s.s2_over_elapsed_s == 5.0f, "S2 accumulator is held, not reset or advanced, across a bad read");
+        TEST_CHECK(s.s10_disagree_elapsed_s == s10_elapsed, "S10 accumulator is held across a bad read");
+        TEST_CHECK(s.s10_warn, "S10 warn is held across a bad read");
+    }}
+
+static void test_admin_test_trip(void)
+{
+    TEST_SECTION("TEST (reason 4) -- admin test trip, docs/TEST_TRIP_PLAN.md section 4");
+
+    /* No request: never trips. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == false, "no request: not tripped");
+        TEST_CHECK(!s.is_tripped, "no request: is_tripped clear");
+    }
+    /* One tick, no debounce, reason 4. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "request latches on the very first tick (no debounce)");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "reason is SAFETY_TRIP_TEST");
+        TEST_CHECK((int)SAFETY_TRIP_TEST == 4, "SAFETY_TRIP_TEST is reason 4");
+    }
+    /* A real guard that fires the same tick keeps the reason. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = true;
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == true, "real guard + request: tripped");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "the real guard's reason wins over the test trip");
+    }
+    /* Ignored while already tripped: cannot rewrite or mask the latched reason. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.config_integrity_trip = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.config_integrity_trip = false;
+        in.test_trip_requested = true;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) == false, "request while tripped: not newly tripped");
+        TEST_CHECK(s.reason == SAFETY_TRIP_CONFIG_CORRUPT, "request while tripped leaves the reason alone");
+    }
+    /* Clear is held until trip_verify_s of K4-open has passed (S9 proved the relay). */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg(); /* trip_verify_s 0 -> 10 s default */
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+
+        safety_guard_input_t open = base_input();
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &open), "clear refused at once (K4 not yet reported open)");
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "still latched after the refused clear");
+
+        open.relay_deenergized = true;
+        for (int i = 0; i < 50; i++) { /* 5 s of verification */
+            (void)safety_guards_tick(&s, &cfg, &open);
+        }
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &open), "clear refused inside trip_verify_s");
+        for (int i = 0; i < 60; i++) { /* now 11 s */
+            (void)safety_guards_tick(&s, &cfg, &open);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST && !s.trip_ineffective,
+                   "no current present: S9 did not escalate");
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &open), "clear granted once trip_verify_s has passed");
+        TEST_CHECK(!s.is_tripped, "unlatched after the granted clear");
+    }
+    /* A K4 that never reads open never releases the hold. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        for (int i = 0; i < 300; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "relay never reported open: clear stays refused");
+    }
+}
+
+/* REVIEW_TRIPWP2 MED-2 (d): a real guard firing on the same tick as a test request keeps its
+ * reason, including the LAST guards in the tick (a test trip placed before them would win). */
+static void test_test_trip_loses_to_every_real_guard(void)
+{
+    TEST_SECTION("same-tick real guard beats the test request (TRIPWP2 MED-2d)");
+    for (int k = 0; k < 5; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        safety_guard_input_t in = base_input();
+        safety_trip_t want = SAFETY_TRIP_NONE;
+        const char *name = "";
+        switch (k) {
+        case 0: in.main_fault_asserted = true; in.dt_s = 1.0f; want = SAFETY_TRIP_MAIN_FAULT; name = "S6a"; break;
+        case 1: in.estop_pressed = true; in.dt_s = 1.0f; want = SAFETY_TRIP_ESTOP; name = "S7"; break;
+        case 2: in.tc_c = 1400.0f; want = SAFETY_TRIP_OVERTEMP; name = "S1"; break;
+        case 3: in.cj_c = 90.0f; in.dt_s = 61.0f; want = SAFETY_TRIP_ENCLOSURE_TEMP; name = "S12"; break;
+        default:
+            cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE; in.context_valid = true;
+            in.sample_counter_advancing = false; in.dt_s = 61.0f;
+            want = SAFETY_TRIP_BORROWED_STALE; name = "S13 (last guard)"; break;
+        }
+        /* Twin run without a request finds the tick the real guard fires on. */
+        int fire = 0;
+        {
+            safety_guard_state_t twin;
+            safety_guards_reset(&twin);
+            for (int i = 1; i <= 400 && fire == 0; i++) {
+                if (safety_guards_tick(&twin, &cfg, &in)) { fire = i; }
+            }
+        }
+        TEST_CHECK(fire > 0, "real guard fires without a request (sanity)");
+        bool tripped = false;
+        for (int i = 1; i <= fire; i++) {
+            in.test_trip_requested = (i == fire); /* request exactly on the firing tick */
+            tripped = safety_guards_tick(&s, &cfg, &in);
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s keeps its reason against a simultaneous test request", name);
+        TEST_CHECK(tripped && s.reason == want, msg);
+    }
+}
+
+/* Latch a TEST trip, then let K4 read open past trip_verify_s so only the "real
+ * condition" test can still refuse the clear. */
+static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard_cfg_t *cfg)
+{
+    safety_guard_input_t in = base_input();
+    in.test_trip_requested = true;
+    (void)safety_guards_tick(s, cfg, &in);
+    in.test_trip_requested = false;
+    in.relay_deenergized = true;
+    for (int i = 0; i < 120; i++) {
+        (void)safety_guards_tick(s, cfg, &in);
+    }
+}
+
+/* REVIEW_TRIPWP2 MED-1: a TEST latch freezes every other guard's debounce, so its clear
+ * must refuse while any real guard's condition holds. */
+static void test_test_trip_clear_refuses_real_conditions(void)
+{
+    TEST_SECTION("TEST trip clear refuses while a real guard condition holds (TRIPWP2 MED-1)");
+    enum { N = 9 };
+    const char *names[N] = {"S1 over ceiling", "S2 over setpoint", "S3 current with nothing commanded",
+                            "S5 bad TC read", "S8 mid-debounce rate", "S12 hot cold junction",
+                            "S13 stale samples", "S6b link down", "S5 NaN reading"};
+    for (int k = -1; k < N; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        if (k == 1) { cfg.tc_placement_mode = SAFETY_TC_CHAMBER_AGREED; }
+        if (k == 6) { cfg.tc_source = SAFETY_TC_SOURCE_BORROWED_ZONE; }
+        if (k == 4) { /* S8 mid-debounce: one over-rate window, then latch TEST */
+            safety_guard_input_t pre = base_input();
+            pre.dt_s = 60.0f; pre.tc_c = 20.0f; (void)safety_guards_tick(&s, &cfg, &pre);
+            pre.tc_c = 40.0f; (void)safety_guards_tick(&s, &cfg, &pre);
+            TEST_CHECK(!s.is_tripped, "S8 sanity: mid-debounce, not yet tripped");
+        }
+        latch_test_trip_and_hold(&s, &cfg);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        if (k == 0) { c.tc_c = 1400.0f; }
+        if (k == 1) { c.context_valid = true; c.zone_count = 1; c.max_zone_setpoint_c = 100.0f; c.tc_c = 300.0f; }
+        if (k == 2) { c.context_valid = true; c.any_current_present = true; c.relay_commanded_recently = false; }
+        if (k == 3) { c.tc_valid = false; }
+        if (k == 4) { c.tc_c = 50.0f; }
+        if (k == 5) { c.cj_c = 90.0f; }
+        if (k == 6) { c.sample_counter_advancing = false; }
+        if (k == 7) { c.link_up = false; }
+        if (k == 8) { c.tc_c = (float)NAN; c.tc_valid = false; }
+        if (k < 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "control: no real condition: TEST clear granted");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), names[k]);
+            TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "refused clear leaves the TEST latch untouched");
+            safety_guard_input_t ok = base_input();
+            ok.relay_deenergized = true;
+            if (k == 4) { ok.tc_c = 40.0f; }
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &ok), "same latch clears once the condition is gone");
+        }
+    }
+}
+
+/* review s8clrfx2 LOW-1/2/3 */
+static void test_s8_clear_followups(void)
+{
+    TEST_SECTION("S8 clear follow-ups (s8clrfx2 LOW-1..3)");
+    /* LOW-1 (P2): 12 C/min rise, 1 s after the trip a sample reads 2.3 C low; must refuse. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 32.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 44.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "P2 sanity: S8 tripped");
+        in.dt_s = 1.0f;
+        in.tc_c = 44.2f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 41.9f;
+        TEST_CHECK(s.s8_post_windows_done < 2u, "P2 sanity: no full post window yet");
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-1: outlier sample before two post windows must not grant");
+    }
+    /* LOW-2: a commissioned 10 s window is floored to 60 s. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 10.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 10.0f;
+        in.tc_c = 20.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-2 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        for (int i = 0; i < 300; i++) (void)safety_guards_tick(&s, &cfg, &in); /* 30 s */
+        TEST_CHECK(s.s8_post_win_s >= 59.9f && s.s8_post_win_s <= 60.1f, "LOW-2: 10 s window floored to 60 s");
+        TEST_CHECK(s.s8_post_windows_done == 0u, "LOW-2: no post window closes within 30 s");
+    }
+    /* LOW-3: tc_valid must gate the post block; NaN flagged valid must not grant. */
+    for (int mode = 0; mode < 5; mode++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.abs_max_temp_c = 0.0f;
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 60.0f;
+        in.tc_c = 20.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 40.0f; (void)safety_guards_tick(&s, &cfg, &in);
+        in.tc_c = 60.0f;
+        TEST_CHECK(safety_guards_tick(&s, &cfg, &in) && s.reason == SAFETY_TRIP_RATE, "LOW-3 sanity: S8 tripped");
+        in.dt_s = 0.1f;
+        if (mode == 0) { /* invalid ticks must not feed the post windows */
+            in.tc_valid = false; in.tc_c = (float)NAN;
+            for (int i = 0; i < 1300; i++) (void)safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(s.s8_post_windows_done == 0u && !s.s8_post_active, "LOW-3: invalid TC ticks never enter the post window");
+        } else if (mode == 1) { /* NaN flagged valid for 121 s */
+            in.tc_valid = true; in.tc_c = (float)NAN;
+            for (int i = 0; i < 1300; i++) (void)safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid for 2 windows must not grant");
+        } else if (mode == 2) { /* NaN flagged valid right after the trip */
+            in.tc_valid = true; in.tc_c = (float)NAN;
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid right after the trip must not grant");
+        } else {
+            /* two good cooled windows, then NaN flagged valid */
+            in.tc_c = 30.0f;
+            for (int i = 0; i < 1300 && s.s8_post_windows_done < 2u; i++) (void)safety_guards_tick(&s, &cfg, &in);
+            TEST_CHECK(s.s8_post_windows_done == 2u, "LOW-3 sanity: two good windows");
+            in.tc_valid = true; in.tc_c = (float)NAN;
+            if (mode == 3) {
+                TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &in), "LOW-3: NaN flagged valid after good windows must not grant");
+            } else {
+                for (int i = 0; i < 700; i++) (void)safety_guards_tick(&s, &cfg, &in);
+                TEST_CHECK(!isnan(s.s8_post_last_rate_c_per_min) && !isnan(s.s8_post_start_c),
+                           "LOW-3: NaN ticks never poison the post-window state");
+            }
+        }
+    }
+}
+
 void run_test_safety_guards(void)
 {
+    test_admin_test_trip();
+    test_test_trip_clear_refuses_real_conditions();
+    test_test_trip_loses_to_every_real_guard();
+    test_s8_clear_followups();
     test_s1();
     test_s1_ceiling_properties();
     test_s5();
+    test_s5_fault_bit_terms();
     test_s5_not_installed();
     test_s7();
     test_s11();
@@ -4205,7 +4987,9 @@ void run_test_safety_guards(void)
     test_tx_independence_representative_sequence();
     test_try_clear();
     test_decide_clear_trip_outcome();
+    test_clear_trip_occurrence_matches();
     test_deciding_threshold();
     test_ct_disabled_guards();
     test_warn_mask();
+    test_guard_review_2026_10_09();
 }

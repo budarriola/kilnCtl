@@ -1,6 +1,6 @@
 # Shared-state ("reset one side of a pair") review pass — 2026-09-17
 
-RELEASE_HARDENING_PLAN.md section 9. A reading pass, not a mechanical check
+RELEASE_HARDENING.md section 9. A reading pass, not a mechanical check
 (rejected for this class — see that section and CLAUDE.md's own writeup).
 Scope: cross-processor state specifically — sequence numbers, dedup cursors,
 boot IDs, config revision counters, seqlock generations, and the `cfg`-vs-NVS

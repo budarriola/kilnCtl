@@ -14,6 +14,7 @@
 
 #include "hal_esp_common.h"
 #include "hal_kv.h"
+#include "hal_time.h"
 /* nvs_flash.h kept for NVS_DEFAULT_PART_NAME only -- see wifi_prov.c's
  * identical comment; every actual nvs_*() call in this file below now goes
  * through hal_kv_*() instead. */
@@ -128,6 +129,24 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
     }
     if (err != HAL_OK) {
         return hal_status_to_esp_err(err);
+    }
+    /* An EMPTY namespace is "not found". ESP-IDF keeps a namespace entry after
+     * nvs_erase_all()/erasing every key, so recovery's Wi-Fi reset (which runs
+     * nvs_erase_all on this default-partition namespace) leaves one behind. Only
+     * a namespace in which at least one known key exists counts as saved data;
+     * otherwise the migration would adopt an all-default legacy config and
+     * override the AP identity that survives in WIFI_NVS_PARTITION. */
+    static const char *const probe_keys[] = WIFI_PROV_NVS_ALL_KEYS_INIT;
+    bool any_key = false;
+    for (size_t i = 0; i < sizeof(probe_keys) / sizeof(probe_keys[0]) && !any_key; i++) {
+        /* Type-agnostic: a typed getter returns NOT_FOUND for a key of another
+         * type on target (ESP-IDF 6.0.2), so mode, the has_ flags and ip_mode (u8) and
+         * saved_nets (blob) would read as absent. */
+        any_key = hal_kv_key_exists(&h, probe_keys[i]) == HAL_OK;
+    }
+    if (!any_key) {
+        hal_kv_close(&h);
+        return ESP_OK;
     }
     if (out_found) {
         *out_found = true;
@@ -245,18 +264,37 @@ esp_err_t wifi_prov_nvs_load_from(const char *partition, bool *out_found)
  * -- not the existence of the wifi_cfg namespace or of the mode key, both of
  * which the first migration step creates before the credential is persisted --
  * is what proves the migration finished and the legacy copy is stale. */
-static bool nvs_saved_nets_record_present(const char *partition)
+typedef enum {
+    SAVED_NETS_REC_ABSENT = 0,   /* definitely no record: safe to adopt legacy */
+    SAVED_NETS_REC_VERIFIED,     /* complete, readable record */
+    SAVED_NETS_REC_UNREADABLE    /* present or unknowable: never adopt over it */
+} saved_nets_rec_t;
+
+/* F1 (review 2026-10-10): tri-state. A refused record (open/read error, wrong
+ * size, newer version, count > 8) must NOT read as "absent", or the legacy
+ * namespace is re-adopted over the user's newer mode/AP identity every boot. */
+static saved_nets_rec_t nvs_saved_nets_record_state(const char *partition)
 {
     hal_kv_handle_t h;
-    if (hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition) != HAL_OK) {
-        return false;
+    hal_status_t oerr = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
+    if (oerr == HAL_NOT_FOUND) {
+        return SAVED_NETS_REC_ABSENT;
+    }
+    if (oerr != HAL_OK) {
+        return SAVED_NETS_REC_UNREADABLE;
     }
     saved_nets_blob_t blob;
     size_t len = sizeof(blob);
     hal_status_t err = hal_kv_get_blob(&h, NVS_KEY_SAVED_NETS, &blob, &len);
     hal_kv_close(&h);
-    return err == HAL_OK && len == sizeof(blob) && blob.version == SAVED_NETS_VERSION &&
-           blob.count <= WIFI_PROV_MAX_SAVED_NETWORKS;
+    if (err == HAL_NOT_FOUND) {
+        return SAVED_NETS_REC_ABSENT;
+    }
+    if (err == HAL_OK && len == sizeof(blob) && blob.version == SAVED_NETS_VERSION &&
+        blob.count <= WIFI_PROV_MAX_SAVED_NETWORKS) {
+        return SAVED_NETS_REC_VERIFIED;
+    }
+    return SAVED_NETS_REC_UNREADABLE;
 }
 
 /* Reads the legacy single-network keys (NVS_KEY_SSID/NVS_KEY_PASS/
@@ -310,9 +348,22 @@ void nvs_load_legacy_single(const char *partition, saved_net_t *out_net, bool *o
  * firmware-rollback case) -- refuse to load it and leave flash untouched
  * rather than risk misinterpreting fields/layout this build doesn't know
  * about, same rationale as zones_cfg_t's version check. */
-static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob_t *out_blob)
+/* LOW-2: set when a saved_nets record exists but could not be loaded
+ * (read error, wrong size, newer version, corrupt count, open failure other
+ * than "absent"). Such a record is "present but unreadable": the board is not
+ * unprovisioned, add/forget are refused and the record is never overwritten.
+ * factory_reset(wifi) is the escape. */
+bool s_saved_nets_refused;
+
+/* F3: set when the last refusal came from an open/read error (possibly
+ * transient) rather than from the record's content. */
+static bool s_saved_nets_refused_transient;
+
+static esp_err_t nvs_load_saved_nets_once(const char *partition, saved_nets_blob_t *out_blob)
 {
     memset(out_blob, 0, sizeof(*out_blob));
+    s_saved_nets_refused = false;
+    s_saved_nets_refused_transient = false;
 
     hal_kv_handle_t h;
     hal_status_t err = hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, partition);
@@ -331,6 +382,8 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
         return ESP_OK;
     }
     if (err != HAL_OK) {
+        s_saved_nets_refused = true;
+        s_saved_nets_refused_transient = true;
         return hal_status_to_esp_err(err);
     }
 
@@ -343,23 +396,37 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
         return ESP_OK;
     }
     if (err != HAL_OK) {
-        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob read from '%s' failed (%s) -- treating as empty",
+        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob read from '%s' failed (%s) -- record kept, add/forget refused",
                  partition, hal_status_to_name(err));
+        s_saved_nets_refused = true;
+        s_saved_nets_refused_transient = true;
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
     if (len != sizeof(*out_blob)) {
-        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is the wrong size -- treating as empty", partition);
+        ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is the wrong size -- record kept, add/forget refused", partition);
+        s_saved_nets_refused = true;
         memset(out_blob, 0, sizeof(*out_blob));
         out_blob->version = SAVED_NETS_VERSION;
         return ESP_OK;
     }
 
-    if (out_blob->version == SAVED_NETS_VERSION) {
-        return ESP_OK; /* current version -- happy path */
-    }
-    if (out_blob->version < SAVED_NETS_VERSION) {
+    if (out_blob->version <= SAVED_NETS_VERSION) {
+        /* LOW-1: a corrupt count would index past nets[]. */
+        if (out_blob->count > WIFI_PROV_MAX_SAVED_NETWORKS) {
+            ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' has count %u > %u -- record kept, add/forget refused",
+                     partition, (unsigned)out_blob->count, (unsigned)WIFI_PROV_MAX_SAVED_NETWORKS);
+            s_saved_nets_refused = true;
+            memset(out_blob, 0, sizeof(*out_blob));
+            out_blob->version = SAVED_NETS_VERSION;
+            return ESP_OK;
+        }
+        /* LOW-1: force NUL termination; later code uses strlen/strcmp. */
+        for (size_t i = 0; i < WIFI_PROV_MAX_SAVED_NETWORKS; i++) {
+            out_blob->nets[i].ssid[sizeof(out_blob->nets[i].ssid) - 1] = '\0';
+            out_blob->nets[i].password[sizeof(out_blob->nets[i].password) - 1] = '\0';
+        }
         /* v1 is the first version that has ever existed -- hook point for a
          * future migration, nothing to convert yet. */
         out_blob->version = SAVED_NETS_VERSION;
@@ -371,9 +438,28 @@ static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob
     ESP_LOGW(WIFI_PROV_TAG, "saved_nets blob from '%s' is version %u, newer than this firmware's %u -- "
                   "refusing to load, flash data left untouched",
              partition, (unsigned)out_blob->version, (unsigned)SAVED_NETS_VERSION);
+    s_saved_nets_refused = true; /* newer */
     memset(out_blob, 0, sizeof(*out_blob));
     out_blob->version = SAVED_NETS_VERSION;
     return ESP_OK;
+}
+
+/* F3: a transient read error is retried (bounded) before latching refused. */
+#define SAVED_NETS_LOAD_ATTEMPTS 3
+#define SAVED_NETS_LOAD_RETRY_DELAY_MS 20 /* INFO-3: back-to-back retries hit the same transient window */
+static esp_err_t nvs_load_saved_nets_from(const char *partition, saved_nets_blob_t *out_blob)
+{
+    esp_err_t e = ESP_OK;
+    for (int i = 0; i < SAVED_NETS_LOAD_ATTEMPTS; i++) {
+        e = nvs_load_saved_nets_once(partition, out_blob);
+        if (!s_saved_nets_refused || !s_saved_nets_refused_transient) {
+            break;
+        }
+        if (i + 1 < SAVED_NETS_LOAD_ATTEMPTS) {
+            (void)hal_time_delay_ms(SAVED_NETS_LOAD_RETRY_DELAY_MS);
+        }
+    }
+    return e;
 }
 
 esp_err_t nvs_save_saved_nets(void)
@@ -550,7 +636,17 @@ void wifi_prov_migrate_from_default_partition(bool found_in_wifi_nvs)
      * its still-only copy erased as stale. Once a verified record exists the
      * new location is the source of truth and the legacy copy is stale. */
     (void)found_in_wifi_nvs;
-    bool adopt = !nvs_saved_nets_record_present(WIFI_NVS_PARTITION);
+    saved_nets_rec_t rec = nvs_saved_nets_record_state(WIFI_NVS_PARTITION);
+    if (rec == SAVED_NETS_REC_UNREADABLE) {
+        /* F1: record present-but-unreadable (or newer): keep wifi_nvs values,
+         * do not adopt and do not erase the legacy copy. */
+        ESP_LOGW(WIFI_PROV_TAG, "saved_nets record in '%s' unreadable -- not adopting the legacy wifi_cfg", WIFI_NVS_PARTITION);
+        s_wifi = from_wifi_nvs;
+        s_legacy_single.has = false;
+        memset(&s_legacy_single.net, 0, sizeof(s_legacy_single.net));
+        return;
+    }
+    bool adopt = rec == SAVED_NETS_REC_ABSENT;
     if (!adopt) {
         /* The destination holds a verified saved_nets record: it is the source
          * of truth and the legacy copy is stale. Drop it so no reset path (recovery wifi reset,
@@ -632,7 +728,10 @@ void nvs_load_saved_nets(void)
         s_wifi.saved_nets.version = SAVED_NETS_VERSION;
     }
 
-    if (s_wifi.saved_nets.count == 0 && s_legacy_single.has && s_legacy_single.net.ssid[0] != '\0') {
+    if (s_saved_nets_refused) {
+        /* LOW-2: never overwrite an unreadable/newer record with a migrated one. */
+        s_legacy_erase_pending = false;
+    } else if (s_wifi.saved_nets.count == 0 && s_legacy_single.has && s_legacy_single.net.ssid[0] != '\0') {
         ESP_LOGI(WIFI_PROV_TAG, "migrating legacy single-network credential ('%s') to the saved-networks list",
                  s_legacy_single.net.ssid);
         s_wifi.saved_nets.nets[0] = s_legacy_single.net;

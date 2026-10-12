@@ -1,5 +1,5 @@
 // HTTP surface for the iter_tune persistence store (docs/
-// ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7). Two ROUTE_TIER_ADMIN routes:
+// ITER_TUNE_REDESIGN.md sec 8 row 7). Two ROUTE_TIER_ADMIN routes:
 //   GET  /api/iter_tune/status              -- per-zone persisted state
 //   POST /api/iter_tune/restore_commissioned -- apply the last-anchored (or
 //        baseline, if never anchored) gains for one zone and persist that

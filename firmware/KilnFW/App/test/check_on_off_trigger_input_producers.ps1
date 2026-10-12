@@ -10,7 +10,7 @@
 # assigned by any production code is silently 0/false on the real board
 # forever, while its host tests keep passing because the test supplies the
 # value by hand -- see project_consumer_without_producer_class.md. This
-# module's input struct is new (docs/ON_OFF_ZONE_PLAN.md sec 3/4/7's trigger
+# module's input struct is new (docs/ON_OFF_ZONE.md sec 3/4/7's trigger
 # evaluation core) and, unlike thermal_guard_input_t, several of its fields
 # (rule.*) currently have only a CONSTANT production producer in
 # profile_executor.c (rule.enable = false, etc.) because profile_on_off_
@@ -200,7 +200,7 @@ if ($missing.Count -gt 0) {
     Write-Host "  A trigger-input field with no producer is silently 0/false on every board" -ForegroundColor Red
     Write-Host "  forever, while its host tests keep passing because the test supplies the" -ForegroundColor Red
     Write-Host "  value by hand. See docs/audits/consumer_without_producer_2026-09-06.md" -ForegroundColor Red
-    Write-Host "  and docs/ON_OFF_ZONE_PLAN.md sec 3/4/7." -ForegroundColor Red
+    Write-Host "  and docs/ON_OFF_ZONE.md sec 3/4/7." -ForegroundColor Red
     throw "$($missing.Count) on_off_trigger_input_t/rule field(s) have no production producer"
 }
 

@@ -75,7 +75,7 @@ bool uart_bridge_ext_flash_worker_started(void);
 #define CFG_FS_SCAN_CHUNK_BYTES 4096
 
 static bool s_format_confirmation_pending = false;
-static char s_format_pending_reason[96] = { 0 };
+static char s_format_pending_reason[160] = { 0 };
 
 bool cfg_fs_mount_format_confirmation_pending(void)
 {
@@ -351,7 +351,7 @@ static bool start_deferred_auto_format(void)
     return true;
 }
 
-/* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+/* Owner decision 2026-09-07 (docs/FILESYSTEM_USER_DATA.md section 5
  * step 1): "Auto format, dont require all ff, search for valid files/
  * partitions ask the user if it is ok to overwright if partitions/files
  * found." Called only after esp_vfs_littlefs_register() has already failed
@@ -445,7 +445,12 @@ static esp_err_t maybe_auto_format_and_remount(esp_err_t original_mount_err)
     }
     /* cfg_fs stays UNAVAILABLE for THIS boot's return from cfg_fs_mount_device()
      * -- the deferred task installs the mount and write functions later, off
-     * this call stack entirely. */
+     * this call stack entirely. Returning the ORIGINAL error (not ESP_OK) is
+     * deliberate and correct: the only caller (main_boot_early.c) uses the
+     * result to report whether cfg_fs is mounted NOW, and it is not -- the
+     * format has merely been scheduled. If the deferred format later succeeds,
+     * status flips to MOUNTED and cfg_fs_get_status()/cfg_fs_is_available()
+     * are the source of truth, never this boot-time return value. */
     return original_mount_err;
 }
 
@@ -473,15 +478,15 @@ esp_err_t cfg_fs_mount_device(void)
         if (auto_fmt_err != ESP_OK) {
             /* Every cfg_fs_*() call fails clean with ESP_ERR_INVALID_STATE
              * from here on this boot; every caller degrades to firmware
-             * defaults (docs/FILESYSTEM_USER_DATA_PLAN.md's mount-failure
+             * defaults (docs/FILESYSTEM_USER_DATA.md's mount-failure
              * contract). maybe_auto_format_and_remount() has already logged
              * the specific reason (absent partition, refused-pending-
              * confirmation, or a format/re-register failure). */
             return auto_fmt_err;
         }
-        /* Auto-formatted and freshly registered -- fall through to the
-         * normal cfg_fs_init() finish below, same as a clean first-try
-         * mount. */
+        /* Not reached today: maybe_auto_format_and_remount() never returns
+         * ESP_OK (a deferred format finishes later), so a successful finish
+         * happens only on the first-try register path below. */
     }
 
     return finish_mount_after_register();
@@ -494,9 +499,24 @@ typedef struct {
     esp_err_t   result;
 } cfg_fs_write_job_t;
 
+static bool (*volatile s_write_refuse_fn)(void) = NULL;
+
+void cfg_fs_mount_set_write_refuse_hook(bool (*fn)(void))
+{
+    s_write_refuse_fn = fn;
+}
+
 static void cfg_fs_write_job_run(void *arg)
 {
     cfg_fs_write_job_t *job = (cfg_fs_write_job_t *)arg;
+    /* Final, on-the-worker look at the factory-reset mark (pref_cfg_fs.h "WRITER FENCE"): the
+     * caller's own check ran before its dispatch, and the reset job (which also runs on this worker,
+     * so is exempt by task identity) may have run in between. Nothing is written after the erase. */
+    bool (*refuse)(void) = s_write_refuse_fn;
+    if (refuse && refuse()) {
+        job->result = ESP_ERR_INVALID_STATE;
+        return;
+    }
     job->result = cfg_fs_write_atomic(job->rel_path, job->data, job->len);
 }
 

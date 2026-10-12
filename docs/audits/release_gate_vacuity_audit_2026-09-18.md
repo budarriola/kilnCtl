@@ -2,7 +2,7 @@
 
 Continues the series started in
 `docs/audits/release_gate_vacuity_audit_2026-09-16.md`; BLOCKER 3 of
-`docs/RELEASE_HARDENING_PLAN.md`.
+`docs/RELEASE_HARDENING.md`.
 
 Work was done in a dedicated worktree, `C:\wt\gateaudit_m2wz4r`, minted at
 `origin/main` `f7f0d0c1` via `tools/worktree_mint.ps1 -Label gateaudit

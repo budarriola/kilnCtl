@@ -51,6 +51,15 @@ class ConfirmedApplyTest(_Base):
         post_mock.assert_called_once_with("10.0.0.5", 3, ack_hardware_differs=False)
         self.assertIn("ok - applied", result)
 
+    def test_status_for_a_different_id_is_not_ok(self):
+        with self._resolve_host_patch(), \
+             unittest.mock.patch.object(ac, "post_apply", return_value=(202, '{"ok":true}')), \
+             unittest.mock.patch.object(ac, "poll_apply_status",
+                                         return_value={"state": "done_ok", "id": 7, "diverged": False, "reason": ""}):
+            result = msi.kiln_config_apply(id=3, confirm=True)
+        self.assertTrue(result.startswith("UNKNOWN"), result)
+        self.assertNotIn("ok - applied", result)
+
     def test_ack_hardware_differs_forwarded_to_client(self):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(ac, "post_apply", return_value=(202, '{"ok":true}')) as post_mock, \

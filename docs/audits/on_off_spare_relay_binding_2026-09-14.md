@@ -22,7 +22,7 @@ rejected on 2026-09-14 (same day, earlier decision). Not implemented.**
 ## 1. Where the "consumes a zone slot" coupling actually lives
 
 An on/off device today is not a separate entity — it **is** a zone, typed
-`ZONE_TYPE_ON_OFF` (`docs/ON_OFF_ZONE_PLAN.md` sec 1), and every zone lives in
+`ZONE_TYPE_ON_OFF` (`docs/ON_OFF_ZONE.md` sec 1), and every zone lives in
 one fixed-size array:
 
 - **`zone_cfg_t zones[MAX31856_CHANNEL_COUNT]`** —
@@ -114,7 +114,7 @@ Per the task's remaining items, independent of the D1 question:
    feeding `adaptive_tune` (and any future firing-history consumer)
    unfiltered on/off-zone data. Fixed: `zr->active = z->active &&
    !zone_is_on_off(zi)`, so an on/off zone is now reported as inactive in
-   every firing record, matching `docs/ON_OFF_ZONE_PLAN.md` sec 1's "Firing
+   every firing record, matching `docs/ON_OFF_ZONE.md` sec 1's "Firing
    stats / IAE: Skip" row.
 3. **`docs/SAFETY_CASE.md`** now carries the two mandated on/off entries
    (items 12 and 13 in sec 3): the guard-3 (welded-contactor) coverage gap

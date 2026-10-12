@@ -62,7 +62,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
  * limit -- checked below like every other literal this file/tree uses,
  * same discipline zones_config_store.c's NVS_KEY_LEN_CHECK documents. */
 #define NVS_KEY_SAFETY_CT_CAL "safetyctcal"
-/* v2 (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md): adds the operator-entered
+/* v2 (docs/CT_ATTRIBUTION_VERIFICATION.md): adds the operator-entered
  * offset/gain trim to each channel's entry. load_ct_cal() below carries a
  * stored v1 record forward field for field and seeds the trim at identity --
  * a board holding a real calibration must never lose it to a version bump.
@@ -1203,7 +1203,7 @@ bool safety_cfg_store_set_ct_cal_trim(size_t ch, float trim_offset_a, float trim
     if (ch >= SAFETY_CT_CAL_CHANNELS) {
         return false;
     }
-    /* Refuse, never clamp -- CT_ATTRIBUTION_VERIFICATION_PLAN.md: "do not
+    /* Refuse, never clamp -- CT_ATTRIBUTION_VERIFICATION.md: "do not
      * clamp a bad trim into a plausible-looking one". A clamped entry would
      * leave the operator looking at a number the board is not using. */
     if (!isfinite(trim_offset_a) || trim_offset_a < SAFETY_CT_CAL_TRIM_OFFSET_A_MIN ||

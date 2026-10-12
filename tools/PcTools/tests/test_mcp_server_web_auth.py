@@ -171,7 +171,7 @@ class UnreadableConfigTest(_Base):
         self.assertNotIn("NOTE:", result)
 
     def test_genuinely_unreachable_board_still_hard_errors(self):
-        err = wac.WebAuthSetupHttpError("board unreachable: [Errno 111] Connection refused")
+        err = wac.WebAuthSetupHttpError("board unreachable: [Errno 111] Connection refused", unreachable=True)
         with unittest.mock.patch.object(wac, "get_auth_config", side_effect=err), \
              unittest.mock.patch.object(wac, "post_bootstrap_password") as boot_mock:
             result = msw.web_auth_setup(confirm=True)

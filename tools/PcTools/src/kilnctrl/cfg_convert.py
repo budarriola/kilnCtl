@@ -5,7 +5,7 @@ produces and POST /api/backup/import accepts -- see
 firmware/KilnFW/App/drivers/http/backup_export.c/backup_import.c/
 backup_http_internal.h).
 
-WHY THIS EXISTS (see docs/CONFIG_MIGRATION_CHAIN_PLAN.md and CLAUDE.md's
+WHY THIS EXISTS (see docs/CONFIG_MIGRATION_CHAIN.md and CLAUDE.md's
 pointer to it): the board's own firmware is deliberately kept to one
 migration step -- N-1 to N -- so a board more than one release behind cannot
 read its own on-flash config and falls back to firmware defaults, silently
@@ -15,7 +15,7 @@ migration code untouched. This module never runs on the board and never
 changes firmware migration behaviour.
 
 SCOPE. The document this module converts is the BACKUP document -- the
-top-level "version" field is BACKUP_FORMAT_VERSION (currently 6, see
+top-level "version" field is BACKUP_FORMAT_VERSION (currently 7, see
 backup_http_internal.h), not ZONES_CFG_VERSION (the on-flash per-zone schema
 version, currently 26). The two are different numbers for a reason: most of
 the fields ZONES_CFG_VERSION bumps added to the on-flash struct were folded
@@ -106,7 +106,7 @@ from typing import Any, Optional
 # drift check (see module docstring) is what keeps them honest, not an
 # import-time reach into firmware/.
 # ---------------------------------------------------------------------------
-BACKUP_FORMAT_VERSION = 6
+BACKUP_FORMAT_VERSION = 7
 BACKUP_FORMAT_VERSION_MIN = 1
 
 # Every zone-level key this module knows firmware can emit/read today, by the
@@ -143,7 +143,7 @@ V4_COUPLING_KEY_PREFIX = "coupling_c"
 # correctly -- it just cannot explain that one key's fate, which is exactly
 # what the mirror-drift check is for).
 ADDITIVE_TOP_LEVEL_KEYS = ("relay_cycles", "unit", "ramp_assist", "display_power",
-                           "hidden_builtin_profiles", "tz", "relay_names")
+                           "hidden_builtin_profiles", "tz", "relay_names", "stale_or_unknown_stores")
 
 KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     "coupling_tau_c", "coupling_dead_time_c", "coupling_diag_k_dc", "settings_source_g",
@@ -184,6 +184,10 @@ KNOWN_ADDITIVE_ZONE_KEYS = frozenset({
     # transplanting), so these are listed here purely so the mirror-drift
     # check can confirm this module has not simply never heard of them.
     "kiln_configs", "is_active", "package", "omitted",
+    # BACKUP_FORMAT_VERSION 7 board topology. Handled at top level by the
+    # v7 block in convert() (not per zone); listed here only because the
+    # mirror-drift check's extraction regex sees them as emitted keys.
+    "thermo_count", "relay_count",
 })
 
 # Calibration fields this module will NEVER fabricate, default, or derive.
@@ -446,6 +450,15 @@ def convert(doc: dict, target_version: int) -> "tuple[dict, ConversionReport]":
                      f"zone {z.get('index', i)}")
         for i, z in enumerate(doc.get("zones", []))
     ]
+    # BACKUP_FORMAT_VERSION 7 added the board topology (thermo_count/relay_count)
+    # so a restore onto a factory-reset board can set it first. Below 7 the
+    # keys are not representable and are dropped, reported.
+    for key in ("thermo_count", "relay_count"):
+        if key in doc:
+            if target_version >= 7:
+                out[key] = doc[key]
+            else:
+                report.add("document", key, "dropped", "not representable below BACKUP_FORMAT_VERSION 7")
     if "safety_tc_type" in doc:
         out["safety_tc_type"] = doc["safety_tc_type"]
     if "update_repo" in doc:  # WP9 top-level string, never version-gated

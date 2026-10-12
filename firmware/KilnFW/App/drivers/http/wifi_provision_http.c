@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "wifi_provision_http.h"
 
 #include <stdatomic.h>
@@ -6,8 +7,11 @@
 #include <string.h>
 #include <sys/socket.h>
 
+#include "persist_scratch.h" /* persist_scratch_alloc() -- scan_get response */
 #include "esp_heap_caps.h" /* heap_caps_malloc() -- networks_get_handler() below */
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "http_origin_check.h" /* http_captive_location() */
 #include "esp_http_server.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
@@ -224,17 +228,7 @@ static const char *ip_mode_name(wifi_prov_ip_mode_t m)
  * one with unusual characters. out_cap includes the closing NUL. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)
@@ -292,7 +286,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * which would be a lie about an AP that is in fact protected. */
     const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
     char ap_password_escaped[WIFI_PROV_PASSWORD_MAX_LEN * 2 + 1];
-    json_escape(on_ap ? wifi_prov_get_ap_password() : "", ap_password_escaped,
+    json_escape(wifi_prov_status_ap_password_view(on_ap, wifi_prov_get_ap_password()), ap_password_escaped,
                 sizeof(ap_password_escaped));
 
     char sta_ip[16];
@@ -356,46 +350,46 @@ static esp_err_t status_get_handler(httpd_req_t *req)
      * radio, same disclosure class as ap_clients just above it. */
     bool ap_pending_teardown = wifi_prov_get_ap_pending_teardown();
 
-    /* +64 over the previous size for the two new booleans and their keys, +24
-     * more for ap_pending_teardown's own key+value. */
-    /* 2026-10-03: static_dns/static_dns2 added (+63 B worst case). Measured
-     * worst-case rendered length with every escaped field at its maximum is
-     * 677 B + NUL = 678 B, so this buffer grew 672 -> 680 B (+8 B, kept rather
-     * than streaming the response: it is well inside the httpd stack budget,
-     * check_httpd_task_stack_budget.ps1). dns/dns2 are formatted inline below
-     * instead of through wifi_prov_status_redact_field(): that helper needs a
-     * caller-supplied buffer per field, and two more 19 B buffers on this
-     * handler's stack buy nothing since the values are already quote-safe
-     * dotted quads (validated before storage). */
-    char json[352 + WIFI_PROV_PASSWORD_MAX_LEN * 2 + 24 + 3 * WIFI_PROV_IPV4_STR_MAX + 32 + 64 + 24 + 8];
-    int n = snprintf(json, sizeof(json),
-                     "{\"mode\":\"%s\",\"state\":\"%s\",\"ssid\":%s,\"sta_connected\":%s,"
-                     "\"sta_ip\":%s,\"ap_ssid\":\"%s\",\"ap_password\":\"%s\",\"sta_rssi\":%d,"
-                     "\"ap_clients\":%u,\"ip_mode\":\"%s\",\"static_ip\":%s,"
-                     "\"static_netmask\":%s,\"static_gateway\":%s,"
-                     "\"static_dns\":%s%s%s,\"static_dns2\":%s%s%s,"
-                     "\"ap_password_known\":%s,\"ap_password_set\":%s,"
-                     "\"ap_pending_teardown\":%s}",
-                     mode_name(wifi_prov_get_mode()), state_name(wifi_prov_get_state()), ssid_field,
-                     sta_connected ? "true" : "false", sta_ip_field, ap_ssid_escaped, ap_password_escaped,
-                     (int)sta_rssi, (unsigned)ap_clients, ip_mode, static_ip_field, static_netmask_field,
-                     static_gateway_field,
-                     /* dns fields: same redaction rule as the three above (JSON null unless
-                      * may_disclose), written inline to avoid two more stack buffers. */
-                     may_disclose ? "\"" : "", may_disclose ? wifi_prov_get_static_dns() : "null",
-                     may_disclose ? "\"" : "", may_disclose ? "\"" : "",
-                     may_disclose ? wifi_prov_get_static_dns2() : "null", may_disclose ? "\"" : "",
-                     on_ap ? "true" : "false",
-                     wifi_prov_get_ap_password()[0] ? "true" : "false",
-                     ap_pending_teardown ? "true" : "false");
+    /* LOW-5 (REVIEW_LD01_WWFIX): layout and cap live in wifi_prov.h (WIFI_PROV_STATUS_JSON_CAP, worst case
+     * ~830 B pinned by a host test with every field at maximum). HEAP, not stack (httpd 8 KB stack). */
+    const size_t json_cap = WIFI_PROV_STATUS_JSON_CAP;
+    char *json = persist_scratch_alloc(json_cap);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
+    /* dns fields: same redaction rule as the three above (JSON null unless may_disclose). */
+    char static_dns_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    char static_dns2_field[WIFI_PROV_IPV4_STR_MAX + 3];
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_dns(), static_dns_field, sizeof(static_dns_field));
+    wifi_prov_status_redact_field(may_disclose, wifi_prov_get_static_dns2(), static_dns2_field,
+                                  sizeof(static_dns2_field));
+    const wifi_prov_status_json_in_t in = {
+        .mode = mode_name(wifi_prov_get_mode()), .state = state_name(wifi_prov_get_state()),
+        .ssid_field = ssid_field, .sta_ip_field = sta_ip_field, .ap_ssid_escaped = ap_ssid_escaped,
+        .ap_password_escaped = ap_password_escaped, .ip_mode = ip_mode, .static_ip_field = static_ip_field,
+        .static_netmask_field = static_netmask_field, .static_gateway_field = static_gateway_field,
+        .static_dns_field = static_dns_field, .static_dns2_field = static_dns2_field,
+        .sta_connected = sta_connected, .ap_password_known = on_ap,
+        .ap_password_set = wifi_prov_get_ap_password()[0] != '\0', .ap_pending_teardown = ap_pending_teardown,
+        .sta_rssi = (int)sta_rssi, .ap_clients = (unsigned)ap_clients,
+        .recovery_hint = wifi_prov_saved_nets_recovery_hint(),
+    };
+    int n = wifi_prov_status_json_format(json, json_cap, &in);
     if (n < 0) {
         n = 0;
     }
-    if ((size_t)n >= sizeof(json)) {
-        n = (int)sizeof(json) - 1; /* truncated is fine for a status readout; never overrun */
+    if ((size_t)n >= json_cap) {
+        /* Never send a truncated (invalid JSON) body as a 200: the cap is pinned above the measured worst
+         * case, so this is unreachable short of a layout change the host test would have caught. */
+        free(json);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "status too large");
+        return ESP_OK;
     }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, n);
+    esp_err_t sent = httpd_resp_send(req, json, n);
+    free(json);
+    return sent;
 }
 
 static esp_err_t scan_get_handler(httpd_req_t *req)
@@ -415,25 +409,33 @@ static esp_err_t scan_get_handler(httpd_req_t *req)
     /* Bounded by MAX_SCAN entries above, each contributing a fixed-size
      * chunk -- no per-request allocation sized from anything a client sent,
      * this is entirely device-controlled. */
-    char json[20 * 64 + 16];
+    /* HEAP, not stack (httpd 8 KB stack); freed on every return path. */
+    const size_t json_cap = 20 * 64 + 16;
+    char *json = persist_scratch_alloc(json_cap);
+    if (json == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     size_t o = 0;
     json[o++] = '[';
     for (size_t i = 0; i < count; i++) {
         char ssid_escaped[WIFI_PROV_SSID_MAX_LEN * 2 + 1];
         json_escape(results[i].ssid, ssid_escaped, sizeof(ssid_escaped));
-        int n = snprintf(json + o, sizeof(json) - o, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
+        int n = snprintf(json + o, json_cap - o, "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%s}",
                          i == 0 ? "" : ",", ssid_escaped, (int)results[i].rssi,
                          results[i].secure ? "true" : "false");
-        if (n < 0 || (size_t)n >= sizeof(json) - o) {
+        if (n < 0 || (size_t)n >= json_cap - o) {
             break; /* ran out of room -- stop here rather than overrun */
         }
         o += (size_t)n;
     }
-    if (o + 1 < sizeof(json)) {
+    if (o + 1 < json_cap) {
         json[o++] = ']';
     }
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    esp_err_t sent = httpd_resp_send(req, json, o);
+    free(json);
+    return sent;
 }
 
 /* WIFI_PROV_MAX_SAVED_NETWORKS is a .c-file-private define in wifi_prov.c,
@@ -595,6 +597,14 @@ static esp_err_t forget_post_handler(httpd_req_t *req)
     esp_err_t err = wifi_prov_forget_network(ssid, (size_t)ssid_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_forget_network failed: %s", esp_err_to_name(err));
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid contains a NUL byte");
+            return ESP_OK;
+        }
+        if (err == ESP_ERR_NOT_SUPPORTED && wifi_prov_saved_nets_recovery_hint()) {
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, wifi_prov_saved_nets_recovery_hint());
+            return ESP_OK;
+        }
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "could not forget network");
         return ESP_OK;
     }
@@ -700,6 +710,12 @@ static esp_err_t ip_config_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
+    const char *problem = wifi_prov_static_ip_config_problem(ip, netmask, gateway);
+    if (problem) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, problem);
+        return ESP_OK;
+    }
+
     esp_err_t err = wifi_prov_set_static_ip(ip, netmask, gateway, dns, dns2);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_set_static_ip failed: %s", esp_err_to_name(err));
@@ -783,6 +799,16 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
     }
 
     if (ap_ssid_len >= 0 || ap_password_len >= 0) {
+        /* Validate both before applying either: a bad password must not
+         * leave the new SSID already live. */
+        if (ap_ssid_len >= 0 && !wifi_prov_ap_ssid_arg_valid(ap_ssid, (size_t)ap_ssid_len)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_ssid must be 1-32 characters");
+            return ESP_OK;
+        }
+        if (ap_password_len >= 0 && !wifi_prov_ap_password_arg_valid(ap_password, (size_t)ap_password_len)) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ap_password must be empty (open) or 8-63 characters");
+            return ESP_OK;
+        }
         if (ap_ssid_len >= 0) {
             esp_err_t err = wifi_prov_set_ap_ssid(ap_ssid, (size_t)ap_ssid_len);
             if (err != ESP_OK) {
@@ -821,8 +847,12 @@ static esp_err_t provision_post_handler(httpd_req_t *req)
     esp_err_t err = wifi_prov_add_network(ssid, (size_t)ssid_len, password, (size_t)password_len);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "wifi_prov_add_network failed: %s", esp_err_to_name(err));
-        if (err == ESP_ERR_NO_MEM) {
+        if (err == ESP_ERR_INVALID_ARG) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "ssid or password contains a NUL byte");
+        } else if (err == ESP_ERR_NO_MEM) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "saved network list is full");
+        } else if (err == ESP_ERR_NOT_SUPPORTED && wifi_prov_saved_nets_recovery_hint()) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, wifi_prov_saved_nets_recovery_hint());
         } else {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "could not save credentials");
         }
@@ -862,7 +892,22 @@ static esp_err_t captive_portal_404_handler(httpd_req_t *req, httpd_err_code_t e
         return ESP_OK;
     }
     httpd_resp_set_status(req, "302 Found");
-    httpd_resp_set_hdr(req, "Location", "/");
+    /* Absolute to the SoftAP IP so the page loads under an IP Host (the F4 Host
+     * allow-list refuses captive.apple.com & co. for POST /provision etc.). */
+    char loc[32] = "/";
+    const bool on_ap = wifi_prov_request_arrived_on_ap(httpd_req_to_sockfd(req));
+    unsigned ap_ip = 0;
+    if (on_ap) {
+        esp_netif_t *ap = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+        esp_netif_ip_info_t ipi;
+        if (ap != NULL && esp_netif_get_ip_info(ap, &ipi) == ESP_OK) {
+            ap_ip = (unsigned)ipi.ip.addr;
+        } else {
+            ESP_LOGW(TAG, "captive 302: AP netif IP unreadable, falling back to 192.168.4.1");
+        }
+    }
+    (void)http_captive_location_for_request(loc, sizeof(loc), on_ap, ap_ip);
+    httpd_resp_set_hdr(req, "Location", loc);
     httpd_resp_send(req, NULL, 0);
     return ESP_OK;
 }
@@ -1178,7 +1223,7 @@ esp_err_t wifi_provision_http_start(void)
      * bytes = 44 bytes, noise against the documented ~11.9 kB DRAM failure
      * floor.
      *
-     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT_PLAN.md pass 2's
+     * Bumped 151 -> 160, 2026-09-19: docs/LIVE_PROFILE_EDIT.md pass 2's
      * five new routes (GET /live_profile, GET+POST /api/profile/live, POST
      * /api/profile/live/fork, POST /api/profile/live/decide --
      * profiles_live_http.c) plus two favorites routes that landed
@@ -1197,7 +1242,7 @@ esp_err_t wifi_provision_http_start(void)
      *
      * Bumped 165 -> 170, 2026-09-23: iter_tune_http.c added two routes
      * (GET /api/iter_tune/status, POST /api/iter_tune/restore_commissioned,
-     * ITER_TUNE_REDESIGN_PLAN.md sec 8 row 7), which would have left only 5
+     * ITER_TUNE_REDESIGN.md sec 8 row 7), which would have left only 5
      * spare against the 165 cap. Set to 170 for the same ~9-slot headroom
      * convention as every bump above.
      *

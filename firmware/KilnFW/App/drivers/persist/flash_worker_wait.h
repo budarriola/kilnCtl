@@ -6,7 +6,7 @@
 // dispatches to the flash worker before main_control_bringup() has started
 // it (relay_cycles_init(), adaptive_tune_init()'s kibase resolve) shares
 // ONE implementation instead of each copying its own 20ms/5s constants --
-// see docs/FILESYSTEM_PLAN.md's "reset one side of a pair" entry for why a
+// see docs/FILESYSTEM.md's "reset one side of a pair" entry for why a
 // copied wait is itself a hazard.
 //
 // Host-testable: backed only by a caller-supplied "is it started yet"

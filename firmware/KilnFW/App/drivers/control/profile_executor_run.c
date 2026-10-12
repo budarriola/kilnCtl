@@ -16,6 +16,7 @@
 #include "esp_log.h"
 
 #include "autotune_engine.h"
+#include "danger_mode.h"
 #include "backup_restore_state.h" /* backup_import_restore_in_flight() -- 2026-09-28
                                     * A4 review follow-up A */
 #include "heat_enable.h"
@@ -79,7 +80,7 @@ void clear_stale_zone_latches_for_new_run(uint8_t zone_mask)
 
 /* The one predicate for "this zone's reading/state is part of the run's shared
  * temperature drive": not an on/off zone (it has no obligation to the shared
- * setpoint, ON_OFF_ZONE_PLAN.md sec 1) and not monitor-only (never driven,
+ * setpoint, ON_OFF_ZONE.md sec 1) and not monitor-only (never driven,
  * SPARE_RELAY_ONOFF_PLAN.md sec 10). Used by the baseline pick, the warm-start
  * coolest pick and the ramp-lock loop so the three cannot disagree. Deliberately
  * NOT used by the ramp-rate-ceiling feasibility check: an on/off zone has a
@@ -203,8 +204,30 @@ static void profile_executor_capture_baseline(uint8_t zone_mask,
     }
 }
 
+/* MED-2 (FIRING_PATH_AUDIT_2026-10-10): a start from DONE overwrites the finished run's state before
+ * several later refusals. done_snap is a copy of s_exec taken just before that overwrite (NULL when
+ * the state was not DONE); a refusal restores it so the DONE run and its fs_persisted flag survive
+ * untouched. Lock-protected fields only: last_tick_tick is written by the control task without the
+ * lock, so it keeps its live value. Caller holds s_exec.lock; this releases it. */
+static void run_refuse_unlock(s_exec_state_t *done_snap)
+{
+    if (done_snap != NULL) {
+        TickType_t live_tick = s_exec.last_tick_tick;
+        history_slot_t *live_history = s_exec.history; /* LOW-B: keep a buffer this start allocated */
+        memcpy(&s_exec, done_snap, sizeof(s_exec));
+        s_exec.last_tick_tick = live_tick;
+        if (live_history != NULL) s_exec.history = live_history;
+        heap_caps_free(done_snap);
+    }
+    xSemaphoreGive(s_exec.lock);
+}
+
 bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 {
+    /* Zones config generation before ANY config read below; re-checked under zones_cfg_lock()
+     * after the heat claim is published (see the "zones config changed" late check). */
+    const uint32_t gen_at_entry = zones_config_generation();
+
     /* THE READINESS INTERLOCK (owner decision 2026-09-09; readiness_gate.h
      * has the full rationale and the standing "NO OVERRIDE" instruction).
      *
@@ -230,7 +253,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * that guard is safe; readiness_gate.c documents the fail-safe direction
      * of every fact it reads on a board that has not finished starting.
      *
-     * Slice 2 (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6): collects the
+     * Slice 2 (docs/SYSTEM_MODE_GATE.md section 3.6): collects the
      * readiness facts once and runs system_mode_gate_check()'s recovery-mode
      * rule against them BEFORE readiness_gate_evaluate() -- the same facts,
      * no second collect -- so the recovery-mode wording an operator sees here
@@ -250,8 +273,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
          * while backup_import.c has one in flight, same choke point as the
          * recovery-mode check just above. */
         mode_snap.restore_in_flight = backup_import_restore_in_flight();
+        mode_snap.danger_mode_active = danger_mode_blocks_start(); /* LCD review N2; R3: fail closed */
         if (system_mode_gate_check(SYS_ACTION_START_PROFILE, &mode_snap, err_msg, err_cap)) {
-            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode or restore)",
+            ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused by the system mode gate (recovery mode, restore or danger mode)",
                      (unsigned)profile_id);
             return false;
         }
@@ -281,6 +305,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
+    /* L23 residual: capture the slot's save revision BEFORE the copy. */
+    const uint32_t slot_rev = profiles_http_slot_rev(profile_id);
     profile_t p;
     if (!profiles_http_get(profile_id, &p)) {
         if (err_msg) snprintf(err_msg, err_cap, "no such profile");
@@ -386,25 +412,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * heat is the failure this refuses to repeat; the message stays under
      * the char[128] dashboard_http.c's start handler passes. */
     {
-        uint32_t sources = 0;
-        if (relay_authority_on_blocked(s_exec.safety, &sources)) {
-            if (err_msg) {
-                /* ROADMAP.md M13: decode the mask instead of showing a bare
-                 * hex value -- same shortening (first source + "(+more)")
-                 * zones_http.c's ZONE_SWEEP_ZONE_ENERGIZE_REFUSED case and
-                 * autotune_engine.c's matching refusal already use. */
-                char src_words[160];
-                safety_fault_source_words(sources, src_words, sizeof(src_words));
-                char *comma = strchr(src_words, ',');
-                bool more = (comma != NULL);
-                if (comma != NULL) {
-                    *comma = '\0';
-                }
-                snprintf(err_msg, err_cap,
-                         "heat is blocked (%.32s%s, usually the safety link down) -- "
-                         "a firing cannot start",
-                         src_words, more ? " (+more)" : "");
-            }
+        if (relay_authority_start_blocked(s_exec.safety, err_msg, err_cap,
+                                          "a firing cannot start")) {
             return false;
         }
     }
@@ -430,6 +439,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                                        &warm_start_coolest_captured,
                                        &ambient_valid, &ambient_c_captured);
 
+    s_exec_state_t *done_snap = NULL; /* MED-2: see run_refuse_unlock() */
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
 
     if (s_exec.state == PROFILE_EXEC_RUNNING || s_exec.state == PROFILE_EXEC_PAUSED) {
@@ -440,6 +450,24 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (s_exec.state == PROFILE_EXEC_FAULTED) {
         xSemaphoreGive(s_exec.lock);
         if (err_msg) snprintf(err_msg, err_cap, "a thermal guard is latched -- acknowledge it (Stop) first");
+        return false;
+    }
+
+    /* HTTP input parsing audit L23: `p` was copied before this lock, so a
+     * profile delete (profiles_delete_slot(), profiles_http.c) may be erasing
+     * the slot right now, or may have finished since. The delete sets its
+     * in-flight mark BEFORE its own running check, which takes this same lock;
+     * this re-check sits in the same locked section that commits RUNNING
+     * below, so one side always sees the other. Lock-free read only: never
+     * take the profiles save lock or wait on the flash worker under
+     * s_exec.lock (order: flash worker -> save lock -> s_exec.lock). */
+    if (!profiles_http_slot_runnable_rev(profile_id, slot_rev)) {
+        xSemaphoreGive(s_exec.lock);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, profiles_http_loaded()
+                         ? "profile is being deleted, was deleted or was re-saved -- not started"
+                         : "profiles still loading -- not started, retry in a moment");
+        }
         return false;
     }
 
@@ -662,11 +690,23 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
 
+    if (s_exec.state == PROFILE_EXEC_DONE) {
+        done_snap = heap_caps_malloc(sizeof(s_exec), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        /* LOW-C: PSRAM only. An internal-RAM fallback could breach the 8 KB internal heap floor. */
+        if (done_snap == NULL) {
+            xSemaphoreGive(s_exec.lock);
+            if (err_msg) snprintf(err_msg, err_cap, "out of memory preparing the start -- try again");
+            return false;
+        }
+        memcpy(done_snap, &s_exec, sizeof(s_exec));
+    }
+
     s_exec.profile = p;
     s_exec.profile_id = profile_id;
     s_exec.segment_index = 0;
     s_exec.dwelling = false;
     s_exec.segment_elapsed_s = 0;
+    s_exec.segment_elapsed_rem_ms = 0;
     s_exec.ramp_lock_held = false;
     s_exec.ramp_lock_lagging_mask = 0;
     /* docs/audits/profile_executor_panic_2026-09-24.md: latched per-run so a
@@ -683,6 +723,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * memset(s_exec.zones, ...) a few lines down. */
     s_exec.dwell_credit_applied_s = 0.0f;
     s_exec.fault_reason[0] = '\0';
+    s_exec.pause_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     s_exec.global_fault_source = 0;
     /* Per-run, not cumulative: carrying a previous firing's claim forward
@@ -690,6 +731,8 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * operator has since taken over manually. Each run starts owing nothing
      * and claims what it touches (see s_exec_state_t.claimed_relay_mask). */
     s_exec.claimed_relay_mask = 0;
+    /* zone_off_pending_mask is deliberately NOT zeroed here (review-2 MEDIUM-1): a bit still set is an OFF write that
+     * has not landed, and forgetting it would strand a closed relay. Ownership is checked at retry time. */
     /* Spare-relay WP-3: per-run aux decision/actuation state starts owing
      * nothing too. aux_claim_mask is NOT zeroed here: a bit still set is a
      * run-end OFF write that failed and has not landed yet, and forgetting it
@@ -757,9 +800,9 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * because this run's first tick already believed generation 0.
      *
      * MEDIUM-2 (review): seeding straight from live_profile_generation() is
-     * wrong on a warm-start resume across a reboot, because that counter is
-     * RAM-only and resets to 0 while a pending working copy on disk does
-     * not (live_profile_generation()'s own doc comment, corrected). If this
+     * wrong after a reboot, because that counter is RAM-only (live_profile_start()
+     * seeds it randomly, not 0) while a pending working copy on disk
+     * survives (live_profile_generation()'s own doc comment, corrected). If this
      * exact profile_id already has a pending live edit, force this run's
      * baseline to NOT match the current generation, so the very first tick's
      * reload_live_profile_if_changed() poll sees a "change" and picks the
@@ -817,7 +860,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         }
     }
     if (n_heating_zones == 0) {
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         /* Name the real cause: a monitor-only zone (relay moved to an aux
          * output) has a control mode but no heater relay, so "control mode
          * OFF" alone would send the operator to the wrong field. Both
@@ -840,7 +883,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         return false;
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md sec 6: "If the cap is reached by on/off zones
+    /* docs/ON_OFF_ZONE.md sec 6: "If the cap is reached by on/off zones
      * alone, that is a configuration error; refuse at run start rather than
      * discovering it mid-firing." An on/off zone counts toward
      * max_simultaneous_relays exactly like a heater (a contactor coil draws
@@ -875,7 +918,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             if (aux_seen_mask & (1u << b)) n_aux++;
         }
         if (n_aux > 0 && (uint16_t)n_on_off_zones + n_aux >= cap_for_on_off_check) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 snprintf(err_msg, err_cap,
                          "this profile has %u on/off zone(s) and %u aux output(s) but "
@@ -890,7 +933,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             return false;
         }
         if (n_on_off_zones >= cap_for_on_off_check) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 snprintf(err_msg, err_cap,
                          "this profile has %u on/off zone(s) but max_simultaneous_relays is %u -- "
@@ -905,7 +948,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
 
     /* HP-02 bench bug (2026-09-25..27, ESP 0fb8ad98): an on/off-typed zone
      * (ZONE_TYPE_ON_OFF, left behind by HP-03/HP-07's zone_type override)
-     * in a profile carrying no on/off rule for it. docs/ON_OFF_ZONE_PLAN.md
+     * in a profile carrying no on/off rule for it. docs/ON_OFF_ZONE.md
      * sec 3 rule 6 holds such a zone's relay OFF for the whole firing, and
      * the tick loop never applies its PID/bang-bang decision (the on/off
      * path owns its apply_relay() call) -- so the bench saw duty 1.00,
@@ -939,7 +982,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             }
         }
         if (any_rule) continue;
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap,
                      "zone %u is typed on/off but no on/off rule in this profile targets it: "
@@ -1083,7 +1126,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
             .progress_band_c = progress_band_c,
         };
         thermal_guard_reset(&z->guard_state);
-        /* docs/ON_OFF_ZONE_PLAN.md sec 5: "Resume starts every on/off device
+        /* docs/ON_OFF_ZONE.md sec 5: "Resume starts every on/off device
          * in its fail-safe state and quasi_dwell = false" -- profile_
          * executor_run() is the single entry point for both a fresh run and
          * the warm-start/resume path, so resetting here covers both without
@@ -1138,12 +1181,14 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * overridden) when the plan actually warm-started -- the "not
      * warm-started" branch leaves every one of those exactly as the
      * pre-feature code already set them, byte-for-byte. */
+    uint8_t warm_replay_end = 0;
     {
         profile_warm_start_plan_t plan = profile_executor_plan_warm_start(&p, warm_start_coolest_c);
         if (plan.warm_started) {
             s_exec.segment_index = plan.entry_segment_index;
             s_exec.dwelling = plan.entry_dwelling;
             s_exec.segment_elapsed_s = plan.entry_segment_elapsed_s;
+            s_exec.segment_elapsed_rem_ms = 0;
             baseline_target_c = plan.entry_target_c;
 
             s_exec.warm_started = true;
@@ -1154,45 +1199,14 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
                      s_exec.warm_start_reason, (int)plan.entry_dwelling, (double)plan.entry_target_c,
                      (unsigned long)plan.entry_segment_elapsed_s);
 
-            /* Q1 owner decision: replay every skipped RELAY_IO segment's
-             * on/off command, in profile order, before the first ramp tick
-             * -- reusing io_seg_start() gets both the hardware write and the
-             * relay_authority claim/claimed_relay_mask registration this
-             * needs "for free", identical to how a segment reached normally
-             * would be started. The one deliberate difference: forcing
-             * `blocking = true` afterward makes io_segs_tick() (which skips
-             * any segment with blocking == true) leave this segment alone
-             * for the rest of the run -- its own hold/dwell_min timer is
-             * NOT replayed (that schedule position is already past), only
-             * the command is. It is retired the same way a real blocking
-             * segment's command is: by the end-of-run sweep
-             * (io_segs_force_all_off(), honoring leave_on_at_end only on the
-             * clean DONE path, same as always) -- exactly the registration
-             * this decision requires so a replayed relay is never left
-             * energized with nothing owning it. */
-            for (uint8_t i = 0; i < plan.entry_segment_index && i < p.segment_count; i++) {
-                if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
-                    continue;
-                }
-                io_seg_start(i, &p.segments[i]);
-                s_exec.io_segs[i].blocking = true;
-                if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
-                    s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
-                }
-                ESP_LOGI(PE_TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
-                              "was NOT restarted, it stays as commanded until the run ends",
-                         i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
-                         s_exec.io_segs[i].is_relay
-                             ? s_exec.io_segs[i].target
-                             : (uint8_t)(s_exec.io_segs[i].target - PROFILE_IO_TARGET_IO_BASE + 1u),
-                         s_exec.io_segs[i].state_on ? "ON" : "OFF");
-            }
+            warm_replay_end = plan.entry_segment_index; /* replayed after the last refusal, below */
         }
     }
 
     s_exec.target_c = baseline_target_c;
     s_exec.run_start_c = baseline_target_c;
     s_exec.total_elapsed_s = 0;
+    s_exec.total_elapsed_rem_ms = 0;
 
     /* PID_EXPANSION_PLAN.md sec 3.6d: seed every zone's own capped setpoint
      * at the same value s_exec.target_c starts this run/warm-start from --
@@ -1292,7 +1306,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     {
         uint8_t conflict_mask = 0;
         if (!relay_authority_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask, &conflict_mask)) {
-            xSemaphoreGive(s_exec.lock);
+            run_refuse_unlock(done_snap);
             if (err_msg) {
                 uint8_t conflict_zone = 0;
                 for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
@@ -1325,7 +1339,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * (non-race) case. */
     if (!relay_authority_heat_zone_claim_begin(RELAY_HEAT_ZONE_CLAIM_PROFILE)) {
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         if (err_msg) {
             snprintf(err_msg, err_cap,
                      "a zone current sweep is running -- it cannot run at the same time as a firing");
@@ -1342,7 +1356,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (ota_http_heat_blocked_by_update(err_msg, err_cap)) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         return false;
     }
 
@@ -1358,7 +1372,7 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
     if (backup_import_restore_in_flight()) {
         relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
         relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
-        xSemaphoreGive(s_exec.lock);
+        run_refuse_unlock(done_snap);
         sys_mode_snapshot_t late_snap;
         memset(&late_snap, 0, sizeof(late_snap));
         late_snap.restore_in_flight = true;
@@ -1366,6 +1380,109 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: a backup restore started meanwhile",
                  (unsigned)profile_id);
         return false;
+    }
+
+    /* Danger mode, second look (LCD review R2): the early gate read precedes the baseline reads.
+     * danger_mode_request_start() opens its window and THEN reads the heat claim published above;
+     * this side publishes the claim and THEN reads the window (fail closed) -- at least one refuses,
+     * so a firing never commits inside a danger window. */
+    if (danger_mode_blocks_start()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        run_refuse_unlock(done_snap);
+        sys_mode_snapshot_t late_snap;
+        memset(&late_snap, 0, sizeof(late_snap));
+        late_snap.danger_mode_active = true;
+        (void)system_mode_gate_check(SYS_ACTION_START_PROFILE, &late_snap, err_msg, err_cap);
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: danger mode opened meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    /* Factory reset in flight, second look: factory_reset.c's execute_scope() sets the reset mark and
+     * then re-reads the heat claim before it dispatches the erase; this side has published the heat
+     * claim (above) and now reads the mark, both under relay_authority's leaf spinlock -- so either the
+     * reset refuses 409 or this refuses, never an erase under a live run (relay_authority.h). */
+    if (relay_authority_reset_in_flight()) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        run_refuse_unlock(done_snap);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "factory reset in progress -- the controller reboots when it finishes");
+        }
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: factory reset in progress",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    /* Zones config changed, second look (HTTP audit E1 finding 1): POST /api/zones gates on the
+     * heat claim at entry, then does a slow Pico ceiling raise before committing, so it could commit
+     * a new config between this function's config reads above and the RUNNING commit below -- and
+     * the executor would then re-read that config mid-run. The POST re-reads the heat claim inside
+     * its commit critical section; this side publishes the heat claim (above) and then reads the
+     * generation under that same lock. Either the POST sees the claim and refuses 409, or this sees
+     * its bump and refuses here; the operator retries against the new config. */
+    if (zones_config_changed_since(gen_at_entry)) {
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        run_refuse_unlock(done_snap);
+        if (err_msg) {
+            snprintf(err_msg, err_cap, "the zones configuration changed while the firing was starting -- start it again");
+        }
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: zones config changed meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    /* LD-01 follow-up (REVIEW_LD01_WWFIX LOW-4): the start gate near the top of this function ran before
+     * validation and plan work; a link drop since then would otherwise commit RUNNING with heat pending.
+     * Recheck right before the commit, unwinding the claims exactly like the refusal above. */
+    const uint32_t warm_off_epoch = kiln_io_relay_off_epoch(); /* LOW-E: sampled BEFORE the LD-01 recheck */
+    if (relay_authority_start_blocked(s_exec.safety, err_msg, err_cap, "a firing cannot start")) {
+        /* Review INFO-5: err_msg now names the actual closed gate (link, fault, ...), as the door check does. */
+        relay_authority_heat_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE);
+        relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_PROFILE, p.zone_mask);
+        run_refuse_unlock(done_snap);
+        ESP_LOGW(PE_TAG, "profile_executor_run(%u) refused at commit: start gate closed meanwhile",
+                 (unsigned)profile_id);
+        return false;
+    }
+
+    if (warm_replay_end > 0) {
+        /* MED-A: runs after the LAST refusal so a refused start never leaves a replayed relay ON.
+         * Q1 owner decision: replay every skipped RELAY_IO segment's
+         * on/off command, in profile order, before the first ramp tick
+         * -- reusing io_seg_start() gets both the hardware write and the
+         * relay_authority claim/claimed_relay_mask registration this
+         * needs "for free", identical to how a segment reached normally
+         * would be started. The one deliberate difference: forcing
+         * `blocking = true` afterward makes io_segs_tick() (which skips
+         * any segment with blocking == true) leave this segment alone
+         * for the rest of the run -- its own hold/dwell_min timer is
+         * NOT replayed (that schedule position is already past), only
+         * the command is. It is retired the same way a real blocking
+         * segment's command is: by the end-of-run sweep
+         * (io_segs_force_all_off(), honoring leave_on_at_end only on the
+         * clean DONE path, same as always) -- exactly the registration
+         * this decision requires so a replayed relay is never left
+         * energized with nothing owning it. */
+        for (uint8_t i = 0; i < warm_replay_end && i < p.segment_count; i++) {
+            if (p.segments[i].seg_kind != PROFILE_SEG_KIND_RELAY_IO) {
+                continue;
+            }
+            io_seg_start_since(i, &p.segments[i], warm_off_epoch);
+            s_exec.io_segs[i].blocking = true;
+            if (s_exec.warm_start_replayed_count < PROFILE_MAX_SEGMENTS) {
+                s_exec.warm_start_replayed_segments[s_exec.warm_start_replayed_count++] = i;
+            }
+            ESP_LOGI(PE_TAG, "warm start: replayed relay/IO segment %u command (%s %u %s) -- its own hold "
+                          "was NOT restarted, it stays as commanded until the run ends",
+                     i + 1, s_exec.io_segs[i].is_relay ? "relay" : "IO_",
+                     s_exec.io_segs[i].is_relay
+                         ? s_exec.io_segs[i].target
+                         : (uint8_t)(s_exec.io_segs[i].target - PROFILE_IO_TARGET_IO_BASE + 1u),
+                     s_exec.io_segs[i].state_on ? "ON" : "OFF");
+        }
     }
 
     /* relay_authority's own per-zone latch is a SEPARATE module, not touched
@@ -1425,11 +1542,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
         if (aux_take != 0 && s_exec.io) {
             esp_err_t aux_err = kiln_io_owner_command_set_relay_mask_authorized(aux_take, 0);
             if (aux_err != ESP_OK) {
-                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- retrying via aux_off_pending",
+                ESP_LOGW(PE_TAG, "aux start handoff OFF write failed (mask 0x%02X): %s -- retried by aux_off_pending / the first aux tick",
                          (unsigned)aux_take, esp_err_to_name(aux_err));
-                /* The retry branch of the task loop re-writes OFF to the
-                 * claim; without this the aux would stay as the operator
-                 * left it until the first rule decision. */
+                /* aux_off_pending's retry branch only runs when not RUNNING; in
+                 * practice profile_executor_aux_tick() rewrites every claimed
+                 * aux on the next tick, so the aux does not stay as the
+                 * operator left it until the first rule decision. */
                 s_exec.aux_off_pending = true;
             } else {
                 relay_off_tracker_note_write(aux_take, 0);
@@ -1471,8 +1589,12 @@ bool profile_executor_run(uint8_t profile_id, char *err_msg, size_t err_cap)
      * rather than requesting K4 for a firing that no longer exists. See
      * heat_enable.h's release-epoch section. */
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
+    if (done_snap != NULL) heap_caps_free(done_snap);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
+    if (!heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch)) {
+        ESP_LOGW(PE_TAG, "start: heat_enable_acquire_since() failed -- run starts with heat blocked until "
+                         "heat_enable_reconcile() succeeds");
+    }
 
     /* First write of this run's breadcrumb, and the one that overwrites any
      * previous run's record in flash. From here on the stored record says a

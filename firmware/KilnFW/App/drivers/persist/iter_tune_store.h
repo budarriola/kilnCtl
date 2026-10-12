@@ -1,5 +1,5 @@
 // iter_tune_store -- persistence for the redesigned iterative-tuning
-// decision core (docs/ITER_TUNE_REDESIGN_PLAN.md step 7).
+// decision core (docs/ITER_TUNE_REDESIGN.md step 7).
 //
 // A NEW, INDEPENDENT NVS namespace ("iter_tune"), deliberately never the old
 // module's "adap_tune" namespace -- the plan's step 7 row names this
@@ -24,7 +24,7 @@
 // OWN SCHEMA VERSION, NOT A ZONES_CFG_VERSION BUMP: this is a brand-new,
 // independent store (same governance class as KILN_CFG_STORE_VERSION). It
 // owns ITER_TUNE_STORE_VERSION and has its own row ("ESP iterative-tuning
-// persistence") in docs/CONFIG_MIGRATION_CHAIN_PLAN.md sec 0.1's per-store
+// persistence") in docs/CONFIG_MIGRATION_CHAIN.md sec 0.1's per-store
 // table -- it does not participate in ZONES_CFG_VERSION's migration chain
 // at all.
 //
@@ -76,7 +76,7 @@ extern "C" {
 // migrate forward, refuse newer-than-known loudly) the plan's acceptance
 // criteria asked to see exercised; it is deliberately NOT a
 // ZONES_CFG_VERSION bump (this store never participated in that chain, see
-// this file's top-of-file comment and CONFIG_MIGRATION_CHAIN_PLAN.md sec
+// this file's top-of-file comment and CONFIG_MIGRATION_CHAIN.md sec
 // 0.1), so it carries none of that chain's rollback hazard.
 //
 // The migration itself is IN-RAM ONLY on a bare load -- iter_tune_store_start()

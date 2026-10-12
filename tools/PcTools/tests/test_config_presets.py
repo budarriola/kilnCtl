@@ -41,6 +41,12 @@ class FakeControl:
         self.model_calls.append((zone, k_dc, tau_s, dead_time_s))
         return OkReason(ok=True)
 
+    def get_zones(self):
+        import types
+        last = {c[0]: c for c in self.pid_calls}
+        return 0, 0, [types.SimpleNamespace(index=z, pid_kp=c[1], pid_ki=c[2], pid_kd=c[3])
+                      for z, c in last.items()]
+
 
 class PresetsDirTest(unittest.TestCase):
     def test_resolves_to_real_config_presets_dir(self):

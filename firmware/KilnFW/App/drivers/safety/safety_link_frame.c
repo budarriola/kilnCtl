@@ -48,6 +48,17 @@ void safety_put_u32_le(uint8_t *out, uint32_t value)
     out[3] = (uint8_t)((value >> 24) & 0xFFu);
 }
 
+bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elapsed_ms, uint32_t now_ms)
+{
+    if (esp_elapsed_ms >= 0x80000000u) {
+        return true; /* modular difference no longer meaningful (~24.8 days): in doubt, count a reboot */
+    }
+    uint32_t expected = baseline_ms + esp_elapsed_ms; /* modular: handles the 32-bit wrap */
+    int32_t diff = (int32_t)(now_ms - expected);
+    int32_t tol = (int32_t)(SAFETY_PICO_UPTIME_TOL_BASE_MS + esp_elapsed_ms / SAFETY_PICO_UPTIME_TOL_PPM_DIV);
+    return diff < -tol;
+}
+
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
                                       uint16_t peer_protocol, uint16_t peer_min_compatible)
 {

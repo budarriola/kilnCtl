@@ -240,12 +240,13 @@ void current_task_reload_cal(void)
     }
     // `calibrated` gates current_snapshot_t.calibrated / current_sense_
     // power_t.calibrated (KILNLINK_POWER_FLAG_CALIBRATED on the wire,
-    // link_task.c's link_task_send_power()) -- docs/CONFIG_REFERENCE.md
-    // section 3 scopes k_ct_v_per_a/gain/mains_voltage_v as "power estimate
-    // only, no guard", so this flag answers exactly that question ("is the
-    // reported amps/power number real") and nothing about guard readiness:
-    // S3/S9/S11/S6b's presence detection no longer depends on k_ct_v_per_a
-    // at all (current_presence_policy.h) and does not read this flag.
+    // link_task.c's link_task_send_power()) -- it answers "is the reported
+    // amps/power number real". NOTE (2026-10-10 review HIGH-B): k_ct_v_per_a
+    // is NOT power-estimate-only. It scales the S3/S9/S6b/S11 presence
+    // threshold (current_presence_policy.c), gates S14/S15 via
+    // amps_valid_for_ct (safety_core.c) and S9 via config_store_current_
+    // sensing_commissioned(), so the volatile-install gate refuses a change
+    // to it while heat is possible. This flag itself is not read by guards.
     // i_present_a/zero_counts are deliberately NOT part of this condition --
     // CONFIG_REFERENCE.md section 3 does not list them among the no-safe-
     // default fields gated by calibration_missing (they ship with real

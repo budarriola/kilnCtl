@@ -36,8 +36,13 @@ same commit as this module -- see that doc's WT-A/WT-C section):
     ``{"username": str, "reset_token": str, "new_password": str}``
     (form-urlencoded). Success: HTTP 200, JSON ``{"ok": true}``. Any
     failure (expired/wrong/reused token, password policy rejection): HTTP
-    400, JSON ``{"ok": false}`` -- deliberately generic per the plan
-    ("never distinguishes wrong token from bad password").
+    400, JSON ``{"ok": false}`` -- generic for a bad/expired/reused token. The one
+    exception is a weak-password refusal: ``{"ok": false, "reason": "weak_password"}``,
+    token left UNSPENT so the caller may retry. The firmware evaluates password
+    strength BEFORE and independently of token validation, so this reply is
+    identical whether the token is good or bad and reveals nothing about token
+    validity ("never reveals whether the TOKEN was wrong"; it does distinguish
+    a weak password, which the caller supplied and can fix).
   * Both OPEN routes: a rate-limit refusal from the shared
     ``login_ip_scope.c`` ladder is HTTP 429 with that ladder's existing
     PLAIN-TEXT body (``web_auth_login_http.c``'s login 429 site), reused
@@ -132,8 +137,9 @@ def _parse_json_body(path: str, status: int, body: str) -> dict:
             # code alone is what the caller branches on.
             return {}
         raise TotpHttpError(
-            f"POST {path} returned HTTP {status} but the body was not JSON: {body!r}",
-            status, body) from exc
+            f"POST {path} returned HTTP {status} but the body was not JSON "
+            f"({len(body)} bytes, body not echoed)",
+            status, "") from exc
     if not isinstance(parsed, dict):
         if not 200 <= status < 300:
             return {}
@@ -153,6 +159,29 @@ def post_forgot(host: str, username: str, code: str,
     returned as-is (body ``{}`` when not JSON), never raised. Never logs, prints, or echoes ``code``."""
     status, body = _post_open(host, _FORGOT_PATH, {"username": username, "code": code}, timeout)
     return status, _parse_json_body(_FORGOT_PATH, status, body)
+
+
+def reset_password_problem(new_password: str, username: str = "") -> "str | None":
+    """Client-side mirror of the firmware's ``web_auth_password_check()``
+    (persist/web_auth_store.c): returns a refusal message, or None when the
+    password passes. /api/auth/reset answers a weak password with the same
+    generic 400 as a bad token, so a caller must check BEFORE ``forgot`` to
+    avoid wasting a TOTP code and the one-time token (web batch W1). The AP
+    SSID/passphrase equality rule is board-side only. Never echoes the
+    password."""
+    n = len(new_password.encode("utf-8"))
+    if n < 10:
+        return "new password too short (minimum 10 characters)"
+    if n > 64:
+        return "new password too long (maximum 64 characters)"
+    if all("a" <= c <= "z" for c in new_password):
+        return "new password is all lowercase letters (add a capital, digit or symbol)"
+    low = new_password.lower()
+    if "password" in low or "kiln" in low:
+        return 'new password contains "password" or "kiln"'
+    if username and new_password == username:
+        return "new password equals the username"
+    return None
 
 
 def post_reset(host: str, username: str, reset_token: str, new_password: str,

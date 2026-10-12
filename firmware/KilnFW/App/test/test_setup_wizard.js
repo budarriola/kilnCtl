@@ -834,7 +834,7 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 // ct_installed=0 (:869) and the same treatment `deliberately_off` gets.
 (function testCtSkipPostsDoneNotSkipped() {
   const html = fs.readFileSync(PAGE_PATH, 'utf8');
-  assert(/postStepState\(8, 'done', 'ct_installed=0, nothing to verify'\)/.test(html),
+  assert(/postStepState\(8, 'done', 'ct_installed=0, no check'\)/.test(html),
     'step8: the no-CT exit posts done (a complete answer), not skipped (which blocks forever)');
   assert(!/postStepState\(8, 'skipped', 'ct_installed=0, nothing to verify'\)/.test(html),
     'step8: the old skipped-forever call is gone');

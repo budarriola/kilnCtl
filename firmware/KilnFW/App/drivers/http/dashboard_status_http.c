@@ -499,6 +499,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
                (unsigned)ds->zones_config_load_fault_on_disk_version);
         APPEND(",\"zones_config_load_fault_fw_version\":%u", (unsigned)ds->zones_config_load_fault_fw_version);
         APPEND(",\"zones_config_load_fault_reason\":\"%s\"", reason_esc);
+        APPEND(",\"zones_config_load_fault_file_rejected\":%s", ds->zones_config_load_fault_file_rejected ? "true" : "false");
+        APPEND(",\"zones_config_load_fault_bad_copy_failed\":%s", ds->zones_config_load_fault_bad_copy_failed ? "true" : "false");
+
     }
 
     /* M13 fix -- bug found during the 2026-09-16 wider sweep: this JSON
@@ -528,6 +531,11 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         json_escape(ds->kiln_cfg_swap_boot_fault_reason, swap_reason_esc, sizeof(swap_reason_esc));
         APPEND(",\"kiln_cfg_swap_boot_fault_target_id\":%ld", (long)ds->kiln_cfg_swap_boot_fault_target_id);
         APPEND(",\"kiln_cfg_swap_boot_fault_reason\":\"%s\"", swap_reason_esc);
+        /* LOW-1, additive: the latched kind's stable name, so the dashboard
+         * can show "active_id_unsaved" (display-only) with softer text. */
+        char swap_kind_esc[sizeof(ds->kiln_cfg_swap_boot_fault_kind) * 2 + 1];
+        json_escape(ds->kiln_cfg_swap_boot_fault_kind, swap_kind_esc, sizeof(swap_kind_esc));
+        APPEND(",\"kiln_cfg_swap_boot_fault_kind\":\"%s\"", swap_kind_esc);
     }
 
     /* 2026-09-16: surfaces thermo_task.c's (SaftyFW) MAX31856 tc_type
@@ -767,6 +775,9 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     if (ds->trip_event_ever_received) {
         APPEND(",\"trip_reason\":%u", (unsigned)ds->trip_reason);
         APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds->trip_reason));
+        /* TEST_TRIP_PLAN 5.5: derived from reason == 4 (SAFETY_TRIP_TEST), no state of its own.
+         * Mirrored in test_dashboard_json.c's render_worst_case_status_json(). */
+        APPEND(",\"trip_is_test\":%s", ds->trip_reason == 4u ? "true" : "false");
         {
             /* 2026-08-28 scope change: the cause line now carries the actual
              * detected numbers where this firmware has them -- see
@@ -872,6 +883,10 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
     /* 2026-10-09 route tier review LOW-3: recovery_mode lives here (OPEN,
      * dashboard) so GET /api/ota/esp/status can be ADMIN. Fixed for the boot. */
     APPEND(",\"recovery_mode\":%s", boot_guard_is_recovery_mode() ? "true" : "false");
+    /* HTTP audit L37 follow-up (LOW-1): true from the moment a factory reset sets relay_authority's
+     * in-flight mark until the board reboots (or the reset is refused before any erase). Run starts,
+     * sweep starts and the guarded config writers refuse while it is set. */
+    APPEND(",\"factory_reset_in_flight\":%s", relay_authority_reset_in_flight() ? "true" : "false");
     APPEND(",\"safety_build_known\":%s", ds->safety_build_known ? "true" : "false");
     if (ds->safety_build_known) {
         APPEND(",\"safety_config_version\":%u", (unsigned)ds->safety_config_version);

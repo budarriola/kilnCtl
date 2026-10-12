@@ -20,6 +20,7 @@ from typing import Optional
 
 from . import aux_http_client as ahc
 from . import mcp_server_core as _core
+from . import readiness_http_client
 from . import zones_http_client
 from .io_expander import IoQueryError
 
@@ -176,6 +177,73 @@ def control_set_aux_output(
     return f"ok - {_fmt_entry(got)} (confirmed by read-back; host={resolved})"
 
 
+def _host_ips(host: str) -> list:
+    """Normalize an HTTP host spec (scheme/port/path/brackets, name or IP) to the
+    list of ipaddress objects it resolves to (EVERY A record, de-duplicated), or
+    [] if it cannot be resolved (callers fail closed)."""
+    import ipaddress
+    import socket
+    from urllib.parse import urlsplit
+    h = host.strip()
+    try:
+        h = urlsplit(h if "//" in h else "//" + h).hostname or ""
+    except ValueError:
+        return []
+    if not h:
+        return []
+    try:
+        return [ipaddress.ip_address(h)]
+    except ValueError:
+        pass
+    try:
+        found = {ipaddress.ip_address(ai[4][0]) for ai in socket.getaddrinfo(h, None, socket.AF_INET)}
+    except (OSError, ValueError, IndexError):
+        return []
+    return sorted(found)
+
+
+def _pin_host(resolved: str, ip) -> str:
+    """The IP literal (with the original port, if any) the write must be sent to,
+    so the POST cannot re-resolve a name to a different address than the one the
+    identity check compared."""
+    from urllib.parse import urlsplit
+    h = resolved.strip()
+    try:
+        port = urlsplit(h if "//" in h else "//" + h).port
+    except ValueError:
+        port = None
+    return f"{ip}:{port}" if port else str(ip)
+
+
+def _board_identity_mismatch(resolved: str) -> Optional[str]:
+    return _board_identity_check(resolved)[0]
+
+
+def _board_identity_check(resolved: str):
+    """(mismatch_reason_or_None, compared_ip_or_None). The host is resolved ONCE
+    here; the caller sends the POST to this ip via _pin_host() (toolfx7 L6).
+
+    None only when the UART link's reported station IP equals the HTTP host the
+    write will go to (both then name the same board); else a reason string. Run
+    BEFORE the POST. With no station IP (AP-only / not connected) there is no
+    board-unique ID shared by UART and HTTP, so it refuses rather than guess."""
+    try:
+        wifi = _srv._info.get_wifi_status()
+    except Exception as exc:  # noqa: BLE001
+        return f"could not read the UART link's board identity ({exc})", None
+    ip = getattr(wifi, "ip", None)
+    if not getattr(wifi, "connected", False) or not ip:
+        return ("the UART-linked board reports no station IP to compare with the HTTP host "
+                "(AP-fallback / not on Wi-Fi: no board-unique ID is shared by UART and HTTP)"), None
+    uart_ips, http_ips = _host_ips(str(ip)), _host_ips(resolved)
+    if len(uart_ips) != 1 or not http_ips:
+        return f"could not normalize UART address {ip!r} / HTTP host {resolved!r} to compare them", None
+    if any(a != uart_ips[0] for a in http_ips):
+        return (f"UART-linked board is at {ip} but the write would go to {resolved} "
+                f"(resolves to {', '.join(str(a) for a in http_ips)})"), None
+    return None, uart_ips[0]
+
+
 @_core._tool()
 def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Optional[str] = None) -> str:
     """Manually switch an ENABLED aux relay on/off while IDLE via POST
@@ -185,7 +253,9 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
     an enabled, unconflicted aux output. At firing start the profile rule takes
     over and at run end aux goes OFF (plan sec 14 item 12), so this is never a
     hold. After the write it reads the relay shadow (io_read) and FAILS LOUD unless
-    it equals `on`. Never prints a credential."""
+    it equals `on` and neither relay_state_unknown nor i2c_failed is set. BEFORE the
+    write it refuses unless the UART link's station IP equals the HTTP host (scheme,
+    port and name normalized); with no station IP (AP-fallback) it refuses. Never prints a credential."""
     if not _is_int(relay) or not 1 <= relay <= ahc.AUX_RELAY_COUNT:
         return f"refused: relay={relay!r} must be an integer 1..{ahc.AUX_RELAY_COUNT}"
     if not isinstance(on, bool):
@@ -210,8 +280,16 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
         return (f"DRY RUN (pass confirm=True, exactly, to actually write) -- would switch aux relay "
                 f"{relay} {'ON' if on else 'OFF'} (host={resolved})")
 
+    mismatch, board_ip = _board_identity_check(resolved)
+    if mismatch is not None:
+        return (f"refused: cannot tie the UART read-back to the HTTP board before writing -- {mismatch} "
+                f"(host={resolved}). Nothing was written.")
+
+    # Every A record equals the UART board's IP (checked above); send the POST to
+    # that literal so a re-resolve inside urllib cannot reach a different host.
+    pinned = _pin_host(resolved, board_ip)
     try:
-        ok = ahc.post_aux_manual(resolved, relay, on)
+        ok = ahc.post_aux_manual(pinned, relay, on)
     except ahc.AuxHttpError as exc:
         return _gate_or_error(exc, "POST /api/aux_outputs/manual", resolved)
     if not ok:
@@ -222,6 +300,11 @@ def control_set_aux_manual(relay: int, on: bool, confirm: bool = False, host: Op
     except IoQueryError as exc:
         return (f"error: POST returned ok, but the confirming io read failed (host={resolved}): {exc} "
                 f"-- state UNKNOWN, re-check before trusting this")
+    if state.relay_state_unknown or state.i2c_failed:
+        flags = [n for n, f in (("relay_state_unknown", state.relay_state_unknown),
+                                ("i2c_failed", state.i2c_failed)) if f]
+        return (f"FAILED: POST returned ok, but the io read reports {', '.join(flags)} (host={resolved}) -- the "
+                f"relay shadow is not trustworthy (unknown is a fault, not OFF). Do not trust this.")
     if state.relay(relay) != on:
         return (f"FAILED: POST returned ok, but the relay shadow reads {'ON' if state.relay(relay) else 'OFF'} "
                 f"for relay {relay}, wanted {'ON' if on else 'OFF'} (host={resolved}). Do not trust this.")
@@ -237,6 +320,23 @@ def _zone_entry(zones_json: dict, zone: int) -> Optional[dict]:
 
 def _count_rules(rules_by_profile: dict, target: int) -> int:
     return sum(1 for rules in rules_by_profile.values() for r in rules if r.get("zone") == target)
+
+
+#: Zone fields compared before/after a conversion for every zone OTHER than the converted one.
+_CONVERT_COLLATERAL_KEYS = ("zone_type", "relay_mask", "thermo_mask", "control_mode", "max_temp_c",
+                            "min_temp_c", "pid_kp", "pid_ki", "pid_kd", "failsafe_state")
+
+
+def _conversion_state_after_failure(resolved: str, zone: int, relay: int) -> str:
+    """Best-effort read of what a failed/timed-out conversion POST left behind."""
+    try:
+        z = _zone_entry(zones_http_client.get_zones(resolved), zone)
+        e = ahc.aux_entry(ahc.get_aux_outputs(resolved), relay)
+    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+        return f"read-back after the failure ALSO failed ({exc}); state UNKNOWN -- do not retry blind"
+    return (f"read-back after the failure: zone {zone} zone_type={z and z.get('zone_type')!r} "
+            f"relay_mask={z and z.get('relay_mask')!r}; aux relay {relay} enabled={e and e.get('enabled')!r} "
+            f"(zone_type 0 + relay_mask 0 + aux enabled means the conversion COMMITTED)")
 
 
 @_core._tool()
@@ -282,12 +382,58 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
             return (f"DRY RUN (pass confirm=True, exactly, to resume) -- would ask the firmware to finish the "
                     f"interrupted conversion of zone {zone} to aux relay {resume_relay} (host={resolved})")
         try:
+            zones_before = zones_http_client.get_zones(resolved)
+            aux_before = ahc.get_aux_outputs(resolved)
+        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+            return f"error: precheck read failed before resume (host={resolved}): {exc}; nothing written"
+        zb_self = _zone_entry(zones_before, zone)
+        want_tc = zone if zb_self and zb_self.get("thermo_mask") else -1
+        try:
             ack = ahc.post_move_zone_to_aux(resolved, zone, resume_relay=resume_relay)
         except ahc.AuxHttpError as exc:
             return _gate_or_error(exc, "POST /api/zones move_zone_to_aux resume", resolved)
-        return (f"ok - resumed and finished the conversion of zone {zone} to aux relay {resume_relay}; the "
-                f"firmware read it back (zones, aux store from NVS, every profile slot) before clearing its "
-                f"marker; firmware ack: {ack}; host={resolved}")
+        # Tool-side read-back (audit F7): final-state checks only, since the pre-state of an
+        # interrupted conversion is unknown.
+        try:
+            zones_after = zones_http_client.get_zones(resolved)
+            aux_after = ahc.get_aux_outputs(resolved)
+            profiles_after = ahc.get_stored_profile_rules(resolved)
+            readiness_after = readiness_http_client.get_readiness(resolved)
+        except (ahc.AuxHttpError, zones_http_client.ZonesHttpError,
+                readiness_http_client.ReadinessHttpError) as exc:
+            return (f"error: resume POST answered ok, but the confirming re-read failed (host={resolved}): "
+                    f"{exc} -- state UNKNOWN, re-check zones, aux outputs and profiles before trusting this")
+        bad = []
+        za = _zone_entry(zones_after, zone)
+        if za is None or za.get("zone_type") != 0 or za.get("relay_mask") != 0:
+            bad.append(f"zone {zone} is not a relay-less heater (zone_type={za and za.get('zone_type')!r}, "
+                       f"relay_mask={za and za.get('relay_mask')!r})")
+        for i in range(3):
+            zb, zn = _zone_entry(zones_before, i), _zone_entry(zones_after, i)
+            if i != zone and zb is not None:
+                for k in ("zone_type", "relay_mask", "thermo_mask"):
+                    if (zb or {}).get(k) != (zn or {}).get(k):
+                        bad.append(f"zone {i} {k} changed")
+        ea = ahc.aux_entry(aux_after, resume_relay)
+        if (ea is None or not ea.get("enabled") or ea.get("conflicted")
+                or ea.get("tc_zone") != want_tc):
+            bad.append(f"aux relay {resume_relay} does not read enabled/unconflicted with "
+                       f"tc_zone={want_tc}: {ea!r}")
+        for r in range(1, ahc.AUX_RELAY_COUNT + 1):
+            if r != resume_relay and ahc.aux_entry(aux_before, r) != ahc.aux_entry(aux_after, r):
+                bad.append(f"aux relay {r} entry changed")
+        marker = next((it for it in readiness_after.get("items", [])
+                       if it.get("key") == "zone_aux_conversion"), None)
+        if marker is not None:
+            bad.append(f"readiness still lists zone_aux_conversion ({marker.get('detail')!r})")
+        if _count_rules(profiles_after, zone):
+            bad.append(f"{_count_rules(profiles_after, zone)} rule(s) still target zone {zone}")
+        if bad:
+            return (f"FAILED: resume POST answered ok but the read-back does not confirm it -- "
+                    f"{'; '.join(bad)} (host={resolved}). Do not trust this; compare with the backup_export.")
+        return (f"ok - resumed and finished the conversion of zone {zone} to aux relay {resume_relay} "
+                f"(confirmed by read-back of zones, aux outputs and every profile; firmware ack: {ack}; "
+                f"host={resolved})")
 
     try:
         zones_before = zones_http_client.get_zones(resolved)
@@ -352,13 +498,20 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
     try:
         ack = ahc.post_move_zone_to_aux(resolved, zone)
     except ahc.AuxHttpError as exc:
-        return _gate_or_error(exc, "POST /api/zones move_zone_to_aux", resolved)
+        msg = _gate_or_error(exc, "POST /api/zones move_zone_to_aux", resolved)
+        if not msg.startswith("refused:"):
+            # 5xx/timeout: the firmware is all-or-nothing but may have committed or be mid-rollback.
+            msg += ("\n" + _conversion_state_after_failure(resolved, zone, relay)
+                    + "\nGET /api/readiness 'zone_aux_conversion' lists an interrupted conversion; "
+                      "resume with resume_relay=<relay> once the cause is understood.")
+        return msg
 
     try:
         zones_after = zones_http_client.get_zones(resolved)
         aux_after = ahc.get_aux_outputs(resolved)
         profiles_after = ahc.get_stored_profile_rules(resolved)
-    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError) as exc:
+        readiness_after = readiness_http_client.get_readiness(resolved)
+    except (ahc.AuxHttpError, zones_http_client.ZonesHttpError, readiness_http_client.ReadinessHttpError) as exc:
         return (f"error: POST answered ok, but the confirming re-read failed (host={resolved}): {exc} "
                 f"-- state UNKNOWN, re-check zones, aux outputs and profiles before trusting this")
 
@@ -370,9 +523,12 @@ def control_convert_onoff_zone_to_aux(zone: int, confirm: bool = False, host: Op
     for i in range(3):
         zb, zn = _zone_entry(zones_before, i), _zone_entry(zones_after, i)
         if i != zone and zb is not None:
-            for k in ("zone_type", "relay_mask", "thermo_mask"):
+            for k in _CONVERT_COLLATERAL_KEYS:
                 if (zb or {}).get(k) != (zn or {}).get(k):
                     bad.append(f"zone {i} {k} changed")
+    marker = next((it for it in readiness_after.get("items", []) if it.get("key") == "zone_aux_conversion"), None)
+    if marker is not None:
+        bad.append(f"readiness still lists zone_aux_conversion ({marker.get('detail')!r})")
     ea = ahc.aux_entry(aux_after, relay)
     if ea is None or not ea.get("enabled") or ea.get("conflicted") or ea.get("tc_zone") != want_tc:
         bad.append(f"aux relay {relay} does not read enabled/unconflicted with tc_zone={want_tc}: {ea!r}")
@@ -412,6 +568,19 @@ def _rule_matches(rule: dict, want: dict) -> "list[str]":
         elif g != v:
             bad.append(f"rule {k}: wanted {v!r}, board reports {g!r}")
     return bad
+
+
+def _stored_profile_fields(detail: object) -> object:
+    """The STORED fields of a GET /api/profile?id= detail (name, zone_mask, segments, on/off rules). The
+    derived fields (feasibility, exceeds_ceiling, ceiling_note, per-segment feasibility) depend on the zone limits,
+    so a concurrent limit change must not read as another profile having changed (mcpfx2 L5)."""
+    if not isinstance(detail, dict):
+        return detail
+    segs = detail.get("segments")
+    if isinstance(segs, list):
+        segs = [{k: v for k, v in sg.items() if k != "feasibility"} if isinstance(sg, dict) else sg for sg in segs]
+    return {"name": detail.get("name"), "zone_mask": detail.get("zone_mask"), "segments": segs,
+            "on_off_rules": detail.get("on_off_rules")}
 
 
 @_core._tool()
@@ -487,6 +656,13 @@ def profile_save_bench_aux_rule(
     mine = next((p["id"] for p in user if p.get("name") == BENCH_AUX_PROFILE_NAME), None)
     slot = -1 if mine is None else mine
     others_before = {p["id"]: p for p in user if p["id"] != mine}
+    # Full content of every other profile, read BEFORE the write, so "others
+    # unchanged" compares segments and rules, not just name/zone_mask/segment_count.
+    try:
+        others_full_before = {oid: ahc._get_json(resolved, f"/api/profile?id={oid}", ahc.AUX_HTTP_TIMEOUT_S)
+                              for oid in others_before}
+    except ahc.AuxHttpError as exc:
+        return f"error: precheck read of the other profiles failed (host={resolved}): {exc}"
 
     rule = pehc.OnOffRule(
         zone_index=8 + relay - 1, segment_index=0, enable=True,
@@ -502,7 +678,11 @@ def profile_save_bench_aux_rule(
     try:
         ack = pehc.post_profile(resolved, slot, BENCH_AUX_PROFILE_NAME, 1 << zone, [seg], [rule])
     except pehc.ProfileEditHttpError as exc:
-        return f"refused: POST /api/profile refused (host={resolved}): {exc}"
+        if exc.status in (400, 403, 409, 422, 503):
+            return f"refused: POST /api/profile refused (HTTP {exc.status}) (host={resolved}): {exc}"
+        return (f"error: POST /api/profile failed (host={resolved}): {exc} -- a 5xx/timeout/transport failure "
+                f"is NOT a refusal: the profile may have been saved, state UNKNOWN; read GET /api/profiles "
+                f"back for '{BENCH_AUX_PROFILE_NAME}' before retrying")
     pid = ack.get("id")
     if not _is_int(pid):
         return f"FAILED: POST answered ok but gave no profile id: {ack!r} (host={resolved}). Do not trust this."
@@ -548,6 +728,14 @@ def profile_save_bench_aux_rule(
         if (a is None or a.get("name") != p.get("name") or a.get("zone_mask") != p.get("zone_mask")
                 or a.get("segment_count") != p.get("segment_count")):
             bad.append(f"other profile {oid} ('{p.get('name')}') changed or vanished")
+    for oid, before_full in others_full_before.items():
+        try:
+            after_full = ahc._get_json(resolved, f"/api/profile?id={oid}", ahc.AUX_HTTP_TIMEOUT_S)
+        except ahc.AuxHttpError as exc:
+            bad.append(f"other profile {oid} could not be re-read ({exc})")
+            continue
+        if _stored_profile_fields(after_full) != _stored_profile_fields(before_full):
+            bad.append(f"other profile {oid} ('{others_before[oid].get('name')}') content changed")
     if set(after_user) - set(others_before) - {pid}:
         bad.append("an unexpected extra profile appeared")
     if bad:

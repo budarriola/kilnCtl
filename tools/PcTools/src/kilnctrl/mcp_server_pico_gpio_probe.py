@@ -75,13 +75,25 @@ from . import mcp_server_core as _core
 # WRITE unconditionally, with no confirm/override -- enforced in
 # pico_gpio_probe.py itself, not just here. READ is allowed for GPIO6.
 #
-# Unlike the ESP tools, there is no "profile running" or "ARMED" gate here:
-# SaftyFW exposes no protocol yet for the PC to query relay state (same gap
-# debug_write_memory() already documents for peer="pico"). GPIO6's hard deny
-# is what stands in for that guard rail today.
+# The writers refuse while the Pico is ARMED, or when ARMED cannot be read
+# (fail closed), exactly like debug_write_memory(); GPIO6 stays hard-denied.
 # ---------------------------------------------------------------------------
+def _armed_refusal(tool: str) -> Optional[str]:
+    """Same fail-closed ARMED gate as debug_write_memory(peer="pico")."""
+    try:
+        armed, detail = debug_probe.pico_armed_state()
+    except Exception as exc:  # noqa: BLE001
+        armed, detail = None, f"state read raised {exc}"
+    if armed is False:
+        return None
+    _srv._session_log.warning("%s: REFUSED armed_state=%s detail=%s", tool, armed, detail)
+    if armed is None:
+        return f"error: {tool} refused -- could not confidently determine Pico ARMED state ({detail})"
+    return f"error: {tool} refused -- Pico is ARMED ({detail})"
+
+
 @_core._tool()
-def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
+def pico_gpio_set_mode(gpio_num: int, mode: str, confirm: bool = False) -> str:
     """Configure a Pico (RP2040) GPIO as input / input_pullup / input_pulldown
     / output, over SWD -- no SaftyFW build flag needed, this works against
     any Pico regardless of firmware.
@@ -89,9 +101,16 @@ def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
     ``mode`` is one of "input", "input_pullup", "input_pulldown", "output".
     Refused unconditionally for GPIO6 (`saftyRelay`, drives K4's pilot relay
     coil) -- there is no override. Halts the core to perform the register
-    writes (same as debug_write_memory).
+    writes (same as debug_write_memory). Requires confirm=True (exactly),
+    like debug_write_memory.
     """
+    if confirm is not True:
+        return "error: pico_gpio_set_mode refused without confirm=True -- it halts the Pico core and rewrites pad registers"
     mode_val = mode.strip().lower()
+    if gpio_num != pico_gpio_probe.SAFTYFW_RELAY_GPIO:
+        refusal = _armed_refusal("pico_gpio_set_mode")
+        if refusal is not None:
+            return refusal
     try:
         pico_gpio_probe.set_mode(gpio_num, mode_val)
     except pico_gpio_probe.PicoGpioProbeRefused as exc:
@@ -105,12 +124,21 @@ def pico_gpio_set_mode(gpio_num: int, mode: str) -> str:
 
 
 @_core._tool()
-def pico_gpio_write(gpio_num: int, level: bool) -> str:
+def pico_gpio_write(gpio_num: int, level: bool, confirm: bool = False) -> str:
     """Drive a Pico (RP2040) GPIO high or low, over SWD.
 
     Refused unconditionally for GPIO6. Refused for any other pin not already
     configured OUTPUT via :func:`pico_gpio_set_mode` in this same process.
+    Requires confirm=True (exactly). The input level is read back afterwards;
+    a mismatch is reported as FAILED (a loaded pin can legitimately differ,
+    but is still not the commanded level).
     """
+    if confirm is not True:
+        return "error: pico_gpio_write refused without confirm=True -- it drives a live Pico pin"
+    if gpio_num != pico_gpio_probe.SAFTYFW_RELAY_GPIO:
+        refusal = _armed_refusal("pico_gpio_write")
+        if refusal is not None:
+            return refusal
     try:
         pico_gpio_probe.write(gpio_num, level)
     except pico_gpio_probe.PicoGpioProbeRefused as exc:
@@ -118,6 +146,13 @@ def pico_gpio_write(gpio_num: int, level: bool) -> str:
     except RuntimeError as exc:
         return f"error: {exc}"
     _srv._session_log.warning("pico_gpio_write: gpio%d = %s", gpio_num, "high" if level else "low")
+    try:
+        if bool(pico_gpio_probe.read(gpio_num)) != bool(level):
+            return (f"FAILED - pico gpio{gpio_num} commanded {'high' if level else 'low'} but the input level "
+                    "reads back different (pin loaded, or the write did not take)")
+    except Exception:  # noqa: BLE001
+        return (f"UNVERIFIED - pico gpio{gpio_num} commanded {'high' if level else 'low'}; "
+                "read-back unavailable, state UNKNOWN")
     return f"ok - pico gpio{gpio_num} = {'high' if level else 'low'}"
 
 

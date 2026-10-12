@@ -312,6 +312,7 @@ void ui_topbar_create(lv_obj_t *scr, const ui_topbar_cfg_t *cfg, ui_topbar_t *ou
              * panel; a perpetually scrolling label is a needless
              * distraction and a needless redraw cost. */
             lv_label_set_long_mode(title, LV_LABEL_LONG_DOT);
+            lv_obj_set_height(title, UI_THEME_FONT_LINE_HEIGHT_PX); /* LONG_DOT needs a fixed height (audit L20) */
         }
         lv_label_set_text(title, cfg->title);
         lv_obj_align(title, LV_ALIGN_LEFT_MID, 0, 0);

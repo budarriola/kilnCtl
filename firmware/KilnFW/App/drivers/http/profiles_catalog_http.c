@@ -1,3 +1,4 @@
+#include "http_form.h"
 #include "profiles_http_internal.h"
 
 #include <stdio.h>
@@ -241,8 +242,13 @@ static esp_err_t send_builtin_full(httpd_req_t *req, uint8_t id, const builtin_p
 esp_err_t builtin_list_get_handler(httpd_req_t *req)
 {
     bool include_hidden = false;
-    char query[48];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+    char query[96];
+    esp_err_t qerr = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (qerr == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "query too long");
+        return ESP_OK;
+    }
+    if (qerr == ESP_OK) {
         char val[8];
         if (httpd_query_key_value(query, "all", val, sizeof(val)) == ESP_OK && val[0] == '1') {
             include_hidden = true;
@@ -290,7 +296,8 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
                                      * +37 (PROFILE_SLOTS_100.md task 8) for
                                      * ",\"last_run_started_unix_s\":4294967295" (10-digit uint32 max);
                                      * base recomputed to 230 for N3's *6 name-escaping term above,
-                                     * +121 slack (matching the original margin) = 351, rounded to 352 */
+                                     * +121 slack (matching the original margin) = 351, rounded to 352;
+                                     * +20 for ",\"rev_unknown\":false" (review S2) fits the slack */
 
 /* Chunked (2026-09-19, 100-slot plan task 2): the old shape built the ENTIRE
  * user-slot section into one stack-local `json[PROFILES_MAX_COUNT *
@@ -308,6 +315,15 @@ esp_err_t builtin_list_get_handler(httpd_req_t *req)
 esp_err_t profiles_list_get_handler(httpd_req_t *req)
 {
     httpd_resp_set_type(req, "application/json");
+    /* fwlow16 L3: rev_unknown is per listed (used) slot, but when the rev floors are unknown every slot is,
+     * unused ones included, and a save into the first free slot is then refused with nothing listed to show it.
+     * The array shape is the wire contract, so the catalog-level fact travels as a header. */
+    for (uint8_t id = 0; id < PROFILES_MAX_COUNT; id++) {
+        if (!profiles_slot_used(id) && s_profile_rev_unknown[id]) {
+            httpd_resp_set_hdr(req, "X-Profile-Floors-Unknown", "1");
+            break;
+        }
+    }
     esp_err_t err = httpd_resp_send_chunk(req, "[", 1);
     bool first = true;
     for (uint8_t id = 0; id < PROFILES_MAX_COUNT && err == ESP_OK; id++) {
@@ -333,9 +349,10 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
         char chunk[PROFILE_LIST_ENTRY_MAX];
         int n = snprintf(chunk, sizeof(chunk),
                          "%s{\"id\":%u,\"builtin\":false,\"name\":\"%s\",\"zone_mask\":%u,\"segment_count\":%u,"
-                         "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu}",
+                         "\"exceeds_ceiling\":%s,\"last_run_started_unix_s\":%lu,\"rev_unknown\":%s}",
                          first ? "" : ",", id, name_escaped, p->zone_mask, p->segment_count,
-                         exceeds ? "true" : "false", (unsigned long)last_run);
+                         exceeds ? "true" : "false", (unsigned long)last_run,
+                         s_profile_rev_unknown[id] ? "true" : "false");
         err = send_chunk_checked(req, chunk, n, sizeof(chunk), "profile list entry");
         first = false;
     }
@@ -365,8 +382,13 @@ esp_err_t profiles_list_get_handler(httpd_req_t *req)
 
 esp_err_t profile_detail_get_handler(httpd_req_t *req)
 {
-    char query[32];
-    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+    char query[96];
+    esp_err_t qerr = httpd_req_get_url_query_str(req, query, sizeof(query));
+    if (qerr == ESP_ERR_HTTPD_RESULT_TRUNC) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "query too long");
+        return ESP_OK;
+    }
+    if (qerr != ESP_OK) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
         return ESP_OK;
     }
@@ -375,9 +397,8 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id missing");
         return ESP_OK;
     }
-    char *end = NULL;
-    long id = strtol(id_str, &end, 10);
-    if (end == id_str || id < 0 || id > 255) {
+    long id = -1;
+    if (!http_form_parse_long(id_str, (int)strlen(id_str), 0, 255, &id)) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "no such profile");
         return ESP_OK;
     }
@@ -431,7 +452,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
      * and on no other path, since every earlier error returns before this
      * allocation; an allocation failure degrades to a clean 500 rather than
      * a stack overflow. */
-#define PROFILE_DETAIL_JSON_CAP (816 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX)
+#define PROFILE_DETAIL_JSON_CAP (848 + PROFILE_MAX_SEGMENTS * 192 + PROFILE_MAX_ON_OFF_RULES * PROFILE_ON_OFF_RULE_JSON_MAX)
     char *json = heap_caps_malloc(PROFILE_DETAIL_JSON_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!json) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
@@ -471,6 +492,9 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
 
     /* *6+1, not *2+1 -- see the identical N3 comment above in
      * profiles_list_get_handler(). */
+    /* M-2 (WEB_UI_JS_AUDIT): the slot's save generation, read before the copy below, is the token a page
+     * echoes as expected_rev on POST /api/profile so a stale editor is refused with 409. */
+    const uint32_t slot_rev_at_read = profiles_http_slot_rev((uint8_t)id);
     char name_escaped[PROFILE_NAME_MAX_LEN * 6 + 1];
     profiles_http_json_escape(p->name, name_escaped, sizeof(name_escaped));
     /* exceeds_ceiling/ceiling_note (2026-09-02 owner correction): same live
@@ -482,10 +506,10 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
     profiles_http_json_escape(ceiling_note, ceiling_note_escaped, sizeof(ceiling_note_escaped));
     APPEND("{\"id\":%ld,\"builtin\":false,\"read_only\":false,\"name\":\"%s\",\"zone_mask\":%u,"
            "\"segment_count\":%u,\"feasibility\":\"%s\",\"exceeds_ceiling\":%s,"
-           "\"ceiling_note\":\"%s\",\"segments\":[",
+           "\"ceiling_note\":\"%s\",\"slot_rev\":%lu,\"segments\":[",
            id, name_escaped, p->zone_mask, p->segment_count,
            profile_feasibility_verdict_str(rollup), exceeds_ceiling ? "true" : "false",
-           ceiling_note_escaped);
+           ceiling_note_escaped, (unsigned long)slot_rev_at_read);
     for (uint8_t i = 0; i < p->segment_count; i++) {
         const profile_segment_t *s = &p->segments[i];
         /* Genuine firmware defect found while wiring the editor UI to this
@@ -507,7 +531,7 @@ esp_err_t profile_detail_get_handler(httpd_req_t *req)
                s->io_leave_on_at_end, profile_feasibility_verdict_str(per_seg[i]));
     }
     APPEND("],\"on_off_rules\":[");
-    /* docs/ON_OFF_ZONE_PLAN.md plan step 5 API surface -- echoes exactly the
+    /* docs/ON_OFF_ZONE.md plan step 5 API surface -- echoes exactly the
      * fields profiles_edit_http.c's rule%u_* parser accepts, same round-trip
      * discipline the segment loop above already follows. "temp_source"
      * added alongside the profiles_page.html editor pass: without it, a

@@ -20,7 +20,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, config_presets, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, config_presets, ramp_assist_http_client, debug_probe, devices, mcp_facade, openocd_util, pico_gpio_probe, safety_cfg_http_client, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -86,7 +86,8 @@ def list_config_presets() -> str:
 @_core._tool()
 def load_config_preset(name: str, host: Optional[str] = None,
                         safety_host: Optional[str] = None,
-                        use_ct_map_backup: bool = False) -> str:
+                        use_ct_map_backup: bool = False,
+                        confirm: bool = False) -> str:
     """Apply a known-good preset's zone config to the live board.
 
     PID gains and (when the preset carries one) the thermal model go over
@@ -127,7 +128,19 @@ def load_config_preset(name: str, host: Optional[str] = None,
     path) and know the map is fabricated.
 
     Does NOT reset, does NOT touch relays, does NOT request enable.
+
+    Refuses unless ``confirm is True`` exactly (whole-page writes of PID
+    gains, zones and optionally safety fields), and refuses while a profile
+    firing or autotune run is live or cannot be ruled out.
     """
+    if confirm is not True:
+        return (f"refused: load_config_preset({name!r}) overwrites PID gains for every zone "
+                "(and zones/safety config when host/safety_host is given); pass "
+                "confirm=True, exactly, to apply.")
+    from .mcp_server_control import _profile_or_autotune_running_reason  # local: avoids an import cycle
+    running = _profile_or_autotune_running_reason()
+    if running is not None:
+        return f"refused: {running} -- will not apply a config preset mid-run"
     from .mcp_server_ota import _ota_resolve_host  # local import: avoids a circular import with mcp_server_ota.py
 
     try:
@@ -141,12 +154,22 @@ def load_config_preset(name: str, host: Optional[str] = None,
             _srv._control, preset, zones_host=resolved, safety_host=resolved_safety,
             use_ct_map_backup=use_ct_map_backup)
     except ControlQueryError as exc:
-        return f"error: {exc}"
+        return f"error: {exc}{_partial_note(exc)}"
     except zones_http_client.ZonesHttpError as exc:
-        return f"error writing zones config over HTTP (host={resolved}): {exc}"
+        return f"error writing zones config over HTTP (host={resolved}): {exc}{_partial_note(exc)}"
     except safety_cfg_http_client.SafetyCfgHttpError as exc:
-        return f"error writing safety config over HTTP (host={resolved_safety}): {exc}"
-    return result.describe()
+        return f"error writing safety config over HTTP (host={resolved_safety}): {exc}{_partial_note(exc)}"
+    except ramp_assist_http_client.RampAssistHttpError as exc:
+        return f"error pinning ramp_assist over HTTP (host={resolved}): {exc}{_partial_note(exc)}"
+    return result.describe() if result.all_ok else "FAILED (partial apply):\n" + result.describe()
+
+
+def _partial_note(exc: BaseException) -> str:
+    """apply_preset() attaches ``preset_partial`` (stages that had already
+    landed) to a stage failure; surface it so a failure is never read as 'no
+    write happened'."""
+    partial = getattr(exc, "preset_partial", None)
+    return f"\nstages that had ALREADY landed before the failure (board is partially written):\n{partial}" if partial else ""
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

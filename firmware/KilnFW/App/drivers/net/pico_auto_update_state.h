@@ -1,6 +1,6 @@
 // pico_auto_update_state -- the single live verdict readiness_gate.c and
 // readiness_http.c both read for the "pico_update" readiness item
-// (docs/PICO_AUTO_UPDATE_PLAN.md), so the ENFORCEMENT (readiness_gate.h's
+// (docs/PICO_AUTO_UPDATE.md), so the ENFORCEMENT (readiness_gate.h's
 // firing block) and the DISPLAY (/api/readiness) can never drift apart --
 // same "one shared predicate" reasoning as safety_ceiling_sync_is_diverged().
 //

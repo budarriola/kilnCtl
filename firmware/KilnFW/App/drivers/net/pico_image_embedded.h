@@ -1,7 +1,7 @@
 // pico_image_embedded.h -- the two SaftyFW slot images embedded directly in
 // this ESP application build, and what they say about themselves.
 //
-// OWNER DECISION 2026-09-20, OVERRIDING docs/PICO_AUTO_UPDATE_PLAN.md sec 2's
+// OWNER DECISION 2026-09-20, OVERRIDING docs/PICO_AUTO_UPDATE.md sec 2's
 // "CORRECTION 2026-09-18" (embedding a SaftyFW binary is not implementable in
 // this tree). That correction was accurate for the tree as it stood: the
 // ESP-IDF build could not produce a SaftyFW .bin, and none existed to embed
@@ -51,7 +51,7 @@
 // change lands, a worktree whose SaftyFW/build/ was not rebuilt), then EVERY
 // board running this ESP build will decide NEEDED at boot and attempt to
 // push that stale image -- the exact fleet-wide scenario
-// docs/PICO_AUTO_UPDATE_PLAN.md sec 9 step 3's note warns about, except now
+// docs/PICO_AUTO_UPDATE.md sec 9 step 3's note warns about, except now
 // reachable because an image is always present. What the tooling agent
 // should check before this ESP build is ever flashed to more than a bench
 // unit: (1) firmware/SaftyFW/build/'s SaftyFW_slotA.elf/.bin build timestamp

@@ -103,7 +103,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
     }
     if (err != ESP_OK) {
         // Applied in RAM, not persisted: report it as a failure, never as success.
-        return cfg_fs_http_persist_failed(req);
+        return cfg_fs_http_persist_failed_for(req, UPDATE_SETTINGS_FILE_PATH, err);
     }
     return send_settings(req);
 }

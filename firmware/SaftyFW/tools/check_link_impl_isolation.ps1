@@ -183,7 +183,12 @@ $allowlistPaths = @(
     # integrity, or a plain accessor/stub computing nothing) than the link's
     # CRC16-CCITT-FALSE, not a from-scratch reimplementation of it.
     (Join-Path $firmwareRoot "KilnFW\App\drivers\persist\boot_guard.c"),
-    # docs/PICO_AUTO_UPDATE_PLAN.md pico_update_attempts.c -- same class as
+    # test_cfg_fs_mount_state.c ref_crc(): littlefs on-flash CRC32 (nibble table,
+    # polynomial 0xedb88320), deliberately an INDEPENDENT reference so the test can
+    # forge littlefs superblock/commit blocks byte-for-byte. Nothing to do with the
+    # link's CRC16-CCITT-FALSE framing; sharing it would defeat its purpose.
+    (Join-Path $firmwareRoot "KilnFW\App\test\test_cfg_fs_mount_state.c"),
+    # docs/PICO_AUTO_UPDATE.md pico_update_attempts.c -- same class as
     # boot_guard.c immediately above: a standalone table-less CRC32 (IEEE
     # 802.3/zlib polynomial) over this module's OWN NVS record, deliberately
     # copied from boot_guard.c's algorithm rather than shared (so this
@@ -347,7 +352,11 @@ $allowlistPaths = @(
     # forwards to ric_crc32() above (on target it is the esp_rom wrapper). It is a
     # delegation, not a CRC implementation, and exists only so the shared
     # stage_header.c links in the host test. Allowlisted by path with this reason.
-    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_ota_image_crc_double.c")
+    (Join-Path $firmwareRoot "KilnFW_recovery\main\test_ota_image_crc_double.c"),
+    # test_link_task_fuzz.c: recording fake returning 0 (config_store_get_config_crc, one
+    # line) and a make_stuffed wrapper that only calls CommonFW kilnlink_stuff; it copies
+    # no CRC or stuffing code. Allowlisted by path with this reason.
+    (Join-Path $firmwareRoot "SaftyFW\test\test_link_task_fuzz.c")
 )
 
 # Concurrent sessions are the norm in this repo: another agent's in-flight

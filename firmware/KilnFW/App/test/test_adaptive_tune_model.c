@@ -25,6 +25,29 @@ static void test_min_observations_guard_rejects_too_few(void)
                "refusal reason should name the observation-count shortfall");
 }
 
+// F3: adaptive_tune_run_end() must call the zones setters (model, pid, baseline
+// bootstrap) with adaptive_tune_lock released -- see SETTER_LOCK_PROBE().
+static void test_run_end_holds_no_lock_across_zones_setters(void)
+{
+    reset_module_state();
+    adaptive_tune_zones[1].enabled = true;
+    s_fake_zone_cfg[1].k_dc = 10.0f;
+    s_fake_zone_cfg[1].autotune_baseline_k_dc = 0.0f; // forces the baseline bootstrap setter too
+    feed_settled_dwell(1, 25.0f, 22.0f, 0.2f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 27.0f, 22.0f, 0.5f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 30.0f, 22.0f, 0.8f, SETTLE_TICKS, DT_S);
+    feed_settled_dwell(1, 29.0f, 22.0f, 0.65f, SETTLE_TICKS, DT_S);
+    g_setter_calls = 0;
+    g_setter_max_lock_depth = 0;
+    TEST_CHECK(g_test_stub_lock_depth == 0, "setup: no lock held before run_end");
+    profile_firing_run_record_t rec = make_clean_record(7, 1, 900);
+    adaptive_tune_run_end(&rec, true);
+    TEST_CHECK(g_setter_calls >= 3, "setup: run_end must reach the baseline, model and pid setters");
+    TEST_CHECK(g_setter_max_lock_depth == 0, "F3: adaptive_tune_lock must not be held while the zones setters run");
+    TEST_CHECK(g_test_stub_lock_depth == 0, "run_end must leave adaptive_tune_lock released");
+    TEST_CHECK(adaptive_tune_zones[1].has_applied, "the refine must still commit its result after the apply");
+}
+
 static void test_duty_spread_guard_rejects_clustered_observations(void)
 {
     reset_module_state();

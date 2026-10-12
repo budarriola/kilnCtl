@@ -194,7 +194,21 @@ void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null);
  * heaters are alarmed-and-disabled rather than merely refused, so a caller
  * building an operator message can distinguish "your swap was refused,
  * nothing changed" from "your swap partly landed and the board is now
- * alarmed -- see the divergence banner." */
+ * alarmed -- see the divergence banner."
+ *
+ * One more false outcome (M1, docs/audits/UNCHECKED_PERSIST_RESULT_
+ * AUDIT_2026-10-09.md): both halves landed and verified and the ceiling
+ * check passed, but persisting active_id failed. RAM active_id already names
+ * target_id; the pending record is left at ESP_DONE so the next boot
+ * retries the save. `reason_out` then starts with
+ * KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX and `out_diverged` stays
+ * false, so a caller can tell this apart from "nothing changed".
+ *
+ * Every journal marker save (STAGED, PICO_OPEN, PICO_DONE, ESP_DONE) is
+ * checked and read back (M2/L6): a failed save refuses before the next step
+ * (PICO_OPEN: before anything but the raise-first ceiling reaches the Pico)
+ * or rolls back, so the persisted marker never lags behind the two sides. */
+#define KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX "Kiln config applied on"
 bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *reason_out, size_t reason_cap,
                          bool *out_diverged);
 
@@ -208,13 +222,26 @@ bool kiln_cfg_swap_apply(int32_t target_id, bool ack_no_safety_processor, char *
  * that only want "is a swap in flight". */
 kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t *out_previous_active_id);
 
-/* true iff a swap transaction has a pending record (marker != NONE) --
- * a plain wrapper over kiln_cfg_swap_get_marker(), meant to be registered
+/* true iff a swap transaction has a pending record (marker != NONE) that
+ * should keep autosave off -- a wrapper over kiln_cfg_swap_get_marker() with
+ * one exception (LOW-2): an ESP_DONE record kept open only because the
+ * active-id save failed, after the apply/boot finish otherwise completed,
+ * reads false while RAM active_id names its target, so autosave follows the
+ * live kiln into its own slot. Meant to be registered
  * with kiln_cfg_store_set_swap_pending_source() (kiln_cfg_store.h) at
  * bring-up, matching the existing kiln_cfg_store_capture_expected_pico_
  * fields()/safety_ceiling_sync_set_expected_pico_fields_source() wiring
  * pattern in main_control_bringup.c. */
 bool kiln_cfg_swap_is_pending(void);
+
+/* LOW-1 (review 10): true while a rollback left the journal kept because restoring the previous active_id failed.
+ * Each boot re-imports the pre-swap zones until the id restore succeeds, so a zones save made meanwhile would be
+ * silently reverted: POST /api/zones refuses while this is true. */
+bool kiln_cfg_swap_zone_edits_at_risk(void);
+/* Shared 409 text for every HTTP zones writer (review 12 LOW-2: true on the ESP_DONE path too). */
+#define KILN_CFG_SWAP_ZONE_EDITS_RISK_TEXT \
+    "a kiln-config rollback is pending (saving the active kiln failed); a zones save may be lost or latch a boot " \
+    "fault at the next boot -- reboot to retry it"
 
 /* M13 ("every fault says what was detected and what to do", ROADMAP.md
  * standing rule): kiln_cfg_swap_boot_recover() (section 4.4's five-case
@@ -235,9 +262,18 @@ bool kiln_cfg_swap_is_pending(void);
  * no safety-link available to recover a PICO_OPEN/PICO_DONE interruption,
  * that recovery's own rollback attempt failing, an ESP_DONE row whose
  * post-boot re-verification could not confirm both sides match (including
- * its own fallback-rollback failing), and an unrecognised marker byte.
- * Never latched by the STAGED case (a clean, harmless discard: nothing was
- * ever written to either processor) or by a recovery that succeeds. Not
+ * its own fallback-rollback failing), an unrecognised marker byte, and
+ * ACTIVE_ID_UNSAVED: an ESP_DONE row confirmed on both sides whose active-id
+ * save failed, and ROLLBACK_ACTIVE_ID_UNSAVED: a recovery that rolled both
+ * sides back to the pre-swap config (PICO_OPEN/PICO_DONE, or the ESP_DONE
+ * fallback) but whose active-id restore failed. Those last two kinds are
+ * display-only (both processors agree, heat is not gated by them) and retried
+ * automatically at every boot; the UI shows them with softer text than the
+ * others (/api/status's kiln_cfg_swap_boot_fault_kind). The first says the
+ * target was APPLIED, the second says it was ROLLED BACK. Never latched by the STAGED case (a clean,
+ * harmless discard: nothing was ever written to either processor), by a
+ * recovery that succeeds, or by an ESP_DONE row found with both sides back
+ * on the pre-swap config with nothing kept (a rollback whose clear failed; LOW-3 clears it). Not
  * cleared mid-boot, same "fixed for the boot" discipline as zones_cfg_load_
  * fault_t (zones_config_accessors.h) -- a fresh boot that recovers cleanly,
  * or that finds no pending record at all, re-evaluates to false. */
@@ -248,7 +284,19 @@ typedef enum {
     KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED,      /* the rollback-to-R attempt itself failed */
     KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED, /* ESP_DONE row: could not re-confirm both sides match */
     KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER,  /* pending record's marker byte is not a known value */
+    KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED,    /* ESP_DONE row confirmed both sides, but the active_id save
+                                                    * failed; record kept for a retry next boot. Display-only:
+                                                    * both processors agree, heat is not gated by this. */
+    KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, /* recovery ROLLED BACK both sides to the pre-swap
+                                                    * config, but the active_id restore failed; record kept
+                                                    * for a retry next boot. Display-only, heat not gated. */
 } kiln_cfg_swap_boot_fault_kind_t;
+
+/* Highest enum value, and the buffer size (NUL included) every name from
+ * kiln_cfg_swap_boot_fault_kind_name() must fit; dashboard_http.h's
+ * kiln_cfg_swap_boot_fault_kind[] is static-asserted against it. */
+#define KILN_CFG_SWAP_BOOT_FAULT_KIND_LAST KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED
+#define KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX 32
 
 typedef struct {
     bool occurred;
@@ -261,6 +309,17 @@ typedef struct {
  * above). *out (if given) is zeroed with occurred==false when nothing was
  * latched this boot. Cheap RAM read, safe from any task. */
 bool kiln_cfg_swap_get_boot_fault(kiln_cfg_swap_boot_fault_t *out);
+
+/* The latched fault's kind only (KILN_CFG_SWAP_BOOT_FAULT_NONE when nothing
+ * latched) -- for callers on a measured stack (the LCD refresh) that need to
+ * pick a message without copying the struct's reason buffer. */
+kiln_cfg_swap_boot_fault_kind_t kiln_cfg_swap_get_boot_fault_kind(void);
+
+/* Stable lowercase name of a fault kind, for /api/status's additive
+ * kiln_cfg_swap_boot_fault_kind field ("none", "unreadable", "no_link",
+ * "rollback_failed", "esp_done_unconfirmed", "unrecognised_marker",
+ * "active_id_unsaved", "rollback_active_id_unsaved"; "unknown" for any other value). */
+const char *kiln_cfg_swap_boot_fault_kind_name(kiln_cfg_swap_boot_fault_kind_t kind);
 
 #ifdef __cplusplus
 }

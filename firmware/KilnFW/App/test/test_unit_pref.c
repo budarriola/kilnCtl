@@ -6,7 +6,7 @@
 // No host test existed for this module before this pass (unit_pref.c had
 // no test file at all -- grepped and confirmed absent from
 // build_host_tests.ps1's $sources). Added alongside the docs/
-// FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 dual-write work so the
+// FILESYSTEM_USER_DATA.md section 5 step 3 dual-write work so the
 // module's pre-existing NVS behavior (default/round-trip/corrupt-value
 // fallback) is proven, not just the new file-backed path this pass adds.
 #include <stdio.h>
@@ -31,6 +31,8 @@
 #include "cfg_fs.h"
 
 #include "../drivers/persist/unit_pref.c"
+#include "../drivers/persist/cfg_save_barrier.h"
+#include "save_section_probe.h"
 
 static const char *UP_SCRATCH_BASE = "cfg_fs_test_unit_pref";
 
@@ -48,6 +50,8 @@ static void up_cfg_fs_reset(void)
     TUP_MKDIR(UP_SCRATCH_BASE);
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();
+    pref_cfg_fs_clear_rev_unknown_for_test();
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +85,21 @@ static void simulate_reboot(void)
     s_unit_pref = UNIT_PREF_FAHRENHEIT; // deliberately the WRONG value -- proves unit_pref_start()
                                          // actually overwrites it rather than the test happening to
                                          // already hold the expected result before start() runs.
+}
+
+static void test_unreadable_cfg_file_keeps_nvs_and_refuses_set(void)
+{
+    TEST_SECTION("unit_pref M1: I/O error reading a present cfg file keeps the NVS value, refuses set()");
+    up_mount_scratch();
+    up_stage_legacy_nvs(UNIT_PREF_FAHRENHEIT, 3);
+    simulate_reboot();
+    cfg_fs_test_inject_read_error(UNIT_PREF_FILE_PATH, ESP_FAIL, 1);
+    TEST_CHECK(unit_pref_start() == ESP_OK, "start succeeds");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT && s_unit_pref_rev == 3,
+               "the valid NVS value survives (not the Celsius default), rev 3");
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_ERR_INVALID_STATE, "set() is refused");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM unchanged by the refused set");
+    pref_cfg_fs_clear_rev_unknown_for_test();
 }
 
 static void test_default_is_celsius_on_empty_nvs(void)
@@ -123,7 +142,9 @@ static void test_set_without_cfg_partition_fails_loud(void)
     simulate_reboot();
     unit_pref_start();
 
+    unit_pref_t before = unit_pref_get();
     TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) != ESP_OK, "set() reports the failed cfg write");
+    TEST_CHECK(unit_pref_get() == before, "failed persist leaves the in-RAM value unchanged (L12)");
 
     hal_kv_handle_t h;
     TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_ONLY, KILN_NVS_PARTITION) == HAL_NOT_FOUND,
@@ -158,7 +179,7 @@ static void test_corrupted_value_falls_back_to_safe_default(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// cfg_fs dual-write coverage (docs/FILESYSTEM_USER_DATA.md section 5
 // step 3). Everything above already proves the partition-absent path.
 // ---------------------------------------------------------------------
 
@@ -410,19 +431,160 @@ static void test_start_nvs_error_but_file_fallback_returns_ok_with_file_value(vo
     cfg_fs_deinit();
 }
 
+static pref_cfg_fs_write_fn_t g_up_orig_write_fn;
+static int g_up_depth_at_write = -1;
+static esp_err_t up_depth_probe_write(const char *rel_path, const void *data, size_t len)
+{
+    g_up_depth_at_write = g_test_stub_lock_depth;
+    return g_up_orig_write_fn(rel_path, data, len);
+}
+
+static esp_err_t up_write_then_fail(const char *rel_path, const void *data, size_t len)
+{
+    (void)g_up_orig_write_fn(rel_path, data, len); /* the file really lands ... */
+    return ESP_FAIL;                               /* ... but the caller sees a failed read-back */
+}
+
+static void test_readback_failure_after_write_keeps_ram_and_file_consistent(void)
+{
+    TEST_SECTION("unit_pref_set: write landed but read-back failed -- RAM adopts the file's value");
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "baseline Celsius saved");
+    g_up_orig_write_fn = pref_cfg_fs_get_write_fn();
+    pref_cfg_fs_set_write_fn(up_write_then_fail);
+    bool adopted = false;
+    TEST_CHECK(unit_pref_set_ex(UNIT_PREF_FAHRENHEIT, &adopted) != ESP_OK, "failure is still reported");
+    TEST_CHECK(adopted, "out_adopted reports live value now matches the file");
+    pref_cfg_fs_set_write_fn(g_up_orig_write_fn);
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM adopted the value the file holds");
+    uint32_t live_rev = s_unit_pref_rev;
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "value after reboot equals the pre-reboot live value");
+    TEST_CHECK(s_unit_pref_rev == live_rev, "rev agrees across the reboot");
+    cfg_fs_deinit();
+}
+
+/* Same-rev race guard: the rev read, the commit and the rev bump are one section under
+ * the save lock (unit_pref_set runs on httpd, the LCD task and the UART bridge task). */
+static void test_save_holds_lock_across_rev_read_and_commit(void)
+{
+    up_cfg_fs_reset();
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    TEST_CHECK(cfg_fs_init(UP_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    simulate_reboot();
+    unit_pref_start();
+    int base = g_test_stub_lock_depth;
+
+    g_up_orig_write_fn = pref_cfg_fs_get_write_fn();
+    pref_cfg_fs_set_write_fn(up_depth_probe_write);
+    uint32_t r0 = s_unit_pref_rev;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "first save ok");
+    TEST_CHECK(g_up_depth_at_write == base + 1, "save lock is held while the file is written");
+    TEST_CHECK(g_test_stub_lock_depth == base, "save lock released after the save");
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "second save ok");
+    TEST_CHECK(s_unit_pref_rev == r0 + 2, "two saves get distinct, consecutive revs");
+    pref_cfg_fs_set_write_fn(g_up_orig_write_fn);
+    cfg_fs_deinit();
+}
+
+/* CFG_STORE_SAVE_RACE audit, "Save mutex vs. flash worker" and MED-3: the
+ * worker reservation is taken before the save mutex and released after it,
+ * the cfg write happens inside it, and RAM is still the OLD value when the
+ * section opens (RAM is assigned under the lock, not before it). */
+static unit_pref_t g_up_ram_at_enter;
+static void up_record_ram_at_enter(void) { g_up_ram_at_enter = s_unit_pref; }
+
+static void test_save_reserves_worker_around_lock(void)
+{
+    TEST_SECTION("unit_pref_set: worker reservation wraps the save lock; RAM assigned inside it");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "starts at Celsius");
+    ssp_install();
+    g_ssp.on_enter = up_record_ram_at_enter;
+    g_up_ram_at_enter = UNIT_PREF_FAHRENHEIT;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "save ok");
+    TEST_CHECK(ssp_shape_ok(1), "reservation taken before the mutex, released after, write inside it");
+    TEST_CHECK(g_up_ram_at_enter == UNIT_PREF_CELSIUS, "RAM not yet assigned when the section opens (MED-3)");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_FAHRENHEIT, "RAM holds the new value after the save");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
+/* Factory-reset writer fence (pref_cfg_fs.h): refusal under the save lock, and the barrier. */
+static bool g_up_reset_mark = false;
+static bool up_reset_hook(void) { return g_up_reset_mark; }
+
+static void test_reset_mark_refuses_save_and_keeps_ram(void)
+{
+    TEST_SECTION("unit_pref_set: reset mark refuses under the lock, RAM and file untouched");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    int base = g_test_stub_lock_depth;
+    pref_cfg_fs_set_reset_refuse_hook(up_reset_hook);
+    g_up_reset_mark = true;
+    uint32_t r0 = s_unit_pref_rev;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_ERR_INVALID_STATE, "refused while the mark is set");
+    TEST_CHECK(unit_pref_get() == UNIT_PREF_CELSIUS, "RAM unchanged by a refused save");
+    TEST_CHECK(s_unit_pref_rev == r0, "rev unchanged");
+    TEST_CHECK(g_test_stub_lock_depth == base, "save lock released on the refusal path");
+    uint8_t raw = 1;
+    TEST_CHECK(pref_cfg_fs_save("x.bin", &raw, 1, 1) == ESP_ERR_INVALID_STATE, "pref_cfg_fs_save refuses centrally");
+    g_up_reset_mark = false;
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "saves again once the mark is clear");
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    cfg_fs_deinit();
+}
+
+static void test_reset_barrier_cycles_every_registered_lock(void)
+{
+    TEST_SECTION("persist_reset_barrier: takes and gives each registered save lock");
+    up_mount_scratch();
+    simulate_reboot();
+    unit_pref_start();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_FAHRENHEIT) == ESP_OK, "a save registers its lock");
+    size_t n = pref_cfg_fs_lock_registry_count();
+    TEST_CHECK(n >= 1, "registry holds at least unit_pref's lock");
+    int base = g_test_stub_lock_depth;
+    ssp_install();
+    persist_reset_barrier();
+    TEST_CHECK(g_ssp.enters == (int)n && g_ssp.exits == (int)n, "one take/give per registered lock");
+    TEST_CHECK(g_test_stub_lock_depth == base, "every lock given back");
+    size_t n_after = pref_cfg_fs_lock_registry_count();
+    TEST_CHECK(unit_pref_set(UNIT_PREF_CELSIUS) == ESP_OK, "second save works after the barrier");
+    TEST_CHECK(pref_cfg_fs_lock_registry_count() == n_after, "a lock registers only once");
+    ssp_uninstall();
+    cfg_fs_deinit();
+}
+
 void run_test_unit_pref(void)
 {
     TEST_SECTION("unit_pref");
     test_default_is_celsius_on_empty_nvs();
+    test_unreadable_cfg_file_keeps_nvs_and_refuses_set();
     test_persistence_round_trip();
     test_set_refuses_invalid_value();
     test_corrupted_value_falls_back_to_safe_default();
     test_set_without_cfg_partition_fails_loud();
+    test_readback_failure_after_write_keeps_ram_and_file_consistent();
     test_save_lands_in_cfg_file_only();
     test_nvs_fallback_when_file_absent_then_migrates();
     test_divergence_tie_break_higher_rev_wins();
     test_dualwrite_status_reports_divergence();
     test_mount_failed_falls_through_to_nvs_only();
+    test_save_holds_lock_across_rev_read_and_commit();
+    test_save_reserves_worker_around_lock();
+    test_reset_mark_refuses_save_and_keeps_ram();
+    test_reset_barrier_cycles_every_registered_lock();
 
     test_start_partition_init_failure_returns_error_and_defaults();
     test_start_open_error_without_file_returns_error();

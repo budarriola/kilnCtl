@@ -32,6 +32,17 @@ extern "C" {
 // Internal RAM that must remain free after allocating a non-PSRAM buffer.
 #define RECOVERY_INTERNAL_FLOOR_BYTES 8192u
 
+// Overall upload deadline (HTTP audit LOW, group C 7): the per-recv timeout
+// alone lets a slow-drip client hold the single httpd task for as long as it
+// keeps a byte arriving inside each window. Budget = 60 s + content_len at a
+// 2 KB/s minimum rate, in microseconds.
+#define RECOVERY_UPLOAD_BASE_US 60000000LL
+#define RECOVERY_UPLOAD_MIN_RATE_BPS 2048LL
+static inline int64_t recovery_upload_budget_us(size_t content_len)
+{
+    return RECOVERY_UPLOAD_BASE_US + ((int64_t)content_len * 1000000LL) / RECOVERY_UPLOAD_MIN_RATE_BPS;
+}
+
 typedef struct {
     bool (*begin)(void *ctx, size_t total_len);
     bool (*write)(void *ctx, const uint8_t *data, size_t len);
@@ -56,6 +67,7 @@ typedef enum {
     RECOVERY_UPLOAD_READ_ERROR,   // 400, client went away / timed out; sink aborted
     RECOVERY_UPLOAD_SINK_ERROR,   // 500, sink begin/write failed; sink aborted
     RECOVERY_UPLOAD_VERIFY_ERROR, // 422, finish() rejected the image
+    RECOVERY_UPLOAD_TOO_SLOW,     // 504, overall upload deadline passed (client alive but slow); sink aborted
 } recovery_upload_result_t;
 
 recovery_upload_result_t recovery_upload_stream(httpd_req_t *req, const recovery_upload_cfg_t *cfg,

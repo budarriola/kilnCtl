@@ -30,7 +30,7 @@
  *     that module's own documented fail-safe direction, and the reason this
  *     item can never be accidentally satisfied by a storage fault.
  *   - pico_auto_update_state_is_blocking(): false (never blocks) until
- *     docs/PICO_AUTO_UPDATE_PLAN.md's boot-time glue is wired -- see that
+ *     docs/PICO_AUTO_UPDATE.md's boot-time glue is wired -- see that
  *     module's own doc comment. */
 
 #include "readiness_gate.h"

@@ -1,5 +1,5 @@
 // recovery_main.c -- entry point for the OTA recovery image.
-// docs/OTA_SINGLE_SLOT_PLAN.md, section 3: "anything beyond
+// docs/OTA_SINGLE_SLOT.md, section 3: "anything beyond
 // receive-an-image-and-write-it must justify itself against being one more
 // thing that can fail in the one image that must never fail."
 //

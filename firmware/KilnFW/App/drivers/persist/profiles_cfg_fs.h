@@ -1,7 +1,7 @@
 // profiles_cfg_fs -- read-through/dual-write bridge between user fire
 // profiles' existing per-slot NVS blob (profiles_http.c's nvs_save_slot()/
 // nvs_erase_slot()/nvs_load_all_from()) and the `cfg` LittleFS partition
-// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA_PLAN.md section 5
+// (cfg_fs.h/cfg_fs_mount.h), per docs/FILESYSTEM_USER_DATA.md section 5
 // step 4 ("user data move" plan) -- copies the shape of
 // zones_config_cfg_fs.c/.h (see that file's header comment for the design
 // this mirrors) but per-SLOT (id 0..PROFILES_MAX_COUNT-1) rather than a
@@ -14,7 +14,7 @@
 // per slot.
 //
 // FILE LAYOUT: one file per slot, "profiles/prof<N>.json" (matches
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 3's `/cfg/profiles/<id>.json`
+// docs/FILESYSTEM_USER_DATA.md section 3's `/cfg/profiles/<id>.json`
 // path shape). Like zones_config_cfg_fs.c, the file is NOT hand-written JSON
 // text yet -- it is a 4-byte little-endian `rev` counter followed by the
 // EXACT SAME versioned blob bytes profile_decode_blob() (profiles_http.c,

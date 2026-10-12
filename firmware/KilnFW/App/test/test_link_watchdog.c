@@ -216,6 +216,91 @@ static void test_zone_claim_arbitrates_profile_vs_autotune_per_zone(void)
     relay_authority_zone_claim_end(RELAY_HEAT_ZONE_CLAIM_AUTOTUNE, 0x02u);
 }
 
+// HTTP audit L37 follow-up (LOW-5): the factory-reset in-flight mark and the sweep claim accessor,
+// against the REAL relay_authority.c counter (the factory_reset/sweep/starter tests use fakes).
+static void test_reset_refuses_writer_exempts_reset_job_task(void)
+{
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "no mark: nothing refused");
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "mark set, no job registered: refused");
+    relay_authority_reset_job_enter();
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "the registered reset-job task itself is exempt");
+    relay_authority_reset_job_exit();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "after the job exits the exemption is gone");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_refuses_writer(), "mark cleared: nothing refused");
+}
+
+static void test_kiln_nvs_fence_only_when_scope_erases_it(void)
+{
+    relay_authority_reset_set_erases_kiln_nvs(false);
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_writer(), "generic fence still set for a non-kiln scope");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "wifi/profiles scope: kiln_nvs writes are NOT refused");
+    relay_authority_reset_in_flight_end();
+    relay_authority_reset_set_erases_kiln_nvs(true);
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "kiln/all scope: other-task kiln_nvs write refused");
+    relay_authority_reset_job_enter();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "the reset job's own task is exempt");
+    relay_authority_reset_job_exit();
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "mark cleared: nothing refused, flag cleared");
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "the erase flag does not leak into the next reset");
+    relay_authority_reset_in_flight_end();
+}
+
+// fwlow16 L2: a second, narrower reset must neither drop the first one's kiln_nvs fence nor run at all.
+static void test_second_reset_cannot_drop_kiln_nvs_fence(void)
+{
+    TEST_CHECK(relay_authority_reset_try_begin(true), "first (kiln-erasing) reset begins");
+    TEST_CHECK(!relay_authority_reset_try_begin(false), "a second reset while one is in flight is refused");
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "the refused second reset left the fence set");
+    relay_authority_reset_set_erases_kiln_nvs(false); // legacy setter path: sticky while in flight
+    TEST_CHECK(relay_authority_reset_refuses_kiln_nvs_writer(), "a false flag never clears a kiln-erasing fence");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "the first reset's end clears the mark");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "and the fence");
+    TEST_CHECK(relay_authority_reset_try_begin(false), "a reset can begin again once the first ended");
+    TEST_CHECK(!relay_authority_reset_refuses_kiln_nvs_writer(), "a wifi/profiles scope does not fence kiln_nvs");
+    relay_authority_reset_in_flight_end();
+}
+
+static void test_reset_in_flight_counter_is_a_depth_count(void)
+{
+    TEST_CHECK(!relay_authority_reset_in_flight(), "clean slate: no reset in flight");
+
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(relay_authority_reset_in_flight(), "begin sets the mark");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "a matching end clears it");
+
+    // Two resets (HTTP and UART) at once: the first to finish must not clear the other's mark.
+    relay_authority_reset_in_flight_begin();
+    relay_authority_reset_in_flight_begin();
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(relay_authority_reset_in_flight(), "depth 2: one end leaves the second reset's mark set");
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "depth 2: the second end clears it");
+
+    // An end with nothing in flight must not wrap the counter (uint8_t) into "in flight".
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "end on zero stays clear (no underflow)");
+    relay_authority_reset_in_flight_begin();
+    relay_authority_reset_in_flight_end();
+    TEST_CHECK(!relay_authority_reset_in_flight(), "after an end on zero, begin/end still pair exactly");
+}
+
+static void test_heat_sweep_active_follows_the_sweep_claim(void)
+{
+    TEST_CHECK(!relay_authority_heat_sweep_active(), "no sweep claim on a clean slate");
+    TEST_CHECK(relay_authority_heat_sweep_claim_begin() == RELAY_HEAT_SWEEP_CLAIM_OK, "sweep claim taken");
+    TEST_CHECK(relay_authority_heat_sweep_active(), "the accessor reports the held sweep claim");
+    relay_authority_heat_sweep_claim_end();
+    TEST_CHECK(!relay_authority_heat_sweep_active(), "released claim reads inactive");
+}
+
 int main(void)
 {
     test_all_unowned_relays_are_in_the_mask();
@@ -228,6 +313,11 @@ int main(void)
     test_never_seen_counts_as_down();
     test_traffic_resets_the_timer();
     test_zone_claim_arbitrates_profile_vs_autotune_per_zone();
+    test_kiln_nvs_fence_only_when_scope_erases_it();
+    test_reset_refuses_writer_exempts_reset_job_task();
+    test_second_reset_cannot_drop_kiln_nvs_fence();
+    test_reset_in_flight_counter_is_a_depth_count();
+    test_heat_sweep_active_follows_the_sweep_claim();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     return g_test_failures > 0 ? 1 : 0;

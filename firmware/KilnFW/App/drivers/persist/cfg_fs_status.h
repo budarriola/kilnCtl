@@ -1,11 +1,11 @@
 // cfg_fs_status -- observability for the `cfg` LittleFS partition
-// (docs/FILESYSTEM_USER_DATA_PLAN.md). Builds the JSON body served at
+// (docs/FILESYSTEM_USER_DATA.md). Builds the JSON body served at
 // GET /api/cfgfs (diagnostics_http.c). Pure and host-testable: it calls
 // ONLY cfg_fs.h's public API (cfg_fs_get_status()/is_available()/list()),
 // plus a plain stat() on paths this module builds itself from a base
 // directory the caller already knows -- it never edits or reaches into
 // cfg_fs.c's/cfg_fs_mount.c's internals, which are foundation-module code
-// owned elsewhere (docs/FILESYSTEM_USER_DATA_PLAN.md's mount-failure
+// owned elsewhere (docs/FILESYSTEM_USER_DATA.md's mount-failure
 // contract). On device the caller passes "/cfg" (cfg_fs_mount.c's fixed
 // mount point); host tests pass whatever scratch directory their own
 // cfg_fs_init() call used -- same on-disk shape either way, so this file's
@@ -75,7 +75,7 @@ typedef struct {
  * carries -- 1 (zones) + 1 (kiln_cfg_store) + 4 (pref-backed: unit pref,
  * ramp assist, display power, TZ) + PROFILES_MAX_COUNT (8) + 3 (2026-09-08:
  * relay_cycles, adaptive_tune ki-baseline, firing_stats -- the last three
- * items docs/FILESYSTEM_USER_DATA_PLAN.md section 5 tracked, all landed in
+ * items docs/FILESYSTEM_USER_DATA.md section 5 tracked, all landed in
  * 762bb29e) = 17 as a ceiling; the live handler (diagnostics_http.c)
  * collapses the profiles into one aggregate row and emits 13 rows today, so
  * the real headroom is 5 more bridges before this needs to grow again. Extra items past this cap are silently dropped by the

@@ -224,13 +224,13 @@ class HappyPathTest(_Base):
         after = copy.deepcopy(before)
         after["zones"][0]["max_temp_c"] = 80.0
         with unittest.mock.patch.object(zones_http_client, "get_zones", side_effect=[before, after]), \
-             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="body") as build_mock, \
+             unittest.mock.patch.object(zones_http_client, "build_post_body", return_value="max_temp_c=80.0&z0_pid_kp=1.5&z0_k=0.5&z0_tau=9&z0_coupling_c1=0.2&z0_hystc=3") as build_mock, \
              unittest.mock.patch.object(zones_http_client, "post_zones", return_value="ok") as post_mock:
             result = mc.control_set_zone_limits(zone=0, max_temp_c=80.0, confirm=True)
         self.assertIn("ok - zone 0", result)
         self.assertIn("max_temp_c=80", result)
         build_mock.assert_called_once_with(before, {"zones": [{"index": 0, "max_temp_c": 80.0}]})
-        post_mock.assert_called_once_with("10.0.0.5", "body")
+        post_mock.assert_called_once_with("10.0.0.5", "max_temp_c=80.0&z0_pid_kp=1.5")
 
     def test_both_fields_at_once(self):
         before = _snapshot([_zone(0, max_temp_c=36.4, min_temp_c=0.0)])

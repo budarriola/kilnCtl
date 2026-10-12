@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "readiness_http.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
@@ -64,17 +65,7 @@ static const char *status_name(readiness_status_t s)
 
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* Bytes held back from the item loop so that, however full the buffer gets,
@@ -715,7 +706,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 10a3. Pico auto-update. docs/PICO_AUTO_UPDATE_PLAN.md owner decision:
+    /* 10a3. Pico auto-update. docs/PICO_AUTO_UPDATE.md owner decision:
      * "on an unrecoverable version mismatch the ESP refuses to fire until
      * matched" -- same shape as safety_ceiling_match immediately above (a
      * live verdict computed once elsewhere, displayed and blocked on here
@@ -772,7 +763,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
         }
     }
 
-    /* 10a4. CT attribution. docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md: proof
+    /* 10a4. CT attribution. docs/CT_ATTRIBUTION_VERIFICATION.md: proof
      * that each current clamp sits on the conductor the configuration names,
      * which is what the over-current guard's whole meaning rests on. Same
      * shape as the two items above -- one verdict, computed once by

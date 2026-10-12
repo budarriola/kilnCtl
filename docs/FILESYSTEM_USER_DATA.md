@@ -1,3 +1,5 @@
+<!-- Completed 2026-10-09: renamed from FILESYSTEM_USER_DATA_PLAN.md (no pending items remain; step 7 closed 2026-10-05, flash-worker device write fns installed by cfg_fs_mount.c and asserted by cfg_fs_assert_device_write_fns_installed, pre-fire interlock decided 2026-10-06). Still-hardware-gated bench soaks are tracked in docs/CONFIG_FILESYSTEM.md. Design record only; CONFIG_FILESYSTEM.md is authoritative for what shipped. -->
+
 # User data on the filesystem — migration design
 
 > **Design record; `docs/CONFIG_FILESYSTEM.md` is authoritative** for what has
@@ -10,7 +12,7 @@
 > **step 7** (closing the dual-write window) closed 2026-10-05 (saves are
 > cfg-file-only, NVS is a read-only legacy source).
 
-Companion to `docs/FILESYSTEM_PLAN.md` (which stages the `logs` SPIFFS→LittleFS
+Companion to `docs/FILESYSTEM.md` (which stages the `logs` SPIFFS→LittleFS
 track). **Owner decision, 2026-09-07:** user-editable configuration and
 user-created profiles move onto a filesystem. This document designs that; it
 does not re-argue the decision. Endurance is *not* the case — the endurance
@@ -276,7 +278,7 @@ last.
 
 | # | Step | Partition change? | Backup/export interaction | Test |
 |---|---|---|---|---|
-| 0 | (prereq) `logs` LittleFS track steps 1–4 in `FILESYSTEM_PLAN.md` land first — do not stand up a second filesystem implementation. | no | none | as documented there |
+| 0 | (prereq) `logs` LittleFS track steps 1–4 in `FILESYSTEM.md` land first — do not stand up a second filesystem implementation. | no | none | as documented there |
 | 1 | Add `cfg` partition (512 K at `0xDB0000`, append-only), `cfg_fs_mount()` with `format_if_mount_failed=false`, recovery-mode gate, mount-failure banner, `/api/cfgfs` status. Mounts and does nothing else. | **YES** — `partitions.csv` already carries the `cfg` row (another pass, 2026-09-07). `cfg_fs_mount_device()` (`App/drivers/persist/cfg_fs_mount.c`, 2026-09-07) registers it (`format_if_mount_failed=false`) and delegates to `cfg_fs_mount_or_skip()` for the recovery-mode gate. `check_partition_labels_vs_firmware.ps1`'s `cfg` declared-but-unused reminder removed accordingly. **AUTO-FORMAT / ASK-FIRST added, 2026-09-07 (owner decision), refined the same day** ("The auto check should be looking to see if it is a valid file system, not just data. If it is just data and not file system then just format it."): on a mount failure, `cfg_fs_mount_device()` scans the raw partition (`cfg_fs_format_gate.c`, pure/host-tested) and structurally validates the LittleFS superblock metadata-block pair — replaying the on-disk tag chain, CRC-32, and version check the pinned `joltwallet/littlefs` component itself uses (`lfs_dir_fetchmatch()`/`lfs_format_()` in `lfs.c`) — rather than a byte-density heuristic. Auto-formats whenever no valid superblock structure is found, however much of the partition reads as non-erased (byte density is reported for context only, never gates); refuses only when a real superblock structure is found (fully valid, or one that decoded far enough to be recognizable but failed CRC/version — a genuinely corrupt filesystem), setting `cfg_fs_mount_format_confirmation_pending()`, surfaced via a loud boot-log banner, `GET /api/cfgfs/format_pending`, and a Settings-page banner with an explicit confirm button (`POST /api/cfgfs/format_confirm`, `cfg_fs_format_http.c`, auth reuses `OTA_HTTP_CONTEXT_FACTORY_RESET`). `factory_reset.c`'s "all" scope also formats `cfg` unconditionally (that button's own confirm dialog IS the explicit operator action). The LCD `/api/status` banner is still **NOT done** — only the boot log and the Settings page know about this today. | none | Host: `cfg_fs_mount_or_skip(recovery_mode, ...)` is the real gate function (`test_cfg_fs.c`); `cfg_fs_format_gate.c`'s valid-filesystem-vs-just-data decision is independently host-tested (`test_cfg_fs_format_gate.c` — a spec-accurate constructed superblock commit for the true-positive/corrupt-CRC cases, a magic-split-across-chunks case, a high-non-erased-density-but-no-filesystem case reproducing the bench board's actual state, and a negative-test drill that mutated the magic-length comparison and confirmed 5 checks fail before the edit was reversed by hand). Bench: **NOT done** — no board has been flashed with this table revision in this pass (otadata/bootloader reflash obligation still outstanding; out of scope here, owned by the partition-table track). On the CURRENT board (`cfg` partition reads 86.6% non-erased residual data, no valid LittleFS structure), the next boot after this lands will now auto-format and mount cleanly — this is the first boot the dual-write bridges actually go live on. |
 | 2 | `cfg_fs_write_atomic()` + temp sweep + flash-worker routing. No callers. | no | none | **DONE, 2026-09-07.** `App/drivers/persist/cfg_fs.c`/`.h` (pure, host-testable, mirrors `log_store.c`'s split) provide mount/read/write-atomic/delete/exists/list; `App/drivers/persist/cfg_fs_mount.c`/`.h` are the device-only glue (`esp_vfs_littlefs_register`, `uart_bridge_ext_run_on_flash_worker()` routing — no callers yet). Host test: `test_cfg_fs.c`, obstructs the temp file's location and asserts the old final file survives untouched. **Negative-tested by breaking the production function** (redirected `cfg_fs_write_atomic()`'s `fopen()` from `tmp_path` to `final_path`, bypassing the temp file entirely): `test_cfg_fs.c:231: write_atomic() reports failure when it cannot create its own temp file` went RED, restored by hand, `git diff` empty (new, untracked file — confirmed identical to the pre-break version by re-running the full green suite). |
 | 3 | Migrate **prefs** (10,11,12,14) — the lowest-stakes items. Read-through + dual-write + `rev` counter. | no | Backup export/import must read/write through the same accessors, not NVS directly — verify `/api/backup/export` output is byte-identical before/after. | Host round-trip; bench: change unit pref, reboot, power-cut during write. **Items 11 (unit pref), 10 (ramp assist), 12 (display power), 14 (TZ) DONE, 2026-09-07.** Item 3 (relay names) **DONE, 2026-09-07** (see step 5's close-out note, since it travels with zones config administratively but reuses this same generic bridge). |
@@ -378,7 +380,7 @@ below for both.
   "reset one side of a pair" bug class this codebase already tracks).
 - **Validation**: each item's file bytes are validated by the SAME function
   its NVS load has always used (`unit_pref_validate()`/
-  `ramp_assist_validate()`/`display_power_validate()`, extracted from each
+  `ramp_assist_cfg_file_validate()`/`display_power_cfg_file_validate()`, extracted from each
   module's existing range checks, not new logic) — no bounds relaxed by the
   move. None of the three has a "0 means use default" sentinel to protect
   (unlike `progress_band_c`, the trap this task's brief calls out) — checked
@@ -482,7 +484,7 @@ here rather than left pending.
   the SAME generic `pref_cfg_fs.h` bridge too: the string is written into a
   fixed `TZ_ITEM_SIZE` (`TIME_SYNC_TZ_MAX_LEN + 1` = 64 bytes) buffer,
   NUL-padded, so the bridge's fixed-item_size contract needs no
-  variable-length special case. Validator (`tz_file_validate()`) requires a
+  variable-length special case. Validator (`time_sync_tz_file_validate()`) requires a
   NUL terminator within the buffer and re-runs `time_sync_tz_is_valid()` —
   the identical POSIX-TZ-grammar check `time_sync_start()`'s NVS path has
   always applied (Finding 2's "America/Chicago" rejection included). File:
@@ -957,7 +959,7 @@ taken here.
   `adaptive_tune_clear_ki_baseline()`, `adaptive_tune_revert()`) funnel
   through that one function to reach storage — a single counter there cannot
   desync between them the way one counter per call site could.
-- **Validator**: `kibase_file_validate()` checks only that `mask` names no
+- **Validator**: `adaptive_tune_kibase_file_validate()` checks only that `mask` names no
   zone index past `MAX31856_CHANNEL_COUNT` — everything else (a garbage
   baseline float for a zone whose bit IS set) is exactly as trusted as the
   NVS blob always was. This is the "simpler treatment" made concrete: no

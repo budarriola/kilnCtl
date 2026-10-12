@@ -9,8 +9,9 @@
 # corrupt each other's objects and produce a link error that looks like a code
 # defect. Give each concurrent run its own directory. Mirrors the same
 # parameter on KilnFW/App/test/build_host_tests.ps1.
-param([string]$OutDir = "")
+param([string]$OutDir = "", [int]$TestTimeoutSec = 300)
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "../../../tools/host_test_exec.ps1")
 
 $vcvars = "C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 if (-not (Test-Path $vcvars)) {
@@ -130,6 +131,8 @@ try {
         (Join-Path $testDir "test_tick_timing.c"),
         (Join-Path $testDir "test_safety_core_stack_budget.c"),
         (Join-Path $testDir "test_safety_core_s8_wiring.c"),
+        (Join-Path $testDir "test_safety_core_clear_trip_binding.c"),
+        (Join-Path $testDir "test_test_trip.c"),
         (Join-Path $testDir "test_safety_core_polarity_wiring.c"),
         (Join-Path $testDir "test_safety_core_ct_calibration_gate.c"),
         (Join-Path $testDir "test_safety_core_unconfigured_armed_backstop.c"),
@@ -143,6 +146,9 @@ try {
         (Join-Path $testDir "test_link_task_tc_type_gate.c"),
         (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
         (Join-Path $testDir "test_link_task_commit_reject.c"),
+        # SET_PARAM staging as an edit list (KILNLINK_ROBUSTNESS_AUDIT M2/M3).
+        (Join-Path $srcDir "tasks\link_staging.c"),
+        (Join-Path $testDir "test_link_staging.c"),
         (Join-Path $srcDir "tasks\link_task_announce_eval.c"),
         (Join-Path $testDir "test_link_task_announce_eval.c"),
         (Join-Path $srcDir "tasks\update_task_reboot_policy.c"),
@@ -155,7 +161,7 @@ try {
         (Join-Path $testDir "test_update_task_erase_plan.c"),
         # 2026-09-20 -- the vector-table plausibility check behind the new
         # Pico-side slot-linkage validation (owner decision,
-        # PICO_AUTO_UPDATE_PLAN.md): a slot-A-linked image landed in slot B
+        # PICO_AUTO_UPDATE.md): a slot-A-linked image landed in slot B
         # (or vice versa) CRCs correctly but must still be rejected before
         # its slot's metadata is flipped active. See update_task_slot_linkage.h.
         (Join-Path $srcDir "tasks\update_task_slot_linkage.c"),
@@ -166,6 +172,8 @@ try {
         # update_task_flash_guard.h).
         (Join-Path $srcDir "tasks\update_task_flash_guard.c"),
         (Join-Path $testDir "test_update_task_flash_guard.c"),
+        (Join-Path $srcDir "tasks\update_task_metadata_write.c"),
+        (Join-Path $testDir "test_update_task_metadata_write.c"),
         (Join-Path $srcDir "clear_trip_diag_codec.c"),
         (Join-Path $testDir "test_clear_trip_diag_codec.c"),
         (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
@@ -203,6 +211,7 @@ try {
         (Join-Path $testDir "test_max31856_live_check.c"),
         (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
         (Join-Path $testDir "test_thermo_task_drdy_recovery.c"),
+        (Join-Path $testDir "test_thermo_inject_gate.c"),
         (Join-Path $srcDir "link_diag_flags.c"),
         (Join-Path $testDir "test_link_diag_flags.c"),
         (Join-Path $srcDir "current_presence_policy.c"),
@@ -289,6 +298,8 @@ try {
     $hostPsExe = (Get-Process -Id $PID).Path
     function Add-HostBuild {
         param([string]$Name, [string]$ExePath, [string]$BuildCmd)
+        $script:allHostNames += $Name
+        $script:queuedBuildCount++
         if (Test-Path $ExePath) { Remove-Item -Force $ExePath }
         $safe = [regex]::Replace($Name, '[^A-Za-z0-9]+', '_')
         $cmdFile = Join-Path $outDir ("job_" + $safe + ".cmd.txt")
@@ -312,6 +323,9 @@ try {
         }
     }
     $exitCodes = @{}
+    $global:HostTestTimedOut = @()
+    $allHostNames = @()
+    $queuedBuildCount = 0
     $buildFailures = @()
     function Complete-HostBuilds {
         Start-HostQueueItems
@@ -330,8 +344,7 @@ try {
                 $script:buildFailures += $it.Name
                 continue
             }
-            & $it.Exe
-            $script:exitCodes[$it.Name] = $LASTEXITCODE
+            $script:exitCodes[$it.Name] = Invoke-HostTestProcess -Name $it.Name -ExePath $it.Exe -TimeoutSec $TestTimeoutSec
         }
         $hostQueue.Clear()
     }
@@ -456,6 +469,66 @@ try {
         "/Fo:`"$configStoreFlashObjDir\\`" /Fe:`"$configStoreFlashExe`" $configStoreFlashSourceArgs"
     Add-HostBuild -Name "config_store_flash_tests.exe" -ExePath $configStoreFlashExe -BuildCmd $configStoreFlashCmd
 
+    # Host campaigns 1 and 2 (docs/audits/HOST_TEST_COVERAGE_GAPS_2026-10-09.md).
+    # Both are SEPARATE executables: each defines recording fakes for the
+    # hardware/link/timer seams (safety_core.c's and link_task.c's callees)
+    # that would collide (LNK2005) with the real tasks the main exe links.
+    #   safety_core_host_tests.exe -- the REAL safety_core.c + safety_guards.c
+    #     driven tick by tick (guards S1..S16: trip, latch, clear, no-false-trip).
+    #   link_task_fuzz_tests.exe   -- link_task.c #included, so its RX statics
+    #     are reachable; seeded deterministic fuzzer plus targeted frame cases.
+    $safetyCoreHostStubsDir = Join-Path $testDir "stubs\safety_core_host"
+    $linkTaskHostStubsDir = Join-Path $testDir "stubs\link_task_host"
+    $scExe = Join-Path $outDir "safety_core_host_tests.exe"
+    $scObjDir = Join-Path $outDir "safety_core_host_obj"
+    New-Item -ItemType Directory -Force -Path $scObjDir | Out-Null
+    $scSources = @(
+        (Join-Path $testDir "test_safety_core_host.c"),
+        (Join-Path $srcDir "tasks\safety_core.c"),
+        (Join-Path $srcDir "safety_guards.c"),
+        (Join-Path $srcDir "config_store.c"),
+        (Join-Path $srcDir "tasks\link_frame.c"),
+        (Join-Path $srcDir "tasks\clock_health.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c"),
+        (Join-Path $srcDir "tasks\reboot_announce.c"),
+        (Join-Path $srcDir "tasks\relay_grace.c"),
+        (Join-Path $srcDir "config_params.c"),
+        (Join-Path $bootDir "crc32.c")
+    )
+    $scSourceArgs = ($scSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $scCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$srcDir\update`" /I `"$bootDir`" /I `"$commonIncDir`" " +
+        "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$hwAbstractionCommonDir`" " +
+        "/I `"$freertosMinStubDir`" /I `"$safetyCoreHostStubsDir`" /I `"$testDir`" " +
+        "/Fo:`"$scObjDir\\`" /Fe:`"$scExe`" $scSourceArgs"
+    Add-HostBuild -Name "safety_core_host_tests.exe" -ExePath $scExe -BuildCmd $scCmd
+
+    $ltExe = Join-Path $outDir "link_task_fuzz_tests.exe"
+    $ltObjDir = Join-Path $outDir "link_task_fuzz_obj"
+    New-Item -ItemType Directory -Force -Path $ltObjDir | Out-Null
+    $ltSources = @(
+        (Join-Path $testDir "test_link_task_fuzz.c"),
+        (Join-Path $commonSrcDir "saftyfw_image_identity.c"),
+        (Join-Path $srcDir "tasks\link_frame.c"),
+        (Join-Path $srcDir "config_store.c"),
+        (Join-Path $srcDir "config_params.c"),
+        (Join-Path $bootDir "crc32.c"),
+        (Join-Path $srcDir "tasks\link_staging.c"),
+        (Join-Path $srcDir "tasks\link_task_announce_eval.c"),
+        (Join-Path $srcDir "tasks\link_task_commit_reject.c"),
+        (Join-Path $srcDir "tasks\link_task_tc_type_gate.c"),
+        (Join-Path $srcDir "tasks\tc_type_reapply_policy.c"),
+        (Join-Path $srcDir "link_diag_flags.c"),
+        (Join-Path $srcDir "tasks\reboot_announce.c")
+    ) + @(Get-ChildItem -Path $commonSrcDir -Filter "kilnlink_*.c" | ForEach-Object { $_.FullName })
+    $ltSourceArgs = ($ltSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $ltCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$srcDir\update`" /I `"$bootDir`" /I `"$commonIncDir`" " +
+        "/I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$hwAbstractionCommonDir`" /I `"$hwAbstractionPicoUartDir`" " +
+        "/I `"$freertosMinStubDir`" /I `"$linkTaskHostStubsDir`" /I `"$safetyCoreHostStubsDir`" /I `"$testDir`" " +
+        "/Fo:`"$ltObjDir\\`" /Fe:`"$ltExe`" $ltSourceArgs"
+    Add-HostBuild -Name "link_task_fuzz_tests.exe" -ExePath $ltExe -BuildCmd $ltCmd
+
     # bootloader/recovery_update.c's own host test -- a SEPARATE executable: it
     # #includes the real recovery_update.c (to reach its static dispatch/status
     # entry points) against bare-metal SDK stubs (stubs\bootloader_sdk_stub:
@@ -487,16 +560,117 @@ try {
         "/Fo:`"$blRecoveryObjDir\\`" /Fe:`"$blRecoveryExe`" $blRecoverySourceArgs"
     Add-HostBuild -Name "bootloader_recovery_update_tests.exe" -ExePath $blRecoveryExe -BuildCmd $blRecoveryCmd
 
+    # Campaign 3 -- the REAL thermo_task.c loop, driven through the task
+    # harness (stubs\task_harness: captured xTaskCreate, scripted
+    # ulTaskNotifyTake/gpio) against max31856.c + fake_spi.c. A SEPARATE exe:
+    # the harness defines xTaskCreate/xSemaphore*/gpio_* which the main exe's
+    # stubs (freertos_min, hardware_gpio_min) also define. Own main().
+    $harnessDir = Join-Path $testDir "stubs\task_harness"
+    $thermoTaskExe = Join-Path $outDir "thermo_task_tests.exe"
+    $thermoTaskObjDir = Join-Path $outDir "thermo_task_obj"
+    New-Item -ItemType Directory -Force -Path $thermoTaskObjDir | Out-Null
+    $thermoTaskSources = @(
+        (Join-Path $testDir "test_thermo_task_main.c"),
+        (Join-Path $testDir "test_thermo_task_faults.c"),
+        (Join-Path $testDir "test_thermo_task_stubs.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\thermo_task.c"),
+        (Join-Path $srcDir "tasks\thermo_task_drdy_recovery.c"),
+        (Join-Path $srcDir "tasks\tick_timing.c"),
+        (Join-Path $srcDir "safety_guards.c"),
+        (Join-Path $srcDir "max31856.c"),
+        (Join-Path $srcDir "max31856_decode.c"),
+        (Join-Path $srcDir "max31856_tc_type_policy.c"),
+        (Join-Path $srcDir "max31856_tc_range_policy.c"),
+        (Join-Path $srcDir "max31856_fault_pin_policy.c"),
+        (Join-Path $srcDir "max31856_reconfig_retry.c"),
+        (Join-Path $srcDir "max31856_live_check.c"),
+        (Join-Path $testDir "fake_log_task.c"),
+        (Join-Path $hwAbstractionHostDir "fake_spi.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $thermoTaskSourceArgs = ($thermoTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $thermoTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$thermoTaskObjDir\\`" /Fe:`"$thermoTaskExe`" $thermoTaskSourceArgs"
+    Add-HostBuild -Name "thermo_task_tests.exe" -ExePath $thermoTaskExe -BuildCmd $thermoTaskCmd
+
+    # Campaign 4 -- the REAL watchdog_task.c (deadline table, tick-wrap
+    # elapsed, feed withholding, overdue latch, LED) plus the end-to-end
+    # "task stops kicking -> hardware watchdog fires" chain via fake_wdt.
+    # SEPARATE exe, same reason as thermo_task_tests.exe above. Own main().
+    $wdTaskExe = Join-Path $outDir "watchdog_task_tests.exe"
+    $wdTaskObjDir = Join-Path $outDir "watchdog_task_obj"
+    New-Item -ItemType Directory -Force -Path $wdTaskObjDir | Out-Null
+    $wdTaskSources = @(
+        (Join-Path $testDir "test_watchdog_task_main.c"),
+        (Join-Path $testDir "test_watchdog_task_loop.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\watchdog_task.c"),
+        (Join-Path $srcDir "tasks\watchdog_gate.c"),
+        (Join-Path $srcDir "watchdog_overdue_diag.c"),
+        (Join-Path $srcDir "watchdog_overdue_diag_codec.c"),
+        (Join-Path $hwAbstractionHostDir "fake_wdt.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionHostDir "fake_scratch.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $wdTaskSourceArgs = ($wdTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $wdTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$wdTaskObjDir\\`" /Fe:`"$wdTaskExe`" $wdTaskSourceArgs"
+    Add-HostBuild -Name "watchdog_task_tests.exe" -ExePath $wdTaskExe -BuildCmd $wdTaskCmd
+
+    # Round 2 R2-2 -- the REAL discrete_task.c (E-stop S7 / mainFault S6a
+    # sampling loop: polarity -> debounce -> published flags -> check-in).
+    # SEPARATE exe (task harness must not leak), own main().
+    $dtTaskExe = Join-Path $outDir "discrete_task_tests.exe"
+    $dtTaskObjDir = Join-Path $outDir "discrete_task_obj"
+    New-Item -ItemType Directory -Force -Path $dtTaskObjDir | Out-Null
+    $dtTaskSources = @(
+        (Join-Path $testDir "test_discrete_task_loop.c"),
+        (Join-Path $harnessDir "task_harness.c"),
+        (Join-Path $srcDir "tasks\discrete_task.c"),
+        (Join-Path $srcDir "discrete_pin_policy.c"),
+        (Join-Path $srcDir "debounce_policy.c"),
+        (Join-Path $hwAbstractionHostDir "fake_gpio.c"),
+        (Join-Path $hwAbstractionCommonDir "hal_status.c")
+    )
+    $dtTaskSourceArgs = ($dtTaskSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $dtTaskCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$harnessDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$srcDir\tasks`" /I `"$bootDir`" " +
+        "/I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" /I `"$hwAbstractionHostDir`" /I `"$testDir`" " +
+        "/Fo:`"$dtTaskObjDir\\`" /Fe:`"$dtTaskExe`" $dtTaskSourceArgs"
+    Add-HostBuild -Name "discrete_task_tests.exe" -ExePath $dtTaskExe -BuildCmd $dtTaskCmd
+    # R2-5 (HOST_TEST_COVERAGE_GAPS_ROUND2): the REAL saftyfw_image_identity_record.c
+    # (test_link_task_fuzz.c stubs the accessor) round-tripped through the real
+    # CommonFW scanner. Own exe: stubs\identity_record_host supplies a fixed
+    # saftyfw_build_info.h (commit "0123456789ab", dirty 1).
+    $idRecStubDir = Join-Path $testDir "stubs\identity_record_host"
+    $idRecExe = Join-Path $outDir "saftyfw_image_identity_record_tests.exe"
+    $idRecObjDir = Join-Path $outDir "saftyfw_image_identity_record_obj"
+    New-Item -ItemType Directory -Force -Path $idRecObjDir | Out-Null
+    $idRecSources = @(
+        (Join-Path $testDir "test_saftyfw_image_identity_record.c"),
+        (Join-Path $updateDir "saftyfw_image_identity_record.c"),
+        (Join-Path $commonSrcDir "saftyfw_image_identity.c")
+    )
+    $idRecSourceArgs = ($idRecSources | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $idRecCmd = "cl /nologo /MP$clMpN /W4 /WX /std:c17 " +
+        "/I `"$idRecStubDir`" /I `"$srcDir`" /I `"$srcDir\board`" /I `"$updateDir`" /I `"$bootDir`" /I `"$commonIncDir`" /I `"$hwAbstractionInterfaceDir`" " +
+        "/Fo:`"$idRecObjDir\\`" /Fe:`"$idRecExe`" $idRecSourceArgs"
+    Add-HostBuild -Name "saftyfw_image_identity_record_tests.exe" -ExePath $idRecExe -BuildCmd $idRecCmd
+
     Complete-HostBuilds
     if ($buildFailures.Count -gt 0) {
         Write-Host "SAFTYFW HOST TESTS: BUILD FAILED -- $($buildFailures -join ', ')"
         exit 1
     }
-    $mainExit = $exitCodes["saftyfw_host_tests.exe"]
     $fuzzExit = $exitCodes["kilnlink_fuzz_payloads.exe"]
-    $halSpiPicoExit = $exitCodes["hal_spi_pico_tests.exe"]
-    $configStoreFlashExit = $exitCodes["config_store_flash_tests.exe"]
-    $blRecoveryExit = $exitCodes["bootloader_recovery_update_tests.exe"]
 
     # Each executable above prints its own "all passed"/"ALL PASS" line on
     # success, so whichever one happens to run last leaves that string as the
@@ -504,34 +678,34 @@ try {
     # code below was already correct (first non-zero wins), but the tail read
     # as a pass regardless. Print one explicit aggregate verdict, naming every
     # executable that failed, so the printed tail always matches the exit code.
-    $results = [ordered]@{
-        "saftyfw_host_tests.exe"       = $mainExit
-        "kilnlink_fuzz_payloads.exe"   = $fuzzExit
-        "hal_spi_pico_tests.exe"       = $halSpiPicoExit
-        "config_store_flash_tests.exe" = $configStoreFlashExit
-        "bootloader_recovery_update_tests.exe" = $blRecoveryExit
+    # Derived from every Add-HostBuild registration, so a new executable can
+    # never be silently ignored. A missing entry (never ran) counts as failure.
+    # Fail closed: an empty or short registered list (lost registration) must
+    # never read as "all passed".
+    $regCount = @($allHostNames).Count
+    if ($regCount -eq 0 -or $regCount -ne $queuedBuildCount) {
+        Write-Host "SAFTYFW HOST TESTS: FAILED -- registered $regCount executables but queued $queuedBuildCount builds"
+        exit 1
+    }
+    $results = [ordered]@{}
+    foreach ($n in $allHostNames) {
+        $results[$n] = if ($exitCodes.ContainsKey($n)) { $exitCodes[$n] } else { -1 }
     }
     $failed = $results.GetEnumerator() | Where-Object { $_.Value -ne 0 }
     if ($failed) {
-        $names = ($failed | ForEach-Object { "$($_.Key) (exit $($_.Value))" }) -join ", "
+        $names = ($failed | ForEach-Object { if (@($global:HostTestTimedOut) -contains $_.Key) { "$($_.Key) (timed out after $TestTimeoutSec s)" } elseif ($_.Value -eq -1) { "$($_.Key) (did not run)" } else { "$($_.Key) (exit $($_.Value))" } }) -join ", "
         Write-Host "SAFTYFW HOST TESTS: FAILED -- $names"
     } else {
         Write-Host "SAFTYFW HOST TESTS: all passed"
     }
 
-    if ($mainExit -ne 0) {
-        exit $mainExit
-    }
     if ($fuzzExit -ne 0) {
-        exit $fuzzExit
+        Write-Host "kilnlink_fuzz_payloads.exe failed: rerun with KILNLINK_FUZZ_SEED=<seed printed above> to reproduce."
     }
-    if ($halSpiPicoExit -ne 0) {
-        exit $halSpiPicoExit
+    foreach ($e in $results.GetEnumerator()) {
+        if ($e.Value -ne 0) { if ($e.Value -lt 0) { exit 1 } else { exit $e.Value } }
     }
-    if ($configStoreFlashExit -ne 0) {
-        exit $configStoreFlashExit
-    }
-    exit $blRecoveryExit
+    exit 0
 } finally {
     Exit-BuildLock -Lock $buildLock
 }

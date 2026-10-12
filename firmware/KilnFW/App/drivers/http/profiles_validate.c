@@ -126,7 +126,7 @@ bool validate_io_segment_in_state(const profile_segment_t *seg, uint8_t seg_num,
     return true;
 }
 
-/* docs/ON_OFF_ZONE_PLAN.md plan step 5 validation -- shared by
+/* docs/ON_OFF_ZONE.md plan step 5 validation -- shared by
  * profiles_http_save() (both the HTTP POST and UART-bridge entry points)
  * so a rule referencing a nonexistent segment or a non-ON_OFF zone can
  * never be persisted, regardless of entry point. THIS IS THE DANGEROUS

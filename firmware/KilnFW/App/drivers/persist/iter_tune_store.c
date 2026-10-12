@@ -9,7 +9,9 @@
 
 #include "cfg_fs.h"
 #include "cfg_fs_status.h"
+#include "legacy_nvs_erase.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
 #include "persist_scratch.h"
 
 static const char *TAG = "iter_tune_store";
@@ -201,14 +203,16 @@ esp_err_t iter_tune_store_start(void) {
     if (pref_cfg_fs_probe_newer_wrong_size(ITER_TUNE_CFG_FILE_PATH, sizeof(nvs_blob), 0, ITER_TUNE_STORE_VERSION,
                                            &newer_ver)) {
         note_version_byte(newer_ver);
-        have = nvs_ok;
-        if (nvs_ok) {
-            resolved = nvs_blob;
-            resolved_rev = nvs_rev;
-        }
+        /* persfx3 MED-3: the frozen NVS copy is never adopted, not even beside a newer-firmware file. */
+        have = false;
     } else {
-        have = pref_cfg_fs_resolve(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
+        have = pref_cfg_fs_resolve_nvs_retired(ITER_TUNE_CFG_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_ok, nvs_rev,
                                    validate_and_note, &resolved, &resolved_rev, &used_file);
+    }
+    if (used_file) {
+        /* persfx3 MED-3: retire the frozen NVS copy once the file is the adopted source. */
+        static const char *const k_legacy[] = {ITER_TUNE_NVS_KEY_BLOB, ITER_TUNE_NVS_KEY_REV};
+        (void)legacy_nvs_erase_keys(TAG, ITER_TUNE_NVS_PARTITION, ITER_TUNE_NVS_NAMESPACE, k_legacy, 2);
     }
     if (have) {
         s_blob = resolved;
@@ -277,7 +281,12 @@ esp_err_t iter_tune_store_set_zone(uint8_t zone_index, const iter_tune_store_zon
     // in-RAM blob keeps the new entry (live now, same contract as before);
     // the rev only advances once the write verified, so a retry reuses it.
     uint32_t new_rev = s_rev + 1;
-    esp_err_t err = pref_cfg_fs_commit(ITER_TUNE_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "iter_tune store");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(ITER_TUNE_CFG_FILE_PATH, &s_blob, sizeof(s_blob), new_rev, "iter_tune store");
+    }
     if (err == ESP_OK) {
         s_rev = new_rev;
     }

@@ -44,6 +44,7 @@ struct sockaddr_in {
 
 static inline uint32_t htonl(uint32_t hostlong) { return hostlong; }
 static inline uint16_t htons(uint16_t hostshort) { return hostshort; }
+static inline uint16_t ntohs(uint16_t netshort) { return netshort; }
 
 static inline int socket(int domain, int type, int protocol)
 {

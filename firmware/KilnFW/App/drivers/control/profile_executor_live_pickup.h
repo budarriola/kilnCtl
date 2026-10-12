@@ -1,5 +1,5 @@
 /* profile_executor_live_pickup.h -- pure pickup logic for
- * docs/LIVE_PROFILE_EDIT_PLAN.md pass 1, section 3/7/11.
+ * docs/LIVE_PROFILE_EDIT.md pass 1, section 3/7/11.
  *
  * Deliberately free of FreeRTOS/s_exec so host tests can call it directly
  * (plan section 11: "written pure ... so it is directly callable"). The

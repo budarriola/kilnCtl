@@ -246,7 +246,7 @@ static inline readiness_status_t readiness_ceiling_match_status(bool link_up, bo
     return link_up ? READY_NOT_DONE : READY_CANNOT_YET;
 }
 
-/* docs/PICO_AUTO_UPDATE_PLAN.md owner decision: "on an unrecoverable version
+/* docs/PICO_AUTO_UPDATE.md owner decision: "on an unrecoverable version
  * mismatch the ESP refuses to fire until matched" -- this is the display
  * half of a real structural block (readiness_gate.h's
  * READINESS_GATE_BLOCK_PICO_UPDATE), the same "promoted from advisory to
@@ -572,7 +572,7 @@ static inline readiness_status_t readiness_ct_leak_alarm_status(bool active)
  * of one extra confirmation click on a board that has never seen line
  * voltage is far smaller than the cost of this item going quiet exactly when
  * it starts to matter. */
-/* ---- CT attribution (docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md) ----------
+/* ---- CT attribution (docs/CT_ATTRIBUTION_VERIFICATION.md) ----------
  *
  * The one fact the `ct_attribution` item and the firing interlock share.
  * Six values rather than a bool because the OWNER'S RULE distinguishes them,

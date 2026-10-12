@@ -1,3 +1,4 @@
+#include "readiness_gate.h" /* READINESS_GATE_MSG_CAP */
 #include "ui_page_profile_detail.h"
 
 #include <math.h>
@@ -15,6 +16,7 @@
 #include "profiles_builtin.h"
 #include "profiles_http.h"
 #include "ui_confirm.h"
+#include "ui_lcd_lock.h"
 #include "ui_page_home_graph.h"
 #include "ui_page_profile_builder_zones.h"
 #include "ui_page_profile_segments.h"
@@ -296,7 +298,7 @@ static void refresh_plan_chart(const profile_t *prof)
     }
 
     /* Runs on the LVGL task -- heap-allocate rather than add another
-     * 1464-byte profile_exec_status_t stack local on that task (see
+     * 1512-byte profile_exec_status_t stack local on that task (see
      * ui_page_home_refresh.c's own comment on its measured stack ceiling
      * for why this task in particular is treated as tight, not generous). */
     profile_exec_status_t *st = heap_caps_malloc(sizeof(*st), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -467,8 +469,8 @@ static void edit_btn_cb(lv_event_t *e)
     (void)e;
     /* Editing a BUILT-IN must mean "save a copy" -- profiles_http_save()
      * treats requested_id >= PROFILES_MAX_COUNT as "first free slot" and
-     * ui_page_profile_builder_review.c's slot picker only ever offers the 8
-     * real user slots either way, so a builtin id (>= PROFILE_BUILTIN_ID_BASE)
+     * ui_page_profile_builder_review.c's slot picker pages through the
+     * real user slots (8 per page) either way, so a builtin id (>= PROFILE_BUILTIN_ID_BASE)
      * structurally cannot be the save target -- see
      * ui_page_profile_builder_zones.h's header comment. */
     ui_page_profile_builder_start_edit(s_profile_id);
@@ -478,7 +480,7 @@ static void edit_btn_cb(lv_event_t *e)
 static void confirm_start_cb(void *user_data)
 {
     (void)user_data;
-    char err_msg[160] = ""; /* 64 -> 160: see ui_page_home_actions.c's matching widening -- the readiness interlock's refusals name an item AND a remedy. */
+    char err_msg[READINESS_GATE_MSG_CAP] = ""; /* 64 -> 160: see ui_page_home_actions.c's matching widening -- the readiness interlock's refusals name an item AND a remedy. */
     /* profile_executor_run() writes NVS on the calling task (run_state.h's
      * breadcrumb). That is safe from here: lvgl_port.c gives the LVGL task
      * (this callback runs on it) an internal-SRAM stack, same HAZARD comment
@@ -501,9 +503,9 @@ static void confirm_start_cb(void *user_data)
     kiln_ui_show("home");
 }
 
-static void start_btn_cb(lv_event_t *e)
+static void start_btn_gated_cb(void *user_data)
 {
-    (void)e;
+    (void)user_data;
     profile_t prof;
     const builtin_profile_t *b = NULL;
     if (!load_current(&prof, &b)) {
@@ -546,6 +548,14 @@ static void start_btn_cb(lv_event_t *e)
         .user_data = NULL,
     };
     ui_confirm_show(&params);
+}
+
+/* LCD review N1: Start needs its own USER-role gate -- it must not rely on every path into
+ * this page having passed the home Profiles/Menu gate (touch_cal exits once skipped it). */
+static void start_btn_cb(lv_event_t *e)
+{
+    (void)e;
+    ui_lcd_lock_run_gated("Enter PIN to start firing", LCD_PIN_ROLE_USER, start_btn_gated_cb, NULL);
 }
 
 static lv_obj_t *build_action_button(lv_obj_t *parent, const char *text, lv_color_t bg, lv_event_cb_t cb)
@@ -629,6 +639,7 @@ lv_obj_t *ui_page_profile_detail_build(void)
     lv_chart_set_point_count(s_plan_chart, UI_PAGE_PROFILE_DETAIL_CHART_POINTS);
     s_plan_series =
         lv_chart_add_series(s_plan_chart, lv_color_hex(UI_PAGE_PROFILE_DETAIL_PLAN_COLOR_HEX), LV_CHART_AXIS_PRIMARY_Y);
+    lv_obj_add_flag(s_plan_chart, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS); /* LCD audit L25 */
     lv_obj_add_event_cb(s_plan_chart, plan_chart_draw_event_cb, LV_EVENT_DRAW_TASK_ADDED, NULL);
     for (uint32_t i = 0; i < UI_PAGE_PROFILE_DETAIL_CHART_POINTS; i++) {
         s_plan_pts[i] = LV_CHART_POINT_NONE;

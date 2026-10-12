@@ -354,6 +354,7 @@ above what a zone can reach.</p>
 </div>
 <div id="importMsg"></div>
 <div id="tuneNotice" class="tune-notice" style="display:none"></div>
+<div id="revNotice" class="tune-notice" style="display:none"></div>
 <div id="bulkBar">
   <button id="modeExportBtn" type="button" class="small">Select to export</button>
   <button id="modeDeleteBtn" type="button" class="small">Select to delete</button>
@@ -406,6 +407,8 @@ any schedule against your own kiln and clay before firing it.</p>
 
 <script>
 var editingId = null;
+var editingRev = null;  /* M-2: slot_rev + name GET /api/profile reported when the editor loaded this slot */
+var editingName = null;
 var zones = [];
 var zoneCeilings = []; // max_ramp_c_per_hr per zone, parallel to `zones`; 0 = unset
 var RAMP_WARN_FRACTION = 0.8; // mirrors PROFILE_RAMP_WARN_FRACTION in profiles_http.c
@@ -429,7 +432,7 @@ var relayOwnedMask = 0;
 var relayCount = 4;
 var IO_DIGITAL_COUNT = 7; // KILN_IO_DIGITAL_COUNT (kiln_io.h); no live count in /api/zones today
 
-// docs/ON_OFF_ZONE_PLAN.md plan step 5's editor pass: zone_type comes back
+// docs/ON_OFF_ZONE.md plan step 5's editor pass: zone_type comes back
 // on every zone in /api/zones (zones_http_get.c, ZONES_CFG_VERSION 22's
 // zone_type/failsafe_state/hyst_c/min_on_s/min_off_s block, "always
 // emitted" -- see that file's own comment) -- the same array the zone
@@ -637,9 +640,9 @@ function checkRamp(input) {
 // Ramp/dwell fields -- unchanged from before this pass, just factored out so
 // segmentRow() can pick between this and ioFieldsHtml() by kind.
 function rampFieldsHtml(seg) {
-  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (seg.target_c || 0) + '"></div>' +
-    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (seg.ramp_c_per_hr || 0) + '"></div>' +
-    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (seg.dwell_min || 0) + '"></div>';
+  return '<div><label>Target &deg;C</label><input type="number" step="1" class="s-target" value="' + (Number(seg.target_c) || 0) + '"></div>' +
+    '<div><label>Ramp &deg;C/hr (0=none)</label><input type="number" step="1" class="s-ramp" value="' + (Number(seg.ramp_c_per_hr) || 0) + '"></div>' +
+    '<div><label>Dwell min</label><input type="number" step="1" class="s-dwell" value="' + (Number(seg.dwell_min) || 0) + '"></div>';
 }
 
 // Builds the <option>s for the relay/IO target <select>. `selected` is the
@@ -687,7 +690,7 @@ function ioFieldsHtml(seg) {
       '<option value="1"' + (state ? ' selected' : '') + '>Turn ON</option>' +
       '<option value="0"' + (!state ? ' selected' : '') + '>Turn OFF</option>' +
     '</select></div>' +
-    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (seg.dwell_min || 0) + '"></div>' +
+    '<div><label>Hold minutes</label><input type="number" step="1" class="io-dwell" value="' + (Number(seg.dwell_min) || 0) + '"></div>' +
     '<div><label>Timing</label><select class="io-blocking">' +
       '<option value="1"' + (blocking ? ' selected' : '') + '>Blocking -- profile waits here, runs BEFORE the next segment</option>' +
       '<option value="0"' + (!blocking ? ' selected' : '') + '>Non-blocking -- runs WITH (alongside) the next segment</option>' +
@@ -968,7 +971,7 @@ document.getElementById('addSegBtn').addEventListener('click', function () {
   loadZones().then(function () { container.appendChild(segmentRow({})); renderSegPreview(); refreshOoUi(); });
 });
 
-// ---- On/off device rules (docs/ON_OFF_ZONE_PLAN.md plan step 5) ----------
+// ---- On/off device rules (docs/ON_OFF_ZONE.md plan step 5) ----------
 // The backend (profile_on_off_rule_t/validate_on_off_rules()/
 // profile_resolve_on_off_rule()) has carried this since plan step 5; this
 // editor is the piece that was still missing. One rule = one (segment,
@@ -1006,7 +1009,7 @@ function ooZoneOptionsHtml(selected) {
   var found = false;
   onOffZones.forEach(function (z) {
     if (z.index === selected) found = true;
-    html += '<option value="' + z.index + '"' + (z.index === selected ? ' selected' : '') + '>' +
+    html += '<option value="' + (Number(z.index) || 0) + '"' + (z.index === selected ? ' selected' : '') + '>' +
             window.kcEscapeHtml(z.name) + '</option>';
   });
   // A stored rule can name a zone that is no longer an on/off zone (retyped,
@@ -1025,10 +1028,11 @@ function ooZoneOptionsHtml(selected) {
     // ooHasStaleZoneRow() below reads the attribute, not the label text, so
     // a copy-editing change to the label alone can never silently disable
     // the save-refusal guard.
-    html += '<option value="' + selected + '" selected data-oo-stale="1">' +
-            (ooIsAuxTarget(selected)
-              ? 'Aux relay ' + (selected - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
-              : 'Zone ' + selected + ' (no longer an on/off zone)') + '</option>';
+    var selN = Number(selected) || 0;
+    html += '<option value="' + selN + '" selected data-oo-stale="1">' +
+            (ooIsAuxTarget(selN)
+              ? 'Aux relay ' + (selN - AUX_RULE_BASE + 1) + ' (not an enabled aux output)'
+              : 'Zone ' + selN + ' (no longer an on/off zone)') + '</option>';
   }
   if (html === '') html = '<option value="">(none)</option>';
   return html;
@@ -1101,9 +1105,9 @@ function ooRuleFieldsHtml(r) {
   var dir = r.direction_mask || 0;
   var tempSource = r.temp_source || 0;
   var tempCmp = (tempSource === 1) ? (r.temp_cmp || 0) : 0;
-  var tempC = (r.temp_c != null) ? r.temp_c : 0;
-  var startS = r.time_start_s || 0;
-  var stopS = r.time_stop_s || 0;
+  var tempC = (r.temp_c != null) ? (Number(r.temp_c) || 0) : 0;
+  var startS = Number(r.time_start_s) || 0;
+  var stopS = Number(r.time_stop_s) || 0;
   var invert = r.invert || 0;
   return (
     '<div class="oo-row2">' +
@@ -1272,7 +1276,7 @@ function ooRulesToParams() {
   rows.forEach(function (row, i) {
     var tempCmp = parseInt(row.querySelector('.oo-tempcmp').value, 10) || 0;
     var tempSource = tempCmp === 0 ? 0 : 1;
-    var tempC = parseFloat(row.querySelector('.oo-tempval').value) || 0; // Celsius-only input, see ooRuleFieldsHtml()
+    var tempC = tempCmp === 0 ? 0 : (parseFloat(row.querySelector('.oo-tempval').value) || 0); // Celsius-only input, see ooRuleFieldsHtml()
     var phase = 0;
     row.querySelectorAll('.oo-phase:checked').forEach(function (cb) { phase |= parseInt(cb.value, 10); });
     var dir = 0;
@@ -1352,8 +1356,36 @@ function onOffRulesSummaryHtml(rules) {
   return '<p class="hint"><strong>On/off devices:</strong><br>' + lines.join('<br>') + '</p>';
 }
 
+/* Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real user event in the
+ * editor (typing, zone tick, segment/rule edit, add/remove row); programmatic loads
+ * (resetEditor, editProfile, loadIntoEditor) and a successful save clear it. */
+var kcDirty = false;
+var kcEditSeq = 0; /* bumped by every real edit: a save clears the guard only for edits made before it was sent */
+var kcSuppressUnload = false; /* set around a download navigation, which must not raise the leave-page prompt */
+function kcMarkDirty() { kcDirty = true; kcEditSeq++; }
+['pname', 'pzone', 'segments', 'oorules'].forEach(function (id) {
+  var el = document.getElementById(id);
+  el.addEventListener('input', kcMarkDirty);
+  el.addEventListener('change', kcMarkDirty);
+  el.addEventListener('click', function (e) {
+    if (e.target && e.target.classList && e.target.classList.contains('remove')) kcMarkDirty();
+  });
+});
+['addSegBtn', 'addOoBtn'].forEach(function (id) {
+  document.getElementById(id).addEventListener('click', kcMarkDirty);
+});
+window.addEventListener('beforeunload', function (e) {
+  if (kcSuppressUnload) { kcSuppressUnload = false; return undefined; } /* one-shot: the download navigation's own event */
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 function resetEditor() {
   editingId = null;
+  editingRev = null;
+  editingName = null;
   document.getElementById('editorTitle').textContent = 'New profile';
   document.getElementById('pname').value = '';
   setSelectedZoneMask(0);
@@ -1362,6 +1394,7 @@ function resetEditor() {
   document.getElementById('addSegBtn').click();
   document.getElementById('oorules').innerHTML = '';
   document.getElementById('msg').innerHTML = '';
+  kcDirty = false;
 }
 
 /* ---- Combined list state (owner request 2026-09-18, items 2/3/4/5/6/7) --
@@ -1370,6 +1403,7 @@ function resetEditor() {
  * overlays a checkbox on eligible rows, and a Favorites section above it
  * that is a SHORTCUT view, not a second copy of the data -- it filters the
  * same two cached arrays rather than owning any state of its own. */
+var floorsUnknown = false; // X-Profile-Floors-Unknown header of /api/profiles (free slots refuse saves too)
 var savedProfiles = null;  // array from /api/profiles, filtered to !builtin
 var catalogEntries = null; // array from /api/profiles/builtin?all=1, hidden ones excluded
 var favoriteIds = [];      // from /api/profiles/favorites
@@ -1424,7 +1458,10 @@ function loadFavorites() {
 
 function refreshAll() {
   return Promise.all([
-    fetch('/api/profiles').then(function (r) { return r.json(); }),
+    fetch('/api/profiles').then(function (r) {
+    floorsUnknown = !!(r.headers && r.headers.get && r.headers.get('X-Profile-Floors-Unknown') === '1');
+    return r.json();
+  }),
     fetch('/api/profiles/builtin?all=1').then(function (r) { return r.json(); }),
     loadFavorites(),
   ]).then(function (res) {
@@ -1443,6 +1480,13 @@ function refreshAll() {
     rb.style.display = hiddenCount > 0 ? '' : 'none';
     rb.textContent = 'Restore ' + hiddenCount + ' removed';
 
+    var revUnknown = floorsUnknown || savedProfiles.some(function (p) { return p.rev_unknown === true; });
+    var rn = document.getElementById('revNotice');
+    if (rn) {
+      rn.style.display = revUnknown ? '' : 'none';
+      rn.textContent = 'Some saved profiles are in a degraded state (revision unknown) and cannot be ' +
+        'edited or saved until the board repairs them. Reboot, or restore from a backup if this persists.';
+    }
     var notice = document.getElementById('tuneNotice');
     if (anyUnknown) {
       notice.style.display = '';
@@ -1629,7 +1673,10 @@ function bulkExport(ids) {
   var msg = document.getElementById('catMsg');
   msg.textContent = 'Preparing ' + ids.length + ' profile' + (ids.length === 1 ? '' : 's') + ' for export…';
   Promise.all(ids.map(function (id) {
-    return fetch('/api/profile?id=' + id).then(function (r) { return r.json(); });
+    return fetch('/api/profile?id=' + id).then(function (r) {
+      if (!r.ok) throw new Error('profile ' + id + ' could not be read (HTTP ' + r.status + ')');
+      return r.json();
+    });
   })).then(function (fulls) {
     var bundle = { kind: 'kilnctl_profile_bundle', version: 1, profiles: fulls.map(profileToExportObj) };
     downloadJson(bundle, 'kilnctl_profiles_' + ids.length + '.json');
@@ -1637,7 +1684,7 @@ function bulkExport(ids) {
     exitSelectMode();
   }).catch(function (authErr) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;
-    msg.innerHTML = '<span class="err">Export failed -- could not reach the board.</span>';
+    msg.innerHTML = '<span class="err">Export failed -- ' + window.kcEscapeHtml(authErr && authErr.message ? authErr.message : 'could not reach the board') + '.</span>';
   });
 }
 
@@ -1751,7 +1798,24 @@ function profileActionsGroup(p) {
        * button makes all three controls siblings of the same shape; the
        * server's own Content-Disposition header (profiles_export_http.c) is
        * what names the saved file, exactly as it did for the <a download>. */
-      window.location.href = profileExportUrl(p.id);
+      /* L-15: fetch as a blob and check r.ok (a navigation to an auth-gated route lands the tab on a
+       * plain-text 401 page and drops unsaved edits); same filename rule as profiles_export_http.c. */
+      fetch(profileExportUrl(p.id)).then(function (r) {
+        if (!r.ok) return r.text().then(function (t) { throw new Error(t || ('HTTP ' + r.status)); });
+        return r.blob();
+      }).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = (String(p.name || '').replace(/[^A-Za-z0-9_-]/g, '_') || 'profile') + '.json';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      }).catch(function (e) {
+        if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
+        window.kcAlert('Export failed: ' + (e && e.message ? e.message : 'error'));
+      });
     });
 
     var editBtn = iconBtn('kgIconEdit', 'Edit "' + p.name + '"');
@@ -1957,7 +2021,7 @@ function segmentTableHtml(segments) {
       return;
     }
     rows += '<tr' + cls + '><td>' + (i + 1) + '</td><td>' + rampText(seg.ramp_c_per_hr) +
-            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + seg.dwell_min + '</td></tr>';
+            '</td><td>' + window.kcUnit.toDisplay(seg.target_c).toFixed(0) + '</td><td>' + (Number(seg.dwell_min) || 0) + '</td></tr>';
   });
   return '<table><tr><th>Step</th><th>Ramp &deg;C/hr</th><th>Target ' + window.kcUnit.label() + '</th>' +
          '<th>Hold min</th></tr>' + rows + '</table>';
@@ -1989,7 +2053,7 @@ function copyBuiltin(p) {
   }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'copy failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.reason || res.data.error || 'copy failed') + '</span>';
         return;
       }
       msg.textContent = 'Saved a copy into profile slot ' + res.data.id + '.';
@@ -2002,6 +2066,9 @@ function copyBuiltin(p) {
 
 function loadIntoEditor(p) {
   editingId = p.id; /* a builtin id: the board turns the save into a copy */
+  editingRev = null;
+  editingName = null;
+  kcDirty = false;
   document.getElementById('editorTitle').textContent = 'Copy of: ' + (p.title || p.name);
   document.getElementById('pname').value = p.name;
   var container = document.getElementById('segments');
@@ -2045,6 +2112,8 @@ function editProfile(id) {
   ]).then(function (results) {
     var p = results[0];
     editingId = id;
+    editingRev = (typeof p.slot_rev === 'number') ? p.slot_rev : null;
+    editingName = p.name;
     document.getElementById('editorTitle').textContent = 'Edit: ' + p.name;
     document.getElementById('pname').value = p.name;
     setSelectedZoneMask(p.zone_mask);
@@ -2054,6 +2123,7 @@ function editProfile(id) {
     p.segments.forEach(function (seg) { container.appendChild(segmentRow(seg)); });
     renderSegPreview();
     loadOoRulesIntoEditor(p.on_off_rules || []);
+    kcDirty = false;
     document.getElementById('msg').innerHTML = '';
     window.scrollTo(0, document.body.scrollHeight);
   }).catch(function (authErr) {
@@ -2181,7 +2251,7 @@ document.getElementById('importFile').addEventListener('change', function (evt) 
     }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok, data: d }; }); })
       .then(function (res) {
         if (!res.ok || res.data.ok === false) {
-          msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.error || 'Import failed.') + '</span>';
+          msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(res.data.reason || res.data.error || 'Import failed.') + '</span>';
           return;
         }
         msg.textContent = 'Imported into profile slot ' + res.data.id + '.';
@@ -2208,6 +2278,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }
   var params = [];
   params.push('id=' + (editingId === null ? '-1' : editingId));
+  /* M-2: let the board refuse (409) if this slot was changed or deleted since the editor loaded it. */
+  if (editingId !== null && editingRev !== null) {
+    params.push('expected_rev=' + editingRev);
+    if (editingName !== null) params.push('expected_name=' + encodeURIComponent(editingName));
+  }
   params.push('name=' + encodeURIComponent(document.getElementById('pname').value));
   var zoneMask = selectedZoneMask();
   if (zoneMask === 0) {
@@ -2254,20 +2329,32 @@ document.getElementById('saveBtn').addEventListener('click', function () {
   }
   params = params.concat(ooRulesToParams());
   msg.textContent = 'Saving…';
+  var savedEditSeq = kcEditSeq;
   fetch('/api/profile', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
     .then(function (result) {
+      if (result.data && result.data.error === 'profile_changed') {
+        msg.innerHTML = '<span class="err">Not saved: this profile was changed or deleted elsewhere since you opened it. ' +
+          'Reload it from the list (Edit) to see the current version, then redo your changes.</span>';
+        refreshAll();
+        return;
+      }
       if (!result.ok || result.data.ok === false) {
-        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(result.data.error || 'save failed') + '</span>';
+        msg.innerHTML = '<span class="err">' + window.kcEscapeHtml(result.data.reason || result.data.error || 'save failed') + '</span>';
         return;
       }
       var html = 'Saved.';
       if (result.data.warnings && result.data.warnings.length > 0) {
-        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + w + '</span>'; }).join('<br>');
+        html += '<br>' + result.data.warnings.map(function (w) { return '<span class="warn">' + window.kcEscapeHtml(w) + '</span>'; }).join('<br>');
       }
       msg.innerHTML = html;
       editingId = result.data.id;
+      editingRev = (typeof result.data.slot_rev === 'number') ? result.data.slot_rev : null;
+      editingName = null; /* the board may normalise the saved name; the rev alone guards the next save */
+      /* Edits typed while the save was in flight are not in what was saved: keep the guard armed for them. */
+      if (kcEditSeq === savedEditSeq) kcDirty = false;
+      else msg.innerHTML += '<br><span class="warn">You made further edits while saving -- they are not saved yet.</span>';
       refreshAll();
     }).catch(function (authErr) {
       if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(authErr)) return;

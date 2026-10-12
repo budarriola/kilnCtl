@@ -1,0 +1,120 @@
+/* Executes live_profile_page.html's real fork/save/decide click handlers (vm,
+ * fake DOM) and pins the operator-visible text for each HTTP refusal: a 400
+ * bound violation / 409 window violation / 403 builtin-overwrite shows the
+ * server's own message verbatim and never "Saved."/"Done."; the overwrite
+ * confirmation box and save-as name are enforced before anything is sent.
+ * Run: node firmware/KilnFW/App/test/test_live_profile_action_errors.js */
+'use strict';
+const fs = require('fs');
+const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const { runPageScript, flush } = require('./_page_vm.js');
+const HTML = fs.readFileSync(resolveDriverFile(resolveDriversDir(__dirname), 'live_profile_page.html'), 'utf8');
+
+let failed = 0;
+function ok(c, l) { if (c) console.log('PASS: ' + l); else { failed++; console.log('FAIL: ' + l); } }
+
+// resp: {status, json} | {status, html} (body that is not JSON) | 'authcancel'
+async function scenario(btnId, resp, setup, confirmAnswer, noGen) {
+  const posts = [];
+  const confirms = [];
+  const listeners = {};
+  const { els, sandbox } = runPageScript(HTML, {
+    elements: ['themeBtn', 'forkBtn', 'saveBtn', 'reloadBtn', 'saveAsBtn', 'saveAsName', 'overwriteBtn',
+      'overwriteConfirm', 'discardBtn', 'segments', 'forkMsg', 'saveMsg', 'decideMsg', 'statusText', 'refusalBanner'],
+    extra: {
+      setInterval: () => 0,
+      kcConfirm: (m) => { confirms.push(m); return Promise.resolve(confirmAnswer !== false); },
+      addEventListener: (ev, fn) => { listeners[ev] = fn; },
+      escapeHtml: (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;'),
+      kcIsAuthCancelled: (e) => !!(e && e.authCancelled),
+      fetch: (url, init) => {
+        if (init && init.method === 'POST') {
+          posts.push({ url, body: init.body });
+          if (resp === 'authcancel') return Promise.reject({ authCancelled: true });
+          return Promise.resolve({
+            ok: resp.status >= 200 && resp.status < 300, status: resp.status,
+            text: () => Promise.resolve(resp.json ? JSON.stringify(resp.json) : (resp.html || '')),
+            json: () => (resp.json ? Promise.resolve(resp.json) : Promise.reject(new SyntaxError('Unexpected token <'))),
+          });
+        }
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ active: false }) });
+      },
+    },
+  });
+  await flush(5);
+  if (!noGen) sandbox.lastGen = 1; // A2: Save needs a known generation
+  if (setup) setup(els);
+  els[btnId].fire('click');
+  await flush();
+  return { els, posts, confirms, listeners };
+}
+const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
+
+(async () => {
+  let r0 = await scenario('saveBtn', { status: 200, json: { ok: true } }, null, true, true);
+  ok(r0.posts.length === 0 && /Still loading/.test(txt(r0.els.saveMsg)), 'A2: Save with an unknown generation sends nothing');
+  let r = await scenario('saveBtn', { status: 400, json: { ok: false, error: 'segment 2: target 1400 C exceeds zone limit 1300 C' } });
+  ok(/segment 2: target 1400 C exceeds zone limit 1300 C/.test(txt(r.els.saveMsg)) && !/Saved\./.test(txt(r.els.saveMsg)),
+    'save 400 shows the server bound-violation text verbatim, not "Saved."');
+  r = await scenario('saveBtn', { status: 409, json: { ok: false, error: 'segment 0 is already running' } });
+  ok(/segment 0 is already running/.test(txt(r.els.saveMsg)), 'save 409 shows the server window-violation text verbatim');
+  r = await scenario('saveBtn', { status: 400, json: {} });
+  ok(/save failed/.test(txt(r.els.saveMsg)), 'save refusal with no error field falls back to "save failed", never success');
+  r = await scenario('saveBtn', { status: 200, json: { ok: true } });
+  ok(txt(r.els.saveMsg) === 'Saved.' && r.posts.length === 1 && /^id=/.test(r.posts[0].body), 'save 200 -> "Saved." and one form POST');
+  r = await scenario('saveBtn', { status: 200, json: { ok: false, error: 'rev conflict' } });
+  ok(/rev conflict/.test(txt(r.els.saveMsg)) && !/Saved\./.test(txt(r.els.saveMsg)), 'HTTP 200 with ok:false is still a failure');
+
+  r = await scenario('saveBtn', { status: 403, html: '<html>forbidden</html>' });
+  ok(/HTTP 403/.test(txt(r.els.saveMsg)) && /forbidden/.test(txt(r.els.saveMsg)) && !/could not reach/.test(txt(r.els.saveMsg)),
+    'save refused 403 with a non-JSON body shows the HTTP status and body text (got "' + txt(r.els.saveMsg) + '")');
+  r = await scenario('forkBtn', { status: 500, html: 'boom page' });
+  ok(/HTTP 500/.test(txt(r.els.forkMsg)) && /boom page/.test(txt(r.els.forkMsg)), 'fork 500 non-JSON body shows status and text');
+  r = await scenario('discardBtn', { status: 401, html: 'login needed' });
+  ok(/HTTP 401/.test(txt(r.els.decideMsg)) && /login needed/.test(txt(r.els.decideMsg)), 'decide 401 non-JSON body shows status and text');
+  r = await scenario('saveBtn', 'authcancel');
+  ok(txt(r.els.saveMsg) === 'Sign-in cancelled', 'sign-in cancel on save clears "Saving..." (got "' + txt(r.els.saveMsg) + '")');
+  r = await scenario('forkBtn', 'authcancel');
+  ok(txt(r.els.forkMsg) === 'Sign-in cancelled', 'sign-in cancel on fork clears "Forking..."');
+  r = await scenario('discardBtn', 'authcancel');
+  ok(txt(r.els.decideMsg) === 'Sign-in cancelled', 'sign-in cancel on decide clears "Working..."');
+
+  r = await scenario('forkBtn', { status: 409, json: { ok: false, error: 'a working copy already exists' } });
+  ok(/a working copy already exists/.test(txt(r.els.forkMsg)), 'fork 409 shows the server text');
+
+  r = await scenario('overwriteBtn', { status: 200, json: { ok: true } }, (e) => { e.overwriteConfirm.checked = false; });
+  ok(r.posts.length === 0 && /confirmation box/.test(txt(r.els.decideMsg)), 'overwrite without the checkbox sends nothing');
+  r = await scenario('overwriteBtn', { status: 200, json: { ok: true } }, (e) => { e.overwriteConfirm.checked = true; });
+  ok(r.posts.length === 1 && r.posts[0].body === 'action=overwrite&confirm=1' && txt(r.els.decideMsg) === 'Done.', 'overwrite with the checkbox posts action=overwrite&confirm=1');
+  r = await scenario('overwriteBtn', { status: 403, json: { ok: false, error: 'origin is a built-in schedule' } }, (e) => { e.overwriteConfirm.checked = true; });
+  ok(/built-in schedule/.test(txt(r.els.decideMsg)) && !/Done\./.test(txt(r.els.decideMsg)), 'overwrite 403 (builtin origin) shows the server text, not "Done."');
+
+  r = await scenario('saveAsBtn', { status: 200, json: { ok: true } }, (e) => { e.saveAsName.value = ''; });
+  ok(r.posts.length === 0 && /Enter a name/.test(txt(r.els.decideMsg)), 'save-as with an empty name sends nothing');
+  r = await scenario('saveAsBtn', { status: 200, json: { ok: true } }, (e) => { e.saveAsName.value = 'a&b c'; });
+  ok(r.posts.length === 1 && r.posts[0].body === 'action=save_as&name=a%26b%20c', 'save-as URL-encodes the name');
+
+  r = await scenario('discardBtn', { status: 200, json: { ok: true } });
+  ok(r.posts.length === 1 && r.confirms.length === 1 && /Discard/.test(r.confirms[0]), 'Discard working copy asks for confirmation, then posts');
+  r = await scenario('discardBtn', { status: 200, json: { ok: true } }, null, false);
+  ok(r.posts.length === 0 && r.confirms.length === 1, 'declined discard confirmation sends nothing');
+
+  // D6: no mojibake in the page source, progress text is plain.
+  ok(HTML.indexOf(String.fromCharCode(0xe2, 0x20ac)) < 0, 'page source has no double-encoded UTF-8 (mojibake)');
+  ok(/Loading\.\.\./.test(HTML) && /Saving\.\.\./.test(HTML) && /Forking\.\.\./.test(HTML) && /Working\.\.\./.test(HTML), 'progress texts use plain ASCII ellipses');
+
+  // D7: beforeunload guard only while there are unsaved segment edits.
+  r = await scenario('reloadBtn', { status: 200, json: { ok: true } });
+  const bu = r.listeners.beforeunload;
+  ok(typeof bu === 'function', 'page registers a beforeunload handler');
+  let prevented = false;
+  const evt = { preventDefault() { prevented = true; }, returnValue: undefined };
+  bu(evt);
+  ok(!prevented, 'no beforeunload prompt when nothing was edited');
+  r.els.segments.fire('input');
+  bu(evt);
+  ok(prevented, 'beforeunload prompts after a segment edit');
+
+  console.log(failed ? failed + ' FAILED' : 'all passed');
+  process.exit(failed ? 1 : 0);
+})();

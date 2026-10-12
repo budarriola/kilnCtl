@@ -1,4 +1,4 @@
-// Host tests for App/drivers/http/profiles_live_http.c (docs/LIVE_PROFILE_EDIT_PLAN.md
+// Host tests for App/drivers/http/profiles_live_http.c (docs/LIVE_PROFILE_EDIT.md
 // pass 2, section 10/11). Its own SEPARATE executable, same "#include the .c
 // directly" convention as test_profiles_http.c/test_live_profile.c: this file
 // reaches every one of profiles_live_http.c's `static` handlers with no other
@@ -128,6 +128,8 @@ void profiles_slot_clear(uint8_t id)
 static profile_t g_fake_slots[PROFILES_MAX_COUNT];
 static bool g_fake_profiles_http_get_fail = false;
 static bool g_fake_profiles_http_save_fail = false;
+static bool g_fake_profiles_http_save_unpersisted = false;
+static void (*g_fake_save_hook)(void) = NULL; /* runs once inside the fake save: another task acting mid-decide */
 
 bool profiles_http_get(uint8_t id, profile_t *out)
 {
@@ -137,9 +139,24 @@ bool profiles_http_get(uint8_t id, profile_t *out)
     *out = g_fake_slots[id];
     return true;
 }
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
 bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id, uint8_t *out_warning_count,
                          char *err_msg, size_t err_cap)
 {
+    return profiles_http_save_ex(requested_id, candidate, out_id, out_warning_count, NULL, err_msg, err_cap);
+}
+bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                           uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
+{
+    if (g_fake_save_hook) {
+        void (*h)(void) = g_fake_save_hook;
+        g_fake_save_hook = NULL;
+        h();
+    }
+    if (out_persisted) {
+        *out_persisted = !g_fake_profiles_http_save_unpersisted;
+    }
     if (g_fake_profiles_http_save_fail) {
         snprintf(err_msg, err_cap, "save refused (test)");
         return false;
@@ -158,6 +175,9 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     }
     g_fake_slots[id] = *candidate;
     profiles_slot_set(id);
+    if (g_fake_profiles_http_save_unpersisted && requested_id >= PROFILES_MAX_COUNT) {
+        profiles_slot_clear(id); /* mirrors the real save_ex in-lock rollback */
+    }
     if (out_id) {
         *out_id = id;
     }
@@ -260,6 +280,10 @@ const uint8_t live_profile_page_html_gz_end[] = {0};
 static const char *s_stub_body_ptr;
 static size_t s_stub_body_len;
 static size_t s_stub_body_pos;
+// Fuzz hooks (HTTP body fuzz part 3): after s_stub_fail_after bytes were handed
+// out every recv returns s_stub_fail_ret (0 = EOF, <0 = error).
+static size_t s_stub_fail_after = (size_t)-1;
+static int s_stub_fail_ret = 0;
 
 static char s_resp_status[32];
 static char s_resp_body[1024];
@@ -269,6 +293,8 @@ static void stub_reset_http(void)
     s_stub_body_ptr = NULL;
     s_stub_body_len = 0;
     s_stub_body_pos = 0;
+    s_stub_fail_after = (size_t)-1;
+    s_stub_fail_ret = 0;
     strncpy(s_resp_status, "200 OK", sizeof(s_resp_status) - 1);
     s_resp_status[sizeof(s_resp_status) - 1] = '\0';
     s_resp_body[0] = '\0';
@@ -284,7 +310,13 @@ static void stub_set_body(const char *body)
 int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
 {
     (void)r;
+    if (s_stub_body_pos >= s_stub_fail_after) {
+        return s_stub_fail_ret;
+    }
     size_t remaining = s_stub_body_len - s_stub_body_pos;
+    if (s_stub_fail_after != (size_t)-1 && s_stub_body_pos + remaining > s_stub_fail_after) {
+        remaining = s_stub_fail_after - s_stub_body_pos;
+    }
     size_t n = remaining < buf_len ? remaining : buf_len;
     if (n == 0) {
         return 0;
@@ -458,6 +490,8 @@ static void reset_fakes(void)
     memset(g_fake_slots, 0, sizeof(g_fake_slots));
     g_fake_profiles_http_get_fail = false;
     g_fake_profiles_http_save_fail = false;
+    g_fake_profiles_http_save_unpersisted = false;
+    g_fake_save_hook = NULL;
     g_fake_parse_ok = true;
     g_fake_builtin_on = false;
     g_fake_no_server = false;
@@ -606,6 +640,55 @@ static void test_accept_success_200(void)
     TEST_CHECK(strcmp(working.name, "cand") == 0, "working slot holds the parsed candidate");
 }
 
+static void test_generation_guard(void)
+{
+    TEST_SECTION("M1 generation -- GET reports it, stale gen on edit/decide is 409, matching gen accepted");
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t greq = make_req(NULL);
+    api_profile_live_get_handler(&greq);
+    char want[48];
+    snprintf(want, sizeof(want), "\"generation\":%u", (unsigned)live_profile_generation());
+    TEST_CHECK(strstr(s_resp_body, want) != NULL, "GET carries the current generation");
+
+    char q[32];
+    snprintf(q, sizeof(q), "gen=%u", (unsigned)(live_profile_generation() + 1u));
+    s_stub_query = q;
+    profile_t before;
+    TEST_CHECK(live_profile_load_working(&before), "setup: working readable");
+    httpd_req_t sreq = make_req("body=ok");
+    api_profile_live_post_handler(&sreq);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "stale gen edit is 409");
+    TEST_CHECK(strstr(s_resp_body, "changed elsewhere") != NULL, "409 text names the cause");
+    profile_t after;
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+               "stale edit wrote nothing");
+
+    httpd_req_t dreq = make_req("action=discard");
+    api_profile_live_decide_post_handler(&dreq);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "stale gen decide is 409");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "stale decide left the record pending");
+
+    snprintf(q, sizeof(q), "gen=%u", (unsigned)live_profile_generation());
+    httpd_req_t ok1 = make_req("body=ok");
+    api_profile_live_post_handler(&ok1);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "matching gen edit accepted");
+    TEST_CHECK(strstr(s_resp_body, "\"generation\":") != NULL, "edit response returns the new generation");
+    snprintf(want, sizeof(want), "\"generation\":%u", (unsigned)live_profile_generation());
+    TEST_CHECK(strstr(s_resp_body, want) != NULL, "edit response generation is the one its own save produced");
+
+    snprintf(q, sizeof(q), "gen=zz");
+    httpd_req_t bad = make_req("body=ok");
+    api_profile_live_post_handler(&bad);
+    TEST_CHECK(strcmp(s_resp_status, "409 Conflict") == 0, "malformed gen is refused");
+
+    s_stub_query = NULL; /* absent gen: compatible with old clients */
+    httpd_req_t ok2 = make_req("action=discard");
+    api_profile_live_decide_post_handler(&ok2);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "absent gen decide accepted (documented compat)");
+}
+
 static void test_decide_nothing_pending_409(void)
 {
     TEST_SECTION("POST /api/profile/live/decide -- 409 when nothing pending");
@@ -653,6 +736,94 @@ static void test_decide_save_as_success(void)
     TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "save_as ok:true");
     TEST_CHECK(profiles_slot_used(1), "landed in the next free slot (0 is origin)");
+}
+
+static void test_decide_save_as_persist_failure_is_500_and_keeps_edit(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- save_as whose storage save fails is 500 and keeps the working copy");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_profiles_http_save_unpersisted = true;
+
+    httpd_req_t req = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "save_as does not report ok:true");
+    TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 on a failed storage save");
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "the pending edit is kept");
+    /* fwlow16 L1: the RAM-only copy must not stay listed, and a same-name retry must land in the same slot. */
+    TEST_CHECK(!profiles_slot_used(1), "the unpersisted RAM slot is dropped (no phantom profile)");
+    g_fake_profiles_http_save_unpersisted = false;
+    httpd_req_t retry = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&retry);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "same-name retry after the failure succeeds");
+    TEST_CHECK(profiles_slot_used(1), "retry landed in the freed slot");
+}
+
+/* REVIEW_WEBFX7 MED-1: an LCD Apply landing during the decide's slot save must not be erased by the clear. */
+static void mid_decide_lcd_apply(void)
+{
+    profile_t edited;
+    char e[96];
+    live_profile_load_working(&edited);
+    edited.segments[0].target_c = 888.0f;
+    (void)live_profile_save_working_if_gen(&edited, false, 0, NULL, e, sizeof(e));
+}
+
+static void check_edit_survived(const char *what)
+{
+    live_edit_record_t rec;
+    TEST_CHECK(live_profile_load_record(&rec) && rec.pending, what);
+    profile_t w;
+    TEST_CHECK(live_profile_load_working(&w) && w.segments[0].target_c == 888.0f, "the mid-decide edit is still the working copy");
+    TEST_CHECK(strstr(s_resp_status, "409") != NULL, "409 Conflict");
+    TEST_CHECK(strstr(s_resp_body, "working copy edited during save, decide again") != NULL, "text names the race");
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "not ok:true");
+}
+
+static void test_decide_save_as_edit_during_save_keeps_edit(void)
+{
+    TEST_SECTION("decide save_as -- an edit applied during the save stays pending (409), clear does not erase it");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_save_hook = mid_decide_lcd_apply;
+    httpd_req_t req = make_req("action=save_as&name=NewOne");
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(profiles_slot_used(1), "the slot was saved");
+    check_edit_survived("the pending record survives (save_as)");
+    char err[96] = {0};
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_DISCARD, NULL, false, NULL, err, sizeof(err)) == LIVE_DECIDE_OK,
+               "deciding again works");
+}
+
+static void test_decide_overwrite_edit_during_save_keeps_edit(void)
+{
+    TEST_SECTION("decide overwrite -- an edit applied during the save stays pending (409)");
+    reset_fakes();
+    fork_for_tests(0);
+    g_fake_save_hook = mid_decide_lcd_apply;
+    httpd_req_t req = make_req("action=overwrite&confirm=1");
+    (void)api_profile_live_decide_post_handler(&req);
+    check_edit_survived("the pending record survives (overwrite)");
+    char err[96] = {0};
+    uint8_t id = 0;
+    TEST_CHECK(profiles_live_decide_apply(LIVE_EDIT_DECISION_OVERWRITE, NULL, true, &id, err, sizeof(err)) == LIVE_DECIDE_OK,
+               "deciding again works");
+}
+
+static void test_decide_clear_failure_after_save_is_reported(void)
+{
+    TEST_SECTION("decide save_as -- a failing clear after the save is a 500, not silent success");
+    reset_fakes();
+    fork_for_tests(0);
+    fake_kv_set_write_safe_here(false); /* live_profile_clear() refuses on a non-write-safe caller */
+    char err[96] = {0};
+    uint8_t id = 0;
+    profiles_live_decide_result_t r =
+        profiles_live_decide_apply(LIVE_EDIT_DECISION_SAVE_AS, "ClrFail", false, &id, err, sizeof(err));
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(r == LIVE_DECIDE_SERVER_ERROR, "SERVER_ERROR, not OK");
+    TEST_CHECK(strstr(err, "clearing the working copy failed") != NULL, "err says the clear failed");
 }
 
 static void test_decide_overwrite_builtin_403(void)
@@ -1112,6 +1283,177 @@ static void mount_fresh_cfg_scratch(void)
     (void)cfg_fs_init(scratch, NULL);
 }
 
+// ---------------------------------------------------------------------------
+// HTTP body fuzz part 3: hostile bodies on the live-edit accept/decide routes.
+// A refused request must leave the pending record and the working slot as they
+// were and must not create or overwrite any saved profile.
+// ---------------------------------------------------------------------------
+static bool fuzz_live_still_pending(void)
+{
+    live_edit_record_t rec;
+    return live_profile_load_record(&rec) && rec.pending;
+}
+
+static httpd_req_t fuzz_req(const char *body, long long content_len, size_t fail_after, int fail_ret)
+{
+    stub_reset_http();
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = content_len;
+    stub_set_body(body);
+    s_stub_fail_after = fail_after;
+    s_stub_fail_ret = fail_ret;
+    return req;
+}
+
+static void test_fuzz_live_decide_hostile_bodies(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- hostile bodies decide nothing");
+    const char *good = "action=overwrite&confirm=1";
+    size_t glen = strlen(good);
+
+    // recv error / EOF at every offset while Content-Length promises the whole body.
+    for (size_t at = 0; at < glen; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            reset_fakes();
+            fork_for_tests(0);
+            httpd_req_t req = fuzz_req(good, (long long)glen, at, ret);
+            (void)api_profile_live_decide_post_handler(&req);
+            TEST_CHECK(fuzz_live_still_pending(), "recv failure mid-body leaves the record pending");
+            TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "recv failure mid-body reports no success");
+        }
+    }
+
+    // Content-Length extremes.
+    long long lens[] = { 0, -1, 192, 193, 100LL * 1024 * 1024, 0x7fffffffffffffffLL };
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(good, lens[i], (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        TEST_CHECK(fuzz_live_still_pending(), "bad Content-Length leaves the record pending");
+        TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "bad Content-Length refused 400");
+    }
+    {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(good, (long long)glen + 30, (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        TEST_CHECK(fuzz_live_still_pending(), "Content-Length longer than the body leaves the record pending");
+    }
+
+    // 8 KB value and an over-long name.
+    static char big[9000];
+    memset(big, 'A', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t breq = fuzz_req(big, (long long)strlen(big), (size_t)-1, 0);
+    (void)api_profile_live_decide_post_handler(&breq);
+    TEST_CHECK(fuzz_live_still_pending() && strcmp(s_resp_status, "400 Bad Request") == 0, "8 KB body refused 400");
+
+    struct {
+        const char *body;
+        const char *why;
+    } bad[] = {
+        { "action=overwrite&confirm=1x", "confirm with trailing junk" },
+        { "action=overwrite&confirm=%2B1", "confirm plus sign" },
+        { "action=overwrite&confirm=+1", "confirm leading space" },
+        { "action=overwrite&confirm=01", "confirm leading zero" },
+        { "action=overwrite&confirm=", "confirm empty" },
+        { "action=overwrite&confirm=1000", "confirm overflows its buffer" },
+        { "action=overwrite&confirm=%00", "confirm NUL" },
+        { "action=overwrite&confirm=0&confirm=1", "duplicate confirm, 0 first" },
+        { "action=overwrite", "no confirm" },
+        { "action=Overwrite&confirm=1", "action case" },
+        { "action=overwrite%00x&confirm=1", "NUL escape in action" },
+        { "action=overwrit%65&confirm=1x", "escape in action plus bad confirm" },
+        { "action=overwrite%&confirm=1", "dangling percent in action" },
+        { "action=bogus&action=overwrite&confirm=1", "duplicate action, bogus first" },
+        { "xaction=overwrite&confirm=1", "key prefix collision" },
+        { "action=", "empty action" },
+        { "", "empty body (zero length)" },
+        { "action=save_as", "save_as with no name" },
+        { "action=save_as&name=", "save_as empty name" },
+        { "action=save_as&name=a%0Ab", "save_as name with newline" },
+        { "action=save_as&name=a%00b", "save_as name with NUL" },
+        { "action=save_as&name=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "save_as over-long name" },
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        httpd_req_t req = fuzz_req(bad[i].body, (long long)strlen(bad[i].body), (size_t)-1, 0);
+        (void)api_profile_live_decide_post_handler(&req);
+        char msg[160];
+        snprintf(msg, sizeof(msg), "refused, nothing decided: %s", bad[i].why);
+        TEST_CHECK(fuzz_live_still_pending() && !profiles_slot_used(1) && strcmp(s_resp_status, "400 Bad Request") == 0,
+                   msg);
+    }
+
+    // Control: the same route does decide with a clean body.
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t req = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_decide_post_handler(&req);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL && !fuzz_live_still_pending(),
+               "control: a clean overwrite body decides and clears the record");
+}
+
+static void test_fuzz_live_accept_hostile_bodies(void)
+{
+    TEST_SECTION("POST /api/profile/live -- hostile transport leaves the working slot untouched");
+    const char *good = "body=ok";
+    size_t glen = strlen(good);
+    profile_t before, after;
+
+    for (size_t at = 0; at < glen; at++) {
+        for (int ret = -1; ret <= 0; ret++) {
+            reset_fakes();
+            fork_for_tests(0);
+            TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+            httpd_req_t req = fuzz_req(good, (long long)glen, at, ret);
+            (void)api_profile_live_post_handler(&req);
+            TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+                       "recv failure mid-body leaves the working slot unchanged");
+            TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "recv failure reports no success");
+        }
+    }
+
+    long long lens[] = { 0, -1, 100LL * 1024 * 1024, 0x7fffffffffffffffLL };
+    for (size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        reset_fakes();
+        fork_for_tests(0);
+        TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+        httpd_req_t req = fuzz_req(good, lens[i], (size_t)-1, 0);
+        (void)api_profile_live_post_handler(&req);
+        TEST_CHECK(strcmp(s_resp_status, "400 Bad Request") == 0, "bad Content-Length refused 400");
+        TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+                   "bad Content-Length leaves the working slot unchanged");
+    }
+
+    // Content-Length longer than what arrives: recv hits EOF, nothing saved.
+    reset_fakes();
+    fork_for_tests(0);
+    TEST_CHECK(live_profile_load_working(&before), "setup: working slot readable");
+    httpd_req_t lreq = fuzz_req(good, (long long)glen + 50, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&lreq);
+    TEST_CHECK(live_profile_load_working(&after) && memcmp(&before, &after, sizeof(before)) == 0,
+               "Content-Length longer than the body leaves the working slot unchanged");
+
+    // Not firing / not forked: the body is never even read.
+    reset_fakes();
+    httpd_req_t nreq = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&nreq);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "accept with no fork is refused");
+
+    // Control.
+    reset_fakes();
+    fork_for_tests(0);
+    httpd_req_t creq = fuzz_req(good, (long long)glen, (size_t)-1, 0);
+    (void)api_profile_live_post_handler(&creq);
+    TEST_CHECK(strstr(s_resp_body, "\"ok\":true") != NULL, "control: a clean body is accepted");
+}
+
 int main(void)
 {
     // fake_kv.c requires every partition to be explicitly initialized before
@@ -1134,10 +1476,15 @@ int main(void)
     test_accept_bad_parse_400();
     test_accept_bad_bound_400();
     test_accept_success_200();
+    test_generation_guard();
     test_decide_nothing_pending_409();
     test_decide_discard();
     test_decide_save_as_missing_name_400();
+    test_decide_save_as_persist_failure_is_500_and_keeps_edit();
     test_decide_save_as_success();
+    test_decide_save_as_edit_during_save_keeps_edit();
+    test_decide_overwrite_edit_during_save_keeps_edit();
+    test_decide_clear_failure_after_save_is_reported();
     test_decide_overwrite_builtin_403();
     test_decide_overwrite_missing_confirm_400();
     test_decide_overwrite_success();
@@ -1160,6 +1507,8 @@ int main(void)
     test_refusals_are_json_with_an_error_field();
     test_registration_registers_all_five_routes();
     test_registration_no_server();
+    test_fuzz_live_decide_hostile_bodies();
+    test_fuzz_live_accept_hostile_bodies();
 
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);
     if (g_test_failures > 0) {

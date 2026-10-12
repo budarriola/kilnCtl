@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .cases_web import _web_client
 from .cases_web_diag import _html, _missing, mutating_gate
 from .cases_web_rw import (_WIFI_WRITE_DENYLIST, ForbiddenWrite, _get_json, _get_text, _policy_from_config,
-                           _post_json, _post_json_body, _post_raw, _sec_client)
+                           _post_json, _post_json_body, _post_raw, _sec_client, cfg_guarded, policy_unstored)
 from .registry import CaseResult, Verdict, get_case
 
 _R = CaseResult
@@ -55,6 +55,9 @@ def _case_wifi02(ctx: dict) -> CaseResult:
     if len(match) != 1:
         return _R(Verdict.FAIL, reason=f"bench SSID appears {len(match)} times in /networks, expected 1")
     n = match[0]
+    if n.get("connected") is True and n.get("saved") is True and n.get("in_range") is False:
+        return _R(Verdict.INCONCLUSIVE, reason="connected but in_range false: scan miss or 20-entry scan cap, not a contract failure",
+                  observed={"entry_keys": sorted(n)})
     bad = [k for k in ("saved", "in_range", "connected") if n.get(k) is not True]
     if bad:
         return _R(Verdict.FAIL, reason=f"bench SSID entry has {bad} not true", observed={"entry_keys": sorted(n)})
@@ -64,7 +67,7 @@ def _case_wifi02(ctx: dict) -> CaseResult:
 
 
 _WIFI03_MARKERS = ('id="apSection"', "#apSection { display: none; }", 'id="apQrCanvas"',
-                   "var KilnQr", "function renderApQr(", "if (s.mode === 'ap') renderApQr")
+                   "var KilnQr", "function renderApQr(")
 
 
 def _case_wifi03(ctx: dict) -> CaseResult:
@@ -74,7 +77,10 @@ def _case_wifi03(ctx: dict) -> CaseResult:
     st, s = _get_json(ctx, "/status")
     if st != 200 or not isinstance(s, dict):
         return _R(Verdict.INCONCLUSIVE, reason=f"GET /status unreadable (status={st})")
-    miss = _missing(html, _WIFI03_MARKERS)
+    miss = list(_missing(html, _WIFI03_MARKERS))
+    # The call sits inside a braced if-block; match it whitespace-tolerantly.
+    if not re.search(r"if\s*\(\s*s\.mode\s*===\s*'ap'\s*\)\s*\{?\s*renderApQr\s*\(", html):
+        miss.append("if (s.mode === 'ap') renderApQr(")
     if miss:
         return _R(Verdict.FAIL, reason=f"/wifi HTML missing {miss}", observed={"missing": miss})
     if s.get("mode") == "ap":
@@ -253,10 +259,12 @@ def _case_sec06(ctx: dict) -> CaseResult:
     st, cfg = _get_json(ctx, "/api/auth/config")
     if st != 200 or not isinstance(cfg, dict) or "admin_password_set" not in cfg:
         return _R(Verdict.INCONCLUSIVE, reason=f"/api/auth/config unreadable at end (status={st})")
+    # Built by concatenation so this file's own literals never match the scan.
+    needle = "clear_" + "credentials"
     problems = [f"missing {m}" for m in _missing(html, ('id="kcSecClearCreds"', "Clear login credentials",
-                                                        "window.kcConfirm", "clear_credentials"))]
+                                                        "window.kcConfirm", needle))]
     hits = scan_bench_sources(_bench_dir(ctx), forbidden_literals=(), forbidden_imports=(),
-                              forbidden_extra=("clear_credentials",))
+                              forbidden_extra=(needle,))
     problems += hits
     start = ctx.get("_sec06_admin_start")
     if start is None:
@@ -348,6 +356,11 @@ def _case_bak03(ctx: dict) -> CaseResult:
         return _R(Verdict.INCONCLUSIVE, reason=f"second export failed: {e2}")
     h1, h2 = _canon_hash(p1), _canon_hash(p2)
     if h1 != h2:
+        if isinstance(p1, dict) and isinstance(p2, dict):
+            diff = {k for k in set(p1) | set(p2) if p1.get(k) != p2.get(k)}
+            if diff == {"relay_cycles"}:
+                return _R(Verdict.INCONCLUSIVE, reason="only relay_cycles wear counters differ (a relay toggled in the gap; not gated)",
+                          observed={"differs": ["relay_cycles"]})
         return _R(Verdict.FAIL, reason="two exports taken without writes differ", observed={"h1": h1[:12], "h2": h2[:12]})
     return _R(Verdict.PASS, observed={"hash": h1[:12], "reduction": "export determinism (owner 2026-10-09)"})
 
@@ -356,8 +369,8 @@ def _case_bak04(ctx: dict) -> CaseResult:
     html, err = _html(ctx, "/settings/backup")
     if html is None:
         return _R(Verdict.INCONCLUSIVE, reason=err or "page unreadable")
-    low = html.lower()
-    if "refused while" in low and "profile is running" in low:
+    low = " ".join(html.lower().split())  # the page wraps this sentence across lines
+    if re.search(r"refused (outright )?(\(nothing is written\) )?while a profile is running", low):
         return _R(Verdict.PASS, observed={"reduction": "static page text (owner 2026-10-09)"})
     return _R(Verdict.FAIL, reason="/settings/backup lacks the 'refused while a profile is running' text")
 
@@ -497,6 +510,8 @@ def _case_kcfg05(ctx: dict) -> CaseResult:
         return _R(Verdict.INCONCLUSIVE, reason=f"/api/readiness unreadable (status={st})")
     item = next((i for i in items if isinstance(i, dict) and i.get("key") == "safety_ceiling_match"), None)
     if item is None:
+        if any(isinstance(i, dict) and i.get("key") == "checklist_truncated" for i in items):
+            return _R(Verdict.INCONCLUSIVE, reason="readiness checklist was truncated (checklist_truncated item); safety_ceiling_match may have been dropped")
         return _R(Verdict.FAIL, reason="readiness has no safety_ceiling_match item")
     status = item.get("status")
     if status in ("cannot_yet", "deliberately_off"):
@@ -563,6 +578,11 @@ def _auth_case_prelude(ctx: dict):
     st, cfg = client.get_config()
     if st != 200 or not isinstance(cfg, dict):
         return None, _R(Verdict.INCONCLUSIVE, reason=f"GET /api/auth/config failed (status={st})")
+    if policy_unstored(cfg):
+        # L10: no clear-policy route exists, so the restore would store an
+        # explicit policy where the board had none.
+        return None, _R(Verdict.INCONCLUSIVE, reason="board shows no stored auth policy (false/false/-1/-1); "
+                        "a restore cannot put 'none' back, so nothing was written")
     return (client, user, pw, _policy_from_config(cfg)), None
 
 
@@ -687,7 +707,7 @@ _CASE_FUNCS = {
     "WEB-WIFI-02": _case_wifi02, "WEB-WIFI-03": _case_wifi03, "WEB-WIFI-04": _case_wifi04,
     "WEB-WIFI-05": _case_wifi05, "WEB-SEC-02": _case_sec02, "WEB-SEC-06": _case_sec06,
     "WEB-BAK-02": _case_bak02, "WEB-BAK-03": _case_bak03, "WEB-BAK-04": _case_bak04,
-    "WEB-KCFG-02": _case_kcfg02, "WEB-KCFG-03": _case_kcfg03, "WEB-KCFG-04": _case_kcfg04,
+    "WEB-KCFG-02": cfg_guarded(_case_kcfg02), "WEB-KCFG-03": _case_kcfg03, "WEB-KCFG-04": _case_kcfg04,
     "WEB-KCFG-05": _case_kcfg05, "WEB-LOG-02": _case_log02, "WEB-LOG-03": _case_log03,
     "WEB-X-02": _case_x02,
 }

@@ -1,6 +1,6 @@
 // Host tests for zones_config_cfg_fs.c -- the read-through/dual-write
 // bridge between zones config's NVS blob and the `cfg` LittleFS partition
-// (docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 5). See that file's
+// (docs/FILESYSTEM_USER_DATA.md section 5 step 5). See that file's
 // header comment for the full policy this exercises.
 //
 // Linked as a SEPARATE translation unit into the "zones_http" host-test
@@ -40,6 +40,7 @@
                                       * defined by zones_http.c's textual #include of
                                       * zones_config_accessors.c in test_zones_http.c, this TU's
                                       * link-mate in the same executable. */
+#include "cfgfs_file_validate.h"
 #include "zones_config_cfg_fs.h"
 #include "zones_http.h"
 #include "zones_http_internal.h" /* s_zones, nvs_load()/nvs_save() */
@@ -59,6 +60,8 @@ static void reset_all(void)
     snprintf(path, sizeof(path), "%s/.tmp/%s", SCRATCH_BASE, ZONES_CFG_FILE_PATH);
     remove(path);
     snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, ZONES_CFG_FILE_PATH);
+    remove(path);
+    snprintf(path, sizeof(path), "%s/%s", SCRATCH_BASE, ZONES_CFG_BAD_FILE_PATH);
     remove(path);
 
     char tmp[600];
@@ -629,7 +632,7 @@ static void test_equal_rev_divergence_adopts_nvs_not_the_stale_file(void)
 //    simplest case -- NVS has nothing trustworthy at all) carrying an
 //    OLD-VERSION blob that only migrates in RAM during decode. Before this
 //    fix, nvs_load() discarded the NVS side unconditionally whenever the
-//    file won (CLAUDE.md/CONFIG_MIGRATION_CHAIN_PLAN.md section 1.5's
+//    file won (CLAUDE.md/CONFIG_MIGRATION_CHAIN.md section 1.5's
 //    "used_file is unreachable in practice" gap) and never wrote the
 //    migrated struct back anywhere -- both NVS (still empty/stale) and the
 //    file (still holding the old-version bytes) would diverge from what
@@ -1074,6 +1077,7 @@ static void oom_setup_file_rev5_and_stale_nvs(void)
     reset_all();
     TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
     prime_rev_to_zero(); /* deterministic: a skipped rev floor would restamp rev 1 */
+    zones_config_load_fault_reset_for_test(); /* a stale latched fault must not satisfy the LOW-4 asserts */
     zones_cfg_t c;
     fill_valid_cfg(&c, "newer_file", 4.0f);
     c.version = ZONES_CFG_VERSION;
@@ -1086,11 +1090,27 @@ static void oom_setup_file_rev5_and_stale_nvs(void)
  * hold the new content, proving the load did not rewind the rev floor. */
 static void oom_check_rev_floor_kept(void)
 {
+    /* persfx LOW-2/LOW-4: assert the floor itself (the primed RAM rev is 0, the staged NVS rev is 1), straight after
+     * the failed load -- a later clean reload re-derives the rev from the file and would hide a dropped floor. A
+     * cannot-decide load also latches the UNREADABLE fault, so the banner and the firing refusal exist. */
+    TEST_CHECK(zones_config_rev_for_test() >= 1, "persfx LOW-2: the OOM'd load kept the NVS rev floor");
+    zones_cfg_load_fault_t lf0;
+    TEST_CHECK(zones_config_get_load_fault(&lf0), "persfx LOW-4: a cannot-decide load latches a load fault");
     stage("after_oom", 9.0f);
-    TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
+    /* Review 2026-10-10 L1: the load could not decide, so a save is refused (it would write a near-empty
+     * config over the higher-rev file); a later clean load decides and saves land again. */
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "L1: a save after a cannot-decide load is refused");
     uint32_t rev = 0;
     zones_cfg_t raw;
     bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 5, "L1: the refused save left the rev-5 file untouched");
+    {
+        bool f2 = false, v2 = false;
+        TEST_CHECK(nvs_load(&f2, &v2) == ESP_OK, "L1: a clean reload decides");
+    }
+    stage("after_oom", 9.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "a later save lands");
     zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
     TEST_CHECK(raw_valid && rev > 1, "the save stamped a rev above the NVS rev floor (1), never restamped rev 1");
 }
@@ -1109,6 +1129,56 @@ static void test_resolve_oom_keeps_rev_floor_and_fails_load(void)
     TEST_CHECK(e == ESP_ERR_NO_MEM, "nvs_load reports the OOM instead of ESP_OK");
     TEST_CHECK(!valid, "the legacy NVS copy is NOT adopted as valid");
     oom_check_rev_floor_kept();
+}
+
+/* Review 15 LOW-3: a file too large for the read buffer (newer firmware) is unreadable, not absent -- the load
+ * must fail and the file must survive byte-for-byte instead of being overwritten from the older NVS copy. */
+static void test_oversize_file_is_cannot_decide_not_absent(void)
+{
+    TEST_SECTION("zones cfg_fs: an over-size (unreadable) zones.json is 'cannot decide' and is never overwritten "
+                 "from NVS (review 15 LOW-3)");
+    oom_setup_file_rev5_and_stale_nvs();
+    static uint8_t big[1028 + 200];
+    memset(big, 0x5A, sizeof(big));
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, big, sizeof(big)) == ESP_OK, "setup: over-size file written");
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    esp_err_t e = nvs_load(&found, &valid);
+    TEST_CHECK(e == ESP_ERR_NO_MEM || !valid, "the load does not adopt the stale NVS copy as valid");
+    static uint8_t back[1028 + 400];
+    size_t blen = 0;
+    TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, back, sizeof(back), &blen) == ESP_OK && blen == sizeof(big) &&
+                   memcmp(back, big, blen) == 0,
+               "the unreadable file is untouched (not overwritten from the older NVS copy)");
+}
+
+/* Review 2026-10-10 L1 + L3: a transient I/O error (not just over-size) reading zones.json is "cannot decide":
+ * the load fails, a UNREADABLE load fault is latched (visible in status/readiness), saves are refused with
+ * ESP_ERR_INVALID_STATE, and the higher-rev file survives. */
+static void test_transient_read_error_is_cannot_decide_and_latches(void)
+{
+    TEST_SECTION("zones cfg_fs: a transient I/O error reading zones.json is 'cannot decide', latches a load fault "
+                 "and refuses saves (review 2026-10-10 L1, L3)");
+    oom_setup_file_rev5_and_stale_nvs();
+    zones_config_load_fault_reset_for_test();
+    bool found = true, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    cfg_fs_test_inject_read_error(ZONES_CFG_FILE_PATH, ESP_FAIL, 1);
+    esp_err_t e = nvs_load(&found, &valid);
+    cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
+    TEST_CHECK(e == ESP_ERR_NO_MEM && !valid && !found, "L3: ESP_FAIL read is cannot-decide, not absent: load fails");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "L1: an UNREADABLE load fault is latched");
+    stage("clobber", 9.0f);
+    TEST_CHECK(nvs_save() == ESP_ERR_INVALID_STATE, "L1: operator save refused");
+    uint32_t rev = 0;
+    zones_cfg_t raw;
+    bool raw_valid = false;
+    zones_config_cfg_fs_load_raw(&raw, &rev, &raw_valid);
+    TEST_CHECK(raw_valid && rev == 5 && strcmp(raw.zones[0].name, "newer_file") == 0,
+               "L1/L3: the rev-5 file is untouched by the refused save and by the load");
+    zones_config_load_fault_reset_for_test();
 }
 
 static void test_nvs_load_resolved_oom_keeps_rev_floor(void)
@@ -1149,8 +1219,8 @@ static void test_nvs_conversion_scratch_oom_is_not_corrupt(void)
     scratch_oom_disarm();
     TEST_CHECK(e == ESP_ERR_NO_MEM && !valid, "load fails with NO_MEM, nothing adopted");
     zones_cfg_load_fault_t lf;
-    TEST_CHECK(!zones_config_get_load_fault(&lf) || lf.kind != ZONES_CFG_LOAD_FAULT_UNREADABLE,
-               "no UNREADABLE fault was latched for an OOM that judged nothing");
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "persfx LOW-4: a conversion OOM that cannot decide latches the fault (safe: no firing on a zeroed config)");
     uint32_t rev = 0;
     zones_cfg_t raw;
     bool raw_valid = false;
@@ -1272,8 +1342,320 @@ static void test_save_persists_locked_snapshot(void)
     TEST_CHECK(!zones_config_persisted_equals_ram(), "an unsaved RAM edit is detected");
 }
 
+// ---------------------------------------------------------------------
+// POST /api/cfgfs/file content gate (audit M7): cfgfs_file_check_write().
+// ---------------------------------------------------------------------
+static void test_cfgfs_file_post_validation(void)
+{
+    TEST_SECTION("cfgfs file POST: body validated by the loader; unknown names need raw=1");
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    stage("m7", 2.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "save a real zones.json");
+    static uint8_t good[4 + sizeof(zones_cfg_t)];
+    size_t glen = 0;
+    TEST_CHECK(cfg_fs_read(ZONES_CFG_FILE_PATH, good, sizeof(good), &glen) == ESP_OK && glen > 4,
+               "read the real file bytes back");
+
+    const char *why = "";
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, good, glen, &why) == CFGFS_FILE_CHECK_OK,
+               "valid zones.json body accepted");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, true, good, glen, &why) == CFGFS_FILE_CHECK_OK,
+               "valid zones.json body accepted with raw=1");
+
+    /* The handler writes only on OK, so INVALID == nothing written. */
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, "garbage", 7, &why) == CFGFS_FILE_CHECK_INVALID,
+               "garbage zones.json refused");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, true, "garbage", 7, &why) == CFGFS_FILE_CHECK_INVALID,
+               "raw=1 does not waive an existing validator");
+    static uint8_t bad[4 + sizeof(zones_cfg_t)];
+    memcpy(bad, good, glen);
+    bad[glen - 1] ^= 0xFF;
+    bad[10] ^= 0x55;
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, bad, glen, &why) == CFGFS_FILE_CHECK_INVALID,
+               "corrupted (CRC-failing) zones.json refused");
+    TEST_CHECK(cfgfs_file_check_write(ZONES_CFG_FILE_PATH, false, good, 3, &why) == CFGFS_FILE_CHECK_INVALID,
+               "truncated zones.json refused");
+
+    TEST_CHECK(cfgfs_file_check_write("mystery.dat", false, "abc", 3, &why) == CFGFS_FILE_CHECK_NO_VALIDATOR,
+               "unknown file without raw=1 refused");
+    TEST_CHECK(cfgfs_file_check_write("mystery.dat", true, "abc", 3, &why) == CFGFS_FILE_CHECK_OK,
+               "unknown file with raw=1 accepted");
+    cfg_fs_deinit();
+}
+
+// ---------------------------------------------------------------------
+// BENCH_PROF1_DIVERGE audit (c) fixes 1, 2, 4: a rejected zones.json is kept as zones.json.bad and
+// latches a visible load fault; never silently left to be overwritten.
+// ---------------------------------------------------------------------
+static bool s_reset_refuses = false;
+static bool reset_refuse_hook(void) { return s_reset_refuses; }
+
+static size_t read_file(const char *name, uint8_t *buf, size_t cap)
+{
+    size_t n = 0;
+    if (cfg_fs_read(name, buf, cap, &n) != ESP_OK) {
+        return (size_t)-1;
+    }
+    return n;
+}
+
+static void test_rejected_file_is_preserved_and_latches_fault(void)
+{
+    TEST_SECTION("zones cfg_fs: a REJECTED zones.json is kept as zones.json.bad and latches a load fault");
+    static uint8_t good[4 + sizeof(zones_cfg_t)], bad[4 + sizeof(zones_cfg_t)], got[4 + sizeof(zones_cfg_t)];
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    stage("keep", 2.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "save a real zones.json");
+    size_t glen = read_file(ZONES_CFG_FILE_PATH, good, sizeof(good));
+    TEST_CHECK(glen > 8 && glen != (size_t)-1, "read the good file");
+
+    /* 1. CRC-corrupt file, no NVS copy. */
+    memcpy(bad, good, glen);
+    bad[glen - 1] ^= 0xFF;
+    bad[10] ^= 0x55;
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "plant a corrupt zones.json");
+    zones_config_load_fault_reset_for_test();
+    bool found = false, valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(!valid, "the rejected file is not adopted");
+    size_t blen = read_file(ZONES_CFG_BAD_FILE_PATH, got, sizeof(got));
+    TEST_CHECK(blen == glen && memcmp(got, bad, glen) == 0, "zones.json.bad holds the rejected bytes exactly");
+    TEST_CHECK(read_file(ZONES_CFG_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "zones.json itself is not touched by the load");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_UNREADABLE,
+               "the cfg-file rejection latches an UNREADABLE load fault");
+    TEST_CHECK(strncmp(lf.reason, "cfg file: ", 10) == 0 && strlen(lf.reason) > 10,
+               "the fault reason is distinct (cfg file prefix) and carries the decoder's reason");
+
+    /* 2. A different rejected file replaces the older .bad (one copy). */
+    bad[20] ^= 0x01;
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "plant a second corrupt file");
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(read_file(ZONES_CFG_BAD_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "the older .bad is overwritten by the newer rejected file");
+
+    /* 3. Newer-version file: preserved, latched NEWER, file never rewritten. */
+    memcpy(bad, good, glen);
+    bad[4] = (uint8_t)(ZONES_CFG_VERSION + 1);
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "plant a newer-version file");
+    zones_config_load_fault_reset_for_test();
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(read_file(ZONES_CFG_BAD_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "newer-version file preserved");
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_NEWER &&
+                   lf.on_disk_version == ZONES_CFG_VERSION + 1,
+               "newer-version file latches a NEWER fault naming the on-disk version");
+    TEST_CHECK(read_file(ZONES_CFG_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "newer-version zones.json is never rewritten");
+
+    /* 4. Too short. */
+    TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK, "clear .bad");
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, "abc", 3) == ESP_OK, "plant a 3-byte file");
+    zones_config_load_fault_reset_for_test();
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(read_file(ZONES_CFG_BAD_FILE_PATH, got, sizeof(got)) == 3 && memcmp(got, "abc", 3) == 0,
+               "too-short file preserved");
+    TEST_CHECK(zones_config_get_load_fault(&lf) && strstr(lf.reason, "too short") != NULL, "too-short fault named");
+
+    /* 5. Reset in flight: nothing written. */
+    TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK, "clear .bad again");
+    s_reset_refuses = true;
+    pref_cfg_fs_set_reset_refuse_hook(reset_refuse_hook);
+    (void)nvs_load(&found, &valid);
+    pref_cfg_fs_set_reset_refuse_hook(NULL);
+    s_reset_refuses = false;
+    bool exists = true;
+    TEST_CHECK(cfg_fs_exists(ZONES_CFG_BAD_FILE_PATH, &exists) == ESP_OK && !exists,
+               "no .bad written while a factory reset is in flight");
+
+    /* 6. A good file leaves no fault and no .bad. */
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, good, glen) == ESP_OK, "restore the good file");
+    zones_config_load_fault_reset_for_test();
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(valid && !zones_config_get_load_fault(NULL), "a good file loads with no fault latched");
+    TEST_CHECK(cfg_fs_exists(ZONES_CFG_BAD_FILE_PATH, &exists) == ESP_OK && !exists, "and writes no .bad");
+    cfg_fs_deinit();
+}
+
+
+
+// ---------------------------------------------------------------------
+// Review 11 MED-1/MED-2/LOW-1/LOW-2: a rejected zones.json with a valid older NVS/legacy copy.
+// ---------------------------------------------------------------------
+static esp_err_t fail_bad_write(const char *name, const void *data, size_t len)
+{
+    if (strcmp(name, ZONES_CFG_BAD_FILE_PATH) == 0) {
+        return ESP_FAIL;
+    }
+    return cfg_fs_write_atomic(name, data, len);
+}
+
+static int s_save_depth;
+static int s_bad_write_depth = -1;
+static bool depth_enter(void)
+{
+    s_save_depth++;
+    return true;
+}
+static void depth_exit(bool reserved)
+{
+    (void)reserved;
+    s_save_depth--;
+}
+static esp_err_t depth_recording_write(const char *name, const uint8_t *data, size_t len)
+{
+    if (strcmp(name, ZONES_CFG_BAD_FILE_PATH) == 0) {
+        s_bad_write_depth = s_save_depth;
+    }
+    return cfg_fs_write_atomic(name, data, len);
+}
+
+static void test_rejected_file_with_older_copy_present(void)
+{
+    TEST_SECTION("zones cfg_fs (review 11): rejected file + valid older NVS/legacy copy");
+    static uint8_t good[4 + sizeof(zones_cfg_t)], bad[4 + sizeof(zones_cfg_t)], got[4 + sizeof(zones_cfg_t)];
+    bool found = false, valid = true, exists = true;
+    zones_cfg_load_fault_t lf;
+
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    stage("keep", 2.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "save a real zones.json");
+    size_t glen = read_file(ZONES_CFG_FILE_PATH, good, sizeof(good));
+    TEST_CHECK(glen > 8 && glen != (size_t)-1, "read the good file");
+
+    /* A. NEWER file + valid NVS copy: file untouched, NVS copy NOT adopted, fault latched. */
+    stage_legacy_nvs("stale", 1.0f, 1);
+    memcpy(bad, good, glen);
+    bad[4] = (uint8_t)(ZONES_CFG_VERSION + 1);
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "plant a newer-version file");
+    zones_config_load_fault_reset_for_test();
+    valid = true;
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(read_file(ZONES_CFG_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "MED-1: a newer-version zones.json is NOT overwritten from the older NVS copy");
+    TEST_CHECK(!valid, "MED-1: the older NVS copy is not adopted over the newer file (no firing on stale data)");
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_NEWER && lf.file_rejected,
+               "MED-1: the fault stays latched when no trustworthy copy is adopted");
+
+    /* B. Corrupt file + valid NVS copy: NVS adopted, NO latched fault (MED-2), .bad holds the bytes, file healed. */
+    memcpy(bad, good, glen);
+    bad[glen - 1] ^= 0xFF;
+    bad[10] ^= 0x55;
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "plant a corrupt file");
+    TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK, "clear .bad");
+    zones_config_load_fault_reset_for_test();
+    valid = false;
+    (void)nvs_load(&found, &valid);
+    TEST_CHECK(valid, "MED-2: a trustworthy NVS copy is adopted");
+    TEST_CHECK(!zones_config_get_load_fault(NULL), "MED-2: no firing-refusing fault when a copy was adopted");
+    TEST_CHECK(read_file(ZONES_CFG_BAD_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "the rejected bytes are kept as .bad");
+
+    /* C. Corrupt file, valid NVS, .bad write fails: the only copy of the file is NOT overwritten. */
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "re-plant the corrupt file");
+    TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK, "clear .bad again");
+    zones_config_cfg_fs_set_write_fn(fail_bad_write);
+    zones_config_load_fault_reset_for_test();
+    valid = false;
+    (void)nvs_load(&found, &valid);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(valid, "NVS copy still adopted when .bad could not be written");
+    TEST_CHECK(read_file(ZONES_CFG_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, bad, glen) == 0,
+               "LOW-2: the corrupt file with no .bad copy is not overwritten");
+
+    /* D. LOW-2: no NVS, corrupt file, .bad write fails: fault records the failed copy. */
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    zones_config_cfg_fs_set_write_fn(fail_bad_write);
+    zones_config_load_fault_reset_for_test();
+    valid = true;
+    (void)nvs_load(&found, &valid);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(!valid && zones_config_get_load_fault(&lf) && lf.file_rejected && lf.bad_copy_failed,
+               "LOW-2: a failed .bad write is reported in the fault record");
+
+    /* F. LOW-1: the .bad write happens inside the zones save section. */
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, bad, glen) == ESP_OK, "re-plant the corrupt file for F");
+    (void)cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH);
+    pref_cfg_fs_set_save_section_hooks(depth_enter, depth_exit);
+    s_save_depth = 0;
+    s_bad_write_depth = -1;
+    zones_config_cfg_fs_set_write_fn(depth_recording_write);
+    zones_config_load_fault_reset_for_test();
+    (void)nvs_load(&found, &valid);
+    zones_config_cfg_fs_reset_write_fn_for_test();
+    pref_cfg_fs_set_save_section_hooks(NULL, NULL);
+    TEST_CHECK(s_bad_write_depth == 1, "review 11 LOW-1: the .bad write runs inside the zones save section");
+
+    /* E. LOW-1: a read-only load_raw never writes .bad. */
+    TEST_CHECK(cfg_fs_delete(ZONES_CFG_BAD_FILE_PATH) == ESP_OK || true, "ensure no .bad");
+    zones_cfg_t tmp;
+    uint32_t trev = 0;
+    bool tvalid = true;
+    zones_config_cfg_fs_load_raw(&tmp, &trev, &tvalid);
+    TEST_CHECK(!tvalid && cfg_fs_exists(ZONES_CFG_BAD_FILE_PATH, &exists) == ESP_OK && !exists,
+               "LOW-1: the read-only load_raw path writes no .bad");
+
+    /* F. LOW-3: the clear helper empties the latch. */
+    zones_config_load_fault_clear();
+    TEST_CHECK(!zones_config_get_load_fault(NULL), "LOW-3: load fault cleared");
+    cfg_fs_deinit();
+}
+
+static void test_legacy_partition_does_not_overwrite_newer_file(void)
+{
+    TEST_SECTION("zones_http_start (review 11 MED-1): legacy default-partition copy vs a NEWER zones.json");
+    static uint8_t good[4 + sizeof(zones_cfg_t)], got[4 + sizeof(zones_cfg_t)];
+    reset_all();
+    TEST_CHECK(cfg_fs_init(SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    prime_rev_to_zero();
+    stage("keep", 2.0f);
+    TEST_CHECK(nvs_save() == ESP_OK, "save a real zones.json");
+    size_t glen = read_file(ZONES_CFG_FILE_PATH, good, sizeof(good));
+    TEST_CHECK(glen > 8 && glen != (size_t)-1, "read the good file");
+    good[4] = (uint8_t)(ZONES_CFG_VERSION + 1);
+    TEST_CHECK(cfg_fs_write_atomic(ZONES_CFG_FILE_PATH, good, glen) == ESP_OK, "plant a newer-version file");
+    fake_kv_reset_all();
+    hal_kv_init_partition(KILN_NVS_PARTITION);
+    hal_kv_init_partition(NVS_DEFAULT_PART_NAME);
+    {
+        zones_cfg_t c;
+        fill_valid_cfg(&c, "legacy", 2.0f);
+        c.version = ZONES_CFG_VERSION;
+        c.crc32 = zones_config_json_compute_crc(&c);
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, NVS_NAMESPACE, HAL_KV_MODE_READ_WRITE, NVS_DEFAULT_PART_NAME) == HAL_OK,
+                   "stage: open default partition");
+        TEST_CHECK(hal_kv_set_blob(&h, NVS_KEY_ZONES, &c, sizeof(c)) == HAL_OK, "stage: legacy blob");
+        TEST_CHECK(hal_kv_commit(&h) == HAL_OK, "stage: commit");
+        hal_kv_close(&h);
+    }
+    zones_config_load_fault_reset_for_test();
+    (void)zones_http_start();
+    TEST_CHECK(read_file(ZONES_CFG_FILE_PATH, got, sizeof(got)) == glen && memcmp(got, good, glen) == 0,
+               "MED-1: the legacy migration does not overwrite a newer-version zones.json");
+    TEST_CHECK(!s_zones_config_valid, "the legacy copy is not adopted over the newer file");
+    zones_cfg_load_fault_t lf;
+    TEST_CHECK(zones_config_get_load_fault(&lf) && lf.kind == ZONES_CFG_LOAD_FAULT_NEWER,
+               "the NEWER fault stays latched");
+    reset_all();
+}
+
 void run_test_zones_config_cfg_fs(void)
 {
+    test_rejected_file_with_older_copy_present();
+    test_legacy_partition_does_not_overwrite_newer_file();
+    test_rejected_file_is_preserved_and_latches_fault();
+    test_cfgfs_file_post_validation();
     test_save_persists_locked_snapshot();
     test_save_crc_writeback_skipped_when_ram_changed();
     test_partition_absent_falls_through_to_nvs_only();
@@ -1291,6 +1673,8 @@ void run_test_zones_config_cfg_fs(void)
     test_file_cycle_is_normalized_in_ram_and_on_writeback();
     test_resolve_oom_keeps_rev_floor_and_fails_load();
     test_nvs_load_resolved_oom_keeps_rev_floor();
+    test_oversize_file_is_cannot_decide_not_absent();
+    test_transient_read_error_is_cannot_decide_and_latches();
     test_nvs_conversion_scratch_oom_is_not_corrupt();
     test_file_conversion_scratch_oom_does_not_overwrite_file();
     test_start_does_not_migrate_after_load_oom();

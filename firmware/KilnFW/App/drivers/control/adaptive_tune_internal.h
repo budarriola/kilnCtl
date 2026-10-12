@@ -266,7 +266,7 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_ENMASK_MIGRATED);
 #define ADAPTIVE_TUNE_NVS_KEY_KIBASE "ki_base"
 NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5, item 9 (adaptive-tune state):
+// docs/FILESYSTEM_USER_DATA.md section 5, item 9 (adaptive-tune state):
 // this task's own audit (ada18d3262, "adaptive-tune state was judged
 // re-derivable over one firing") licenses a SIMPLER treatment than zones
 // config/relay cycles get -- no per-zone divergence forensics, just the same
@@ -275,7 +275,7 @@ NVS_KEY_LEN_CHECK(ADAPTIVE_TUNE_NVS_KEY_KIBASE);
 // to the WHOLE adaptive_tune_kibase_blob_t as one document. Losing this file
 // (partition wipe, corrupt file) costs at most one firing's worth of
 // baseline re-latching, not a safety-relevant fact -- see adaptive_tune.c's
-// kibase_file_validate() for the one structural check applied (the mask
+// adaptive_tune_kibase_file_validate() for the one structural check applied (the mask
 // cannot reference a zone index that does not exist), everything else is
 // trusted the same way the NVS blob always was.
 /* ADAPTIVE_TUNE_KIBASE_FILE_PATH now lives in adaptive_tune.h (kiln-scope reset names it). */
@@ -577,8 +577,23 @@ typedef struct {
     bool     revert_available;
     float    revert_kp, revert_ki, revert_kd;
     float    revert_k_dc, revert_tau_s, revert_dead_time_s;
+    // Fix-review F2: the values THIS adaptive commit left live. adaptive_tune_revert() refuses (and
+    // clears revert_available) unless the live gains and model still equal these, so ANY other
+    // writer (Accept, PID POST, UART, iter_tune restore, backup import, kiln_cfg apply) that
+    // changed the zone since invalidates the snapshot without each writer needing a hook.
+    float    revert_expect_kp, revert_expect_ki, revert_expect_kd;
+    float    revert_expect_k_dc, revert_expect_tau_s, revert_expect_dead_time_s;
     bool     revert_ki_baseline_valid;
     float    revert_ki_baseline;
+
+    // F3 follow-up (FLASH_WORKER_LOCK_INVERSION_AUDIT_2026-10-09): true while a
+    // zones_config write for this zone runs with adaptive_tune_lock RELEASED --
+    // adaptive_tune_run_end()'s apply pass (set at plan, cleared at commit) or
+    // adaptive_tune_revert()'s write. Each refuses to start while the other has
+    // it set, so a revert can never consume a snapshot whose change has not
+    // landed yet (and be silently overwritten by it), and a run-end commit can
+    // never latch has_applied/ki_baseline over gains a revert just restored.
+    bool     write_in_flight;
 
     // ---------------------------------------------------------------------
     // ADAPTIVE_FUZZY_EVALUATION.md sec 3: the fuzzy confidence gate's
@@ -652,6 +667,48 @@ void adaptive_tune_set_reason(char *buf, size_t bufsz, const char *fmt, ...);
 // only from adaptive_tune_run_end() (adaptive_tune.c), always with adaptive_tune_lock
 // already held.
 bool adaptive_tune_refine_zone_locked(uint8_t zi, uint8_t profile_id);
+
+// F3 plan/apply/commit split of the two refines above (see the comment in
+// adaptive_tune_model.c): plan and commit run with adaptive_tune_lock held,
+// apply runs with it RELEASED because the zones setters reach the flash worker.
+typedef struct {
+    bool bootstrap_baseline, bootstrap_ok;
+    float baseline_k_dc;
+    bool have_model, model_ok, pid_ok;
+    float k_dc, k_blended, tau_s, dead_time_s, kp, ki, kd;
+    uint8_t profile_id;
+    uint32_t clear_gen; // adaptive_tune_ki_clear_gen[zi] at plan time
+    // Dev review 9 L1: the live gains read at plan time. apply re-reads them and skips the writes
+    // if another writer (autotune Accept) changed them since; commit re-reads them to detect a
+    // writer that landed after ours. Either way no has_applied / revert snapshot is recorded.
+    bool have_prior;
+    float prior_kp, prior_ki, prior_kd;
+    bool stale; // apply found the gains changed since plan; nothing was written
+    bool busy;  // fix-review F3/F4: a profile/autotune claim was held at apply; nothing was written
+    bool save_failed; // RAM updated and live, persist failed
+} adaptive_tune_zone_plan_t;
+
+typedef struct {
+    bool reached_apply;
+    uint8_t count;
+    struct {
+        uint8_t j;
+        bool ok;
+        float blended, tau, dead;
+    } cells[MAX31856_CHANNEL_COUNT];
+} adaptive_tune_coupled_plan_t;
+
+// Bumped per zone (under adaptive_tune_lock) by adaptive_tune_clear_ki_baseline().
+// Per zone, so an Accept on one zone does not stop another zone's commit from
+// re-latching its own fresh SIMC Ki.
+extern uint32_t adaptive_tune_ki_clear_gen[MAX31856_CHANNEL_COUNT];
+
+bool adaptive_tune_plan_zone_locked(uint8_t zi, uint8_t profile_id, adaptive_tune_zone_plan_t *plan);
+void adaptive_tune_apply_zone_plan(uint8_t zi, adaptive_tune_zone_plan_t *plan);
+bool adaptive_tune_commit_zone_locked(uint8_t zi, const adaptive_tune_zone_plan_t *plan);
+void adaptive_tune_plan_coupled_locked(uint8_t zi, adaptive_tune_coupled_plan_t *plan);
+void adaptive_tune_apply_coupled_plan(uint8_t zi, adaptive_tune_coupled_plan_t *plan);
+void adaptive_tune_commit_coupled_locked(uint8_t zi, const adaptive_tune_coupled_plan_t *plan);
 void adaptive_tune_refine_coupled_locked(uint8_t zi);
 void adaptive_tune_refine_ki_locked(uint8_t zi, const profile_exec_firing_stats_t *stats);
 

@@ -1,3 +1,4 @@
+#include "../common/json_escape_ctl.h"
 #include "kiln_cfg_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 
@@ -5,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "persist_scratch.h" /* persist_scratch_alloc() -- list_get response */
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
@@ -97,17 +99,7 @@ static bool read_small_body(httpd_req_t *req, char *buf, size_t cap)
  * json_escape -- a config name came from a POST body at some point. */
 static void json_escape(const char *src, char *out, size_t out_cap)
 {
-    size_t o = 0;
-    for (const char *p = src; *p && o + 2 < out_cap; p++) {
-        if (*p == '"' || *p == '\\') {
-            if (o + 3 >= out_cap) {
-                break;
-            }
-            out[o++] = '\\';
-        }
-        out[o++] = *p;
-    }
-    out[o] = '\0';
+    kiln_json_escape_ctl(src, out, out_cap);
 }
 
 /* Parses a required "id=<int>" form field, 0..INT32_MAX. Returns false (body
@@ -119,9 +111,9 @@ static bool parse_required_id(const char *body, const char *key, int32_t *out_id
     if (len <= 0) {
         return false;
     }
-    char *end = NULL;
-    long v = strtol(val, &end, 10);
-    if (end == val || *end != '\0' || v < 0 || v > INT32_MAX) {
+    /* HTTP fuzz F7/F9: plain decimal digits only (no '+', no leading whitespace), ERANGE rejected, not saturated. */
+    long v = 0;
+    if (val[0] == '+' || !http_form_parse_long(val, len, 0, INT32_MAX, &v)) {
         return false;
     }
     *out_id = (int32_t)v;
@@ -137,7 +129,7 @@ static bool parse_required_id(const char *body, const char *key, int32_t *out_id
 static bool parse_required_name(const char *body, char *out, size_t out_cap)
 {
     int len = http_form_find_field(body, "name", out, out_cap);
-    return len > 0;
+    return len > 0 && !http_form_value_has_ctl(out, len);
 }
 
 /* ---- GET /api/kiln_configs -------------------------------------------------
@@ -155,14 +147,23 @@ static esp_err_t list_get_handler(httpd_req_t *req)
     /* KILN_CFG_MAX_COUNT rows * (~60 bytes/row headroom for id+escaped name)
      * plus a small fixed header -- generous over what 8 rows of a <=23-char
      * name could ever need. */
-    char json[KILN_CFG_MAX_COUNT * 96 + 96];
+    /* HEAP, not stack (httpd 8 KB stack, "httpd stack blob class"); freed on
+     * every return path. */
+    const size_t json_cap = KILN_CFG_MAX_COUNT * 96 + 96;
+    char *json = persist_scratch_alloc(json_cap);
+    if (json == NULL) {
+        ESP_LOGE(TAG, "kiln_configs list: malloc(%u) failed", (unsigned)json_cap);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, "application/json");
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"out of memory building the response\"}");
+    }
     size_t o = 0;
     int written;
 
 #define APPEND(...)                                                                              \
     do {                                                                                          \
-        written = snprintf(json + o, sizeof(json) - o, __VA_ARGS__);                             \
-        if (written < 0 || (size_t)written >= sizeof(json) - o) {                                \
+        written = snprintf(json + o, json_cap - o, __VA_ARGS__);                                 \
+        if (written < 0 || (size_t)written >= json_cap - o) {                                    \
             goto overflow;                                                                        \
         }                                                                                          \
         o += (size_t)written;                                                                      \
@@ -184,7 +185,11 @@ static esp_err_t list_get_handler(httpd_req_t *req)
            safety_cfg_store_has_data() ? "true" : "false");
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_send(req, json, o);
+    {
+        esp_err_t sent = httpd_resp_send(req, json, o);
+        free(json);
+        return sent;
+    }
 
 overflow:
     /* Never send the truncated, malformed partial buffer as a 200 -- that
@@ -194,7 +199,8 @@ overflow:
      * sized generously already; do not enlarge it to "fix" this (house
      * rule: never enlarge httpd stack buffers). */
     ESP_LOGE(TAG, "kiln_configs list JSON overflowed %u-byte buffer at o=%u",
-             (unsigned)sizeof(json), (unsigned)o);
+             (unsigned)json_cap, (unsigned)o);
+    free(json);
     httpd_resp_set_status(req, "500 Internal Server Error");
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_send(req, "{\"ok\":false,\"error\":\"kiln configs list too large to encode\"}", HTTPD_RESP_USE_STRLEN);
@@ -217,12 +223,18 @@ static esp_err_t save_post_handler(httpd_req_t *req)
     }
     int32_t id_or_negative = -1;
     {
+        /* Same strict parse as parse_required_id() (F7/F9): -2 (bad escape /
+         * too long), a leading '+' or space, ERANGE and out-of-range are all
+         * refused, never treated as an absent id (which saves a NEW slot). */
         char id_val[16];
         int id_len = http_form_find_field(body, "id", id_val, sizeof(id_val));
+        if (id_len == -2 || id_len == 0) { /* fwlow16 L4: present-but-empty "id=" is malformed, not absent (-1) */
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
+            return ESP_OK;
+        }
         if (id_len > 0) {
-            char *end = NULL;
-            long v = strtol(id_val, &end, 10);
-            if (end == id_val || *end != '\0' || v < 0 || v > INT32_MAX) {
+            long v = 0;
+            if (id_val[0] == '+' || !http_form_parse_long(id_val, id_len, 0, INT32_MAX, &v)) {
                 httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "id out of range");
                 return ESP_OK;
             }
@@ -362,7 +374,7 @@ static esp_err_t apply_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25,
+    /* Owner decision Q2 (docs/SYSTEM_MODE_GATE.md, 2026-09-25,
      * gate-slices-2/4/5 spec): refuse ALL zone/relay/guard config writes --
      * applying a saved kiln config is exactly that -- while a firing or
      * autotune run is active, PAUSED included. Checked HERE, right after the

@@ -1318,11 +1318,11 @@ class PlanCountTest(unittest.TestCase):
         ids = R.SUITES["lcd"]
         self.assertEqual(len(ids), 26)
         heat = [c for c in ids if R.get_case(c).heat]
-        self.assertEqual(heat, ["LCD-22", "LCD-23", "LCD-24", "LCD-25"])
+        self.assertEqual(heat, ["LCD-10", "LCD-22", "LCD-23", "LCD-24", "LCD-25"])
         plan = os.path.join(os.path.dirname(__file__), "..", "..", "..", "docs", "BENCH_TEST_SYSTEM_PLAN.md")
         with open(plan, encoding="utf-8") as fh:
             text = fh.read()
-        self.assertIn("| LCD | 26 | 4 (LCD-22, LCD-23, LCD-24, LCD-25) |", text)
+        self.assertIn("| LCD | 26 | 5 (LCD-10, LCD-22, LCD-23, LCD-24, LCD-25) |", text)
         self.assertIn("| LCD-25 |", text)
 
 

@@ -312,10 +312,10 @@ for cid in _WEB_IDS:
     # via operator.require_attended() inside its case function.
     register(_c(cid, "WEB", cid, operator_only=(cid == "WEB-WIFI-06")))
 _LCD_DEPENDS_ON = {
-    "LCD-02": "HP-01", "LCD-03": "HP-04", "LCD-04": "OT-B01", "LCD-19": "WEB-SEC-04",
+    "LCD-02": "HP-01", "LCD-03": "HP-04", "LCD-04": "OT-B01", "LCD-19": "WEB-SEC-04", "LCD-20": "OT-E11",
 }
 for cid in _LCD_IDS:
-    register(_c(cid, "LCD", cid, depends_on=_LCD_DEPENDS_ON.get(cid), heat=(cid in ("LCD-22", "LCD-23", "LCD-24", "LCD-25"))))
+    register(_c(cid, "LCD", cid, depends_on=_LCD_DEPENDS_ON.get(cid), heat=(cid in ("LCD-10", "LCD-22", "LCD-23", "LCD-24", "LCD-25"))))
 _SP_DEPENDS_ON = {"SP-03": "HP-02", "SP-06": "HP-01", "SP-04": "OT-B01"}
 for cid, desc in _SP:
     register(_c(

@@ -2,7 +2,7 @@
 // image is currently sitting in the `pico_img` staging partition.
 //
 // WHY THIS EXISTS, AND WHY IT REPLACED THE PLAN'S "EMBED THE IMAGE" SHAPE
-// (docs/PICO_AUTO_UPDATE_PLAN.md G1). The plan proposed embedding a SaftyFW
+// (docs/PICO_AUTO_UPDATE.md G1). The plan proposed embedding a SaftyFW
 // binary in the ESP application so a boot-time updater always has something
 // to push. That is not implementable in this tree, for three independent
 // reasons, none of which is the flash budget the plan worried about:

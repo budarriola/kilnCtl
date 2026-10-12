@@ -305,6 +305,8 @@ typedef enum {
     ADAPTIVE_TUNE_REVERT_INVALID_ZONE,
     ADAPTIVE_TUNE_REVERT_WRITE_FAILED,       // the zone-config write itself was rejected -- see
                                               // zones_config_set_model()/set_pid()'s own validation
+    ADAPTIVE_TUNE_REVERT_BUSY,               // refused: run_end's unlocked apply pass (or another revert)
+                                              // is writing this zone right now -- retry (F3 follow-up)
 } adaptive_tune_revert_result_t;
 
 // Restores zone zone_index's Kp/Ki/Kd, K_dc/tau/dead_time, AND the Ki-
@@ -343,6 +345,12 @@ typedef enum {
 // operator-facing refusal string (empty on ADAPTIVE_TUNE_REVERT_OK) -- same
 // idiom as this module's other refusal-reason fields.
 adaptive_tune_revert_result_t adaptive_tune_revert(uint8_t zone_index, char *reason, size_t reason_cap);
+
+// Dev review 9 L1: true while any zone has a run-end apply (or a revert) writing
+// gains with adaptive_tune_lock released. autotune_engine_accept() refuses (busy)
+// while this is set so Accept cannot interleave with the run-end apply. Takes
+// adaptive_tune_lock briefly; the caller must hold no autotune or zones lock.
+bool adaptive_tune_any_write_in_flight(void);
 
 // ---- pure helpers, exposed for host tests (adaptive_tune.c has no other
 // seam into this math -- see test_adaptive_tune.c) --------------------------

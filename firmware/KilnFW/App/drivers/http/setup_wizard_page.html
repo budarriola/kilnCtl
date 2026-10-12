@@ -403,7 +403,7 @@ function computeStepState(step, storedStep, readinessByKey) {
   // of problems. Steps that legitimately declare no readinessKeys (0
   // and 11, "Welcome / preflight" and "Authentication (optional)" as of
   // the 2026-09-19 step-count reduction to 12 -- step 8 has
-  // 'ct_attribution' with docs/CT_ATTRIBUTION_VERIFICATION_PLAN.md, which is
+  // 'ct_attribution' with docs/CT_ATTRIBUTION_VERIFICATION.md, which is
   // exactly what lets this file's existing regression machinery refuse a
   // stale 'done' there; see the comment above WIZARD_STEPS) are unaffected:
   // this can only be true for a step that named keys and got none of them back.
@@ -780,17 +780,31 @@ function submitZonesConfig(data, liveZones, extraParams) {
     params = params.concat(zoneToPostParams(z, i));
   }
   if (extraParams) params = params.concat(extraParams);
+  /* WEB_UI_JS_AUDIT M-1: send the generation this step's GET saw; the board refuses 409 if the zones config
+     changed elsewhere since (autotune Accept, an MCP writer, another page). */
+  if (data.generation !== undefined && data.generation !== null) params.push('expected_generation=' + data.generation);
   return fetch('/api/zones', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: params.join('&'),
   }).then(function (r) {
-    if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
+    if (!r.ok) {
+      return r.text().then(function (t) {
+        try {
+          var j = JSON.parse(t);
+          if (j && j.error === 'zones_config_stale') {
+            throw new Error('The zone settings changed elsewhere since this step loaded (autotune, another page or a tool). ' +
+              'Nothing was saved. Reload this page and redo the step.');
+          }
+        } catch (pe) { if (pe && pe.message && pe.message.indexOf('Nothing was saved') !== -1) throw pe; }
+        throw new Error(t || ('http ' + r.status));
+      });
+    }
     return r;
   });
 }
 
 /* ---- Step 4 (zone type). Requirement 1: the consequence text below is
  * copied VERBATIM (byte-for-byte) from zones_page.html's zoneBlock()
- * ".onoffWarn" paragraph (docs/ON_OFF_ZONE_PLAN.md step 6, commit
+ * ".onoffWarn" paragraph (docs/ON_OFF_ZONE.md step 6, commit
  * 172e3081) -- reused, not reworded, so an operator who later opens
  * /settings/zones sees the exact same sentence rather than a second,
  * differently-phrased account of the same consequence. Only the
@@ -1097,7 +1111,7 @@ function step8SweepVerdict(st) {
     return { resolved: true, text: 'Verification complete: a CT channel was resolved for all ' +
       total + ' zone(s).' };
   }
-  var why = st.ct_map_reason ? (' ' + st.ct_map_reason) : '';
+  var why = st.ct_map_reason ? (' ' + window.kcEscapeHtml(st.ct_map_reason)) : '';
   return { resolved: false, text: 'Sweep finished, but CT attribution was NOT resolved (' +
     resolved + ' of ' + total + ' zone(s) resolved).' + why +
     ' This step is not complete -- the result is inconclusive, not a pass.' };
@@ -1126,7 +1140,7 @@ function renderStep8() {
         'legitimate finish, not a deferral.</p><div class="gnav"><button type="button" id="step8Skip">No CT ' +
         'installed &amp; mark done</button></div>';
       document.getElementById('step8Skip').addEventListener('click', function () {
-        postStepState(8, 'done', 'ct_installed=0, nothing to verify').then(function () { loadAll(); });
+        postStepState(8, 'done', 'ct_installed=0, no check').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
       });
       return;
     }
@@ -1173,7 +1187,8 @@ function renderStep8() {
           return;
         }
         okEl.innerHTML = '<p class="wok">' + v.text + '</p>';
-        postStepState(8, 'done').then(function () {
+        postStepState(8, 'done').then(function (r) {
+          if (stepSaveFailed(r)) return;
           armStepMessage(9, function () {
             var ok2 = document.getElementById('step8Ok');
             if (ok2) ok2.innerHTML = '<p class="wok">' + v.text + '</p>';
@@ -1184,6 +1199,18 @@ function renderStep8() {
         step8StopPoll();
       }
     }
+
+    /* L-5: a sweep already running (page reload, or coming back to this step) must not read
+       "Not running." -- show it and resume polling. Only a running sweep is rendered here, so a
+       finished one is never re-posted as done on a mere visit. */
+    fetchJsonOr('/api/zones/current_sweep/status', null).then(function (st0) {
+      if (!st0 || st0.state !== 'running' || !document.getElementById('step8Status')) return;
+      renderSweepStatus(st0);
+      step8StopPoll();
+      step8Poll = setInterval(function () {
+        fetchJsonOr('/api/zones/current_sweep/status', null).then(renderSweepStatus);
+      }, 2000);
+    });
 
     document.getElementById('step8Start').addEventListener('click', function () {
       var errEl = document.getElementById('step8Err');
@@ -1216,7 +1243,7 @@ function renderStep8() {
 
     document.getElementById('step8SkipLater').addEventListener('click', function () {
       step8StopPoll();
-      postStepState(8, 'skipped', 'deferred -- resume later, requires heat + owner present').then(function () { loadAll(); });
+      postStepState(8, 'skipped', 'deferred, needs heat + owner').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
     });
   });
 }
@@ -1250,7 +1277,7 @@ function autotunePrecheck(zone) {
 // WIZARD_STEPS). Reuses GET /api/autotune/matrix verbatim, same as the old
 // step 11 did; ON_OFF zones are excluded from the pair count for the same
 // reason the old step excluded them from its review rows (their coupling
-// row/column is zeroed by construction -- ON_OFF_ZONE_PLAN.md).
+// row/column is zeroed by construction -- ON_OFF_ZONE.md).
 function couplingSummaryHtml(matrix, zones) {
   if (!matrix || !matrix.cells) {
     return '<p class="hint">Cross-zone coupling: no data yet (populated by autotune). ' +
@@ -1355,7 +1382,7 @@ function renderStep9() {
             resultEl.textContent = matched ? 'Stored.' : 'WARNING: board reports different gains than sent.';
             resultEl.className = matched ? 's10result wok' : 's10result werr';
             if (matched && kp > 0) {
-              postStepState(9, 'done').then(function () { loadAll(); });
+              postStepState(9, 'done').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
             }
           });
         }).catch(function (e) {
@@ -1432,8 +1459,8 @@ function renderStep11() {
       : ('<p class="hint">Currently off for both the web UI and the LCD (the shipped default). ' +
          'Administrator credential ' + (credsSet ? 'already set.' : 'not set yet.') + '</p>');
     var html = '<p class="hint">Optional. With authentication off, anyone on the network can start a ' +
-      'firing or change a safety limit -- the OTA/factory-reset/system-reset routes still require the ' +
-      'AP password either way.</p>' +
+      'firing or change a safety limit -- the OTA/factory-reset/system-reset routes are open too ' +
+      'while login is off.</p>' +
       statusLine +
       '<div class="wfield"><label for="s11User">Administrator username</label>' +
       '<input type="text" id="s11User" autocomplete="username" value="' + window.kcEscapeHtml(adminUser) + '"></div>' +
@@ -1460,7 +1487,19 @@ function renderStep11() {
         renderErrList(errEl, ['Set an administrator password -- none is on record yet.']);
         return;
       }
+      /* L-12: a password without a username, or a changed username without a password, used to be
+         dropped silently while the page still said "Saved." */
+      if (password && !username) {
+        renderErrList(errEl, ['Enter the administrator username that goes with this password.']);
+        return;
+      }
+      if (username && !password && username !== adminUser) {
+        renderErrList(errEl, ['A changed username needs the password entered too -- it cannot be sent alone.']);
+        return;
+      }
       renderErrList(errEl, []);
+      var unlock11 = lockSave('step11Save');
+      if (!unlock11) return;
       var chain = Promise.resolve();
       if (username && password) {
         chain = chain.then(function () {
@@ -1475,31 +1514,59 @@ function renderStep11() {
             // (too short, bad role, store full), locking the web UI behind a
             // credential that does not exist. Reject here so the catch below
             // surfaces it and cmd=set_policy is never sent.
-            if (res.ok) return null;
+            // The board answers 200 {"ok":false,"error":...} on refusal (security_http.c).
             return res.json().catch(function () { return {}; }).then(function (body) {
+              if (res.ok && body && body.ok === true) return null;
               throw new Error((body && body.error) ||
                 'The board refused the administrator login details -- login was NOT turned on.');
             });
           });
         });
       }
+      // set_policy requires all four fields (strict form parsing): read the
+      // current policy and change only web_enabled.
       chain = chain.then(function () {
+        return fetch('/api/auth/config').then(function (r) {
+          if (!r.ok) throw new Error('Could not read the current login policy -- nothing was changed.');
+          return r.json();
+        });
+      }).then(function (cur) {
+        var tmo = function (v) { return (typeof v === 'number' && isFinite(v)) ? Math.trunc(v) : -1; };
         return fetch('/api/auth/security', {
           method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'cmd=set_policy&web_enabled=' + (wantEnable ? '1' : '0'),
+          body: 'cmd=set_policy&web_enabled=' + (wantEnable ? '1' : '0') +
+                '&lcd_enabled=' + (cur && cur.lcd_enabled ? '1' : '0') +
+                '&web_timeout_min=' + tmo(cur && cur.web_timeout_min) +
+                '&lcd_timeout_min=' + tmo(cur && cur.lcd_timeout_min),
         });
       });
       chain.then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (body) {
-          return { ok: res.ok, body: body };
+          return { ok: res.ok && !!body && body.ok === true, body: body };
         });
       }).then(function (r) {
         if (!r.ok) {
           renderErrList(errEl, [(r.body && r.body.error) || 'Save refused -- see status above and try again.']);
           return;
         }
-        msgEl.textContent = 'Saved. Read back: web login is now ' + (wantEnable ? 'ON' : 'off') + '.';
-        postStepState(11, 'done').then(function () { loadAll(); });
+        // Re-read the policy: the text below reports what the board says, not what was sent.
+        // RETURNED so a rejection here (network, cancelled sign-in) reaches the catch below.
+        return fetch('/api/auth/config').then(function (rb) {
+          if (!rb.ok) throw new Error('read-back refused');
+          return rb.json();
+        }).then(function (cfg) {
+          msgEl.textContent = wizardLoginReadBackText(wantEnable, cfg);
+          if (!cfg || typeof cfg.web_enabled === 'undefined' || !!cfg.web_enabled !== !!wantEnable) {
+            renderErrList(errEl, ['The board does not report the requested login setting. Step 11 is NOT marked done -- check and save again.']);
+            return null;
+          }
+          return postStepState(11, 'done');
+        }, function (rbErr) {
+          if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(rbErr)) throw rbErr;
+          msgEl.textContent = wizardLoginReadBackText(wantEnable, null);
+          renderErrList(errEl, ['Could not read the setting back to confirm it. Step 11 is NOT marked done -- try again.']);
+          return null;
+        }).then(function (r) { if (r && !stepSaveFailed(r)) loadAll(); });
       }).catch(function (err) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(err)) {
           renderErrList(errEl, ['Sign-in cancelled.']);
@@ -1507,12 +1574,23 @@ function renderStep11() {
         }
         renderErrList(errEl, [(err && err.message) ||
           'Could not reach the board to save this -- try again once it answers.']);
-      });
+      }).then(unlock11);
     });
     document.getElementById('step11Skip').addEventListener('click', function () {
-      postStepState(11, 'skipped', 'optional, deferred').then(function () { loadAll(); });
+      postStepState(11, 'skipped', 'optional, deferred').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
     });
   });
+}
+
+/* Step 11 read-back text. cfg = parsed GET /api/auth/config, or null when it could not be read
+ * (401, network): then only "sent" is claimed. Pure; unit-tested. */
+function wizardLoginReadBackText(wantEnable, cfg) {
+  if (!cfg || typeof cfg.web_enabled === 'undefined') {
+    return 'The setting was sent but could not be read back to confirm it.';
+  }
+  var on = !!cfg.web_enabled;
+  return (on !== !!wantEnable ? 'Not as requested. ' : 'Saved. ') + 'Read back: web login is now ' +
+    (on ? 'ON' : 'off') + '.' + (on !== !!wantEnable ? ' This differs from what was requested.' : '');
 }
 
 /* ---- Step 7 (safety processor commissioning, embedded per owner decision).
@@ -1619,7 +1697,7 @@ function gRenderStepper() {
 function pillHtml(state) {
   var label = { pending: 'PENDING', done: 'DONE', skipped: 'SKIPPED', regressed: 'REGRESSED',
     unknown: 'UNKNOWN' }[state] || state;
-  return '<span class="pill pill-' + state + '">' + label + '</span>';
+  return '<span class="pill pill-' + window.kcEscapeHtml(state) + '">' + window.kcEscapeHtml(label) + '</span>';
 }
 
 function gRenderOverview() {
@@ -1679,6 +1757,8 @@ function gRenderTarget(target) {
   if (target === 'overview' || target === null || target === undefined) {
     overview.hidden = false;
     stepScreen.hidden = true;
+    /* Leaving a step for the overview (e.g. after a progress-save failure) is not unsaved work. */
+    kcDirty = false;
     gRenderStepper();
     return;
   }
@@ -1697,18 +1777,73 @@ function gGoto(target) {
   gRenderTarget(target);
 }
 
+/* Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): armed only by a real input/change event
+ * inside a step body; cleared when a step is (re)rendered from board data
+ * (gRenderStepDetail) and when a step's progress save succeeds (postStepState). */
+var kcDirty = false;
+var kcEditSeq = 0; /* bumped by every real edit: a save clears the guard only for edits made before it was sent */
+[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11].forEach(function (id) {
+  var body = document.getElementById('stepBody' + id);
+  if (!body) return;
+  body.addEventListener('input', function () { kcDirty = true; kcEditSeq++; });
+  body.addEventListener('change', function () { kcDirty = true; kcEditSeq++; });
+});
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 // Marks a step's stored state via the already-landed POST /api/setup/progress
 // (implementation step 2) -- never a second store, per plan section 5.
 // Reloads readiness+progress afterward so the overview/stepper immediately
 // reflect the board's own merged verdict rather than an optimistic local guess.
 function postStepState(stepId, state, note) {
+  var seqAtSend = kcEditSeq;
   var body = 'step=' + stepId + '&state=' + encodeURIComponent(state) +
     (note ? ('&note=' + encodeURIComponent(note)) : '');
   return fetch('/api/setup/progress', {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: body,
   }).then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
+    if (r.ok && kcEditSeq === seqAtSend) kcDirty = false;
     return { ok: r.ok, body: j };
   }); });
+}
+
+/* Chain-friendly variant: a refused progress save rejects so the step's .catch shows it
+ * instead of the "Saved." message. */
+function postStepStateOrThrow(stepId, state, note) {
+  return postStepState(stepId, state, note).then(function (r) {
+    if (r && r.ok) return r;
+    throw new Error('Could not save this step: ' + stepRefusalText(r) + ' -- try again.');
+  });
+}
+
+/* A refusal code from the board as operator text: bad_host / cross_origin get the app.js
+ * guidance (dev web review LOW-5), anything else is shown as the code. */
+function stepRefusalText(r) {
+  var code = (r && r.body && r.body.error) || '';
+  var guide = (code && window.kcHostRefusalText) ? window.kcHostRefusalText({ error: code }) : null;
+  return guide || code || 'the board refused it';
+}
+
+/* Double-submit guard (dev web review LOW-3): disables the Save button and returns the
+ * release function, or null when a save is already in flight (the caller must then return). */
+function lockSave(id) {
+  var b = document.getElementById(id);
+  if (!b || b.disabled) return null;
+  b.disabled = true;
+  return function () { var b2 = document.getElementById(id); if (b2) b2.disabled = false; };
+}
+
+/* A step save the board refused (non-2xx) must be shown, not chained into loadAll. */
+function stepSaveFailed(r) {
+  if (r && r.ok) return false;
+  var el = document.getElementById('stepStatusLine');
+  var msg = 'Could not save this step: ' + stepRefusalText(r) + ' -- try again.';
+  if (el) { el.textContent = msg; el.className = 'werr'; }
+  return true;
 }
 
 function renderErrList(el, errors) {
@@ -1764,7 +1899,7 @@ function renderStep0() {
             ['A crash report appeared since this screen loaded -- review it before continuing.']);
           return;
         }
-        postStepState(0, 'done').then(function () { loadAll(); });
+        postStepState(0, 'done').then(function (r) { if (!stepSaveFailed(r)) loadAll(); });
       });
     });
   });
@@ -1809,6 +1944,8 @@ function renderStep1() {
       okEl.innerHTML = '';
       if (!v.valid) { renderErrList(errEl, v.errors); return; }
       renderErrList(errEl, []);
+      var unlock1 = lockSave('step1Save');
+      if (!unlock1) return;
       fetch('/api/settings/tz', {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'tz=' + encodeURIComponent(fields.tz),
@@ -1820,7 +1957,7 @@ function renderStep1() {
         });
       }).then(function (r) {
         if (!r.ok) { return r.text().then(function (t) { throw new Error(t || ('http ' + r.status)); }); }
-        return postStepState(1, 'done');
+        return postStepStateOrThrow(1, 'done');
       }).then(function () {
         armStepMessage(1, function () {
           var ok2 = document.getElementById('step1Ok');
@@ -1831,7 +1968,7 @@ function renderStep1() {
         // Rejection text rendered verbatim, never paraphrased (plan section 1).
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock1);
     });
   });
 }
@@ -1964,8 +2101,10 @@ function renderStep2() {
         copy.thermo_mask = liveZones[mi].thermo_mask;
         mergedZones.push(copy);
       }
+      var unlock2 = lockSave('step2Save');
+      if (!unlock2) return;
       submitZonesConfig(dataCopy, mergedZones).then(function () {
-        return postStepState(2, 'done');
+        return postStepStateOrThrow(2, 'done');
       }).then(function () {
         armStepMessage(2, function () {
           var ok2 = document.getElementById('step2Ok');
@@ -1975,7 +2114,7 @@ function renderStep2() {
       }).catch(function (e) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock2);
     });
   });
 }
@@ -2073,7 +2212,11 @@ function renderStep3() {
       }).then(function (allVerified) {
         if (allVerified) {
           okEl.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
-          return postStepState(3, 'done').then(function () {
+          return postStepState(3, 'done').then(function (r) {
+            if (stepSaveFailed(r)) {
+              okEl.innerHTML = '<p class="hint">The thermocouple settings were written, but this step was NOT marked done.</p>';
+              return;
+            }
             armStepMessage(3, function () {
               var ok2 = document.getElementById('step3Ok');
               if (ok2) ok2.innerHTML = '<p class="wok">Write accepted and every channel verified converting.</p>';
@@ -2215,8 +2358,10 @@ function renderStep4() {
       var newlyOnOff = step4ZoneTypeConfirmLines(zones, liveZones, thermoCount);
 
       function doSubmit() {
+        var unlock4 = lockSave('step4Save');
+        if (!unlock4) return;
         submitZonesConfig(data, liveZones).then(function () {
-          return postStepState(4, 'done');
+          return postStepStateOrThrow(4, 'done');
         }).then(function () {
           armStepMessage(4, function () {
             var ok2 = document.getElementById('step4Ok');
@@ -2226,7 +2371,7 @@ function renderStep4() {
         }).catch(function (e) {
           if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
           renderErrList(errEl, [String(e.message || e)]);
-        });
+        }).then(unlock4);
       }
 
       function revertNewlyOnOff() {
@@ -2412,8 +2557,10 @@ function renderStep5() {
       document.querySelectorAll('#s5names .s5relayname').forEach(function (inp) {
         relayNameParams.push('relay' + (parseInt(inp.dataset.relay, 10) + 1) + '_name=' + encodeURIComponent(inp.value));
       });
+      var unlock5 = lockSave('step5Save');
+      if (!unlock5) return;
       submitZonesConfig(dataCopy, liveZones, relayNameParams).then(function () {
-        return postStepState(5, 'done');
+        return postStepStateOrThrow(5, 'done');
       }).then(function () {
         armStepMessage(5, function () {
           var ok2 = document.getElementById('step5Ok');
@@ -2423,7 +2570,7 @@ function renderStep5() {
       }).catch(function (e) {
         if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
         renderErrList(errEl, [String(e.message || e)]);
-      });
+      }).then(unlock5);
     });
   });
 }
@@ -2523,6 +2670,8 @@ function renderStep6() {
       var changedLines = step6LimitConfirmLines(zones, liveZones, thermoCount);
 
       function doCommitCheckAndSubmit() {
+        var unlock6 = lockSave('step6Save');
+        if (!unlock6) return;
         // Commit-time re-check (requirement 4 / plan section 1 "Validation"):
         // re-fetch the Pico's ceiling right now -- step 7 could commission it
         // in another tab while this one sits open, and this is exactly the
@@ -2530,9 +2679,9 @@ function renderStep6() {
         fetchJsonOr('/api/safety/commissioning', null).then(function (freshCommissioning) {
           var freshAbsMax = getAbsMaxTempC(freshCommissioning);
           var v2 = validateStep6(liveZones.slice(0, thermoCount), freshAbsMax);
-          if (!v2.valid) { renderErrList(errEl, v2.errors); return; }
+          if (!v2.valid) { renderErrList(errEl, v2.errors); unlock6(); return; }
           submitZonesConfig(data, liveZones).then(function () {
-            return postStepState(6, 'done');
+            return postStepStateOrThrow(6, 'done');
           }).then(function () {
             armStepMessage(6, function () {
               var ok2 = document.getElementById('step6Ok');
@@ -2542,8 +2691,8 @@ function renderStep6() {
           }).catch(function (e) {
             if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
             renderErrList(errEl, [String(e.message || e)]);
-          });
-        });
+          }).then(unlock6);
+        }, unlock6);
       }
 
       if (!changedLines.length) {
@@ -2858,6 +3007,11 @@ function renderStep7() {
       fetchJsonOr('/api/zones', null).then(function (freshZones) {
         // Same thermo_count slice as the initial render above -- re-fetched
         // fresh, so a thermo_count change in another tab is honoured too.
+        /* L-16: an unreadable /api/zones must not pass the abs_max >= zone max check. */
+        if (!freshZones) {
+          renderErrList(errEl, ['Could not re-read the zone limits to check the ceiling -- nothing was saved. Try again.']);
+          return;
+        }
         var freshThermoCount = (freshZones && freshZones.thermo_count) || 0;
         var freshMaxTemps = ((freshZones && freshZones.zones) || []).slice(0, freshThermoCount)
           .map(function (z) { return z.max_temp_c || 0; });
@@ -2890,7 +3044,8 @@ function renderStep7() {
           }).then(function (res) {
             msgEl.textContent = res.message;
             if (res.ok) {
-              postStepState(7, 'done').then(function () {
+              postStepState(7, 'done').then(function (r) {
+                if (stepSaveFailed(r)) return;
                 var savedMsg = res.message;
                 armStepMessage(7, function () {
                   var ok2 = document.getElementById('step7Ok');
@@ -2935,6 +3090,7 @@ function consumeArmedStepMessage(stepId) {
 function gRenderStepDetail(stepId) {
   var s = latestMerged.filter(function (m) { return m.id === stepId; })[0];
   if (!s) return;
+  kcDirty = false;
   document.getElementById('stepHeading').textContent = (stepId + 1) + '. ' + s.title;
   var safetyNote = document.getElementById('stepSafetyNote');
   if (s.safety) {
@@ -2944,6 +3100,7 @@ function gRenderStepDetail(stepId) {
   } else {
     safetyNote.hidden = true;
   }
+  document.getElementById('stepStatusLine').className = 'hint';
   document.getElementById('stepStatusLine').textContent = 'Current state (from the board, not this ' +
     'browser tab): ' + s.state.toUpperCase() + (s.detail ? ' -- ' + s.detail : '');
   var regressedNote = document.getElementById('stepRegressedNote');
@@ -2997,6 +3154,7 @@ function gResume() {
 }
 
 function loadAll() {
+  var seqAtStart = kcEditSeq; /* REVIEW_WEBFX4 LOW-4: an edit typed while the reload was in flight must survive it */
   return Promise.all([
     fetchJsonOr('/api/readiness', { items: [] }),
     fetchJsonOr('/api/setup/progress', defaultProgress()),
@@ -3009,7 +3167,7 @@ function loadAll() {
     gRenderOverview();
     gRenderStepper();
     var target = currentStepId();
-    if (target !== null) {
+    if (target !== null && kcEditSeq === seqAtStart) {
       gGoto(target);
     }
   });

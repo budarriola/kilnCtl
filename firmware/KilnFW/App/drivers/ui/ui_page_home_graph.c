@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 void ui_page_home_format_mmss(uint32_t seconds, char *out, size_t out_cap)
 {
@@ -263,4 +264,52 @@ size_t ui_page_home_lagging_zone_indices(uint8_t mask, uint8_t max_zones, uint8_
         out_indices[n++] = zi;
     }
     return n;
+}
+
+float ui_page_home_active_horizon_s(float plan_horizon_s, float elapsed_s)
+{
+    float h = 1.0f;
+    if (plan_horizon_s > h) {
+        h = plan_horizon_s;
+    }
+    if (elapsed_s > h) {
+        h = elapsed_s;
+    }
+    if (!(h <= UI_PAGE_HOME_GRAPH_MAX_HORIZON_S)) {
+        h = UI_PAGE_HOME_GRAPH_MAX_HORIZON_S;
+    }
+    return h;
+}
+
+float ui_page_home_history_tolerance_s(float horizon_s, size_t point_count, float sample_period_s)
+{
+    float tol = sample_period_s;
+    if (point_count > 1 && horizon_s > 0.0f) {
+        float half_bucket = horizon_s / (float)(point_count - 1) * 0.5f;
+        if (half_bucket > tol) {
+            tol = half_bucket;
+        }
+    }
+    return tol;
+}
+
+size_t ui_page_home_pause_reason_text(const char *reason, char *out, size_t out_cap)
+{
+    if (out == NULL || out_cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (reason == NULL || reason[0] == '\0') {
+        return 0;
+    }
+    if (strcmp(reason, "pico_reboot_undecided") == 0) {
+        snprintf(out, out_cap, "Heat withheld: safety processor rebooted, cause unknown");
+    } else if (strcmp(reason, "pico_fatal_reboot") == 0) {
+        snprintf(out, out_cap, "Paused: safety processor rebooted after a fatal fault");
+    } else if (strcmp(reason, "heat_grant_unconfirmed") == 0) {
+        snprintf(out, out_cap, "Paused: heat grant not confirmed by safety processor");
+    } else {
+        snprintf(out, out_cap, "Paused: %.40s", reason);
+    }
+    return strlen(out);
 }

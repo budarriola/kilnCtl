@@ -115,6 +115,8 @@ logs/bench_test/
 # backup_export() MCP tool default output -- machine-generated board backup
 # JSON snapshots, timestamped filenames, never analysis worth committing.
 logs/backup_export/
+# MCP per-call audit log (tool name + arg keys only), mcpkit/call_log.py
+logs/mcp_calls/
 logs/firing_readiness/
 
 # idf.py menuconfig writes these next to the (already-ignored) sdkconfig.

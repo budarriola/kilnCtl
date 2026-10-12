@@ -43,9 +43,11 @@ extern "C" {
  * sec 210, COMMISSIONING.md sec 2: "retuning a safety threshold during a
  * firing is not a supported operation"), which this path had silently
  * stopped enforcing. config_store_write_volatile() now DOES refuse a
- * narrow class of installs while ARMED -- raising or clearing
- * abs_max_temp_c (S1) or max_rate_c_per_min (S8), or any tc_type change --
- * and IS reported with KILNLINK_COMMIT_CONFIG_REJECT_ARMED on this same
+ * install while heat is POSSIBLE (relay energized, heat requested, stale
+ * context, or current flowing) unless every trip-relevant field matches the
+ * running record apart from a short allowlist of non-safety fields and a few
+ * provable tightenings (guard-fixes review HIGH-1/MED-1; ARMED alone no
+ * longer refuses) -- and IS reported with KILNLINK_COMMIT_CONFIG_REJECT_ARMED on this same
  * frame. An ordinary kiln-package swap (PID/profile-shaped params) is
  * unaffected, since a swap is already refused during a firing by its own
  * separate interlock and never needs to touch these fields anyway.

@@ -1,6 +1,6 @@
 """Tests for kilnctrl.pico_image_freshness -- the parser and checker behind
 firmware/KilnFW/App/test/check_embedded_pico_image_fresh.ps1
-(docs/PICO_AUTO_UPDATE_PLAN.md, 2026-09-20 embed-at-boot pass).
+(docs/PICO_AUTO_UPDATE.md, 2026-09-20 embed-at-boot pass).
 
 Includes a drift guard (test_struct_layout_matches_header) mirroring
 test_autotune_rules_drift_guard.py's technique: regex the real C header
@@ -236,7 +236,7 @@ def test_git_saftyfw_scoped_head_real_repo_matches_git_cli():
     git_saftyfw_scoped_head() must return exactly what `git log -1
     --format=%h -- <SCOPED_PATHS>` returns, since that is the exact
     invocation gen_build_info.cmake uses to stamp SAFTYFW_GIT_COMMIT
-    (docs/PICO_AUTO_UPDATE_PLAN.md sec 13) -- any difference would make
+    (docs/PICO_AUTO_UPDATE.md sec 13) -- any difference would make
     every real board read as stale."""
     import subprocess
     expected = subprocess.run(
@@ -253,7 +253,7 @@ def test_git_saftyfw_scoped_head_real_repo_matches_git_cli():
 # ---------------------------------------------------------------------------
 #
 # Three separately-maintained, differently-typed copies of the same
-# five-path list exist (docs/PICO_AUTO_UPDATE_PLAN.md sec 13, review rounds
+# five-path list exist (docs/PICO_AUTO_UPDATE.md sec 13, review rounds
 # 2-3 -- round 1 shipped only two of the three paths kept in sync, missing
 # firmware/hwAbstraction; round 2 added the whole firmware/hwAbstraction tree,
 # which over-covered esp/, host/, idf/, test/ and README.md that never reach

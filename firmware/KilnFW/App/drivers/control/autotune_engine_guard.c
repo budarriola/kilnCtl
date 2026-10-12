@@ -104,6 +104,7 @@ void autotune_apply_relay(bool want_on)
      * the bench: 293 relay samples over 12 s of stepping, every one open, with
      * relay_cycles unmoved. profile_executor.c's autotune_apply_relay() already logs
      * both of these; this one did not. */
+    const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E: before the gate decision */
     if (want_on) {
         uint32_t sources = 0;
         if (relay_authority_zone_blocked(s_at.safety, s_at.zone_index, &sources)) {
@@ -117,7 +118,7 @@ void autotune_apply_relay(bool want_on)
         /* AUTHORIZED, not the manual gate -- see kiln_io_owner.h's top
          * comment and profile_executor.c's autotune_apply_relay() for the identical
          * reasoning (2026-08-19, TODO.md 10.14 Phase 1). */
-        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized(mask, want_on ? mask : 0);
+        esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(mask, want_on ? mask : 0, off_epoch_since);
         if (err != ESP_OK) {
             ESP_LOGW(AT_TAG, "autotune zone %u relay write failed: %s -- relay state is unknown and "
                           "the trace cannot be trusted",
@@ -264,6 +265,29 @@ autotune_sample_t *autotune_unpack_zone_trace(uint8_t zone, size_t count)
     return out;
 }
 
+/* SL3-R2 A2: watchdog variant. The guard-9 task must never block on s_at.lock (the start path holds it
+ * across a long section). Returns true if no autotune is running or the abort was applied; false if the
+ * lock was not obtained within timeout_ms (caller retries next tick). */
+bool autotune_engine_abort_bounded(const char *reason, uint32_t timeout_ms)
+{
+    if (s_at.lock == NULL) {
+        return true;
+    }
+    if (xSemaphoreTake(s_at.lock, pdMS_TO_TICKS(timeout_ms)) != pdTRUE) {
+        ESP_LOGW(AT_TAG, "autotune_engine_abort_bounded(%s): s_at.lock busy for %u ms -- retry next tick",
+                 reason ? reason : "?", (unsigned)timeout_ms);
+        return false;
+    }
+    if (!state_is_running(s_at.state)) {
+        xSemaphoreGive(s_at.lock);
+        return true;
+    }
+    abort_locked(reason);
+    xSemaphoreGive(s_at.lock);
+    ESP_LOGI(AT_TAG, "autotune zone %u aborted by watchdog: %s", s_at.zone_index, s_at.abort_reason);
+    return true;
+}
+
 void autotune_engine_abort(const char *reason)
 {
     /* See autotune_begin_run_locked()'s guard comment above. */
@@ -298,7 +322,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         out->refused_by_mode_gate = false;
         out->mode_reason[0] = '\0';
     }
-    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE_PLAN.md): accept
+    /* Owner decision 2026-10-08 (docs/SYSTEM_MODE_GATE.md): accept
      * writes zone PID gains/max_ramp, so refuse while a firing or autotune
      * run is active, before any mutation. Single choke point for the HTTP
      * and UART-bridge callers. */
@@ -440,11 +464,12 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * is held and before the first write. relay_authority_heat_run_active()
      * is a leaf spinlock (takes no other lock), so calling it here -- after
      * s_at.lock was released, holding only the reservation flag -- cannot
-     * invert any lock order. A start that lands after this re-check is not
-     * closed here: profile_executor_run() has no cheap way to see the
-     * reservation, so a residual window of the few writes below remains.
-     * Other gated writers (e.g. zones_http_pid.c) share the same
-     * snapshot-then-write pattern; deliberately unchanged in this pass. */
+     * invert any lock order. A start that lands after this re-check is closed
+     * by the setters themselves (profile_executor_run() has no cheap way to see the
+     * reservation, so the claim is re-read at the write instead).
+     * L2 (dev review 9) closes that residual: zones_config_set_pid/model re-check the
+     * heat claim inside the zones_cfg_lock section that bumps the generation, and the
+     * busy result is mapped below. */
     {
         sys_mode_snapshot_t recheck = {0};
         relay_authority_heat_run_active(&recheck.profile_running, &recheck.autotune_running);
@@ -463,8 +488,38 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
         }
     }
 
-    if (!zones_config_set_pid(zone, g.kp, g.ki, g.kd)) {
+    /* Dev review 9 L1: refuse (busy, the same 409 path as the mode gate) while the adaptive tuner's
+     * run-end apply is writing this or any zone with its lock released; otherwise the SIMC gains
+     * would overwrite these or a stale revert snapshot would later undo them. The reservation is
+     * held and no s_at/zones lock is, so the brief adaptive_tune_lock take cannot invert an order. */
+    if (adaptive_tune_any_write_in_flight()) {
         autotune_engine_release_zone_for_external_write(zone);
+        ESP_LOGW(AT_TAG, "autotune_engine_accept() refused -- an adaptive-tune gain write is in progress");
+        if (out != NULL) {
+            out->refused_by_mode_gate = true;
+            snprintf(out->mode_reason, sizeof(out->mode_reason), "%s",
+                     "an adaptive-tune gain write is in progress -- retry in a moment");
+        }
+        return false;
+    }
+
+    /* Fix-review F1/F3: a step-method Accept writes model + gains as ONE atomic zones_config
+     * section (single claim check; the adaptive run-end apply uses the same setter and its
+     * plan-time stale check lives inside that section, so neither can interleave with the other).
+     * A relay Accept has no model to write and stays gains-only. */
+    zones_set_result_t pid_result =
+        (method == AUTOTUNE_METHOD_RELAY)
+            ? zones_config_set_pid_checked(zone, g.kp, g.ki, g.kd)
+            : zones_config_set_model_and_pid_checked(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s, g.kp, g.ki,
+                                                     g.kd, NULL);
+    if (pid_result != ZONES_SET_OK) {
+        autotune_engine_release_zone_for_external_write(zone);
+        if (pid_result == ZONES_SET_BUSY_RUNNING && out != NULL) {
+            /* L2: a run claimed heat between the re-check above and the setter's own re-check. */
+            out->refused_by_mode_gate = true;
+            snprintf(out->mode_reason, sizeof(out->mode_reason), "%s",
+                     "a profile or autotune run is active -- zone writes refused");
+        }
         return false;
     }
 
@@ -543,7 +598,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
      * feedback alone -- exactly how every zone ran before this existed --
      * and it is recoverable by re-running the test. Losing the accepted
      * gains to a false return would not be. */
-    bool model_persisted = zones_config_set_model(zone, m.k_gain_c_per_duty, m.tau_s, m.dead_time_s);
+    bool model_persisted = true; /* written atomically with the gains above */
     if (!model_persisted) {
         ESP_LOGW(AT_TAG,
                  "autotune zone %u: gains accepted but plant model (K=%.2f tau=%.1f L=%.1f) was rejected or "
@@ -693,6 +748,24 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                  * ignored above and this branch didn't exist), so a rejected
                  * or failed persist looked identical to ADOPTED to every
                  * caller. Now reported distinctly. */
+                /* Review 15 LOW-2: a refusal (heat claim held by a run, bad zone)
+                 * writes NOTHING, unlike an nvs_save() failure which leaves the
+                 * value live in RAM. Tell them apart by reading the ceiling back:
+                 * only report "live in RAM" when it really is. */
+                float live_ceiling_c_per_hr = 0.0f;
+                const bool live_in_ram = zones_config_get_max_ramp(zone, &live_ceiling_c_per_hr) &&
+                                         live_ceiling_c_per_hr == predicted_max_ramp_ambient_c_per_hr;
+                if (!live_in_ram) {
+                    if (out != NULL) {
+                        out->adoption = AUTOTUNE_CEILING_REFUSED_NOT_WRITTEN;
+                        out->new_ceiling_c_per_hr = old_ceiling_c_per_hr;
+                    }
+                    ESP_LOGW(AT_TAG,
+                             "autotune zone %u: gains and model accepted; predicted ramp ceiling (%.1f degC/hr) "
+                             "was refused by the zones store (a run holds the heat claim?) and NOT written; "
+                             "ceiling stays %.1f degC/hr",
+                             zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
+                } else {
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_FAILED_TO_PERSIST;
                     out->new_ceiling_c_per_hr = predicted_max_ramp_ambient_c_per_hr;
@@ -707,6 +780,7 @@ bool autotune_engine_accept(const autotune_accept_opts_t *opts, autotune_accept_
                          "is live in RAM for this boot but was not persisted -- will revert to %.1f degC/hr "
                          "on reboot",
                          zone, (double)predicted_max_ramp_ambient_c_per_hr, (double)old_ceiling_c_per_hr);
+                }
             } else {
                 if (out != NULL) {
                     out->adoption = AUTOTUNE_CEILING_ADOPTED;

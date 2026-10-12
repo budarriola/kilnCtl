@@ -13,6 +13,9 @@
 
 #include "../drivers/http/http_auth_enforce.h"
 #include "../drivers/http/http_origin_check.h"
+#include "../drivers/http/http_num_strict.h"
+#include "../drivers/common/json_escape_ctl.h"
+#include "../drivers/common/http_form.h"
 
 static void test_lookup_tier_real_routes(void) {
     TEST_SECTION("http_auth_lookup_tier -- against the real route_tier_table.h, not a mirror");
@@ -605,10 +608,25 @@ static size_t fake_len(void *c, const char *name) {
 static int fake_str(void *c, const char *name, char *buf, size_t cap) {
     const char *v = fake_find((const fake_hdrs_t *)c, name);
     if (!v) return -1;
+    if (!cap) return 1;
     size_t n = strlen(v);
     if (n >= cap) { memcpy(buf, v, cap - 1); buf[cap - 1] = '\0'; return 1; } /* truncated, like httpd */
     memcpy(buf, v, n + 1);
     return 0;
+}
+
+static void test_num_strict(void) {
+    TEST_SECTION("http_num_parse_ulong -- strict decimal (audit L7)");
+    unsigned long v = 99;
+    TEST_CHECK(http_num_parse_ulong("123", &v) && v == 123, "plain decimal");
+    TEST_CHECK(http_num_parse_ulong("0", &v) && v == 0, "zero");
+    TEST_CHECK(!http_num_parse_ulong("-1", &v), "leading minus refused");
+    TEST_CHECK(!http_num_parse_ulong("", &v), "empty refused");
+    TEST_CHECK(!http_num_parse_ulong("+5", &v), "leading plus refused");
+    TEST_CHECK(!http_num_parse_ulong(" 5", &v), "leading space refused");
+    TEST_CHECK(!http_num_parse_ulong("5x", &v), "trailing junk refused");
+    TEST_CHECK(!http_num_parse_ulong("99999999999999999999999", &v), "overflow refused");
+    TEST_CHECK(!http_num_parse_ulong(NULL, &v), "NULL refused");
 }
 
 static void test_origin_glue(void) {
@@ -628,6 +646,8 @@ static void test_origin_glue(void) {
     TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "Origin beats good Referer: refused");
     f.origin = longref;
     TEST_CHECK(http_origin_request_is_cross_origin(&f, fake_len, fake_str), "overlong Origin: refused");
+    fake_hdrs_t empty_o = {"", NULL, "192.168.1.50"};
+    TEST_CHECK(http_origin_request_is_cross_origin(&empty_o, fake_len, fake_str), "present-but-empty Origin, no Referer: refused (L35)");
     fake_hdrs_t none = {NULL, NULL, "192.168.1.50"};
     TEST_CHECK(!http_origin_request_is_cross_origin(&none, fake_len, fake_str), "no provenance headers: allowed");
     fake_hdrs_t proxy = {"http://kiln.example", NULL, "10.0.0.2"};
@@ -652,9 +672,147 @@ static void test_origin_check(void) {
     TEST_CHECK(http_origin_is_cross_origin("garbage", NULL, "192.168.1.50", false), "unparseable Origin refused");
 }
 
+static void test_host_allowlist(void) {
+    TEST_SECTION("http_origin_request_host_refused -- F4 DNS-rebinding Host allow-list");
+    fake_hdrs_t f = {NULL, NULL, "192.168.1.50"};
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "IPv4 host passes");
+    f.host = "192.168.4.1:80";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "AP IP with port passes");
+    f.host = "kilnctl.local";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mDNS name passes");
+    f.host = "KilnCtl.Local:80";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "mDNS name case-insensitive");
+    f.host = "kiln.local";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kiln"), "kiln.local passes when it is the name");
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "other .local refused");
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, NULL), ".local refused with no mdns name");
+    f.host = "localhost:8080";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, NULL), "localhost passes");
+    f.host = "evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "evil.example refused");
+    f.host = "192.168.1.50.evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "IP-prefixed hostname refused");
+    f.host = "1.2.3";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "3-octet refused");
+    f.host = "kilnctl";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "bare hostname passes");
+    f.host = "KilnCtl.lan:8080";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "router DNS name.lan with port passes");
+    f.host = "kilnctl.home";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "name.home passes");
+    f.host = "kilnctl.local.evil.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.local.evil.example refused (rebinding)");
+    f.host = "kilnctl.attacker.com";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.attacker.com refused (rebinding)");
+    f.host = "kilnctl.lan.evil.com";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.lan.evil.com refused (rebinding)");
+    f.host = "kilnctl.home.arpa.evil.com";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.home.arpa.evil.com refused (rebinding)");
+    f.host = "kilnctl.attacker.example";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.attacker.example refused (rebinding)");
+    f.host = "kilnctl.lan";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.lan passes");
+    f.host = "kilnctl.home";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.home passes");
+    f.host = "kilnctl.localdomain";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.localdomain passes");
+    f.host = "kilnctl.home.arpa";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.home.arpa passes");
+    f.host = "kilnctl.internal";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.internal passes");
+    f.host = "kilnctl.intranet";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.intranet passes");
+    f.host = "kilnctl.private";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.private passes");
+    f.host = "kilnctl.LAN.";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "kilnctl.LAN. passes");
+    f.host = "KILNCTL.LAN:80";
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "KILNCTL.LAN:80 passes");
+    f.host = "kilnctlx.lan";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "label extension refused");
+    f.host = "evil.kilnctl.lan";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "name as non-first label refused");
+    f.host = "kiln";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "label prefix refused");
+    f.host = "captive.apple.com";
+    TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "captive probe host refused");
+    {
+        /* review LOW-2/3/4: edge cases */
+        static const struct { const char *host; const char *name; bool refused; const char *what; } k[] = {
+            {"kilnctl..lan", "kilnctl", true, "empty label refused"},
+            {"kilnctl.lan..", "kilnctl", true, "two trailing dots refused"},
+            {"kilnctl.", "kilnctl", false, "bare name with one trailing dot passes"},
+            {"kilnctl.lan:abc", "kilnctl", true, "non-numeric port refused"},
+            {"kilnctl.lan:", "kilnctl", true, "empty port refused"},
+            {":", "kilnctl", true, "bare colon refused"},
+            {".lan", "kilnctl", true, ".lan alone refused"},
+            {"kilnctl.lan", "", true, "empty name arg refuses names"},
+            {"kilnctl.lan", "KilnCtl", false, "mixed-case name arg matches"},
+            {"localhost.", "kilnctl", false, "localhost. passes (consistent trailing dot)"},
+            {"192.168.1.50.", "kilnctl", false, "IPv4 with trailing dot passes"},
+            {"192.168.1.50..", "kilnctl", true, "IPv4 two trailing dots refused"},
+            {"[::1]", "kilnctl", false, "IPv6 literal passes"},
+            {"[::ffff:192.168.1.1]:80", "kilnctl", false, "IPv4-mapped IPv6 passes"},
+            {"[kilnctl.attacker.com]", "kilnctl", true, "bracketed name refused"},
+            {"[::g]", "kilnctl", true, "bracketed non-hex refused"},
+            {"[]", "kilnctl", true, "empty brackets refused"},
+        };
+        for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+            f.host = k[i].host;
+            TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, k[i].name) == k[i].refused, k[i].what);
+        }
+        char h95[96], h96[97];
+        memcpy(h95, "kilnctl.lan", 11);
+        memset(h95 + 11, 'a', 95 - 11);
+        h95[95] = '\0';
+        memset(h96, 'a', 96);
+        h96[96] = '\0';
+        f.host = h95;
+        TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "95-byte unlisted host refused (fits buffer)");
+        f.host = h96;
+        TEST_CHECK(http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "96-byte host refused (overlong)");
+    }
+    f.host = NULL;
+    TEST_CHECK(!http_origin_request_host_refused(&f, fake_len, fake_str, "kilnctl"), "missing Host not refused here");
+    {
+        char loc[32];
+        TEST_CHECK(http_captive_location(loc, sizeof(loc), 0x0104a8c0u) && strcmp(loc, "http://192.168.4.1/") == 0, "captive Location absolute to AP IP");
+        TEST_CHECK(!http_captive_location(loc, sizeof(loc), 0) && strcmp(loc, "/") == 0, "captive Location falls back to / without an IP");
+        char tiny[8];
+        TEST_CHECK(!http_captive_location(tiny, sizeof(tiny), 0x0104a8c0u) && strcmp(tiny, "/") == 0, "captive Location small buffer falls back");
+        TEST_CHECK(http_captive_location(loc, sizeof(loc), 0xff0a0a0au) && strcmp(loc, "http://10.10.10.255/") == 0, "captive Location multi-digit octets");
+        TEST_CHECK(http_captive_location_for_request(loc, sizeof(loc), true, 0x0104a8c0u) && strcmp(loc, "http://192.168.4.1/") == 0, "captive request on AP is absolute");
+        TEST_CHECK(!http_captive_location_for_request(loc, sizeof(loc), false, 0x0104a8c0u) && strcmp(loc, "/") == 0, "captive request off AP stays relative");
+        TEST_CHECK(http_captive_location_for_request(loc, sizeof(loc), true, 0) && strcmp(loc, "http://192.168.4.1/") == 0, "captive on AP, netif unreadable -> default AP IP");
+    }
+    /* The attack: matching evil Origin + Host passes the Origin compare, not the Host gate. */
+    fake_hdrs_t atk = {"http://rebind.attacker.example", NULL, "rebind.attacker.example"};
+    TEST_CHECK(!http_origin_request_is_cross_origin(&atk, fake_len, fake_str), "matching evil Origin+Host passes origin compare");
+    TEST_CHECK(http_origin_request_host_refused(&atk, fake_len, fake_str, "kilnctl"), "matching evil Origin+Host refused by Host gate");
+}
+
+static void test_f5_shared_helpers(void) {
+    TEST_SECTION("F5 -- kiln_json_escape_ctl and http_form_value_has_ctl");
+    char o[40];
+    kiln_json_escape_ctl("x\"\\\n\t\x1f\x7f", o, sizeof(o));
+    TEST_CHECK(strcmp(o, "x\\\"\\\\\\u000a\\u0009\\u001f\\u007f") == 0, "quote, backslash, controls, DEL");
+    char t[4];
+    kiln_json_escape_ctl("\x01", t, sizeof(t));
+    TEST_CHECK(t[0] == '\0', "escape that does not fit is dropped whole");
+    TEST_CHECK(http_form_value_has_ctl("a\nb", 3), "newline detected");
+    TEST_CHECK(http_form_value_has_ctl("a\x7f", 2), "DEL detected");
+    TEST_CHECK(!http_form_value_has_ctl("Zone 1 (top)", 12), "ordinary name clean");
+    char dec[16];
+    int n = http_form_find_field("name=a%00b", "name", dec, sizeof(dec));
+    TEST_CHECK(n == -2, "%00 is refused by the decoder (-2), never decoded to an embedded NUL");
+}
+
 void run_test_http_auth_enforce(void) {
+    test_f5_shared_helpers();
     test_origin_check();
+    test_host_allowlist();
     test_origin_glue();
+    test_num_strict();
     test_page_shell_allowlist();
     test_lookup_tier_real_routes();
     test_effective_tier_fail_closed_default();

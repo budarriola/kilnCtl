@@ -1,4 +1,5 @@
 #include "display_power_cfg.h"
+#include "cfgfs_file_validators.h"
 
 #include <string.h>
 
@@ -8,6 +9,8 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "relay_authority.h" /* relay_authority_reset_in_flight() -- no save during a factory reset */
+#include "cfg_save_lock.h"
 
 static const char *TAG = "display_power_cfg";
 
@@ -17,7 +20,7 @@ static const char *TAG = "display_power_cfg";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_DISPLAY_POWER "display_power"
-// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA_PLAN.md
+// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 3) -- see unit_pref.c's identical NVS_KEY_UNIT_PREF_REV for
 // why this is a separate key rather than a field on the stored blob.
 #define NVS_KEY_DISPLAY_POWER_REV "disp_pow_rev"
@@ -26,7 +29,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER);
 NVS_KEY_LEN_CHECK(NVS_KEY_DISPLAY_POWER_REV);
 
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 (prefs move): the file
+// docs/FILESYSTEM_USER_DATA.md section 5 step 3 (prefs move): the file
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.
@@ -77,7 +80,7 @@ static void apply_defaults(void)
 // applied to a stored NVS blob -- reused verbatim as the
 // pref_cfg_fs_validate_fn_t for the file, so the moved item is validated
 // exactly as its NVS path validates today.
-static bool display_power_validate(const void *bytes, size_t len)
+bool display_power_cfg_file_validate(const void *bytes, size_t len)
 {
     if (len != sizeof(display_power_cfg_blob_t)) {
         return false;
@@ -124,7 +127,7 @@ esp_err_t display_power_cfg_start(void)
         size_t len = sizeof(blob);
         hal_status_t rerr = hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len);
         if (rerr == HAL_OK) {
-            if (display_power_validate(&blob, len)) {
+            if (display_power_cfg_file_validate(&blob, len)) {
                 nvs_valid = true;
                 nvs_blob = blob;
             } else {
@@ -155,7 +158,7 @@ esp_err_t display_power_cfg_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(DISPLAY_POWER_FILE_PATH, &nvs_blob, sizeof(nvs_blob), nvs_valid, nvs_rev,
-                                           display_power_validate, &resolved, &resolved_rev, &used_file);
+                                           display_power_cfg_file_validate, &resolved, &resolved_rev, &used_file);
     if (!have_value) {
         return ESP_OK; // neither side had anything trustworthy -- defaults stand
     }
@@ -179,6 +182,12 @@ display_timeout_setting_t display_power_cfg_timeout_setting(void) { return s_tim
 bool display_power_cfg_keep_on_while_firing(void) { return s_keep_on_while_firing; }
 bool display_power_cfg_display_on_error(void) { return s_display_on_error; }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_setting_t timeout_setting,
                                 bool keep_on_while_firing, bool display_on_error)
 {
@@ -192,6 +201,7 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     // In-RAM truth first -- live for the very next display_power_policy_step()
     // caller regardless of whether the NVS write below succeeds, same
     // ordering as unit_pref_set()/ramp_assist_cfg_set_enabled().
+    cfg_save_lock_take(&s_save_lock);
     s_brightness_percent = brightness_percent;
     s_timeout_setting = timeout_setting;
     s_keep_on_while_firing = keep_on_while_firing;
@@ -207,9 +217,17 @@ esp_err_t display_power_cfg_set(uint8_t brightness_percent, display_timeout_sett
     blob.display_on_error = display_on_error ? 1 : 0;
 
     // cfg file ONLY -- see unit_pref_set() and docs/CONFIG_FILESYSTEM.md.
-    esp_err_t err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
+    /* No save while a factory reset is in flight (HTTP audit L37 follow-up, MED-2): the write would land
+     * on storage the reset is erasing. Narrows the window only; the erase takes no lock this path holds. */
+    esp_err_t err = ESP_ERR_INVALID_STATE;
+    if (!relay_authority_reset_in_flight()) {
+        err = pref_cfg_fs_commit(DISPLAY_POWER_FILE_PATH, &blob, sizeof(blob), new_rev, "display power settings");
+    }
     if (err == ESP_OK) {
         s_display_power_rev = new_rev;
+    }
+    cfg_save_lock_give(&s_save_lock);
+    if (err == ESP_OK) {
         ESP_LOGI(TAG, "display power settings saved: brightness=%u%% timeout_setting=%u keep_on_while_firing=%s "
                       "display_on_error=%s",
                  (unsigned)brightness_percent, (unsigned)timeout_setting,
@@ -241,7 +259,7 @@ void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev
     memset(&f_blob, 0, sizeof(f_blob));
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(f_blob), display_power_validate, &f_blob, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(DISPLAY_POWER_FILE_PATH, sizeof(f_blob), display_power_cfg_file_validate, &f_blob, &f_rev, &f_valid);
 
     bool n_valid = false;
     display_power_cfg_blob_t n_blob;
@@ -254,7 +272,7 @@ void display_power_cfg_get_dualwrite_status(bool *file_valid, uint32_t *file_rev
             memset(&blob, 0, sizeof(blob));
             size_t len = sizeof(blob);
             if (hal_kv_get_blob(&h, NVS_KEY_DISPLAY_POWER, &blob, &len) == HAL_OK &&
-                display_power_validate(&blob, len)) {
+                display_power_cfg_file_validate(&blob, len)) {
                 n_valid = true;
                 n_blob = blob;
                 uint32_t rev = 0;

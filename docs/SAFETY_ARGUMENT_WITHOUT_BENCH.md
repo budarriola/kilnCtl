@@ -1,6 +1,6 @@
 # The safety argument that does not depend on the bench
 
-> Works blocker 4 of `docs/RELEASE_HARDENING_PLAN.md` ("a safety argument that
+> Works blocker 4 of `docs/RELEASE_HARDENING.md` ("a safety argument that
 > does not depend on the bench"). Standalone document rather than an extension
 > of the plan, because it needs to sit alongside — and periodically
 > re-reconcile against — `docs/SAFETY_CASE.md` §4 and

@@ -181,6 +181,17 @@ void setup_wizard_progress_get_all(setup_wizard_step_t out[SETUP_WIZARD_STEP_COU
 // step_index >= SETUP_WIZARD_STEP_COUNT.
 esp_err_t setup_wizard_progress_get_step(uint8_t step_index, setup_wizard_step_t *out);
 
+// Largest decoded "note" form value the HTTP handler can see: its POST body cap
+// (setup_progress_http.c SETUP_PROGRESS_BODY_MAX, 192) bounds it.
+#define SETUP_WIZARD_NOTE_FORM_MAX 193
+
+// Extracts the "note" field from a url-encoded form body into out (out_cap
+// bytes, normally SETUP_WIZARD_NOTE_MAX), TRUNCATING to out_cap-1 bytes
+// without splitting a UTF-8 sequence, never rejecting a long note. out is ""
+// when the field is absent or empty. Returns false only if the decoded value
+// cannot fit even the form scratch (body larger than the handler's cap).
+bool setup_wizard_progress_note_from_form(const char *body, char *out, size_t out_cap);
+
 // Records `state` (and `note`, which may be NULL/empty -- truncated to
 // SETUP_WIZARD_NOTE_MAX-1 bytes if longer, never rejected outright, since a
 // too-long note is an operator's free text, not a schema violation) for one

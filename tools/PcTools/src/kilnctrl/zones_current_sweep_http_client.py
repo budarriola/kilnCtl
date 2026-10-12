@@ -187,6 +187,8 @@ def status(host: str, timeout: float = ZONE_SWEEP_HTTP_TIMEOUT_S) -> dict:
     ``i_normal_pushed_mask``: bitmask of zones whose measured baseline
     current was actually pushed to the safety processor
     (zone_normals_set()) this run.
+    ``esp_persist_failed``: true when an ESP-side save of the CT provenance
+    records failed this run (Pico values unaffected).
     ``summed_unmeasured_mask``: bitmask of zones that, in summed-CT
     topology, could NOT be measured -- see this module's own docstring and
     ZONE_SWEEP_NORMAL_NOISE_FLOOR_A. A zone appearing in this mask on a

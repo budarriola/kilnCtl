@@ -73,11 +73,14 @@ esp_err_t unit_pref_post_handler(httpd_req_t *req)
         return ESP_OK;
     }
 
-    if (unit_pref_set(pref) != ESP_OK) {
-        /* Live value took effect (unit_pref_set() updates RAM first) but the
-         * cfg save failed. With no NVS fallback that is an error, never ok. */
-        ESP_LOGW(DASH_TAG, "unit preference applied but not persisted -- will not survive a reboot");
-        return cfg_fs_http_persist_failed(req);
+    bool adopted = false;
+    esp_err_t pref_err = unit_pref_set_ex(pref, &adopted);
+    if (pref_err != ESP_OK) {
+        /* Live value is unchanged unless `adopted` (file read back with the new value, RAM
+         * matches it). No NVS fallback: an error, never ok. */
+        ESP_LOGW(DASH_TAG, "unit preference save not verified -- %s",
+                 adopted ? "live value now matches the file" : "live value unchanged");
+        return cfg_fs_http_persist_failed_adopted_for(req, adopted, UNIT_PREF_FILE_PATH, pref_err);
     }
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
@@ -142,7 +145,7 @@ esp_err_t safety_log_level_post_handler(httpd_req_t *req)
     }
     char *endptr = NULL;
     long level = strtol(level_val, &endptr, 10);
-    if (endptr == level_val || *endptr != '\0' || level < 0 || level > UART_LOG_LEVEL_VERBOSE) {
+    if (level_val[0] < '0' || level_val[0] > '9' || endptr == level_val || *endptr != '\0' || level < 0 || level > UART_LOG_LEVEL_VERBOSE) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "level must be 0-4 (ERROR..VERBOSE)");
         return ESP_OK;
     }

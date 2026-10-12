@@ -158,6 +158,11 @@ def encode_announce(f: dict) -> bytes:
 # uptime_ms(u32) boot_reason(1) context_age_100ms(1) context_frames_ok(u32)
 # context_frames_bad(u32) tx_frames_dropped(u32) state(1) flags(1)
 # log_frames_dropped(u32) = 30 bytes. (KILNLINK_PROTOCOL_VERSION 15 -> 16)
+# Optional byte30 trip_seq(u8) = 31 bytes, sent by a protocol 17 Pico to a
+# protocol 17 ESP (kilnlink audit 2026-10-09 M4); emitted here only when the
+# field dict carries "trip_seq". Optional byte31 pico_boot_id(u8) = 32 bytes
+# (protocol 18, docs/TEST_TRIP_PLAN.md): emitted when the dict carries
+# "pico_boot_id"; byte30 is then always written (0 if "trip_seq" is absent).
 
 _DIAG_BOOT = {
     "KILNLINK_DIAG_BOOT_POWERON": 0x01,
@@ -190,7 +195,7 @@ _DIAG_FLAG = {
 
 
 def encode_diag(f: dict) -> bytes:
-    return struct.pack(
+    out = struct.pack(
         "<BBHHIBBIIIBBI",
         0x08,
         f["trip_reason"],
@@ -206,6 +211,11 @@ def encode_diag(f: dict) -> bytes:
         _resolve_enum(f["flags"], _DIAG_FLAG),
         f["log_frames_dropped"],
     )
+    if "trip_seq" in f or "pico_boot_id" in f:
+        out += struct.pack("<B", f.get("trip_seq", 0))
+    if "pico_boot_id" in f:
+        out += struct.pack("<B", f["pico_boot_id"])
+    return out
 
 
 # -- SAFETY_CMD_TRIP_EVENT = 0x0D (Pico -> ESP, Frame D) ---------------------
@@ -349,9 +359,19 @@ def encode_ceiling(f: dict) -> bytes:
 
 
 # -- SAFETY_CMD_CLEAR_TRIP = 0x0A (ESP -> Pico) ------------------------------
-# kilnlink_clear_trip.c: cmd(1) trip_mask(u16) = 3 bytes.
+# kilnlink_clear_trip.c: cmd(1) trip_mask(u16) = 3 bytes, plus optional
+# trip_seq(u8) = 4 bytes (kilnlink audit 2026-10-09 M4, protocol 17): the
+# trip occurrence the clear is bound to, echoed from the last 31-byte DIAG.
+# Emitted only when the field dict carries "trip_seq".
+
+# Optional pico_boot_id(u8) = 5 bytes (protocol 18); the 5-byte form always
+# carries trip_seq (0 if the dict has none).
 
 def encode_clear_trip(f: dict) -> bytes:
+    if "pico_boot_id" in f:
+        return struct.pack("<BHBB", 0x0A, f["trip_mask"], f.get("trip_seq", 0), f["pico_boot_id"])
+    if "trip_seq" in f:
+        return struct.pack("<BHB", 0x0A, f["trip_mask"], f["trip_seq"])
     return struct.pack("<BH", 0x0A, f["trip_mask"])
 
 

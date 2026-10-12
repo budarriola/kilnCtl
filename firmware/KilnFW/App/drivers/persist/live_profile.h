@@ -1,4 +1,4 @@
-/* live_profile.h -- docs/LIVE_PROFILE_EDIT_PLAN.md, pass 1 (backend only, no
+/* live_profile.h -- docs/LIVE_PROFILE_EDIT.md, pass 1 (backend only, no
  * HTTP routes -- those are pass 2/3).
  *
  * Owns the structural live-edit working slot (plan section 4): a profile
@@ -166,7 +166,7 @@ bool live_edit_can_overwrite(const live_edit_record_t *rec, char *err, size_t er
  * asks for -- that file was left untouched this pass (its own edit is out
  * of this pass's assigned scope), so this is a small, deliberately
  * duplicated equivalent pending that widening; flagged in
- * docs/LIVE_PROFILE_EDIT_PLAN.md as follow-up work. */
+ * docs/LIVE_PROFILE_EDIT.md as follow-up work. */
 bool live_edit_name_collides(const char *candidate_name, const char *(*name_at)(void *ctx, uint8_t id), void *ctx,
                               uint8_t exclude_id, char *err, size_t err_cap);
 
@@ -225,12 +225,27 @@ bool live_edit_check_window(const profile_t *running, const profile_t *candidate
 bool live_profile_fork(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
                         profile_t *out_working, live_edit_record_t *out_record, char *err, size_t err_cap);
 
+/* Same as live_profile_fork(), additionally reporting whether THIS call forked (*out_forked) and, when it did,
+ * the generation its own save produced (*out_gen, read under the save lock). On the idempotent
+ * "already pending" path *out_forked is false and *out_gen is untouched: the caller keeps the generation it
+ * already holds. Either out pointer may be NULL. */
+bool live_profile_fork_gen(uint8_t origin_id, bool origin_is_builtin, const char *origin_name, const profile_t *origin,
+                           profile_t *out_working, live_edit_record_t *out_record, uint32_t *out_gen,
+                           bool *out_forked, char *err, size_t err_cap);
+
 /* Overwrites the working slot's profile content in place (does not touch the
  * record) -- the accept-time write pass 2's HTTP handler will call after
  * validating a candidate. Bumps the generation counter live_profile_
  * generation() polls so a caller (the executor tick, once wired) picks the
  * edit up on the next tick. */
 bool live_profile_save_working(const profile_t *p, char *err, size_t err_cap);
+
+/* A1: compare-and-save. With check_gen, refuses (LIVE_SAVE_STALE, nothing written) unless the generation still
+ * equals expected_gen; the check, the verified save and the bump are one section under a lock. *out_gen (if
+ * non-NULL) receives the generation produced by this very save. */
+typedef enum { LIVE_SAVE_OK = 0, LIVE_SAVE_STALE, LIVE_SAVE_FAILED } live_save_result_t;
+live_save_result_t live_profile_save_working_if_gen(const profile_t *p, bool check_gen, uint32_t expected_gen,
+                                                    uint32_t *out_gen, char *err, size_t err_cap);
 bool live_profile_load_working(profile_t *out);
 
 /* HIGH (review, 2026-09-19): tri-state so the caller (profile_executor.c's
@@ -302,6 +317,13 @@ bool live_profile_load_record(live_edit_record_t *out);
  * lands, since the working slot's job for that edit is done. Idempotent:
  * calling it with nothing pending is not an error. */
 bool live_profile_clear(char *err, size_t err_cap);
+
+/* REVIEW_WEBFX7 MED-1: for decide save-as/overwrite. load_working_gen reads the working copy and the generation
+ * together under the save lock; clear_if_gen clears only if the generation is unchanged (else LIVE_CLEAR_STALE:
+ * nothing touched, the newer edit stays pending). No lock is held between the two calls. */
+typedef enum { LIVE_CLEAR_OK = 0, LIVE_CLEAR_STALE, LIVE_CLEAR_FAILED } live_clear_result_t;
+bool live_profile_load_working_gen(profile_t *out, uint32_t *gen);
+live_clear_result_t live_profile_clear_if_gen(uint32_t expected, char *err, size_t err_cap);
 
 /* Boot hook: copies a legacy NVS record / working profile into the cfg files
  * when the matching file is absent. Never erases NVS. */

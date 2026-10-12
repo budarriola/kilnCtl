@@ -54,6 +54,7 @@ int g_test_count = 0;
 #include "cfg_fs.h"
 
 #include "profiles_builtin.c"
+#include "save_section_probe.h"
 
 static const char *UNRATED_CODES[] = {
     "FSCG1", "FSCGB1", "FSCGCL", "FSCGWM", "FSCRGL",
@@ -163,7 +164,7 @@ static void test_every_rising_segment_has_bounded_positive_ramp(void)
 }
 
 // ---------------------------------------------------------------------
-// cfg_fs dual-write of the hidden-builtin mask (docs/FILESYSTEM_USER_DATA_PLAN.md
+// cfg_fs dual-write of the hidden-builtin mask (docs/FILESYSTEM_USER_DATA.md
 // item 6, /cfg/profiles/hidden.json via pref_cfg_fs). Same shape as
 // test_unit_pref.c's dual-write cases.
 // ---------------------------------------------------------------------
@@ -233,11 +234,37 @@ static void test_hidden_save_writes_file_only(void)
 
     uint32_t f_mask = 0, f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
     TEST_CHECK(f_valid && f_mask == (1u << 3), "the file decodes to the new mask");
     uint32_t n_mask = 0, n_rev = 0;
     TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "NVS holds no mask -- the dual-write window is closed");
     TEST_CHECK(f_rev == 1 && s_hidden_rev == 1, "file rev and in-RAM rev agree at 1");
+    cfg_fs_deinit();
+}
+
+/* CFG_STORE_SAVE_RACE audit MED-2 / "Save mutex vs. flash worker": the mask
+ * edit, rev read, commit and rev bump run inside the reserved save section,
+ * so the mask still holds its old value when the section opens. */
+static uint32_t s_pb_mask_at_enter;
+static void pb_capture_mask(void) { s_pb_mask_at_enter = s_hidden_mask; }
+static void test_hidden_save_runs_in_save_section(void)
+{
+    TEST_SECTION("hidden mask: set_hidden()/restore_all() save inside the reserved save section");
+    pb_fresh();
+    TEST_CHECK(cfg_fs_init(PB_SCRATCH_BASE, NULL) == ESP_OK, "cfg_fs mounts");
+    pb_reboot();
+    profiles_builtin_start();
+    ssp_install();
+    g_ssp.on_enter = pb_capture_mask;
+    s_pb_mask_at_enter = 0xFFFFFFFFu;
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 4, true) == ESP_OK, "set_hidden ok");
+    TEST_CHECK(ssp_shape_ok(1), "set_hidden: reservation before the mutex, released after, write inside it");
+    TEST_CHECK(s_pb_mask_at_enter == 0, "set_hidden: mask untouched until the section is open");
+    ssp_uninstall();
+    ssp_install();
+    TEST_CHECK(profiles_builtin_restore_all() == ESP_OK, "restore_all ok");
+    TEST_CHECK(ssp_shape_ok(1), "restore_all: same shape");
+    ssp_uninstall();
     cfg_fs_deinit();
 }
 
@@ -271,7 +298,7 @@ static void test_hidden_higher_rev_wins_over_file(void)
     TEST_CHECK(s_hidden_mask == (1u << 9) && s_hidden_rev == 5, "NVS (rev 5) beat the file (rev 1)");
     uint32_t f_mask = 0, f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
     TEST_CHECK(f_valid && f_mask == (1u << 9) && f_rev == 5, "the file was resynced from NVS");
 
     /* Reverse: file ahead of NVS. */
@@ -349,14 +376,18 @@ static void test_hidden_cfg_write_failure_is_loud_and_rev_unadvanced(void)
     pref_cfg_fs_set_write_fn(pb_failing_write_fn);
     TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
                "set_hidden reports the cfg write failure");
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) != ESP_OK,
+               "retry of the same change still reports the failure (audit L1: no silent no-op)");
     pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(profiles_builtin_set_hidden(PROFILE_BUILTIN_ID_BASE + 7, true) == ESP_OK,
+               "retry after the fault clears writes and succeeds");
+    TEST_CHECK(s_hidden_rev == rev_before + 1, "the retry actually wrote (rev advanced)");
     TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "applied live");
-    TEST_CHECK(s_hidden_rev == rev_before, "rev did not advance without a verified write");
     uint32_t n_mask = 0, n_rev = 0;
     TEST_CHECK(!pb_nvs_mask(&n_mask, &n_rev), "nothing fell back to NVS");
     pb_reboot();
     TEST_CHECK(profiles_builtin_start() == ESP_OK, "next boot resolves cleanly");
-    TEST_CHECK(!profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "the unsaved change is gone after a reboot");
+    TEST_CHECK(profiles_builtin_is_hidden(PROFILE_BUILTIN_ID_BASE + 7), "the retried change survived the reboot");
     cfg_fs_deinit();
 }
 
@@ -405,6 +436,7 @@ void run_test_profiles_builtin(void)
     test_exactly_the_ten_named_entries_are_unrated();
     test_every_rising_segment_has_bounded_positive_ramp();
     test_hidden_save_writes_file_only();
+    test_hidden_save_runs_in_save_section();
     test_hidden_boot_resolves_from_file_when_nvs_empty();
     test_hidden_higher_rev_wins_over_file();
     test_hidden_unmounted_fails_loud_and_loads_legacy();

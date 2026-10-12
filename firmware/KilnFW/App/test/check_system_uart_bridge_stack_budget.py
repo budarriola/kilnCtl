@@ -57,7 +57,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import check_main_task_stack_budget as base  # noqa: E402
 
 ROOT = "system_bridge_task"
-CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
+CONFIGURED_STACK_BYTES = 4096  # must match uart_bridge_start_system_task()'s xTaskCreatePinnedToCore() literal
 
 # Measured 2026-09-08 against KilnCtrl.elf as built that day -- see this
 # module's docstring for the "TODO.md section 13" unresized-stack context.
@@ -73,9 +73,17 @@ CONFIGURED_STACK_BYTES = 3072  # must match uart_bridge_start_system_task()'s xT
 # the deepest reachable path (still through the cfg_fs_confirm_format_device
 # chain -- see this module's docstring; that chain is off-limits cfg_fs*
 # code and was not touched) from 2192 B to 1936 B. Retightened to match.
-CEILING_BYTES = 1936
+# 2026-10-09: long calls (l32r+callx) now followed: measured 3136 B (was 1936 B); stack raised 3072 -> 4096.
+# 2026-10-10: 3136 -> 3152 B (+16 B in a frame on the factory_reset_execute/execute_scope chain after the
+# persist K10 fixes touched factory_reset.c); honest headroom 644 B of 4096 B, above the floor (the earlier 256 B figure here was stale; the enforced floor is MIN_HONEST_HEADROOM_BYTES = 512 B, 2026-10-11), so no stack bump.
+# 2026-10-10: 3152 -> 3216 B re-measured; honest headroom still 580 B of 4096 B after the 300 B allowance.
+CEILING_BYTES = 3216
 
 UNMODELED_OVERHEAD_BYTES = 300
+
+# Honest headroom floor, enforced (2026-10-11, REVIEW_DEVBREAK3 LOW-4): retightening CEILING_BYTES upward must not walk
+# the stack into the margin with the check green; a breach forces a stack bump. Same value as the all-task checker's absolute floor.
+MIN_HONEST_HEADROOM_BYTES = 512
 
 
 def main():
@@ -121,6 +129,12 @@ def main():
     for fn in [ROOT] + path:
         running += frames.get(fn, 0)
         print(f"    {frames.get(fn, 0):>6} B  {running:>6} B cumulative  {fn}")
+
+    if honest_headroom < MIN_HONEST_HEADROOM_BYTES:
+        print()
+        print(f"check_system_uart_bridge_stack_budget: FAIL -- honest headroom {honest_headroom} B is below the "
+              f"{MIN_HONEST_HEADROOM_BYTES} B floor; raise the system_uart_bridge stack instead of raising the ceiling.")
+        return 1
 
     if total > ceiling:
         print()

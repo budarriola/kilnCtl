@@ -1,4 +1,4 @@
-// sim_wide_temp_sweep -- ITER_TUNE_REDESIGN_PLAN.md sec 6: closes the four
+// sim_wide_temp_sweep -- ITER_TUNE_REDESIGN.md sec 6: closes the four
 // sim_kiln gaps (G1 real measured params, G2 real heater_output.c PWM
 // window, G3 relay actuation lag, G4 MAX31856 quantisation) and then sweeps
 // ambient-to-cone setpoints through the real pid.c + zone_coupling_solve.c
@@ -98,7 +98,7 @@ bool zones_config_get_coupling_diag_k_dc(uint8_t zone_index, float *out_k_dc)
 #endif
 static const bool SWEEP_USE_MEASURED_DIAG_K_DC = (KILN_SWEEP_USE_MEASURED_DIAG != 0);
 
-// ---- G3: relay actuation lag. Not bench-measured (ITER_TUNE_REDESIGN_PLAN
+// ---- G3: relay actuation lag. Not bench-measured (ITER_TUNE_REDESIGN
 // sec 6.1's G3 row: "default from the bench-measured lag" -- no such
 // measurement exists in this repo as of writing; docs/audits grep turned up
 // nothing beyond the qualitative "1Hz switching through a 60s window"
@@ -489,7 +489,7 @@ int main(void)
 {
     /* See sim_plant.h's SIM_PLANT_ASSERT_ABI_FRESH() comment. */
     SIM_PLANT_ASSERT_ABI_FRESH();
-    printf("# sim_wide_temp_sweep -- ITER_TUNE_REDESIGN_PLAN sec 6 gap closure + wide sweep\n");
+    printf("# sim_wide_temp_sweep -- ITER_TUNE_REDESIGN sec 6 gap closure + wide sweep\n");
     printf("# Results above ~62C are EXTRAPOLATION: radiative_coeff_w_per_k4 is NOT measured on this kiln.\n\n");
 
     verify_coupling_step_test();

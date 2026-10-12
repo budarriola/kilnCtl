@@ -704,6 +704,7 @@ static bool s_loaded = false;
 // diagnostics" case 2, distinct from an ordinary never-committed board (case
 // 1, this stays false). See config_store_is_config_rejected()'s own comment.
 static bool s_load_rejected = false;
+static bool s_load_tc_offset_clamped = false; // review LOW-A: winning record's tc_offset_c was clamped at load
 
 // Module-scope, not a local: SAFTYFW_CONFIG_STORE_FLASH_SIZE is 4096 bytes
 // (one erase sector, bootloader/flash_layout.h), and read_latest_or_default()'s
@@ -781,6 +782,7 @@ void config_store_boot_load(void)
 
     s_cached_slot = read_latest_or_default(&s_cached_record, &s_cached_sector, &reject_info);
     s_load_rejected = (s_cached_slot == CONFIG_STORE_NO_SLOT) && reject_info.rejected;
+    s_load_tc_offset_clamped = (s_cached_slot != CONFIG_STORE_NO_SLOT) && reject_info.tc_offset_clamped;
     s_persisted_record = s_cached_record; // opus review item 4: seed flash-truth from what boot found
     // Seed the periodic RAM-integrity check's tracked CRC from the same
     // boot-loaded record -- config_store_seqlock_write() is not the path
@@ -861,7 +863,24 @@ void config_store_boot_load(void)
                           "(UNCOMMISSIONED).\r\n");
     }
 
+    if (s_load_tc_offset_clamped) {
+        // Review LOW-A: loud, not silent. A stored offset beyond the write
+        // bound was clamped; the Pico thermocouple may read cooler than the
+        // sensor (S1 trips late) until the offset is re-commissioned.
+        char line[160];
+        snprintf(line, sizeof(line),
+                 "SaftyFW: config_store tc_offset_c CLAMPED at load: stored %.1f C -> %.1f C "
+                 "(re-commission the safety TC offset)\r\n",
+                 (double)reject_info.tc_offset_stored_c, (double)s_cached_record.tc_offset_c);
+        console_uart_puts(line);
+    }
+
     s_loaded = true;
+}
+
+bool config_store_tc_offset_was_clamped(void)
+{
+    return s_loaded && s_load_tc_offset_clamped;
 }
 
 bool config_store_is_config_rejected(void)
@@ -1284,6 +1303,31 @@ static bool config_store_flash_slot_is_erased(hal_flash_region_t *region, size_t
     return true;
 }
 
+// KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: true iff `to_write`, with the
+// persisted record's seq in place of its own, packs to exactly the bytes in
+// the slot the persisted record was loaded from or last written to. False
+// when there is no valid persisted record, or the slot cannot be read --
+// both fall through to a real write. Static buffers: 2 x 512 bytes would
+// otherwise sit on link_task's stack, and only link_task writes this store.
+static uint8_t s_noop_packed[CONFIG_STORE_RECORD_LEN];
+static uint8_t s_noop_flash[CONFIG_STORE_RECORD_LEN];
+
+static bool config_store_write_is_noop(const config_store_record_t *to_write)
+{
+    if (s_cached_slot == CONFIG_STORE_NO_SLOT || s_persisted_record.seq == 0u ||
+        s_cached_sector >= SAFTYFW_CONFIG_STORE_NUM_SECTORS) {
+        return false;
+    }
+    config_store_record_t probe = *to_write;
+    probe.seq = s_persisted_record.seq;
+    config_store_pack(&probe, s_noop_packed);
+    if (hal_flash_read(s_regions[s_cached_sector], (uint32_t)s_cached_slot * CONFIG_STORE_RECORD_LEN,
+                       s_noop_flash, sizeof(s_noop_flash)) != HAL_OK) {
+        return false;
+    }
+    return memcmp(s_noop_packed, s_noop_flash, sizeof(s_noop_flash)) == 0;
+}
+
 static void config_store_write_cb(void *param)
 {
     config_store_write_args_t *a = (config_store_write_args_t *)param;
@@ -1382,11 +1426,15 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     // zero_counts/k_ct_v_per_a-only change is the second (and, today, only
     // other) narrow-change shape this decision accepts -- see
     // config_store_only_ct_cal_differs()'s header comment (config_store.h)
-    // for the safety argument. The two comparators are mutually exclusive
-    // by construction (they compare disjoint field sets), so ORing them is
-    // safe: a record can satisfy both only if NEITHER actually changed
-    // anything, which config_store_write_ex()'s caller never does (a
-    // no-op write is not on any call path here).
+    // for the safety argument. The two comparators compare disjoint field
+    // sets, so at most one of them can be true for a real change, and ORing
+    // them is safe. A record identical to the persisted one makes BOTH false
+    // (each requires its own field to differ), so an identical write is
+    // treated like any other full-record write by the decision below: allowed
+    // while idle, refused while ARMED. Identical writes do happen (a
+    // COMMIT_CONFIG with nothing staged, a repeated SET_CONFIG or SET_CT_CAL,
+    // KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3); an allowed one is answered
+    // without a flash write further down.
     bool ct_cal_only_change = config_store_only_ct_cal_differs(&s_persisted_record, rec);
     bool narrow_change_only = tc_type_only_change || ct_cal_only_change;
     config_store_write_decision_t decision =
@@ -1442,6 +1490,36 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     // the caller's record, and after the write decision above so it can
     // never turn a refusal into a write.
     config_store_backfill_legacy_ct_topology(&to_write);
+
+    // KILNLINK_ROBUSTNESS_AUDIT_2026-10-09 L3: a record whose bytes are
+    // exactly what the current slot already holds is not written again.
+    // Without this, every replayed COMMIT_CONFIG / SET_CONFIG / SET_CT_CAL
+    // programmed a fresh slot (and erased a sector every eighth time, under
+    // hal_flash_safe_execute(), which stalls both cores). Placed after the
+    // write decision above, so it can never turn a refusal into a success.
+    // The comparison is against the slot's real flash bytes, packed with the
+    // persisted seq -- not against the RAM mirror -- so it only ever skips a
+    // write whose result is provably already on flash; anything else
+    // (different content, a migrated older-format record, an unreadable slot)
+    // takes the full write path below, erased-slot check and read-back
+    // included.
+    if (config_store_write_is_noop(&to_write)) {
+        // Same RAM effect a real write of this content would have: the
+        // cached record becomes flash truth again, which also drops a prior
+        // volatile install (config_store_is_volatile_dirty() goes false).
+        config_store_record_t same = to_write;
+        same.seq = s_persisted_record.seq;
+        config_store_seqlock_write(&same);
+        s_persisted_record = same;
+        s_persisted_record_crc = config_store_record_crc(&s_persisted_record);
+        if (out_reason != NULL) {
+            *out_reason = "ok (unchanged, no flash write)";
+        }
+        if (out_decision != NULL) {
+            *out_decision = CONFIG_STORE_WRITE_OK;
+        }
+        return true;
+    }
 
     // config_store.h's "A/B sector arbitration" -- this plan names which
     // sector this write actually targets, and whether that sector needs an
@@ -1543,71 +1621,38 @@ bool config_store_write_ex(const config_store_record_t *rec, bool heat_safe, con
     return true;
 }
 
-// Loosening carve-out for config_store_write_volatile() below (2026-09-14
-// review, Finding A) -- see config_store.h's doc comment on that function
-// for the full rationale. `cur` is the live record BEFORE this install,
-// `next` is the record about to be installed; returns true iff installing
-// `next` would loosen any threshold this store treats as fields_set-gated
-// safety-relevant (S1's abs_max_temp_c, S8's max_rate_c_per_min, or
-// tc_type). Only meaningful while ARMED -- the caller is responsible for
-// only consulting this under that condition, exactly as config_store_
-// decide_write() only consults relay_owner_get_state() for its own gate.
+// 2026-10-09 guard-fixes review HIGH-1/MED-1: the volatile-install gate.
 //
-// What counts as "loosening", decided explicitly per field rather than left
-// implicit:
-//   - abs_max_temp_c (S1): a fields_set-gated field whose UNSET state is
-//     documented (CONFIG_REFERENCE.md sec 7, safety_guards.c/.h) as
-//     abs_max_temp_c == 0.0f, "never trips" -- i.e. unset IS the loosest
-//     possible state, not a neutral one. So: unset -> any set value is a
-//     TIGHTENING (a bound now exists where none did) and always allowed;
-//     set -> unset, or a set value raised, are both LOOSENING and refused
-//     while ARMED; a set value lowered or held is allowed.
-//   - max_rate_c_per_min (S8): same fields_set-gated "unset == loosest,
-//     rate check disabled" shape (config_store.h's own comment on this
-//     field) -- identical rule as abs_max_temp_c above.
-//   - tc_type: also CONFIG_STORE_SET_TC_TYPE-gated (config_store.h's
-//     2026-08-24 addition), same "unset is a real, distinguishable state"
-//     shape as the two fields above, so the same unset/set split applies:
-//     unset -> any type (first commissioning) is a tightening, always
-//     allowed. But unlike a numeric threshold, tc_type has no ordering once
-//     it IS commissioned -- it rescales what abs_max_temp_c's already-
-//     validated bound (TC_MAX_C_BY_TYPE[tc_type]) means, and feeds the
-//     borrowed/main-board type-mismatch guards elsewhere in this codebase,
-//     so there is no "safer" direction to compare against. Once set, ANY
-//     change away from the commissioned type (including clearing the bit
-//     back to "unset") is treated as loosening while ARMED.
-//   - Every other field (PID/profile-shaped params, CT cal, etc.) is
-//     unaffected -- an ordinary kiln-package swap's volatile install still
-//     never has to unarm the Pico, matching the plan's section 1a.2
-//     requirement.
-static bool config_store_volatile_would_loosen_safety(const config_store_record_t *cur,
-                                                        const config_store_record_t *next)
+// WHEN the gate applies ("heat possible"): the installer registers a probe
+// (config_store_set_heat_possible_probe(), link_task registers one built on
+// the same fail-closed signal as the tc_type gate: K4 energized, a recent
+// REQUEST_ENABLE(true), a stale/absent ESP context, or any ESP heat flag).
+// Without a registered probe the gate falls back to the old, stricter-than-
+// needed "relay_owner is ARMED" rule, so a host build or a boot-order slip
+// never silently opens it. GRACE/INIT/TRIPPED cannot energize K4, so they
+// never trigger the gate by themselves. (With the probe registered, a stale
+// or absent ESP context also counts as heat possible, so in GRACE/idle right
+// after boot, before the first context frame, the gate DOES apply and an
+// early ESP config replay that loosens a field is refused until context
+// arrives -- fail-closed and intended; do not "fix" the code to the old text.)
+//
+// WHAT the gate refuses: config_store_volatile_would_loosen_safety()
+// (config_store.c) -- ANY trip-relevant field that differs from the running
+// record, except an explicit allowlist of non-safety fields and provable
+// tightenings. Fail-closed: a field added later is refused by default.
+static config_store_heat_possible_probe_t s_heat_possible_probe = NULL;
+
+void config_store_set_heat_possible_probe(config_store_heat_possible_probe_t probe)
 {
-    bool cur_abs_set = (cur->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
-    bool next_abs_set = (next->fields_set & CONFIG_STORE_SET_ABS_MAX_TEMP_C) != 0u;
-    if (cur_abs_set && !next_abs_set) {
-        return true; // clearing a commissioned ceiling loosens it back to "never trips"
-    }
-    if (cur_abs_set && next_abs_set && next->abs_max_temp_c > cur->abs_max_temp_c) {
-        return true; // raising an already-commissioned ceiling
-    }
+    s_heat_possible_probe = probe;
+}
 
-    bool cur_rate_set = (cur->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
-    bool next_rate_set = (next->fields_set & CONFIG_STORE_SET_MAX_RATE_C_PER_MIN) != 0u;
-    if (cur_rate_set && !next_rate_set) {
-        return true; // clearing a commissioned S8 rate cap loosens it back to "disabled"
+static bool config_store_heat_possible(void)
+{
+    if (s_heat_possible_probe != NULL) {
+        return s_heat_possible_probe();
     }
-    if (cur_rate_set && next_rate_set && next->max_rate_c_per_min > cur->max_rate_c_per_min) {
-        return true; // raising an already-commissioned S8 rate cap
-    }
-
-    bool cur_tc_set = (cur->fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
-    bool next_tc_set = (next->fields_set & CONFIG_STORE_SET_TC_TYPE) != 0u;
-    if (cur_tc_set && (!next_tc_set || next->tc_type != cur->tc_type)) {
-        return true; // changing (or un-committing) an already-commissioned TC type
-    }
-
-    return false;
+    return relay_owner_get_state() == RELAY_OWNER_STATE_ARMED;
 }
 
 // KILN_PROFILES_PLAN.md item 15 -- see config_store.h's own doc comment on
@@ -1618,14 +1663,13 @@ static bool config_store_volatile_would_loosen_safety(const config_store_record_
 // hal_flash_safe_execute()/s_cached_slot/s_cached_sector -- nothing here is
 // persisted.
 //
-// It DOES now consult relay_owner_get_state() for a second, narrower reason
-// (2026-09-14 review, Finding A): while ARMED, refuse an install that would
-// LOOSEN a trip threshold -- see config_store_volatile_would_loosen_safety()
-// above for exactly which changes that covers. This is not the same gate
-// config_store_decide_write() runs (that one refuses ALL writes while
-// ARMED, for a flash-stall reason that does not apply here); this one
-// refuses a specific subset of installs, for the safety reason that DOES
-// still apply here.
+// It DOES consult the heat-possible gate above for a second reason
+// (2026-09-14 review Finding A, widened 2026-10-09): while heat is possible,
+// refuse any install that changes a trip-relevant field (fail-closed, see
+// config_store_volatile_would_loosen_safety() in config_store.c). This is
+// not the same gate config_store_decide_write() runs (that one refuses ALL
+// writes while ARMED, for a flash-stall reason that does not apply here).
+// Idle and de-energized, every install is allowed.
 //
 // The only side effect on success is the seqlock-guarded update of
 // s_cached_record, exactly the field every guard and every config_store_
@@ -1640,14 +1684,6 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
         return false;
     }
 
-    if (relay_owner_get_state() == RELAY_OWNER_STATE_ARMED &&
-        config_store_volatile_would_loosen_safety(&s_cached_record, rec)) {
-        if (out_reason != NULL) {
-            *out_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
-        }
-        return false;
-    }
-
     config_store_record_t to_write = *rec;
     to_write.format_version = CONFIG_STORE_FORMAT_VERSION;
     to_write.seq = s_cached_record.seq + 1u;
@@ -1656,9 +1692,19 @@ bool config_store_write_volatile(const config_store_record_t *rec, const char **
     // firmware that cannot see zone_ct_channel still reads a meaningful
     // topology (a genuine split collapsing to SUMMED, never PER_ZONE).
     // Applied to the copy that is actually persisted/published, not to
-    // the caller's record, and after the write decision above so it can
-    // never turn a refusal into a write.
+    // the caller's record. 2026-10-09 review INFO: done BEFORE the heat-
+    // possible comparison below, so a stale legacy ct_topology in the
+    // caller's record is not refused spuriously -- the comparison sees
+    // exactly the bytes that would be installed.
     config_store_backfill_legacy_ct_topology(&to_write);
+
+    if (config_store_heat_possible() &&
+        config_store_volatile_would_loosen_safety(&s_cached_record, &to_write)) {
+        if (out_reason != NULL) {
+            *out_reason = config_store_write_decision_reason(CONFIG_STORE_WRITE_REFUSED_ARMED);
+        }
+        return false;
+    }
 
     // Seqlock write, not a plain struct assignment -- identical reasoning to
     // config_store_write()'s own call just above: every reader of

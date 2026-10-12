@@ -131,6 +131,10 @@ class Notes(unittest.TestCase):
             self.assertIn("since v1.0.0-pre.2", text)
             self.assertIn("after pre2", text)
             self.assertNotIn("after pre1", text)
+            # F6: WPA1/TKIP-only fallback is announced in every generated body
+            self.assertIn("Behaviour changes:", text)
+            self.assertIn("WPA/TKIP-only", text)
+
 
     def test_release_sorts_above_prerelease(self):
         with tempfile.TemporaryDirectory() as d:

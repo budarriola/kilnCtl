@@ -14,6 +14,8 @@ code**, has never actually run on this board (disarmed, zero observations), and
 does **not** address requirement (c) — confidence-graduated authority — in any
 form. See §0.2.**
 
+**Owner decision 2026-10-07: fuzzy stays at strength 0, no removal; revisit after real firings. No software work is pending from this plan until then.**
+
 No controller behaviour is changed by this document. No board was flashed and no
 heating run was performed. Board facts are live `kiln_call` reads.
 

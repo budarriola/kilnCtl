@@ -62,6 +62,11 @@ static bool g_release_should_fail = false;
 static bool g_reenter_acquire_during_release = false;
 static bool g_reentrant_acquire_result;
 static bool g_reentrant_acquire_ran = false;
+// Review-2 LOW-1: a fatal Pico reboot is classified while an enable send is in flight.
+static bool g_hold_during_enable = false;
+static bool g_hold_during_enable_ran = false;
+static bool g_classify_during_enable = false; /* SL3-R2 A3 */
+static bool g_classify_during_enable_ran = false;
 
 esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
 {
@@ -69,6 +74,14 @@ esp_err_t safety_link_request_enable(SafetyLinkClass *link, bool enable)
     g_last_enable_value = enable;
     if (enable) {
         g_enable_true_calls++;
+        if (g_classify_during_enable && !g_classify_during_enable_ran) {
+            g_classify_during_enable_ran = true;
+            heat_enable_note_pico_boot(6u, false, 0u, 2000u); /* reboot noticed, cause undecided */
+        }
+        if (g_hold_during_enable && !g_hold_during_enable_ran) {
+            g_hold_during_enable_ran = true;
+            heat_enable_note_pico_boot(6u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+        }
         // safety_link.c: refuses and sends NOTHING when the link is down.
         return g_link_up ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
@@ -96,6 +109,10 @@ static void reset_all(bool link_up)
     g_reenter_acquire_during_release = false;
     g_reentrant_acquire_result = false;
     g_reentrant_acquire_ran = false;
+    g_hold_during_enable = false;
+    g_hold_during_enable_ran = false;
+    g_classify_during_enable = false;
+    g_classify_during_enable_ran = false;
     heat_enable_init((SafetyLinkClass *)0x1);
     g_base_enable_sends = heat_enable_enable_send_count();
     g_base_release_sends = heat_enable_release_send_count();
@@ -622,6 +639,61 @@ static char *profile_executor_read_source(void)
                                       sizeof(candidates) / sizeof(candidates[0]));
 }
 
+static char *profile_executor_status_read_source(void)
+{
+    static const char *const candidates[] = {
+        "../drivers/control/profile_executor_status.c",
+        "App/drivers/control/profile_executor_status.c",
+        "firmware/KilnFW/App/drivers/control/profile_executor_status.c",
+    };
+    return test_read_source_anchored(__FILE__, "../drivers/control/profile_executor_status.c", candidates,
+                                      sizeof(candidates) / sizeof(candidates[0]));
+}
+
+// Review-2 LOW-3: pin the watchdog-loop wiring (M1, M3, LOW-2 order) and the bounded pause (M4b).
+static void test_watchdog_loop_and_bounded_pause_wiring(void)
+{
+    TEST_SECTION("profile_executor -- review-2 LOW-3: guard 9 merge wired into the loop before the unknown-relay "
+                 "release, status-read gate, bounded pause really bounded");
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c");
+        return;
+    }
+    const char *wd = strstr(text, "void watchdog_task_entry(void *arg)");
+    TEST_CHECK(wd != NULL, "watchdog_task_entry found");
+    const char *merge = wd ? strstr(wd, "tick_stale = guard9_merge_pending(tick_stale") : NULL;
+    const char *assert_fn = wd ? strstr(wd, "guard9_assert_stale_tick_fault();") : NULL;
+    const char *rel = wd ? strstr(wd, "\n        relay_unknown_release_locked();") : NULL;
+    TEST_CHECK(merge != NULL, "MUST GO RED if the watchdog loop stops calling guard9_merge_pending");
+    TEST_CHECK(merge && assert_fn && rel && merge < assert_fn && assert_fn < rel,
+               "guard 9 merge+assert precede relay_unknown_release_locked() so APP never drops (LOW-2)");
+    const char *gate = strstr(text, "if (safety_status_ok)");
+    const char *note = gate ? strstr(gate, "heat_enable_note_pico_boot(") : NULL;
+    TEST_CHECK(gate && note && (note - gate) < 80,
+               "MUST GO RED if note_pico_boot is no longer gated on a successful status read");
+    TEST_CHECK(strstr(text, "if (true)") == NULL, "no if (true) stand-in for the status gate");
+    free(text);
+
+    char *st = profile_executor_status_read_source();
+    if (!st) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor_status.c");
+        return;
+    }
+    const char *bf = strstr(st, "bool profile_executor_pause_with_reason_bounded(const char *reason)");
+    const char *end = bf ? strstr(bf, "bool profile_executor_resume(void)") : NULL;
+    bool bounded = false, unbounded = false;
+    if (bf && end) {
+        for (const char *q = bf; q < end; q++) {
+            if (strncmp(q, "pdMS_TO_TICKS(", 14) == 0) bounded = true;
+            if (strncmp(q, "portMAX_DELAY", 13) == 0) unbounded = true;
+        }
+    }
+    TEST_CHECK(bf && end && bounded && !unbounded,
+               "MUST GO RED if the bounded pause waits portMAX_DELAY instead of a finite pdMS_TO_TICKS bound");
+    free(st);
+}
+
 static void test_stale_claim_is_not_resurrected(void)
 {
     TEST_SECTION("heat_enable -- an acquire whose claim was released after the caller committed to "
@@ -915,8 +987,515 @@ static void test_bad_claimant(void)
     TEST_CHECK(enable_sends() == 0 && release_sends() == 0, "and neither touched the wire");
 }
 
+static void test_k4_mismatch_rerequests_with_backoff_then_gives_up(void)
+{
+    TEST_SECTION("heat_enable -- F1: grant held but Pico ARMED with K4 open is re-requested, bounded");
+
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    uint32_t t = 1000;
+    // GRACE (Pico rebooted): K4 cannot be expected closed, nothing timed.
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t);
+    t += 10000;
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "no re-request during GRACE");
+    // ARMED, K4 open: clock starts, no resend before 3 s.
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    t += 2900;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1 && heat_enable_is_granted(), "still granted inside the 3 s window");
+    // 3 s: first re-request; granted reads false until it lands.
+    t += 200;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    TEST_CHECK(!heat_enable_is_granted(), "not claimed granted while re-requesting");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "first re-request sent");
+    TEST_CHECK(heat_enable_is_granted(), "granted again once the re-request is accepted");
+    // Backoff: next one only after 6 s more.
+    t += 5000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "backoff holds the second re-request");
+    t += 1100;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 3, "second re-request after 6 s");
+    for (int i = 0; i < 40 && !heat_enable_grant_unconfirmed(); i++) {
+        t += 30000;
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(enable_sends() == 5, "exactly 4 re-requests (5 sends total), then no more");
+    TEST_CHECK(heat_enable_grant_unconfirmed(), "gave up: unconfirmed flag set");
+    TEST_CHECK(!heat_enable_is_granted(), "never claims heat enabled while K4 is open");
+    TEST_CHECK(heat_enable_retry_pending(), "surfaced as retry-pending");
+    t += 60000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 5, "bounded: no further sends");
+    // K4 finally closes: everything clears.
+    heat_enable_note_pico_state(true, ARMED, true, t + 100);
+    TEST_CHECK(!heat_enable_grant_unconfirmed() && heat_enable_is_granted(), "K4 closed clears the fault");
+}
+
+static void test_k4_closed_or_released_never_resends(void)
+{
+    TEST_SECTION("heat_enable -- F1: K4 closed, stale status, or no claim never triggers a re-request");
+
+    reset_all(true);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 100);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 100000);
+    TEST_CHECK(enable_sends() == 0, "no claim held: nothing re-requested");
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    for (uint32_t t = 1000; t < 60000; t += 1000) {
+        heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, true, t);
+        heat_enable_note_pico_state(false, SAFETY_LINK_DIAG_STATE_ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(enable_sends() == 1, "K4 closed / stale status: still exactly one send");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 70000);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, false, 90000);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "after release nothing is re-requested");
+}
+
+/* ---- Safety-link fix batch 2 -------------------------------------------- */
+
+static void test_k4_timer_and_episode_restart(void)
+{
+    TEST_SECTION("heat_enable -- LOW-1/LOW-2: WARN is timed like ARMED; leaving ARMED ends the episode");
+
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    const uint8_t WARN = SAFETY_LINK_DIAG_STATE_WARN;
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    uint32_t t = 1000;
+    /* WARN with K4 open is timed and re-requested exactly like ARMED. */
+    heat_enable_note_pico_state(true, WARN, false, t);
+    t += 3100;
+    heat_enable_note_pico_state(true, WARN, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "WARN + K4 open re-requests after 3 s (LOW-2)");
+
+    /* ARMED, K4 open: timer running mid-episode. Then GRACE: the episode ends, so the
+     * timer AND the resend budget restart (LOW-1, LOW-8-2). Without the clear the next
+     * ARMED tick would resend at once on the old deadline. */
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted again");
+    t = 1000;
+    heat_enable_note_pico_state(true, ARMED, false, t); /* timer starts */
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t + 500);
+    t += 20000; /* far past the old deadline */
+    heat_enable_note_pico_state(true, ARMED, false, t); /* ARMED again: clock restarts */
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "GRACE -> ARMED restarts the 3 s clock: no instant re-request");
+    t += 3100;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "and the re-request comes 3 s after the NEW ARMED stretch began");
+
+    /* Stale status: the timer stops; a later fresh ARMED restarts it (no stale deadline). */
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted (stale case)");
+    t = 1000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_note_pico_state(false, ARMED, false, t + 500);
+    t += 20000;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 1, "stale then fresh ARMED restarts the clock: no instant re-request");
+
+    /* The give-up latch is per ARMED episode: GRACE clears it. */
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted (latch case)");
+    t = 1000;
+    for (int i = 0; i < 40 && !heat_enable_grant_unconfirmed(); i++) {
+        t += 30000;
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(heat_enable_grant_unconfirmed(), "gave up in the first episode");
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, t + 1000);
+    TEST_CHECK(!heat_enable_grant_unconfirmed(), "leaving ARMED clears the unconfirmed latch (LOW-1)");
+}
+
+static void test_pico_reboot_after_tripped_holds(void)
+{
+    TEST_SECTION("heat_enable -- T3: a reboot that followed a TRIPPED DIAG is fatal even if benign-looking");
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "POWERON reboot right after a TRIPPED DIAG -> hold (trip latch lost)");
+
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_ARMED, true, 1500u); /* trip cleared */
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "a POWERON reboot after the trip was cleared stays benign");
+
+    /* I4: the executor watchdog feeds INIT while no DIAG of the new boot has arrived; the
+     * snapshot (not the live flag) must still carry the trip into the verdict. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_INIT, false, 2100u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2200u);
+    TEST_CHECK(heat_enable_reboot_hold(), "I4: INIT tick between reboot and DIAG does not lose the trip snapshot");
+
+    /* F3: a second reboot before the first boot's DIAG keeps the snapshot. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_INIT, false, 2100u);
+    heat_enable_note_pico_boot(3u, false, 0u, 2200u);
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2300u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F3: double reboot before any DIAG still holds (trip lost)");
+
+    /* F8: TRIPPED, release, reboot with no claim, POWERON DIAG, then acquire -> hold. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: lost trip across a claim-less reboot holds on the next acquire");
+
+    /* F8 caveat: reboot while no claim, DIAG arrives after the next acquire. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: DIAG after the re-acquire still holds");
+
+    /* F8: release while the reboot is unresolved must not clear the snapshot. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    TEST_CHECK(heat_enable_reboot_hold(), "F8: release/re-acquire with the reboot unresolved keeps the trip snapshot");
+}
+
+static void test_reboot_fatal_latch_survives_newer_seq(void)
+{
+    TEST_SECTION("heat_enable -- firing audit 2 MED-1/LOW-3: an unconsumed fatal verdict is never "
+                 "downgraded by a newer reboot seq (double count of one reboot)");
+    /* verdict without a claim: fatal cause latches, benign cause does not */
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "fatal cause while claim-less latches: next acquire holds");
+    reset_all(true);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2100u);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(!heat_enable_reboot_hold(), "benign cause while claim-less: next acquire does not hold");
+
+    /* P2: lost trip latched, then the SAME reboot counted again (seq+2) after the executor refreshed
+     * last_pico_tripped from the new boot's GRACE DIAG: the latch must survive. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_TRIPPED, false, 1000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u); /* DIAG first: T3 latch */
+    heat_enable_note_pico_state(true, SAFETY_LINK_DIAG_STATE_GRACE, false, 2100u);
+    heat_enable_note_pico_boot(3u, false, 0u, 2200u);                           /* FW_VERSION double count */
+    heat_enable_note_pico_boot(3u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 4200u); /* benign DIAG */
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if a newer seq erases the unconsumed T3 lost-trip latch");
+}
+
+static void test_pico_reboot_cause_holds_or_retries(void)
+{
+    TEST_SECTION("heat_enable -- MED-1: a fatal-cause Pico reboot is never silently re-requested");
+
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    const uint8_t WD = SAFETY_LINK_DIAG_BOOT_WATCHDOG;
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    uint32_t t = 1000;
+    heat_enable_note_pico_boot(5u, true, 0u, t); /* first sight: establishes the baseline only */
+    heat_enable_note_pico_state(true, ARMED, true, t);
+    TEST_CHECK(!heat_enable_reboot_hold(), "no hold without a reboot");
+
+    /* Reboot detected, new boot's DIAG not seen yet: undecided, not a hold. */
+    t += 100;
+    heat_enable_note_pico_boot(6u, false, 0u, t);
+    TEST_CHECK(!heat_enable_reboot_hold(), "cause unknown yet: not a hold");
+    /* First DIAG of the new boot says WATCHDOG. */
+    t += 200;
+    heat_enable_note_pico_boot(6u, true, WD, t);
+    TEST_CHECK(heat_enable_reboot_hold(), "WATCHDOG boot reason -> hold");
+    TEST_CHECK(!heat_enable_is_granted(), "the grant is withdrawn, never claimed while held");
+    for (int i = 0; i < 10; i++) {
+        t += 5000;
+        heat_enable_note_pico_boot(6u, true, WD, t);
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(enable_sends() == 1, "K4 stays open: no REQUEST_ENABLE after a fatal reboot, ever");
+    TEST_CHECK(heat_enable_reboot_hold(), "the hold persists while the claim is held");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(!heat_enable_reboot_hold(), "the hold ends with the claim");
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE) && enable_sends() == 2,
+               "a fresh operator-started claim requests heat normally");
+
+    /* Each fatal bit holds; a benign one does not. */
+    const uint8_t fatal_bits[] = {SAFETY_LINK_DIAG_BOOT_WATCHDOG, SAFETY_LINK_DIAG_BOOT_BROWNOUT,
+                                  SAFETY_LINK_DIAG_BOOT_STACK_OVERFLOW, SAFETY_LINK_DIAG_BOOT_MALLOC_FAILED,
+                                  SAFETY_LINK_DIAG_BOOT_ASSERT_FAILED};
+    for (unsigned i = 0; i < sizeof(fatal_bits); i++) {
+        reset_all(true);
+        (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+        heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+        heat_enable_note_pico_boot(2u, true, (uint8_t)(SAFETY_LINK_DIAG_BOOT_POWERON | fatal_bits[i]), 2000u);
+        TEST_CHECK(heat_enable_reboot_hold(), "every fatal boot-reason bit holds");
+    }
+    /* MED-A: a fatal-reboot hold on a standing grant owes the wire a REQUEST_ENABLE(false). */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 2000u);
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() >= 1, "fatal reboot hold sends REQUEST_ENABLE(false) for the standing grant");
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 2000u);
+    TEST_CHECK(!heat_enable_reboot_hold(), "POWERON alone is benign: no hold");
+    /* Benign: F1 re-requests once ARMED and K4 reads open (existing behaviour, TODO owner decision). */
+    heat_enable_note_pico_state(true, ARMED, false, 3000u);
+    heat_enable_note_pico_state(true, ARMED, false, 6200u);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == 2, "benign reboot keeps the F1 re-request");
+
+    /* No DIAG for a long time: still undecided (no timeout fallback), and a LATE fatal DIAG holds. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 12100u);
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_WATCHDOG, 12200u);
+    TEST_CHECK(heat_enable_reboot_hold(), "a late fatal DIAG still holds: no timeout turns it benign");
+
+    /* While the cause is undecided, a pending (link-down) request is not retried. */
+    reset_all(false);
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "link down: pending");
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    g_link_up = true;
+    heat_enable_reconcile();
+    TEST_CHECK(g_enable_true_calls == 1,
+               "while the cause is undecided the pending request is not re-sent");
+}
+
+static void test_reboot_verdict_survives_release_and_resume(void)
+{
+    TEST_SECTION("heat_enable -- firing audit MED-5: an undecided reboot verdict survives pause/resume; "
+                 "resume withholds heat and a late fatal DIAG still holds");
+    const uint8_t WD = SAFETY_LINK_DIAG_BOOT_WATCHDOG;
+    /* (a) pause while undecided, resume before the DIAG: heat withheld, late fatal DIAG holds. */
+    reset_all(true);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "granted");
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    TEST_CHECK(heat_enable_reboot_undecided(), "setup: undecided");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE); /* operator pause */
+    int sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "resume while undecided is withheld");
+    TEST_CHECK(enable_sends() == sends, "MUST GO RED if resume sends REQUEST_ENABLE during an undecided reboot");
+    TEST_CHECK(heat_enable_reboot_undecided(), "the verdict is still pending after resume");
+    heat_enable_note_pico_boot(2u, true, WD, 3000u);
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if the late fatal DIAG is ignored after pause/resume");
+    TEST_CHECK(enable_sends() == sends, "no heat requested");
+
+    /* (b) benign verdict after the withheld resume: reconcile re-requests. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "withheld");
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, 3000u);
+    TEST_CHECK(!heat_enable_reboot_hold() && !heat_enable_reboot_undecided(), "benign: decided, no hold");
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == sends + 1, "benign verdict: the withheld claim is re-requested");
+
+    /* (c) fatal DIAG arrives while paused (no claim): next acquire starts under a hold. */
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(1u, true, 0u, 1000u);
+    heat_enable_note_pico_boot(2u, false, 0u, 2000u);
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    heat_enable_note_pico_boot(2u, true, WD, 3000u);
+    sends = enable_sends();
+    TEST_CHECK(!heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "fatal verdict landed while paused: withheld");
+    TEST_CHECK(heat_enable_reboot_hold(), "MUST GO RED if a fatal DIAG that arrived while paused is dropped");
+    TEST_CHECK(enable_sends() == sends, "no heat requested");
+    heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE), "the second, deliberate resume proceeds");
+}
+
+static void test_enable_in_flight_under_classify_pending_queues_release(void)
+{
+    TEST_SECTION("heat_enable -- SL3-R2 A3: a reboot noticed (undecided) while an enable send is IN FLIGHT "
+                 "must not record granted=true");
+    reset_all(true);
+    heat_enable_note_pico_boot(5u, true, 0u, 1000u); /* baseline */
+    g_classify_during_enable = true;
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(g_classify_during_enable_ran, "sanity: classification became pending mid-send");
+    TEST_CHECK(heat_enable_reboot_undecided(), "sanity: undecided");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "MUST GO RED if send_enable records granted=true under a pending classification");
+    uint32_t rel0 = release_sends();
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == rel0 + 1, "the standing enable is released on the wire");
+}
+
+static void test_enable_in_flight_under_reboot_hold_queues_release(void)
+{
+    TEST_SECTION("heat_enable -- review-2 LOW-1: a fatal-reboot hold set while an enable send is IN FLIGHT "
+                 "must not leave granted=true; the standing enable is released");
+    reset_all(true);
+    heat_enable_note_pico_boot(5u, true, 0u, 1000u); /* baseline */
+    g_hold_during_enable = true;
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    TEST_CHECK(g_hold_during_enable_ran, "sanity: the reboot hold was set mid-send");
+    TEST_CHECK(heat_enable_reboot_hold(), "sanity: hold is set");
+    TEST_CHECK(!heat_enable_is_granted(),
+               "MUST GO RED if send_enable leaves granted=true under a reboot hold set while in flight");
+    uint32_t rel0 = release_sends();
+    heat_enable_service_pending_release();
+    TEST_CHECK(release_sends() == rel0 + 1 && g_last_enable_value == false,
+               "the standing enable is released on the wire (release queued)");
+    uint32_t en0 = enable_sends();
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() == en0, "no re-request while the hold stands");
+}
+
+static void test_executor_wires_k4_and_reboot_state(void){
+    TEST_SECTION("profile_executor -- the watchdog feeds heat_enable the real K4 / reboot facts and "
+                 "pauses (LOW-8-1, MED-1, MED-2)");
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c");
+        return;
+    }
+    const char *k4 = strstr(text, "safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;");
+    TEST_CHECK(k4 != NULL, "K4-closed comes from link_up AND the Pico's RELAY flag, not a constant");
+    const char *seq = strstr(text, "safety_reboot_seq = safety_status.pico_reboot_seq;");
+    const char *since = strstr(text, "safety_diag_since_reboot = safety_status.diag_since_reboot;");
+    const char *br = strstr(text, "safety_boot_reason = safety_status.diag_boot_reason;");
+    TEST_CHECK(seq && since && br, "reboot seq / diag-since-reboot / boot reason come from safety_status");
+    const char *boot = strstr(text, "heat_enable_note_pico_boot(safety_reboot_seq, safety_diag_since_reboot, safety_boot_reason,");
+    const char *state = strstr(text, "heat_enable_note_pico_state(safety_diag_valid,");
+    const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
+    const char *rec = strstr(text, "heat_enable_reconcile();");
+    TEST_CHECK(boot && state && boot < state, "note_pico_boot runs before note_pico_state");
+    TEST_CHECK(hold && unc && state && rec && state < hold && hold < unc && unc < rec,
+               "reboot-hold then unconfirmed-grant pauses sit between note_pico_state and reconcile");
+    TEST_CHECK(strstr(text, "heat_enable_reboot_hold()") != NULL && strstr(text, "heat_enable_grant_unconfirmed()") != NULL,
+               "the pause decisions read heat_enable_reboot_hold()/heat_enable_grant_unconfirmed()");
+    free(text);
+}
+
+static void test_reboot_resets_k4_episode_and_undecided_is_visible(void)
+{
+    TEST_SECTION("heat_enable -- K5: a Pico reboot restarts the K4 episode; undecided state is visible (sl3)");
+    const uint8_t ARMED = SAFETY_LINK_DIAG_STATE_ARMED;
+    reset_all(true);
+    (void)heat_enable_acquire(HEAT_ENABLE_CLAIMANT_PROFILE);
+    uint32_t t = 1000;
+    heat_enable_note_pico_boot(1u, true, 0u, t);
+    for (int i = 0; i < 40 && !heat_enable_grant_unconfirmed(); i++) {
+        t += 30000;
+        heat_enable_note_pico_state(true, ARMED, false, t);
+        heat_enable_reconcile();
+    }
+    TEST_CHECK(heat_enable_grant_unconfirmed(), "setup: old boot's K4 episode gave up");
+    TEST_CHECK(!heat_enable_reboot_undecided(), "no reboot yet: not undecided");
+    int sends_before = enable_sends();
+    t += 100;
+    heat_enable_note_pico_boot(2u, false, 0u, t);
+    TEST_CHECK(heat_enable_reboot_undecided(), "reboot seen, no DIAG of the new boot: undecided");
+    TEST_CHECK(!heat_enable_grant_unconfirmed(),
+               "the new boot starts a new K4 episode: the old boot's give-up is cleared");
+    t += 100;
+    heat_enable_note_pico_boot(2u, true, SAFETY_LINK_DIAG_BOOT_POWERON, t);
+    TEST_CHECK(!heat_enable_reboot_undecided(), "DIAG decides it");
+    /* The new episode gets its own full retry budget, not the exhausted one. */
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    t += 3200;
+    heat_enable_note_pico_state(true, ARMED, false, t);
+    heat_enable_reconcile();
+    TEST_CHECK(enable_sends() > sends_before, "new episode re-requests again after the reboot");
+}
+
+static void test_executor_autotune_and_stale_diag_wiring(void)
+{
+    TEST_SECTION("profile_executor -- autotune is stopped with the run, stale-boot DIAG fed as INIT (K9, sl3)");
+    char *text = profile_executor_read_source();
+    if (!text) {
+        TEST_CHECK(false, "could not locate drivers/control/profile_executor.c");
+        return;
+    }
+    const char *hold = strstr(text, "profile_executor_pause_with_reason_bounded(\"pico_fatal_reboot\")");
+    const char *at1 = strstr(text, "autotune_engine_abort_bounded(\"pico_fatal_reboot\"");
+    TEST_CHECK(strstr(text, "autotune_engine_abort(\"pico_fatal_reboot\")") == NULL &&
+                   strstr(text, "autotune_engine_abort(\"heat_grant_unconfirmed\")") == NULL,
+               "SL3-R2 A2: the watchdog must not call the unbounded autotune_engine_abort()");
+    const char *unc = strstr(text, "profile_executor_pause_with_reason_bounded(\"heat_grant_unconfirmed\")");
+    const char *at2 = strstr(text, "autotune_engine_abort_bounded(\"heat_grant_unconfirmed\"");
+    TEST_CHECK(hold && at1 && at1 > hold && at1 < unc, "fatal-reboot hold also aborts autotune");
+    TEST_CHECK(unc && at2 && at2 > unc, "unconfirmed grant also aborts autotune");
+    TEST_CHECK(strstr(text, "safety_diag_since_reboot ? safety_diag_state : SAFETY_LINK_DIAG_STATE_INIT") != NULL,
+               "an old-boot DIAG is fed as INIT so its ARMED cannot satisfy the new boot's K4 check");
+    free(text);
+}
+
 void run_test_heat_enable(void)
 {
+    test_reboot_resets_k4_episode_and_undecided_is_visible();
+    test_executor_autotune_and_stale_diag_wiring();
+    test_k4_timer_and_episode_restart();
+    test_pico_reboot_cause_holds_or_retries();
+    test_pico_reboot_after_tripped_holds();
+    test_reboot_fatal_latch_survives_newer_seq();
+    test_enable_in_flight_under_classify_pending_queues_release();
+    test_reboot_verdict_survives_release_and_resume();
+    test_enable_in_flight_under_reboot_hold_queues_release();
+    test_watchdog_loop_and_bounded_pause_wiring();
+    test_executor_wires_k4_and_reboot_state();
+    test_k4_mismatch_rerequests_with_backoff_then_gives_up();
+    test_k4_closed_or_released_never_resends();
     test_start_requests_exactly_once();
     test_release_on_stop();
     test_two_claimants_refcount();

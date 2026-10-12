@@ -98,7 +98,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
             sc, "apply_safety_fields",
             return_value=sc.SafetyApplyResult(ok=True, confirmed=["tc_type"], commissioned_after=True),
         ) as mock_apply:
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("ok"))
         self.assertIn("tc_type=3", result)
         (host, fields), kwargs = mock_apply.call_args
@@ -112,7 +112,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
             sc, "apply_safety_fields",
             return_value=sc.SafetyApplyResult(ok=True, confirmed=["tc_type"]),
         ) as mock_apply:
-            mcp_server.safety_set_tc_type("k")
+            mcp_server.safety_set_tc_type("k", confirm=True)
         (host, fields), _kwargs = mock_apply.call_args
         self.assertEqual(fields, {"tc_type": 0x03})
 
@@ -138,7 +138,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
                 mismatches=["tc_type: expected 3, board reports 0"],
             ),
         ):
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("failed"))
         self.assertIn("tc_type", result)
 
@@ -153,7 +153,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
                             "config writes are refused while ARMED -- values were staged but NOT written",
             ),
         ):
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn('debug_reset(peer="pico")', result)
         self.assertIn("60 seconds", result)
@@ -164,7 +164,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
         with unittest.mock.patch.object(
             sc, "apply_safety_fields", side_effect=sc.SafetyCfgHttpError("unreachable")
         ):
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("error"))
 
     def test_refused_while_profile_running(self):
@@ -173,7 +173,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
         running = unittest.mock.MagicMock(state=1, state_name="running", profile_id=3, name="Cone 6")
         with unittest.mock.patch.object(mcp_server._profiles, "get_exec_status", return_value=running), \
              unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("running", result)
         mock_apply.assert_not_called()
@@ -184,7 +184,7 @@ class SafetySetTcTypeToolTests(unittest.TestCase):
         at = unittest.mock.MagicMock(state=3, state_name="relay_approach", zone=1)
         with unittest.mock.patch.object(mcp_server._autotune, "get_status", return_value=at), \
              unittest.mock.patch.object(sc, "apply_safety_fields") as mock_apply:
-            result = mcp_server.safety_set_tc_type("K")
+            result = mcp_server.safety_set_tc_type("K", confirm=True)
         self.assertTrue(result.startswith("refused"))
         self.assertIn("autotune", result)
         mock_apply.assert_not_called()

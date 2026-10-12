@@ -160,6 +160,26 @@ class StopTest(unittest.TestCase):
         r = J.judge_stop("idle", [0.0, 0.0, 0.0], [False, False, False], acked=False)
         self.assertEqual(r.verdict, Verdict.FAIL)
 
+    def test_other_ack_refusal_fails(self):
+        r = J.judge_stop("idle", [0.0] * 3, [False] * 3, acked=False, ack_reason="timed out")
+        self.assertEqual(r.verdict, Verdict.FAIL)
+
+    def test_no_boot_record_means_card_already_clear(self):
+        # Firmware run_state_acknowledge() only acks the boot record; a firing
+        # started and stopped this boot has none (bench1 HP-05 false FAIL).
+        r = J.judge_stop(
+            "idle", [0.0] * 3, [False] * 3, acked=False,
+            ack_reason="refused: no previous-run record to acknowledge", card_clear=True,
+        )
+        self.assertEqual(r.verdict, Verdict.PASS)
+
+    def test_no_record_text_needs_card_read_back(self):
+        # toolfx7 L1: the same text also covers a run_state lock failure.
+        kw = dict(acked=False, ack_reason="refused: no previous-run record to acknowledge")
+        self.assertEqual(J.judge_stop("idle", [0.0] * 3, [False] * 3, **kw).verdict, Verdict.INCONCLUSIVE)
+        self.assertEqual(J.judge_stop("idle", [0.0] * 3, [False] * 3, card_clear=False, **kw).verdict,
+                         Verdict.FAIL)
+
 
 class UnauthenticatedStopTest(unittest.TestCase):
     # Owner decision 2026-09-28 ("stop needs login. there is an estop

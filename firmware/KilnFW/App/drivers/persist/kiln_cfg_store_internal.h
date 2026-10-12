@@ -2,7 +2,7 @@
 // whole kiln config store, shared between kiln_cfg_store.c (which owns the
 // NVS side, migration, and every public accessor) and
 // kiln_cfg_store_cfg_fs.c (the `cfg` LittleFS read-through/dual-write bridge
-// for it, docs/FILESYSTEM_USER_DATA_PLAN.md section 5's "kiln config slots"
+// for it, docs/FILESYSTEM_USER_DATA.md section 5's "kiln config slots"
 // item). Split out purely so the bridge module can operate on
 // kiln_cfg_store_blob_t by value/pointer without kiln_cfg_store.c having to
 // make its whole internal layout public via kiln_cfg_store.h -- the same

@@ -554,7 +554,7 @@ class BuildPostBodyTest(unittest.TestCase):
     # ---- on/off zone preset fields (HP-03: preset build failed loudly on
     # zone_type -- correctly, per the "consumer without producer" guard, but
     # zone_type/failsafe_state/hyst_c/min_on_s/min_off_s are legitimate
-    # always-POST-writable per-zone fields (docs/ON_OFF_ZONE_PLAN.md) that
+    # always-POST-writable per-zone fields (docs/ON_OFF_ZONE.md) that
     # were simply never added to the override allowlist) ----
 
     def test_preset_overlay_carries_zone_type(self):
@@ -878,6 +878,26 @@ class PostZonesTest(unittest.TestCase):
             with self.assertRaises(zh.ZonesHttpError):
                 zh.post_zones("192.0.2.1", "x=1")
 
+    def test_stale_generation_409_gets_clear_message(self):
+        err = urllib.error.HTTPError(
+            "http://x/api/zones", 409, "Conflict", hdrs=None,
+            fp=io.BytesIO(b'{"ok":false,"error":"zones_config_stale","reason":"x"}'))
+        with unittest.mock.patch.object(zh.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(zh.ZonesHttpError) as ctx:
+                zh.post_zones("kiln.local", "expected_generation=1")
+        self.assertEqual(ctx.exception.status, 409)
+        self.assertIn("changed on the board", str(ctx.exception))
+        self.assertIn("nothing was written", str(ctx.exception))
+
+    def test_build_post_body_pins_expected_generation(self):
+        cur = _sample_get_response()
+        cur["generation"] = 41
+        fields = dict(urllib.parse.parse_qsl(zh.build_post_body(cur, {"zones": []})))
+        self.assertEqual(fields.get("expected_generation"), "41")
+        del cur["generation"]
+        fields = dict(urllib.parse.parse_qsl(zh.build_post_body(cur, {"zones": []})))
+        self.assertNotIn("expected_generation", fields)
+
 
 class ApplyZonePresetTest(unittest.TestCase):
     def _mock_get_then_post_then_get(self, first_get: dict, post_body: bytes, second_get: dict):
@@ -1024,12 +1044,10 @@ class ApplyZonePresetTest(unittest.TestCase):
         posted = urllib.parse.parse_qs(captured["body"].decode())
         self.assertEqual(posted["z0_approachratecap"], ["30.0"],
                           "zone 0: the POST body must carry the preset's own cap value")
-        self.assertEqual(posted["z1_approachratecap"], ["0.0"],
-                          "zone 1 was not named by the preset -- it must echo its CURRENT "
-                          "(board-reported) value, uncapped, not silently drop the field or "
-                          "inherit zone 0's cap")
-        self.assertEqual(posted["z2_approachratecap"], ["0.0"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+        self.assertNotIn("z1_approachratecap", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_approachratecap", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
 
     def test_approach_rate_cap_NOT_landing_is_caught(self):
         """NEGATIVE TEST proving the write path is real: if the board's
@@ -1089,16 +1107,14 @@ class ApplyZonePresetTest(unittest.TestCase):
                           "zone 0: the POST body must carry the preset's own rescaled error band")
         self.assertEqual(posted["z0_rateband"], ["0.22"],
                           "zone 0: the POST body must carry the preset's own rescaled rate band")
-        self.assertEqual(posted["z1_errorband"], ["20.0"],
-                          "zone 1 was not named by the preset -- it must echo its CURRENT "
-                          "(board-reported, firmware-default) value, not silently drop the "
-                          "field or inherit zone 0's rescale")
-        self.assertEqual(posted["z1_rateband"], ["0.5"],
-                          "zone 1 was not named by the preset -- same reasoning as z1_errorband above")
-        self.assertEqual(posted["z2_errorband"], ["20.0"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
-        self.assertEqual(posted["z2_rateband"], ["0.5"],
-                          "zone 2 was not named by the preset -- same reasoning as zone 1 above")
+        self.assertNotIn("z1_errorband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z1_rateband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_errorband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
+        self.assertNotIn("z2_rateband", posted,
+                         "not named by the preset: omit-preserved by the firmware, so it must NOT be re-posted at GET's rounding")
 
     def test_fuzzy_bands_NOT_landing_is_caught(self):
         """NEGATIVE TEST proving the write path is real: if the board's
@@ -1364,3 +1380,29 @@ class MergeZonesDiagTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_format_scalar_refuses_empty_string():
+    import pytest
+    from kilnctrl import zones_http_client as zc
+    with pytest.raises(zc.ZonesHttpError):
+        zc._format_scalar("z0_xzone", "", set())
+
+
+class UnreadableStoreRefusalTest(unittest.TestCase):
+    """persfx3 LOW-4: the two 'stored config unreadable at boot' 409s get a specific message."""
+
+    def test_zones_undecided(self):
+        msg = zh.unreadable_store_refusal(
+            409, '{"ok":false,"error":"zones_config_undecided","reason":"x"}')
+        self.assertIn("zones config", msg)
+        self.assertIn("force_healthy", msg)
+
+    def test_store_unreadable(self):
+        msg = zh.unreadable_store_refusal(409, '{"error":"store_unreadable_at_boot"}')
+        self.assertIn("stored setting", msg)
+
+    def test_other_409_and_other_status_untouched(self):
+        self.assertIsNone(zh.unreadable_store_refusal(409, "safety_ceiling_raise_failed"))
+        self.assertIsNone(zh.unreadable_store_refusal(500, "zones_config_undecided"))
+        self.assertIsNone(zh.unreadable_store_refusal(409, None))

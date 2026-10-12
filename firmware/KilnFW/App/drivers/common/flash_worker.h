@@ -108,6 +108,14 @@ esp_err_t uart_bridge_ext_run_on_flash_worker_timeout(void (*fn)(void *arg), voi
  * must surface a refusal as a real "busy, try again" outcome, not silence. */
 esp_err_t uart_bridge_ext_post_on_flash_worker(void (*fn)(void *arg));
 
+/* Creates the flash-worker reservation lock (static storage, cannot fail)
+ * and installs the save-section hooks (pref_cfg_fs_set_save_section_hooks())
+ * that every cfg save lock calls, so a save section reserves the worker
+ * even when it begins before the worker task exists. app_main calls this
+ * before anything else can start a task; idempotent. See uart_bridge_ext.c's
+ * SAVE-SECTION RESERVATION block. */
+void uart_bridge_ext_save_reservation_init(void);
+
 #ifdef __cplusplus
 }
 #endif

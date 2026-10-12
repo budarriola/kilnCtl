@@ -22,6 +22,10 @@
 const fs = require('fs'), path = require('path'), vm = require('vm');
 
 const dir = process.argv[2];
+if (typeof dir !== 'string' || dir === '') {
+  console.error('usage: node lint_pages.js <drivers-dir> [extra-page-root ...]');
+  process.exit(2);
+}
 let bad = 0, checked = 0;
 
 /* firmware/KilnFW/App/drivers/ is being split into layer subdirectories
@@ -167,10 +171,31 @@ function hardcoded_background_literals(code, label, line0) {
   return out;
 }
 
-for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) {
-  const f = path.relative(dir, fullPath).split(path.sep).join('/');
+/* Extra page roots (argv[3..], e.g. firmware/KilnFW_recovery) get the same parse/style checks. */
+const page_roots = [dir, ...process.argv.slice(3)];
+for (const root of page_roots) for (const fullPath of walk_files(root).filter(p => /\.(html|js|css)$/.test(p) && !/[\\/](build|managed_components)[\\/]/.test(p))) {
+  const f = path.relative(root, fullPath).split(path.sep).join('/');
   let src = fs.readFileSync(fullPath, 'utf8');
   const scripts = [], styles = [];
+
+  /* Mojibake: UTF-8 text that was decoded as a single-byte codepage and
+   * re-encoded. A double-encoded ellipsis (U+2026) becomes U+00E2 U+20AC
+   * U+00A6 and renders as "a-circumflex, euro, broken bar" in the browser
+   * (live_profile_page.html shipped four of them unnoticed, 2026-10-10). The
+   * pair U+00E2 U+20AC is the lead of every double-encoded U+2000 block
+   * punctuation character, and never appears in real text. */
+  {
+    /* Lead pairs: U+00E2 U+20AC (punctuation), U+00C2 + U+00A0..U+00BF
+     * (degree sign, plus-minus, micro, nbsp...), U+00C3 + a Latin-1 or
+     * cp1252-mapped continuation (accented letters). */
+    const mre = new RegExp(String.fromCharCode(0xe2, 0x20ac) + '|\\u00c2[\\u00a0-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u20ac\\u2122]|\\u00c3[\\u0080-\\u00bf\\u0152\\u0153\\u0160\\u0161\\u0178\\u017d\\u017e\\u0192\\u02c6\\u02dc\\u2013-\\u203a\\u20ac\\u2122]', 'g');
+    let mm;
+    while ((mm = mre.exec(src))) {
+      bad++;
+      console.log(`${f} (line ${src.slice(0, mm.index).split(String.fromCharCode(10)).length}): mojibake sequence (U+00E2 U+20AC, U+00C2 xx or U+00C3 xx) ` +
+        `(double-encoded UTF-8, e.g. a broken ellipsis) -- retype the character or use ASCII.`);
+    }
+  }
 
   if (f.endsWith('.js')) {
     scripts.push({ code: src, line: 1 });
@@ -183,13 +208,20 @@ for (const fullPath of walk_files(dir).filter(p => /\.(html|js|css)$/.test(p))) 
      * syntax error in a file that is fine. */
     src = src.replace(/<!--[\s\S]*?-->/g, m => m.replace(/[^\n]/g, ' '));
 
-    const sre = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
+    const sre = /<script(?![^>]*\bsrc=)([^>]*)>([\s\S]*?)<\/script>/gi;
     let m;
     while ((m = sre.exec(src))) {
-      scripts.push({ code: m[1], line: src.slice(0, m.index).split('\n').length });
+      /* Only a script with no type, text/javascript or module is JS; any other
+       * type (json, importmap, template, ...) is data and is not parsed. */
+      const tm = /\btype\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(m[1]);
+      if (tm) {
+        const t = (tm[1] ?? tm[2] ?? tm[3]).trim().toLowerCase();
+        if (t !== '' && t !== 'text/javascript' && t !== 'module') continue;
+      }
+      scripts.push({ code: m[2], line: src.slice(0, m.index).split('\n').length });
     }
     const yre = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-    while ((m = yre.exec(src))) {
+    while (root === dir && (m = yre.exec(src))) { /* theme/style rules are main-UI only */
       styles.push({ code: m[1], line: src.slice(0, m.index).split('\n').length });
     }
   }

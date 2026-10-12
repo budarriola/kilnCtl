@@ -61,7 +61,8 @@ $required = @(
         File = "ui_page_diagnostics.c"
         Asserts = @(
             "_Static_assert(UI_PAGE_DIAGNOSTICS_SAFETY_BH_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,",
-            "_Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
+            "_Static_assert(UI_PAGE_DIAGNOSTICS_THERMO_FAULT_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,",
+            "_Static_assert(UI_PAGE_DIAGNOSTICS_TD_WORST_CASE_HEIGHT_PX <= UI_THEME_PAGE_CONTENT_BUDGET_PX,"
         )
     },
     @{
@@ -79,7 +80,8 @@ $required = @(
     @{
         File = "ui_page_home.c"
         Asserts = @(
-            "_Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <="
+            "_Static_assert(UI_PAGE_HOME_RAIL_WORST_CASE_HEIGHT_PX <=",
+            "UI_PAGE_HOME_PROGRESS_WRAP_PX - (2 * UI_PAGE_HOME_CONTENT_GAP_PX))"
         )
     }
 )

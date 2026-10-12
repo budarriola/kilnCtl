@@ -737,6 +737,34 @@ static void enforce_heat_off_during_restore(float target_c, bool target_known, f
 static StaticSemaphore_t s_reconcile_lock_storage;
 static SemaphoreHandle_t s_reconcile_lock;
 
+/* The zone maxima every ceiling decision in this file derives its target
+ * from. One reader, shared by reconcile_on_link_up_impl() and
+ * safety_ceiling_sync_required_ceiling_c(), so the two can never read the
+ * zones differently. */
+static void read_zone_max_temps(float out[MAX31856_CHANNEL_COUNT])
+{
+    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
+        float cur_max = 0.0f, cur_min = 0.0f;
+        zones_config_get_temp_limits(zi, &cur_max, &cur_min);
+        out[zi] = cur_max;
+    }
+}
+
+bool safety_ceiling_sync_required_ceiling_c(float *out_c)
+{
+    if (!out_c || !zones_config_is_valid()) {
+        return false;
+    }
+    float max_temp_c[MAX31856_CHANNEL_COUNT];
+    read_zone_max_temps(max_temp_c);
+    float target_c = safety_ceiling_policy_target_c(max_temp_c, MAX31856_CHANNEL_COUNT);
+    if (target_c <= 0.0f) {
+        return false;
+    }
+    *out_c = target_c;
+    return true;
+}
+
 /* 2026-09-22 (opus review, advisory adopted): the poll-side caller
  * (safety_link_poll.c) ticks this every ~500 ms purely to re-assert a
  * level-triggered condition -- if the lock is already held (the swap-worker
@@ -790,11 +818,7 @@ static bool reconcile_on_link_up_impl(SafetyLinkClass *link, bool blocking)
     now_us = (int64_t)hal_time_now_us();
 
     float new_max_temp_c[MAX31856_CHANNEL_COUNT];
-    for (uint8_t zi = 0; zi < MAX31856_CHANNEL_COUNT; zi++) {
-        float cur_max = 0.0f, cur_min = 0.0f;
-        zones_config_get_temp_limits(zi, &cur_max, &cur_min);
-        new_max_temp_c[zi] = cur_max;
-    }
+    read_zone_max_temps(new_max_temp_c);
 
     /* Divergence enforcement runs UNCONDITIONALLY, before the backoff check
      * below -- deliberately. The backoff exists only to bound the cost of

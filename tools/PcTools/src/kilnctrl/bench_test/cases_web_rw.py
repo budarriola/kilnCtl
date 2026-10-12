@@ -110,6 +110,27 @@ def _http_post_raw(host: str, path: str, fields: Dict[str, Any], timeout: float 
         return None, str(exc), None
 
 
+class BodyDecodeError(OSError):
+    """Content-Encoding said gzip but the body would not decode: a transport
+    problem, never a board verdict. Subclasses OSError so the GET seams map
+    it to ``(None, reason)`` (unreachable -> INCONCLUSIVE, not FAIL)."""
+
+
+def _decode_body(raw: bytes, headers) -> str:
+    """Decode a response body, gunzipping when Content-Encoding says gzip."""
+    enc = ""
+    try:
+        enc = (headers.get("Content-Encoding") or "") if headers is not None else ""
+    except Exception:  # noqa: BLE001
+        enc = ""
+    if enc.lower() == "gzip":
+        try:
+            raw = gzip.decompress(raw)
+        except (OSError, EOFError, zlib.error) as exc:
+            raise BodyDecodeError(f"gzip decode failed: {exc}") from exc
+    return raw.decode("utf-8", errors="replace")
+
+
 def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[Optional[int], Optional[str]]":
     """Authenticated GET via ``kilnctrl.http_auth.urlopen`` -- for
     WEB-DASH-13/WEB-DIAG-07/WEB-DIAG-08 and WEB-SEC-03's own
@@ -120,14 +141,18 @@ def _http_get_raw_authed(host: str, path: str, timeout: float = 5.0) -> "Tuple[O
     write path itself, not the auth gate, and must keep working whether the
     board's web auth happens to be on or off when the run reaches them."""
     url = f"http://{host}{path}"
-    req = urllib.request.Request(url, method="GET")
+    # urllib's default "Accept-Encoding: identity" makes the firmware answer
+    # 406 for its gzip-only embedded pages; advertise gzip and decode.
+    req = urllib.request.Request(url, method="GET", headers={"Accept-Encoding": "gzip"})
     try:
         with http_auth.urlopen(req, timeout=timeout) as resp:
-            return resp.getcode(), resp.read().decode("utf-8", errors="replace")
+            return resp.getcode(), _decode_body(resp.read(), resp.headers)
     except urllib.error.HTTPError as exc:
         try:
-            detail = exc.read().decode("utf-8", errors="replace") if exc.fp else None
+            detail = _decode_body(exc.read(), exc.headers) if exc.fp else None
         except Exception:  # noqa: BLE001
+            # Includes BodyDecodeError: the HTTP status is real and decisive
+            # (a 409/403 refusal); only the body is unusable.
             detail = None
         return exc.code, detail
     except (urllib.error.URLError, OSError, http_auth.HttpAuthError) as exc:
@@ -204,11 +229,14 @@ def _post_json(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[
     _check_write_allowed(path, fields)
     fn = ctx.get("http_post_json")
     if fn is not None:
-        return fn(path, fields)
+        status, body = fn(path, fields)
+        _note_post_status(ctx, status)
+        return status, body
     host = ctx.get("host")
     if not host:
         return None, None
     status, text = _http_post_raw_authed(host, path, fields)
+    _note_post_status(ctx, status)
     return status, _parse_json(text)
 
 
@@ -229,11 +257,14 @@ def _post_raw(ctx: dict, path: str, fields: Dict[str, Any]) -> "Tuple[Optional[i
     _check_write_allowed(path, fields)
     fn = ctx.get("http_post_raw")
     if fn is not None:
-        return fn(path, fields)
-    host = ctx.get("host")
-    if not host:
-        return None, None
-    return _http_post_raw_authed(host, path, fields)
+        res = fn(path, fields)
+    else:
+        host = ctx.get("host")
+        if not host:
+            return None, None
+        res = _http_post_raw_authed(host, path, fields)
+    _note_post_status(ctx, res[0])
+    return res
 
 
 def _http_post_json_body_authed(host: str, path: str, body: Any,
@@ -260,11 +291,95 @@ def _post_json_body(ctx: dict, path: str, body: Any) -> "Tuple[Optional[int], Op
     _check_write_allowed(path, body)
     fn = ctx.get("http_post_json_body")
     if fn is not None:
-        return fn(path, body)
-    host = ctx.get("host")
-    if not host:
-        return None, None
-    return _http_post_json_body_authed(host, path, body)
+        res = fn(path, body)
+    else:
+        host = ctx.get("host")
+        if not host:
+            return None, None
+        res = _http_post_json_body_authed(host, path, body)
+    _note_post_status(ctx, res[0])
+    return res
+
+
+# ---------------------------------------------------------------------------
+# Shared gates (web judge contract audit 2, M1 / L1 / L10).
+# ---------------------------------------------------------------------------
+
+_CTX_POST_503 = "_post_503_count"
+
+
+def _note_post_status(ctx: dict, status: Any) -> None:
+    """Count 503 replies on the WEB POST seams: the cfg LittleFS partition
+    being unmounted answers 503 (cfg_fs_http_refuse_if_unmounted), a board
+    state and not a contract failure of the route under test."""
+    if status == 503:
+        ctx[_CTX_POST_503] = int(ctx.get(_CTX_POST_503, 0) or 0) + 1
+
+
+def cfg_unmounted_reason(ctx: dict) -> Optional[str]:
+    """A reason string when ``GET /api/cfgfs`` says the cfg partition is not
+    mounted, else None (mounted, or unreadable: a 503 on the write is mapped
+    to INCONCLUSIVE separately by :func:`cfg_guarded`)."""
+    try:
+        status, body = _get_json(ctx, "/api/cfgfs")
+    except Exception:  # noqa: BLE001
+        return None
+    if status == 200 and isinstance(body, dict) and body.get("mounted") is False:
+        return "cfg partition not mounted (board state, e.g. a format is pending); no write attempted"
+    return None
+
+
+def cfg_guarded(fn):
+    """Wrap a judge that writes a cfg-backed route (M1). Before the judge runs
+    an unmounted cfg partition gives INCONCLUSIVE with nothing written; after
+    it, a FAIL while any POST answered 503 is re-labelled INCONCLUSIVE (the
+    board refused because cfg is unmounted), except a reason starting
+    "ERROR:" (a possible leftover) which stays FAIL."""
+    def wrapper(ctx: dict) -> CaseResult:
+        why = cfg_unmounted_reason(ctx)
+        if why:
+            return CaseResult(Verdict.INCONCLUSIVE, reason=why, observed={"cfgfs_mounted": False})
+        ctx[_CTX_POST_503] = 0
+        result = fn(ctx)
+        n503 = int(ctx.get(_CTX_POST_503, 0) or 0)
+        if result.verdict == Verdict.FAIL and n503 and not (result.reason or "").startswith("ERROR:"):
+            obs = dict(result.observed or {})
+            obs["post_503_count"] = n503
+            return CaseResult(
+                Verdict.INCONCLUSIVE,
+                reason=f"{n503} POST(s) answered 503 (cfg partition unmounted); not a route verdict: {result.reason}",
+                observed=obs,
+            )
+        return result
+    wrapper.__name__ = getattr(fn, "__name__", "wrapper")
+    wrapper.__doc__ = getattr(fn, "__doc__", None)
+    return wrapper
+
+
+def idle_gate_reason(ctx: dict) -> Optional[str]:
+    """Executor must read idle and autotune idle/done/aborted (L1): the same
+    rule as the dash/diag/misc modules' gate. Returns a reason or None."""
+    st, ex = _get_json(ctx, "/api/profile_exec")
+    if st != 200 or not isinstance(ex, dict):
+        return f"GET /api/profile_exec unreadable (status={st}); cannot confirm the executor is idle"
+    if ex.get("state") != "idle":
+        return f"profile executor is {ex.get('state')!r}, not idle"
+    st, at = _get_json(ctx, "/api/autotune")
+    if st != 200 or not isinstance(at, dict):
+        return f"GET /api/autotune unreadable (status={st}); cannot confirm autotune is inactive"
+    if at.get("state") not in ("idle", "done", "aborted"):
+        return f"autotune is active (state={at.get('state')!r})"
+    return None
+
+
+def policy_unstored(cfg: Optional[dict]) -> bool:
+    """True when GET /api/auth/config shows the all-defaults snapshot the
+    handler prints when NO policy was ever stored (false/false/-1/-1,
+    security_http.c config handler). set_policy is the only HTTP writer and
+    there is no clear-policy route, so a restore could never put "none" back
+    (L10); judges that restore a policy refuse to start from this state."""
+    return (isinstance(cfg, dict) and not cfg.get("web_enabled") and not cfg.get("lcd_enabled")
+            and cfg.get("web_timeout_min") == -1 and cfg.get("lcd_timeout_min") == -1)
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +392,16 @@ def _bool_toggle_case(ctx: dict, get_path: str, post_path: str, get_field: str,
     refusal = board_lock.write_refusal(ctx)
     if refusal:
         return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
+    idle = idle_gate_reason(ctx)
+    if idle:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {idle}; no write attempted")
     status0, body0 = _get_json(ctx, get_path)
+    if status0 is None or status0 == 401:
+        # L5: a transport/session failure on the first read is not a verdict
+        # on the route under test.
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=f"GET {get_path} unreachable or unauthorised (status={status0}); no write attempted",
+                          observed={"status": status0})
     if status0 != 200 or body0 is None or get_field not in body0:
         return CaseResult(
             Verdict.FAIL,
@@ -313,7 +437,14 @@ def _case_dash13(ctx: dict) -> CaseResult:
     refusal = board_lock.write_refusal(ctx)
     if refusal:
         return CaseResult(Verdict.SKIP, reason=f"gate: {refusal}; no write attempted")
+    idle = idle_gate_reason(ctx)
+    if idle:
+        return CaseResult(Verdict.SKIP, reason=f"gate: {idle}; no write attempted")
     status0, body0 = _get_json(ctx, "/api/status")
+    if status0 is None or status0 == 401:
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=f"GET /api/status unreachable or unauthorised (status={status0}); no write attempted",
+                          observed={"status": status0})
     if status0 != 200 or body0 is None or body0.get("temp_unit") not in ("C", "F"):
         return CaseResult(
             Verdict.FAIL,
@@ -412,17 +543,7 @@ class _SecHttpClient:
             req.add_header("Cookie", f"kiln_sid={cookie}")
         try:
             with self._opener.open(req, timeout=self.timeout) as resp:
-                raw = resp.read()
-                if (resp.headers.get("Content-Encoding") or "").lower() == "gzip":
-                    try:
-                        raw = gzip.decompress(raw)
-                    except (EOFError, zlib.error, OSError):
-                        # A Content-Encoding: gzip header with a body that
-                        # doesn't actually decompress (truncated read,
-                        # misbehaving proxy) must not crash the case --
-                        # report "no body", not an unhandled exception.
-                        return resp.getcode(), None, resp.headers
-                return resp.getcode(), raw.decode("utf-8", errors="replace"), resp.headers
+                return resp.getcode(), _decode_body(resp.read(), resp.headers), resp.headers
         except urllib.error.HTTPError as exc:
             try:
                 raw = exc.read()
@@ -435,6 +556,8 @@ class _SecHttpClient:
                 detail = None
             return exc.code, detail, exc.headers
         except (urllib.error.URLError, OSError) as exc:
+            # OSError includes BodyDecodeError (bad gzip on a 2xx): a transport
+            # problem -> (None, reason) so the judge reports INCONCLUSIVE.
             return None, str(exc), None
 
     def get_config(self) -> "Tuple[Optional[int], Optional[dict]]":
@@ -596,11 +719,34 @@ def _case_web_sec03(ctx: dict) -> CaseResult:
         )
 
     status0, cfg0 = client.get_config()
+    if status0 is None or status0 == 401:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"GET /api/auth/config unreachable or unauthorised (status={status0}); no write attempted",
+            observed={"status": status0},
+        )
     if status0 != 200 or cfg0 is None:
         return CaseResult(
             Verdict.FAIL,
             reason=f"GET /api/auth/config failed (status={status0})",
             observed={"status": status0},
+        )
+    if policy_unstored(cfg0):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="board shows no stored auth policy (false/false/-1/-1); a restore cannot put 'none' back, so nothing was written",
+            observed={"policy_unstored": True},
+        )
+
+    # M2 (review 4 L3 pattern): never overwrite the admin password unless a
+    # real login with the same credential already succeeds -- else the board
+    # password silently changes to a stale environment value for good.
+    pre_status, pre_cookie = client.login(username, password)
+    if pre_status != 200 or not pre_cookie:
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason=f"harness credential is not the live one (login status={pre_status}); no password written",
+            observed={"login_status": pre_status},
         )
 
     orig = _policy_from_config(cfg0)
@@ -855,6 +1001,16 @@ def seed_lcd_pin(ctx: dict) -> Dict[str, Any]:
     straight into a `CaseResult` -- the PIN is never present in either.
     """
     resolved = _resolve_lcd_pin(ctx)
+    if resolved["cfg0"].get("admin_pin_set"):
+        # The config GET only says a PIN is set, and no route verifies one
+        # without side effects. Do not overwrite it and do not trust it
+        # here: return it flagged unverified so the caller proves it with a
+        # real keypad unlock (LCD-19: enter_pin, INCONCLUSIVE if it fails).
+        return {
+            "right_pin": resolved["right_pin"], "wrong_pin": resolved["wrong_pin"],
+            "orig": resolved["orig"], "unverified": True,
+            "state": {"pin_unverified": True, "admin_pin_set_before": True},
+        }
     pin_set_ok, state = _write_lcd_pin_if_needed(resolved["client"], resolved["cfg0"], resolved["right_pin"])
     if not pin_set_ok:
         raise LcdPinSeedError(
@@ -880,6 +1036,12 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
     right_pin = resolved["right_pin"]
     wrong_pin = resolved["wrong_pin"]
     orig = resolved["orig"]
+    if policy_unstored(resolved["cfg0"]):
+        return CaseResult(
+            Verdict.INCONCLUSIVE,
+            reason="board shows no stored auth policy (false/false/-1/-1); a restore cannot put 'none' back, so nothing was written",
+            observed={"policy_unstored": True},
+        )
 
     pin_set_ok, seed_state = _write_lcd_pin_if_needed(client, resolved["cfg0"], right_pin)
     enabled_ok = False
@@ -919,7 +1081,13 @@ def _case_web_sec04(ctx: dict) -> CaseResult:
         restore_ok=state["restore"]["post_ok"], restore_matches=state["restore"]["readback_matches"],
         state=state,
     )
-    if result.verdict == Verdict.PASS:
+    if result.verdict == Verdict.PASS and seed_state.get("admin_pin_set_before"):
+        # A pre-existing PIN is not proven to be the env PIN (the config GET
+        # only says one is set). Hand it to LCD-19 flagged unverified; LCD-19
+        # proves it by a real keypad unlock and is INCONCLUSIVE otherwise.
+        result.observed = dict(result.observed or {}, pin_unverified=True)
+        ctx["_lcd_pin"] = {"right_pin": right_pin, "wrong_pin": wrong_pin, "unverified": True}
+    elif result.verdict == Verdict.PASS:
         # LCD-19 (registry.py depends_on WEB-SEC-04) reads this to drive
         # UiTestClient.enter_pin() -- never populated on anything less than
         # a confirmed PASS here, so LCD-19 never acts on a PIN that might
@@ -960,9 +1128,9 @@ def _case_web_zone14(ctx: dict) -> CaseResult:
 #: Wire this wave's judge functions into the shared REGISTRY (same
 #: convention as cases_web.py's own tail).
 _CASE_FUNCS = {
-    "WEB-DASH-13": _case_dash13,
+    "WEB-DASH-13": cfg_guarded(_case_dash13),
     "WEB-DIAG-07": _case_diag07,
-    "WEB-DIAG-08": _case_diag08,
+    "WEB-DIAG-08": cfg_guarded(_case_diag08),
     "WEB-ZONE-14": _case_web_zone14,
     "WEB-SEC-04": _case_web_sec04,
     "WEB-SEC-03": _case_web_sec03,

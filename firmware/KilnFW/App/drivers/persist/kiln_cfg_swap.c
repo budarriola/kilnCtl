@@ -1,3 +1,4 @@
+#include "zones_import_reasons.h"
 #include "kiln_cfg_swap.h"
 
 #include <stddef.h>
@@ -14,6 +15,7 @@
 
 #include "kiln_cfg_store.h"
 #include "kiln_package.h"
+#include "persist_scratch.h" /* persist_scratch_alloc() -- save_pending()'s read-back buffer */
 #include "ota_state.h" /* ota_http_check_interlocks()/OTA_INTERLOCK_OK -- same predicate
                         * kiln_cfg_store_apply() itself is built on, section 4.3 */
 #include "safety_cfg_write.h" /* safety_cfg_write_apply_package_and_confirm()/_set_and_confirm_f32() */
@@ -25,6 +27,18 @@
 static const char *TAG = "kiln_cfg_swap";
 
 static SafetyLinkClass *s_link = NULL;
+
+/* LOW-2: the target id of an ESP_DONE record that stays open only because
+ * the active-id save failed after both sides were confirmed on the target.
+ * KILN_CFG_NO_ACTIVE_ID otherwise. Set at the very end of
+ * kiln_cfg_swap_apply_impl() / finish_esp_done_impl(), reset when an apply
+ * starts and whenever the record is cleared. See kiln_cfg_swap_is_pending(). */
+static volatile int32_t s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
+/* LOW-1 (review 10): true while a rollback left the journal KEPT because the active_id restore failed. Every
+ * boot then re-imports the rollback blob over the live zones, so a zones save in between would be silently
+ * reverted. nvs_save() (every zones writer) refuses while this is set (kiln_cfg_swap_zone_edits_at_risk()). Re-set by each
+ * boot's rollback_ex() that still cannot restore the id; cleared with the journal. */
+static volatile bool s_rollback_id_kept = false;
 
 /* M13 fix -- see kiln_cfg_swap_boot_fault_t's own doc comment
  * (kiln_cfg_swap.h) for scope and rationale. Latched once per boot, never
@@ -50,6 +64,35 @@ bool kiln_cfg_swap_get_boot_fault(kiln_cfg_swap_boot_fault_t *out)
     return s_boot_fault.occurred;
 }
 
+kiln_cfg_swap_boot_fault_kind_t kiln_cfg_swap_get_boot_fault_kind(void)
+{
+    return s_boot_fault.occurred ? s_boot_fault.kind : KILN_CFG_SWAP_BOOT_FAULT_NONE;
+}
+
+const char *kiln_cfg_swap_boot_fault_kind_name(kiln_cfg_swap_boot_fault_kind_t kind)
+{
+    switch (kind) {
+    case KILN_CFG_SWAP_BOOT_FAULT_NONE:
+        return "none";
+    case KILN_CFG_SWAP_BOOT_FAULT_UNREADABLE:
+        return "unreadable";
+    case KILN_CFG_SWAP_BOOT_FAULT_NO_LINK:
+        return "no_link";
+    case KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_FAILED:
+        return "rollback_failed";
+    case KILN_CFG_SWAP_BOOT_FAULT_ESP_DONE_UNCONFIRMED:
+        return "esp_done_unconfirmed";
+    case KILN_CFG_SWAP_BOOT_FAULT_UNRECOGNISED_MARKER:
+        return "unrecognised_marker";
+    case KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED:
+        return "active_id_unsaved";
+    case KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED:
+        return "rollback_active_id_unsaved";
+    default:
+        return "unknown";
+    }
+}
+
 void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null)
 {
     s_link = link_or_null;
@@ -61,6 +104,14 @@ void kiln_cfg_swap_set_link(SafetyLinkClass *link_or_null)
 #define KILN_NVS_PARTITION_SWAP "kiln_nvs"
 #define NVS_NAMESPACE_SWAP "kiln_cfg"
 #define NVS_KEY_SWAP_PENDING "swap_pend"
+
+/* LOW-4: what rollback() writes to its reason_out when both sides are back
+ * on R but the journal clear failed. */
+#define KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE \
+    "swap journal not cleared after rollback; autosave off, next boot retries (edits meanwhile may be lost)"
+#define KILN_CFG_SWAP_ROLLBACK_ID_NOTE \
+    "previous active kiln config id not restored after rollback; journal kept, next boot retries and re-imports the " \
+    "pre-swap zones, so zone edits saved meanwhile will be LOST"
 
 static bool set_reason(char *reason_out, size_t reason_cap, const char *msg)
 {
@@ -148,7 +199,28 @@ static bool save_pending(const kiln_cfg_swap_pending_t *p)
         err = hal_kv_commit(&h);
     }
     hal_kv_close(&h);
-    return err == HAL_OK;
+    if (err != HAL_OK) {
+        return false;
+    }
+    /* L6 (docs/audits/UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md): never
+     * trust the write's return code alone -- boot_guard's 2026-09-08 failure
+     * was an NVS write reporting HAL_OK while the value never landed. Read
+     * the record back and compare every byte, the same verified-write
+     * discipline as boot_guard's verify_persisted_count(). A record boot
+     * recovery cannot rely on is reported as a failed save. Heap scratch,
+     * not stack: the record is about 2 kB and the swap worker's stack
+     * budget is measured. */
+    kiln_cfg_swap_pending_t *rb = persist_scratch_alloc(sizeof(*rb));
+    if (!rb) {
+        ESP_LOGE(TAG, "save_pending: no memory for the read-back check -- treating the save as failed");
+        return false;
+    }
+    bool verified = load_pending(rb) && memcmp(rb, p, sizeof(*p)) == 0;
+    free(rb);
+    if (!verified) {
+        ESP_LOGE(TAG, "save_pending: write reported success but the record did not read back as written");
+    }
+    return verified;
 }
 
 static bool clear_pending(void)
@@ -159,7 +231,17 @@ static bool clear_pending(void)
     none.target_id = KILN_CFG_NO_ACTIVE_ID;
     none.previous_active_id = KILN_CFG_NO_ACTIVE_ID;
     none.crc32 = pending_crc(&none);
-    return save_pending(&none);
+    if (!save_pending(&none)) {
+        return false;
+    }
+    s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
+    s_rollback_id_kept = false;
+    return true;
+}
+
+bool kiln_cfg_swap_zone_edits_at_risk(void)
+{
+    return s_rollback_id_kept;
 }
 
 static bool persist_marker(kiln_cfg_swap_pending_t *p, kiln_cfg_swap_marker_t marker)
@@ -211,7 +293,26 @@ kiln_cfg_swap_marker_t kiln_cfg_swap_get_marker(int32_t *out_target_id, int32_t 
  * boot-recovery and status-reporting callers already read. */
 bool kiln_cfg_swap_is_pending(void)
 {
-    return kiln_cfg_swap_get_marker(NULL, NULL) != KILN_CFG_SWAP_MARKER_NONE;
+    int32_t target_id = KILN_CFG_NO_ACTIVE_ID;
+    kiln_cfg_swap_marker_t marker = kiln_cfg_swap_get_marker(&target_id, NULL);
+    if (marker == KILN_CFG_SWAP_MARKER_NONE) {
+        return false;
+    }
+    /* LOW-2: an ESP_DONE record kept open ONLY because the active-id save
+     * failed (s_id_unsaved_target, set at the very end of a finished apply
+     * or boot finish, never while one is in flight) does not block autosave
+     * when RAM active_id already names that target. Autosave then writes
+     * into the target's own slot -- the kiln that is genuinely live -- so a
+     * zone edit after such an apply keeps the slot equal to the live config,
+     * and the next boot's finish_esp_done_impl() finds them matching instead
+     * of latching ESP_DONE_UNCONFIRMED. Every other pending state still
+     * blocks, including ESP_DONE during an apply's own steps 10-13 (the race
+     * kiln_cfg_store_set_swap_pending_source()'s doc comment describes). */
+    if (marker == KILN_CFG_SWAP_MARKER_ESP_DONE && target_id != KILN_CFG_NO_ACTIVE_ID &&
+        target_id == s_id_unsaved_target && kiln_cfg_store_get_active_id() == target_id) {
+        return false;
+    }
+    return true;
 }
 
 /* ---- field-by-field Pico readback compare (section 4.2 step 7 / 3.1's
@@ -338,6 +439,53 @@ static bool push_and_verify_pico(SafetyLinkClass *link, const kiln_pkg_safety_t 
     return pico_readback_matches(pkg, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, reason_out, reason_cap);
 }
 
+/* Restores R's own recorded ceiling (p->rollback_pico's
+ * SAFETY_PARAM_ID_ABS_MAX_TEMP_C entry) through the volatile install.
+ * Best-effort: a failure is logged only, see rollback()'s comment below.
+ * Shared by rollback() and kiln_cfg_swap_apply_impl()'s PICO_OPEN-persist
+ * failure path, where the raise-first ceiling is the only thing the Pico has
+ * been told.
+ *
+ * LOW-6 (docs/audits/UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md follow-up):
+ * R's snapshot can be older than the live zones. A zones POST that raised a
+ * zone max between the snapshot (or the raise-first step) and this restore
+ * has already raised the Pico ceiling to match; writing R's lower snapshot
+ * value back would leave the Pico tighter than the zone maxima, which the
+ * owner's "same or looser, never tighter" rule forbids. So the value written
+ * is max(R's ceiling, the ceiling the CURRENT zones require), the latter
+ * from safety_ceiling_sync_required_ceiling_c() -- the same policy and zone
+ * read the reconcile and the zones POST guard use. When the current
+ * requirement is unknown (zones not valid yet), R's value is written as
+ * before. A zones POST that has guard-raised but not yet committed its
+ * zones is not visible here; the reconcile every caller runs right after
+ * this re-derives the target and is the second pass for that window. */
+static void restore_r_ceiling_volatile(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p)
+{
+    for (uint16_t i = 0; i < p->rollback_pico.count; i++) {
+        if (p->rollback_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
+            (p->rollback_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
+            float r_ceiling = 0.0f;
+            memcpy(&r_ceiling, &p->rollback_pico.entries[i].value_bits, sizeof(r_ceiling));
+            float required_c = 0.0f;
+            if (safety_ceiling_sync_required_ceiling_c(&required_c) && required_c > r_ceiling) {
+                ESP_LOGW(TAG, "restoring the Pico ceiling to %.1f C, not R's %.1f C -- the current zone maxima "
+                              "require it (never tighter than the zones)",
+                         (double)required_c, (double)r_ceiling);
+                r_ceiling = required_c;
+            }
+            char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
+            ceiling_reason[0] = '\0';
+            if (!safety_cfg_write_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, r_ceiling,
+                                                              ceiling_reason, sizeof(ceiling_reason), NULL)) {
+                ESP_LOGW(TAG, "could not restore the Pico's pre-swap ceiling directly (%s) -- "
+                              "the standing reconcile-on-link-up call is a second attempt",
+                         ceiling_reason);
+            }
+            break;
+        }
+    }
+}
+
 /* ---- rollback -------------------------------------------------------------
  *
  * Re-applies R (the pre-swap snapshot) to whichever side(s) actually moved.
@@ -347,9 +495,12 @@ static bool push_and_verify_pico(SafetyLinkClass *link, const kiln_pkg_safety_t 
  * confirmed back on R (or were never moved off it) -- false means the
  * owner's worst case: latch, disable, and leave the pending record for a
  * retry (never silently re-arm on an unconfirmed rollback). */
-static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bool esp_was_committed,
-                     char *reason_out, size_t reason_cap)
+static bool rollback_ex(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bool esp_was_committed,
+                        char *reason_out, size_t reason_cap, bool *record_kept)
 {
+    if (record_kept) {
+        *record_kept = false;
+    }
     char sub[KILN_CFG_SWAP_REASON_MAX];
     sub[0] = '\0';
     /* Item 15: rollback uses the SAME mechanism as the forward push
@@ -383,6 +534,19 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
         kiln_cfg_store_set_autosave_target_override(KILN_CFG_AUTOSAVE_OVERRIDE_NONE);
         kiln_cfg_store_unlock();
         if (!imported) {
+            if (strcmp(sub, ZONES_IMPORT_REASON_RUN_CLAIMED) == 0) {
+                /* Review 15 LOW-1: the re-import was refused ONLY because a profile/autotune run holds the claim --
+                 * the previous config is valid, it just could not be written right now. Report a distinct
+                 * REFUSED outcome (still false: the ESP side is still on the target, the journal is kept and
+                 * boot recovery retries the rollback) instead of "ROLLBACK FAILED", which reads as the previous
+                 * config being rejected. */
+                /* Literal (not sub): the full ZONES_IMPORT_REASON_RUN_CLAIMED text (57 chars) must not be cut
+                 * mid-word (review SL3 A5), and the compiler can then prove prefix + text fit the caller's wrapper
+                 * inside KILN_CFG_SWAP_REASON_MAX (200); the test asserts the full text. */
+                snprintf(reason_out, reason_cap,
+                         "ROLLBACK REFUSED, previous config valid (retried at run end or boot): " ZONES_IMPORT_REASON_RUN_CLAIMED);
+                return false;
+            }
             snprintf(reason_out, reason_cap, "ROLLBACK FAILED (ESP would not re-accept the previous config): %.136s",
                      sub);
             return false;
@@ -400,40 +564,74 @@ static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bo
      * content and the Pico's ceiling identity are what the caller's own
      * post-rollback state actually depends on, and the standing reconcile
      * call right after this still runs as a second attempt/verification. */
-    for (uint16_t i = 0; i < p->rollback_pico.count; i++) {
-        if (p->rollback_pico.entries[i].param_id == SAFETY_PARAM_ID_ABS_MAX_TEMP_C &&
-            (p->rollback_pico.entries[i].flags & KILN_PKG_PARAM_FLAG_SET)) {
-            float r_ceiling = 0.0f;
-            memcpy(&r_ceiling, &p->rollback_pico.entries[i].value_bits, sizeof(r_ceiling));
-            char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
-            ceiling_reason[0] = '\0';
-            if (!safety_cfg_write_set_and_confirm_f32_volatile(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, r_ceiling,
-                                                              ceiling_reason, sizeof(ceiling_reason), NULL)) {
-                ESP_LOGW(TAG, "rollback: could not restore the Pico's pre-swap ceiling directly (%s) -- "
-                              "the standing reconcile-on-link-up call below is a second attempt",
-                         ceiling_reason);
-            }
-            break;
-        }
-    }
+    restore_r_ceiling_volatile(link, p);
     /* Best-effort second pass / verification, exactly like the forward
      * path's own step 10 (safety_ceiling_sync_apply_lower()'s documented
      * contract: never blocks, never a failure the caller must act on). */
     safety_ceiling_sync_reconcile_on_link_up(link);
-    if (!kiln_cfg_store_set_active_id_raw(p->previous_active_id, sub, sizeof(sub))) {
-        ESP_LOGW(TAG, "rollback: restoring previous active_id bookkeeping failed: %s -- live config is "
-                      "correct, only the picker's 'active' marker may be stale",
+    /* LOW-5: under kiln_cfg_store_lock like every other active_id writer in
+     * this file. Taken only after the Pico round trips and the reconcile
+     * above have returned -- never held across Pico or HTTP calls. */
+    kiln_cfg_store_lock();
+    bool id_restored = kiln_cfg_store_set_active_id_raw(p->previous_active_id, sub, sizeof(sub));
+    kiln_cfg_store_unlock();
+    if (!id_restored) {
+        /* MED: the persisted active_id still names the TARGET while live
+         * zones are back on R. Clearing the journal here would drop the only
+         * record that lets a later boot retry the id restore, and autosave
+         * would then write R's live content into the target's slot. Keep the
+         * record (a leftover PICO_* record is harmless: boot re-applies R; a
+         * leftover ESP_DONE goes to finish_esp_done_impl()'s LOW-3 branch,
+         * which retries the id first). Autosave stays suppressed meanwhile. */
+        ESP_LOGE(TAG, "rollback: both sides are back on the previous config but restoring the previous "
+                      "active_id failed: %s -- journal KEPT, autosave suppressed until the next boot "
+                      "retries it",
                  sub);
+        s_rollback_id_kept = true;
+        if (record_kept) {
+            *record_kept = true;
+        }
+        (void)set_reason(reason_out, reason_cap, KILN_CFG_SWAP_ROLLBACK_ID_NOTE);
+        return true;
     }
-    /* Both sides confirmed back on R -- the pending record's job is done.
-     * Idempotent with boot_recover()'s own explicit clear_pending() calls
-     * on its PICO_OPEN/PICO_DONE paths (this function is their shared
-     * implementation); every OTHER caller (kiln_cfg_swap_apply()'s own
-     * rollback branches) relied on this and would otherwise leave a stale
-     * PICO_OPEN/PICO_DONE/ESP_DONE record behind after a swap that was, in
-     * fact, cleanly refused with nothing changed. */
-    clear_pending();
+    /* Both sides confirmed back on R (and the active_id restored) -- clear
+     * the journal. Idempotent with boot_recover()'s own clear_pending().
+     *
+     * LOW-4: the clear's result is checked. If it fails the record stays
+     * readable and kiln_cfg_swap_is_pending() stays true, so autosave is
+     * suppressed. This is NOT self-healing by itself: the next boot's
+     * recovery clears it only if nothing changed meanwhile -- edits made
+     * after the failed clear can latch ESP_DONE_UNCONFIRMED (ESP_DONE record
+     * no longer matches either side) or be re-imported over (PICO_DONE
+     * re-applies R). Reported via KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE. */
+    if (!clear_pending()) {
+        s_rollback_id_kept = true; /* review 12 LOW-2: the kept journal makes zone edits at risk here too */
+        ESP_LOGE(TAG, "rollback: both sides are back on the previous config, but clearing the swap journal "
+                      "failed -- autosave stays suppressed; boot recovery retries the clear, but edits made "
+                      "before then may latch a boot fault or be overwritten");
+        (void)set_reason(reason_out, reason_cap, KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE);
+    }
     return true;
+}
+
+static bool rollback(SafetyLinkClass *link, const kiln_cfg_swap_pending_t *p, bool esp_was_committed,
+                     char *reason_out, size_t reason_cap)
+{
+    return rollback_ex(link, p, esp_was_committed, reason_out, reason_cap, NULL);
+}
+
+/* Reason for an apply that was refused and rolled back cleanly. `roll_note`
+ * is the rollback()'s reason_out: empty on a fully clean rollback, or
+ * KILN_CFG_SWAP_ROLLBACK_UNCLEARED_NOTE when the journal clear failed
+ * (LOW-4), which is put first so truncation never drops it. Always returns false. */
+static bool rolled_back_reason(char *reason_out, size_t reason_cap, const char *msg, const char *roll_note)
+{
+    if (roll_note && roll_note[0] && reason_out && reason_cap) {
+        /* Note first: a long msg truncates, never the note (LOW-4). */
+        snprintf(reason_out, reason_cap, "%s; %s", roll_note, msg);
+        return false;
+    }
+    return set_reason(reason_out, reason_cap, msg);
 }
 
 /* ---- step 13: best-effort Pico flash-fallback persist ---------------------
@@ -472,10 +670,11 @@ static void persist_pico_flash_fallback(SafetyLinkClass *link, const kiln_pkg_sa
     if (have_target_ceiling) {
         char ceiling_reason[KILN_CFG_SWAP_REASON_MAX];
         ceiling_reason[0] = '\0';
-        if (!safety_cfg_write_set_and_confirm_f32(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
+        if (!safety_cfg_write_set_and_confirm_f32_blocking(link, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, target_ceiling,
                                                  ceiling_reason, sizeof(ceiling_reason), NULL)) {
-            ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land (%s) -- expected "
-                          "while ARMED, swap already succeeded via the volatile install, not a failure",
+            ESP_LOGI(TAG, "step 13 (flash fallback): ceiling flash persist did not land or is not yet "
+                          "confirmed (%s) -- may be an ARMED refusal or a DIAG older than the commit; the swap "
+                          "already succeeded via the volatile install, not a failure",
                      ceiling_reason);
         }
     }
@@ -570,6 +769,9 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
             return set_reason(reason_out, reason_cap, "could not snapshot the current Pico config for rollback");
         }
     }
+    /* LOW-2: a new transaction supersedes any earlier "only the active id is
+     * unsaved" record; autosave stays blocked for this one's whole run. */
+    s_id_unsaved_target = KILN_CFG_NO_ACTIVE_ID;
     if (!persist_marker(p, KILN_CFG_SWAP_MARKER_STAGED)) {
         return set_reason(reason_out, reason_cap, "could not persist the rollback record -- refusing to "
                                                     "start a swap with no way back");
@@ -608,8 +810,25 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
         }
     }
 
-    /* step 5 */
-    persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_OPEN);
+    /* step 5 (M2, docs/audits/UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md):
+     * PICO_OPEN must be on flash BEFORE the Pico is told anything but the
+     * raise-first ceiling. If it is not, a crash after step 6 would be
+     * recovered as STAGED (discard, no re-apply of R) while the Pico holds the
+     * target's volatile values. So a failed persist refuses here: the only
+     * change on the Pico so far is a ceiling that is the same as or looser
+     * than R's (the owner's "same or looser" rule allows that), and it is put
+     * back to R's best-effort, with the standing reconcile as a second pass.
+     * The record is then cleared; if that clear fails too, it still reads
+     * STAGED, and boot's STAGED discard is correct for this state. */
+    if (!persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_OPEN)) {
+        if (raise_first) {
+            restore_r_ceiling_volatile(link, p);
+            safety_ceiling_sync_reconcile_on_link_up(link);
+        }
+        clear_pending();
+        return set_reason(reason_out, reason_cap, "could not persist the swap journal before touching the safety "
+                                                    "processor -- swap refused, nothing changed");
+    }
 
     /* step 6/7: push everything except the ceiling, read back, compare.
      * Item 15: volatile_install=true -- the owner's "Pico never leaves
@@ -628,10 +847,33 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
                      roll_reason);
             return false;
         }
-        snprintf(reason_out, reason_cap, "swap refused, rolled back cleanly: %s", push_reason);
-        return false;
+        char refused[KILN_CFG_SWAP_REASON_MAX + 40];
+        snprintf(refused, sizeof(refused), "swap refused, rolled back cleanly: %s", push_reason);
+        return rolled_back_reason(reason_out, reason_cap, refused, roll_reason);
     }
-    persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_DONE);
+    /* M2: PICO_DONE must be on flash before the ESP half is committed. If it
+     * is not, the record still reads PICO_OPEN, whose boot recovery restores
+     * only the Pico (esp_was_committed=false) -- a crash after step 8 would
+     * leave the ESP on the target and the Pico on R. Roll back now instead,
+     * while the ESP is untouched. */
+    if (!persist_marker(p, KILN_CFG_SWAP_MARKER_PICO_DONE)) {
+        char roll_reason[KILN_CFG_SWAP_REASON_MAX];
+        roll_reason[0] = '\0';
+        if (!rollback(link, p, /*esp_was_committed=*/false, roll_reason, sizeof(roll_reason))) {
+            if (out_diverged) {
+                *out_diverged = true;
+            }
+            snprintf(reason_out, reason_cap,
+                     "could not persist the swap journal after the safety processor half, AND rollback failed "
+                     "(%.100s) -- alarmed",
+                     roll_reason);
+            return false;
+        }
+        return rolled_back_reason(reason_out, reason_cap,
+                                  "could not persist the swap journal after the safety processor half -- swap "
+                                  "refused and rolled back",
+                                  roll_reason);
+    }
 
     /* generation check -- H6: refuse to proceed if another writer touched
      * the store while we were off doing the Pico round trip, unlocked. */
@@ -646,8 +888,9 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
                      "another kiln-config write raced this swap, AND rollback failed (%s) -- alarmed", roll_reason);
             return false;
         }
-        return set_reason(reason_out, reason_cap,
-                          "another kiln-config write raced this swap -- refused and rolled back, try again");
+        return rolled_back_reason(reason_out, reason_cap,
+                                  "another kiln-config write raced this swap -- refused and rolled back, try again",
+                                  roll_reason);
     }
 
     /* step 8/9: commit the ESP half, read it back byte-for-byte */
@@ -677,10 +920,32 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
                      esp_reason, roll_reason);
             return false;
         }
-        snprintf(reason_out, reason_cap, "ESP half refused, rolled back cleanly: %s", esp_reason);
-        return false;
+        char refused[KILN_CFG_SWAP_REASON_MAX + 40];
+        snprintf(refused, sizeof(refused), "ESP half refused, rolled back cleanly: %s", esp_reason);
+        return rolled_back_reason(reason_out, reason_cap, refused, roll_reason);
     }
-    persist_marker(p, KILN_CFG_SWAP_MARKER_ESP_DONE);
+    /* M2: without ESP_DONE on flash the record still reads PICO_DONE, and the
+     * final clear below would most likely fail the same way -- the next boot
+     * would then roll back a swap this call had reported as a success. Roll
+     * back now, so the persisted record never lags behind the two sides. */
+    if (!persist_marker(p, KILN_CFG_SWAP_MARKER_ESP_DONE)) {
+        char roll_reason[KILN_CFG_SWAP_REASON_MAX];
+        roll_reason[0] = '\0';
+        if (!rollback(link, p, /*esp_was_committed=*/true, roll_reason, sizeof(roll_reason))) {
+            if (out_diverged) {
+                *out_diverged = true;
+            }
+            snprintf(reason_out, reason_cap,
+                     "could not persist the swap journal after the ESP half, AND rollback failed (%.100s) -- "
+                     "alarmed",
+                     roll_reason);
+            return false;
+        }
+        return rolled_back_reason(reason_out, reason_cap,
+                                  "could not persist the swap journal after the ESP half -- swap refused and "
+                                  "rolled back",
+                                  roll_reason);
+    }
 
     kiln_cfg_store_lock();
     uint8_t *readback_blob = scratch->readback_blob;
@@ -699,8 +964,9 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
                      roll_reason);
             return false;
         }
-        return set_reason(reason_out, reason_cap,
-                          "ESP readback did not match what was committed -- rolled back cleanly");
+        return rolled_back_reason(reason_out, reason_cap,
+                                  "ESP readback did not match what was committed -- rolled back cleanly",
+                                  roll_reason);
     }
 
     /* step 12 moved up here, right after readback proves the live zones
@@ -723,10 +989,19 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
     bool finalized = kiln_cfg_store_set_active_id_raw(target_id, final_reason, sizeof(final_reason));
     kiln_cfg_store_unlock();
     if (!finalized) {
-        /* Content is correct on both sides; only the bookkeeping id write
-         * failed -- log loudly but do not treat this as a failed swap (the
-         * live config genuinely IS target_id's on both sides regardless). */
-        ESP_LOGE(TAG, "swap content landed and verified, but recording active_id failed: %s", final_reason);
+        /* M1 (docs/audits/UNCHECKED_PERSIST_RESULT_AUDIT_2026-10-09.md):
+         * content is correct on both sides and RAM active_id already names
+         * target_id (set_active_id_raw sets RAM before persisting), but the
+         * persisted id still names the outgoing kiln. The record stays at
+         * ESP_DONE (never cleared, see the end of this function) so the next
+         * boot's finish_esp_done() re-verifies and retries the id save.
+         * Autosave never writes into the outgoing kiln's slot: it targets
+         * RAM active_id (the target), and kiln_cfg_swap_is_pending() keeps it
+         * off entirely until this apply has finished (LOW-2 below lifts that
+         * only at the end). Reported as a failed apply, not a clean success. */
+        ESP_LOGE(TAG, "swap content landed and verified, but recording active_id failed: %s -- swap journal "
+                      "kept open, retried at next boot",
+                 final_reason);
     }
 
     /* step 10/11: ceiling identity + arming, reusing item 7's existing
@@ -763,6 +1038,16 @@ static bool kiln_cfg_swap_apply_impl(int32_t target_id, bool ack_no_safety_proce
      * result, which is already decided above. */
     persist_pico_flash_fallback(link, target_pico, target_ceiling, have_target_ceiling);
 
+    if (!finalized) {
+        /* LOW-2: the transaction is finished in every respect but the
+         * persisted id; let autosave follow the live (target) kiln. */
+        s_id_unsaved_target = target_id;
+        snprintf(reason_out, reason_cap,
+                 "%s both processors, but saving which kiln is active failed (%.80s) -- retried at next boot; "
+                 "until then the kiln list may name the previous kiln",
+                 KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX, final_reason);
+        return false;
+    }
     clear_pending();
     return true;
 }
@@ -863,8 +1148,17 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, c
         ESP_LOGE(TAG, "boot: ESP_DONE recovery could not re-read target slot %ld: %s -- rolling back "
                       "to the pre-swap config instead",
                  (long)p->target_id, sub);
-        if (link && rollback(link, p, /*esp_was_committed=*/true, sub, sizeof(sub))) {
-            clear_pending();
+        bool kept = false;
+        if (link && rollback_ex(link, p, /*esp_was_committed=*/true, sub, sizeof(sub), &kept)) {
+            if (!kept) {
+                clear_pending();
+            } else {
+                /* Rolled back, but the active-id restore failed and the journal is kept: never silent. */
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
+                                 "a kiln-config swap was rolled back, but saving which kiln is active "
+                                 "failed -- zone saves are refused until the next boot retries it (a saved "
+                                 "edit would be reverted); heat is not affected");
+            }
         } else {
             ESP_LOGE(TAG, "boot: ESP_DONE fallback rollback also failed: %s -- staying alarmed", sub);
             char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];
@@ -878,16 +1172,57 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, c
     }
     kiln_cfg_store_lock();
     uint8_t *live_blob = scratch->live_blob;
-    bool esp_matches = zones_config_export_blob(live_blob, sizeof(scratch->live_blob)) &&
-                       memcmp(live_blob, target_blob, target_blob_len) == 0;
+    bool live_ok = zones_config_export_blob(live_blob, sizeof(scratch->live_blob));
+    bool esp_matches = live_ok && memcmp(live_blob, target_blob, target_blob_len) == 0;
+    /* LOW-3: an ESP_DONE record whose two sides are both back on R is a
+     * rollback that completed but whose final clear failed (rollback()'s
+     * LOW-4 path). Nothing is left to finish or undo -- clear the record
+     * instead of latching ESP_DONE_UNCONFIRMED over a consistent state. */
+    bool esp_on_r = live_ok && !esp_matches && p->rollback_blob_len > 0 &&
+                    memcmp(live_blob, p->rollback_blob, p->rollback_blob_len) == 0;
     kiln_cfg_store_unlock();
     bool pico_matches = false;
+    bool pico_on_r = false;
     if (link && safety_cfg_store_refetch(link, 0)) {
         pico_matches = pico_readback_matches(target_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
+        if (esp_on_r) {
+            /* `sub` reused, not a second reason buffer: this frame's stack is
+             * measured (see the noinline comment above), and esp_on_r implies
+             * !esp_matches, so the target compare's text is not needed. */
+            pico_on_r = pico_readback_matches(&p->rollback_pico, SAFETY_PARAM_ID_ABS_MAX_TEMP_C, sub, sizeof(sub));
+        }
+    }
+    if (esp_on_r && pico_on_r) {
+        /* Both sides hold R, so the persisted active_id must name R's kiln
+         * before the record can go. A diverged/ACTIVE_ID_UNSAVED path may
+         * already have persisted the target id; clearing with that id while
+         * R is live would let autosave write R over the target's slot.
+         * Restore previous_active_id first; if that fails, fall through to
+         * the ESP_DONE_UNCONFIRMED latch below instead of clearing. */
+        kiln_cfg_store_lock();
+        bool id_ok = kiln_cfg_store_get_active_id() == p->previous_active_id ||
+                     kiln_cfg_store_set_active_id_raw(p->previous_active_id, sub, sizeof(sub));
+        kiln_cfg_store_unlock();
+        if (!id_ok) {
+            ESP_LOGE(TAG, "boot: ESP_DONE record with both sides back on the pre-swap config, but restoring "
+                          "active_id %ld failed: %s -- not cleared",
+                     (long)p->previous_active_id, sub);
+            esp_on_r = false;
+        }
+    }
+    if (esp_on_r && pico_on_r) {
+        if (clear_pending()) {
+            ESP_LOGW(TAG, "boot: ESP_DONE record found with both sides back on the pre-swap config (a rollback "
+                          "whose journal clear failed) -- cleared");
+        } else {
+            ESP_LOGE(TAG, "boot: ESP_DONE record found with both sides back on the pre-swap config, but the "
+                          "clear failed again -- will retry next boot");
+        }
+        return;
     }
     if (esp_matches && pico_matches) {
         kiln_cfg_store_lock();
-        kiln_cfg_store_set_active_id_raw(p->target_id, sub, sizeof(sub));
+        bool id_saved = kiln_cfg_store_set_active_id_raw(p->target_id, sub, sizeof(sub));
         kiln_cfg_store_unlock();
         /* step 13, same as kiln_cfg_swap_apply()'s own -- best-effort,
          * allowed to fail, never affects the outcome already decided
@@ -903,6 +1238,23 @@ static void KILN_CFG_SWAP_NOINLINE finish_esp_done_impl(SafetyLinkClass *link, c
             }
         }
         persist_pico_flash_fallback(link, target_pico, target_ceiling, have_target_ceiling);
+        if (!id_saved) {
+            /* M1: both sides are confirmed on the target, but the persisted
+             * active_id still names the outgoing kiln. Keep the record at
+             * ESP_DONE so the next boot retries. RAM active_id names the
+             * target (set_active_id_raw sets RAM before persisting), so
+             * LOW-2's s_id_unsaved_target lets autosave write into the
+             * target's slot -- never the outgoing kiln's. Display-only
+             * fault: the divergence check, not this latch, gates heat. */
+            ESP_LOGE(TAG, "boot: ESP_DONE swap confirmed on both sides, but saving active_id %ld failed: %s -- "
+                          "swap journal kept open, will retry next boot",
+                     (long)p->target_id, sub);
+            s_id_unsaved_target = p->target_id;
+            latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ACTIVE_ID_UNSAVED, p->target_id,
+                             "kiln config applied on both processors, but saving which kiln is active failed -- "
+                             "retried automatically at each boot; heat is not affected");
+            return;
+        }
         clear_pending();
         ESP_LOGW(TAG, "boot: ESP_DONE swap confirmed complete on both sides -- finished");
     } else {
@@ -987,11 +1339,17 @@ static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
     case KILN_CFG_SWAP_MARKER_NONE:
         return;
     case KILN_CFG_SWAP_MARKER_STAGED:
-        /* Crashed before the Pico was ever touched -- both sides are still
-         * on R (nothing was written). Simply discard the record; the
-         * standing divergence check confirms this normally once the link
-         * is up. */
-        ESP_LOGW(TAG, "boot: discarding a STAGED swap record (crashed before the Pico was touched) -- "
+        /* Crashed before PICO_OPEN was persisted. Both sides' config is
+         * still R: the one write that can precede PICO_OPEN is step 4's
+         * raise-first ceiling (volatile), which is the same as or looser
+         * than R's -- permitted by the "abs_max same or looser" rule -- and
+         * the standing reconcile-on-link-up lowers it back to match the
+         * zones. kiln_cfg_swap_apply_impl() refuses before step 6 if
+         * PICO_OPEN cannot be persisted (M2), so a STAGED record never sits
+         * behind a Pico that holds target values. Simply discard it; the
+         * standing divergence check confirms this normally once the link is
+         * up. */
+        ESP_LOGW(TAG, "boot: discarding a STAGED swap record (crashed before the Pico config was touched) -- "
                       "both sides are still on the pre-swap config");
         clear_pending();
         return;
@@ -1011,10 +1369,24 @@ static void kiln_cfg_swap_boot_recover_impl(kiln_cfg_swap_pending_t *p)
                              "connection, or reboot once it is up");
             return;
         }
-        if (rollback(link, p, /*esp_was_committed=*/(p->marker == KILN_CFG_SWAP_MARKER_PICO_DONE), reason,
-                    sizeof(reason))) {
-            clear_pending();
-            ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
+        bool kept = false;
+        if (rollback_ex(link, p, /*esp_was_committed=*/(p->marker == KILN_CFG_SWAP_MARKER_PICO_DONE), reason,
+                        sizeof(reason), &kept)) {
+            if (!kept) {
+                clear_pending();
+                ESP_LOGW(TAG, "boot: interrupted swap recovered -- both sides confirmed back on the pre-swap config");
+            } else {
+                /* Review LOW: both sides are back on R but the persisted active_id restore failed, so the
+                 * journal is kept (autosave stays suppressed, retried each boot). Never silent: latch the
+                 * display-only ROLLBACK_ACTIVE_ID_UNSAVED kind (web banner + LCD notice say ROLLED BACK). Heat is not
+                 * gated: kiln_cfg_swap_is_pending() only blocks autosave, never a firing start or an apply. */
+                ESP_LOGE(TAG, "boot: interrupted swap rolled back, but restoring the saved active kiln failed -- "
+                              "journal kept, autosave suppressed, will retry next boot");
+                latch_boot_fault(KILN_CFG_SWAP_BOOT_FAULT_ROLLBACK_ACTIVE_ID_UNSAVED, p->target_id,
+                                 "an interrupted kiln-config swap was rolled back, but saving which kiln is "
+                                 "active failed -- zone saves are refused until the next boot retries it (a "
+                                 "saved edit would be reverted); heat is not affected");
+            }
         } else {
             ESP_LOGE(TAG, "boot: interrupted-swap recovery failed: %s -- staying alarmed, will retry", reason);
             char op_reason[KILN_CFG_SWAP_REASON_MAX + 128];

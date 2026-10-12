@@ -61,8 +61,11 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "hal_sysinfo.h" // hal_sysinfo_fill_random()
@@ -190,7 +193,7 @@ typedef struct {
     uint32_t last_activity_ms;
     totp_backoff_state_t backoff;
 } totp_lockout_slot_t;
-static totp_lockout_slot_t s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS];
+static EXT_RAM_BSS_ATTR totp_lockout_slot_t s_totp_lockouts[TOTP_LOCKOUT_MAX_IPS];
 static totp_lockout_slot_t s_remote_totp_slot;
 static SemaphoreHandle_t s_totp_lock;
 
@@ -338,6 +341,7 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     }
 
     if (req->content_len <= 0 || req->content_len >= FORGOT_BODY_MAX) {
+        totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
@@ -346,6 +350,8 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
+            totp_secure_zero(body, sizeof(body));
+            totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
         }
@@ -357,7 +363,10 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
     char code[8];
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int code_len = http_form_find_field(body, "code", code, sizeof(code));
+    totp_secure_zero(body, sizeof(body)); /* body holds the TOTP code; fields are copied out */
     if (username_len < 0 || code_len < 0) {
+        totp_secure_zero(code, sizeof(code));
+        totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username and code are required");
         return ESP_OK;
     }
@@ -432,7 +441,10 @@ static esp_err_t forgot_post_handler(httpd_req_t *req)
 
 // --- OPEN: POST /api/auth/reset ---------------------------------------------
 
-#define RESET_BODY_MAX 256
+// Worst legal body: "username=" + 32 chars and "new_password=" + 128 chars both fully
+// percent-encoded (3x) + "reset_token=" + hex token + separators, so 256 could refuse
+// a valid reset (login was raised to 512 for the same reason, e51f9402). Heap, not stack.
+#define RESET_BODY_MAX 512
 
 static esp_err_t reset_post_handler(httpd_req_t *req)
 {
@@ -449,14 +461,25 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     }
 
     if (req->content_len <= 0 || req->content_len >= RESET_BODY_MAX) {
+        totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "body missing or too large");
         return ESP_OK;
     }
-    char body[RESET_BODY_MAX];
+    char *body = (char *)heap_caps_malloc(RESET_BODY_MAX, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (body == NULL) {
+        body = (char *)heap_caps_malloc(RESET_BODY_MAX, MALLOC_CAP_8BIT);
+    }
+    if (body == NULL) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
+        return ESP_OK;
+    }
     size_t received = 0;
     while (received < (size_t)req->content_len) {
         int ret = httpd_req_recv(req, body + received, (size_t)req->content_len - received);
         if (ret <= 0) {
+            totp_secure_zero(body, RESET_BODY_MAX);
+            free(body);
+            totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "failed to read body");
             return ESP_OK;
         }
@@ -470,9 +493,33 @@ static esp_err_t reset_post_handler(httpd_req_t *req)
     int username_len = http_form_find_field(body, "username", username, sizeof(username));
     int token_len = http_form_find_field(body, "reset_token", reset_token, sizeof(reset_token));
     int password_len = http_form_find_field(body, "new_password", new_password, sizeof(new_password));
+    totp_secure_zero(body, RESET_BODY_MAX);
+    free(body);
+    body = NULL;
     if (username_len < 0 || token_len < 0 || password_len < 0) {
+        totp_secure_zero(reset_token, sizeof(reset_token));
+        totp_secure_zero(new_password, sizeof(new_password));
+        totp_backoff_record(ip, ip_known, false); /* malformed attempts count too (audit L44) */
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "username, reset_token and new_password are required");
         return ESP_OK;
+    }
+
+    // Validate the new password BEFORE spending the one-time token: a weak
+    // password is a typo the caller can fix, and must not force a fresh
+    // /api/auth/forgot. The backend re-checks at write time (defence in
+    // depth); consume stays immediately before the write so a token is
+    // still spent atomically with the actual password set.
+    if (web_auth_password_check(new_password, username, wifi_prov_get_ap_ssid(), wifi_prov_get_ap_password()) !=
+        WEB_AUTH_PW_OK) {
+        totp_secure_zero(reset_token, sizeof(reset_token));
+        totp_secure_zero(new_password, sizeof(new_password));
+        totp_backoff_record(ip, ip_known, false);
+        ESP_LOGW(TAG, "reset refused (weak password) from %s", ip);
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, "application/json");
+        /* F2: tells the web client the token is still unspent. Safe: the check runs before
+         * the token is looked up, so this says nothing about token validity. */
+        return httpd_resp_sendstr(req, "{\"ok\":false,\"reason\":\"weak_password\"}");
     }
 
     totp_reset_token_result_t tr = totp_reset_token_consume(reset_tokens(), reset_token, username, now_ms());

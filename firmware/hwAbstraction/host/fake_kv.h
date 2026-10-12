@@ -37,13 +37,12 @@
  *
  * Type/error injection decisions (contract points hal_kv.h leaves to the
  * fake, since NVS's own byte-for-byte typing isn't part of the header):
- *  - get_blob accepts a key regardless of whether it was written via
- *    set_blob or set_str (both are just bytes on flash) -- this is the
- *    "blob size-probe" path kiln_cfg_store.c and touch_cal_store.c use on
- *    values that may have been written either way.
- *  - get_str requires the key was last written via set_str; calling it on
- *    a set_blob key returns HAL_INVALID_ARG (the plan's "wrong-type" error
- *    injection case) rather than silently reinterpreting the bytes.
+ *  - Keys are TYPED like real NVS: each get requires the type the key was
+ *    last written with (blob, str, u8, u32). Any crossing (get_blob on a
+ *    set_str/set_u8/set_u32 key, get_str on a blob, get_u8 on a u32, ...)
+ *    returns HAL_NOT_FOUND, matching ESP-IDF 6.0.2 (a typed read of a key
+ *    of another type ends in NOT_FOUND, never a type error) rather than
+ *    silently reinterpreting the bytes.
  *  - fake_kv_script_corrupt_key() marks a COMMITTED value corrupted; any
  *    get_* on it (once no newer pending write shadows it) returns HAL_IO
  *    until overwritten by a fresh set_*+commit, modeling flash bit-rot
@@ -158,6 +157,10 @@ bool fake_kv_script_corrupt_key(const char *partition, const char *namespace_nam
  * injection per the plan's "error injection ... no-space" spec. */
 void fake_kv_script_next_write_status(hal_status_t status);
 
+/* The next `count` hal_kv_key_exists() probes (any handle) return `status` instead of looking the key up.
+ * Cleared by fake_kv_reset_all(). Added for legacy_nvs_erase_keys' probe-error handling (review web7 LOW-9). */
+void fake_kv_script_key_exists_status(unsigned count, hal_status_t status);
+
 /* Like fake_kv_script_next_write_status(), but lets the first `skip` write-class
  * calls (set_blob/set_str/erase_key/commit, any handle) succeed and fails the
  * one after, once. Lets a test fail a multi-write sequence at every point. */
@@ -194,6 +197,13 @@ void fake_kv_script_silent_erase_noops(unsigned count);
  * a lying write on that path (see boot_guard_reset_counter()'s host tests).
  * Consumed one call at a time; cleared by fake_kv_reset_all(). */
 void fake_kv_script_silent_set_noops(unsigned count);
+
+/* Target-fidelity switch: ESP-IDF's typed nvs_get_blob() on a key stored as U8 ends in NOT_FOUND (the
+ * lookup keeps scanning past the type mismatch), whereas this fake stores by raw size and would return
+ * the 1 byte as a blob. While armed, hal_kv_get_blob() reports HAL_NOT_FOUND for any key whose stored
+ * length is exactly 1 (what a hal_kv_set_u8() key looks like). hal_kv_get_u8() is unaffected.
+ * Cleared by fake_kv_reset_all(). */
+void fake_kv_script_blob_get_misses_size1(bool on);
 
 /* hal_kv_get_u32/set_u32 (profiles_builtin.c's NVS_KEY_HIDDEN mask) are
  * modeled as a plain 4-byte blob under the same key-slot storage

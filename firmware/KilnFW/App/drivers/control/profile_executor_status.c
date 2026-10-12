@@ -6,6 +6,7 @@
  * multi-way split this is one piece of. */
 
 #include "profile_executor_internal.h"
+#include "profile_history_search.h"
 
 #include <math.h>
 #include <stdlib.h> /* free() -- firing-history blob is heap-allocated, see get_firing_history() */
@@ -111,6 +112,7 @@ void profile_executor_halt(void)
      * precondition the helper documents. */
     exec_enter_terminal_state(PROFILE_EXEC_IDLE);
     s_exec.fault_reason[0] = '\0';
+    s_exec.pause_reason[0] = '\0';
     s_exec.fault_guard = THERMAL_GUARD_TRIP_NONE;
     xSemaphoreGive(s_exec.lock);
 
@@ -270,12 +272,21 @@ void profile_executor_fault_halt(const char *reason)
 
 bool profile_executor_pause(void)
 {
+    return profile_executor_pause_with_reason(NULL);
+}
+
+static bool pause_with_reason_impl(const char *reason, TickType_t lock_wait)
+{
     /* See profile_executor_run()'s guard comment above. */
     if (s_exec.lock == NULL) {
         ESP_LOGW(PE_TAG, "profile_executor_pause() called before profile_executor_start() -- refused");
         return false;
     }
-    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (xSemaphoreTake(s_exec.lock, lock_wait) != pdTRUE && lock_wait != portMAX_DELAY) {
+        /* Only reachable on the bounded (watchdog) path: a wedged holder must not block guard 9. */
+        ESP_LOGE(PE_TAG, "pause(%s): s_exec.lock not obtained within the bound -- not paused", reason ? reason : "");
+        return false;
+    }
     if (s_exec.state != PROFILE_EXEC_RUNNING) {
         xSemaphoreGive(s_exec.lock);
         return false;
@@ -307,6 +318,12 @@ bool profile_executor_pause(void)
      * just handed the relay mask itself back to MANUAL ownership. */
     relay_authority_claim_mask(s_exec.claimed_relay_mask, RELAY_OWNER_MANUAL);
     s_exec.state = PROFILE_EXEC_PAUSED;
+    if (reason != NULL) {
+        strncpy(s_exec.pause_reason, reason, sizeof(s_exec.pause_reason) - 1);
+        s_exec.pause_reason[sizeof(s_exec.pause_reason) - 1] = '\0';
+    } else {
+        s_exec.pause_reason[0] = '\0';
+    }
     run_snapshot_buf_t pause_snap;
     capture_run_snapshot(&pause_snap);
     xSemaphoreGive(s_exec.lock);
@@ -320,6 +337,16 @@ bool profile_executor_pause(void)
     return true;
 }
 
+bool profile_executor_pause_with_reason(const char *reason)
+{
+    return pause_with_reason_impl(reason, portMAX_DELAY);
+}
+
+bool profile_executor_pause_with_reason_bounded(const char *reason)
+{
+    return pause_with_reason_impl(reason, pdMS_TO_TICKS(1000));
+}
+
 bool profile_executor_resume(void)
 {
     /* See profile_executor_run()'s guard comment above. */
@@ -330,6 +357,14 @@ bool profile_executor_resume(void)
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
     if (s_exec.state != PROFILE_EXEC_PAUSED) {
         xSemaphoreGive(s_exec.lock);
+        return false;
+    }
+    /* LD-01 follow-up (REVIEW_LD01_WWFIX MED-1): the same start gate a fresh run uses. A resume on a down or
+     * unconfirmed safety link would otherwise report RUNNING and heat silently when the link returns. Shared
+     * by every caller (UART, HTTP, LCD). Refused resume leaves the run PAUSED; retry once the link is up. */
+    if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "resume")) {
+        xSemaphoreGive(s_exec.lock);
+        ESP_LOGW(PE_TAG, "profile_executor_resume() refused: heat is blocked or the safety link is not positively up");
         return false;
     }
     /* Reclaim PROFILE ownership handed to MANUAL on pause -- see
@@ -380,6 +415,7 @@ bool profile_executor_resume(void)
         }
     }
     s_exec.state = PROFILE_EXEC_RUNNING;
+    s_exec.pause_reason[0] = '\0';
     run_snapshot_buf_t resume_snap;
     capture_run_snapshot(&resume_snap);
     /* Epoch sampled under s_exec.lock -- a halt landing between this unlock
@@ -387,7 +423,14 @@ bool profile_executor_resume(void)
      * for a run that was just stopped. See heat_enable.h. */
     uint32_t he_epoch = heat_enable_claim_epoch(HEAT_ENABLE_CLAIMANT_PROFILE);
     xSemaphoreGive(s_exec.lock);
-    (void)heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch);
+    if (!heat_enable_acquire_since(HEAT_ENABLE_CLAIMANT_PROFILE, he_epoch)) {
+        /* Same handling as the start path: not a reason to unwind a RUNNING run
+         * (no K4 means no heat, which fails safe), but never silent -- the zones
+         * report heat_blocked and heat_enable_reconcile() (watchdog task) retries.
+         * Firing review 2026-10-09 item 7. */
+        ESP_LOGW(PE_TAG, "resume: heat_enable_acquire_since() failed -- run resumes with heat blocked until "
+                         "heat_enable_reconcile() succeeds");
+    }
 
     /* Back to "in progress" -- and it must be written now rather than left to
      * the periodic refresh, or a brownout minutes after a resume would show
@@ -557,6 +600,13 @@ void profile_executor_get_status(profile_exec_status_t *out)
             zo->ramp_dwell_credit_s = z->dwell_credit_s;
         }
 
+        if (s_exec.state == PROFILE_EXEC_PAUSED) {
+            strncpy(out->pause_reason, s_exec.pause_reason, sizeof(out->pause_reason) - 1);
+        } else if (s_exec.state == PROFILE_EXEC_RUNNING && heat_enable_reboot_undecided()) {
+            /* Pico rebooted, cause not yet known (no DIAG of the new boot):
+             * heat is withheld; say why instead of a silent cold run. */
+            strncpy(out->pause_reason, "pico_reboot_undecided", sizeof(out->pause_reason) - 1);
+        }
         if (s_exec.state == PROFILE_EXEC_FAULTED) {
             strncpy(out->fault_reason, s_exec.fault_reason, sizeof(out->fault_reason) - 1);
             out->fault_guard = (uint8_t)s_exec.fault_guard;
@@ -757,4 +807,47 @@ size_t profile_executor_get_history(profile_history_entry_t *out, size_t start_i
     }
     xSemaphoreGive(s_exec.lock);
     return count;
+}
+
+typedef struct {
+    size_t oldest;
+} history_search_ctx_t;
+
+static uint32_t history_elapsed_at(const void *ctx, size_t index)
+{
+    const history_search_ctx_t *c = (const history_search_ctx_t *)ctx;
+    profile_history_entry_t e;
+    history_unpack(&s_exec.history[(c->oldest + index) % HISTORY_MAX_SAMPLES], &e);
+    return e.elapsed_s;
+}
+
+size_t profile_executor_history_sample_actual(uint8_t zone, const float *t_s, size_t n, float tol_s, float *out_c)
+{
+    if (!out_c) {
+        return 0;
+    }
+    for (size_t i = 0; i < n; i++) {
+        out_c[i] = NAN;
+    }
+    if (!t_s || zone >= MAX31856_CHANNEL_COUNT || s_exec.lock == NULL) {
+        return 0;
+    }
+    size_t found = 0;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    if (s_exec.history != NULL && s_exec.history_count > 0) {
+        history_search_ctx_t ctx = { .oldest = (s_exec.history_count < HISTORY_MAX_SAMPLES) ? 0u : s_exec.history_head };
+        for (size_t i = 0; i < n; i++) {
+            size_t idx;
+            if (profile_history_find_nearest(s_exec.history_count, history_elapsed_at, &ctx, t_s[i], tol_s, &idx)) {
+                profile_history_entry_t e;
+                history_unpack(&s_exec.history[(ctx.oldest + idx) % HISTORY_MAX_SAMPLES], &e);
+                out_c[i] = e.actual_c[zone];
+                if (!isnan(out_c[i])) {
+                    found++;
+                }
+            }
+        }
+    }
+    xSemaphoreGive(s_exec.lock);
+    return found;
 }

@@ -40,6 +40,8 @@
 #include "uart_task_ids.h"
 #include "kilnlink/kilnlink_version.h" /* KILNLINK_PROTOCOL_VERSION -- self_protocol_version below is this firmware's ESP<->Pico link version, not the PC<->ESP UART_PROTOCOL_VERSION */
 #include "kiln_cfg_swap.h"
+_Static_assert(sizeof(((dashboard_status_t *)0)->kiln_cfg_swap_boot_fault_kind) >= KILN_CFG_SWAP_BOOT_FAULT_KIND_NAME_MAX,
+               "kiln_cfg_swap_boot_fault_kind[] too small for the longest kind name");
 #include "ramp_assist_cfg.h"
 #include "unit_pref.h"
 #include "watchdog_cfg.h"
@@ -473,6 +475,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->zones_config_load_fault_fw_version = load_fault.fw_version;
     snprintf(out->zones_config_load_fault_reason, sizeof(out->zones_config_load_fault_reason), "%s",
              load_fault.reason);
+    out->zones_config_load_fault_file_rejected = out->zones_config_load_fault && load_fault.file_rejected;
+    out->zones_config_load_fault_bad_copy_failed = out->zones_config_load_fault && load_fault.bad_copy_failed;
 
     /* M13 fix (2026-09-16): the single-migration-step write-back's own
      * verified-persist failure -- distinct from zones_config_load_fault
@@ -498,6 +502,8 @@ void dashboard_get_status(dashboard_status_t *out)
     out->kiln_cfg_swap_boot_fault_target_id = swap_boot_fault.target_id;
     snprintf(out->kiln_cfg_swap_boot_fault_reason, sizeof(out->kiln_cfg_swap_boot_fault_reason), "%s",
              swap_boot_fault.reason);
+    snprintf(out->kiln_cfg_swap_boot_fault_kind, sizeof(out->kiln_cfg_swap_boot_fault_kind), "%s",
+             out->kiln_cfg_swap_boot_fault ? kiln_cfg_swap_boot_fault_kind_name(swap_boot_fault.kind) : "");
 
     /* UI_PLAN.md section 5's missing field set (see dashboard_http.h's
      * struct comment above these fields for the full rationale). Every read
@@ -845,6 +851,9 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     static const httpd_uri_t safety_clear_trip_uri = {
         .uri = "/api/safety/clear_trip", .method = HTTP_POST, .handler = safety_clear_trip_post_handler,
     };
+    static const httpd_uri_t safety_test_trip_uri = {
+        .uri = "/api/safety/test_trip", .method = HTTP_POST, .handler = safety_test_trip_post_handler,
+    };
     static const httpd_uri_t safety_log_level_uri = {
         .uri = "/api/safety/log_level", .method = HTTP_POST, .handler = safety_log_level_post_handler,
     };
@@ -916,6 +925,10 @@ esp_err_t dashboard_http_start(kiln_io_t *io_or_null, MAX31856BusClass *thermo_b
     err = kiln_http_register(server, &safety_clear_trip_uri);
     if (err != ESP_OK) {
         ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/clear_trip) failed: %s", esp_err_to_name(err));
+    }
+    err = kiln_http_register(server, &safety_test_trip_uri);
+    if (err != ESP_OK) {
+        ESP_LOGE(DASH_TAG, "httpd_register_uri_handler(/api/safety/test_trip) failed: %s", esp_err_to_name(err));
     }
     err = kiln_http_register(server, &safety_log_level_uri);
     if (err != ESP_OK) {

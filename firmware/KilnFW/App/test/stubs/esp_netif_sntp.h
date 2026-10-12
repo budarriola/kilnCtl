@@ -1,5 +1,5 @@
 // Host-test stub for esp_netif_sntp.h -- ESP-IDF's SNTP client wrapper.
-// Added for time_sync.c's host tests (docs/FILESYSTEM_USER_DATA_PLAN.md item
+// Added for time_sync.c's host tests (docs/FILESYSTEM_USER_DATA.md item
 // 14, TZ move task): time_sync.c was the one MOVE-item module with no host
 // stub at all before this pass, blocking it from the project's usual
 // "test through the real production function" standard. This is a thin,

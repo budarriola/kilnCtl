@@ -220,7 +220,10 @@ void esp_restart(void) {}
 // existing convention of defining its own minimal stand-ins for symbols it
 // never actually exercises rather than linking a real backend/fake.
 // ---------------------------------------------------------------------------
-void hal_wdt_reboot(void) {}
+// 2026-10-09: counts calls, so the factory-reset "reboot task could not be created" path can prove it
+// reboots inline (factory_reset_reboot_fallback()) instead of leaving erased storage under live RAM.
+static int g_hal_wdt_reboot_calls = 0;
+void hal_wdt_reboot(void) { g_hal_wdt_reboot_calls++; }
 
 // ---------------------------------------------------------------------------
 // profiles_builtin.h -- factory_reset.c's execute_scope() calls this for
@@ -251,7 +254,7 @@ void firing_stats_cache_invalidate_all(void) {}
 
 // ---------------------------------------------------------------------------
 // cfg_fs_mount.h (2026-09-07) -- factory_reset.c's "all" scope now also
-// formats the `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA_PLAN.md
+// formats the `cfg` LittleFS partition (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 1, owner decision). Never actually exercised by any test in
 // this file (same "the interlock check always refuses first" note above --
 // no test here reaches a scope's actual execute_scope_job()), but the symbol
@@ -274,6 +277,29 @@ esp_err_t kiln_scope_cfg_files_delete(int *out_deleted)
         *out_deleted = 0;
     }
     return g_kiln_scope_cfg_delete_result;
+}
+
+// crash_report.c is not linked here: count crash_report_clear() calls so the
+// scope wiring (kiln/all yes, wifi/profiles never) is pinned.
+static int g_crash_report_clear_calls = 0;
+static esp_err_t g_crash_report_clear_result = ESP_OK;
+// Review 14 LOW-7: on the real backend hal_kv_erase_partition() de-initializes
+// kiln_nvs, so crash_report_clear() must run BEFORE the partition erase. The test seeds a
+// sentinel key in kiln_nvs; the stub reports whether it was still there when called.
+static bool g_crash_report_clear_saw_sentinel = false;
+esp_err_t crash_report_clear(void)
+{
+    g_crash_report_clear_calls++;
+    {
+        hal_kv_handle_t h;
+        uint8_t b = 0;
+        size_t n = sizeof(b);
+        if (hal_kv_open(&h, "ordtest", HAL_KV_MODE_READ_ONLY, "kiln_nvs") == HAL_OK) {
+            g_crash_report_clear_saw_sentinel = (hal_kv_get_blob(&h, "sentinel", &b, &n) == HAL_OK);
+            hal_kv_close(&h);
+        }
+    }
+    return g_crash_report_clear_result;
 }
 
 // Same for the "profiles" scope's slot/firing-history cfg mirrors
@@ -301,8 +327,16 @@ esp_err_t profiles_scope_cfg_files_delete(int *out_deleted)
 // bx_worker_stub.h (that header models re-entrancy across a dispatch this
 // file never performs; a plain pass-through is enough here and keeps this
 // file from taking on a dependency it does not exercise).
+// Factory reset in flight: counts dispatches (the erase job ran) and can refuse the dispatch
+// outright, so the late-check tests can prove "nothing erased" and "mark cleared on dispatch failure".
+static int g_flash_worker_dispatches = 0;
+static esp_err_t g_flash_worker_result = ESP_OK;
 esp_err_t uart_bridge_ext_run_on_flash_worker(void (*fn)(void *arg), void *arg)
 {
+    if (g_flash_worker_result != ESP_OK) {
+        return g_flash_worker_result;
+    }
+    g_flash_worker_dispatches++;
     fn(arg);
     return ESP_OK;
 }
@@ -317,8 +351,9 @@ bool uart_bridge_ext_is_on_flash_worker(void) { return false; }
 // ---------------------------------------------------------------------------
 esp_err_t esp_partition_write(const esp_partition_t *partition, size_t dst_offset, const void *src, size_t size)
 { (void)partition; (void)dst_offset; (void)src; (void)size; return ESP_OK; }
+static int g_erase_range_calls = 0;
 esp_err_t esp_partition_erase_range(const esp_partition_t *partition, size_t offset, size_t size)
-{ (void)partition; (void)offset; (void)size; return ESP_OK; }
+{ (void)partition; (void)offset; (void)size; g_erase_range_calls++; return ESP_OK; }
 uint32_t esp_partition_get_main_flash_sector_size(void) { return 4096u; }
 // Referenced by net/pico_image_source.c, linked in for real (see
 // build_host_tests.ps1's cmd8) because ota_pico_do_stage() now calls
@@ -329,24 +364,42 @@ uint32_t esp_partition_get_main_flash_sector_size(void) { return 4096u; }
 esp_err_t esp_partition_read(const esp_partition_t *partition, size_t src_offset, void *dst, size_t size)
 { (void)partition; (void)src_offset; if (dst) memset(dst, 0, size); return ESP_OK; }
 
+// Settable so test_ota_http_refusals.c can drive the ESP push handler (defaults keep this file's behaviour).
+static const esp_partition_t *s_fake_next_part = NULL;
+static const esp_partition_t *s_fake_running_part = NULL;
 const esp_partition_t *esp_ota_get_next_update_partition(const esp_partition_t *start_from)
-{ (void)start_from; return NULL; }
-const esp_partition_t *esp_ota_get_running_partition(void) { return NULL; }
+{ (void)start_from; return s_fake_next_part; }
+const esp_partition_t *esp_ota_get_running_partition(void) { return s_fake_running_part; }
 
 // recovery_switch.c is target-only (esp_image_verify); ota_http_recovery.c's
 // recovery_boot handler only calls these two seams. Never reached by a test
 // in this file except test_recovery_boot_set_failed_restores_boot_target().
 static recovery_switch_result_t s_fake_select_result = RECOVERY_SWITCH_NOT_PRESENT;
 static int s_fake_restore_calls = 0;
+static int s_fake_select_calls = 0;
 recovery_switch_result_t recovery_switch_select_boot(char *msg, size_t cap)
-{ if (msg && cap) msg[0] = '\0'; return s_fake_select_result; }
+{ s_fake_select_calls++; if (msg && cap) msg[0] = '\0'; return s_fake_select_result; }
 bool recovery_switch_restore_running(void) { s_fake_restore_calls++; return true; }
+static esp_err_t s_fake_ota_begin_rc = ESP_OK;
+static esp_err_t s_fake_ota_write_rc = ESP_OK;
+static int s_fake_ota_write_ok_budget = -1; // >=0: that many writes succeed, then s_fake_ota_write_rc applies
+static esp_err_t s_fake_ota_end_rc = ESP_OK;
+static int s_fake_ota_begin_calls = 0, s_fake_ota_write_calls = 0, s_fake_ota_end_calls = 0, s_fake_ota_abort_calls = 0;
+static size_t s_fake_ota_written = 0;
 esp_err_t esp_ota_begin(const esp_partition_t *partition, size_t image_size, esp_ota_handle_t *out_handle)
-{ (void)partition; (void)image_size; if (out_handle) *out_handle = 1; return ESP_OK; }
+{ (void)partition; (void)image_size; s_fake_ota_begin_calls++; if (out_handle) *out_handle = 1; return s_fake_ota_begin_rc; }
 esp_err_t esp_ota_write(esp_ota_handle_t handle, const void *data, size_t size)
-{ (void)handle; (void)data; (void)size; return ESP_OK; }
-esp_err_t esp_ota_end(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
-esp_err_t esp_ota_abort(esp_ota_handle_t handle) { (void)handle; return ESP_OK; }
+{
+    (void)handle; (void)data;
+    s_fake_ota_write_calls++;
+    if (s_fake_ota_write_ok_budget == 0) return s_fake_ota_write_rc;
+    if (s_fake_ota_write_ok_budget > 0) s_fake_ota_write_ok_budget--;
+    else if (s_fake_ota_write_rc != ESP_OK) return s_fake_ota_write_rc;
+    s_fake_ota_written += size;
+    return ESP_OK;
+}
+esp_err_t esp_ota_end(esp_ota_handle_t handle) { (void)handle; s_fake_ota_end_calls++; return s_fake_ota_end_rc; }
+esp_err_t esp_ota_abort(esp_ota_handle_t handle) { (void)handle; s_fake_ota_abort_calls++; return ESP_OK; }
 // Fakes for boot_partition_verify.c: s_fake_boot_part is what the "otadata"
 // reads back as; esp_ota_set_boot_partition() copies the request into it
 // unless a test sets s_fake_set_ignored (a write that reports OK but does not
@@ -363,7 +416,8 @@ esp_err_t esp_ota_set_boot_partition(const esp_partition_t *partition)
 }
 esp_err_t esp_ota_get_partition_description(const esp_partition_t *partition, esp_app_desc_t *out)
 { (void)partition; (void)out; return ESP_FAIL; }
-bool esp_ota_check_rollback_is_possible(void) { return false; }
+static bool s_fake_rollback_possible = false;
+bool esp_ota_check_rollback_is_possible(void) { return s_fake_rollback_possible; }
 esp_err_t esp_ota_mark_app_invalid_rollback_and_reboot(void) { return ESP_FAIL; }
 
 // ---------------------------------------------------------------------------
@@ -402,7 +456,7 @@ static bool g_stub_autotune_active = false;
 bool autotune_engine_is_active(void) { return g_stub_autotune_active; }
 
 // relay_authority.h -- factory_reset.c's system_mode_gate wiring
-// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25) reads this
+// (docs/SYSTEM_MODE_GATE.md, gate-slices-2/4/5, 2026-09-25) reads this
 // same profile_running/autotune_running snapshot; derive it from the SAME
 // g_stub_profile_state/g_stub_autotune_active globals the fakes above use,
 // so a test that sets those up for the existing sw_reset refusal checks
@@ -415,6 +469,68 @@ void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_r
     }
     if (autotune_running_out) {
         *autotune_running_out = g_stub_autotune_active;
+    }
+}
+
+// relay_authority.h -- factory reset in flight mark (factory_reset.c's execute_scope()). Depth counter
+// like the real one. g_stub_run_starts_at_reset_mark models a firing that started after the entry
+// mode-gate check but before the mark: it flips the run state as the mark is set, so only the late
+// re-check after the mark can see it.
+// g_stub_sweep_starts_at_reset_mark does the same for a zone current sweep (the sweep heat claim).
+static int g_reset_in_flight_depth = 0;
+static bool g_stub_run_starts_at_reset_mark = false;
+static bool g_stub_sweep_starts_at_reset_mark = false;
+static bool g_stub_heat_sweep_active = false;
+void relay_authority_reset_in_flight_begin(void)
+{
+    g_reset_in_flight_depth++;
+    if (g_stub_run_starts_at_reset_mark) {
+        g_stub_profile_state = PROFILE_EXEC_RUNNING;
+    }
+    if (g_stub_sweep_starts_at_reset_mark) {
+        g_stub_heat_sweep_active = true;
+    }
+}
+bool relay_authority_heat_sweep_active(void) { return g_stub_heat_sweep_active; }
+
+// backup_restore_state.h -- factory_reset.c refuses while a backup restore is in flight.
+static bool g_stub_restore_in_flight = false;
+bool backup_import_restore_in_flight(void) { return g_stub_restore_in_flight; }
+// profiles_http.h -- factory_reset.c refuses while a zone-to-aux conversion is running (LOW-1).
+static bool g_stub_convert_busy = false;
+bool profiles_http_convert_busy(void) { return g_stub_convert_busy; }
+void relay_authority_reset_in_flight_end(void)
+{
+    if (g_reset_in_flight_depth > 0) {
+        g_reset_in_flight_depth--;
+    }
+}
+bool relay_authority_reset_in_flight(void) { return g_reset_in_flight_depth != 0; }
+// Writer fence: the reset job brackets itself, and persist_reset_barrier() must run after the mark is set.
+static int g_reset_job_depth = 0;
+static int g_barrier_calls = 0;
+static int g_barrier_saw_mark = 0;
+void relay_authority_reset_job_enter(void) { g_reset_job_depth++; }
+static int g_last_erases_kiln_nvs = -1;
+void relay_authority_reset_set_erases_kiln_nvs(bool erases) { g_last_erases_kiln_nvs = erases ? 1 : 0; }
+/* Real try_begin refuses while a reset mark is held (covered by test_link_watchdog.c). Many tests here run several
+ * successful resets back to back without a reboot, so this fake refuses only when a test asks it to. */
+static bool g_stub_try_begin_enforce = false;
+bool relay_authority_reset_try_begin(bool erases_kiln_nvs)
+{
+    if (g_stub_try_begin_enforce && g_reset_in_flight_depth != 0) {
+        return false;
+    }
+    relay_authority_reset_set_erases_kiln_nvs(erases_kiln_nvs);
+    relay_authority_reset_in_flight_begin();
+    return true;
+}
+void relay_authority_reset_job_exit(void) { g_reset_job_depth--; }
+void persist_reset_barrier(void)
+{
+    g_barrier_calls++;
+    if (g_reset_in_flight_depth != 0) {
+        g_barrier_saw_mark++;
     }
 }
 
@@ -495,8 +611,9 @@ float zones_config_apply_cal(uint8_t zone_index, float raw_c) { (void)zone_index
 esp_err_t thermo_owner_command_read_all(MAX31856Reading *out, size_t max_readings, size_t *out_count)
 { (void)out; (void)max_readings; if (out_count) *out_count = 0; return ESP_FAIL; }
 static esp_err_t s_fake_io_read_result = ESP_FAIL;
+static uint8_t s_fake_io_relay_shadow = 0; // settable: bits 0..3 are K1..K4 energized
 esp_err_t kiln_io_owner_command_read(kiln_io_state_t *out)
-{ if (out) memset(out, 0, sizeof(*out)); return s_fake_io_read_result; }
+{ if (out) { memset(out, 0, sizeof(*out)); out->relay_shadow = s_fake_io_relay_shadow; } return s_fake_io_read_result; }
 
 // ota_pico_relay.h -- never called by ota_http.c's own tests, but review
 // finding D6 adds a direct test of pico_img_stage.c (linked in for real,
@@ -508,11 +625,14 @@ static esp_partition_t s_fake_pico_img_partition = {
 };
 const esp_partition_t *ota_pico_img_partition(void) { return &s_fake_pico_img_partition; }
 const char *ota_pico_relay_phase_str(ota_pico_relay_phase_t phase) { (void)phase; return "idle"; }
+static bool s_fake_relay_start_rc = false;
+static int s_fake_relay_start_calls = 0;
 bool ota_pico_relay_start(SafetyLinkClass *link, uint32_t image_length, uint32_t image_crc32,
                           const char *version16_or_null, const uint8_t image_sha256_or_null[32])
 {
     (void)link; (void)image_length; (void)image_crc32; (void)version16_or_null; (void)image_sha256_or_null;
-    return false;
+    s_fake_relay_start_calls++;
+    return s_fake_relay_start_rc;
 }
 void ota_pico_relay_get_status(ota_pico_relay_status_t *out) { if (out) memset(out, 0, sizeof(*out)); }
 
@@ -521,11 +641,15 @@ void ota_pico_relay_get_status(ota_pico_relay_status_t *out) { if (out) memset(o
 // doing whatever RAM-only setup they needed (ota_http_start()'s mutex/state
 // init already ran by the time it checks this -- see that function's own
 // body), before touching an httpd handle this stub cannot provide.
-httpd_handle_t wifi_provision_http_get_server(void) { return NULL; }
+static httpd_handle_t s_fake_http_server = NULL;
+httpd_handle_t wifi_provision_http_get_server(void) { return s_fake_http_server; }
 
 // boot_guard.h
-bool boot_guard_is_recovery_mode(void) { return false; }
-void boot_guard_mark_healthy(void) {}
+static bool s_stub_recovery_mode = false;
+static bool s_stub_mark_healthy_result = true;
+static int s_stub_mark_healthy_calls = 0;
+bool boot_guard_is_recovery_mode(void) { return s_stub_recovery_mode; }
+bool boot_guard_mark_healthy(void) { s_stub_mark_healthy_calls++; return s_stub_mark_healthy_result; }
 // Test-controllable so ota_boot_guard_reset_post_handler()'s success/failure
 // reporting can be exercised without pulling in the real boot_guard.c (its
 // own NVS-backed clear-and-verify sequence is covered directly by
@@ -629,8 +753,21 @@ esp_err_t httpd_req_get_hdr_value_str(httpd_req_t *r, const char *field, char *v
 
 int httpd_req_to_sockfd(httpd_req_t *r) { (void)r; return -1; }
 
+// Registration capture (test_ota_http_refusals.c): every (uri, method, handler) the code under test registers.
+#define STUB_REG_MAX 64
+static struct { char uri[96]; int method; void *handler; } s_reg[STUB_REG_MAX];
+static int s_reg_count = 0;
 esp_err_t httpd_register_uri_handler(httpd_handle_t handle, const httpd_uri_t *uri_handler)
-{ (void)handle; (void)uri_handler; return ESP_OK; }
+{
+    (void)handle;
+    if (s_reg_count < STUB_REG_MAX && uri_handler) {
+        strncpy(s_reg[s_reg_count].uri, uri_handler->uri, sizeof(s_reg[0].uri) - 1);
+        s_reg[s_reg_count].method = (int)uri_handler->method;
+        s_reg[s_reg_count].handler = (void *)uri_handler->handler;
+        s_reg_count++;
+    }
+    return ESP_OK;
+}
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 esp_err_t httpd_resp_set_hdr(httpd_req_t *r, const char *field, const char *value)
 { (void)r; (void)field; (void)value; return ESP_OK; }
@@ -670,6 +807,11 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     }
     return ESP_OK;
 }
+esp_err_t httpd_resp_send_custom_err(httpd_req_t *r, const char *status, const char *msg)
+{
+    (void)httpd_resp_set_status(r, status);
+    return httpd_resp_send(r, msg, HTTPD_RESP_USE_STRLEN);
+}
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
@@ -696,7 +838,43 @@ esp_err_t httpd_resp_sendstr(httpd_req_t *r, const char *s)
     }
     return ESP_OK;
 }
-int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len) { (void)r; (void)buf; (void)buf_len; return 0; }
+// Body source for the factory-reset late-check test; NULL (default) keeps the old "no body" behavior.
+static const char *s_fake_recv_body = NULL;
+static size_t s_fake_recv_off = 0;
+// Binary body source (NULL = off): serves s_fake_recv_bin_len bytes from s_fake_recv_bin (or zeros when
+// s_fake_recv_bin is NULL), at most s_fake_recv_max_chunk per call, and returns -1 once
+// s_fake_recv_fail_after bytes were served (>=0). Takes precedence over s_fake_recv_body.
+static const unsigned char *s_fake_recv_bin = NULL;
+static size_t s_fake_recv_bin_len = 0;
+static size_t s_fake_recv_bin_off = 0;
+static size_t s_fake_recv_max_chunk = 4096;
+static long s_fake_recv_fail_after = -1;
+static int s_fake_recv_calls = 0;
+int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
+{
+    (void)r;
+    s_fake_recv_calls++;
+    if (s_fake_recv_bin_len > 0) {
+        if (s_fake_recv_fail_after >= 0 && (long)s_fake_recv_bin_off >= s_fake_recv_fail_after) return -1;
+        size_t left = s_fake_recv_bin_len - s_fake_recv_bin_off;
+        size_t n = left < buf_len ? left : buf_len;
+        if (n > s_fake_recv_max_chunk) n = s_fake_recv_max_chunk;
+        if (s_fake_recv_fail_after >= 0 && s_fake_recv_bin_off + n > (size_t)s_fake_recv_fail_after) {
+            n = (size_t)s_fake_recv_fail_after - s_fake_recv_bin_off;
+        }
+        if (s_fake_recv_bin) memcpy(buf, s_fake_recv_bin + s_fake_recv_bin_off, n); else memset(buf, 0, n);
+        s_fake_recv_bin_off += n;
+        return (int)n;
+    }
+    if (!s_fake_recv_body) {
+        return 0;
+    }
+    size_t left = strlen(s_fake_recv_body) - s_fake_recv_off;
+    size_t n = left < buf_len ? left : buf_len;
+    memcpy(buf, s_fake_recv_body + s_fake_recv_off, n);
+    s_fake_recv_off += n;
+    return (int)n;
+}
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -900,6 +1078,68 @@ static void test_pico_rollback_post_returns_pending_without_blocking(void)
     // otherwise every test after this one in the same process sees an
     // update "already in progress" that never clears.
     s_update_claim = OTA_UPDATE_NONE;
+}
+
+static void test_reboot_handlers_reply_only_after_task_created(void)
+{
+    TEST_SECTION("rollback / recovery_exit -- reply ok:true 'rebooting' only after the reboot task exists and "
+                 "the boot-guard clear verified; otherwise 500 (campaign 9b LOW)");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+
+    /* --- rollback: task creation fails -> 500, claim released, no ok:true --- */
+    s_test_sweep_active = false;
+    s_update_claim = OTA_UPDATE_NONE;
+    memset(&s_rollback_test_safety, 0, sizeof(s_rollback_test_safety));
+    ota_http_safety = &s_rollback_test_safety;
+    s_fake_rollback_possible = true;
+    set_pico_rollback_headers_for(g_stub_ap_password);
+    g_test_stub_xtaskcreate_result = 0; /* pdFAIL */
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "rollback with a failed task create answers 500");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL && strstr(s_last_sendstr_body, "\"ok\":true") == NULL,
+               "rollback never claims ok:true when no reboot task was created");
+    TEST_CHECK(s_update_claim == OTA_UPDATE_NONE, "rollback releases the update claim when the task cannot start");
+
+    /* --- rollback: success path still replies ok:true rebooting --- */
+    g_test_stub_xtaskcreate_result = 1;
+    s_last_resp_status[0] = '\0';
+    s_last_resp_body[0] = '\0';
+    (void)ota_esp_rollback_post_handler(&req);
+    TEST_CHECK(strstr(s_last_resp_body, "\"status\":\"rebooting\"") != NULL, "rollback success replies rebooting");
+    TEST_CHECK(s_last_resp_status[0] == '\0', "rollback success keeps the default 200 status");
+    s_update_claim = OTA_UPDATE_NONE;
+    s_fake_rollback_possible = false;
+    ota_http_safety = NULL;
+
+    /* --- recovery_exit --- */
+    s_stub_recovery_mode = true;
+    s_stub_mark_healthy_result = true;
+    g_test_stub_xtaskcreate_result = 0;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "recovery_exit with a failed task create answers 500");
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"ok\":true") == NULL, "recovery_exit never claims ok:true without a task");
+
+    g_test_stub_xtaskcreate_result = 1;
+    s_stub_mark_healthy_result = false;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strncmp(s_last_resp_status, "500", 3) == 0, "recovery_exit with an unverified boot-guard clear answers 500");
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"ok\":true") == NULL, "no ok:true when the clear did not verify");
+
+    s_stub_mark_healthy_result = true;
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    (void)ota_recovery_exit_post_handler(&req);
+    TEST_CHECK(strstr(s_last_sendstr_body, "\"status\":\"rebooting\"") != NULL, "recovery_exit success replies rebooting");
+    TEST_CHECK(s_last_resp_status[0] == '\0', "recovery_exit success keeps status 200");
+    s_stub_recovery_mode = false;
 }
 
 static void test_pico_rollback_status_reports_idle_before_any_request(void)
@@ -1264,7 +1504,7 @@ static void assert_webauth12b_credential_survived(const char *scope_name)
               scope_name);
 }
 
-// Task 1d (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the UART path
+// Task 1d (docs/SYSTEM_MODE_GATE.md known gap): the UART path
 // (SYSTEM_CMD_FACTORY_RESET, uart_bridge_system.c) never goes through
 // reset_post_handler()'s HTTP auth/interlock gate above -- it calls
 // factory_reset_execute() directly and switches on ITS return code, per
@@ -1297,6 +1537,308 @@ static void test_factory_reset_execute_refused_by_mode_gate_during_firing(void)
     g_stub_profile_state = PROFILE_EXEC_IDLE;
 }
 
+// Factory reset in flight, reset side: a firing that starts after the entry mode-gate check (modeled
+// by g_stub_run_starts_at_reset_mark) is seen by the late re-check taken after the reset mark is set.
+// The reset refuses with the mode gate's sentinel, dispatches no erase, and clears its mark.
+// Writer fence: a reset that proceeds runs the writer barrier once, AFTER the mark is set, and brackets
+// its job with relay_authority_reset_job_enter/exit; a refused reset runs no barrier.
+static void test_factory_reset_execute_runs_writer_barrier_after_mark(void)
+{
+    TEST_SECTION("factory_reset_execute() -- writer barrier runs once, after the reset mark is set");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_barrier_calls = 0;
+    g_barrier_saw_mark = 0;
+    g_reset_job_depth = 0;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_WIFI);
+    TEST_CHECK(g_barrier_calls == 1, "barrier ran exactly once");
+    TEST_CHECK(g_barrier_saw_mark == 1, "the mark was already set when the barrier ran");
+    TEST_CHECK(g_reset_job_depth == 0, "job enter/exit balanced");
+    TEST_CHECK(g_last_erases_kiln_nvs == 0, "wifi scope does not arm the kiln_nvs writer fence (fwbatch13 LOW-4)");
+    g_reset_in_flight_depth = 0;
+    g_last_erases_kiln_nvs = -1;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_KILN);
+    TEST_CHECK(g_last_erases_kiln_nvs == 1, "kiln scope arms the kiln_nvs writer fence");
+    g_reset_in_flight_depth = 0;
+
+    g_barrier_calls = 0;
+    g_stub_run_starts_at_reset_mark = true;
+    (void)factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_run_starts_at_reset_mark = false;
+    TEST_CHECK(g_barrier_calls == 0, "a refused reset runs no barrier");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+}
+
+static void test_factory_reset_execute_refused_when_run_starts_during_dispatch(void)
+{
+    TEST_SECTION("factory_reset_execute() -- a run started after the entry check is refused at dispatch, "
+                 "nothing erased, reset mark cleared");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_stub_run_starts_at_reset_mark = true;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_run_starts_at_reset_mark = false;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED,
+              "a run that started during the dispatch must refuse the reset with the mode-gate sentinel");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// Same race through POST /api/factory_reset: the late refusal is the mode gate's 409, not a 500.
+static void test_factory_reset_http_refused_when_run_starts_during_dispatch(void)
+{
+    TEST_SECTION("reset_post_handler -- a run started after the entry check answers the mode gate's 409 "
+                 "at dispatch, nothing erased, reset mark cleared");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1"); /* no safety link in this fixture */
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    g_stub_run_starts_at_reset_mark = true;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_run_starts_at_reset_mark = false;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0,
+              "the late refusal is the system mode gate's 409, never a 500 erase failure");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+}
+
+// fwlow16 LOW-2: a second reset while one is in flight is refused by try_begin (nothing erased, first mark kept).
+static void test_factory_reset_refused_when_another_reset_in_flight(void)
+{
+    TEST_SECTION("factory reset -- try_begin refusal (another reset in flight): sentinel, 409, nothing erased");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 1;
+    g_stub_try_begin_enforce = true;
+    g_flash_worker_dispatches = 0;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "execute refuses with the mode-gate sentinel");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the first reset's mark is left alone");
+
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    err = reset_post_handler(&req);
+    s_fake_recv_body = NULL;
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0, "HTTP answers 409");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "HTTP path dispatches nothing");
+
+    g_stub_try_begin_enforce = false;
+    g_reset_in_flight_depth = 0;
+}
+
+// The mark is cleared when the erase job could not be dispatched (nothing erased), and kept once the
+// erase ran (the board reboots next).
+static void test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase(void)
+{
+    TEST_SECTION("factory_reset_execute() -- reset mark cleared on dispatch failure, kept after the erase");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+
+    g_flash_worker_result = ESP_FAIL;
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_flash_worker_result = ESP_OK;
+    TEST_CHECK(err == ESP_FAIL, "a dispatch failure is reported");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the mark is cleared when nothing was erased");
+
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdPASS;
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_stub_task_create_result = saved_task_result;
+    TEST_CHECK(err == ESP_OK, "the erase and the reboot-task creation both succeed");
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(g_reset_in_flight_depth == 1,
+              "the mark stays set after the erase, so no run can start before the reboot");
+    g_reset_in_flight_depth = 0;
+}
+
+// MED-1 (review of ffcea431), reset side, UART entry: factory_reset_execute() has no interlock call, so
+// it must refuse a running zone current sweep itself, and a backup restore in flight (MED-2).
+static void test_factory_reset_execute_refused_by_sweep_or_restore(void)
+{
+    TEST_SECTION("factory_reset_execute() -- refused while a zone current sweep runs or a backup restore "
+                 "is in flight, nothing erased, reset mark clear");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+
+    g_stub_heat_sweep_active = true;
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_heat_sweep_active = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a running sweep refuses the UART reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a sweep");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+
+    g_stub_restore_in_flight = true;
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_restore_in_flight = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a backup restore in flight refuses the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a restore");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+
+    g_stub_convert_busy = true;
+    err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_convert_busy = false;
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED, "a running zone-to-aux conversion refuses the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched under a conversion");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is not left set");
+}
+
+// MED-1, reset side, late check: a sweep that starts after the entry check (its claim published before
+// the reset mark is visible to it) is seen by the late re-check taken after the mark is set.
+static void test_factory_reset_execute_refused_when_sweep_starts_during_dispatch(void)
+{
+    TEST_SECTION("factory_reset_execute() -- a sweep started after the entry check is refused at dispatch");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_stub_sweep_starts_at_reset_mark = true;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_ALL);
+    g_stub_sweep_starts_at_reset_mark = false;
+    g_stub_heat_sweep_active = false;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_MODE_GATE_REFUSED,
+              "a sweep that started during the dispatch must refuse the reset");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+}
+
+// Same sweep race through POST /api/factory_reset (the entry interlock saw no sweep): 409, not 500.
+static void test_factory_reset_http_refused_when_sweep_starts_during_dispatch(void)
+{
+    TEST_SECTION("reset_post_handler -- a sweep started after the entry check answers 409 at dispatch");
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=all";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    g_stub_sweep_starts_at_reset_mark = true;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_sweep_starts_at_reset_mark = false;
+    g_stub_heat_sweep_active = false;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(strcmp(s_last_resp_status, "409 Conflict") == 0, "the late sweep refusal is a 409");
+    TEST_CHECK(g_flash_worker_dispatches == 0, "no erase job is dispatched");
+    TEST_CHECK(g_reset_in_flight_depth == 0, "the reset mark is cleared on the refusal path");
+}
+
+// LOW-2: the erase ran but the reboot task could not be created. UART entry: a distinct error, the
+// mark stays set (storage is erased; no run may start before the reboot).
+static void test_factory_reset_execute_reboot_task_failure_is_distinct(void)
+{
+    TEST_SECTION("factory_reset_execute() -- reboot task failure after the erase returns "
+                 "FACTORY_RESET_ERR_REBOOT_FAILED and keeps the mark");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdFAIL;
+
+    esp_err_t err = factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES);
+    g_stub_task_create_result = saved_task_result;
+
+    TEST_CHECK(err == FACTORY_RESET_ERR_REBOOT_FAILED,
+              "a reboot task that cannot be created is FACTORY_RESET_ERR_REBOOT_FAILED, not ESP_ERR_NO_MEM");
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the mark stays set: storage is already erased");
+    g_reset_in_flight_depth = 0;
+}
+
+// LOW-2, HTTP: 500 with the exact operator text, then an inline reboot (hal_wdt_reboot()).
+static void test_factory_reset_http_reboot_task_failure_reboots_inline(void)
+{
+    TEST_SECTION("reset_post_handler -- reboot task failure after the erase answers 500 "
+                 "\"storage erased, reboot failed -- power-cycle now\" and reboots inline");
+    fake_kv_reset_all();
+    TEST_CHECK(hal_kv_init_partition("profiles_nvs") == HAL_OK, "setup: init profiles_nvs");
+    TEST_CHECK(hal_kv_init_partition(NULL) == HAL_OK, "setup: init the default nvs partition");
+    g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_stub_profile_state = PROFILE_EXEC_IDLE;
+    g_reset_in_flight_depth = 0;
+    g_flash_worker_dispatches = 0;
+    g_hal_wdt_reboot_calls = 0;
+    stub_headers_reset();
+    stub_header_set("X-Ota-Ack-No-Safety", "1");
+    s_last_resp_status[0] = '\0';
+    s_last_sendstr_body[0] = '\0';
+    s_last_err_code = 0;
+    static const char body[] = "scope=profiles";
+    s_fake_recv_body = body;
+    s_fake_recv_off = 0;
+    BaseType_t saved_task_result = g_stub_task_create_result;
+    g_stub_task_create_result = pdFAIL;
+
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = sizeof(body) - 1;
+    esp_err_t err = reset_post_handler(&req);
+    g_stub_task_create_result = saved_task_result;
+    s_fake_recv_body = NULL;
+
+    TEST_CHECK(err == ESP_OK, "reset_post_handler must always return ESP_OK");
+    TEST_CHECK(s_last_err_code == 0, "setup: the interlock passes and the body/scope are accepted");
+    TEST_CHECK(g_flash_worker_dispatches == 1, "setup: the erase job ran");
+    TEST_CHECK(strcmp(s_last_resp_status, "500 Internal Server Error") == 0, "the reply is a 500");
+    TEST_CHECK(strcmp(s_last_sendstr_body, "storage erased, reboot failed -- power-cycle now") == 0,
+              "the reply names what happened and what the operator must do");
+    TEST_CHECK(g_hal_wdt_reboot_calls == 1, "the handler reboots inline once the reply is sent");
+    TEST_CHECK(g_reset_in_flight_depth == 1, "the mark stays set until the reboot");
+    g_reset_in_flight_depth = 0;
+}
+
 static void test_credential_survives_factory_reset_wifi_scope(void)
 {
     TEST_SECTION("factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) -- a kiln_auth credential must survive");
@@ -1305,8 +1847,10 @@ static void test_credential_survives_factory_reset_wifi_scope(void)
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_WIFI) == ESP_OK,
               "factory_reset_execute(WIFI) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 0, "the wifi scope never erases the coredump/crash record");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the wifi scope never deletes the kiln_nvs cfg mirrors");
     TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the wifi scope never deletes the profiles_nvs cfg mirrors");
     assert_webauth12b_credential_survived(
@@ -1322,16 +1866,21 @@ static void test_credential_survives_factory_reset_kiln_scope(void)
     seed_webauth12b_credential();
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_OK,
               "factory_reset_execute(KILN) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 1, "the kiln scope clears the crash report/coredump exactly once");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 1, "the kiln scope deletes its cfg mirrors exactly once");
     TEST_CHECK(g_profiles_scope_cfg_delete_calls == 0, "the kiln scope never deletes the profiles_nvs cfg mirrors");
     g_kiln_scope_cfg_delete_result = ESP_FAIL;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL,
               "a cfg mirror that cannot be deleted fails the kiln reset (a stale file would undo it)");
     g_kiln_scope_cfg_delete_result = ESP_OK;
+    g_crash_report_clear_result = ESP_FAIL;
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_FAIL, "a coredump erase failure fails the kiln reset");
+    g_crash_report_clear_result = ESP_OK;
     g_stub_task_create_result = pdFAIL;
-    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == ESP_ERR_NO_MEM,
+    TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) == FACTORY_RESET_ERR_REBOOT_FAILED,
               "a reboot task that cannot be created fails the reset");
     g_stub_task_create_result = pdPASS;
     assert_webauth12b_credential_survived(
@@ -1349,8 +1898,10 @@ static void test_credential_survives_factory_reset_profiles_scope(void)
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_result = ESP_OK;
+    g_crash_report_clear_calls = 0;
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
               "factory_reset_execute(PROFILES) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 0, "the profiles scope never erases the coredump/crash record");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
               "PROFILES scope must call profiles_builtin_discard_file() exactly once");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0, "the profiles scope never deletes the kiln_nvs cfg mirrors");
@@ -1377,8 +1928,20 @@ static void test_credential_survives_factory_reset_all_scope(void)
     g_stub_profiles_discard_calls = 0;
     g_kiln_scope_cfg_delete_calls = 0;
     g_profiles_scope_cfg_delete_calls = 0;
+    g_crash_report_clear_calls = 0;
+    g_crash_report_clear_saw_sentinel = false;
+    {
+        hal_kv_handle_t h;
+        uint8_t one = 1;
+        TEST_CHECK(hal_kv_open(&h, "ordtest", HAL_KV_MODE_READ_WRITE, "kiln_nvs") == HAL_OK, "setup: sentinel handle");
+        TEST_CHECK(hal_kv_set_blob(&h, "sentinel", &one, 1) == HAL_OK && hal_kv_commit(&h) == HAL_OK, "setup: sentinel written");
+        hal_kv_close(&h);
+    }
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_ALL) == ESP_OK,
               "factory_reset_execute(ALL) must succeed");
+    TEST_CHECK(g_crash_report_clear_calls == 1, "the all scope clears the crash report/coredump exactly once (review 14 LOW-7)");
+    TEST_CHECK(g_crash_report_clear_saw_sentinel,
+               "crash_report_clear() ran BEFORE the kiln_nvs partition erase (the erase de-initializes it on the real backend)");
     TEST_CHECK(g_kiln_scope_cfg_delete_calls == 0 && g_profiles_scope_cfg_delete_calls == 0,
               "ALL formats cfg instead of deleting per-scope mirrors");
     TEST_CHECK(g_stub_profiles_discard_calls == 1,
@@ -1413,6 +1976,9 @@ static void reset_wifi_restore_stub_counters(void)
 // ---------------------------------------------------------------------------
 static const char *const LEGACY_KILN_KEYS[] = { "zones_cfg", "run_state", "relay_cyc" };
 static const char *const LEGACY_PROFILE_KEYS[] = { "prof_used", "prof0", "prof3", "prof7" };
+
+extern void fake_kv_script_write_status_after(unsigned skip, hal_status_t status);
+extern bool fake_kv_has_uncommitted_writes(const char *partition);
 
 static void seed_legacy_default_keys(void)
 {
@@ -1509,6 +2075,36 @@ static void test_factory_reset_fails_loudly_when_legacy_erase_fails(void)
     TEST_CHECK(hal_kv_init_partition("kiln_nvs") == HAL_OK, "setup: init kiln_nvs (default partition NOT inited)");
     TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_KILN) != ESP_OK,
                "kiln reset reports failure when the legacy default-partition copy cannot be erased");
+}
+
+static void test_legacy_erase_mid_loop_and_commit_failures_are_reported(void)
+{
+    TEST_SECTION("legacy default-partition erase: a mid-loop erase failure or a commit failure is reported, "
+                 "never ESP_OK (HOST_TEST_GAP_AUDIT gap 7)");
+    bool saw_fail = false;
+    for (unsigned skip = 0; skip < 14; skip++) {
+        seed_legacy_default_keys();
+        fake_kv_script_write_status_after(skip, HAL_NO_MEM);
+        esp_err_t e = legacy_default_nvs_erase_profiles();
+        fake_kv_script_write_status_after(0, HAL_OK);
+        if (e != ESP_OK) saw_fail = true;
+        hal_kv_handle_t h;
+        TEST_CHECK(hal_kv_open(&h, "kiln_cfg", HAL_KV_MODE_READ_ONLY, NULL) == HAL_OK, "reopen legacy ns");
+        char b[8];
+        size_t l = sizeof(b);
+        bool used_present = hal_kv_get_blob(&h, "prof_used", b, &l) != HAL_NOT_FOUND;
+        hal_kv_close(&h);
+        /* An armed fault that fires must surface as an error; a clean ESP_OK means the fault never fired
+         * (skip beyond the last write-class call) and the erase fully landed. */
+        TEST_CHECK(e != ESP_OK || !used_present, "ESP_OK only if the erase fully landed");
+        TEST_CHECK(e != ESP_OK || !fake_kv_has_uncommitted_writes(NULL),
+                   "ESP_OK only if the erase was committed (a swallowed commit failure leaves it pending)");
+        if (e != ESP_OK) {
+            TEST_CHECK(factory_reset_execute(FACTORY_RESET_SCOPE_PROFILES) == ESP_OK,
+                       "a retry after the failure completes the reset");
+        }
+    }
+    TEST_CHECK(saw_fail, "some injected failure (mid-loop erase or commit) was reported as an error");
 }
 
 static void test_factory_reset_wifi_scope_calls_esp_wifi_restore(void)
@@ -2377,6 +2973,22 @@ static void test_pico_img_stage_offset_and_crc_bookkeeping(void)
                "no per-call reset");
 }
 
+static void test_pico_img_stage_erase_deferred_to_first_chunk(void)
+{
+    TEST_SECTION("pico_img_stage -- begin does not erase; first chunk does (audit L26)");
+    pico_img_stage_ctx_t ctx;
+    char fail_reason[64] = "";
+    pico_img_stage_begin_result_t result;
+    int before = g_erase_range_calls;
+    TEST_CHECK(pico_img_stage_begin(&ctx, 6u, fail_reason, sizeof(fail_reason), &result), "setup: begin");
+    TEST_CHECK(g_erase_range_calls == before, "begin alone destroys nothing (no erase)");
+    const uint8_t chunk[3] = {1, 2, 3};
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk, sizeof(chunk), fail_reason, sizeof(fail_reason)), "first chunk");
+    TEST_CHECK(g_erase_range_calls == before + 1, "first chunk erases once");
+    TEST_CHECK(pico_img_stage_write_chunk(&ctx, chunk, sizeof(chunk), fail_reason, sizeof(fail_reason)), "second chunk");
+    TEST_CHECK(g_erase_range_calls == before + 1, "second chunk does not erase again");
+}
+
 static void test_pico_img_stage_write_chunk_refuses_overrun(void)
 {
     TEST_SECTION("pico_img_stage -- write_chunk refuses writing past the staged total (D6)");
@@ -2474,8 +3086,23 @@ static void test_ota_pico_do_stage_refuses_oversize_with_http_400(void)
 
 // ---------------------------------------------------------------------------
 
+static void test_upload_deadline_helpers(void)
+{
+    TEST_SECTION("ota_http_upload_budget_ms / deadline_passed -- overall upload cap");
+    TEST_CHECK(ota_http_upload_budget_ms(0) == 60000u, "zero-length budget is the 60 s base");
+    TEST_CHECK(ota_http_upload_budget_ms(2048u * 100u) == 60000u + 100000u, "2 KB/s minimum rate adds len/2048 s");
+    TEST_CHECK(ota_http_upload_budget_ms((size_t)4u * 1024u * 1024u) == 60000u + 2048000u, "4 MiB does not overflow");
+    TEST_CHECK(!ota_http_upload_deadline_passed(1000, 1000 + 60000, 60000), "exactly at budget is not yet past");
+    TEST_CHECK(ota_http_upload_deadline_passed(1000, 1000 + 60001, 60000), "one ms past budget is past");
+    TEST_CHECK(!ota_http_upload_deadline_passed(5000, 1000, 60000), "clock going backwards never trips");
+    TEST_CHECK(OTA_HTTP_UPLOAD_SLOW_CODE == 503, "deadline status must be 503, never 408 (browser auto-resend)");
+    TEST_CHECK(strncmp(OTA_HTTP_UPLOAD_SLOW_STATUS_LINE, "503 ", 4) == 0, "deadline status line is 503");
+    TEST_CHECK(strcmp(OTA_HTTP_UPLOAD_SLOW_ERROR, "upload_too_slow") == 0, "deadline error name");
+}
+
 void run_test_ota_http(void)
 {
+    test_upload_deadline_helpers();
     esp_err_t start_err = ota_http_start(NULL, NULL, NULL);
     // ESP_ERR_INVALID_STATE is expected (wifi_provision_http_get_server()
     // stubbed to NULL) -- s_ota_lock and every lockout/nonce state are
@@ -2488,6 +3115,16 @@ void run_test_ota_http(void)
     test_factory_reset_refused_by_system_mode_gate_during_firing();
     test_recovery_boot_set_failed_restores_boot_target();
     test_factory_reset_execute_refused_by_mode_gate_during_firing();
+    test_factory_reset_execute_refused_when_run_starts_during_dispatch();
+    test_factory_reset_execute_runs_writer_barrier_after_mark();
+    test_factory_reset_http_refused_when_run_starts_during_dispatch();
+    test_factory_reset_refused_when_another_reset_in_flight();
+    test_factory_reset_mark_cleared_on_dispatch_failure_kept_after_erase();
+    test_factory_reset_execute_refused_by_sweep_or_restore();
+    test_factory_reset_execute_refused_when_sweep_starts_during_dispatch();
+    test_factory_reset_http_refused_when_sweep_starts_during_dispatch();
+    test_factory_reset_execute_reboot_task_failure_is_distinct();
+    test_factory_reset_http_reboot_task_failure_reboots_inline();
 
     test_check_interlocks_refuses_during_zone_sweep();
     test_check_interlocks_ok_when_no_sweep();
@@ -2517,6 +3154,7 @@ void run_test_ota_http(void)
     }
 
     test_pico_rollback_post_returns_pending_without_blocking();
+    test_reboot_handlers_reply_only_after_task_created();
     test_pico_rollback_status_reports_idle_before_any_request();
     test_pico_rollback_status_reports_pending_while_in_progress();
     test_pico_rollback_status_reports_all_four_outcomes_honestly();
@@ -2541,6 +3179,7 @@ void run_test_ota_http(void)
     test_credential_survives_factory_reset_all_scope();
     test_factory_reset_erases_legacy_default_partition_keys();
     test_factory_reset_fails_loudly_when_legacy_erase_fails();
+    test_legacy_erase_mid_loop_and_commit_failures_are_reported();
     test_factory_reset_wifi_scope_calls_esp_wifi_restore();
     test_factory_reset_all_scope_calls_esp_wifi_restore();
     test_factory_reset_kiln_scope_never_calls_esp_wifi_restore();
@@ -2556,6 +3195,7 @@ void run_test_ota_http(void)
     test_refusal_drain_verdict();
 
     test_pico_img_stage_offset_and_crc_bookkeeping();
+    test_pico_img_stage_erase_deferred_to_first_chunk();
     test_pico_img_stage_write_chunk_refuses_overrun();
     test_pico_img_stage_begin_refuses_oversize();
     test_ota_pico_do_stage_refuses_oversize_with_http_400();

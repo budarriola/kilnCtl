@@ -612,6 +612,35 @@ static void test_http_buffer_is_the_shared_internal_chunk(void)
                "no PSRAM / heap buffer (bounce-through-stack-temp and hidden internal temp)");
     free(text);
 }
+static void test_upload_recv_failure_clears_gate_and_has_deadline(void)
+{
+    TEST_SECTION("update_http.c -- stage upload recv-failure exit clears the stack gate pointer; overall deadline (source-text scan)");
+    static const char *const candidates[] = {
+        "../drivers/update/update_http.c",
+        "App/drivers/update/update_http.c",
+        "firmware/KilnFW/App/drivers/update/update_http.c",
+    };
+    char *text = test_read_source_anchored(__FILE__, "../drivers/update/update_http.c", candidates,
+                                           sizeof(candidates) / sizeof(candidates[0]));
+    TEST_CHECK(text != NULL, "update_http.c is readable");
+    if (text == NULL) {
+        return;
+    }
+    char *fail = strstr(text, "receive failed at");
+    TEST_CHECK(fail != NULL, "recv-failure log line present");
+    if (fail != NULL) {
+        char *ret = strstr(fail, "return ESP_FAIL;");
+        TEST_CHECK(ret != NULL, "recv-failure path returns ESP_FAIL");
+        if (ret != NULL) {
+            *ret = '\0';
+            TEST_CHECK(strstr(fail, "update_stage_set_gate(&s_stage, NULL, NULL)") != NULL,
+                       "recv-failure exit clears the dangling gate_ctx stack pointer before returning");
+        }
+    }
+    TEST_CHECK(strstr(text, "ota_http_upload_deadline_passed(") != NULL, "upload loop enforces an overall deadline");
+    free(text);
+}
+
 static void test_status_never_trusts_a_header_alone(void)
 {
     TEST_SECTION("update_stage -- staged needs a valid header AND a matching sha256");
@@ -1245,6 +1274,7 @@ void run_test_update_stage(void)
     test_gate_refusal_keeps_stage();
     test_interrupted_and_blank();
     test_http_buffer_is_the_shared_internal_chunk();
+    test_upload_recv_failure_clears_gate_and_has_deadline();
     test_status_never_trusts_a_header_alone();
     test_clear();
     test_flash_and_hash_failures();

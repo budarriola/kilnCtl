@@ -216,7 +216,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * threshold" periods; which guard applies depends on which way the
      * error points.
      *
-     * ON_OFF_ZONE_PLAN.md sec 1: disabled entirely for an on/off zone. A
+     * ON_OFF_ZONE.md sec 1: disabled entirely for an on/off zone. A
      * correctly working vent commands duty 1.0 for hours and produces no
      * rise at all (often a fall) -- guard 1's whole trip condition ("duty
      * high, temperature flat") is also a healthy vent's normal operating
@@ -324,10 +324,12 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                  * thermal_guard_cfg_t.progress_band_c. */
                 float band_c = effective_f(cfg->progress_band_c, PROGRESS_BAND_C);
                 bool climbing = (error > band_c);
-                float window_s = effective_f(cfg->wrong_dir_window_s,
-                                              climbing
-                                                  ? effective_f(cfg->progress_window_s, PROGRESS_WINDOW_S)
-                                                  : WRONG_DIR_WINDOW_S);
+                /* Review F3: on the climbing branch an explicit progress_window_s wins over
+                 * wrong_dir_window_s; wrong_dir_window_s is the fallback, then the default. */
+                float window_s = climbing
+                                     ? effective_f(cfg->progress_window_s,
+                                                   effective_f(cfg->wrong_dir_window_s, PROGRESS_WINDOW_S))
+                                     : effective_f(cfg->wrong_dir_window_s, WRONG_DIR_WINDOW_S);
                 /* 2026-09-10 fix (docs/audits/esp_panic_after_zone0_guard_
                  * trip_2026-09-10.md): wrong_dir_window_s is sized for
                  * guard 2's falling-while-heating case and can be
@@ -348,6 +350,19 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
                  * the derived floor, sees byte-identical behaviour. */
                 if (climbing && cfg->climb_window_floor_s > window_s) {
                     window_s = cfg->climb_window_floor_s;
+                }
+                /* No trusted plant model (climb_window_floor_s == 0) AND the window came
+                 * from wrong_dir_window_s (sized for guard 2's falling case) rather than
+                 * the operator's own progress_window_s: floor it at the SAME minimum the
+                 * model path never goes below (CLIMB_WINDOW_FLOOR_MIN_S). Without this an
+                 * unmodelled slow zone with a 60 s wrong_dir_window_s gets a climbing
+                 * window shorter than its own dead time -- false HEATING_FAILED trips
+                 * (firing review 2026-10-09 item 6). Only ever lengthens window_s; an
+                 * explicit progress_window_s is honoured unchanged; a dead element is
+                 * still caught within CLIMB_WINDOW_FLOOR_MIN_S. */
+                if (climbing && cfg->climb_window_floor_s <= 0.0f && cfg->progress_window_s <= 0.0f &&
+                    cfg->wrong_dir_window_s > 0.0f && window_s < CLIMB_WINDOW_FLOOR_MIN_S) {
+                    window_s = CLIMB_WINDOW_FLOOR_MIN_S;
                 }
                 if (state->progress_window_elapsed_s >= window_s) {
                     float delta = in->measurement_c - state->progress_window_start_c;
@@ -402,7 +417,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
     }
 
     /* --- Guard 3: runaway with heat off (welded contact) -------------------
-     * ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone -- this guard
+     * ON_OFF_ZONE.md sec 1: disabled for an on/off zone -- this guard
      * infers a welded output from "temperature rising while commanded off",
      * which an on/off channel's relay cannot express (its whole job may BE
      * cooling while on). Welded-contactor detection for this output is a
@@ -526,7 +541,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
      * the idle-arming backstop above ever mattering: idle_elapsed_s still
      * accumulates (harmless, unread by anything else), but nothing below
      * reads settled_or_timed_out when no_setpoint is set. */
-    /* ON_OFF_ZONE_PLAN.md sec 1: disabled for an on/off zone, same reasoning
+    /* ON_OFF_ZONE.md sec 1: disabled for an on/off zone, same reasoning
      * as in->no_setpoint just above -- "drifted from setpoint" has no
      * meaning for a device with no setpoint to drift from. */
     if (!in->no_setpoint && !in->on_off_zone) {
@@ -566,7 +581,7 @@ bool thermal_guard_tick(thermal_guard_state_t *state, const thermal_guard_cfg_t 
         for (uint8_t i = 0; i < in->peer_count; i++) {
             if (i == in->peer_index_self) continue;
             if (in->peer_ok && !in->peer_ok[i]) continue; /* untrustworthy reading -- guard 6's problem, not this one */
-            /* ON_OFF_ZONE_PLAN.md sec 1: exclude an on/off zone from the
+            /* ON_OFF_ZONE.md sec 1: exclude an on/off zone from the
              * OTHER side of this comparison too -- a vent reading 200C below
              * its heater neighbours is the design working, not a fault. */
             if (in->peer_is_on_off && in->peer_is_on_off[i]) continue;

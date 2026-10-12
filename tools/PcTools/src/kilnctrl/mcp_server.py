@@ -462,6 +462,10 @@ registry = collapse(
     source_root=os.path.normpath(os.path.join(os.path.dirname(__file__), "..")),
 )
 
+# One timestamped line per tool call (arg keys only) -> logs/mcp_calls/<port>_<date>.log.
+from mcpkit import call_log as _call_log  # noqa: E402
+_call_log.install(mcp, registry, mcp_facade.KEEP)
+
 
 def _close() -> None:
     """Shut the query clients down and let go of the shared link."""

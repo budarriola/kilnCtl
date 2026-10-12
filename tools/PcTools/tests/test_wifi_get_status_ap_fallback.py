@@ -71,7 +71,9 @@ class StateNameTest(unittest.TestCase):
 
         wifi = unittest.mock.MagicMock(spec=["get_status"])
         wifi.get_status.return_value = _fake_uart_status(state=3)
-        with unittest.mock.patch.object(_srv, "_wifi", wifi):
+        with unittest.mock.patch.object(_srv, "_wifi", wifi), \
+                unittest.mock.patch("urllib.request.urlopen",
+                                    side_effect=OSError("no network in tests")):
             output = wifi_tools.wifi_get_status()
         self.assertIn("state=connected", output)
         self.assertNotIn("state=3 ", output)

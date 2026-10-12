@@ -97,6 +97,10 @@ void safety_guards_clear(safety_guard_state_t *state)
     safety_guards_reset(state);
 }
 
+#define S8_POST_MIN_S 5.0f
+#define S8_POST_WIN_MIN_S 60.0f
+#define S8_POST_WIN_MAX_S 600.0f
+
 static void trip(safety_guard_state_t *state, safety_trip_t reason, const char *fmt, ...)
 {
     state->is_tripped = true;
@@ -130,6 +134,63 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
     return in->spi_failed || !in->tc_valid || isnan(in->tc_c) ||
            ((in->fault_bits & (SAFETY_THERMO_FAULT_OPEN | SAFETY_THERMO_FAULT_OVUV |
                                 SAFETY_THERMO_FAULT_TCRANGE)) != 0u);
+}
+
+/* S8 clear test. strict=true: a RATE trip is latched (post-trip window state valid).
+ * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1) -- no post state exists,
+ * only the last pre-latch tripping window, if any, is a usable basis. */
+static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
+                            const safety_guard_state_t *state, bool strict)
+{
+    if (cfg->max_rate_c_per_min <= 0.0f) {
+        return false;
+    }
+    /* review saftyfx6 F4: unknown reading refuses; s8clrfx2 LOW-3: so does NaN flagged valid. */
+    if (!in->tc_valid || isnan(in->tc_c)) {
+        return true;
+    }
+    if (strict) {
+        /* review s8clrfx2 LOW-1: a grant needs TWO consecutive full post-trip windows
+         * at or under the limit (mirrors the trip streak). Until then refuse -- the
+         * frozen tripping window is a single-sample test and one outlier would grant. */
+        if (state->s8_post_windows_done < 2u) {
+            return true;
+        }
+        if (state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min ||
+            state->s8_post_prev_rate_c_per_min > cfg->max_rate_c_per_min) {
+            return true;
+        }
+        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+            float m = state->s8_post_elapsed_s / 60.0f;
+            if (((in->tc_c - state->s8_post_start_c) / m) > cfg->max_rate_c_per_min) {
+                return true;
+            }
+        }
+        return false;
+    }
+    if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
+        float elapsed_min = state->s8_window_elapsed_s / 60.0f;
+        return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
+    }
+    return false;
+}
+
+static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
+                                             const safety_guard_input_t *in,
+                                             const safety_guard_state_t *state);
+static bool test_trip_masks_real_condition(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
+                                           const safety_guard_state_t *state)
+{
+    static const safety_trip_t real[] = {
+        SAFETY_TRIP_SENSOR_INVALID, SAFETY_TRIP_OVERTEMP, SAFETY_TRIP_OVER_SETPOINT,
+        SAFETY_TRIP_LOAD_STUCK_ON, SAFETY_TRIP_FROZEN_SENSOR, SAFETY_TRIP_ENCLOSURE_TEMP,
+        SAFETY_TRIP_BORROWED_STALE, SAFETY_TRIP_LINK_DEAD};
+    for (unsigned i = 0; i < sizeof(real) / sizeof(real[0]); i++) {
+        if (guard_condition_still_immediate(real[i], cfg, in, state)) {
+            return true;
+        }
+    }
+    return s8_clear_refuse(cfg, in, state, false);
 }
 
 /* 2026-08-23 hardware finding: safety_guards_try_clear() resets every
@@ -169,16 +230,10 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
  * function is ever consulted, so recomputing its condition here would be
  * dead code guarding an unreachable branch.
  *
- * S1 remains excluded: it is a 3-tick debounce with no single-tick "the
- * value itself is disqualifying" test short of the trip condition itself,
- * so there is nothing to recompute that isn't just re-running the debounce
- * from scratch. S8 (added later than this function's original audit pass)
- * is excluded for the identical reason -- it is a two-window average-rate
- * debounce (S8_OVER_RATE_STREAK_TO_TRIP), not a single-tick level, and its
- * own window state is exactly what safety_guards_clear() is about to zero,
- * so "still true right now" has no honest single-tick answer here either;
- * it re-trips on its own normal two-window timescale instead, the same
- * accepted scope limit as S1. Returning false for any other reason leaves
+ * S1 and S8 (REVIEW_SAFTYFW_TRIP_PATH_2026-10-10 T1): handled above. S1's
+ * single-tick level is the over-ceiling test its debounce counts; S8 re-evaluates
+ * the window that tripped (state not yet zeroed) against the current reading.
+ * Returning false for any other reason leaves
  * safety_guards_try_clear()'s existing one-tick-retest behaviour completely
  * unchanged for every guard not listed here. */
 static bool guard_condition_still_immediate(safety_trip_t reason, const safety_guard_cfg_t *cfg,
@@ -186,8 +241,30 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                              const safety_guard_state_t *state)
 {
     switch (reason) {
+    case SAFETY_TRIP_TEST: /* admin test trip (docs/TEST_TRIP_PLAN.md section 4.3): there is
+                            * no physical condition of its own to re-test, so the clear is held
+                            * until S9's verification window has elapsed -- K4 has been COMMANDED
+                            * open for trip_verify_s (the Pico's own relay mirror, not contact
+                            * feedback; REVIEW_TRIPWP2 LOW-4) and S9 had its chance to escalate.
+                            * s9_verify_elapsed_s only advances while K4 is reported
+                            * de-energized, so a relay that never opens never releases the hold. */
+        if (state->s9_verify_elapsed_s < effective_f(cfg->trip_verify_s, TRIP_VERIFY_S_DEFAULT)) {
+            return true;
+        }
+        /* REVIEW_TRIPWP2 MED-1: while TEST is latched the tick runs only the tripped path, so
+         * every other guard's debounce is frozen. A clear must therefore also refuse while any
+         * real guard's immediate condition holds right now, so the test trip never masks a real
+         * one. (S9 is not listed: it escalates by itself in the tripped path.) */
+        return test_trip_masks_real_condition(cfg, in, state);
     case SAFETY_TRIP_SENSOR_INVALID: /* S5 */
         return s5_bad_read_now(in);
+    case SAFETY_TRIP_OVERTEMP: /* S1 -- reading still above the absolute ceiling right now
+                                * (REVIEW_SAFTYFW_TRIP_PATH T1: the S1 debounce counts exactly
+                                * this level; refusing here never loosens the guard). */
+        /* Review saftyfx6 F4: an unknown reading (bad TC) is not a pass -- refuse. */
+        return cfg->abs_max_temp_c > 0.0f && (!in->tc_valid || in->tc_c > cfg->abs_max_temp_c);
+    case SAFETY_TRIP_RATE: /* S8 -- see s8_clear_refuse(); strict = a real RATE trip is latched */
+        return s8_clear_refuse(cfg, in, state, true);
     case SAFETY_TRIP_OVER_SETPOINT: /* S2 -- still over max zone setpoint + margin right now */
         return in->context_valid && cfg->tc_placement_valid &&
                cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED && in->zone_count > 0u &&
@@ -230,8 +307,12 @@ static bool guard_condition_still_immediate(safety_trip_t reason, const safety_g
                                       * whether heat happens to be commanded on this exact tick. */
         return in->tc_valid && state->s11_window_active && in->tc_c == state->s11_last_c;
     case SAFETY_TRIP_ENCLOSURE_TEMP: /* S12 -- cj_c still over cj_max_c right now */
-        return in->tc_valid && !isnan(in->cj_c) &&
-               in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
+        /* F4: an unknown cold junction (NaN / cj_invalid) means the
+         * enclosure condition cannot be shown to have cleared -> still
+         * immediate, so the clear is refused. */
+        /* Review saftyfx6 F1: no tc_valid term; T4 lets S12 trip on a bad TC read. */
+        return in->cj_invalid || isnan(in->cj_c) ||
+               (in->cj_c > effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT));
     case SAFETY_TRIP_BORROWED_STALE: /* S13 -- channel still not producing fresh samples */
         return (cfg->tc_source == SAFETY_TC_SOURCE_BORROWED_ZONE ||
                 cfg->tc_source == SAFETY_TC_SOURCE_BOTH) &&
@@ -280,11 +361,21 @@ bool safety_guards_try_clear(safety_guard_state_t *state, const safety_guard_cfg
     return !safety_guards_tick(state, cfg, in);
 }
 
+bool safety_guards_clear_trip_occurrence_matches(bool bound, uint8_t wire_trip_seq,
+                                                  uint8_t current_trip_seq)
+{
+    return !bound || wire_trip_seq == current_trip_seq;
+}
+
 safety_clear_trip_outcome_t safety_guards_decide_clear_trip_outcome(bool was_tripped,
+                                                                      bool occurrence_matches,
                                                                       bool try_clear_result)
 {
     if (!was_tripped) {
         return SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_NOTHING_LATCHED;
+    }
+    if (!occurrence_matches) {
+        return SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STALE_OCCURRENCE;
     }
     return try_clear_result ? SAFETY_CLEAR_TRIP_OUTCOME_ACCEPTED
                              : SAFETY_CLEAR_TRIP_OUTCOME_REFUSED_STILL_TRIPPED;
@@ -331,6 +422,42 @@ float safety_guards_deciding_threshold_c(safety_trip_t reason, const safety_guar
     }
 }
 
+/* S12 evaluation, shared by the normal path and the bad-TC-read path (T4,
+ * REVIEW_SAFTYFW_TRIP_PATH_2026-10-10). Returns true if it tripped. */
+static bool s12_evaluate(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
+                         const safety_guard_input_t *in)
+{
+    {
+        float cj_max = effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
+        float cj_warn = effective_f(cfg->cj_warn_c, CJ_WARN_C_DEFAULT);
+
+        if (in->cj_invalid || isnan(in->cj_c)) {
+            /* Guard review F4: an unknown cold junction (CJRANGE, i.e.
+             * enclosure beyond the part's range -- the hottest possible
+             * S12 case) is never a pass. Raise the WARN and HOLD the
+             * accumulator (neither advance nor reset), and
+             * guard_condition_still_immediate() refuses to clear an S12
+             * trip while cj is unknown. */
+            state->s12_warn = true;
+        } else if (in->cj_c > cj_max) {
+            state->s12_warn = true;
+            state->s12_over_max_elapsed_s += in->dt_s;
+            if (state->s12_over_max_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
+                trip(state, SAFETY_TRIP_ENCLOSURE_TEMP, "cold junction %.1fC > cj_max_c %.1fC for %.0fs",
+                     (double)in->cj_c, (double)cj_max, (double)state->s12_over_max_elapsed_s);
+                return true;
+            }
+        } else if (in->cj_c > cj_warn) {
+            state->s12_warn = true;
+            state->s12_over_max_elapsed_s = 0.0f;
+        } else {
+            state->s12_warn = false;
+            state->s12_over_max_elapsed_s = 0.0f;
+        }
+    }
+    return false;
+}
+
 bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *cfg,
                          const safety_guard_input_t *in)
 {
@@ -342,6 +469,34 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
     state->ct_guards_disabled = in->current_sensing_disabled;
 
     if (state->is_tripped) {
+        /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
+         * clear refusal in guard_condition_still_immediate() is bounded in time.
+         * Only used by the clear check; never touches the trip path. */
+        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid && !isnan(in->tc_c)) {
+            if (!state->s8_post_active) {
+                state->s8_post_active = true;
+                state->s8_post_start_c = in->tc_c;
+                state->s8_post_elapsed_s = 0.0f;
+                /* review s8clrfx LOW-3: latch + clamp the post window at trip time
+                 * so a mid-trip rate_window_s change cannot shorten or stick it. */
+                float lw = effective_f(cfg->rate_window_s, RATE_WINDOW_S_DEFAULT);
+                state->s8_post_win_s = lw < S8_POST_WIN_MIN_S ? S8_POST_WIN_MIN_S
+                                       : (lw > S8_POST_WIN_MAX_S ? S8_POST_WIN_MAX_S : lw);
+            } else {
+                state->s8_post_elapsed_s += in->dt_s;
+                float win = state->s8_post_win_s;
+                if (state->s8_post_elapsed_s >= win) {
+                    state->s8_post_prev_rate_c_per_min = state->s8_post_last_rate_c_per_min;
+                    if (state->s8_post_windows_done < 2u) {
+                        state->s8_post_windows_done++;
+                    }
+                    state->s8_post_last_rate_c_per_min =
+                        (in->tc_c - state->s8_post_start_c) / (state->s8_post_elapsed_s / 60.0f);
+                    state->s8_post_start_c = in->tc_c;
+                    state->s8_post_elapsed_s = 0.0f;
+                }
+            }
+        }
         /* --- S9: trip ineffective / contactor welded -------------------------
          * The one guard that must keep evaluating after a trip -- everything
          * else stops mattering once K4 should be open, but "did it actually
@@ -368,11 +523,12 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * no debounce, no context_valid gate, and no check that the
                  * current measurement itself was trustworthy.
                  *
-                 * in->context_valid is required (S3, the guard this one most
-                 * resembles -- "current present with nothing that should
-                 * produce it" -- gates on context_valid at this file's
-                 * context block below; S9 must too, since any_current_present
-                 * is the same caller-computed fact S3 trusts).
+                 * in->context_valid is deliberately NOT required (2026-10-09
+                 * review F3, superseding the c3542d97 rationale): S3 needs
+                 * the ESP's heat command, S9 only the Pico's own
+                 * de-energize command. The current-trust concern is
+                 * covered by the debounce streak and the commissioned split
+                 * below.
                  *
                  * The debounce streak (S9_CURRENT_PRESENT_STREAK_TO_TRIP
                  * consecutive ticks, below) catches a TRANSIENT spurious
@@ -401,8 +557,11 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                  * once latched, it is still refused unconditionally by
                  * safety_guards_try_clear() and link_frame_decide_clear_trip().
                  * This only changes what evidence is required to set it. */
-                if (state->s9_verify_elapsed_s >= verify_th && in->context_valid &&
-                    in->any_current_present) {
+                /* No in->context_valid gate (guard review 2026-10-09, F3): S9
+                 * reasons about the Pico's OWN de-energize command, which it
+                 * always knows. Gating on ESP context made S9 blind in exactly
+                 * the case it exists for (K4 welded while the ESP is dead). */
+                if (state->s9_verify_elapsed_s >= verify_th && in->any_current_present) {
                     if (in->current_sensing_disabled) {
                         /* No CT is fitted. any_current_present here is the
                          * op-amp offset floor read through an uncalibrated
@@ -555,6 +714,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * falling through to S1/S11/S12 below with an un-flagged garbage
      * value. */
     bool bad_read = s5_bad_read_now(in);
+    bool tc_usable = true; /* false on a bad read: S2/S10 hold, see context_guards */
 
     if (bad_read) {
         if (state->s5_bad_streak < UINT16_MAX) {
@@ -607,11 +767,22 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
             }
         }
 
-        /* A bad read can't feed S1/S11/S12 below a real number -- skip the
-         * rest of this tick's checks rather than reasoning about a value
-         * that isn't trustworthy (same discipline thermal_guard.c's guard 6
-         * uses for guards 1/2/3/4/7 below it). */
-        return false;
+        /* A bad read can't feed S1/S11/S12/S8 below a real number -- skip
+         * those rather than reasoning about a value that isn't
+         * trustworthy (same discipline thermal_guard.c's guard 6 uses for
+         * guards 1/2/3/4/7 below it). 2026-10-09 review F6: the
+         * TC-independent context guards (S3, S4, S13, S14, S15) must NOT
+         * be suspended by a blind TC, so jump to the context block; S2 and
+         * S10 inside it consume tc_c and hold their state while
+         * tc_usable is false. */
+        /* T4: the cold junction is a separate MAX31856 register, usually still
+         * valid on the commonest fault (open TC). Run S12 on a valid CJ so the
+         * enclosure guard is not blind; S5 is untouched. */
+        if (!in->cj_invalid && !isnan(in->cj_c) && s12_evaluate(state, cfg, in)) {
+            return true;
+        }
+        tc_usable = false;
+        goto context_guards;
     }
 
     state->s5_bad_streak = 0;
@@ -677,25 +848,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * Two independent thresholds: cj_warn_c is a plain level crossing
      * (WARN only, no timer -- it is reported every tick it is exceeded, not
      * latched); cj_max_c needs cj_time_s of sustained excess to TRIP. */
-    if (in->tc_valid) {
-        float cj_max = effective_f(cfg->cj_max_c, CJ_MAX_C_DEFAULT);
-        float cj_warn = effective_f(cfg->cj_warn_c, CJ_WARN_C_DEFAULT);
-
-        if (in->cj_c > cj_max) {
-            state->s12_warn = true;
-            state->s12_over_max_elapsed_s += in->dt_s;
-            if (state->s12_over_max_elapsed_s >= effective_f(cfg->cj_time_s, CJ_TIME_S_DEFAULT)) {
-                trip(state, SAFETY_TRIP_ENCLOSURE_TEMP, "cold junction %.1fC > cj_max_c %.1fC for %.0fs",
-                     (double)in->cj_c, (double)cj_max, (double)state->s12_over_max_elapsed_s);
-                return true;
-            }
-        } else if (in->cj_c > cj_warn) {
-            state->s12_warn = true;
-            state->s12_over_max_elapsed_s = 0.0f;
-        } else {
-            state->s12_warn = false;
-            state->s12_over_max_elapsed_s = 0.0f;
-        }
+    if (in->tc_valid && s12_evaluate(state, cfg, in)) {
+        return true;
     }
 
     /* --- S8: implausible rate of rise -----------------------------------------
@@ -791,6 +945,7 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
      * value at all until S5 either clears or this whole guard set is
      * latched by S5's own trip. */
 
+context_guards:
     /* --- Context-dependent guards: S2, S3, S4, S10, S13 -----------------------
      * SAFETY_MODEL.md section 5, rule 2: "stale context is no context" -- and
      * ARCHITECTURE.md section 9: context-dependent guards report *inactive*
@@ -839,7 +994,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * chamber setpoint is meaningless (SAFETY_MODEL.md section 4, S2).
          * zone_count == 0 means "no active zones this tick", same inactive
          * treatment as stale context. */
-        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+        if (!tc_usable) {
+            /* bad TC read: hold the S2 accumulator (F6), as before this tick's early return */
+        } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float margin = effective_f(cfg->overshoot_margin_c, OVERSHOOT_MARGIN_C_DEFAULT);
             if (in->tc_c > in->max_zone_setpoint_c + margin) {
@@ -895,7 +1052,9 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
          * CHAMBER_AGREED only, same reasoning as S2 (SAFETY_MODEL.md section
          * 4, S10). Compares against the caller-supplied *nearest* valid zone
          * reading, never the mean -- kilns stratify. */
-        if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
+        if (!tc_usable) {
+            /* bad TC read: hold the S10 state (F6) */
+        } else if (cfg->tc_placement_valid && cfg->tc_placement_mode == SAFETY_TC_CHAMBER_AGREED &&
             in->zone_count > 0u && in->tc_valid) {
             float disagree_c = effective_f(cfg->tc_disagreement_c, TC_DISAGREEMENT_C_DEFAULT);
             float diff = in->tc_c - in->nearest_zone_measured_c;
@@ -1184,6 +1343,18 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
                 }
             }
         }
+    }
+
+    /* Admin test trip (docs/TEST_TRIP_PLAN.md section 4.2). Evaluated LAST on the
+     * not-tripped path so a real guard that fired this tick has already
+     * returned and keeps the reason. One-tick request, no debounce: the ESP
+     * already authenticated and rate-limited it. Goes through the same
+     * trip() latch as a genuine guard, so safety_core's newly_tripped branch
+     * (relay drop, boot_reason latch, trip_seq bump, TRIP_EVENT) is shared.
+     * It can only ever CAUSE a trip -- nothing here clears, masks or blinds one. */
+    if (in->test_trip_requested) {
+        trip(state, SAFETY_TRIP_TEST, "admin test trip");
+        return true;
     }
 
     /* Not tripped this tick -- S9's verification window has nothing to

@@ -100,6 +100,8 @@ typedef struct {
 
 typedef struct {
     cmd_type_t type;
+    uint32_t off_epoch; /* kiln_io_relay_off_epoch() sampled when an AUTHORIZED command was posted;
+                         * a later all-off makes a still-queued ON stale (LOW-3) */
     int slot; /* index into s_slots[] -- module-owned result storage and
                * semaphore, assigned by post_and_wait() via
                * owner_slot_pool_alloc(). Never a pointer into the caller's
@@ -200,7 +202,7 @@ static SemaphoreHandle_t s_slot_lock;
  * never block on NVS I/O the way crash_report_get() would.
  *
  * out_mode_blocked works the same as out_updating/out_crash_unack above, for
- * the same reason: docs/SYSTEM_MODE_GATE_PLAN.md, owner decision 2026-09-25
+ * the same reason: docs/SYSTEM_MODE_GATE.md, owner decision 2026-09-25
  * (Q1) -- BLANKET-refuse any manual relay-ON while a firing or autotune run
  * is active, on all three transports that reach this one choke point.
  * Checked LAST, after every gate above, so a more specific refusal (safety
@@ -465,10 +467,25 @@ static void owner_task(void *arg)
             /* No ownership/safety gate -- see kiln_io_owner.h's top comment.
              * The caller (profile_executor.c/autotune_engine.c) already
              * applied its own zone-level gate before posting this. */
-            r.err = kiln_io_set_relay_mask(s_io, cmd.args.set_relay_mask.mask,
-                                           cmd.args.set_relay_mask.value);
-            if (r.err == ESP_OK) {
-                relay_off_tracker_note_write(cmd.args.set_relay_mask.mask, cmd.args.set_relay_mask.value);
+            {
+                bool stale = false;
+                uint8_t auth_value = cmd.args.set_relay_mask.value;
+                /* LOW-D: the epoch is compared under the kiln_io lock. */
+                r.err = kiln_io_set_relay_mask_if_epoch(s_io, cmd.args.set_relay_mask.mask, auth_value,
+                                                        cmd.off_epoch, &stale);
+                if (stale) {
+                    /* LOW-3: a fail-safe all-off ran after this was posted (the caller may have
+                     * timed out and moved on). Never close a relay on its behalf; the OFF bits
+                     * of the mask are still safe to write. */
+                    auth_value = 0;
+                    ESP_LOGW(TAG, "stale AUTHORIZED relay command dropped to OFF (all-off ran since the caller decided)");
+                }
+                if (r.err == ESP_OK) {
+                    relay_off_tracker_note_write(cmd.args.set_relay_mask.mask, auth_value);
+                    if (stale && cmd.args.set_relay_mask.value != 0) {
+                        r.err = ESP_ERR_INVALID_STATE; /* the requested ON did not happen */
+                    }
+                }
             }
             break;
         case CMD_SET_IO:
@@ -552,24 +569,20 @@ static void owner_task(void *arg)
             r.sx_result = (r.err == ESP_OK) ? KILN_IO_OWNER_SX_OK : KILN_IO_OWNER_SX_IO_FAIL;
             break;
         case CMD_SX_RESET:
-            r.err = SX1509_reset(s_io->exp, cmd.args.sx_reset.hard);
+            /* A reset -- soft OR hard -- is a POR: every pin goes back to being an
+             * input, which de-energizes every relay coil. kiln_io_reset_and_reinit()
+             * does the reset under the kiln_io lock, then K7-03's verified re-init
+             * (relay pins back to outputs, all latched OFF), restores the user's
+             * IO_1..IO_7 config (K7 LOW-1) and keeps relay_shadow / the off-tracker
+             * honest on every path (K7 HIGH-1, LOW-5). On failure the board stays
+             * not-initialised (relay ON refused) and the error is returned. No
+             * safety/ownership gate is needed (same as CMD_ALL_RELAYS_OFF): a reset
+             * can only ever turn relays OFF, never on. */
+            r.err = kiln_io_reset_and_reinit(s_io, cmd.args.sx_reset.hard);
             if (r.err == ESP_OK) {
-                /* A reset -- soft OR hard, SX1509_reset()'s own comment --
-                 * is a POR: every one of the 16 pins goes back to being an
-                 * input, which de-energizes every relay coil exactly the
-                 * way kiln_io_init()'s step-1 comment describes for the
-                 * boot-time case. This is the runtime equivalent, reached
-                 * from uart_bridge.c's IO_CMD_SX_RESET debug subcommand, and
-                 * it was leaving relay_shadow claiming whatever it last
-                 * said -- coils reading ON on the dashboard/LCD after they
-                 * had actually just been silently floated off. No
-                 * safety/ownership gate is needed here (same as
-                 * CMD_ALL_RELAYS_OFF above): a reset can only ever turn
-                 * relays OFF, never on, so there is nothing for those gates
-                 * to protect against. */
-                s_io->relay_shadow = 0;
-                ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, all relay pins now inputs, "
-                              "relay_shadow cleared to match", cmd.args.sx_reset.hard ? "hard" : "soft");
+                relay_off_tracker_note_write(0xFFu, 0u);
+                ESP_LOGI(TAG, "io: SX_RESET (%s) -- expander POR, re-initialised, all relays off",
+                         cmd.args.sx_reset.hard ? "hard" : "soft");
             }
             break;
         case CMD_SX_SCAN: {
@@ -756,7 +769,14 @@ kiln_io_owner_relay_result_t kiln_io_owner_command_set_relay_mask(uint8_t mask, 
 
 esp_err_t kiln_io_owner_command_set_relay_mask_authorized(uint8_t mask, uint8_t value)
 {
+    return kiln_io_owner_command_set_relay_mask_authorized_since(mask, value, kiln_io_relay_off_epoch());
+}
+
+esp_err_t kiln_io_owner_command_set_relay_mask_authorized_since(uint8_t mask, uint8_t value,
+                                                                 uint32_t since_epoch)
+{
     owner_cmd_t cmd = { .type = CMD_SET_RELAY_MASK_AUTHORIZED,
+                        .off_epoch = since_epoch,
                         .args.set_relay_mask = { .mask = mask, .value = value } };
     owner_result_t r;
     if (!post_and_wait(&cmd, &r)) {

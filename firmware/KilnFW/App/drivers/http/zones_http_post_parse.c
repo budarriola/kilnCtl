@@ -13,10 +13,32 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "http_form.h"
+#include "persist_scratch.h" /* persist_scratch_alloc() -- probe copy */
 #include "zone_settings_source_chain.h"
+
+/* Blank-tolerant presence for the guard fields and z%u_xzone: pre-strict-parse these
+ * treated "key=" (a page pushing an empty <input type=number>) as omitted, i.e. 0/disabled.
+ * Non-empty garbage still fails the range parse (400). */
+static bool zones_http_field_nonblank(const char *body, const char *key)
+{
+    char probe[2];
+    int n = http_form_find_field(body, key, probe, sizeof(probe));
+    return n != -1 && n != 0; /* -2 (overflow) is non-blank: parse rejects it */
+}
+
+/* "key=" present but empty. A blank keeps the STORED value (omit-preserve, like pc_link_abort_silence_ms):
+ * it must never fall back to the firmware default or disable guard 8 (owner decision: no guard-disable
+ * path). A key that is wholly omitted keeps the documented whole-page-submit meaning (0). */
+static bool zones_http_field_blank(const char *body, const char *key)
+{
+    char probe[2];
+    return http_form_find_field(body, key, probe, sizeof(probe)) == 0;
+}
+
 
 /* SRC_GROUP_LIMITS/RELAY_TIMING/CONTROL/GUARDS/TC order, indexed by the
  * #defines in zones_config_accessors.h -- see zones_http_internal.h's
@@ -50,7 +72,11 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     char name[ZONE_NAME_MAX_LEN + 1];
     int name_len = http_form_find_field(body, key, name, sizeof(name));
     if (name_len == -2) {
-        *err_reason = "zone name too long";
+        *err_reason = "zone name too long or contains a control character";
+        return false;
+    }
+    if (name_len > 0 && http_form_value_has_ctl(name, name_len)) {
+        *err_reason = "zone name contains a control character";
         return false;
     }
     if (name_len < 0) {
@@ -97,7 +123,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_tctype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t tc_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, ZONE_TC_TYPE_MAX_REAL, &tc_type_raw)) {
                 *err_reason = "zone thermocouple type must be a real thermocouple type (0-7: "
@@ -177,7 +203,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_relaytype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t relay_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_RELAY_TYPE_MAX, &relay_type_raw)) {
                 *err_reason = "zone relay_type out of range (0-2: SSR/Contactor/Mercury)";
@@ -189,7 +215,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         }
     }
 
-    /* docs/ON_OFF_ZONE_PLAN.md step 6: zone_type/failsafe_state/hyst_c/
+    /* docs/ON_OFF_ZONE.md step 6: zone_type/failsafe_state/hyst_c/
      * min_on_s/min_off_s (ZONES_CFG_VERSION 22->23 storage, unused by any
      * consumer until this UI pass). OPTIONAL, same reasoning as z%u_relaytype
      * above -- every pre-existing client (pc_tools/MCP, older test bodies)
@@ -204,7 +230,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_zonetype", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t zone_type_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, (long)ZONE_TYPE_ON_OFF, &zone_type_raw)) {
                 *err_reason = "zone zone_type out of range (0=heater, 1=on/off device)";
@@ -218,7 +244,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_failsafe", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t failsafe_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 1, &failsafe_raw)) {
                 *err_reason = "zone failsafe_state out of range (0=off, 1=on)";
@@ -338,7 +364,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_thermo_mask", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t thermo_mask_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &thermo_mask_raw)) {
                 *err_reason = "zone thermo_mask missing or invalid";
@@ -365,7 +391,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_ct_mask", i);
     {
         char probe[8];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             uint8_t ct_mask_raw;
             if (!zones_config_json_parse_u8_field(body, key, 0, 0xFF, &ct_mask_raw)) {
                 *err_reason = "zone ct_mask missing or invalid";
@@ -570,115 +596,130 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
         return false;
     }
     /* TODO.md 6A.3's remaining named guard thresholds. OPTIONAL, same reason
-     * z%u_xzone below is: a submission that omits one leaves the
-     * corresponding firmware default in force (z is zero-initialized by the
-     * caller, and 0 is thermal_guard.c's own "substitute the default" value
-     * for every one of these -- unlike z%u_xzone, omitting one of these does
-     * NOT disable its guard). Bounds are generous sanity ceilings against a
+     * z%u_xzone below is: a submission that omits one keeps the
+     * STORED value (review 11 made omission preserve the stored guard rather
+     * than reset it to the firmware default; 0 is still thermal_guard.c's own
+     * "substitute the default" value, and unlike z%u_xzone, omitting one of
+     * these does NOT disable its guard). Bounds are generous sanity ceilings against a
      * typo, not real per-field tuning limits: rates 0-20C/min matches
      * z%u_sanity's own ceiling, windows/periods 0-7200s (2h) covers any
      * kiln's plausible time constant, debounce ticks 0-100, margin 0-500C. */
     snprintf(key, sizeof(key), "z%u_wrongdirwindow", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_wrong_dir_window_s)) {
                 *err_reason = "zone guard_wrong_dir_window_s out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_wrong_dir_window_s = current_z->guard_wrong_dir_window_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_wrongdirrate", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_wrong_dir_rate_c_per_min)) {
                 *err_reason = "zone guard_wrong_dir_rate_c_per_min out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_wrong_dir_rate_c_per_min = current_z->guard_wrong_dir_rate_c_per_min; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_offsettle", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_off_settle_s)) {
                 *err_reason = "zone guard_off_settle_s out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_off_settle_s = current_z->guard_off_settle_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_runawayrate", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_RATE_C_PER_MIN_MAX, &z->guard_runaway_rate_c_per_min)) {
                 *err_reason = "zone guard_runaway_rate_c_per_min out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_runaway_rate_c_per_min = current_z->guard_runaway_rate_c_per_min; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_runawaymargin", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_MARGIN_C_MAX, &z->guard_runaway_margin_c)) {
                 *err_reason = "zone guard_runaway_margin_c out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_runaway_margin_c = current_z->guard_runaway_margin_c; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_driftperiod", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_drift_period_s)) {
                 *err_reason = "zone guard_drift_period_s out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_drift_period_s = current_z->guard_drift_period_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_debounce", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_DEBOUNCE_TICKS_MAX, &z->guard_sensor_fault_debounce_ticks)) {
                 *err_reason = "zone guard_sensor_fault_debounce_ticks out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_sensor_fault_debounce_ticks = current_z->guard_sensor_fault_debounce_ticks; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     snprintf(key, sizeof(key), "z%u_frozenwindow", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_GUARD_TIME_S_MAX, &z->guard_frozen_window_s)) {
                 *err_reason = "zone guard_frozen_window_s out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->guard_frozen_window_s = current_z->guard_frozen_window_s; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     /* The nine v8 overrides that used to be parsed inline here now live on
      * the timing profile this zone points at -- see z%u_timingprofile above
      * and zones_config_json_parse_timing_profile_fields() (tp%u_progressduty..tp%u_ramplock),
      * parsed once per PROFILE rather than once per zone. */
-    /* Guard 8. OPTIONAL, unlike every field above: a submission that omits
-     * it means "leave the guard disabled" (z is zero-initialized by the
-     * caller), so older clients -- the MCP/pc_tools path and the test
-     * harnesses that post the original 14 fields -- keep working unchanged
-     * instead of being rejected by a field they've never heard of. Such a
-     * client does clear a previously saved threshold, which is the same
-     * whole-page-submit semantics every other field already has. Present
-     * but malformed is still an error. 1000C is a sanity bound only; a real
-     * threshold comes from a measured cross-gain matrix. */
+    /* Guard 8. A submission that omits this field, or leaves it blank, keeps
+     * the STORED threshold (owner decision: a thermal guard is never disabled
+     * by omission; an explicit 0 is the only way to write 0). Older clients
+     * (MCP/pc_tools, test harnesses) that post only the original 14 fields
+     * therefore keep working AND no longer clear a saved threshold. Present
+     * but malformed is still an error. 1000C is a sanity bound only. */
     snprintf(key, sizeof(key), "z%u_xzone", i);
     {
         char probe[16];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_http_field_nonblank(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_CROSS_ZONE_DELTA_C_MAX, &z->cross_zone_max_delta_c)) {
                 *err_reason = "zone cross_zone_max_delta_c out of range";
                 return false;
             }
+        } else { /* blank OR missing */
+            z->cross_zone_max_delta_c = current_z->cross_zone_max_delta_c; /* blank keeps the stored value (blank or missing); never a default/disable */
         }
     }
     /* The identified plant model (TODO.md 6A.4 -> 6A.2's feedforward).
@@ -731,7 +772,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_k", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_K_MAX, &z->model_k_dc)) {
                 *err_reason = "zone model K out of range";
                 return false;
@@ -743,7 +784,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_tau", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_TIME_MAX_S, &z->model_tau_s)) {
                 *err_reason = "zone model tau out of range";
                 return false;
@@ -755,7 +796,7 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
     snprintf(key, sizeof(key), "z%u_deadtime", i);
     {
         char probe[24];
-        if (http_form_find_field(body, key, probe, sizeof(probe)) > 0) {
+        if (zones_config_json_field_present(body, key)) {
             if (!zones_config_json_parse_float_field(body, key, 0.0f, ZONE_MODEL_TIME_MAX_S, &z->model_dead_time_s)) {
                 *err_reason = "zone model dead time out of range";
                 return false;
@@ -1035,10 +1076,17 @@ bool zones_http_parse_zone_fields(const char *body, uint8_t i, uint8_t thermo_co
              * this function's call site's loop and before that handler's
              * commit point -- see the comment there. */
             {
-                zone_cfg_t probe[MAX31856_CHANNEL_COUNT];
-                memcpy(probe, s_zones.cfg.zones, sizeof(probe));
+                /* Heap, not stack: zone_cfg_t[3] is well over 1 KB on the httpd stack. */
+                zone_cfg_t *probe = persist_scratch_alloc(sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
+                if (probe == NULL) {
+                    *err_reason = ZONES_HTTP_ERR_OOM;
+                    return false;
+                }
+                memcpy(probe, s_zones.cfg.zones, sizeof(zone_cfg_t) * MAX31856_CHANNEL_COUNT);
                 probe[i].settings_source[g] = src_raw;
-                if (zones_config_json_settings_source_chain_has_cycle(probe, g, i, thermo_count)) {
+                bool cycle = zones_config_json_settings_source_chain_has_cycle(probe, g, i, thermo_count);
+                free(probe);
+                if (cycle) {
                     *err_reason = "zone settings_source would create an inheritance cycle";
                     return false;
                 }

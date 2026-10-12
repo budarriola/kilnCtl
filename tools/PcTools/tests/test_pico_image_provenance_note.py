@@ -1,5 +1,5 @@
 """flash_firmware()'s provenance report now names the embedded SaftyFW
-(Pico) image identity -- 2026-09-20 owner decision, docs/PICO_AUTO_UPDATE_PLAN.md.
+(Pico) image identity -- 2026-09-20 owner decision, docs/PICO_AUTO_UPDATE.md.
 This tests only the pure helper, `_pico_image_provenance_note`, not a real
 flash (no hardware, no OpenOCD)."""
 from __future__ import annotations

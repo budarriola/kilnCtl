@@ -99,7 +99,7 @@ class _Base(unittest.TestCase):
     candidates = None
 
     def run_tool(self, fn, board, **kw):
-        clock = {"t": 0.0}
+        clock = self.clock = {"t": 0.0}
         cands = self.candidates or [HOST]
 
         def fake_sleep(s):
@@ -393,6 +393,24 @@ class BootGuardResetTest(_Base):
         self.assertTrue(out.startswith("ok - "), out)
         self.assertEqual([p["path"] for p in board.posts], ["/api/ota/esp/boot_guard_reset"])
 
+    def test_not_applicable_reply_is_not_reported_ok(self):
+        # kiln_nvs failed to start: the board answers 200 "not applicable" and clears nothing,
+        # while status reads record_present=False/unreadable. Must never read as a confirmed clear.
+        board = FakeBoard(status=[_status(), _status(record_present=False, record_len=0,
+                                                     boot_guard_record="unreadable")],
+                          post_reply={"status": 200,
+                                      "text": "boot_guard not applicable (kiln_nvs unavailable)"})
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("NOT APPLICABLE"), out)
+        self.assertNotIn("ok - ", out)
+        self.assertNotIn("confirms", out)
+
+    def test_unreadable_record_after_plain_ok_is_unverified(self):
+        board = FakeBoard(status=[_status(), _status(record_present=False, record_len=0,
+                                                     boot_guard_record="unreadable")])
+        out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
+        self.assertTrue(out.startswith("UNVERIFIED"), out)
+
     def test_lost_reply_is_unverified(self):
         board = FakeBoard(post_error=rpc.RecoveryPostError("timed out", None, stage="post"))
         out = self.run_tool(mr.recovery_boot_guard_reset, board, confirm=True)
@@ -440,6 +458,40 @@ class PicoUploadTest(_Base):
             out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True)
             self.assertTrue(out.startswith("REFUSED"), out)
             self.assertEqual(board.posts, [])
+
+    def test_wait_clamped_under_client_abort(self):
+        # wait_s=600 must not poll past ~240 s: the client aborts at 300 s.
+        clock = [0.0]
+        board = self._board(_pico(phase="sending", busy=True, bytes_sent=1, total_bytes=len(self.IMAGE)))
+        with unittest.mock.patch.object(mr, "_monotonic", lambda: clock[0]),                 unittest.mock.patch.object(mr, "_sleep", lambda s: clock.__setitem__(0, clock[0] + 50.0)):
+            out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=600)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertLessEqual(clock[0], 300.0)
+        self.assertIn("240", out)
+
+    def test_deadline_counts_from_call_start_not_poll_start(self):
+        # A slow preflight/POST (100 s here) counts against wait_s: with wait_s=120 the call must end
+        # near t=120, not at 100 + 120.
+        board = FakeBoard(pico=[_pico(), _pico(phase="sending", busy=True, bytes_sent=1,
+                                               total_bytes=len(self.IMAGE))], post_reply=self.started)
+        real_post = board.post
+
+        def slow_post(*a, **k):
+            self.clock["t"] += 100.0
+            return real_post(*a, **k)
+        board.post = slow_post
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=120)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertLessEqual(self.clock["t"], 125.0)
+
+    def test_lost_polls_cannot_outlast_deadline(self):
+        # Lost status polls used to `continue` before the deadline check; with a
+        # deadline measured from the call start they end UNKNOWN at wait_s.
+        board = FakeBoard(pico=[_pico(), _unreachable()], post_reply=self.started)
+        out = self.run_tool(mr.recovery_pico_upload, board, image_path=self.path, confirm=True, wait_s=3)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("3s limit", out)
+        self.assertIn("within 90 s", out)
 
     def test_outcome_unknown_is_never_success(self):
         board = self._board(_pico(phase="outcome_unknown", busy=False, bytes_sent=len(self.IMAGE),
@@ -1011,7 +1063,7 @@ class ApplyStagedTest(_ApplyBase):
         self.assertEqual(board.posts[0]["data"], b"")
 
     def test_lost_before_done_is_unknown_not_ok(self):
-        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable()], post_reply=_accepted())
+        board = ApplyBoard(apply=[_apply(), _apply(phase="copying"), _unreachable()], post_reply=_accepted())
         out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=10.0)
         self.assertTrue(out.startswith("UNKNOWN"), out)
         self.assertNotIn("ok", out.split(":")[0])
@@ -1026,6 +1078,27 @@ class ApplyStagedTest(_ApplyBase):
         self.assertIn("app_readback_mismatch", out)
         self.assertIn("app_modified=True", out)
         self.assertIn("1500 bytes free", out)
+
+    def test_lost_after_finalizing_is_probable_ok(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable()],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("PROBABLE-OK"), out)
+        self.assertIn("application came up", out)
+
+    def test_finalizing_then_lost_then_failed_reports_failed(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="finalizing"), _unreachable(),
+                                  _apply(phase="failed", result="set_boot_failed")],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=30.0)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertIn("set_boot_failed", out)
+
+    def test_lost_before_finalizing_is_still_unknown(self):
+        board = ApplyBoard(apply=[_apply(), _apply(phase="copying"), _unreachable()],
+                           post_reply=_accepted())
+        out = self.run_tool(mr.recovery_apply_staged, board, confirm=True, wait_s=2.0)
+        self.assertFalse(out.startswith(("PROBABLE-OK", "ok")), out)
 
     def test_timeout_is_unverified(self):
         board = ApplyBoard(apply=[_apply(), _apply(phase="copying")], post_reply=_accepted())
@@ -1076,6 +1149,21 @@ class ApplyStagedTest(_ApplyBase):
         self.assertTrue(out.startswith("error:"), out)
         self.assertEqual(board.posts, [])
 
+
+
+class FirmwareWordingPin(unittest.TestCase):
+    """REVIEW_RECOVERY_FIX3 N4: the tool detects the board's not-applicable reply by
+    text, so the firmware's wording and the tool's needle must stay in step."""
+
+    def test_firmware_message_contains_tool_needle(self):
+        src = os.path.join(os.path.dirname(__file__), "..", "..", "..", "firmware",
+                           "KilnFW_recovery", "main", "recovery_http.c")
+        with open(src, encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        self.assertIn("boot_guard not applicable (", text)
+        tool = os.path.join(os.path.dirname(mr.__file__), "mcp_server_recovery.py")
+        with open(tool, encoding="utf-8") as f:
+            self.assertIn('"not applicable" in str(reply.get("text", "")).lower()', f.read())
 
 
 if __name__ == "__main__":

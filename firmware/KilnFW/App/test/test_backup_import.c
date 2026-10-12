@@ -76,7 +76,7 @@ void test_stub_kiln_cfg_export_content_toggle_byte0(void);
 void test_safety_cfg_store_mark_fetched_for_kiln_cfg_store_test(void);
 
 // relay_authority.h -- backup_import.c's system_mode_gate wiring
-// (docs/SYSTEM_MODE_GATE_PLAN.md, gate-slices-2/4/5, 2026-09-25). Defaults
+// (docs/SYSTEM_MODE_GATE.md, gate-slices-2/4/5, 2026-09-25). Defaults
 // idle so every pre-existing test in this file keeps exercising exactly the
 // scenario it did before; test_backup_import_refused_by_system_mode_gate()
 // below is the one test that sets this to prove the refusal is wired.
@@ -88,6 +88,14 @@ static bool s_test_autotune_running_for_mode_gate = false;
 // before and after.
 bool backup_import_restore_in_flight(void);
 static bool s_test_restore_flag_seen_set_at_heat_read = false;
+// relay_authority.h's factory reset in flight mark (HTTP audit L37 follow-up, MED-2): the guarded
+// persistence setters linked into this executable (aux_outputs_cfg_set(), ramp_assist_cfg, display_power,
+// update_settings, setup_wizard_progress, iter_tune_store, zones_config_set_coupling_cell()) refuse
+// while it is set. Defaults clear; test_aux_outputs_store.c's refusal test sets it.
+bool g_test_reset_in_flight = false;
+bool relay_authority_reset_in_flight(void) { return g_test_reset_in_flight; }
+bool g_test_reset_refuses_writer = false;
+bool relay_authority_reset_refuses_writer(void) { return g_test_reset_refuses_writer; }
 void relay_authority_heat_run_active(bool *profile_running_out, bool *autotune_running_out)
 {
     if (backup_import_restore_in_flight()) s_test_restore_flag_seen_set_at_heat_read = true;
@@ -250,6 +258,7 @@ profile_decode_result_t profile_decode_blob(const void *blob, size_t len, profil
 #include "time_sync.h"
 /* g_builtin_profile_count: see g_test_builtin_count above (real width 28; hidden mask is 32 bits) */
 static char g_pf_tz[TIME_SYNC_TZ_MAX_LEN + 1] = "UTC0";
+static bool g_pf_fail_tz = false, g_pf_fail_hidden = false, g_pf_fail_relay_name = false;
 void time_sync_get_status(time_sync_status_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -260,6 +269,7 @@ esp_err_t time_sync_set_tz(const char *tz)
     if (!time_sync_tz_is_valid(tz)) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (g_pf_fail_tz) { return ESP_FAIL; }
     strcpy(g_pf_tz, tz);
     return ESP_OK;
 }
@@ -271,6 +281,7 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool h)
     if (id < PROFILE_BUILTIN_ID_BASE || id >= PROFILE_BUILTIN_ID_BASE + 28) {
         return ESP_ERR_INVALID_ARG;
     }
+    if (g_pf_fail_hidden) { return ESP_FAIL; }
     g_pf_hidden[id - PROFILE_BUILTIN_ID_BASE] = h;
     return ESP_OK;
 }
@@ -286,6 +297,7 @@ bool zones_config_get_relay_name(uint8_t n, char *out, size_t cap)
 bool zones_config_set_relay_name(uint8_t n, const char *name)
 {
     if (n < 1 || n > KILN_IO_RELAY_COUNT || (name && strlen(name) > RELAY_NAME_MAX_LEN)) { return false; }
+    if (g_pf_fail_relay_name) { return false; }
     strncpy(g_pf_rname[n - 1], name ? name : "", RELAY_NAME_MAX_LEN);
     return true;
 }
@@ -455,7 +467,7 @@ esp_err_t httpd_resp_send_500(httpd_req_t *r)
     s_send_last_err_msg[0] = '\0';
     return ESP_FAIL;
 }
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): the handler-level order
+// Task 1c (docs/SYSTEM_MODE_GATE.md known gap): the handler-level order
 // test below (test_backup_import_post_*) needs to see what status/body the
 // real backup_import_post_handler() actually sent for a refusal, so these two
 // capture their last argument into static buffers rather than discarding it.
@@ -588,7 +600,7 @@ esp_err_t ota_http_send_interlock_refusal(httpd_req_t *req, ota_interlock_result
     return ESP_OK;
 }
 
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known gap): backup_import_post_handler()
+// Task 1c (docs/SYSTEM_MODE_GATE.md known gap): backup_import_post_handler()
 // also checks http_async_job_busy() after the mode gate and the OTA
 // interlock, the same three-stage order zones_post_handler() uses. Unlike
 // the mode gate and the interlock, this symbol is NOT locally stubbed here --
@@ -896,6 +908,26 @@ uint8_t zones_config_get_relay_count(void)
     return s_relay_count;
 }
 
+static int g_topology_set_calls = 0;
+static uint8_t g_topology_set_thermo = 0, g_topology_set_relay = 0;
+bool zones_config_set_topology_no_save(uint8_t thermo_count, uint8_t relay_count)
+{
+    if (zones_config_get_thermo_count() != 0 || thermo_count < 1 || thermo_count > STUB_ZONE_COUNT) {
+        return false;
+    }
+    g_topology_set_calls++;
+    g_topology_set_thermo = thermo_count;
+    g_topology_set_relay = relay_count;
+    test_stub_zones_set_thermo_count(thermo_count);
+    s_relay_count = relay_count;
+    return true;
+}
+float zones_config_peek_slot_max_temp_c(uint8_t zone_index)
+{
+    (void)zone_index;
+    return 0.0f;
+}
+
 bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, float *out_kd)
 {
     if (zone_index >= STUB_ZONE_COUNT) {
@@ -1191,7 +1223,7 @@ bool zones_config_get_coupling(uint8_t zone_index, float out_row[MAX31856_CHANNE
     }
     memcpy(out_row, s_writes[zone_index].coupling_coeff, sizeof(s_writes[zone_index].coupling_coeff));
     /* Mirror zones_config_accessors.c's own on/off belt-and-braces mask
-     * (docs/ON_OFF_ZONE_PLAN.md sec 1) so this stub's behavior matches
+     * (docs/ON_OFF_ZONE.md sec 1) so this stub's behavior matches
      * production closely enough to reproduce the bench A4 (2026-09-28)
      * backup-export bug: a currently on/off zone reads its whole row as
      * zero, and any OTHER zone reads a zero in the column of an on/off
@@ -2518,7 +2550,7 @@ static void test_malformed_body_writes_nothing(void)
 // mode-gate logic at all -- the old test here (asserting the sentinel
 // prefix) tested code that no longer exists and has been removed.
 //
-// Task 1c (docs/SYSTEM_MODE_GATE_PLAN.md known test gaps): the handler-level
+// Task 1c (docs/SYSTEM_MODE_GATE.md known test gaps): the handler-level
 // harness this comment used to say was out of scope now exists, following
 // test_zones_http.c's run_zones_post() pattern exactly -- a staged
 // httpd_req_t driving the real backup_import_post_handler() (#included above)
@@ -2567,6 +2599,112 @@ static void test_backup_import_post_refused_by_mode_gate_before_interlock(void)
     // (kiln_cfg_store_delete()/save_current() consult the same
     // ota_http_check_interlocks() stub), so leave them at their defaults.
     reset_backup_import_post_stubs();
+}
+
+/* HTTP audit group A findings 1-4. */
+static bool backup_zone_refused(const char *entry_tail, const char *needle)
+{
+    char body[1024];
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,%s}]}", entry_tail);
+    char err[160];
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    if (ok || g_total_write_calls != 0) {
+        return false;
+    }
+    return needle == NULL || strstr(err, needle) != NULL;
+}
+
+static void test_group_a_pass1_range_checks(void)
+{
+    TEST_SECTION("backup_import_apply -- non-finite/over-ceiling gains and tuning fields refuse in pass 1");
+    reset_stub_state();
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1e300,\"pid_ki\":0,\"pid_kd\":0", "gain ceiling"), "kp 1e300 refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1001,\"pid_ki\":0,\"pid_kd\":0", "gain ceiling"), "kp > max refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":1001,\"pid_kd\":0", "gain ceiling"), "ki > max refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":2000000", "gain ceiling"), "kd > max refused");
+    const char *tv = "\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"tuning_valid\":1,\"tuning_settled\":1,"
+                     "\"tuning_extrapolation_converged\":1,\"tuning_tau_consistent\":1,";
+    char tail[600];
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":256,\"tuning_rule\":0,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_method 256 refused (no uint8 wrap)");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":4,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_rule 4 refused");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":0,\"tuning_baseline_c\":1e300,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":6", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_baseline_c 1e300 refused");
+    snprintf(tail, sizeof(tail), "%s\"tuning_method\":0,\"tuning_rule\":0,\"tuning_baseline_c\":20,"
+             "\"tuning_step_ambient_c\":20,\"tuning_raw_rise_c\":5,\"tuning_rise_inf_c\":1e39", tv);
+    TEST_CHECK(backup_zone_refused(tail, "tuning_*"), "tuning_rise_inf_c beyond float range refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"model_fit_temp_c\":1e300,"
+                                   "\"model_fit_ambient_c\":20", "model_fit"), "model_fit_temp_c 1e300 refused");
+    TEST_CHECK(backup_zone_refused("\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"model_fit_temp_c\":500,"
+                                   "\"model_fit_ambient_c\":5000", "model_fit"), "model_fit_ambient_c 5000 refused");
+}
+
+static void test_group_a_prefs_bool_exact(void)
+{
+    TEST_SECTION("backup_prefs_bool -- exact match only");
+    bool b = false;
+    TEST_CHECK(!backup_prefs_bool("trueXYZ,", &b), "trueXYZ refused");
+    TEST_CHECK(!backup_prefs_bool("falsey", &b), "falsey refused");
+    TEST_CHECK(backup_prefs_bool("true}", &b) && b, "true accepted");
+    TEST_CHECK(backup_prefs_bool("false,", &b) && !b, "false accepted");
+}
+
+static const char *s_hdr_dry = NULL, *s_hdr_mode = NULL, *s_hdr_ack = NULL;
+static bool s_hdr_dry_trunc = false, s_hdr_mode_trunc = false, s_hdr_ack_trunc = false;
+extern esp_err_t (*g_test_get_hdr_hook)(const char *field, char *val, size_t val_size);
+static esp_err_t test_hdr_hook(const char *field, char *val, size_t n)
+{
+    const char *v = NULL;
+    bool trunc = false;
+    if (strcmp(field, "X-Kiln-Config-Dry-Run") == 0) {
+        v = s_hdr_dry; trunc = s_hdr_dry_trunc;
+    } else if (strcmp(field, "X-Kiln-Config-Mode") == 0) {
+        v = s_hdr_mode; trunc = s_hdr_mode_trunc;
+    } else if (strcmp(field, "X-Kiln-Config-Ack-Delete") == 0) {
+        v = s_hdr_ack; trunc = s_hdr_ack_trunc;
+    }
+    if (!v) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    snprintf(val, n, "%s", v);
+    return trunc ? ESP_ERR_HTTPD_RESULT_TRUNC : ESP_OK;
+}
+
+static bool header_case_refused_400(void)
+{
+    reset_backup_import_post_stubs();
+    g_total_write_calls = 0;
+    s_send_last_err_msg[0] = 0;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    req.content_len = 10;
+    g_test_get_hdr_hook = test_hdr_hook;
+    esp_err_t err = backup_import_post_handler(&req);
+    g_test_get_hdr_hook = NULL;
+    bool r = err == ESP_OK && strncmp(s_send_last_err_msg, "X-Kiln-Config-", 14) == 0 &&
+             g_total_write_calls == 0;
+    s_hdr_dry = s_hdr_mode = s_hdr_ack = NULL;
+    s_hdr_dry_trunc = s_hdr_mode_trunc = s_hdr_ack_trunc = false;
+    reset_backup_import_post_stubs();
+    return r;
+}
+
+static void test_group_a_header_fail_closed(void)
+{
+    TEST_SECTION("backup_import_post_handler -- Dry-Run/Mode/Ack-Delete headers fail closed");
+    s_hdr_dry = "1234567"; s_hdr_dry_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Dry-Run header refused 400, nothing written");
+    s_hdr_dry = "yes";
+    TEST_CHECK(header_case_refused_400(), "Dry-Run value other than 1/0 refused 400");
+    s_hdr_mode = "mirrorx"; s_hdr_mode_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Mode header refused 400 (no merge fallback)");
+    s_hdr_ack = "123456789012345"; s_hdr_ack_trunc = true;
+    TEST_CHECK(header_case_refused_400(), "truncated Ack-Delete header refused 400");
 }
 
 // Proves the interlock IS reached once the mode gate passes (so the fix
@@ -2750,6 +2888,22 @@ static void test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock
 // into dozens of unrelated suites that run later in this same combined
 // executable. Covered by direct code inspection instead.
 
+static void test_backup_import_job_refused_when_reset_mark_set(void)
+{
+    TEST_SECTION("backup_import_job -- reset mark set after the flag is published refuses before any write, flag cleared");
+    reset_stub_state();
+    reset_backup_import_post_stubs();
+    g_total_write_calls = 0;
+    g_test_reset_in_flight = true;
+    run_backup_import_job_with_body(k_job_body);
+    g_test_reset_in_flight = false;
+    TEST_CHECK(g_total_write_calls == 0, "nothing written while a factory reset is in flight");
+    TEST_CHECK(g_stub_ota_interlock_call_count == 0, "refused before the interlock re-check");
+    TEST_CHECK(!backup_import_restore_in_flight(), "restore flag cleared after the refusal");
+    reset_backup_import_post_stubs();
+    reset_stub_state();
+}
+
 static void test_wrong_kind_refused(void)
 {
     TEST_SECTION("backup_import_apply -- wrong \"kind\" is refused");
@@ -2777,11 +2931,11 @@ static void test_unknown_version_refused(void)
      * kiln_configs[] array, safety_tc_type key), so 5 is now real/supported
      * too -- this test moves again, to version 6, the new too-new boundary.
      * 5 -> 6 (profile segment kinds, io fields, on_off_rules): the boundary is now 7. */
-    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
+    const char *body = "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}";
     char err[160];
     bool ok = test_backup_import_apply(body, err, sizeof(err));
 
-    TEST_CHECK(!ok, "version 7 is newer than this firmware's BACKUP_FORMAT_VERSION (6) -- must be refused");
+    TEST_CHECK(!ok, "version 8 is newer than this firmware's BACKUP_FORMAT_VERSION (7) -- must be refused");
     TEST_CHECK(g_total_write_calls == 0, "nothing written for an unsupported version");
 }
 
@@ -3224,7 +3378,7 @@ static void test_import_allows_profile_named_like_a_builtin(void)
     g_fake_builtin_on = false;
 }
 
-// RELEASE_HARDENING_PLAN.md item 7, "import of a deliberately hostile
+// RELEASE_HARDENING.md item 7, "import of a deliberately hostile
 // config": the individual rejection tests above (malformed body, wrong
 // kind, too-new version, out-of-range model, overlong zone/profile name)
 // each prove ONE shape is refused, but the actual release gate --
@@ -3243,6 +3397,132 @@ static void test_import_allows_profile_named_like_a_builtin(void)
 // shape without a matching rejection test for it -- this test is a single
 // choke point that would still catch a REGRESSION in any of the shapes
 // already listed here, which is exactly the gap the audit named.
+// HTTP fuzz campaign part 2 (docs/audits/HTTP_PARSER_TEST_FINDINGS_2026-10-09.md): hostile body shapes
+// the existing release-gate list does not cover -- every proper prefix of a valid body, wrong JSON types,
+// huge arrays, very deep nesting, duplicate keys, out-of-range topology indices. All must be refused
+// with nothing written.
+static void bi_fuzz_expect_refused(const char *label, const char *body)
+{
+    char err[256] = "";
+    reset_stub_state();
+    bool ok = test_backup_import_apply(body, err, sizeof(err));
+    char msg[300];
+    snprintf(msg, sizeof(msg), "fuzz: %s: refused", label);
+    TEST_CHECK(!ok, msg);
+    snprintf(msg, sizeof(msg), "fuzz: %s: nothing written", label);
+    TEST_CHECK(g_total_write_calls == 0 && g_profile_save_calls == 0, msg);
+}
+
+static void test_fuzz_hostile_backup_shapes(void)
+{
+    TEST_SECTION("backup_import_apply -- fuzz: truncation, wrong types, huge arrays, deep nesting, duplicates");
+    static const char valid[] =
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[{\"id\":0,\"name\":\"P\",\"zone_mask\":1,"
+        "\"segments\":[{\"target_c\":100,\"ramp_c_per_hr\":50,\"dwell_min\":30}]}],"
+        "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}]}";
+    size_t vl = strlen(valid);
+    static char pre[512];
+    for (size_t n = 0; n < vl; n++) {
+        memcpy(pre, valid, n);
+        pre[n] = '\0';
+        char label[48];
+        snprintf(label, sizeof(label), "prefix of %zu/%zu bytes", n, vl);
+        bi_fuzz_expect_refused(label, pre);
+    }
+    bi_fuzz_expect_refused("empty body", "");
+    bi_fuzz_expect_refused("F5 profiles is an object",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":{},\"zones\":[]}");
+    bi_fuzz_expect_refused("F5 zones is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":\"x\"}");
+    bi_fuzz_expect_refused("F6 duplicate kind",
+        "{\"kind\":\"kilnctl_backup\",\"kind\":\"x\",\"version\":2,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("F6 duplicate version",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"version\":9999,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("trailing garbage after the document",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[]} x");
+    bi_fuzz_expect_refused("zone entry is a number",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[5]}");
+    bi_fuzz_expect_refused("zone index is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":\"0\",\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("pid_kp is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":\"9\",\"pid_ki\":0,\"pid_kd\":0}]}");
+    bi_fuzz_expect_refused("pid_kp is null",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":null,\"pid_ki\":0,\"pid_kd\":0}]}");
+    bi_fuzz_expect_refused("version is a string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":\"2\",\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("kind is a number", "{\"kind\":5,\"version\":2,\"profiles\":[],\"zones\":[]}");
+    bi_fuzz_expect_refused("top level is an array", "[{\"kind\":\"kilnctl_backup\"}]");
+    bi_fuzz_expect_refused("zone index 99999999999",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":99999999999,\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("zone index -1",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":-1,\"pid_kp\":1}]}");
+    bi_fuzz_expect_refused("pid_kp 1e999",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1e999,\"pid_ki\":0,\"pid_kd\":0}]}");
+    bi_fuzz_expect_refused("ct_mask 256",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":256}]}");
+    bi_fuzz_expect_refused("ct_mask -1",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":-1}]}");
+    bi_fuzz_expect_refused("ct_mask string",
+        "{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,\"ct_mask\":\"3\"}]}");
+
+    /* Review 15 LOW-4: positive controls. Each hostile shape above now carries all three gains, so it is refused
+     * by the check its label names; these prove the same shapes with a GOOD value are accepted, i.e. the refusal is
+     * about the one field, not a missing gain. */
+    {
+        char err[256] = "";
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply(valid, err, sizeof(err)), "fuzz control: the full valid body is accepted");
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],"
+                                            "\"zones\":[{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0}]}",
+                                            err, sizeof(err)),
+                   "fuzz control: a numeric pid_kp with all three gains is accepted");
+        reset_stub_state();
+        TEST_CHECK(test_backup_import_apply("{\"kind\":\"kilnctl_backup\",\"version\":6,\"profiles\":[],"
+                                            "\"zones\":[{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0,"
+                                            "\"ct_mask\":3}]}",
+                                            err, sizeof(err)),
+                   "fuzz control: an in-range ct_mask with all three gains is accepted");
+    }
+
+    /* huge zones array: 5000 entries of the same index (duplicate AND over any topology) */
+    static char big[400000];
+    size_t o = (size_t)snprintf(big, sizeof(big),
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 5000 && o + 80 < sizeof(big); i++) {
+        o += (size_t)snprintf(big + o, sizeof(big) - o, "%s{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0}",
+                              i ? "," : "");
+    }
+    snprintf(big + o, sizeof(big) - o, "]}");
+    bi_fuzz_expect_refused("5000 zone entries", big);
+
+    /* deep nesting: must not blow the stack, must be refused */
+    o = (size_t)snprintf(big, sizeof(big), "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 100000 && o + 8 < sizeof(big) / 2; i++) big[o++] = '[';
+    for (int i = 0; i < 100000 && o + 8 < sizeof(big); i++) {
+        if (big[o - 1] == '[' && i >= 0) { /* close as many as opened */ }
+    }
+    {
+        size_t opened = o - strlen("{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+        for (size_t i = 0; i < opened; i++) big[o++] = ']';
+        snprintf(big + o, sizeof(big) - o, "]}");
+    }
+    bi_fuzz_expect_refused("100000-deep nested arrays", big);
+    o = (size_t)snprintf(big, sizeof(big), "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":[");
+    for (int i = 0; i < 20000 && o + 16 < sizeof(big); i++) o += (size_t)snprintf(big + o, sizeof(big) - o, "{\"a\":");
+    snprintf(big + o, sizeof(big) - o, "1");
+    bi_fuzz_expect_refused("deep unterminated object nesting", big);
+
+    /* duplicate keys at top level: the second must not smuggle a bad version past the first */
+    /* F5/F6: "duplicate kind, second wrong" is accepted today; see findings doc. */
+    /* F5/F6: "duplicate version, second future" is accepted today; see findings doc. */
+    bi_fuzz_expect_refused("duplicate zone index in one import",
+        "{\"kind\":\"kilnctl_backup\",\"version\":2,\"profiles\":[],\"zones\":["
+        "{\"index\":0,\"pid_kp\":1,\"pid_ki\":0,\"pid_kd\":0},{\"index\":0,\"pid_kp\":2,\"pid_ki\":0,\"pid_kd\":0}]}");
+    bi_fuzz_expect_refused("embedded raw NUL after kind (string cut)",
+        "{\"kind\":\"kilnctl_backup\"\0,\"version\":2,\"profiles\":[],\"zones\":[]}");
+}
+
 static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state(void)
 {
     TEST_SECTION("backup_import_apply -- release gate: no hostile input shape writes anything at all");
@@ -3252,8 +3532,8 @@ static void test_no_hostile_backup_input_produces_a_bootable_heat_commanding_sta
         "{",
         // wrong "kind"
         "{\"kind\":\"something_else\",\"version\":2,\"profiles\":[],\"zones\":[]}",
-        // version newer than this firmware's BACKUP_FORMAT_VERSION (6)
-        "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}",
+        // version newer than this firmware's BACKUP_FORMAT_VERSION (7)
+        "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}",
         // a version number "from the future", far past anything ever issued
         "{\"kind\":\"kilnctl_backup\",\"version\":9999,\"profiles\":[],\"zones\":[]}",
         // valid JSON, in-range "kind"/"version", but a value outside the
@@ -3937,7 +4217,7 @@ static void test_export_emits_expected_keys_and_values_for_a_known_config(void)
     TEST_CHECK(s_export_body != NULL && s_export_len > 0, "the handler must have streamed something");
 
     TEST_CHECK(strstr(s_export_body, "\"kind\":\"kilnctl_backup\"") != NULL, "top-level kind key");
-    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (6)");
+    TEST_CHECK(strstr(s_export_body, "\"version\":7") != NULL, "top-level version is the CURRENT BACKUP_FORMAT_VERSION (7)");
 
     TEST_CHECK(strstr(s_export_body, "\"id\":0,\"name\":\"Cone6\",\"zone_mask\":3") != NULL,
               "the seeded profile's id/name/zone_mask are emitted exactly");
@@ -4443,7 +4723,7 @@ static void test_export_round_trips_through_import_to_identical_config(void)
 // Root cause: backup_export.c read the matrix through
 // zones_config_get_coupling(), which deliberately zeroes any row/column
 // touching an on/off zone as a live-control-loop guard (docs/
-// ON_OFF_ZONE_PLAN.md sec 1) -- exporting through that masking getter
+// ON_OFF_ZONE.md sec 1) -- exporting through that masking getter
 // permanently lost the real stored value the moment it was written back by
 // import via zones_config_set_coupling_cell() (which has no on/off
 // awareness at all). Fix: export now reads zones_config_get_coupling_raw(),
@@ -4969,6 +5249,160 @@ static void test_import_of_identical_tuning_quality_does_not_bump_seq(void)
     TEST_CHECK(s_writes[1].tuning_seq == 3, "differing record: import commits and bumps the seq");
     TEST_CHECK_NEAR(s_writes[1].tuning_quality.baseline_c, 24.537, 1e-3,
                     "differing record: the file's value was restored");
+}
+
+static void test_import_onto_empty_zones_config_refused_before_any_write(void)
+{
+    TEST_SECTION("backup_import_apply -- a board with zero configured zones refuses zone entries in pass 1: "
+                 "400-class (no partial write), nothing committed, clear message");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (!s_export_body) {
+        return;
+    }
+    test_stub_zones_set_thermo_count(0);
+    /* Emulate a pre-v7 backup: no topology keys, version 6. */
+    char *tk = strstr(s_export_body, "\"thermo_count\"");
+    char *rk = strstr(s_export_body, "\"relay_count\"");
+    char *vk = strstr(s_export_body, "\"version\":7");
+    TEST_CHECK(tk != NULL && rk != NULL && vk != NULL, "export carries topology and v7");
+    if (tk) { tk[1] = 'x'; }
+    if (rk) { rk[1] = 'x'; }
+    if (vk) { vk[10] = '6'; }
+    char import_err[256] = "";
+    bool partial = true;
+    float kp_before = s_writes[1].kp;
+    bool ok = backup_import_apply(s_export_body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan,
+                                  &partial, import_err, sizeof(import_err));
+    TEST_CHECK(!ok, "import onto an empty zones config is refused");
+    TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
+    TEST_CHECK(strstr(import_err, "not a configured zone") != NULL, "the error names the missing zone configuration");
+    TEST_CHECK(s_writes[1].kp == kp_before, "no zone setter ran");
+    reset_stub_state();
+}
+
+static void test_import_pass1b_parse_failure_is_not_a_partial_write(void)
+{
+    TEST_SECTION("backup_import_apply -- DEV_REVIEW_13 F8: a pass-1b zone parse refusal happens before any commit "
+                 "(400-class, nothing written, not a partial write)");
+    reset_stub_state();
+    zones_config_set_pid(1, 1.0f, 0.0f, 0.0f);
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (!s_export_body) {
+        return;
+    }
+    char *k = strstr(s_export_body, "\"pid_kp\":");
+    TEST_CHECK(k != NULL, "export carries pid_kp");
+    if (!k) {
+        return;
+    }
+    k[5] = 'q'; /* "pid_kq": the required gain is now missing -> pass-1b refusal */
+    char import_err[256] = "";
+    bool partial = true;
+    int writes_before = g_total_write_calls;
+    bool ok = backup_import_apply(s_export_body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan,
+                                  &partial, import_err, sizeof(import_err));
+    TEST_CHECK(!ok, "missing pid_kp is refused");
+    TEST_CHECK(!partial, "the refusal is not a partial write (no 500)");
+    TEST_CHECK(g_total_write_calls == writes_before, "nothing was written before the refusal");
+    reset_stub_state();
+}
+
+static void test_backup_topology_only_restore_is_saved(void)
+{
+    TEST_SECTION("backup topology -- review 14 LOW-2: a v7 restore carrying ONLY thermo_count/relay_count "
+                 "(no zones, no timing profiles) still reaches zones_config_save_now()");
+    char body[160];
+    char e[256] = "";
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    snprintf(body, sizeof(body), "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_settings_source_save_calls = 0;
+    bool ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "topology-only import onto an empty board succeeds");
+    TEST_CHECK(g_topology_set_calls == 1, "topology applied once");
+    TEST_CHECK(g_settings_source_save_calls == 1, "the topology reached flash: exactly one batched save");
+    reset_stub_state();
+    /* Control: no topology to apply (configured board, matching counts) and nothing else -> no save. */
+    snprintf(body, sizeof(body), "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":3,\"relay_count\":4}",
+             BACKUP_FORMAT_VERSION);
+    g_settings_source_save_calls = 0;
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok && g_settings_source_save_calls == 0, "matching topology and nothing else pays for no save");
+    reset_stub_state();
+}
+
+static void test_backup_topology_round_trip(void)
+{
+    TEST_SECTION("backup topology -- export carries thermo_count/relay_count; empty board takes them then the zones; "
+                 "configured mismatch and pre-v7 backups are refused with nothing written");
+    reset_stub_state();
+    esp_err_t err = run_export();
+    TEST_CHECK(err == ESP_OK && s_export_body != NULL, "export must succeed");
+    if (s_export_body) {
+        TEST_CHECK(strstr(s_export_body, "\"thermo_count\":3,\"relay_count\":4") != NULL,
+                   "export carries the board topology");
+        TEST_CHECK(BACKUP_FORMAT_VERSION >= 7, "format version bumped for topology");
+    }
+    char body[320];
+    char e[256] = "";
+    bool partial = true;
+
+    /* Empty board + v7 backup: topology set first, zones then land. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    s_relay_count = 0;
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_total_write_calls = 0;
+    bool ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, true, -1, true, &s_test_backup_plan, &partial, e,
+                                  sizeof(e));
+    TEST_CHECK(ok && g_topology_set_calls == 0, "dry run on an empty board validates and writes no topology");
+    ok = test_backup_import_apply(body, e, sizeof(e));
+    TEST_CHECK(ok, "import onto an empty board succeeds");
+    TEST_CHECK(g_topology_set_calls == 1 && g_topology_set_thermo == 2 && g_topology_set_relay == 4,
+               "topology applied once with the backup's values");
+    TEST_CHECK(s_writes[1].kp == 7.0f, "zone entry landed after the topology");
+
+    /* Configured board, different topology: refused, partial_write false, nothing written. */
+    reset_stub_state();
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"thermo_count\":2,\"relay_count\":4,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+             BACKUP_FORMAT_VERSION);
+    g_topology_set_calls = 0;
+    g_total_write_calls = 0;
+    partial = true;
+    e[0] = '\0';
+    ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan, &partial, e,
+                             sizeof(e));
+    TEST_CHECK(!ok && !partial, "mismatching topology on a configured board is refused, not a partial write");
+    TEST_CHECK(strstr(e, "thermo_count 2") != NULL && strstr(e, "thermo_count 3") != NULL,
+               "message names both topologies");
+    TEST_CHECK(g_total_write_calls == 0 && g_topology_set_calls == 0, "nothing written");
+
+    /* Pre-v7 backup onto an empty board: the old refusal. */
+    reset_stub_state();
+    test_stub_zones_set_thermo_count(0);
+    snprintf(body, sizeof(body),
+             "{\"kind\":\"kilnctl_backup\",\"version\":6,\"zones\":["
+             "{\"index\":1,\"pid_kp\":7,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}");
+    g_total_write_calls = 0;
+    partial = true;
+    ok = backup_import_apply(body, KILN_CFG_RESTORE_MERGE, false, -1, true, &s_test_backup_plan, &partial, e,
+                             sizeof(e));
+    TEST_CHECK(!ok && !partial && strstr(e, "not a configured zone") != NULL, "v6 backup keeps the old refusal");
+    TEST_CHECK(g_total_write_calls == 0, "nothing written");
+    reset_stub_state();
 }
 
 static void test_import_refuses_duplicate_zone_index(void)
@@ -6525,14 +6959,14 @@ static void test_backup_format_version_is_6_and_5_still_imports(void)
 {
     TEST_SECTION("backup format version is 6 (seg_kind/io_*/on_off_rules); a version-5 file is still accepted");
     reset_stub_state();
-    TEST_CHECK(BACKUP_FORMAT_VERSION == 6, "BACKUP_FORMAT_VERSION is 6");
+    TEST_CHECK(BACKUP_FORMAT_VERSION == 7, "BACKUP_FORMAT_VERSION is 7");
     TEST_CHECK(run_export() == ESP_OK, "export ok");
-    TEST_CHECK(strstr(s_export_body, "\"version\":6") != NULL, "export stamps version 6");
+    TEST_CHECK(strstr(s_export_body, "\"version\":7") != NULL, "export stamps version 7");
     char err[200] = "";
     const char *v5 = "{\"kind\":\"kilnctl_backup\",\"version\":5,\"profiles\":[],\"zones\":[]}";
     TEST_CHECK(test_backup_import_apply(v5, err, sizeof(err)), "a version-5 backup is still accepted");
-    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":7,\"profiles\":[],\"zones\":[]}";
-    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 6 is refused");
+    const char *v7 = "{\"kind\":\"kilnctl_backup\",\"version\":8,\"profiles\":[],\"zones\":[]}";
+    TEST_CHECK(!test_backup_import_apply(v7, err, sizeof(err)), "a version newer than 7 is refused");
 }
 
 static void test_aux_outputs_dry_run_and_partial_write(void)
@@ -6891,8 +7325,103 @@ static void test_prefs_hidden_catalogue_overflow_refused_before_writes(void)
                "prefs byte-identical to before (nothing written)");
 }
 
+static void test_prefs_commit_failure_is_partial_write_profiles_untouched(void)
+{
+    TEST_SECTION("backup_import_apply -- a preference setter failing at commit time is a 500 partial write, "
+                 "profiles untouched (HOST_TEST_GAP_AUDIT gap 6)");
+    static const struct { const char *tail; bool *flag; const char *what; } cases[] = {
+        { ",\"tz\":\"EST5EDT,M3.2.0,M11.1.0\"", &g_pf_fail_tz, "tz" },
+        { ",\"hidden_builtin_profiles\":[128]", &g_pf_fail_hidden, "hidden profiles" },
+        { ",\"relay_names\":[{\"relay\":1,\"name\":\"Vent\"}]", &g_pf_fail_relay_name, "relay name" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_stub_state();
+        pf_reset();
+        kiln_cfg_plan_t plan;
+        bool partial = false;
+        char err[200] = "";
+        *cases[i].flag = true;
+        bool ok = wp9_apply_full(cases[i].tail, KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial, err, sizeof(err));
+        *cases[i].flag = false;
+        TEST_CHECK(!ok, cases[i].what);
+        TEST_CHECK(partial, "reported as a partial write (the handler turns this into the 500)");
+        TEST_CHECK(strstr(err, "a preference could not be persisted") != NULL, "error text names the preference failure");
+        TEST_CHECK(g_profile_save_calls == 0, "profiles are committed last: none written");
+    }
+}
+
+/* HOST_TEST_GAP_AUDIT gap 7 remainder: candidate-buffer allocation failure, err_msg truncation, thermo_count. */
+static void test_gap7_candidate_oom_truncation_thermo_count(void)
+{
+    TEST_SECTION("backup_import_apply -- PSRAM candidate buffer OOM is a clean partial-write refusal");
+    {
+        reset_stub_state();
+        pf_reset();
+        kiln_cfg_plan_t plan;
+        bool partial = false;
+        char err[200] = "";
+        heap_caps_malloc_test_set_fail(true);
+        bool ok = wp9_apply_full("", KILN_CFG_RESTORE_MERGE, false, -1, &plan, &partial, err, sizeof(err));
+        heap_caps_malloc_test_set_fail(false);
+        TEST_CHECK(!ok, "import refused when the candidate arrays cannot be allocated");
+        TEST_CHECK(!partial, "refused in the pre-commit parse: not a partial write");
+        TEST_CHECK(strstr(err, "out of memory validating the backup") != NULL, "error names the validation OOM");
+        TEST_CHECK(g_profile_save_calls == 0, "no profile written");
+    }
+
+    TEST_SECTION("backup_import_apply -- pass-1 profile error prefix truncates safely into a small err buffer");
+    {
+        const char *body = bi_profile_backup(BI_IO_SEG(9), "", "{\"index\":0,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,"
+                                                                "\"settings_source\":255}", "");
+        char full[256] = "";
+        reset_stub_state();
+        aux_bk_fresh();
+        TEST_CHECK(!test_backup_import_apply(body, full, sizeof(full)), "baseline: io_target 9 refused");
+        TEST_CHECK(strncmp(full, "profile entry 0: ", 17) == 0, "full-size buffer carries the entry prefix");
+        /* Every capacity from below the prefix length to past the full message, so the case where the
+         * unprefixed message fits but the prefixed one does not (needs the explicit NUL) is covered. */
+        size_t caps_n = strlen(full) + 12u;
+        for (size_t cap = 10; cap < caps_n; cap++) {
+            char small[320];
+            memset(small, 'X', sizeof(small));
+            reset_stub_state();
+            aux_bk_fresh();
+            bool ok = test_backup_import_apply(body, small, cap);
+            TEST_CHECK(!ok, "refused with a small error buffer");
+            size_t len = strnlen(small, sizeof(small));
+            TEST_CHECK(len < cap, "message is NUL-terminated inside the caller's capacity");
+            TEST_CHECK(small[cap] == 'X' || cap >= sizeof(small), "nothing written past the capacity");
+            if (cap > 17) {
+                TEST_CHECK(strncmp(small, "profile entry 0: ", 17) == 0, "prefix kept, message truncated after it");
+                TEST_CHECK(strncmp(small + 17, full + 17, len - 17) == 0, "truncated tail is a prefix of the full message");
+            }
+        }
+    }
+
+    TEST_SECTION("backup_import_apply -- thermo_count is the live count: zone entries past it are refused");
+    {
+        reset_stub_state();
+        test_stub_zones_set_thermo_count(1);
+        char err[256] = "";
+        g_total_write_calls = 0;
+        g_profile_save_calls = 0;
+        char zbody[256];
+        snprintf(zbody, sizeof(zbody),
+                 "{\"kind\":\"kilnctl_backup\",\"version\":%d,\"zones\":["
+                 "{\"index\":2,\"pid_kp\":9,\"pid_ki\":0,\"pid_kd\":0,\"settings_source\":255}]}",
+                 BACKUP_FORMAT_VERSION);
+        bool ok = test_backup_import_apply(zbody, err, sizeof(err));
+        test_stub_zones_set_thermo_count(3);
+        TEST_CHECK(!ok, "zone index 2 refused when the live thermo_count is 1");
+        TEST_CHECK(strstr(err, "not a configured zone") != NULL, "error says the zone is not configured");
+        TEST_CHECK(g_total_write_calls == 0, "nothing written");
+    }
+}
+
 void run_test_backup_import(void)
 {
+    test_gap7_candidate_oom_truncation_thermo_count();
+    test_prefs_commit_failure_is_partial_write_profiles_untouched();
     test_prefs_hidden_catalogue_overflow_refused_before_writes();
     test_prefs_import_applies_each_key();
     test_prefs_hidden_past_eighth_builtin();
@@ -6932,9 +7461,13 @@ void run_test_backup_import(void)
     test_backup_import_post_refused_by_sweep_reason_via_interlock();
     test_backup_import_job_rechecks_mode_gate_before_writing();
     test_backup_import_job_recheck_refused_by_sweep_reason_via_interlock();
+    test_backup_import_job_refused_when_reset_mark_set();
     test_backup_import_job_clears_restore_in_flight_flag();
 
     test_malformed_body_writes_nothing();
+    test_group_a_pass1_range_checks();
+    test_group_a_prefs_bool_exact();
+    test_group_a_header_fail_closed();
     test_wrong_kind_refused();
     test_unknown_version_refused();
     test_version1_body_imports_under_v2_reader();
@@ -6954,6 +7487,8 @@ void run_test_backup_import(void)
     test_import_write_ids_sim_matches_pass2_commit_order();
     test_import_allows_profile_named_like_a_builtin();
     test_no_hostile_backup_input_produces_a_bootable_heat_commanding_state();
+    test_fuzz_hostile_backup_shapes();
+    test_import_pass1b_parse_failure_is_not_a_partial_write();
 
     test_v4_new_fields_round_trip_distinct_values();
     test_coupling_diag_k_dc_round_trips_distinct_value();
@@ -6987,6 +7522,9 @@ void run_test_backup_import(void)
     test_ct_normals_and_new_fields_round_trip_through_export_import();
     test_import_of_identical_tuning_quality_does_not_bump_seq();
     test_import_refuses_duplicate_zone_index();
+    test_import_onto_empty_zones_config_refused_before_any_write();
+    test_backup_topology_round_trip();
+    test_backup_topology_only_restore_is_saved();
     test_import_identity_roundtrip_keeps_tuning_seq_and_validity();
     test_import_gains_differ_invalidates_then_reinstates_matching_record();
     test_timing_profiles_bundle_round_trips_nonempty();

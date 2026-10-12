@@ -1,7 +1,7 @@
 // Host tests for App/drivers/http/adaptive_tune_http.c's enable_post_handler()
 // and revert_post_handler() -- POST /api/adaptive_tune/enable and
 // POST /api/adaptive_tune/revert. Closes a known test gap named in
-// docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 4: these two handlers'
+// docs/SYSTEM_MODE_GATE.md section 3.6 slice 4: these two handlers'
 // system_mode_gate wiring (owner decision Q2, 2026-09-25, narrowed the same
 // day to only gate enable's enabled=true case) was verified only by
 // code-pattern review and an ESP-IDF target build, never a host-test
@@ -17,7 +17,7 @@
 // `static` with no other seam, so this file #includes adaptive_tune_http.c
 // directly.
 //
-// Rule under test (docs/SYSTEM_MODE_GATE_PLAN.md section 3.6 slice 4, owner
+// Rule under test (docs/SYSTEM_MODE_GATE.md section 3.6 slice 4, owner
 // decision 2026-09-25 "later same day"):
 //   - enable_post_handler() with enabled=true is refused 409 by the system
 //     mode gate while a firing or autotune run is active.

@@ -340,11 +340,11 @@ static void wifi_task(void *arg)
                 const char *fail_msg = NULL;
                 if (has_ssid) {
                     err = wifi_prov_set_ap_ssid(ssid, ssid_len);
-                    if (err != ESP_OK) fail_msg = "ap_ssid must be 1-32 characters";
+                    if (err != ESP_OK) fail_msg = "ap_ssid must be 1-32 characters, no NUL bytes";
                 }
                 if (err == ESP_OK && has_password) {
                     err = wifi_prov_set_ap_password(password, pass_len);
-                    if (err != ESP_OK) fail_msg = "ap_password must be empty or 8-63 characters";
+                    if (err != ESP_OK) fail_msg = "ap_password must be empty or 8-63 characters, no NUL bytes";
                 }
                 uart_bridge_ext_reply_ok_err(ctx->proto, &msg, UART_TASK_ID_WIFI, subcmd, err == ESP_OK, fail_msg);
                 break;

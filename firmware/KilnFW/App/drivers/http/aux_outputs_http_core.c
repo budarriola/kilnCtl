@@ -29,9 +29,9 @@ static aux_field_t field_long(const char *body, const char *key, long min, long 
     if (len < 0 || len == 0) {
         return AUX_FIELD_BAD;
     }
-    char *end = NULL;
-    long v = strtol(val, &end, 10);
-    if (end == val || *end != '\0' || v < min || v > max) {
+    /* HTTP fuzz F7: plain decimal only -- no leading '+' or whitespace ("+1" decodes to " 1"), no ERANGE saturation. */
+    long v = 0;
+    if (val[0] == '+' || !http_form_parse_long(val, len, min, max, &v)) {
         return AUX_FIELD_BAD;
     }
     *out = v;

@@ -49,7 +49,8 @@ if ($Record) {
     if (-not $m.Success) { Write-Host $out; Write-Host "worktree mint failed"; exit 1 }
     $wt = $m.Groups[1].Value
     $log = "$wt.run.log"    # beside the worktree, never inside it (it must stay clean)
-    $args2 = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $wt "tools\run_all_checks.ps1"))
+    # Start-Process (PS 5.1) does not quote array elements: quote the path so a space cannot split it.
+    $args2 = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"' + (Join-Path $wt "tools\run_all_checks.ps1") + '"'))
     if (-not $Full) { $args2 += "-Fast" }
     $p = Start-Process -FilePath "powershell.exe" -ArgumentList $args2 -WorkingDirectory $wt `
         -RedirectStandardOutput $log -RedirectStandardError "$log.err" -WindowStyle Hidden -PassThru

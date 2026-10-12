@@ -190,6 +190,15 @@ def _git_ok(root, *args):
     return subprocess.run(["git", "-C", root] + list(args), capture_output=True).returncode == 0
 
 
+#: Operator-facing behaviour changes that every generated release body repeats until removed
+#: (review 2026-10-10 F6). Not derivable from commits or schema versions.
+BEHAVIOUR_NOTES = [
+    "Wi-Fi: the station minimum auth mode is WPA2-PSK. A board joined to a WPA/TKIP-only (WPA1) "
+    "access point stops associating after this upgrade and falls back to AP mode; reconfigure the "
+    "access point to WPA2 or join another network.",
+]
+
+
 def build_notes(root, tag, max_commits=50):
     prev = previous_tag(root, tag)
     if prev:
@@ -202,6 +211,7 @@ def build_notes(root, tag, max_commits=50):
     out = ["kilnCtl %s" % tag, "", "Changes %s (%d):" % (rng, len(lines)), ""]
     out += ["- " + l for l in lines] or ["- (none)"]
     out += [""] + schema_section(root, tag, prev)
+    out += ["Behaviour changes:", ""] + ["* " + n for n in BEHAVIOUR_NOTES] + [""]
     out += ["See release.json (compat) and docs/RELEASING.md gate 9; SHA256SUMS for hashes.", ""]
     return "\n".join(out)
 

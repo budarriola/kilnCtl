@@ -143,6 +143,65 @@ class BenchTestStartTest(_Base):
         self.assertIs(runner.ctx["attended"], True)
         self.assertIs(runner.ctx["allow_flash"], True)
 
+    def test_ota_image_arguments_reach_the_runner_ctx(self):
+        # bench1 2026-10-10: OT-G06 could not run via bench_test_start because
+        # ota_image_path was not accepted.
+        kw = dict(ota_image_path="C:/img/KilnCtrl.bin", ota_corrupt_image_path="C:/img/bad.bin",
+                  ota_truncated_image_path="C:/img/trunc.bin", ota_wrong_build_image_path="C:/img/wb.bin",
+                  ota_image_build="2026-10-10", ota_pico_image_path="C:/img/p.bin",
+                  ota_pico_image_commit="abc1234", ota_pico_corrupt_image_path="C:/img/pb.bin",
+                  update_downgrade_repo="o/old", update_wrong_repo="o/wrong")
+        self.finish(BT.bench_test_start(suite="ota", cases="OT-G06", confirm=True, **kw))
+        ctx = _FakeRunner.instances[-1].ctx
+        for k, v in kw.items():
+            self.assertEqual(ctx[k], v, k)
+        # and the synchronous twin
+        BT.bench_test_run(suite="ota", cases="OT-G06", confirm=True, **kw)
+        ctx2 = _FakeRunner.instances[-1].ctx
+        for k, v in kw.items():
+            self.assertEqual(ctx2[k], v, k)
+
+    def test_ota_images_without_confirm_refuse_before_runner(self):
+        out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin")
+        self.assertIn("refused", out)
+        out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin", confirm="yes")
+        self.assertIn("refused", out)
+        out = BT.bench_test_start(suite="ota", update_wrong_repo="o/w")
+        self.assertIn("refused", out)
+        self.assertEqual(_FakeRunner.instances, [])
+
+    def test_start_unconfirmed_ota_refused_synchronously_and_creates_no_job(self):
+        # toolfx8 T4: the refusal comes back at once, not as a FAILED job report.
+        for kw in ({"ota_image_path": "C:/img/a.bin"}, {"ota_corrupt_image_path": "C:/img/b.bin"},
+                   {"ota_truncated_image_path": "C:/img/t.bin"}, {"ota_wrong_build_image_path": "C:/img/w.bin"},
+                   {"ota_image_build": "2026-10-10"}, {"ota_pico_image_path": "C:/img/p.bin"},
+                   {"ota_pico_image_commit": "abc"}, {"ota_pico_corrupt_image_path": "C:/img/pc.bin"},
+                   {"update_downgrade_repo": "o/old"}, {"update_wrong_repo": "o/w"}):
+            for bad in (False, "yes", 1, None):
+                with mock.patch.object(build_jobs, "start_job") as sj:
+                    out = BT.bench_test_start(suite="ota", confirm=bad, **kw)  # type: ignore[arg-type]
+                self.assertTrue(out.startswith("error: refused"), out)
+                self.assertNotIn("STARTED", out)
+                sj.assert_not_called()
+        self.assertEqual(_FakeRunner.instances, [])
+
+    def test_start_dry_run_with_image_args_is_not_refused(self):
+        out = BT.bench_test_start(suite="ota", dry_run=True, ota_image_path="C:/img/a.bin",
+                                  update_wrong_repo="o/w")
+        self.assertIn("STARTED", out)
+        self.finish(out)
+
+    def test_ota_images_preflight_refusal_blocks_runner(self):
+        with mock.patch.object(M, "_run_level_preflight", return_value="safety is ARMED"):
+            out = BT.bench_test_run(suite="ota", ota_image_path="C:/img/a.bin", confirm=True)
+        self.assertIn("run-level precondition failed: safety is ARMED", out)
+        self.assertEqual(_FakeRunner.instances, [])
+
+    def test_omitted_ota_arguments_stay_out_of_ctx(self):
+        self.finish(BT.bench_test_start(suite="smoke"))
+        ctx = _FakeRunner.instances[-1].ctx
+        self.assertNotIn("ota_image_path", ctx)
+
     def test_defaults_keep_opt_ins_off(self):
         self.finish(BT.bench_test_start(suite="heat"))
         kw = _FakeRunner.instances[-1].run_kwargs

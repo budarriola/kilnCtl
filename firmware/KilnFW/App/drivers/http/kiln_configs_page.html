@@ -261,12 +261,16 @@ function kcPost(path, formBody) {
     method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: formBody,
   }).then(function (r) {
     return r.json().catch(function () { return {}; }).then(function (j) { return { httpOk: r.ok, body: j }; });
+  }).catch(function (e) {
+    /* L-14: a network error or declined sign-in is a failed result, not an unhandled rejection */
+    var cancelled = window.kcIsAuthCancelled && window.kcIsAuthCancelled(e);
+    return { httpOk: false, body: { ok: false, error: cancelled ? 'Sign-in cancelled.' : 'Could not reach the board.' } };
   });
 }
 function kcHandleResult(result, okMsg) {
   var failed = !result.httpOk || result.body.ok === false;
   if (failed) {
-    kcSetMsg(result.body.error || 'That failed.', true);
+    kcSetMsg(result.body.reason || result.body.error || 'That failed.', true);
   } else {
     kcSetMsg(okMsg, false);
   }
@@ -310,7 +314,7 @@ document.getElementById('kcApplyBtn').addEventListener('click', function () {
     if (!r.ok) {
       return r.text().then(function (t) {
         var msg = t;
-        try { var j = JSON.parse(t); if (j && j.error) msg = j.error; } catch (e) { /* raw text */ }
+        try { var j = JSON.parse(t); if (j && (j.reason || j.error)) msg = j.reason || j.error; } catch (e) { /* raw text */ }
         kcSetMsg(msg || 'Apply failed.', true);
       });
     }
@@ -357,9 +361,14 @@ function pollApplyStatus(cfg) {
           // flag alone -- only kiln_cfg_swap.c's ceiling-latch branch
           // disables heat; its four rollback-failure branches set the same
           // flag and disable nothing. The reason text above says which.
+          // A reason starting "Kiln config applied on" (kiln_cfg_swap.h's
+          // KILN_CFG_SWAP_REASON_ACTIVE_ID_UNSAVED_PREFIX) means the config
+          // DID land; only saving the active kiln failed. Never append
+          // "Nothing was changed." to that one.
+          var landed = /^Kiln config applied on/.test(st.reason || '');
           kcSetMsg((st.reason || 'Apply failed.') +
                    (st.diverged ? ' The safety processor is now out of sync; see the reason above.'
-                                : ' Nothing was changed.'), true);
+                                : (landed ? '' : ' Nothing was changed.')), true);
           refreshDivergence();
           loadKilnConfigs();
           resolve();
@@ -421,13 +430,31 @@ function refreshDivergence() {
   });
 }
 
+// Unsaved-edit guard (WEB_JS_COVERAGE_GAPS D7): the only free-text fields are the
+// three name boxes. Armed by a real input event while any holds text, cleared when
+// the save/clone/rename that consumed the text succeeds (the box is emptied).
+var kcDirty = false;
+var KC_NAME_INPUTS = ['kcSaveNewName', 'kcCloneName', 'kcRenameName'];
+function kcRecomputeDirty() {
+  kcDirty = KC_NAME_INPUTS.some(function (id) { return document.getElementById(id).value.trim() !== ''; });
+}
+KC_NAME_INPUTS.forEach(function (id) {
+  document.getElementById(id).addEventListener('input', kcRecomputeDirty);
+});
+window.addEventListener('beforeunload', function (e) {
+  if (!kcDirty) return undefined;
+  e.preventDefault();
+  e.returnValue = '';
+  return '';
+});
+
 document.getElementById('kcSaveNewBtn').addEventListener('click', function () {
   var input = document.getElementById('kcSaveNewName');
   var name = input.value.trim();
   if (!name) { kcSetMsg('Enter a name first.', true); return; }
   kcPost('/api/kiln_configs/save', 'name=' + encodeURIComponent(name)).then(function (result) {
     kcHandleResult(result, 'Saved current setup as "' + name + '".').then(function (ok) {
-      if (ok) input.value = '';
+      if (ok) { input.value = ''; kcRecomputeDirty(); }
     });
   });
 });
@@ -452,7 +479,7 @@ document.getElementById('kcCloneBtn').addEventListener('click', function () {
   kcPost('/api/kiln_configs/clone', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
     .then(function (result) {
       kcHandleResult(result, 'Cloned "' + cfg.name + '" as "' + name + '".').then(function (ok) {
-        if (ok) input.value = '';
+        if (ok) { input.value = ''; kcRecomputeDirty(); }
       });
     });
 });
@@ -466,7 +493,7 @@ document.getElementById('kcRenameBtn').addEventListener('click', function () {
   kcPost('/api/kiln_configs/rename', 'id=' + encodeURIComponent(cfg.id) + '&name=' + encodeURIComponent(name))
     .then(function (result) {
       kcHandleResult(result, 'Renamed to "' + name + '".').then(function (ok) {
-        if (ok) input.value = '';
+        if (ok) { input.value = ''; kcRecomputeDirty(); }
       });
     });
 });
@@ -500,7 +527,7 @@ document.getElementById('kcDownloadBtn').addEventListener('click', function () {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    URL.revokeObjectURL(url);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     kcSetMsg('Downloaded "' + cfg.name + '".', false);
   }).catch(function (e) {
     if (window.kcIsAuthCancelled && window.kcIsAuthCancelled(e)) return;
@@ -529,7 +556,7 @@ document.getElementById('kcUploadBtn').addEventListener('click', function () {
     });
   }).then(function (result) {
     if (!result.httpOk || result.body.error) {
-      kcSetMsg(result.body.error || result.raw || ('Import failed (HTTP status).'), true);
+      kcSetMsg(result.body.reason || result.body.error || result.raw || ('Import failed (HTTP status).'), true);
       return;
     }
     kcSetMsg('Imported as a new kiln config (id ' + result.body.id + ').', false);

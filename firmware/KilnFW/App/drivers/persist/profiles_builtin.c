@@ -10,6 +10,7 @@
 // outright to write anything whose name does not end in .inc, so pointing it
 // at this file by mistake fails loudly instead of silently.)
 #include "profiles_builtin.h"
+#include "cfgfs_file_validators.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,6 +22,7 @@
 #include "cfg_fs_status.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "profiles_builtin";
 
@@ -40,7 +42,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_HIDDEN);
 NVS_KEY_LEN_CHECK(NVS_KEY_HIDDEN_REV);
 
-/* docs/FILESYSTEM_USER_DATA_PLAN.md section 3 item 6: the hidden-builtin mask
+/* docs/FILESYSTEM_USER_DATA.md section 3 item 6: the hidden-builtin mask
  * lives at /cfg/profiles/hidden.json, next to the profiles/prof<id>.json slot
  * files (profiles_cfg_fs.c). Same deviation those files carry: the ".json"
  * name is the plan's path, the content is pref_cfg_fs.h's rev-prefixed binary
@@ -66,7 +68,7 @@ static uint32_t s_hidden_rev;
 /* Any 32-bit mask is accepted -- the NVS path never range-checked it either
  * (bits past g_builtin_profile_count are inert), so the file is validated
  * exactly as NVS is: by size alone. */
-static bool hidden_mask_validate(const void *bytes, size_t len)
+bool profiles_builtin_hidden_file_validate(const void *bytes, size_t len)
 {
     (void)bytes;
     return len == sizeof(uint32_t);
@@ -98,9 +100,18 @@ static hal_status_t nvs_partition_init(const char *partition)
     return hal_kv_init_partition(partition);
 }
 
+/* Callers: httpd and backup_import's own async task (http_async_job_try_start),
+ * so the rev read, RAM assign, commit and rev bump are one section
+ * (docs/audits/CFG_STORE_SAVE_RACE_2026-10-09.md, MED-2). cfg_save_lock_t also
+ * reserves the flash worker first -- see cfg_save_lock.h. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+/* RAM mask changed but the save failed (audit L1): a retry must still write.
+ * Guarded by s_save_lock. */
+static bool s_hidden_dirty = false;
+
 /* Persists the mask at the next rev to the cfg file ONLY (docs/CONFIG_FILESYSTEM.md,
  * "Dual-write window: closed"). s_hidden_rev advances only once the verified
- * write succeeded, same as unit_pref_set(). */
+ * write succeeded, same as unit_pref_set(). Caller holds s_save_lock. */
 static esp_err_t hidden_mask_save(void)
 {
     uint32_t new_rev = s_hidden_rev + 1;
@@ -116,6 +127,7 @@ esp_err_t profiles_builtin_start(void)
 {
     s_hidden_mask = 0;
     s_hidden_rev = 0;
+    s_hidden_dirty = false;
 
     hal_status_t part_err = nvs_partition_init(PROFILES_NVS_PARTITION);
     if (part_err != HAL_OK) {
@@ -165,7 +177,7 @@ esp_err_t profiles_builtin_start(void)
     uint32_t resolved_rev = nvs_rev;
     bool used_file = false;
     bool have_value = pref_cfg_fs_resolve(PROFILES_HIDDEN_FILE_PATH, &nvs_mask, sizeof(nvs_mask), nvs_valid, nvs_rev,
-                                           hidden_mask_validate, &resolved, &resolved_rev, &used_file);
+                                           profiles_builtin_hidden_file_validate, &resolved, &resolved_rev, &used_file);
     if (have_value) {
         s_hidden_mask = resolved;
         s_hidden_rev = resolved_rev;
@@ -186,7 +198,7 @@ void profiles_builtin_get_dualwrite_status(bool *file_valid, uint32_t *file_rev,
     uint32_t f_mask = 0;
     uint32_t f_rev = 0;
     bool f_valid = false;
-    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), hidden_mask_validate, &f_mask, &f_rev, &f_valid);
+    pref_cfg_fs_load_raw(PROFILES_HIDDEN_FILE_PATH, sizeof(f_mask), profiles_builtin_hidden_file_validate, &f_mask, &f_rev, &f_valid);
 
     bool n_valid = false;
     uint32_t n_mask = 0;
@@ -298,21 +310,31 @@ esp_err_t profiles_builtin_set_hidden(uint8_t id, bool hidden)
     if (!builtin_index(id, &idx)) {
         return ESP_ERR_INVALID_ARG;
     }
+    cfg_save_lock_take(&s_save_lock);
     uint32_t updated = hidden ? (s_hidden_mask | (1u << idx)) : (s_hidden_mask & ~(1u << idx));
-    if (updated == s_hidden_mask) {
+    if (updated == s_hidden_mask && !s_hidden_dirty) {
+        cfg_save_lock_give(&s_save_lock);
         return ESP_OK; /* already in the requested state -- no flash write */
     }
     s_hidden_mask = updated;
-    return hidden_mask_save();
+    esp_err_t err = hidden_mask_save();
+    s_hidden_dirty = (err != ESP_OK);
+    cfg_save_lock_give(&s_save_lock);
+    return err;
 }
 
 esp_err_t profiles_builtin_restore_all(void)
 {
-    if (s_hidden_mask == 0) {
+    cfg_save_lock_take(&s_save_lock);
+    if (s_hidden_mask == 0 && !s_hidden_dirty) {
+        cfg_save_lock_give(&s_save_lock);
         return ESP_OK;
     }
     s_hidden_mask = 0;
-    return hidden_mask_save();
+    esp_err_t err = hidden_mask_save();
+    s_hidden_dirty = (err != ESP_OK);
+    cfg_save_lock_give(&s_save_lock);
+    return err;
 }
 
 esp_err_t profiles_builtin_discard_file(void)

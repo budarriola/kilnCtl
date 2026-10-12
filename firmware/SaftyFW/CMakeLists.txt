@@ -155,6 +155,9 @@ set(SAFTYFW_APP_SOURCES
     # host-testable (test/test_link_task_commit_reject.c) -- see
     # link_task_commit_reject.h.
     src/tasks/link_task_commit_reject.c
+    # SET_PARAM staging as an edit list, pure and host-testable
+    # (test/test_link_staging.c) -- see link_staging.h.
+    src/tasks/link_staging.c
     # Pure ANNOUNCE_VERSION decode-to-verdict (peer version + degraded_no_
     # context), split out of link_task_handle_announce_version() so it is
     # host-testable (test/test_link_task_announce_eval.c) -- see
@@ -185,7 +188,7 @@ set(SAFTYFW_APP_SOURCES
     src/tasks/update_task_erase_plan.c
     # 2026-09-20 -- the pure vector-table plausibility check behind the new
     # slot-linkage validation in update_task_process_end() (owner decision,
-    # PICO_AUTO_UPDATE_PLAN.md), split out for the same host-testability
+    # PICO_AUTO_UPDATE.md), split out for the same host-testability
     # reason as update_task_erase_plan.c immediately above -- see
     # update_task_slot_linkage.h.
     src/tasks/update_task_slot_linkage.c
@@ -197,6 +200,7 @@ set(SAFTYFW_APP_SOURCES
     # update_task_slot_linkage.c/update_task_erase_plan.c are -- see
     # update_task_flash_guard.h.
     src/tasks/update_task_flash_guard.c
+    src/tasks/update_task_metadata_write.c
     # Phase 10 -- update_task.c's own frame-receive/decision logic. These
     # four are the FROZEN, host-tested (272/272, test/build_host_tests.ps1)
     # pure modules from src/update/; bootloader/crc32.c and
@@ -209,7 +213,7 @@ set(SAFTYFW_APP_SOURCES
     src/update/received_ranges.c
     src/update/update_receiver.c
     src/update/confirm.c
-    # docs/PICO_AUTO_UPDATE_PLAN.md G2 -- the one instance of the
+    # docs/PICO_AUTO_UPDATE.md G2 -- the one instance of the
     # build-identity record this image declares about itself, which the ESP
     # scans out of a staged image to decide whether the running Pico is out of
     # date. Compiled into ALL THREE targets that share this source list
@@ -413,6 +417,7 @@ target_link_libraries(SaftyFW PRIVATE
     hardware_flash # Phase 10, added this pass -- update_task.c's flash_range_erase()/_program(), same library bootloader/CMakeLists.txt already links
     pico_flash
     pico_multicore
+    pico_rand # get_rand_32() for link_task.c's boot_id (kilnlink audit 2026-10-09 M1)
     FreeRTOS-Kernel
     FreeRTOS-Kernel-Heap4
     kilnlink
@@ -594,6 +599,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
         hardware_flash
         pico_flash
         pico_multicore
+        pico_rand
         FreeRTOS-Kernel
         FreeRTOS-Kernel-Heap4
         kilnlink
@@ -624,7 +630,7 @@ function(saftyfw_add_slot_executable TARGET_NAME FLASH_ORIGIN)
     pico_set_linker_script(${TARGET_NAME} ${_saftyfw_slot_ld})
 
     # Raw binary image of this slot, for the ESP-side embed-and-push-to-Pico
-    # auto-update path (docs/PICO_AUTO_UPDATE_PLAN.md, owner decision
+    # auto-update path (docs/PICO_AUTO_UPDATE.md, owner decision
     # 2026-09-20). picotool is still unavailable in this build environment
     # (see the pico_add_extra_outputs() comment above) so no .uf2 is
     # produced here -- but a plain position-dependent .bin needs nothing

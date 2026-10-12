@@ -62,6 +62,48 @@ from .thermo import ThermoClient, ThermoQueryError
 from . import mcp_server_core as _core
 
 
+def _wifi_write_refusal(confirm: object, what: str, allow_running: object = False) -> Optional[str]:
+    """Common gate for Wi-Fi writes: confirm is True exactly, and not mid-firing
+    (a join/mode switch can drop the AP/STA link the operator is watching the
+    firing through)."""
+    if confirm is not True:
+        return f"error: {what} refused without confirm=True -- it changes the board's network configuration"
+    if allow_running is not True:
+        try:
+            status = _srv._profiles.get_exec_status(timeout=2.0)
+        except Exception as exc:  # noqa: BLE001
+            return (f"error: {what} refused -- profile executor state could not be read ({exc}), so a "
+                    "firing cannot be ruled out. Pass allow_running=True (exactly True) to override.")
+        if status is None:
+            return (f"error: {what} refused -- profile executor state could not be read (no answer). "
+                    "Pass allow_running=True (exactly True) to override.")
+        if status.state not in (0, 3, 4):
+            return (f"error: {what} refused while a profile is {status.state_name} (running/paused/unknown) -- a Wi-Fi change can "
+                    "drop the link mid-firing. Stop the profile first or pass allow_running=True.")
+        try:
+            at = _srv._autotune.get_status()
+        except Exception as exc:  # noqa: BLE001
+            return (f"error: {what} refused -- autotune state could not be read ({exc}). "
+                    "Pass allow_running=True (exactly True) to override.")
+        if at.state not in (0, 5, 6):
+            return (f"error: {what} refused while autotune is {at.state_name!r} -- a Wi-Fi change can "
+                    "drop the link mid-run. Pass allow_running=True to override.")
+    return None
+
+
+WIFI_PASSWORD_ENV = "KILNCTL_WIFI_PASSWORD"
+WIFI_AP_PASSWORD_ENV = "KILNCTL_WIFI_AP_PASSWORD"
+
+
+def _wifi_readback_networks(ssid: str) -> "Optional[bool]":
+    """True/False if ssid is in the saved list, None if unreadable."""
+    try:
+        entries, _trunc = _srv._wifi.get_networks()
+    except Exception:  # noqa: BLE001
+        return None
+    return any(e.ssid == ssid for e in entries)
+
+
 # ---------------------------------------------------------------------------
 # WIFI (task 11) -- status/scan/provision/forget over UART
 #
@@ -106,7 +148,9 @@ def wifi_get_status(host: Optional[str] = None) -> str:
     ap_pending_teardown = "unknown (no host given and no STA IP)"
     if http_host:
         try:
-            data = wifi_prov_http_client.get_status(http_host)
+            # An explicit caller-supplied host is not established as the board:
+            # trusted=False sends no credential and never records it as default.
+            data = wifi_prov_http_client.get_status(http_host, trusted=host is None)
         except wifi_prov_http_client.WifiProvHttpError:
             ap_pending_teardown = "unknown (unreachable over HTTP)"
         else:
@@ -141,7 +185,10 @@ def wifi_scan() -> str:
 
 
 @_core._tool()
-def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None) -> str:
+def wifi_add_network(
+    ssid: Optional[str] = None, password: Optional[str] = None, confirm: bool = False, allow_running: bool = False,
+    password_from_env: bool = False,
+) -> str:
     """Save a network and immediately attempt to join it -- this is the
     one-step way to connect the board to a specific scanned network; no
     separate wifi_set_mode() call is needed first. If the board is currently
@@ -156,26 +203,58 @@ def wifi_add_network(ssid: Optional[str] = None, password: Optional[str] = None)
 
     Leave ssid unset to auto-connect using the credentials most recently
     saved from the GUI's Wi-Fi Settings popup (see wifi_credentials.py) --
-    fails with a clear error if nothing has been saved that way yet."""
+    fails with a clear error if nothing has been saved that way yet.
+
+    Requires confirm=True (exactly) and refuses while a profile is running or
+    paused (allow_running=True overrides): joining can drop the link. After a
+    success the saved list is read back; an unreadable read-back is FAILED, not
+    ok. Passwords are never echoed. PREFERRED: pass password_from_env=True
+    to take it from the KILNCTL_WIFI_PASSWORD environment variable (refused if
+    unset; a `password` argument still works but travels in the MCP client
+    transcript; giving both is an error). With neither, an open network is
+    saved -- the environment is never consulted implicitly.
+    """
+    refusal = _wifi_write_refusal(confirm, "wifi_add_network", allow_running)
+    if refusal is not None:
+        return refusal
+    if ssid is None and password_from_env:
+        return ("error: password_from_env=True needs an explicit ssid; with ssid omitted the saved "
+                "network's own password is used")
     if ssid is None:
         saved = wifi_credentials.load()
         if saved is None:
             return "error: no ssid given and no saved credentials found (set Wi-Fi up once via the GUI first)"
         ssid, password = saved["ssid"], saved["password"]
+    if password_from_env:
+        if password is not None:
+            return "error: give either password or password_from_env=True, not both"
+        password = os.environ.get(WIFI_PASSWORD_ENV) or None
+        if password is None:
+            return f"error: password_from_env=True but {WIFI_PASSWORD_ENV} is unset or empty"
     try:
         result = _srv._wifi.add_network(ssid, password or "")
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        present = _wifi_readback_networks(ssid)
+        if present is False:
+            return f"FAILED - board reported ok for {ssid!r} but it is not in the saved list on read-back"
+        if present is None:
+            return (f"FAILED - board reported ok for {ssid!r} but the saved list could not be read back; "
+                    "state UNVERIFIED")
         return f"ok - saved {ssid!r}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not save {ssid!r}{detail}"
 
 
 @_core._tool()
-def wifi_set_mode(mode: str) -> str:
+def wifi_set_mode(mode: str, confirm: bool = False, allow_running: bool = False) -> str:
     """Switch between "home" (join a saved network) and "ap" (host the
-    provisioning access point) mode."""
+    provisioning access point) mode. Requires confirm=True and refuses
+    mid-firing (allow_running=True overrides); the mode is read back."""
+    refusal = _wifi_write_refusal(confirm, "wifi_set_mode", allow_running)
+    if refusal is not None:
+        return refusal
     mode_map = {"home": WIFI_MODE_HOME, "ap": WIFI_MODE_AP}
     mode_val = mode_map.get(mode.strip().lower())
     if mode_val is None:
@@ -185,21 +264,63 @@ def wifi_set_mode(mode: str) -> str:
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        try:
+            got = _srv._wifi.get_status().mode_name
+        except Exception:  # noqa: BLE001
+            return (f"FAILED - board reported ok for mode {mode!r} but the mode could not be read back; "
+                    "state UNVERIFIED")
+        if got != mode.strip().lower():
+            return f"FAILED - board reported ok but mode reads back as {got!r}, wanted {mode!r}"
         return f"ok - mode set to {mode}"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not set mode to {mode}{detail}"
 
 
 @_core._tool()
-def wifi_set_ap_identity(ap_ssid: Optional[str] = None, ap_password: Optional[str] = None) -> str:
+def wifi_set_ap_identity(
+    ap_ssid: Optional[str] = None, ap_password: Optional[str] = None, confirm: bool = False,
+    allow_running: bool = False, ap_password_from_env: bool = False,
+) -> str:
     """Rename the board's own provisioning AP and/or change its password.
-    Leave either argument unset (None) to keep it unchanged."""
+    Leave either argument unset (None) to keep it unchanged.
+
+    Requires confirm=True (exactly) and refuses while a profile or autotune is
+    running/unreadable (allow_running=True overrides). The new identity is read
+    back over the link (SSID compared; the firmware only reports a
+    "[set]"/"" marker for the password, so only its presence is verified, never
+    the value); a mismatch or unreadable read-back is FAILED. The AP password is
+    never echoed. PREFERRED: pass ap_password_from_env=True to take it from the
+    KILNCTL_WIFI_AP_PASSWORD environment variable (refused if unset; the
+    ap_password argument still works but travels in the MCP client
+    transcript; giving both is an error). With neither, the password is left
+    unchanged -- the environment is never consulted implicitly.
+    """
+    refusal = _wifi_write_refusal(confirm, "wifi_set_ap_identity", allow_running)
+    if refusal is not None:
+        return refusal
+    if ap_password_from_env:
+        if ap_password is not None:
+            return "error: give either ap_password or ap_password_from_env=True, not both"
+        ap_password = os.environ.get(WIFI_AP_PASSWORD_ENV) or None
+        if ap_password is None:
+            return f"error: ap_password_from_env=True but {WIFI_AP_PASSWORD_ENV} is unset or empty"
     try:
         result = _srv._wifi.set_ap_identity(ap_ssid, ap_password)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
-        return "ok - AP identity updated"
+        try:
+            st = _srv._wifi.get_status()
+            got_ssid, got_pw = st.ap_ssid, st.ap_password
+        except Exception:  # noqa: BLE001
+            return "FAILED - board reported ok but the AP identity could not be read back; state UNVERIFIED"
+        if ap_ssid is not None and got_ssid != ap_ssid:
+            return f"FAILED - board reported ok but AP SSID reads back as {got_ssid!r}, wanted {ap_ssid!r}"
+        if ap_password is not None and bool(got_pw) != bool(ap_password):
+            return ("FAILED - board reported ok but the AP password presence marker reads "
+                    f"{'set' if got_pw else 'empty'}, wanted {'set' if ap_password else 'empty'}")
+        pw_note = "; password presence verified, value cannot be read back" if ap_password is not None else ""
+        return f"ok - AP identity updated (read back{pw_note})"
     detail = f": {result.reason}" if result.reason else ""
     return f"refused - could not update AP identity{detail}"
 
@@ -225,16 +346,26 @@ def wifi_get_networks() -> str:
 
 
 @_core._tool()
-def wifi_forget(ssid: str) -> str:
-    """Delete a saved network."""
+def wifi_forget(ssid: str, confirm: bool = False, allow_running: bool = False) -> str:
+    """Delete a saved network. Requires confirm=True and refuses mid-firing
+    (allow_running=True overrides); the saved list is read back."""
+    refusal = _wifi_write_refusal(confirm, "wifi_forget", allow_running)
+    if refusal is not None:
+        return refusal
     try:
         result = _srv._wifi.forget(ssid)
     except WifiUartQueryError as exc:
         return f"error: {exc}"
     if result.ok:
+        present = _wifi_readback_networks(ssid)
+        if present is True:
+            return f"FAILED - board reported ok but {ssid!r} is still in the saved list"
+        if present is None:
+            return (f"FAILED - board reported ok for forgetting {ssid!r} but the saved list could not be "
+                    "read back; state UNVERIFIED")
         return f"ok - forgot {ssid!r}"
-    detail = f": {result.reason}" if result.reason else ""
-    return f"refused - no such saved network {ssid!r}{detail}"
+    detail = f": {result.reason}" if result.reason else " (no reason given; the board may simply not have that network saved)"
+    return f"refused - could not forget {ssid!r}{detail}"
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

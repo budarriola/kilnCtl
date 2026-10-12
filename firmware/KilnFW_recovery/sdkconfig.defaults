@@ -1,6 +1,6 @@
 # KilnFW_recovery sdkconfig defaults. Deliberately minimal: this image's
 # entire value is having almost nothing that can fail (docs/
-# OTA_SINGLE_SLOT_PLAN.md section 3), so it takes on none of the main
+# OTA_SINGLE_SLOT.md section 3), so it takes on none of the main
 # KilnFW project's LVGL/UART-bridge configuration. It does take optional PSRAM
 # (see below) for upload buffers, per docs/RECOVERY_IMAGE_PLAN.md.
 

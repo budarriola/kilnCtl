@@ -742,6 +742,11 @@ def _case_wiz06(ctx: dict) -> CaseResult:
     zones = z.get("zones")
     if not isinstance(zones, list):
         return _r(FAIL, "no zones[]")
+    if not zones:
+        # L3: an empty array must not PASS the zone_type half vacuously.
+        if z.get("thermo_count") == 0:
+            return _r(INCONC, "zones[] empty and thermo_count is 0: zone_type half not exercised")
+        return _r(FAIL, f"zones[] is empty (thermo_count {z.get('thermo_count')!r}); zone_type not checked")
     bad = [i for i, zz in enumerate(zones) if not _is_int(zz.get("zone_type"))]
     if bad:
         return _r(FAIL, f"zones {bad} lack an integer zone_type")
@@ -975,12 +980,15 @@ def _case_disp02(ctx: dict) -> CaseResult:
     stash: Dict[str, Any] = {"brightness_window_ok": None, "timeout_window_ok": None, "samples": {}}
     sleep = ctx.get("_sleep") or time.sleep
     try:
-        s, b = _post_json(ctx, _DP_PATH, _dp_form(50, t0, k0, e0))
+        # L4: write a value that differs from the snapshot, else a firmware
+        # that ignored the field would still read back the same number.
+        test_b = 60 if b0 == 50 else 50
+        s, b = _post_json(ctx, _DP_PATH, _dp_form(test_b, t0, k0, e0))
         a = _dp_read(ctx) or {}
         if not _dp_ok(s, b):
             fail.append(f"brightness write not ok (status {s})")
-        elif a.get("brightness_percent") != 50 or any(a.get(f) != snap[f] for f in _DP_FIELDS[1:]):
-            fail.append(f"brightness=50 read back {a.get('brightness_percent')!r} or disturbed another field")
+        elif a.get("brightness_percent") != test_b or any(a.get(f) != snap[f] for f in _DP_FIELDS[1:]):
+            fail.append(f"brightness={test_b} read back {a.get('brightness_percent')!r} or disturbed another field")
         else:
             hook = ctx.get("_lcd05_sample")
             if snap.get("brightness_inert") is True:

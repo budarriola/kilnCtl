@@ -14,7 +14,7 @@
 #   powershell -ExecutionPolicy Bypass -File tools\land.ps1
 #       [-WaitPid <pid>] [-CheckLog <file>] [-AllowFail <regex>[,<regex>]]
 #       [-AllowKnownFailures]
-#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-Target dev|main] [-DryRun]
+#       [-PostRebaseChecks <regex>] [-RestartMcp] [-RemoveWorktree] [-Target dev|main] [-Coordinator] [-DryRun]
 #
 #   -WaitPid / -CheckLog  wait (bounded by -WaitTimeoutMin, default 120) for a
 #       run_all_checks run to finish, then parse its summary. UTF-16 logs (what
@@ -37,10 +37,18 @@
 #       (fast-forward it first) or the restart just reloads old code; warned.
 #   -Target dev|main      branch to rebase onto and push to (default dev). Agents land on dev;
 #                         the coordinator promotes dev to main with tools\dev_promote.ps1.
+#                         -Target main is REFUSED unless -Coordinator AND -CheckLog are both given
+#                         (review F1): main normally only moves through dev_promote.ps1.
+#   -CheckLog binding     the log must carry the "Run tree: <hash> dirty=0 partial=0" line that
+#                         run_all_checks.ps1 prints, and <hash> must equal HEAD^{tree} (review F9);
+#                         when a file holds several runs, the LAST run is the one judged. The count
+#                         of parsed FAIL lines must equal the summary's failed count (review F10).
 #   -RemoveWorktree       after LANDED only: cd out, worktree_mint -Remove.
 #   -DryRun               do the refusals + log gate + fetch, report what would
 #       happen, change nothing (no rebase, no push).
 #   -ChecksScript         override run_all_checks.ps1 path (tests).
+#   -PinCheckScript       override check_submodule_pins_pushed.ps1 path (tests; needs -AllowStandaloneClone,
+#       recorded in the verdict as submodule_pins=pass(stub:<path>)).
 #   -AllowStandaloneClone permit running in a non-linked checkout (tests /
 #       private clones). Without it a main/shared tree is always refused.
 #
@@ -63,8 +71,10 @@ param(
     [switch]$RemoveWorktree,
     [ValidateSet('dev','main')][string]$Target = 'dev',
     [switch]$DryRun,
+    [switch]$Coordinator,
     [double]$WaitTimeoutMin = 120,
     [string]$ChecksScript,
+    [string]$PinCheckScript,
     [switch]$AllowStandaloneClone,
     [int]$MaxPushTries = 3,
     [double]$McpTimeoutMin = 10
@@ -82,6 +92,9 @@ $script:allowedFails = @()
 $script:knownFails = @()
 $script:newFails = @()
 $script:sha = $null
+$script:subPins = 'not-run'
+$script:pinOverride = $null
+$script:checksOverride = $null
 
 function Finish([int]$code, [string]$err, [bool]$landed = $false) {
     $o = [ordered]@{
@@ -92,6 +105,8 @@ function Finish([int]$code, [string]$err, [bool]$landed = $false) {
         known_fails   = @($script:knownFails)
         new_fails     = @($script:newFails)
         dry_run       = [bool]$DryRun
+        submodule_pins = $(if ($script:pinOverride -and $script:subPins -ne 'not-run') { "$($script:subPins)(stub:$($script:pinOverride))" } else { $script:subPins })
+        checks_script_override = $script:checksOverride
         error         = $(if ($err) { $err } else { $null })
     }
     if ($err) { Write-Host "REFUSED/FAILED: $err" -ForegroundColor Red }
@@ -104,6 +119,21 @@ function Test-WorktreeRegistered([string]$root, [string]$wt) {
         if ($l -like 'worktree *' -and (($l.Substring(9) -replace '\\', '/').TrimEnd('/') -ieq $want)) { return $true }
     }
     return $false
+}
+function Run-Bounded([string]$script, [string]$verb, [double]$timeoutMin) {
+    # Run `powershell -File <script> <verb>` with a wall-clock cap. Returns the exit code, or -1
+    # after killing the whole process tree on timeout, or -2 when it could not be started.
+    try {
+        $psi = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $script + '"'), $verb)
+        $p = Start-Process -FilePath 'powershell.exe' -ArgumentList $psi -PassThru -NoNewWindow
+    } catch { return -2 }
+    if ($null -eq $p) { return -2 }
+    [void]$p.Handle   # cache the handle so ExitCode is readable after exit (PS 5.1)
+    if (-not $p.WaitForExit([int][Math]::Max(1000, $timeoutMin * 60000))) {
+        & taskkill.exe /PID $p.Id /T /F *>$null
+        return -1
+    }
+    return [int]$p.ExitCode
 }
 function Step([string]$s) { [void]$script:steps.Add($s); Write-Host "[step] $s" -ForegroundColor Cyan }
 
@@ -139,6 +169,11 @@ function Abort-Rebase {
     if ($p) { Finish 1 "tree not clean after rebase --abort: $($p -join '; ')" }
 }
 
+# F1: main only moves through dev_promote.ps1; the direct path is a coordinator escape hatch.
+if ($Target -eq 'main' -and (-not $Coordinator -or -not $CheckLog)) {
+    Finish 1 "-Target main is refused: main moves only through tools\dev_promote.ps1. The direct path needs BOTH -Coordinator and -CheckLog <full run_all_checks log of this tree>."
+}
+
 # ---------------------------------------------------------------- step 1
 $top = git rev-parse --show-toplevel 2>$null
 if ($LASTEXITCODE -ne 0 -or -not $top) { Finish 2 "not inside a git repository" }
@@ -154,6 +189,14 @@ $isLinked = ($gitDir.TrimEnd('\') -ne $commonDir)
 if (-not $isLinked -and -not $AllowStandaloneClone) {
     Finish 1 "this is the main/shared tree (not a linked worktree); mint one with tools\worktree_mint.ps1 and land from there"
 }
+if (($PinCheckScript -or $ChecksScript) -and -not $AllowStandaloneClone) {
+    Finish 1 "-PinCheckScript / -ChecksScript are test seams: refused unless -AllowStandaloneClone is given"
+}
+if (($PinCheckScript -or $ChecksScript) -and -not (Test-Path -LiteralPath (Join-Path $commonDir 'kilnctl_scratch_repo'))) {
+    Finish 1 "-PinCheckScript / -ChecksScript are test seams: refused unless the target repository is a verified scratch repo (marker file kilnctl_scratch_repo in its git common dir, created only by the test fixtures)"
+}
+if ($PinCheckScript) { $script:pinOverride = $PinCheckScript }
+if ($ChecksScript) { $script:checksOverride = $ChecksScript }
 $mainRoot = if ($isLinked) { Split-Path -Parent $commonDir } else { $top }
 
 # Fetch BEFORE anything reads origin/main: the -AllowKnownFailures gate below computes a
@@ -198,11 +241,22 @@ if ($WaitPid -gt 0 -or $CheckLog) {
         Start-Sleep -Seconds 5
     }
     if (-not $text) { Finish 1 "check log '$CheckLog' missing or empty" }
-    $sm = [regex]::Match($text, $SummaryRe)
-    if (-not $sm.Success) { Finish 1 "check log '$CheckLog' has no run_all_checks summary line (run unfinished or died)" }
+    # F9: judge only the LAST run in the file (a log with several appended runs), and bind it to
+    # the tree being landed. run_all_checks.ps1 prints "Run tree: <hash> dirty=<0|1> partial=<0|1>".
+    $treeMs = @([regex]::Matches($text, '(?m)^Run tree: ([0-9a-f]{40}) dirty=(\d) partial=(\d)'))
+    if ($treeMs.Count -eq 0) { Finish 1 "check log '$CheckLog' has no 'Run tree:' line; it cannot be tied to this tree (re-run run_all_checks.ps1 from this checkout)" }
+    $lastRun = $treeMs[$treeMs.Count - 1]
+    $text = $text.Substring($lastRun.Index)
+    $headTree = (git rev-parse 'HEAD^{tree}').Trim()
+    if ($lastRun.Groups[1].Value -ne $headTree) { Finish 1 "check log '$CheckLog' was run on tree $($lastRun.Groups[1].Value), but HEAD's tree is $headTree; run the checks on exactly what you are landing" }
+    if ($lastRun.Groups[2].Value -ne '0') { Finish 1 "check log '$CheckLog' was run on a dirty working tree; its result does not describe a commit" }
+    if ($lastRun.Groups[3].Value -ne '0') { Finish 1 "check log '$CheckLog' is a partial (-Only/-Skip) run" }
+    $sms = @([regex]::Matches($text, $SummaryRe))
+    if ($sms.Count -eq 0) { Finish 1 "check log '$CheckLog' has no run_all_checks summary line (run unfinished or died)" }
+    $sm = $sms[$sms.Count - 1]
     $failedCount = [int]$sm.Groups[1].Value
     if ($text -match '(?m)^\s*\d+ passed,[^\r\n]*?, [1-9]\d* BUSY \(not run\)') { Finish 1 "check log reports BUSY checks that never ran" }
-    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\(') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     $failedLines = @([regex]::Matches($text, '(?m)^FAILED:.*$') | ForEach-Object { $_.Value.Trim() })
     $blocked = @()
     foreach ($n in $failNames) {
@@ -241,7 +295,8 @@ if ($WaitPid -gt 0 -or $CheckLog) {
         }
         $script:newFails = @($blocked)
     } elseif ($blocked.Count -gt 0) { $script:newFails = @($blocked) }
-    if ($failedCount -gt 0 -and $failNames.Count -eq 0) { $blocked += "summary reports $failedCount failed but no FAIL lines could be parsed" }
+    # F10: the parsed FAIL lines must account for exactly the summary's failed count.
+    if ($failNames.Count -ne $failedCount) { $blocked += "summary reports $failedCount failed but $($failNames.Count) FAIL line(s) were parsed; cannot classify them" }
     foreach ($a in $script:allowedFails) { Write-Host "!!! ALLOWED FAIL (-AllowFail): $a" -ForegroundColor Yellow }
     if ($blocked.Count -gt 0) { Finish 1 ("check log has unallowed FAIL: " + ($blocked -join '; ')) }
     Write-Host "check log OK ($failedCount failed, all allowed)" -ForegroundColor Green
@@ -298,10 +353,35 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $ChecksScript -Only $re -AllowFewerChecks @extra
     if ($LASTEXITCODE -ne 0) { Finish 1 "post-rebase checks failed (exit $LASTEXITCODE); rebased commits remain local, nothing pushed" }
 
+    # Skip the (network, up to minutes) pin check on a retry when the gitlinks did not change
+    # since a run that already PASSED.
+    $headSha = (& git rev-parse --verify -q HEAD 2>$null | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0 -or $headSha -notmatch '^[0-9a-f]{40}$') { Finish 1 "git rev-parse HEAD failed; cannot run the submodule pin check; nothing pushed" }
+    $glNow = (& git ls-tree -r $headSha 2>$null | Where-Object { $_ -match '^160000 commit ' } | Out-String).Trim() + "|" + (& git show "${headSha}:.gitmodules" 2>$null | Out-String).Trim()
+    if ($script:subPins -eq 'pass' -and $script:pinTreeSeen -eq $glNow) {
+        Step "submodule pins pushed (unchanged gitlinks since the passing check; skipped re-run)"
+    } else {
+        Step "submodule pins pushed"
+        if (-not $PinCheckScript) { $PinCheckScript = Join-Path $PSScriptRoot "check_submodule_pins_pushed.ps1" }
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $PinCheckScript -RepoPath $top -Commit $headSha
+        $pinExit = $LASTEXITCODE
+        $script:subPins = $(if ($pinExit -eq 0) { 'pass' } elseif ($pinExit -eq 3) { 'skipped' } else { 'fail' })
+        $script:pinTreeSeen = $glNow
+        if ($pinExit -ne 0 -and $pinExit -ne 3) { Finish 1 "submodule pin check refused (exit $pinExit): a pin is not on its remote or the check errored; nothing pushed" }
+        if ($pinExit -eq 3) { Write-Host "WARNING: submodule pin check could not run (exit $pinExit); not a PASS (final verdict carries submodule_pins=skipped)" -ForegroundColor Yellow }
+    }
+
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
-    if ($pout -match 'non-fast-forward|fetch first|\[rejected\]|rejected') {
+    # A concurrent-push ref-lock collision is reported as [remote rejected] (failed to update ref) but is a race: retry.
+    $refRace = $pout -match 'cannot lock ref|failed to update ref[^\r\n]*expected|is at \S+ but expected'
+    if ($refRace) {
+        Write-Host "push lost a ref-lock race (cannot lock ref); re-fetching and rebasing" -ForegroundColor Yellow
+        continue
+    }
+    if ($pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
+    if ($pout -match 'non-fast-forward|fetch first|\[rejected\]') {
         Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
         continue
     }

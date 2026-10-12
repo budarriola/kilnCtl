@@ -1212,13 +1212,13 @@ static void test_v1_migration(void)
 }
 
 // ---------------------------------------------------------------------------
-// Frozen-input migration fixtures (docs/CONFIG_MIGRATION_CHAIN_PLAN.md).
+// Frozen-input migration fixtures (docs/CONFIG_MIGRATION_CHAIN.md).
 //
 // FROZEN_V1_BLOB / FROZEN_V2_BLOB are byte-exact records, committed as
 // literals. NEVER REGENERATE THEM from today's config_store_pack(): that would
 // make the migration test tautological. The point is that these bytes are what
 // OLD firmware wrote, independent of the current layout.
-//   v1: layout of config_store_pack() at 901256e0 (header 16 B, ct_cal[3] x 9 B
+//   v1: layout of config_store_pack() at 901256e0^ (header 16 B, ct_cal[3] x 9 B
 //       at offset 16, CRC32 over [0,248) at 248, rest 0xFF).
 //   v2: layout before 5dcea99b (fields_set u16 at 12, field block from
 //       tc_source at 14, reserved from 235, CRC32 over [0,504) at 504).
@@ -1411,6 +1411,19 @@ static void test_frozen_blob_truncated_rejected(void)
                    "truncated old blob in a sector: no valid slot");
         TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
                    "truncated old blob in a sector: *out untouched");
+    }
+    // Torn DATA byte with the stored CRC intact (v2 offset 20 is inside the
+    // CRC-covered payload): must be rejected by the CRC check alone.
+    for (int i = 0; i < 2; i++) {
+        uint8_t torn[CONFIG_STORE_RECORD_LEN];
+        memcpy(torn, blobs[i], sizeof(torn));
+        torn[20] ^= 0x5Au; // inside both v1 ([0,248)) and v2 ([0,504)) CRC ranges
+        config_store_record_t sentinel;
+        memset(&sentinel, 0xAA, sizeof(sentinel));
+        config_store_record_t out = sentinel;
+        TEST_CHECK(!config_store_unpack(torn, &out), "data byte torn, CRC intact: refused");
+        TEST_CHECK(memcmp(&out, &sentinel, sizeof(out)) == 0,
+                   "data byte torn, CRC intact: *out untouched");
     }
     config_store_record_t fallback;
     config_store_default(&fallback);
@@ -2043,8 +2056,10 @@ static void test_config_params_set_range_validation(void)
         // 20.0 (not 12.5) since max_rate_c_per_min now carries its own
         // [CONFIG_STORE_MAX_RATE_C_PER_MIN_FLOOR, _CEILING] bound (15..60) --
         // see that macro's doc comment (config_store.h) -- and this loop
-        // shares one value across every field in the table.
-        v.f32_val = 20.0f;
+        // shares one value across every field in the table, except the
+        // ct_cal gains, whose sanity band tops out at
+        // CONFIG_PARAMS_CT_CAL_GAIN_MAX (kilnlink audit 2026-10-09 L2).
+        v.f32_val = (f32_ids[i] >= 0x0310u && f32_ids[i] <= 0x0312u) ? 1.0f : 20.0f;
         TEST_CHECK(config_params_set(&rec, f32_ids[i], KILNLINK_PARAM_TYPE_F32, v),
                    "an ordinary finite value is still accepted for this F32 field");
     }
@@ -2446,6 +2461,87 @@ static void test_config_params_ct_topology_set(void)
     v.u8_val = 0u;
     TEST_CHECK(!config_params_set(&rec, 0x031Fu, KILNLINK_PARAM_TYPE_U16, v),
                "ct_topology refuses a mismatched wire type");
+}
+
+// kilnlink audit 2026-10-09 L2: a calibrated ct_cal channel with gain <= 0
+// reads 0 A and blinds S14; SET_PARAM, SET_CT_CAL (via
+// config_params_ct_cal_entry_ok()) and COMMIT_CONFIG (validate_ex) must refuse
+// it, while an uncalibrated channel's default gain 0 stays storable.
+static void test_config_params_ct_cal_gain_offset_bounds(void)
+{
+    TEST_SECTION("config_params -- ct_cal gain/offset sanity bounds (kilnlink audit L2)");
+
+    config_store_record_t rec;
+    config_store_default(&rec);
+    kilnlink_param_value_t v;
+
+    // SET_PARAM, one field at a time.
+    v.f32_val = 0.0f;
+    TEST_CHECK(config_params_set(&rec, 0x0310u, KILNLINK_PARAM_TYPE_F32, v),
+               "gain 0 is still stageable (uncalibrated default, kiln_cfg re-push)");
+    v.f32_val = -1.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0310u, KILNLINK_PARAM_TYPE_F32, v), "negative gain refused");
+    v.f32_val = CONFIG_PARAMS_CT_CAL_GAIN_MAX * 2.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0311u, KILNLINK_PARAM_TYPE_F32, v), "absurd gain refused");
+    v.f32_val = NAN;
+    TEST_CHECK(!config_params_set(&rec, 0x0312u, KILNLINK_PARAM_TYPE_F32, v), "NaN gain refused");
+    v.f32_val = 1.05f;
+    TEST_CHECK(config_params_set(&rec, 0x0312u, KILNLINK_PARAM_TYPE_F32, v), "ordinary gain accepted");
+    v.f32_val = CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A + 1.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x0313u, KILNLINK_PARAM_TYPE_F32, v), "offset above band refused");
+    v.f32_val = -(CONFIG_PARAMS_CT_CAL_OFFSET_ABS_MAX_A + 1.0f);
+    TEST_CHECK(!config_params_set(&rec, 0x0315u, KILNLINK_PARAM_TYPE_F32, v), "offset below band refused");
+    v.f32_val = -0.5f;
+    TEST_CHECK(config_params_set(&rec, 0x0314u, KILNLINK_PARAM_TYPE_F32, v), "ordinary offset accepted");
+
+    // Whole-record: the default (uncalibrated, gain 0) passes validate_ex.
+    config_store_default(&rec);
+    TEST_CHECK(config_params_validate_ex(&rec, NULL, NULL, NULL),
+               "default record (uncalibrated, gain 0) still validates");
+
+    // Calibrated with gain 0: the exact audit trigger. Refused, naming gain.
+    rec.ct_cal[1].calibrated = true;
+    rec.ct_cal[1].gain = 0.0f;
+    rec.ct_cal[1].offset = 0.0f;
+    const char *field = NULL;
+    const char *rule = NULL;
+    config_params_reject_reason_t reason = CONFIG_PARAMS_REJECT_NONE;
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, &rule, &reason),
+               "calibrated channel with gain 0 is refused at commit");
+    TEST_CHECK(reason == CONFIG_PARAMS_REJECT_RANGE, "reported as a RANGE rejection");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0311u, "names ct_cal[1].gain (0x0311)");
+
+    rec.ct_cal[1].gain = 1.0f;
+    TEST_CHECK(config_params_validate_ex(&rec, NULL, NULL, NULL), "calibrated with gain 1.0 validates");
+    rec.ct_cal[1].offset = 75.0f;
+    field = NULL;
+    TEST_CHECK(!config_params_validate_ex(&rec, &field, NULL, NULL), "calibrated with absurd offset refused");
+    TEST_CHECK(config_params_id_for_field_name(field) == 0x0314u, "names ct_cal[1].offset (0x0314)");
+
+    // Load-time validate_ranges deliberately does NOT reject a legacy bad
+    // ct_cal: that would discard the whole record (see config_params.c).
+    config_store_default(&rec);
+    rec.ct_cal[0].calibrated = true;
+    rec.ct_cal[0].gain = 0.0f;
+    TEST_CHECK(config_params_validate_ranges(&rec, NULL, NULL, NULL),
+               "load-time range check keeps the record (no whole-record discard)");
+
+    // The SET_CT_CAL helper.
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, 0.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL calibrated gain 0 refused");
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, -2.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL calibrated negative gain refused");
+    TEST_CHECK(!config_params_ct_cal_entry_ok(false, -2.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL uncalibrated negative gain refused");
+    TEST_CHECK(config_params_ct_cal_entry_ok(false, 0.0f, 0.0f, NULL, NULL, NULL),
+               "SET_CT_CAL uncalibrated zero entry accepted");
+    TEST_CHECK(config_params_ct_cal_entry_ok(true, 0.98f, -0.2f, NULL, NULL, NULL),
+               "SET_CT_CAL ordinary calibrated entry accepted");
+    bool gain_bad = true;
+    bool offset_bad = false;
+    TEST_CHECK(!config_params_ct_cal_entry_ok(true, 1.0f, INFINITY, &gain_bad, &offset_bad, NULL),
+               "SET_CT_CAL infinite offset refused");
+    TEST_CHECK(!gain_bad && offset_bad, "infinite offset reported as the offset field");
 }
 
 static void test_config_params_finalize_i_present_a(void)
@@ -3277,8 +3373,112 @@ static void test_tc_type_voltage_mode_clamp_v1_migration(void)
     TEST_CHECK(out.tc_type == 0x03u, "real v1 tc_type passes through the clamp unchanged");
 }
 
+// SaftyFW guard review 2026-10-09, F2: |tc_offset_c| is bounded.
+static void test_tc_offset_magnitude_bound(void)
+{
+    TEST_SECTION("tc_offset_c -- magnitude bounded at SET_PARAM time and at load/validate time");
+    config_store_record_t rec;
+    kilnlink_param_value_t v;
+    config_store_default(&rec);
+    v.f32_val = -4.25f;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "a real few-degree correction is accepted");
+    v.f32_val = -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "exactly -bound is accepted (inclusive)");
+    v.f32_val = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C;
+    TEST_CHECK(config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "exactly +bound is accepted (inclusive)");
+    config_store_default(&rec);
+    v.f32_val = -400.0f;
+    TEST_CHECK(!config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "-400 C offset is refused at SET_PARAM");
+    TEST_CHECK(rec.tc_offset_c == 0.0f, "rec untouched by the refused write");
+    v.f32_val = CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C + 0.5f;
+    TEST_CHECK(!config_params_set(&rec, 0x010Au, KILNLINK_PARAM_TYPE_F32, v), "just above +bound is refused");
+
+    // Load/validate-time half: a record that bypassed SET_PARAM.
+    config_store_default(&rec);
+    rec.tc_offset_c = -4.25f;
+    const char *field = NULL, *rule = NULL; config_params_reject_reason_t reason;
+    TEST_CHECK(config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -4.25 C offset still validates");
+    rec.tc_offset_c = -400.0f;
+    TEST_CHECK(!config_params_validate_ranges(&rec, &field, &rule, &reason), "stored -400 C offset fails validation");
+}
+
+// 2026-10-09 guard-fixes review LOW-1: a stored record whose tc_offset_c is
+// beyond the +/-50 C write bound must load (clamped), not fall back to
+// defaults and lose abs_max_temp_c. NaN is still refused.
+static void test_unpack_clamps_out_of_bound_tc_offset(void)
+{
+    TEST_SECTION("config_store_unpack -- stored tc_offset_c beyond the write bound is clamped, not rejected (LOW-1)");
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.abs_max_temp_c = 1300.0f;
+    rec.fields_set |= CONFIG_STORE_SET_ABS_MAX_TEMP_C;
+    uint8_t record[CONFIG_STORE_RECORD_LEN];
+    config_store_record_t back;
+
+    rec.tc_offset_c = 80.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "record with tc_offset_c=+80 still loads");
+    TEST_CHECK(back.tc_offset_c == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "+80 clamps to +bound");
+    TEST_CHECK(back.abs_max_temp_c == 1300.0f, "abs_max_temp_c survives (no fall back to defaults)");
+
+    rec.tc_offset_c = -80.0f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back), "record with tc_offset_c=-80 still loads");
+    TEST_CHECK(back.tc_offset_c == -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "-80 clamps to -bound");
+
+    rec.tc_offset_c = 12.5f;
+    config_store_pack(&rec, record);
+    TEST_CHECK(config_store_unpack(record, &back) && back.tc_offset_c == 12.5f, "in-bound offset untouched");
+
+    { const uint32_t nan_bits = 0x7FC00000u; memcpy(&rec.tc_offset_c, &nan_bits, sizeof nan_bits); }
+    config_store_pack(&rec, record);
+    TEST_CHECK(!config_store_unpack(record, &back), "NaN offset still refused");
+}
+// Review LOW-C/LOW-A: the clamp must also run on the v2 migration branch
+// (the v1 branch cannot carry an offset: v1 has no tc_offset_c field and
+// migrates from defaults, so its clamp call is a documented no-op backstop),
+// and a clamp must be REPORTED through out_reject, never silent.
+static void test_unpack_clamps_tc_offset_on_v2_migration_and_reports(void)
+{
+    TEST_SECTION("config_store_unpack_ex -- v2 migration clamps tc_offset_c and reports it (LOW-A, LOW-C)");
+    uint8_t blob[CONFIG_STORE_RECORD_LEN];
+    memcpy(blob, FROZEN_V2_BLOB, sizeof blob);
+    const size_t off = 230u; // v2 tc_offset_c (v3 offset 232 minus the 2-byte fields_set widening)
+    float v = 80.0f;
+    memcpy(&blob[off], &v, sizeof v);
+    uint32_t crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    config_store_record_t back;
+    config_store_reject_info_t info;
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info), "v2 record with tc_offset_c=+80 still loads");
+    TEST_CHECK(back.tc_offset_c == CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C, "v2 +80 clamps to +bound");
+    TEST_CHECK(info.tc_offset_clamped && info.tc_offset_stored_c == 80.0f && !info.rejected,
+               "clamp is reported (tc_offset_clamped + original value), not a rejection");
+    v = -80.0f;
+    memcpy(&blob[off], &v, sizeof v);
+    crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info) && back.tc_offset_c == -CONFIG_PARAMS_TC_OFFSET_ABS_MAX_C,
+               "v2 -80 clamps to -bound");
+    v = 12.5f;
+    memcpy(&blob[off], &v, sizeof v);
+    crc = bootloader_crc32(blob, 504u);
+    memcpy(&blob[504], &crc, sizeof crc);
+    TEST_CHECK(config_store_unpack_ex(blob, &back, &info) && back.tc_offset_c == 12.5f && !info.tc_offset_clamped,
+               "v2 in-bound offset untouched and not reported");
+
+    // current-format path reports too
+    config_store_record_t rec;
+    config_store_default(&rec);
+    rec.tc_offset_c = 80.0f;
+    uint8_t cur[CONFIG_STORE_RECORD_LEN];
+    config_store_pack(&rec, cur);
+    TEST_CHECK(config_store_unpack_ex(cur, &back, &info) && info.tc_offset_clamped && info.tc_offset_stored_c == 80.0f,
+               "current-format clamp is reported");
+}
 void run_test_config_store(void)
 {
+    test_tc_offset_magnitude_bound();
     test_pack_unpack_roundtrip();
     test_unpack_hostile();
     test_default();
@@ -3326,10 +3526,13 @@ void run_test_config_store(void)
     test_config_params_ct_channel_map_two_of_three();
     test_ct_topology_legacy_decode();
     test_config_params_ct_topology_set();
+    test_config_params_ct_cal_gain_offset_bounds();
     test_config_params_finalize_i_present_a();
     test_config_params_finalize_i_normal_a_invalidation();
     test_config_params_all_required_set();
     test_config_params_get_config_page_roundtrip();
     test_config_params_is_set_through_get_config_page();
     test_config_params_commit_refused_while_armed();
+    test_unpack_clamps_out_of_bound_tc_offset();
+    test_unpack_clamps_tc_offset_on_v2_migration_and_reports();
 }

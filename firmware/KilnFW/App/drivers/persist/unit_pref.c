@@ -6,6 +6,7 @@
 #include "hal_kv.h"
 #include "nvs_key_check.h"
 #include "pref_cfg_fs.h"
+#include "cfg_save_lock.h"
 
 static const char *TAG = "unit_pref";
 
@@ -17,7 +18,7 @@ static const char *TAG = "unit_pref";
 #define KILN_NVS_PARTITION "kiln_nvs"
 #define NVS_NAMESPACE      "kiln_cfg"
 #define NVS_KEY_UNIT_PREF  "unit_pref"
-// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA_PLAN.md
+// rev counter for the cfg-filesystem dual-write below (docs/FILESYSTEM_USER_DATA.md
 // section 5 step 3) -- a SEPARATE key, same pattern zones_config_cfg_fs.c's
 // "zones_rev" key uses rather than a field on the value itself, so the rev
 // survives independently of whatever shape unit_pref_t ever takes.
@@ -27,7 +28,7 @@ NVS_KEY_LEN_CHECK(NVS_NAMESPACE);
 NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF);
 NVS_KEY_LEN_CHECK(NVS_KEY_UNIT_PREF_REV);
 
-// docs/FILESYSTEM_USER_DATA_PLAN.md section 5 step 3 (prefs move): the file
+// docs/FILESYSTEM_USER_DATA.md section 5 step 3 (prefs move): the file
 // this preference dual-writes to on the `cfg` LittleFS partition, once
 // mounted -- see pref_cfg_fs.h for the read-through/dual-write/tie-break
 // policy this module hands its NVS candidate to.
@@ -139,17 +140,31 @@ unit_pref_t unit_pref_get(void)
     return s_unit_pref;
 }
 
+/* Callers: httpd, LCD task, UART bridge task -- rev read + commit + bump is one section. */
+static cfg_save_lock_t s_save_lock = CFG_SAVE_LOCK_INIT;
+
 esp_err_t unit_pref_set(unit_pref_t pref)
 {
+    return unit_pref_set_ex(pref, NULL);
+}
+
+esp_err_t unit_pref_set_ex(unit_pref_t pref, bool *out_adopted)
+{
+    if (out_adopted) {
+        *out_adopted = false;
+    }
     if (pref != UNIT_PREF_CELSIUS && pref != UNIT_PREF_FAHRENHEIT) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Live immediately -- the very next LCD redraw tick and the next
-    // GET /api/status both need to see this, whether or not the NVS write
-    // below succeeds (same "in-RAM truth first" reasoning zones_http.c's
-    // zones_config_set_pid()/set_model() use).
-    s_unit_pref = pref;
+    // Persist first, publish to RAM only on success (HTTP_INPUT_PARSING_AUDIT L12):
+    // a failed save leaves the live value, and every reader, unchanged. The whole
+    // commit + publish + rev bump is one section under the save lock (MED-3).
+    cfg_save_lock_take(&s_save_lock);
+    if (cfg_save_lock_reset_refused()) { /* factory reset in flight: nothing may persist, RAM stays as is */
+        cfg_save_lock_give(&s_save_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
     uint32_t new_rev = s_unit_pref_rev + 1;
     uint8_t raw = (uint8_t)pref;
 
@@ -159,7 +174,31 @@ esp_err_t unit_pref_set(unit_pref_t pref)
     // reads the file back), so a retry reuses the same next rev.
     esp_err_t err = pref_cfg_fs_commit(UNIT_PREF_FILE_PATH, &raw, sizeof(raw), new_rev, "unit preference");
     if (err == ESP_OK) {
+        s_unit_pref = pref;
         s_unit_pref_rev = new_rev;
+    } else {
+        // Review LOW: the write may have landed (rename done) while its read-back failed, so the
+        // file could already hold the NEW value at new_rev -- which would win over RAM after a
+        // reboot. Choice: re-read the file and adopt what it holds when it carries exactly new_rev,
+        // so RAM and file agree. The failure is still reported (err) so the caller knows the save
+        // was not verified; a file that still holds the old value leaves RAM untouched (L12).
+        uint8_t f_raw = 0;
+        uint32_t f_rev = 0;
+        bool f_valid = false;
+        pref_cfg_fs_load_raw(UNIT_PREF_FILE_PATH, sizeof(f_raw), unit_pref_validate, &f_raw, &f_rev, &f_valid);
+        if (f_valid && f_rev == new_rev) {
+            s_unit_pref = (unit_pref_t)f_raw;
+            s_unit_pref_rev = f_rev;
+            if (out_adopted) {
+                *out_adopted = true;
+            }
+            ESP_LOGW(TAG, "unit preference save reported %s but the file holds the new value (rev %lu) -- RAM "
+                          "adopts it so a reboot cannot flip the live value",
+                     esp_err_to_name(err), (unsigned long)f_rev);
+        }
+    }
+    cfg_save_lock_give(&s_save_lock);
+    if (err == ESP_OK) {
         ESP_LOGI(TAG, "unit preference saved: %s", pref == UNIT_PREF_FAHRENHEIT ? "Fahrenheit" : "Celsius");
     }
     return err;

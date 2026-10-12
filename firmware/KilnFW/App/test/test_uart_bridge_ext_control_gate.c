@@ -3,7 +3,7 @@
 // which reach zones_config_set_pid()/set_model() and must be refused while a
 // firing or autotune run is active, same as the HTTP side
 // (zones_http_post.c's POST /api/zones/pid) per owner decision Q2
-// (docs/SYSTEM_MODE_GATE_PLAN.md, 2026-09-25, gate-slices-2/4/5 spec).
+// (docs/SYSTEM_MODE_GATE.md, 2026-09-25, gate-slices-2/4/5 spec).
 //
 // #includes uart_bridge_ext_control.c directly (same convention as
 // test_adaptive_tune_http_gate.c/test_adaptive_tune.c) to reach its static
@@ -124,6 +124,14 @@ bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
     s_fake_zone_cfg[zone_index].kd = kd;
     return true;
 }
+zones_set_result_t zones_config_set_pid_checked(uint8_t zone_index, float kp, float ki, float kd)
+{
+    return zones_config_set_pid(zone_index, kp, ki, kd) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
+zones_set_result_t zones_config_set_model_checked(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
+{
+    return zones_config_set_model(zone_index, k_dc, tau_s, dead_time_s) ? ZONES_SET_OK : ZONES_SET_REJECTED;
+}
 // Under test (via CONTROL_CMD_SET_ZONE_MODEL).
 bool zones_config_set_model(uint8_t zone_index, float k_dc, float tau_s, float dead_time_s)
 {
@@ -171,6 +179,11 @@ esp_err_t unit_pref_set(unit_pref_t pref)
 {
     s_fake_unit_pref = pref;
     return ESP_OK;
+}
+esp_err_t unit_pref_set_ex(unit_pref_t pref, bool *out_adopted)
+{
+    if (out_adopted) *out_adopted = false;
+    return unit_pref_set(pref);
 }
 
 // ---------------------------------------------------------------------
