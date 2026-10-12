@@ -190,6 +190,6 @@ The task explicitly authorized these two builds. No other target build or `run_a
 ## Fix status
 
 - LOW-1: commit-message error only; history not rewritten, correction recorded above.
-- LOW-2: fixed in a28c7154d (comments now 6352 B / 35.0% and 7728 B / 21.6%).
-- LOW-3: fixed in a28c7154d (safety_uart_bridge 4096 -> 4608 B; check_all_task_stack_budgets reads declared 4608 from source and is OK on a fresh full target build). No negtest: a stack-size bump has no meaningful mutation.
-- INFO-4: fixed in a28c7154d (LCDFX13 names the first-row checkbuild directory).
+- LOW-2: fixed in cc0441c70 (comments now 6352 B / 35.0% and 7728 B / 21.6%).
+- LOW-3: fixed in cc0441c70 (safety_uart_bridge 4096 -> 4608 B; check_all_task_stack_budgets reads declared 4608 from source and is OK on a fresh full target build). No negtest: a stack-size bump has no meaningful mutation.
+- INFO-4: fixed in cc0441c70 (LCDFX13 names the first-row checkbuild directory).
