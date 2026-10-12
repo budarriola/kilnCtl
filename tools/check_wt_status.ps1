@@ -279,7 +279,7 @@ try {
         $gr = [WtStatusWalk]::Git($repo, "-c `"alias.zz=!$tag >/dev/null & git`" zz rev-parse HEAD")
         Assert-True ($gr.ExitCode -eq -1) "git timeout: stderr-held call must fail closed with -1, got $($gr.ExitCode)"
         Start-Sleep -Milliseconds 500
-        $left = @(Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match [regex]::Escape($tag) })
+        $left = @(Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match 'sleep(\.exe)?"?\s+47\s*$' })
         foreach ($l in $left) { try { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
         Assert-True ($left.Count -eq 0) "git timeout: $($left.Count) '$tag' grandchild(ren) survived the timeout (job kill missing)"
     }
