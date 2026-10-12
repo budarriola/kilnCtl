@@ -135,3 +135,8 @@ Web (`-Preset check -PresetArg tools/check_page_js_tests.ps1 -ExpectPattern "(?m
 
 No vacuous test found. The LCD and client-side items in LOW-1 and LOW-2 have no tests; they are new
 findings, not regressions.
+
+## Fix status
+
+- LOW-1: fixed. `ui_page_live_decide.c` shows a `SERVER_ERROR` starting "saved to slot" as-is (no "Refused:"); `err` is 160 bytes, `msg` 192.
+- LOW-2: fixed. The 409 SAVED_BUT_EDITED and the saved-then-clear-failed 500 bodies carry `"saved":true,"id":N`; `live_profile_page.html` re-reads the live view after any failed decide; both Python docstrings updated. Host test asserts the fields.

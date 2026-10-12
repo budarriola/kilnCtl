@@ -102,3 +102,8 @@ them. The guard's own refusal in an unmarked repo is still tested by
 Both changes are correct. No HIGH or MED findings. LOW-1 is a documented residual
 in an already best-effort path. The main follow-up worth doing is the cheap
 host test in INFO-2.
+
+## Fix status
+
+- LOW-1: fixed. The rollback log now says the stale cfg file WILL reappear at next boot.
+- INFO-2: done. `test_save_ex_rollback_delete_failure_logs_reappear` in `test_profiles_http.c`.

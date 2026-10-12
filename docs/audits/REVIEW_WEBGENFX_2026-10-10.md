@@ -197,3 +197,11 @@ The host run ended with negtest verdict ERROR, "REAL TREE CHANGED": this review 
 | J1: remove the Enable `reloadUnlessDirty` | LOW-3 page | CAUGHT ("adaptive-tune Enable refreshes via reloadUnlessDirty") |
 | J2: remove the Revert `reloadUnlessDirty` | LOW-3 page | CAUGHT ("adaptive-tune Revert refreshes via reloadUnlessDirty") |
 | J3: remove the zones `expected_generation` push | webfx5 page | CAUGHT ("zones save body pushes expected_generation") |
+
+## Fix status
+
+- LOW-A: not fixed in this batch (bench test restore, separate pooled item).
+- LOW-B: fixed. `ui_page_profile_builder_zones.c` captures the source slot rev at `start_edit`; the review page uses it when overwriting the edited slot; `profiles_http_save_expect_rev()` compares the rev inside the profiles save lock. Host test `test_save_expect_rev_under_lock`; the source-scan test now checks the new call.
+- LOW-C: fixed. `profiles_delete_slot` returns `PROFILES_DELETE_REV_UNKNOWN` before the favorite clear and the stats prune; the handler maps it to the 409, a real persist failure to 500. Test: favorite survives a refused rev-unknown delete.
+- Nit `live_profile.h` generation comment: fixed.
+- Test gaps H3b, H5b, H7 (parity): not done here. H8 is superseded by the LOW-B test.
