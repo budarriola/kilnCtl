@@ -208,3 +208,15 @@ Not run, for safety:
 - the `make_release.ps1:238` probe dead under the full file, because the
   `-DevDryRun` control would fetch from origin and start both target builds
 - any `web_commission_row` mutation in a tree that has a venv
+
+## Fix status (2026-10-12, testnetfx7)
+
+MED-1, LOW-1, LOW-2, INFO-1 FIXED. Static pin now requires an executable guard line, then an
+executable probe `if` with the guard's condition (NO_HUB -> GUARD_PROBE), only blanks/comments
+up to an executable anchor, guard before probe. Controls are inert (web: closed 127.0.0.1:1 and
+dummy creds; make_release: -SkipBuild and GIT_CONFIG origin URL to a nonexistent path). The
+-Publish probe prints `GUARD-PROBE-PAST-GUARD publish` and the refusal test requires each
+guard's own message. Mutations (all CAUGHT by test assertions, tree committed): hotspot probe
+commented/deleted, web probe commented/`$false -and`, publish probe commented, network probe
+commented/`$false -and`, executable line between probe and anchor, web guard condition off,
+publish :78 guard off.
