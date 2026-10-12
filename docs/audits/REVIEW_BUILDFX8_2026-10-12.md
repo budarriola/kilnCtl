@@ -274,3 +274,18 @@ PASS, `real_tree_unchanged: true` and `copies_removed: true`.
 | N10 | "restored it to" printed even when the put-back fails | CAUGHT | `test_restored_logged_only_after_put_back_succeeds`: AssertionError "'restored it to' unexpectedly found" |
 
 Totals: 8 CAUGHT by assertion, 1 CAUGHT by exception (N4), 1 MISSED (N8).
+
+## Fix status (buildfx9)
+
+Fixed on origin/dev; SHAs are the landed commits listed by `git log` for
+`tools/PcTools/src/mcpkit/buildlock.py`.
+
+- LOW-1 fixed: the leaked-lock free path checks `wait_timeout` before `continue`.
+- LOW-2 fixed: `_touch_aside` re-stamps the aside's mtime at move time, so the sweep ages it from the move; `_remove_judged` reads the lock's mtime before the re-stamp.
+- LOW-3 fixed: the no-`.rel.`-aside assertion is back; the newer-lock test asserts the aside exists with the grabbed text. N8 is now CAUGHT.
+- INFO-2 fixed: LEAKED LOCK message states the next-contention free.
+- INFO-3 fixed: `BuildLockBuildFx8` uses a temporary lock directory.
+- INFO-4 not fixed: no standard run_all_checks wiring exists for PcTools pytest files (no check runs them); `test_buildlock.py` also flakes under load (INFO-5), so wiring it is left to the owner.
+- INFO-1, INFO-5, INFO-6: no change.
+
+Negtests (`-Preset pytest`, scoped to `BuildLockReviewFixes` + `BuildLockBuildFx8`): N8, LOW-1 (timeout check removed) and LOW-2 (utime removed) all CAUGHT by a failing assertion.
