@@ -281,12 +281,129 @@ _PROBE = "GUARD-PROBE-PAST-GUARD"
 _BACKSTOP = "GUARD-PROBE-CRED-BACKSTOP"
 
 
+_TOKENIZE_PS = (
+    "$t = Get-Content -LiteralPath $env:KILNCTL_TOK_FILE -Raw -Encoding UTF8; "
+    "$e = $null; "
+    "$tk = [System.Management.Automation.PSParser]::Tokenize($t, [ref]$e); "
+    "$o = @($tk | ForEach-Object { [pscustomobject]@{ T = [string]$_.Type; C = [string]$_.Content; "
+    "S = $_.Start; L = $_.Length; N = $_.StartLine } }); "
+    "[Console]::Out.Write((ConvertTo-Json -InputObject $o -Compress))")
+_TOK_CACHE = {}
+
+
+def _tokens(text):
+    """Real PowerShell tokens (PSParser.Tokenize) of `text`: list of (type, content, start,
+    length, 1-based start line). Comments and strings are genuine tokens, so no regex can be
+    fooled by `#` inside a string or `<#` inside a line comment. Skips loudly only when
+    PowerShell is absent; any tokenizer failure is a hard test failure (fail closed)."""
+    import json, os, subprocess, tempfile
+    text = text.lstrip("﻿")
+    if text in _TOK_CACHE:
+        return _TOK_CACHE[text]
+    ps = _ps_exe()
+    if ps is None:
+        pytest.skip("needs powershell (PSParser tokenizer)")
+    fd, path = tempfile.mkstemp(suffix=".ps1.txt")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(text.encode("utf-8"))
+        r = subprocess.run([ps, "-NoProfile", "-Command", _TOKENIZE_PS], capture_output=True,
+                           text=True, encoding="utf-8", timeout=120,
+                           env={**os.environ, "KILNCTL_TOK_FILE": path})
+    finally:
+        os.unlink(path)
+    assert r.returncode == 0 and r.stdout.strip(), ("PSParser tokenizer failed", r.stderr)
+    toks = [(d["T"], d["C"], d["S"], d["L"], d["N"]) for d in json.loads(r.stdout)]
+    _TOK_CACHE[text] = toks
+    return toks
+
+
 def _exec_lines(text):
-    """Lines of a PowerShell file with <# #> block comments blanked (line numbers preserved)
-    and quotes normalised; full-line # comments are kept for callers to skip."""
+    """Lines of a PowerShell file with every Comment TOKEN (line and <# #> alike) blanked
+    (line numbers preserved) and quotes normalised."""
+    text = text.lstrip("﻿")
+    chars = list(text)
+    for typ, _c, start, length, _n in _tokens(text):
+        if typ == "Comment":
+            for i in range(start, min(start + length, len(chars))):
+                if chars[i] not in "\r\n":
+                    chars[i] = " "
+    return [l.strip().replace('"', "'") for l in "".join(chars).splitlines()]
+
+
+_GUARD_VAR = "kilnctl_test_guard_probe"
+_ENV_CMDS = {"remove-item", "ri", "rm", "del", "erase", "rd", "set-item", "si", "clear-item", "cli",
+             "new-item", "ni", "rename-item", "rni", "copy-item", "move-item", "set-content",
+             "add-content", "out-file", "clear-content", "set-itemproperty", "remove-itemproperty"}
+_EVAL_CMDS = {"invoke-expression", "iex"}
+
+
+def _env_name_hits_guard(name):
+    """True if an env var written as `name` could be KILNCTL_TEST_GUARD* (fail closed on
+    anything dynamic, wildcarded or unresolvable)."""
+    import fnmatch
+    n = name.strip("'\"").lower()
+    if not n or any(c in n for c in "$()+`{}[]"):
+        return True
+    stem = n.split("*")[0].split("?")[0]
+    return n.startswith("kilnctl_test_guard") or _GUARD_VAR.startswith(stem) or fnmatch.fnmatch(_GUARD_VAR, n)
+
+
+def _env_write_problems(text, last_line=None):
+    """Problems for any write to an env var that could be KILNCTL_TEST_GUARD*, by any form
+    (assignment, *-Item Env:, SetEnvironmentVariable, concatenated/dynamic names) or any eval
+    construct, in tokens on lines <= last_line (1-based; None = whole file)."""
     import re
-    text = re.sub(r"<#.*?#>", lambda m: "\n" * m.group().count("\n"), text, flags=re.S)
-    return [l.strip().replace('"', "'") for l in text.splitlines()]
+    toks = [t for t in _tokens(text) if t[0] != "Comment" and (last_line is None or t[4] <= last_line)]
+    probs = []
+    for i, (typ, c, _s, _l, ln) in enumerate(toks):
+        cl = c.lower()
+        if typ == "Variable" and cl.startswith("env:"):
+            nxt = toks[i + 1] if i + 1 < len(toks) else None
+            if nxt and nxt[0] == "Operator" and "=" in nxt[1] and _env_name_hits_guard(c[4:]):
+                probs.append((ln, "assignment to " + c))
+        elif typ == "Member" and cl == "setenvironmentvariable":
+            probs.append((ln, "SetEnvironmentVariable"))
+        elif typ == "Command" and cl in _EVAL_CMDS:
+            probs.append((ln, "eval command " + c))
+        elif typ == "Command" and cl in _ENV_CMDS:
+            args = []
+            for t in toks[i + 1:]:
+                if t[0] in ("NewLine", "StatementSeparator"):
+                    break
+                args.append(t[1])
+            joined = " ".join(args)
+            if re.search(r"env:|HKEY|Environment", joined, re.I):
+                m = re.search(r"env:[\\/]?([^\s,;)]*)", joined, re.I)
+                if m is None or _env_name_hits_guard(m.group(1)) or "+" in joined:
+                    probs.append((ln, c + " on Env: " + joined))
+    return probs
+
+
+def _dot_sourced(text, last_line, script_path):
+    """.ps1 files dot-sourced on lines <= last_line. Fails closed on a dot-source whose target
+    cannot be resolved to an existing file."""
+    import os
+    toks = [t for t in _tokens(text) if t[0] != "Comment" and t[4] <= last_line]
+    out = []
+    for i, (typ, c, _s, _l, ln) in enumerate(toks):
+        if typ == "Operator" and c == "." and (i == 0 or toks[i - 1][0] in ("NewLine", "StatementSeparator")):
+            line_toks = []
+            for t in toks[i + 1:]:
+                if t[0] in ("NewLine", "StatementSeparator"):
+                    break
+                line_toks.append(t)
+            names = [t[1] for t in line_toks if t[0] == "String" and t[1].lower().endswith(".ps1")]
+            found = None
+            for nm in names:
+                for d in (os.path.dirname(script_path), _repo_file("tools")):
+                    cand = os.path.join(d, os.path.basename(nm))
+                    if os.path.isfile(cand):
+                        found = cand
+                        break
+            assert found, ("dot-sourced file cannot be resolved (fail closed)", ln, line_toks)
+            out.append(found)
+    return out
 
 
 def test_nofetch_env_is_network_dead():
@@ -317,6 +434,7 @@ _HS = ("tools", "PcTools", "scripts", "bench_hotspot.ps1")
 _WEB = ("tools", "PcTools", "scripts", "web_commission_row.ps1")
 _MR = ("tools", "make_release.ps1")
 _PROBE_RC = 86
+_HS_ANCHOR = "if ($env:KILNCTL_TEST_GUARD_PROBE) {"  # the exit-87 backstop line
 _NH = "KILNCTL_TEST_NO_HUB"
 # id, script, args, refusal needle, guard line (single-quoted form), first executable line
 # after the probe, marker the probe prints, extra env
@@ -325,11 +443,11 @@ _CASES = [
      "live mode refused", "if (-not $DryRun -and $env:" + _NH + " -eq '1') {",
      "$repoRoot = Resolve-Path", _PROBE, {}),
     ("hs-start", _HS, ["-Action", "start"], "start refused", "if ($env:" + _NH + " -eq '1') {",
-     "switch ($Action)", _PROBE, {}),
+     _HS_ANCHOR, _PROBE, {}),
     ("hs-stop", _HS, ["-Action", "stop"], "stop refused", "if ($env:" + _NH + " -eq '1') {",
-     "switch ($Action)", _PROBE, {}),
+     _HS_ANCHOR, _PROBE, {}),
     ("hs-status", _HS, ["-Action", "status"], "status refused", "if ($env:" + _NH + " -eq '1') {",
-     "switch ($Action)", _PROBE, {}),
+     _HS_ANCHOR, _PROBE, {}),
     ("publish", _MR, ["-Tag", "v0.0.0-test.1", "-Publish", "-SkipBuild"], "-Publish refused",
      "if ($Publish -and $env:" + _NH + " -eq '1') {", "function Get-ReleaseApiHeaders",
      _PROBE + " publish", _NOFETCH_ENV),
@@ -368,7 +486,7 @@ def test_user_scope_credential_scripts_refuse_under_test_env(cid, script_parts, 
 def test_guard_probe_reaches_past_guard_without_no_hub(cid, script_parts, args, needle, guard, anchor, marker, xenv):
     """Control for the refusal test: with the guard condition off, each invocation reaches ITS
     OWN probe (site marker on stderr, exit 86, never 0). Inputs are inert even if a probe is
-    dead: closed localhost port + dummy credentials, -SkipBuild, unreachable origin."""
+    dead: closed localhost port, no credentials (the web script's backstop stops it), -SkipBuild, unreachable origin."""
     import subprocess, os
     env = {k: v for k, v in os.environ.items() if k != _NH}
     env.update(xenv)
@@ -402,6 +520,14 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
     assert gs[0] < pn, ("guard must precede probe", gs[0], pn)
     # testnetfx7 LOW-1: guard..probe holds only the refusal body and its closing brace; no
     # disarm of the probe variable and no network command in that executable span.
+    # testnetfx9 LOW-1: token-based; no disarm of KILNCTL_TEST_GUARD* by ANY form before the
+    # probe, including in files dot-sourced before it.
+    probs = _env_write_problems(text, pn + 1)
+    assert not probs, ("env write before the probe", probs)
+    for dep in _dot_sourced(text, pn + 1, _repo_file(*script_parts)):
+        with open(dep, encoding="utf-8") as dfh:
+            dprobs = _env_write_problems(dfh.read())
+        assert not dprobs, ("env write in dot-sourced file before the probe", dep, dprobs)
     span = [(n, norm[n]) for n in range(gs[0] + 1, pn) if norm[n] and not norm[n].startswith("#")]
     assert span and span[-1][1] == "}", ("guard block must close with } right before the probe", span)
     bad = re.compile(r"GUARD_PROBE|Remove-Item|Set-Item|Clear-Item|\bgit\b|ls-remote|\bfetch\b|\bpush\b|"
@@ -419,18 +545,25 @@ def test_guard_probe_precedes_real_action(cid, script_parts, args, needle, guard
         assert norm[n] == "" or norm[n].startswith("#"), ("executable line between probe and anchor", lines[n])
 
 
-def test_web_credential_backstop_precedes_credential_load():
-    """testnetfx7 LOW-3: web_commission_row.ps1 refuses (exit 87) while the test probe variable
-    is set, as one executable line BEFORE the first credential read."""
-    with open(_repo_file(*_WEB), encoding="utf-8") as fh:
+@pytest.mark.parametrize("script_parts,actions", [
+    (_WEB, ["GetEnvironmentVariable"]),
+    (_HS, ["GetEnvironmentVariable", "switch ($Action)", "TetheringManager"]),
+], ids=["web", "hotspot"])
+def test_credential_backstop_precedes_credential_load(script_parts, actions):
+    """testnetfx7 LOW-3 / testnetfx9 LOW-2: the script refuses (exit 87) while the test probe
+    variable is set, as one executable line AFTER the probe and BEFORE the first credential
+    read, tethering call or action dispatch."""
+    with open(_repo_file(*script_parts), encoding="utf-8") as fh:
         norm = _exec_lines(fh.read())
     want = ("if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('" + _BACKSTOP + "'); exit 87 }")
     bs = [n for n, l in enumerate(norm) if l == want]
     assert len(bs) == 1, ("backstop must appear exactly once as an executable line", bs)
-    creds = [n for n, l in enumerate(norm) if "GetEnvironmentVariable" in l and not l.startswith("#")]
-    assert creds and bs[0] < min(creds), (bs, creds)
-    for n in range(bs[0] + 1, min(creds)):
-        assert norm[n] == "" or norm[n].startswith("#"), norm[n]
+    probe = [n for n, l in enumerate(norm) if _PROBE in l and "exit 86" in l]
+    assert probe and probe[-1] < bs[0], ("backstop must follow the probe", probe, bs)
+    acts = [n for n, l in enumerate(norm) if any(a in l for a in actions) and n > probe[-1]]
+    assert acts and bs[0] < min(acts), (bs, acts)
+    for n in range(bs[0] + 1, min(acts)):
+        assert norm[n] == "", norm[n]
 
 
 def test_settings_override_prints_notice():

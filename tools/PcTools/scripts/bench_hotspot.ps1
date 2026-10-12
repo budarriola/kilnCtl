@@ -93,6 +93,9 @@ if ($env:KILNCTL_TEST_NO_HUB -eq '1') {
     exit 3
 }
 if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
+# Backstop (testnetfx9 LOW-2): never read credentials or touch tethering while the test probe is set,
+# even if the probe above regressed.
+if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('GUARD-PROBE-CRED-BACKSTOP'); exit 87 }
 
 switch ($Action) {
     'start' {
