@@ -703,6 +703,17 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     out->trip_event_age_ms =
         out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
     out->diag_frame_age_ms = out->diag_ever_received ? (uint32_t)(uart_proto_rx_stamp_ms(xTaskGetTickCount()) - link->diag_tick) : 0u;
+    /* REBOOTFX7 LOW-1: the raw 32-bit ms difference wraps after 2^32 ms (49.7 days) with the link up and no DIAG,
+     * which would read a 49.7-day-old DIAG as fresh. Latch staleness once seen (cleared only by the next DIAG
+     * apply) and never report a fresh age while latched: fail closed. */
+    if (out->diag_ever_received) {
+        if (out->diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS) {
+            link->diag_stale_latched = true;
+        }
+        if (link->diag_stale_latched && out->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS) {
+            out->diag_frame_age_ms = UINT32_MAX;
+        }
+    }
     safety_unlock(link);
     return ESP_OK;
 }

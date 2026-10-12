@@ -1452,6 +1452,13 @@ try {
 
     Invoke-HostTestExe -Name "uart_protocol_link_delegate" -ExePath $exe9 -BuildCmd $cmd9
 
+    # REBOOTFX7 LOW-2: same TU with a 10 ms tick period, running only the uart_proto_message_make() rx_ms units test.
+    $exe9t = Join-Path $outDir "kilnctl_host_tests_uart_protocol_tick10.exe"
+    $linkObjDirT = Join-Path $outDir "link_tick10"
+    New-Item -ItemType Directory -Force -Path $linkObjDirT | Out-Null
+    $cmd9t = $cmd9.Replace("/Fo:`"$linkObjDir\`"", "/Fo:`"$linkObjDirT\`"").Replace("/Fe:`"$exe9`"", "/Fe:`"$exe9t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    Invoke-HostTestExe -Name "uart_protocol_tick10" -ExePath $exe9t -BuildCmd $cmd9t
+
     # ---- test_board_temps.c: its own TENTH, separate executable --------------
     # Same reason as test_zones_http.c above: it #includes board_temps.c
     # directly to reach board_temps_get() (the pure half of that file, no other
@@ -3595,7 +3602,8 @@ try {
     # 95 -> 98: test_cfg_fs_format_http.c, test_setup_progress_http.c, test_dashboard_settings_http.c (round 3)
     # 98 -> 99: test_main_reset_fence.c (REVIEW_DEVBREAKFX6 MED-1)
     # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
-    $totalExpected = 100
+    # 100 -> 101: uart_protocol_tick10 (REBOOTFX7 LOW-2)
+    $totalExpected = 101
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
