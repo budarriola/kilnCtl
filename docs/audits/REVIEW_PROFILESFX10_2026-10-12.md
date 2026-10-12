@@ -145,7 +145,7 @@ were not mutated separately. They are covered by the same `test_profile_routes_u
 
 ## Fixed (PROFILESFX11)
 
-Fixed in 4f9f65224 (pre-rebase SHA; see the landed SHA in the landing commit):
+Fixed in 92ca60e9d (test tweak d6855f7d2):
 
 - MED-1: `profile_post_handler` refuses a rev-unknown target before the RAM copy (same 409 profile text); its free-slot search skips rev-unknown slots.
 - INFO-2: every first-free allocation (`profiles_http_slot_used_cb`, backup pass-1 simulation, POST handler) skips rev-unknown slots.
