@@ -93,6 +93,7 @@ void fr_reset(void)
     g_fr_flash_write_fail = false;
     g_fr_flash_write_block = false;
     g_fr_wr_wait_after_wedge = 0;
+    g_fr_sem_idle_waiters = 0;
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
     if (s_flash_ev == NULL) {
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -304,15 +305,16 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
         }
         // Scaled writer-timeout wait: the (shrunk) clock starts only once a writer thread is parked in
         // flash, so a descheduled writer under load is not declared wedged early. Polls in 1 ms slices
-        // so a semaphore given meanwhile still returns at once; unscaled fallback after 15 s.
+        // so a semaphore given meanwhile still returns at once; wall-clock fallback after 15 s (inside the tests' 30 s ceiling).
         DWORD budget = (DWORD)(ticks / (TickType_t)g_fr_time_div);
-        DWORD waited = 0, started = 0;
+        DWORD started = 0;
+        const ULONGLONG t_start = GetTickCount64(); // wall-clock fallback (not iteration-counted: starved polls are slow)
         bool running = false;
         for (;;) {
             if (WaitForSingleObject((HANDLE)s, 1) == WAIT_OBJECT_0) {
                 return pdTRUE;
             }
-            if (!running && (g_fr_flash_blocked_n >= 1 || ++waited > 15000)) {
+            if (!running && (g_fr_flash_blocked_n >= 1 || GetTickCount64() - t_start >= 15000)) {
                 running = true;
             }
             if (running && ++started >= budget) {

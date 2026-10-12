@@ -159,5 +159,7 @@ handshake-less version catches it (A3).
 
 | Finding | Status |
 |---|---|
-| LOW-1 | OPEN (comment-only) |
-| INFO-1..6 | no action required |
+| LOW-1 | FIXED (stale line removed; the following comment already says the writer parks) |
+| INFO-1 | FIXED (counter reset in `fr_reset()`; snapshot-based hardening not done) |
+| INFO-2 | FIXED (fallback is wall-clock `GetTickCount64()`, 15 s, inside the 30 s ceiling) |
+| INFO-3..6 | no action required |

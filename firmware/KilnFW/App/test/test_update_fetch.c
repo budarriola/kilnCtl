@@ -515,7 +515,6 @@ static void test_writer_wedge(void)
     CHECK(stage_phase() == UPDATE_STAGE_IDLE, "abandoned op aborted its own upload (stage back to idle)");
     CHECK(!stage_staged(), "abandoned op left no valid stage");
     CHECK(update_fetch_writer_wedged(), "wedge itself is permanent until reboot");
-    // the released writer must have exited before the semaphore check (no fixed sleep)
     // handshake: the released writer finished its abandoned op (final give included) and is back parked in its
     // idle command wait (unbounded take), so nothing it does later can race the check below
     WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
