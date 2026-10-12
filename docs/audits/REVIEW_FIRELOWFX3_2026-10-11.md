@@ -229,4 +229,5 @@ The `cur_len > sizeof(*bm) &&` test duplicates the first clause of
 | INFO-6 | PARTLY | boot log line reworded ("favorites unresolved (the next favorite POST retries the read)"); no API exists to withdraw the startup fault note, not added. |
 | INFO-2,3,5,7 | no action | |
 
-Negtests (`tools\negtest.ps1 -Preset kilnfw-host`): see the commit message / handoff report.
+Negtests (`tools
+egtest.ps1 -Preset kilnfw-host`, all CAUGHT): favorites POST back to the generic 409 text (LOW-1, test lines 2209-2213); builtin mask re-read starting from 0 instead of the published value (LOW-2, :2188); `profiles_used_bitmap` back in the degraded registry (LOW-5, :2130-2131).
