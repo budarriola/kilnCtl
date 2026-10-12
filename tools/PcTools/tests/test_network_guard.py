@@ -450,3 +450,18 @@ def test_guard_refuses_asyncio_connections(host, port, _no_outbound_network):
         asyncio.run(go())
     assert len(_no_outbound_network) == 1, _no_outbound_network
     _no_outbound_network.clear()
+
+
+@pytest.mark.parametrize("host,port", [("127.0.0.1", 8767), ("192.0.2.1", 80)])
+def test_guard_refuses_selector_loop_connections(host, port, _no_outbound_network):
+    """oldpoolb MED-1: the selector loop's sock_connect (the non-Windows default) is guarded
+    too. Refused targets only."""
+    import asyncio
+    loop = asyncio.SelectorEventLoop()
+    try:
+        with pytest.raises(NetworkGuardError):
+            loop.run_until_complete(loop.create_connection(asyncio.Protocol, host, port))
+    finally:
+        loop.close()
+    assert len(_no_outbound_network) == 1, _no_outbound_network
+    _no_outbound_network.clear()
