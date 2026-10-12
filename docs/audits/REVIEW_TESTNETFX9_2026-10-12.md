@@ -23,6 +23,8 @@ Neither LOW is a live leak today: no current script contains a disarm.
 
 ### LOW-1: env-write pin is a deny-list; nine verified one-line disarms still pass
 
+**FIXED in 4c44501df (testnetfx10).** The web and hotspot guards are now the first statements after `param()` (structurally pinned); everything that can execute before any probe must match a token allow-list (commands, members, types, call operators, the one resolved lib dot-source, bodies of the three called functions); all 13 MISSED mutants are CAUGHT.
+
 `tools/PcTools/tests/test_network_guard.py:335` (`_ENV_CMDS`), `:352`
 (`_env_write_problems`), `:383` (`_dot_sourced`), `:537-541` ("elsewhere"
 check).
@@ -98,6 +100,8 @@ which have nothing before it. Then pin "no executable token between
 
 ### LOW-2: tokenizer skip-if-absent applies on Windows too
 
+**FIXED in 4c44501df (testnetfx10).** `_ps_exe()` resolves `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe` on win32 and the tests fail (not skip) when it is missing; skip only off Windows.
+
 `test_network_guard.py:303-305`: `_tokens` calls
 `pytest.skip("needs powershell (PSParser tokenizer)")` when
 `shutil.which("powershell")` and `shutil.which("pwsh")` both return None.
@@ -153,12 +157,16 @@ to `d8157efb6`. Neither commit is on any remote branch
 
 ### INFO-3: code comments cite "testnetfx9 LOW-1/LOW-2" for TESTNETFX8 findings
 
+**FIXED in 4c44501df (testnetfx10).** Comments now read testnetfx8.
+
 The new comments in `bench_hotspot.ps1:96`, `test_network_guard.py:523` and
 `:553` label the fix as `testnetfx9 LOW-1` and `LOW-2`. The findings are
 TESTNETFX8 LOW-1/LOW-2; this doc's LOW-1/LOW-2 are different findings.
 Cosmetic. Rename to `testnetfx8` on the next touch.
 
 ### INFO-4: smaller notes on the token pin
+
+**FIXED in 4c44501df (testnetfx10)** for the tokenizer error list: `_tokens` now asserts no parse errors. The basename-resolution note is superseded: the dot-source must be `. (Join-Path $PSScriptRoot "x.ps1")` in the script's own directory.
 
 - `_tokens` discards the PSParser error list (`$e`). A file with a parse
   error does not run at all under `-File`, so this is not a bypass. Asserting
