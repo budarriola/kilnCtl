@@ -77,6 +77,10 @@ if ($FetchTimeoutSec -le 0) {
     Write-Host "ERROR: -FetchTimeoutSec must be > 0 (got $FetchTimeoutSec)." -ForegroundColor Red
     exit 2
 }
+if ($FetchTimeoutSec -gt 2000000) {   # x1000 must fit the int ms argument (review INFO-4)
+    Write-Host "ERROR: -FetchTimeoutSec must be <= 2000000 (got $FetchTimeoutSec)." -ForegroundColor Red
+    exit 2
+}
 
 $repoRoot = Get-RepoRoot
 
@@ -197,11 +201,11 @@ try {
     $gitExe = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     if ($assignDelay -gt 0) { Write-Host "push_verify: TEST HOOK assign delay ${assignDelay} ms" }
     $jobAssigned = $false
-    $useJob = ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1')  # env hook: check_push_verify forces the no-job fallback
+    $useJob = ($fetchJob -ne [IntPtr]::Zero -and -not ($env:PUSH_VERIFY_TEST_MODE -eq '1' -and $env:PUSH_VERIFY_TEST_NO_JOB -eq '1'))  # env hook: check_push_verify forces the no-job fallback; honored only with PUSH_VERIFY_TEST_MODE=1 (LOW-4)
     # Created suspended, assigned to the job, then resumed (M1). Assign result is checked: if the job cannot hold the process, a timeout falls back to the snapshot walk.
     $fetchPid = 0
     $fetchH = [PvJob]::Launch($gitExe, $fetchCmd, $outTmp, $errTmp, $(if ($useJob) { $fetchJob } else { [IntPtr]::Zero }), $assignDelay, [ref]$jobAssigned, [ref]$fetchPid)
-    # test seam: let git exit before the first read (MED-1 regression case)
+    # test seam: let git exit before the first read. This is the ONLY lever the MED-1 regression case has; do not remove as dead code.
     if ($env:PUSH_VERIFY_TEST_MODE -eq '1' -and $env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS -match '^\d{1,4}$') { Start-Sleep -Milliseconds ([int]$env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS) }
     if (-not [PvJob]::WaitExit($fetchH, $FetchTimeoutSec * 1000)) {
         if ($jobAssigned) { [PvJob]::Kill($fetchJob) }

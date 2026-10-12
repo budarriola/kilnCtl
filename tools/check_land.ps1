@@ -228,24 +228,55 @@ try {
     Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote') "remote rejection fails with its message"
     Assert ($rebases -le 1) "no retry loop on remote rejection (rebases: $rebases)"
 
-    Write-Host "case: cannot lock ref race is retried, not a hard refusal"
+    # MED-1: a REAL ref race. The pre-receive hook (quarantine env unset so its objects persist) advances refs/heads/dev
+    # with a new commit under the push, so receive-pack itself rejects with its own "incorrect old value provided".
+    function Race-Hook([string]$cond) {
+        $lines = @('#!/bin/sh',
+            'unset GIT_QUARANTINE_PATH GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES',
+            $cond,
+            'cur=$(git rev-parse refs/heads/dev)',
+            'n=$(git commit-tree -p "$cur" -m racer "$cur^{tree}")',
+            'git update-ref refs/heads/dev "$n" "$cur"',
+            'exit 0')
+        return ($lines -join "`n") + "`n"
+    }
+
+    Write-Host "case: REAL ref race (incorrect old value provided) is retried, not a hard refusal"
     $c = New-Clone "c_lockref"
     Commit-File $c "lockref.txt" "x" "lockref"
     $lm = (Join-Path $tmp "lockref.marker") -replace '\\','/'
     $hook = Join-Path $origin "hooks/pre-receive"
-    [IO.File]::WriteAllText($hook, "#!/bin/sh`nif [ ! -f '$lm' ]; then touch '$lm'; echo `"error: cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb`" >&2; exit 1; fi`nexit 0`n")
+    [IO.File]::WriteAllText($hook, (Race-Hook "if [ -f '$lm' ]; then exit 0; fi; touch '$lm'"))
     try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
-    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after cannot-lock-ref retry"
-    Assert ($rebases -eq 2) "rebased twice after ref-lock race (got $rebases)"
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after real-race retry"
+    Assert ($rebases -eq 2) "rebased twice after real ref race (got $rebases)"
 
-    Write-Host "case: persistent ref-lock race ends with git's last output in the error"
+    Write-Host "case: persistent REAL race ends with git's last output in the error"
     $c = New-Clone "c_lkpersist"
     Commit-File $c "lkp.txt" "x" "lkp"
-    $hook = Join-Path $origin "hooks/pre-receive"
-    [IO.File]::WriteAllText($hook, "#!/bin/sh`necho `"error: cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb`" >&2`nexit 1`n")
+    [IO.File]::WriteAllText($hook, (Race-Hook "true"))
     try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
-    Assert ($r.Code -eq 1 -and $r.Out -match 'still rejected after' -and $r.Out -match 'is at aaaa but expected bbbb') "persistent race: final error keeps the git output"
+    Assert ($r.Code -eq 1 -and $r.Out -match 'still rejected after' -and $r.Out -match 'incorrect old value provided') "persistent race: final error keeps the git output"
+
+    Write-Host "case: Get-PushRejectVerdict classification (porcelain status lines only)"
+    $fnText = [regex]::Match([IO.File]::ReadAllText($land), '(?ms)^function Get-PushRejectVerdict.*?^\}').Value
+    Assert ($fnText.Length -gt 50) "found Get-PushRejectVerdict in land.ps1"
+    . ([scriptblock]::Create($fnText))
+    $h40a = 'a' * 40; $h40b = 'b1' * 20
+    $verdictCases = @(
+        @{ n = 'modern git incorrect old value'; o = "To x`n!`tHEAD:refs/heads/dev`t[remote rejected] (incorrect old value provided)`nDone`n"; v = 'race' },
+        @{ n = 'GitHub form 40-hex'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': is at $h40a but expected $h40b)`n"; v = 'race' },
+        @{ n = 'fetch first'; o = "!`tHEAD:refs/heads/dev`t[rejected] (fetch first)`n"; v = 'race' },
+        @{ n = 'non-fast-forward'; o = "!`tHEAD:refs/heads/dev`t[rejected] (non-fast-forward)`n"; v = 'race' },
+        @{ n = 'hook declined'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
+        @{ n = 'protected branch'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (protected branch hook declined)`n"; v = 'refused' },
+        @{ n = 'stale lock file exists'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': Unable to create dev.lock: File exists)`n"; v = 'refused' },
+        @{ n = 'prose in remote: line only'; o = "remote: policy says error: cannot lock ref 'x': is at $h40a but expected $h40b`nremote: (incorrect old value provided)`n!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
+        @{ n = 'prose with no status line'; o = "error: cannot lock ref 'refs/heads/dev': is at $h40a but expected $h40b`nfatal: the remote end hung up`n"; v = 'other' },
+        @{ n = 'status-looking prose without the porcelain prefix'; o = "remote: [remote rejected] (incorrect old value provided)`n"; v = 'other' },
+        @{ n = 'short sha is not git form'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb)`n"; v = 'refused' })
+    foreach ($vc in $verdictCases) { Assert ((Get-PushRejectVerdict $vc.o) -eq $vc.v) "verdict $($vc.n) -> $($vc.v)" }
 
     # LOW-1: a genuine refusal whose free text mentions the race phrases, or a lock that never clears, is NOT a race.
     foreach ($variant in @(

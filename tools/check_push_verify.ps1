@@ -78,24 +78,108 @@ try {
     Assert (-not $sacB.WaitForExit(1000)) "S2: process whose StartTime differs from the snapshot is NOT killed by bare PID"
 } finally { foreach ($sp in @($sacA, $sacB)) { try { if (-not $sp.HasExited) { $sp.Kill() } } catch { } } }
 $pvSrc = Get-Content -LiteralPath (Join-Path $here "push_verify.ps1") -Raw
-# L1 (LOW-3): parse push_verify.ps1 with the PowerShell AST (no regex comment stripping, so a '#' inside a string cannot hide a kill),
-# forbid every bare-PID kill command / member call, and scan the C# here-string with its own rules.
-$pvTok = $null; $pvErr = $null
-$pvAst = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$pvTok, [ref]$pvErr)
-$pvBadCmds = @('stop-process', 'kill', 'spps', 'taskkill', 'taskkill.exe')
-$pvCmdHits = @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and ($pvBadCmds -contains ([string]$n.GetCommandName()).ToLowerInvariant()) }, $true))
-$pvMemHits = @($pvAst.FindAll({ param($n)
-    $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Expression.Extent.Text -ne '[PvJob]' -and
-    ([string]$n.Member.Extent.Text) -match '^(Kill|GetProcessById|GetProcessesByName|GetProcesses|GetProcess)$' }, $true))
-$pvStopCalls = @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Stop-PvTargets' }, $true))
+$pvLibSrc = Get-Content -LiteralPath (Join-Path $here "lib_push_verify_walk.ps1") -Raw
+# L1 (review LOW-3): kill-surface ALLOWLIST over push_verify.ps1 AND lib_push_verify_walk.ps1 (PowerShell AST, no regex comment
+# stripping). Process-kill-capable tokens are permitted only at named sites: [PvJob]::Kill($fetchJob) and [PvJob]::KillProc($fetchH)
+# once each in the script, Process.Kill() only inside Stop-PvTargets and Process.GetProcessById only inside Open-PvTargets in the
+# lib, and in the C# block TerminateProcess/TerminateJobObject only at pinned call sites. Dynamic command names, process-spawning
+# commands (cmd, Start-Process, nested powershell), CIM/WMI method invocation, Get-Process and Invoke-Expression are refused outright.
+function Get-FnOf($n) { $p = $n.Parent; while ($p) { if ($p -is [System.Management.Automation.Language.FunctionDefinitionAst]) { return $p.Name }; $p = $p.Parent }; return '' }
+function Get-KillLintViolations([string]$src, [string]$kind) {
+    $tok = $null; $err = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tok, [ref]$err)
+    $v = New-Object System.Collections.ArrayList
+    if ($err.Count -gt 0) { [void]$v.Add("parse error: $($err[0].Message)") }
+    $bad = '^(stop-process|kill|spps|taskkill(\.exe)?|get-process|gps|ps|start-process|saps|start|invoke-cimmethod|invoke-wmimethod|invoke-expression|iex|invoke-command|icm|remove-ciminstance|remove-wmiobject|cmd(\.exe)?|wmic(\.exe)?|powershell(\.exe)?|pwsh(\.exe)?|stop-computer|start-job|start-threadjob|start-threadjob)$'
+    foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
+        $nm = $c.GetCommandName()
+        if ($c.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot) {
+            if ($c.Extent.Text -notmatch '^\.\s*\(Join-Path \$PSScriptRoot "lib_push_verify_walk\.ps1"\)$') { [void]$v.Add("dot-source of something else: $($c.Extent.Text)") }
+            continue
+        }
+        if (-not $nm) { [void]$v.Add("dynamic command name: $($c.Extent.Text)"); continue }
+        if ($nm -match $bad) {
+            [void]$v.Add("forbidden command: $nm")
+        }
+        if ($nm -ieq 'Add-Type' -and $kind -ne 'script') { [void]$v.Add("Add-Type outside the script") }
+    }
+    foreach ($t in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.TypeExpressionAst] }, $true)) {
+        $tn = $t.TypeName.FullName
+        if ($tn -match '(?i)(^|\.)(Process|ManagementObject|WmiObject|CimMethod\w*|ScriptBlock|Activator|Marshal)$|Management\.|Wmi|Cim') {
+            if ($tn -match '(?i)diagnostics\.process$' -and (Get-FnOf $t) -eq 'Open-PvTargets' -and $kind -eq 'lib') { continue }
+            [void]$v.Add("type [$tn] outside its allowed site")
+        }
+    }
+    $killJob = 0; $killProc = 0; $libKill = 0; $libGet = 0
+    foreach ($m in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] }, $true)) {
+        if ($m.Member -isnot [System.Management.Automation.Language.StringConstantExpressionAst]) { [void]$v.Add("dynamic member call: $($m.Extent.Text)"); continue }
+        $mn = [string]$m.Member.Value; $recv = $m.Expression.Extent.Text
+        $args0 = (@($m.Arguments) | ForEach-Object { $_.Extent.Text }) -join ','
+        if ($recv -eq '[PvJob]') {
+            if ($mn -eq 'Kill') { if ($args0 -eq '$fetchJob') { $killJob++ } else { [void]$v.Add("[PvJob]::Kill with argument '$args0'") } }
+            elseif ($mn -eq 'KillProc') { if ($args0 -eq '$fetchH') { $killProc++ } else { [void]$v.Add("[PvJob]::KillProc with argument '$args0'") } }
+            elseif ($mn -notmatch '^(Create|Launch|WaitExit|ExitCode|StartFileTime|CloseProc|Close|Assign)$') { [void]$v.Add("[PvJob]::$mn not allowlisted") }
+            continue
+        }
+        if ($mn -match '(?i)^(Kill|Terminate\w*|CloseMainWindow|GetProcess\w*|Start|InvokeMethod|Invoke|CreateInstance|Create)$') {
+            $fn = Get-FnOf $m
+            if ($kind -eq 'lib' -and $mn -ceq 'Kill' -and $fn -eq 'Stop-PvTargets') { $libKill++; continue }
+            if ($kind -eq 'lib' -and $mn -ceq 'GetProcessById' -and $fn -eq 'Open-PvTargets') { $libGet++; continue }
+            [void]$v.Add("$recv.$mn() outside its allowed site (in '$fn')")
+        }
+    }
+    if ($kind -eq 'script') {
+        if ($killJob -ne 1) { [void]$v.Add("expected exactly one [PvJob]::Kill(`$fetchJob), found $killJob") }
+        if ($killProc -ne 1) { [void]$v.Add("expected exactly one [PvJob]::KillProc(`$fetchH), found $killProc") }
+        if (@($ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Stop-PvTargets' }, $true)).Count -lt 1) { [void]$v.Add("no Stop-PvTargets call") }
+    } else {
+        if ($libKill -ne 1) { [void]$v.Add("expected exactly one .Kill() inside Stop-PvTargets, found $libKill") }
+        if ($libGet -ne 1) { [void]$v.Add("expected exactly one GetProcessById inside Open-PvTargets, found $libGet") }
+    }
+    if ($kind -eq 'script') {
+        $cs = ''
+        foreach ($hs in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true)) { $cs += $hs.Value + "`n" }
+        $cs = [regex]::Replace($cs, '//[^\r\n]*', '')
+        if ($cs.Length -lt 200) { [void]$v.Add("C# block not found") }
+        if ($cs -match '(?i)GetProcessById|Process\.GetProcess\w*|\.Kill\s*\(|taskkill|Process\.Start\b|OpenProcess|NtTerminate|DuplicateHandle|ExitWindows|GenerateConsoleCtrlEvent') { [void]$v.Add("C# block uses a forbidden process API: $($Matches[0])") }
+        $tp = @([regex]::Matches($cs, '(?<!extern bool )TerminateProcess\s*\(([^)]*)\)') | ForEach-Object { ($_.Groups[1].Value -replace '\s', '') })
+        if (($tp -join '|') -ne 'pi.hp,1|h,1') { [void]$v.Add("TerminateProcess call sites/args not pinned to (pi.hp,1) and (h,1): $($tp -join '|')") }
+        $tj = @([regex]::Matches($cs, '(?<!extern bool )TerminateJobObject\s*\(([^)]*)\)') | ForEach-Object { ($_.Groups[1].Value -replace '\s', '') })
+        if (($tj -join '|') -ne 'j,1') { [void]$v.Add("TerminateJobObject call sites/args not pinned to (j,1): $($tj -join '|')") }
+        if ($cs -notmatch 'public static void KillProc\(IntPtr h\)\s*\{\s*TerminateProcess\(h, 1\);\s*\}') { [void]$v.Add("KillProc body is not exactly TerminateProcess(h, 1)") }
+        if ($cs -notmatch 'catch\s*\{\s*TerminateProcess\(pi\.hp, 1\);\s*throw;') { [void]$v.Add("Launch failure path does not terminate its own pi.hp") }
+    }
+    return ,$v
+}
+$pvV = Get-KillLintViolations $pvSrc 'script'
+$libV = Get-KillLintViolations $pvLibSrc 'lib'
+foreach ($x in @($pvV) + @($libV)) { Write-Host "  lint: $x" }
 $pvCs = ''
-foreach ($hs in @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
+$pvAst0 = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$null, [ref]$null)
+foreach ($hs in @($pvAst0.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
-$pvCsBad = '(?i)GetProcessById|Process\.GetProcess\w*|\.Kill\s*\(|taskkill|Process\.Start\b|TerminateProcess\s*\((?!\s*(IntPtr\s+p\b|pi\.hp\s*,|h\s*,))'
-Assert ($pvErr.Count -eq 0 -and $pvCmdHits.Count -eq 0 -and $pvMemHits.Count -eq 0 -and $pvStopCalls.Count -ge 1) "S2/L1: push_verify.ps1 (AST) has no bare-PID kill command or member call and kills via Stop-PvTargets"
+Assert (@($pvV).Count -eq 0 -and @($libV).Count -eq 0) "S2/L1: kill-surface allowlist holds for push_verify.ps1 and lib_push_verify_walk.ps1"
+# The lint itself must reject each hole the 2026-10-12 review demonstrated (dead code inserted at the end of the file).
+$holes = @{
+    'Stop-Process' = 'if ($false) { Stop-Process -Id $fetchPid }'
+    'cmd taskkill' = 'if ($false) { cmd /c taskkill /F /PID $fetchPid }'
+    'Start-Process taskkill' = 'if ($false) { Start-Process taskkill -ArgumentList "/F /PID $fetchPid" }'
+    'CIM Terminate' = 'if ($false) { Invoke-CimMethod -Query "select * from Win32_Process where ProcessId=$fetchPid" -MethodName Terminate }'
+    'KillProc via Get-Process' = 'if ($false) { [PvJob]::KillProc((Get-Process -Id $fetchPid).Handle) }'
+    'dynamic command name' = 'if ($false) { & (''Stop-'' + ''Process'') -Id $fetchPid }'
+    'Process.Kill via GetProcessById' = 'if ($false) { [System.Diagnostics.Process]::GetProcessById($fetchPid).Kill() }'
+    'second KillProc' = 'if ($false) { [PvJob]::KillProc($otherH) }'
+    'dynamic member' = 'if ($false) { $p.("Ki" + "ll")() }'
+}
+foreach ($k in $holes.Keys) {
+    Assert (@(Get-KillLintViolations ($pvSrc + "`n" + $holes[$k]) 'script').Count -gt 0) "L1 hole closed (script): $k"
+}
+Assert (@(Get-KillLintViolations ($pvLibSrc + "`nif (`$false) { Stop-Process -Id 1 }") 'lib').Count -gt 0) "L1 hole closed (lib): Stop-Process"
+Assert (@(Get-KillLintViolations ($pvLibSrc + "`nif (`$false) { `$x.Kill() }") 'lib').Count -gt 0) "L1 hole closed (lib): Kill outside Stop-PvTargets"
+Assert (@(Get-KillLintViolations ($pvSrc.Replace('TerminateProcess(h, 1);', 'TerminateProcess(h, 1); TerminateProcess(pi.hp, 9);')) 'script').Count -gt 0) "L1 hole closed: extra C# TerminateProcess call site"
+Assert (@(Get-KillLintViolations ($pvSrc.Replace('static extern bool CloseHandle(IntPtr h);', 'static extern bool CloseHandle(IntPtr h); [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, uint c);')) 'script').Count -gt 0) "L1 hole closed: C# OpenProcess"
 Assert (($pvCs -match 'ResumeThread\(pi\.ht\)\s*==\s*0xFFFFFFFF') -and ($pvCs -match 'hin\s*==\s*bad') -and ($pvCs -match 'hout\s*==\s*bad') -and ($pvCs -match 'herr\s*==\s*bad')) "LOW-2: ResumeThread and every CreateFileW result is checked (INVALID_HANDLE_VALUE / 0xFFFFFFFF)"
 Assert (($pvCs -match 'CreateProcessW\(gitExe,') -and ($pvSrc -match 'Get-Command git -CommandType Application')) "INFO-3: CreateProcessW gets the resolved git.exe path as lpApplicationName"
-Assert ($pvCs.Length -gt 200 -and $pvCs -notmatch $pvCsBad) "L1: C# block has no GetProcessById / Process.GetProcess* / .Kill( / taskkill, and TerminateProcess only on held handles"
 $me = Get-Process -Id $PID
 $hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
 Assert ($hm.ContainsKey($PID)) "R2: a live process whose StartTime matches the snapshot is opened"
@@ -149,7 +233,8 @@ try {
     $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "-5")
     Assert ($r.Rc -eq 2 -and $r.Out -match "must be > 0") "negative -FetchTimeoutSec -> usage error"
 
-    Write-Host "case: failed fetch -> UNKNOWN, never LANDED (P3)"
+    $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2000001")
+    Assert ($r.Rc -eq 2 -and $r.Out -match "must be <= 2000000") "oversized -FetchTimeoutSec -> usage error (INFO-4)"    Write-Host "case: failed fetch -> UNKNOWN, never LANDED (P3)"
     $goodUrl = (git -C $work remote get-url origin).Trim()
     git -C $work remote set-url origin (Join-Path $tmp "no_such_remote.git") *>$null
     $r = Run-PV @("-Commit", $c1)
@@ -165,11 +250,14 @@ try {
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no git process for the hung fetch survives the timeout"
         # I2: survivors are matched by the URL (git-remote-http) OR this run's unique scratch dir (wrapper git and inner git carry it in -C).
         # toolfx8 T1: force the no-job fallback (test hook) and require the whole tree, grandchild included, to die.
-        $env:PUSH_VERIFY_TEST_NO_JOB = "1"
-        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
+        $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_NO_JOB = "1"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership" -and $r.Out -match "walk found [1-9]\d* descendant") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
-        # M1 (toolfx10): job path with the create->assign window widened by 300 ms. The child is created suspended, so no descendant can escape the job.
+        # LOW-4: PUSH_VERIFY_TEST_NO_JOB without PUSH_VERIFY_TEST_MODE is ignored (the job path is used).
+        $env:PUSH_VERIFY_TEST_NO_JOB = "1"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB -ErrorAction SilentlyContinue }
+        Assert ($r.Rc -eq 1 -and $r.Out -match "timed out" -and $r.Out -notmatch "no job membership") "stray PUSH_VERIFY_TEST_NO_JOB without PUSH_VERIFY_TEST_MODE: ignored (job path used)"        # M1 (toolfx10): job path with the create->assign window widened by 300 ms. The child is created suspended, so no descendant can escape the job.
         $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "300"
         try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -notmatch "no job membership") "late job assign (300 ms): job path still used, hung fetch -> UNKNOWN"
@@ -187,6 +275,23 @@ try {
     } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null
 
+    # LOW-2: no-job path where the ROOT git has no descendant (mingw64 git.exe, git:// connects in process). Only KillProc can kill it.
+    Write-Host "case: no-job fallback, root git without descendants (git://), KillProc is load-bearing"
+    $mingwBin = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent ((git --exec-path) -replace '/', '\')))) 'bin'
+    $lis2 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
+    $lis2.Start(); $port2 = $lis2.LocalEndpoint.Port
+    $oldPath = $env:PATH
+    try {
+        if (-not (Test-Path (Join-Path $mingwBin 'git.exe'))) { Assert $false "precondition: mingw64\bin\git.exe exists at $mingwBin" }
+        else {
+            git -C $work remote set-url origin "git://127.0.0.1:$port2/x.git" *>$null
+            $env:PATH = "$mingwBin;$oldPath"
+            $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_NO_JOB = "1"
+            try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_NO_JOB, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue; $env:PATH = $oldPath }
+            Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership") "root-only fallback: hung git:// fetch -> UNKNOWN via the no-job path"
+            Assert-NoSurvivors $port2 (Split-Path -Leaf $tmp) "root-only fallback: the root git itself is killed (KillProc), no survivor"
+        }
+    } finally { $env:PATH = $oldPath; $lis2.Stop(); git -C $work remote set-url origin $goodUrl *>$null }
     Write-Host "case: fetch exits before the first handle read (MED-1)"
     $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS = "1500"
     try { $r = Run-PV @("-Commit", $c1) } finally { Remove-Item Env:\PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
