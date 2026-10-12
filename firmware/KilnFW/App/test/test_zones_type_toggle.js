@@ -237,11 +237,14 @@ function renderZoneFragment(zoneType, overrides) {
   };
   vm.createContext(sandbox);
   vm.runInContext(
-    TEMPLATE_SRC + '\nresult = settingsStackHtml + zoneTypeHtml;',
+    KGR6_SRC + '\n' + TEMPLATE_SRC + '\nresult = settingsStackHtml + zoneTypeHtml;',
     sandbox
   );
   return sandbox.result;
 }
+
+// Real kgR6 helper from the page (fragment calls it for cal/ramp/sanity/max/min).
+const KGR6_SRC = LINES.find((l) => l.startsWith('function kgR6(')).replace(/\r$/, '');
 
 function buildZoneDiv(zoneType, overrides) {
   const html = renderZoneFragment(zoneType, overrides);
