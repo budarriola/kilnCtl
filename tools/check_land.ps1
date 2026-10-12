@@ -99,6 +99,11 @@ try {
     Assert ($r.Code -eq 0 -and $r.Json.dry_run -eq $true -and $r.Json.landed -eq $false) "dry run exits 0, landed false"
     Assert ((OriginHead) -eq $before) "dry run pushed nothing"
 
+    Write-Host "case: MaxPushTries 0 refused at parameter binding (TOOLFX13 INFO-5)"
+    $r = Run-Land $c @("-MaxPushTries", "0", "-ChecksScript", $okStub)
+    Assert ($r.Code -ne 0 -and $r.Out -match "MaxPushTries" -and -not $r.Json) "MaxPushTries 0 rejected before any work"
+    Assert ((OriginHead) -eq $before) "MaxPushTries 0 pushed nothing"
+
     Write-Host "case: conflict aborts and leaves clean tree"
     $c = New-Clone "c_conf"
     Set-Content -LiteralPath (Join-Path $c "f.txt") -Value "mine" -Encoding ascii
