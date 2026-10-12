@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -466,6 +467,129 @@ class BuildLockReviewFixes(unittest.TestCase):
                               if n.startswith(os.path.basename(path) + ".rel.")], [])
         finally:
             os.remove(path)
+
+
+class BuildLockBuildFx6(unittest.TestCase):
+    """REVIEW_BUILDFX5 LOW-1, LOW-2, INFO-5."""
+
+    def test_timeout_names_lock_path_and_own_process_recovery(self):
+        key = f"test-fx6-msg-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        with build_lock(key, wait_timeout=5.0):
+            try:
+                with build_lock(key, wait_timeout=0.3, poll_interval=0.05, stale_after=3600.0):
+                    self.fail("second holder acquired a held lock")
+            except BuildLockTimeout as exc:
+                msg = str(exc)
+        self.assertIn(path, msg)
+        self.assertIn("THIS server process", msg)
+        self.assertIn("restarting the MCP server", msg)
+
+    def test_timeout_for_foreign_holder_does_not_claim_own_process(self):
+        msg = str(BuildLockTimeout("r", 1.0, "99999999 5 tok", "C:/x.lock"))
+        self.assertIn("C:/x.lock", msg)
+        self.assertNotIn("THIS server process", msg)
+
+    def test_release_giving_up_logs_to_stderr(self):
+        import contextlib
+        import io
+        import mcpkit.buildlock as bl
+        key = f"test-fx6-leak-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write("1 0 tok\n")
+        err = io.StringIO()
+        try:
+            with mock.patch.object(bl.os, "rename", side_effect=PermissionError), \
+                    mock.patch.object(bl.time, "sleep"), \
+                    contextlib.redirect_stderr(err):
+                bl._release(path, "1 0 tok")
+        finally:
+            os.remove(path)
+        self.assertIn("LEAKED LOCK", err.getvalue())
+        self.assertIn(path, err.getvalue())
+
+    def test_release_retries_transient_aside_read_failure(self):
+        import mcpkit.buildlock as bl
+        key = f"test-fx6-readretry-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        text = "1 0 tok"
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+        real = bl._read_holder
+        calls = {"n": 0}
+
+        def flaky(p):
+            calls["n"] += 1
+            return None if calls["n"] <= 2 else real(p)
+
+        with mock.patch.object(bl, "_read_holder", flaky):
+            bl._release(path, text)
+        leaked = os.path.exists(path)
+        if leaked:
+            os.remove(path)
+        self.assertFalse(leaked, "transient read failure restored (leaked) our own lock")
+
+    def test_reclaim_does_not_remove_lock_after_its_sidecar_was_replaced(self):
+        import mcpkit.buildlock as bl
+        key = f"test-fx6-sidecar-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        side = path + ".reclaim"
+        text = "99999999 0 deadtoken"
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+
+        def replace_sidecar(_text):
+            with open(side, "w", encoding="ascii") as handle:
+                handle.write("othertoken\n")  # another reclaimer's sidecar
+            return True
+
+        try:
+            with mock.patch.object(bl, "_text_is_dead_holder", replace_sidecar):
+                bl._try_reclaim(path, text, force=False)
+            lock_kept = os.path.exists(path)
+            side_text = bl._read_holder(side)
+        finally:
+            for f in (path, side):
+                if os.path.exists(f):
+                    os.remove(f)
+        self.assertTrue(lock_kept, "reclaimed while no longer owning the sidecar")
+        self.assertEqual(side_text, "othertoken", "deleted another reclaimer's sidecar")
+
+    def test_reclaim_finally_removes_own_sidecar(self):
+        import mcpkit.buildlock as bl
+        key = f"test-fx6-own-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        text = "99999999 0 deadtoken"
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+        bl._try_reclaim(path, text, force=False)
+        self.assertFalse(os.path.exists(path))
+        self.assertFalse(os.path.exists(path + ".reclaim"), "own sidecar leaked")
+
+    def test_confirmed_alive_holder_never_touches_sidecar(self):
+        import mcpkit.buildlock as bl
+        _alive, start = bl._pid_info(os.getpid())
+        if start is None:
+            self.skipTest("process start time unavailable")
+        key = f"test-fx6-alive-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        text = f"{os.getpid()} {int(start)} livetoken"
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text + "\n")
+        created = []
+        real_open = os.open
+
+        def spy(p, *a, **k):
+            created.append(p)
+            return real_open(p, *a, **k)
+
+        try:
+            with mock.patch.object(bl.os, "open", spy):
+                bl._try_reclaim(path, text, force=True)
+        finally:
+            os.remove(path)
+        self.assertEqual(created, [], "sidecar taken for a confirmed-alive holder")
 
 
 class BuildLockReleaseAndReclaimGuards(unittest.TestCase):

@@ -54,23 +54,47 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import sys
 import tempfile
 import time
 import uuid
 from typing import Iterator
 
 
+def _holder_is_this_process(text: "str | None") -> bool:
+    parsed = _parse_holder(text)
+    if parsed is None or parsed[0] != os.getpid():
+        return False
+    _alive, started = _pid_info(os.getpid())
+    second = parsed[1]
+    if parsed[2] is None or second <= 0 or started is None:
+        return False
+    return abs(started - second) <= _START_SLACK_S
+
+
 class BuildLockTimeout(Exception):
     """Raised when a build lock could not be acquired within its timeout."""
 
-    def __init__(self, resource: str, waited: float, holder: "str | None") -> None:
+    def __init__(self, resource: str, waited: float, holder: "str | None",
+                 lock_path: "str | None" = None) -> None:
         self.resource = resource
         self.waited = waited
         self.holder = holder
+        self.lock_path = lock_path
         holder_note = f" (held by: {holder})" if holder else ""
+        path_note = f" [lock file: {lock_path}]" if lock_path else ""
+        own_note = ""
+        if _holder_is_this_process(holder):
+            own_note = (
+                " The holder is THIS server process (PID and start time match): "
+                "if no build is running here the lock was leaked by a failed "
+                "release. Recover by restarting the MCP server"
+                + (f" or deleting {lock_path}" if lock_path else " or deleting the lock file")
+                + "."
+            )
         super().__init__(
             f"another build is in progress on {resource!r} -- waited {waited:.1f}s "
-            f"for the lock and gave up{holder_note}"
+            f"for the lock and gave up{holder_note}{path_note}.{own_note}"
         )
 
 
@@ -217,12 +241,38 @@ def _break_stale_sidecar(sidecar: str) -> None:
         pass
 
 
+def _release_sidecar(sidecar: str, token: str) -> None:
+    """Remove the sidecar only if it still holds our token (rename-aside and
+    verify); another reclaimer's live sidecar is put back, never deleted."""
+    aside = f"{sidecar}.rel.{uuid.uuid4().hex}"
+    for _ in range(400):
+        try:
+            os.rename(sidecar, aside)
+            break
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.005)
+    else:
+        return
+    if _read_holder(aside) == token:
+        _remove_retry(aside)
+        return
+    try:
+        os.rename(aside, sidecar)
+    except OSError:
+        _remove_retry(aside)  # a newer sidecar exists; the grabbed one is moot
+
+
 def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
     """Remove ``lock_path`` only if it still holds the content that was judged
     dead/stale. Serialized through an O_EXCL sidecar so no two waiters can
     both remove, and a freshly created live lock is never deleted
     (REVIEW_BUILDFX3 MED-1). ``force`` is the age-based path."""
     sidecar = lock_path + ".reclaim"
+    if _holder_confirmed_alive(judged):
+        return  # alive holder: never reclaim, even by age (skip the sidecar)
+    token = uuid.uuid4().hex
     try:
         fd = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
@@ -230,7 +280,12 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
         return
     except OSError:
         return
-    os.close(fd)
+    try:
+        os.write(fd, (token + "\n").encode("ascii"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
     try:
         current = _read_holder(lock_path)
         if current != judged:
@@ -239,9 +294,11 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
             return  # alive holder: never reclaim, even by age
         if not force and not _text_is_dead_holder(current):
             return
+        if _read_holder(sidecar) != token:
+            return  # our sidecar was broken and replaced: no longer exclusive
         _remove_retry(lock_path)
     finally:
-        _remove_retry(sidecar)
+        _release_sidecar(sidecar, token)
 
 
 def _read_holder(lock_path: str) -> "str | None":
@@ -296,7 +353,7 @@ def build_lock(
                 # no timeout charged (bounded below for a PermissionError that
                 # is not contention).
                 if time.monotonic() - started >= wait_timeout:
-                    raise BuildLockTimeout(resource_key, wait_timeout, None)
+                    raise BuildLockTimeout(resource_key, wait_timeout, None, lock_path)
                 time.sleep(0.001)
                 continue
             # The recorded PID being dead (or reused by a younger process) also
@@ -308,7 +365,7 @@ def build_lock(
                 # we never busy-spin when the reclaim declines.
             waited = time.monotonic() - started
             if waited >= wait_timeout:
-                raise BuildLockTimeout(resource_key, waited, _read_holder(lock_path))
+                raise BuildLockTimeout(resource_key, waited, _read_holder(lock_path), lock_path)
             time.sleep(poll_interval)
     try:
         yield
@@ -334,8 +391,17 @@ def _release(lock_path: str, my_text: str) -> None:
         except OSError:
             time.sleep(0.005)
     else:
+        print(f"buildlock: LEAKED LOCK -- could not rename {lock_path} aside after "
+              f"400 attempts; later builds on this directory will wait until the "
+              f"server restarts or the file is deleted", file=sys.stderr, flush=True)
         return
-    if _read_holder(aside) == my_text:
+    held = _read_holder(aside)
+    for _ in range(4):
+        if held is not None:
+            break
+        time.sleep(0.02)
+        held = _read_holder(aside)
+    if held == my_text:
         _remove_retry(aside)
         return
     try:
