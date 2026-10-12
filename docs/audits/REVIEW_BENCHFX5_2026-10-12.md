@@ -317,3 +317,11 @@ Verification.
  }
 ]
 ```
+
+## Fix status
+
+| Finding | Status |
+|---|---|
+| MED-1 | Fixed in the benchfx6 commit: `test_post_omitting_five_float_fields_preserves_stored_values` (`test_zones_http.c`) seeds the five fields with distinct nonzero values for zone_type 0 and 1, asserts omit preserves, posted values win, and a blank value is refused. The drift test now rejects `else if` in the omit chain, compound assignment, and a later assignment in any block. X1, X2, X3 CAUGHT by host tests and the drift test. |
+| LOW-1 | Fixed: `_ALLOWED_RHS` limits `settings_source` to `src_raw` and `tc_type` to `preserved_tc_type`/`tc_type_raw`. X4b CAUGHT by host and drift tests, X5 CAUGHT by both. |
+| INFO-1..4 | No action. |
