@@ -374,6 +374,12 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     Step "push origin HEAD:$Target (attempt $try)"
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
+    # A concurrent-push ref-lock collision is reported as [remote rejected] (failed to update ref) but is a race: retry.
+    $refRace = $pout -match 'cannot lock ref|failed to update ref[^\r\n]*expected|is at \S+ but expected'
+    if ($refRace) {
+        Write-Host "push lost a ref-lock race (cannot lock ref); re-fetching and rebasing" -ForegroundColor Yellow
+        continue
+    }
     if ($pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
     if ($pout -match 'non-fast-forward|fetch first|\[rejected\]') {
         Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow

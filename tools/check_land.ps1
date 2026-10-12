@@ -229,6 +229,17 @@ try {
     Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote') "remote rejection fails with its message"
     Assert ($rebases -le 1) "no retry loop on remote rejection (rebases: $rebases)"
 
+    Write-Host "case: cannot lock ref race is retried, not a hard refusal"
+    $c = New-Clone "c_lockref"
+    Commit-File $c "lockref.txt" "x" "lockref"
+    $lm = (Join-Path $tmp "lockref.marker") -replace '\\','/'
+    $hook = Join-Path $origin "hooks/pre-receive"
+    [IO.File]::WriteAllText($hook, "#!/bin/sh`nif [ ! -f '$lm' ]; then touch '$lm'; echo `"error: cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb`" >&2; exit 1; fi`nexit 0`n")
+    $r = Run-Land $c @("-ChecksScript", $okStub)
+    Remove-Item -LiteralPath $hook -Force
+    $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+    Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after cannot-lock-ref retry"
+    Assert ($rebases -eq 2) "rebased twice after ref-lock race (got $rebases)"
     Write-Host "case: -RestartMcp really runs mcp_servers.ps1 restart then status (F3)"
     $c = New-Clone "c_mcp"
     Commit-File $c "mcp.txt" "x" "mcp"
