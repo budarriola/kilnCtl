@@ -816,6 +816,13 @@ static esp_err_t nvs_partition_init(const char *partition)
 /* Largest used-bitmap blob accepted as a newer-firmware "longer" shape (review LOW-2). */
 #define USED_BITMAP_LONGER_MAX_BYTES 64u
 
+/* One predicate for load AND save (FIRELOWFX2 LOW-1): a longer newer-firmware bitmap is a whole number of
+ * uint32 words, longer than ours and no longer than the deliberate cap. */
+static bool used_bitmap_len_is_longer_shape(size_t len)
+{
+    return len > sizeof(profiles_slot_bitmap_t) && len <= USED_BITMAP_LONGER_MAX_BYTES && (len % sizeof(uint32_t)) == 0;
+}
+
 static hal_status_t used_bitmap_load_ex(hal_kv_handle_t *h, profiles_slot_bitmap_t *out, bool *wrong_size)
 {
     *wrong_size = false;
@@ -835,7 +842,7 @@ static hal_status_t used_bitmap_load_ex(hal_kv_handle_t *h, profiles_slot_bitmap
         size_t full_len = sizeof(*out);
         return hal_kv_get_blob(h, NVS_KEY_USED, out, &full_len);
     }
-    if (err == HAL_OK && len > sizeof(*out) && len <= USED_BITMAP_LONGER_MAX_BYTES && (len % sizeof(uint32_t)) == 0) {
+    if (err == HAL_OK && used_bitmap_len_is_longer_shape(len)) {
         /* Review LOW-2: a longer bitmap is newer firmware with more slots -- use our first 16 bytes; the tail is
          * preserved verbatim by used_bitmap_save() (same policy as the rev array). */
         uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
@@ -847,19 +854,18 @@ static hal_status_t used_bitmap_load_ex(hal_kv_handle_t *h, profiles_slot_bitmap
         memcpy(out, big, sizeof(*out));
         return HAL_OK;
     }
-    if (err == HAL_OK && len != 1) {
-        /* A blob exists but is neither the 16-byte shape, a longer newer-firmware shape, nor a legacy single byte:
-         * corrupt. Falling through to the u8 read would answer a type mismatch (NOT_FOUND on target and in the
+    if (err == HAL_OK) {
+        /* A blob exists but is neither the 16-byte shape nor a longer newer-firmware shape (a 1-byte BLOB is not the
+         * legacy u8 format either: FIRELOWFX2 LOW-2): corrupt. Falling through to the u8 read would answer a type mismatch (NOT_FOUND on target and in the
          * typed fake) and read as "no bitmap yet" -- silent slot loss. Callers repair via
          * used_bitmap_load_or_rebuild(). A longer blob must be a whole number of words (LOW-2b) and at most
          * USED_BITMAP_LONGER_MAX_BYTES (a deliberate limit). */
         *wrong_size = true;
         return HAL_IO;
     }
-    /* Either a real-backend type mismatch (err == HAL_INVALID_ARG, the key
-     * was written by a pre-task-6 hal_kv_set_u8()) or the host fake's
-     * size-based equivalent (err == HAL_OK, len == 1) -- both mean "old
-     * single-byte format", so fall back to reading it as one. */
+    /* A real-backend type mismatch (err == HAL_INVALID_ARG: the key was written by a pre-task-6 hal_kv_set_u8())
+     * means the old single-byte format, so fall back to reading it as one. A 1-byte blob (err == HAL_OK) never gets
+     * here: it is handled above as wrong_size. */
     uint8_t legacy = 0;
     hal_status_t legacy_err = hal_kv_get_u8(h, NVS_KEY_USED, &legacy);
     if (legacy_err != HAL_OK) {
@@ -894,7 +900,7 @@ static hal_status_t used_bitmap_save(hal_kv_handle_t *h, const profiles_slot_bit
     /* Review LOW-2: a longer newer-firmware bitmap is rewritten at its FULL length, tail verbatim. */
     size_t cur_len = 0;
     if (hal_kv_get_blob(h, NVS_KEY_USED, NULL, &cur_len) == HAL_OK && cur_len > sizeof(*bm) &&
-        cur_len <= USED_BITMAP_LONGER_MAX_BYTES) {
+        used_bitmap_len_is_longer_shape(cur_len)) {
         uint8_t big[USED_BITMAP_LONGER_MAX_BYTES];
         size_t bl = cur_len;
         if (hal_kv_get_blob(h, NVS_KEY_USED, big, &bl) == HAL_OK && bl == cur_len) {
@@ -928,9 +934,13 @@ static hal_status_t used_bitmap_load_or_rebuild(hal_kv_handle_t *h, profiles_slo
         if (perr == HAL_OK) {
             profiles_slot_bitmap_set(&rebuilt, id);
         } else if (perr != HAL_NOT_FOUND) {
+            ESP_LOGE(PROFILES_TAG, "used bitmap rebuild: profN probe for slot %u failed (%s) -- failing closed", (unsigned)id,
+                     hal_status_to_name(perr));
+            cfg_fs_degraded_set("profiles_used_bitmap", true); /* LOW-3: visible in GET /api/cfgfs */
             return perr; /* cannot tell present from absent: fail closed, drop no bit, save nothing */
         }
     }
+    cfg_fs_degraded_set("profiles_used_bitmap", false);
     *out = rebuilt;
     return HAL_OK;
 }

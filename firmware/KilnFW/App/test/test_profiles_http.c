@@ -2018,6 +2018,56 @@ static void test_used_bitmap_rebuild_keeps_present_slot_bit(void)
     TEST_CHECK((back[0] & 0x08) == 0, "slot 3 cleared");
 }
 
+static size_t used_blob_len(void);
+
+static void stage_two_slots_with_keys(void)
+{
+    profile_t src = make_stored_profile();
+    stage_legacy_slot(3, &src, 1);
+    stage_legacy_slot(5, &src, 1);
+    nvs_handle_t kh;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &kh);
+    char k[8];
+    uint8_t blob[8] = {1};
+    profile_nvs_key(3, k, sizeof(k));
+    nvs_set_blob(kh, k, blob, sizeof(blob));
+    profile_nvs_key(5, k, sizeof(k));
+    nvs_set_blob(kh, k, blob, sizeof(blob));
+    nvs_commit(kh);
+    nvs_close(kh);
+    s_profiles.profiles[3] = src;
+    s_profiles.profiles[5] = src;
+}
+
+static void test_used_bitmap_18_byte_junk_converges_to_16(void)
+{
+    TEST_SECTION("nvs_erase_slot -- FIRELOWFX2 LOW-1: an 18-byte junk used blob is rewritten at 16 bytes, not kept at 18");
+    pcfg_reset_all();
+    stage_two_slots_with_keys();
+    uint8_t junk[18] = {0};
+    junk[0] = 0x28;
+    set_used_blob(junk, sizeof(junk));
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite 18-byte bitmap");
+    TEST_CHECK(used_blob_len() == 16, "bitmap is 16 bytes afterwards (repair converged)");
+}
+
+static void test_used_bitmap_1_byte_blob_is_wrong_size(void)
+{
+    TEST_SECTION("nvs_erase_slot -- FIRELOWFX2 LOW-2: a 1-byte used BLOB is wrong-size and rebuilt, not 'no bitmap'");
+    pcfg_reset_all();
+    stage_two_slots_with_keys();
+    uint8_t one = 0x28;
+    set_used_blob(&one, 1);
+    TEST_CHECK(nvs_erase_slot(3) == ESP_OK, "delete slot 3 despite 1-byte bitmap blob");
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READONLY, &h);
+    uint8_t back[64] = {0};
+    size_t blen = sizeof(back);
+    TEST_CHECK(nvs_get_blob(h, NVS_KEY_USED, back, &blen) == ESP_OK && blen == 16, "16-byte bitmap");
+    nvs_close(h);
+    TEST_CHECK((back[0] & 0x20) != 0, "slot 5 (key present) keeps its bit");
+}
+
 static void test_used_bitmap_boot_load_longer_and_junk_length(void)
 {
     TEST_SECTION("nvs_load_all_from -- review LOW-2b: a 24-byte used blob loads; an 18-byte one is refused");
@@ -2077,6 +2127,7 @@ static void test_used_bitmap_rebuild_fails_closed_on_probe_error(void)
     s_profiles.profiles[3] = src;
     TEST_CHECK(nvs_erase_slot(3) != ESP_OK, "erase fails closed");
     TEST_CHECK(used_blob_len() == sizeof(junk), "no bitmap was saved");
+    TEST_CHECK(cfg_fs_degraded_is("profiles_used_bitmap"), "LOW-3: the fail-closed condition is listed in GET /api/cfgfs");
 }
 
 static void test_favorites_set_refuses_while_user_mask_unresolved(void)
@@ -2096,6 +2147,39 @@ static void test_favorites_set_refuses_while_user_mask_unresolved(void)
     nvs_commit(h);
     nvs_close(h);
     (void)profiles_favorites_start();
+}
+
+static int fuzz_post(esp_err_t (*h)(httpd_req_t *), const char *body, long long clen, size_t fail_after, int fail_ret);
+static void fuzz_small_setup(void);
+
+static void test_favorites_unresolved_is_degraded_409_and_retry_heals(void)
+{
+    TEST_SECTION("profile favorite POST -- FIRELOWFX2 MED-1: unresolved store is degraded, answers 409, and a retry heals");
+    fuzz_small_setup();
+    nvs_handle_t h;
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    uint8_t junk[5] = {1, 2, 3, 4, 5};
+    nvs_set_blob(h, "prof_favusr", junk, sizeof(junk));
+    nvs_commit(h);
+    nvs_close(h);
+    TEST_CHECK(profiles_favorites_start() != ESP_OK, "start reports the unusable blob");
+    TEST_CHECK(cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "favorites store is listed as degraded");
+    s_last_status_str[0] = '\0';
+    s_last_sendstr[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409, not 500");
+    TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    /* The cause clears (transient failure): the next set re-reads and succeeds without a reboot. */
+    nvs_open_from_partition(PROFILES_NVS_PARTITION, NVS_NAMESPACE, NVS_READWRITE, &h);
+    nvs_erase_key(h, "prof_favusr");
+    nvs_commit(h);
+    nvs_close(h);
+    s_last_status_str[0] = '\0';
+    (void)fuzz_post(profile_favorite_post_handler, "id=8&favorite=1", 15, (size_t)-1, 0);
+    TEST_CHECK(strncmp(s_last_status_str, "409", 3) != 0 && strncmp(s_last_status_str, "500", 3) != 0, "retry no longer refused");
+    TEST_CHECK(profiles_favorites_is(8), "slot 8 is now a favorite");
+    TEST_CHECK(!cfg_fs_degraded_is(PROFILES_FAVORITES_FILE_PATH), "degraded mark cleared");
+    (void)profiles_favorites_set(8, false);
 }
 
 static void test_nvs_erase_slot_propagates_firing_stats_error(void)
@@ -6032,6 +6116,9 @@ void run_test_profiles_http(void)
     test_used_bitmap_genuine_read_error_does_not_rebuild();
     test_used_bitmap_rebuild_fails_closed_on_probe_error();
     test_favorites_set_refuses_while_user_mask_unresolved();
+    test_used_bitmap_18_byte_junk_converges_to_16();
+    test_used_bitmap_1_byte_blob_is_wrong_size();
+    test_favorites_unresolved_is_degraded_409_and_retry_heals();
     test_nvs_erase_slot_propagates_firing_stats_error();
     test_pcfg_rev0_file_with_invalid_nvs_is_adopted_not_deleted();
     test_pcfg_stale_file_after_delete_is_not_resurrected();

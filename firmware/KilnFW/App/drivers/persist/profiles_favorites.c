@@ -9,6 +9,7 @@
 
 #include "esp_log.h"
 #include "hal_esp_common.h"
+#include "cfg_fs.h"
 #include "cfg_fs_status.h"
 #include "hal_kv.h"
 #include "nvs_key_check.h"
@@ -209,13 +210,14 @@ static void favorites_read_builtin_only(uint32_t *builtin)
     hal_kv_close(&h);
 }
 
-esp_err_t profiles_favorites_start(void)
+static esp_err_t favorites_load(void)
 {
     profiles_slot_bitmap_from_u32(&s_fav_user, 0);
     s_fav_builtin = 0;
     s_fav_rev = 0;
     s_fav_dirty = false;
     s_fav_user_unresolved = false;
+    cfg_fs_degraded_set(PROFILES_FAVORITES_FILE_PATH, false);
 
     /* Read-through (pref_cfg_fs.h): the cfg file wins on a strictly higher
      * rev; otherwise the legacy NVS copy stands and, when cfg is mounted, is
@@ -238,6 +240,7 @@ esp_err_t profiles_favorites_start(void)
             return ESP_OK;
         }
         s_fav_user_unresolved = true;
+        cfg_fs_degraded_set(PROFILES_FAVORITES_FILE_PATH, true); /* FIRELOWFX2 MED-1: listed in GET /api/cfgfs, HTTP save 409 */
         favorites_read_builtin_only(&s_fav_builtin);
         return hal_status_to_esp_err(nerr);
     }
@@ -248,6 +251,11 @@ esp_err_t profiles_favorites_start(void)
              (unsigned long)profiles_slot_bitmap_to_u32(&s_fav_user), (unsigned long)s_fav_builtin,
              used_file ? "file" : "NVS", (unsigned long)s_fav_rev);
     return ESP_OK;
+}
+
+esp_err_t profiles_favorites_start(void)
+{
+    return favorites_load();
 }
 
 bool profiles_favorites_is(uint8_t id)
@@ -281,8 +289,11 @@ esp_err_t profiles_favorites_set(uint8_t id, bool favorite)
         return ESP_ERR_INVALID_STATE;
     }
     if (s_fav_user_unresolved) { /* LOW-3a: never write a file from an unresolved (empty) user mask */
-        cfg_save_lock_give(&s_save_lock);
-        return ESP_ERR_INVALID_STATE;
+        (void)favorites_load(); /* MED-1: retry the read so a transient boot failure heals without a reboot */
+        if (s_fav_user_unresolved) {
+            cfg_save_lock_give(&s_save_lock);
+            return ESP_ERR_INVALID_STATE;
+        }
     }
     bool changed;
     if (is_user) {

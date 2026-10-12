@@ -135,3 +135,11 @@ The delete path's `(void)profiles_favorites_set(id, false)` (`profiles_http.c:21
   - `demoB_1byte_blob_reads_absent` (LOW-2 demonstration): `test_profiles_http.c:2015: slot 5 (key present) keeps its bit`.
   - `guard_drop_rev_unknown` (rollback guard 1 replaced by `true`): `test_profiles_http.c:2489`.
   - `guard_drop_rev_match` (rollback rev-equality check dropped): `test_profiles_http.c:2505`.
+
+## Fix status (2026-10-11)
+
+- MED-1 FIXED: the unresolved favorites store registers as degraded (PROFILES_FAVORITES_FILE_PATH in the cfg degraded registry, so GET /api/cfgfs lists it and POST favorite answers 409 store_unreadable_at_boot); profiles_favorites_set() re-runs the load while unresolved, so a transient failure heals without a reboot (also closes INFO-5). Not done: a non-destructive favorites-only reset route. The remaining recovery path is the existing cfg format / reboot text; a new route would use one of the 9 spare URI handler slots and is deferred as optional.
+- LOW-1 FIXED: one shared `used_bitmap_len_is_longer_shape()` predicate for load and save; test with an 18-byte blob.
+- LOW-2 FIXED: a 1-byte blob is wrong-size and rebuilt; stale comment corrected; test.
+- LOW-3 FIXED: the failing slot is logged and the condition is listed as `profiles_used_bitmap` in GET /api/cfgfs degraded.
+- INFO-1, INFO-2, INFO-3: harmless or unreachable, left as is. INFO-4 (SAVE_AS skipping rev-unknown free slots): pre-existing, not changed. INFO-5: covered by the MED-1 retry.
