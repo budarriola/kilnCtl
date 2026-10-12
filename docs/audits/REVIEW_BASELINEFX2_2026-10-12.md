@@ -27,7 +27,7 @@ describes M1 and the base by the old text and the old SHA.
 
 ## Findings
 
-### LOW-1: the reconstructed M1 is not labelled, and the row's M1 text and base are stale
+### LOW-1 (FIXED): the reconstructed M1 is not labelled, and the row's M1 text and base are stale
 
 Where: the `tools/check_lcd_sink_callgraph.ps1` row in `GATE_NEGATIVE_TEST_EVIDENCE.md`.
 
@@ -49,13 +49,13 @@ Fix: in the rerun clause, write "M1 reconstructed for the post-`d8d6713ac` filte
 (`if not (...GATE_OBJ and ...GATE_CALLER)]` -> `if False]`; original text not
 recoverable)". Add the re-run base SHA to the Audit column.
 
-### INFO-1: the test header still does not list case F
+### INFO-1 (FIXED): the test header still does not list case F
 
 `tools/test_check_lcd_sink_callgraph.ps1` lines 2 to 14 list A to E, G to N and K, but
 not F (no build means exit 3 SKIP). This was REVIEW_BASELINEFX1 INFO-2. `042909f0e`
 edited this header to add N and left F out.
 
-### INFO-2: mutation names drift between documents
+### INFO-2 (FIXED): mutation names drift between documents
 
 The row's "M1b" (bare-name append off, H and I2) is not the earlier review's R5 (bare-name
 walk loop emptied). The row also calls M4 the "first" reverse-walk loop, but it is the
@@ -76,3 +76,7 @@ there is no compile step.
 | M4 | node-keyed loop `for c in rev.get(node, ()):` -> `for c in ():` (line 146) | CAUGHT | `FAIL: N` only (1 failure) |
 | M1r | gate filter `if not (os.path.basename(c.partition("::")[0]) == GATE_OBJ and c.partition("::")[2] == GATE_CALLER)]` -> `if False]` (my own reconstruction for the current code) | CAUGHT | `FAIL: D` only (1 failure) |
 | R5 | bare-name loop `for c in rev.get(fn, ()):` -> `for c in ():` | CAUGHT | `FAIL: C`, `FAIL: N` (2 failures) |
+
+## Fix status
+
+LOW-1, INFO-1 and INFO-2 fixed in the baselinefx3 commit: the row now labels M1 as reconstructed for the post-d8d6713ac filter, cites the 042909f0e re-run base next to b4c819c80, names M4 as the node-keyed loop and the bare-name loop as R5 (the row's M1b is a different mutation: bare-name append off); the test header lists case F.

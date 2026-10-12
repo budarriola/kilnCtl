@@ -4,6 +4,7 @@
 #   C: ui function reaches the sink through a non-ui helper (macro/wrapper)    -> exit 1
 #   D: ui function pointer table references clear_action                       -> exit 1
 #   E: unreviewed non-UI caller of the sink                                     -> exit 1
+#   F: no build objects present (real-build wrapper path)                    -> exit 3 SKIP
 #   G: sinks renamed / absent (check must not pass vacuously)                  -> exit 1
 #   H: clear_action referenced by bare name (global) from a non-ui object      -> exit 1
 #   I: btn_clicked_cb in a DIFFERENT object references the gated action         -> exit 1
