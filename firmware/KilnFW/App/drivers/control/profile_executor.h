@@ -148,11 +148,8 @@ typedef enum {
 typedef struct {
     bool     tick_stale;               /* control task's own liveness tick is too old (guard 9 proper) */
     uint32_t tick_stale_ms;            /* how long, for the fault_reason text; meaningful only if tick_stale */
-    bool     safety_processor_tripped; /* diag_state == TRIPPED off a FRESH (non-stale) DIAG frame --
-                                         * the caller is responsible for the staleness gate (against
-                                         * SAFETY_LINK_STALE_MS) before setting this, same as the
-                                         * caller already gates safety_link_silent_30s below against
-                                         * its own, much larger threshold. */
+    bool     safety_processor_tripped; /* cached diag_state == TRIPPED, counted at ANY age (SAFETYFX7 I-1: a stale
+                                         * DIAG never relabels a trip as OK); only the K4 timing uses freshness. */
     uint8_t  safety_trip_reason;       /* SAFETY_TRIP_* (SaftyFW's safety_guards.h); meaningful only if
                                          * safety_processor_tripped */
     bool     safety_link_silent_30s;   /* link silent >= SAFETY_LINK_FIRING_ABORT_SILENCE_MS */

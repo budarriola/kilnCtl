@@ -676,6 +676,22 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 }
 
 /* F5HOLDERFX2 LOW-3: as aux_apply_relay(), refusing an ON while the tick's Pico report says TRIPPED. */
+/* SAFETYFX7 LOW-1: a DIAG that is stale (or was not received since the Pico's last reboot) cannot show a trip
+ * that happened after it, so it must not PERMIT a new switch-ON. Used by the ON gates ONLY: never by an OFF,
+ * fault, drop or abort path (a DIAG gap must not drop an output that is already on or abort a run). No
+ * safety link bound (host/sim) means nothing to gate on. An unreadable status counts as not fresh. */
+static bool pico_diag_stale_for_on(void)
+{
+    if (!s_exec.safety) {
+        return false;
+    }
+    safety_link_status_t st;
+    if (safety_link_get_status(s_exec.safety, &st) != ESP_OK) {
+        return true;
+    }
+    return !relay_authority_pico_diag_fresh(&st);
+}
+
 bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
 {
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
@@ -691,6 +707,11 @@ bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
     if (want_on && (pico_tripped || relay_authority_on_blocked(s_exec.safety, &sources))) {
         ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X", (unsigned)aux_idx + 1u,
                  (unsigned)sources);
+        want_on = false;
+    }
+    /* SAFETYFX7 LOW-1: a stale DIAG refuses a NEW ON only; an aux already on is held (no drop on a DIAG gap). */
+    if (want_on && !s_exec.aux[aux_idx].commanded_on && pico_diag_stale_for_on()) {
+        ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT PICO DIAG IS STALE -- not switched on", (unsigned)aux_idx + 1u);
         want_on = false;
     }
     static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
@@ -784,7 +805,7 @@ void force_aux_relays_off(void)
 
 /* Audit AUX_OUTPUTS_SAFETY_REVIEW_2026-10-09 F1/F2. Called every executor
  * tick while NOT RUNNING, with s_exec.lock held. When a safety fault is
- * asserted (relay_authority_on_blocked(), or a fresh Pico TRIPPED report passed
+ * asserted (relay_authority_on_blocked(), or a cached Pico TRIPPED report (any age) passed
  * in as pico_tripped), every aux output that is on is driven OFF:
  *  - PAUSED (F1): a pause otherwise holds the last commanded aux state; that
  *    hold only lasts while nothing is faulted. Goes through aux_apply_relay()
@@ -990,7 +1011,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
     profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, cap, false);
 }
 
-/* F5HOLDERFX2 LOW-3: pico_tripped (the tick's fresh Pico TRIPPED report) is treated like an authority block
+/* F5HOLDERFX2 LOW-3: pico_tripped (the tick's cached Pico TRIPPED report, any age) is treated like an authority block
  * for every ON; OFF is never gated. */
 void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap,
                                     bool pico_tripped)
@@ -1224,6 +1245,12 @@ void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t
                      idx + 1, r->target, (unsigned)blocked_sources);
             drive_on = false;
             r->state_on = false; /* F5HOLDER LOW-4: physical truth; wants_on keeps the request for the gated retry */
+        } else if (drive_on && pico_diag_stale_for_on()) {
+            /* SAFETYFX7 LOW-1: stale DIAG refuses the ON; wants_on keeps it for the retry once DIAG is fresh. */
+            ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT PICO DIAG IS STALE -- commanded OFF", idx + 1,
+                     r->target);
+            drive_on = false;
+            r->state_on = false;
         }
         if (s_exec.io) {
             esp_err_t err = kiln_io_owner_command_set_relay_mask_authorized_since(bit, drive_on ? bit : 0, off_epoch_since);
@@ -1359,7 +1386,7 @@ void io_segs_tick(float dt_s)
 /* F5HOLDER LOW-4 / F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs. Called once per RUNNING tick as the LAST
  * relay-writing step of the RUNNING body (after segment stepping, zone loop, thermal guards, aux tick and the
  * mode-state check), so a guard trip that tick never leaves an ON write after it. Refuses
- * while the authority gate is blocked OR a fresh Pico TRIPPED report is pending (fail-safe). s_exec.lock held. */
+ * while the authority gate is blocked OR a cached Pico TRIPPED report (any age) is pending (fail-safe). s_exec.lock held. */
 void io_segs_retry_on(bool pico_tripped)
 {
     if (!s_exec.io || pico_tripped) {
@@ -1372,7 +1399,7 @@ void io_segs_retry_on(bool pico_tripped)
         }
         const uint32_t off_epoch_since = kiln_io_relay_off_epoch();
         uint32_t blocked_sources = 0;
-        if (relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
+        if (relay_authority_on_blocked(s_exec.safety, &blocked_sources) || pico_diag_stale_for_on()) {
             continue;
         }
         uint8_t bit = (uint8_t)(1u << (r->target - PROFILE_IO_TARGET_RELAY_BASE));

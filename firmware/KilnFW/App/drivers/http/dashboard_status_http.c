@@ -756,7 +756,7 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
          * TRIP_EVENT was lost. Mirrored in test_dashboard_json.c's render_worst_case_status_json(). */
         APPEND(",\"trip_is_test\":%s",
                (ds->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED && ds->diag_trip_reason == 4u &&
-                ds->diag_since_reboot && ds->diag_frame_age_ms < SAFETY_LINK_DIAG_FRESH_MS) ? "true" : "false");
+                ds->diag_since_reboot && ds->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS) ? "true" : "false");
         /* 2026-09-09: raw boot_reason byte plus three decoded booleans for
          * the fatal-fault bits specifically (SAFETY_LINK_DIAG_BOOT_STACK_
          * OVERFLOW/_MALLOC_FAILED/_ASSERT_FAILED, safety_link.h) -- this is

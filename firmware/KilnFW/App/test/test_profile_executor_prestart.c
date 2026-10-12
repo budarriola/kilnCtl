@@ -3052,6 +3052,8 @@ static char *pe_strip_if0_blocks(const char *code)
 static int pe_count_in_range(const char *begin, const char *end, const char *needle);
 static void test_f5holderfx3_start_gate_pico_tripped(void);
 static void test_f5holderfx3_aux_tick_pico_gate(void);
+static void test_safetyfx7_stale_diag_on_gates(void);
+static void test_safetyfx7_watchdog_any_age_tripped(void);
 
 static void test_f5holderfx2_retry_placement_and_pico_gate(void)
 {
@@ -12822,6 +12824,8 @@ static void run_test_aux_wp3(void)
     test_aux_manual_toggle_handoff_at_start();
     test_aux_rule_drives_relay_on_and_off();
     test_f5holderfx3_aux_tick_pico_gate();
+    test_safetyfx7_stale_diag_on_gates();
+    test_safetyfx7_watchdog_any_age_tripped();
     test_aux_disabled_mid_run_opens_once_and_stops_driving();
     test_aux_pause_holds_state_resume_continues();
     test_aux_off_on_every_end_path();
@@ -13842,6 +13846,120 @@ static void test_f5holderfx3_aux_tick_pico_gate(void)
     aux_test_settle();
     TEST_CHECK(aux_test_wrote(0x01, 0x01), "ON written once the Pico is not tripped");
     profile_executor_halt();
+}
+
+/* Drive the safety_link stub: link reports a DIAG of the given frame age and state. */
+static void safetyfx7_set_diag(uint32_t frame_age_ms, uint8_t state)
+{
+    memset(&g_stub_safety_st, 0, sizeof(g_stub_safety_st));
+    g_stub_safety_st.link_up = true;
+    g_stub_safety_st.age_ms = 100; /* STATUS fresh: must not matter */
+    g_stub_safety_st.diag_ever_received = true;
+    g_stub_safety_st.diag_since_reboot = true;
+    g_stub_safety_st.diag_frame_age_ms = frame_age_ms;
+    g_stub_safety_st.diag_state = state;
+    g_stub_safety_rc = ESP_OK;
+    g_stub_force_link_up = false;
+    s_exec.safety = (SafetyLinkClass *)0x1;
+}
+
+static void safetyfx7_clear_diag(void)
+{
+    g_stub_force_link_up = true;
+    g_stub_safety_rc = ESP_FAIL;
+    s_exec.safety = NULL;
+}
+
+/* SAFETYFX7 LOW-1: a stale-but-NOT-tripped DIAG refuses every mid-run switch-ON (aux, io segment start, io
+ * segment retry) and never touches an OFF or an output that is already on. */
+static void test_safetyfx7_stale_diag_on_gates(void)
+{
+    TEST_SECTION("SAFETYFX7 LOW-1 -- stale (not tripped) DIAG refuses aux/segment/retry ON; OFF and already-on untouched");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+    const uint32_t stale = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+
+    /* aux_apply_relay_pico */
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "stale DIAG: aux ON writes OFF instead");
+    TEST_CHECK(!s_exec.aux[0].commanded_on, "stale DIAG: aux not commanded on");
+    safetyfx7_set_diag(SAFETY_LINK_DIAG_FRESH_MS, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0, "fresh DIAG (age == FRESH): aux ON written");
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0 && s_exec.aux[0].commanded_on,
+               "DIAG goes stale while aux is already on: it is held, not dropped");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, false, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "stale DIAG: aux OFF still written");
+    safetyfx7_clear_diag();
+
+    /* io_seg_start_pico: ON refused, request kept for the retry */
+    reset_io_seg_test_state();
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on &&
+                   s_exec.io_segs[0].wants_on,
+               "stale DIAG: segment ON driven OFF, wants_on kept");
+
+    /* io_segs_retry_on: refused while stale, proceeds once fresh */
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "stale DIAG: retry does not switch ON");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && s_exec.io_segs[0].state_on, "fresh DIAG: retry switches ON");
+    safetyfx7_set_diag(stale, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_relay_write_calls = 0;
+    io_segs_force_all_off(false);
+    TEST_CHECK(g_relay_write_calls >= 1 && (g_last_relay_write_value & 0x02u) == 0, "stale DIAG: forced OFF still written");
+    safetyfx7_clear_diag();
+    memset(&s_exec, 0, sizeof(s_exec));
+}
+
+/* SAFETYFX7 LOW-5: one real watchdog pass over a RUNNING firing. A cached TRIPPED DIAG whose frame is far past
+ * SAFETY_LINK_DIAG_FRESH_MS must still fault the run (any age); an equally old non-tripped DIAG must not. */
+static void safetyfx7_wd_case(uint8_t diag_state, profile_exec_state_t *state_out)
+{
+    monitor_only_tick_setup(false);
+    char err[128] = {0};
+    TEST_CHECK(profile_executor_run(0, err, sizeof(err)), "watchdog case: run starts");
+    s_exec.last_tick_tick = xTaskGetTickCount();
+    safetyfx7_set_diag(60000u, diag_state);
+    g_stub_safety_st.diag_trip_reason = 1;
+    BaseType_t saved_take = g_test_stub_semaphore_take_default;
+    g_test_stub_semaphore_take_default = pdTRUE;
+    g_task_delay_budget = 1;
+    if (setjmp(g_task_delay_jmp) == 0) {
+        watchdog_task_entry(NULL);
+    }
+    g_task_delay_budget = -1;
+    g_test_stub_semaphore_take_default = saved_take;
+    *state_out = s_exec.state;
+    safetyfx7_clear_diag();
+    profile_executor_halt();
+    s_exec.state = PROFILE_EXEC_IDLE;
+}
+
+static void test_safetyfx7_watchdog_any_age_tripped(void)
+{
+    TEST_SECTION("SAFETYFX7 LOW-5 -- watchdog faults a RUNNING firing on a cached TRIPPED DIAG of any age");
+    profile_exec_state_t st = PROFILE_EXEC_IDLE;
+    safetyfx7_wd_case(SAFETY_LINK_DIAG_STATE_TRIPPED, &st);
+    TEST_CHECK(st == PROFILE_EXEC_FAULTED, "old cached TRIPPED DIAG faults the run (MUST GO RED if the any-age wiring is gated on freshness)");
+    safetyfx7_wd_case(SAFETY_LINK_DIAG_STATE_ARMED, &st);
+    TEST_CHECK(st == PROFILE_EXEC_RUNNING, "an equally old non-tripped DIAG does NOT fault the run");
 }
 
 static void test_task_entry_reads_before_taking_s_exec_lock(void)

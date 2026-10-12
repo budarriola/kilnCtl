@@ -348,7 +348,11 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "DIAG age bound-1 -> true");
     s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG age == bound -> false");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL,
+               "DIAG age == bound -> true (inclusive, matches relay_authority_pico_diag_fresh)");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge+1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG age bound+1 -> false");
     /* LOW-C: a DIAG from the previous Pico boot never reads as a test trip. */
     s_fake_status.diag_frame_age_ms = 100u;
     s_fake_status.diag_since_reboot = false;
