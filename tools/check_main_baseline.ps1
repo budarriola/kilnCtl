@@ -306,7 +306,9 @@ try {
     function ScTool([string]$n) { Join-Path (Join-Path $sc "tools") $n }
     git init -b main $sc *>$null
     New-Item -ItemType Directory -Path (Join-Path $sc "tools") | Out-Null
-    Copy-Item (Join-Path $tools "run_all_checks.ps1"), (Join-Path $tools "lib_pctools_python.ps1"), (Join-Path $tools "checkcache_lib.ps1"), (Join-Path $tools "main_baseline_lib.ps1") (Join-Path $sc "tools")
+    # Every lib_*.ps1 run_all_checks.ps1 dot-sources must be present, or the scratch run dies at load.
+    Copy-Item (Join-Path $tools "run_all_checks.ps1"), (Join-Path $tools "checkcache_lib.ps1"), (Join-Path $tools "main_baseline_lib.ps1") (Join-Path $sc "tools")
+    Copy-Item (Get-ChildItem -LiteralPath $tools -Filter "lib_*.ps1").FullName (Join-Path $sc "tools")
     Set-Content -LiteralPath (ScTool "check_ok.ps1") -Value "exit 0" -Encoding ascii
     Set-Content -LiteralPath (ScTool "check_known.ps1") -Value "Write-Host 'boom'; exit 1" -Encoding ascii
     git -C $sc add -A *>$null; git -C $sc commit -m base *>$null
