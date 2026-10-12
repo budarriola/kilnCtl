@@ -104,6 +104,12 @@ re-check with `status` rather than assuming it failed.
    a live one holds a `*.lock` file under
    `%TEMP%\kilnctl-builds\locks\` (age vs. the 2100s stale timeout tells you
    if it's a live holder or an abandoned one — see that file's docstring).
+   A lock held by a confirmed-alive PID (this server) is never age-reclaimed,
+   so a *leaked* lock (release rename gave up; `buildlock: LEAKED LOCK` on
+   stderr) blocks that build directory until the server restarts. The
+   `BuildLockTimeout` message names the lock file and, when the holder is this
+   same server process, says so. Recover by restarting the MCP server or
+   deleting the named `*.lock` file once no build is running.
    Tail the newest `tools/PcTools/logs/session_*.log` for recent
    `flash_firmware`/`build_kilnfw` activity as a second signal. Then call
    `safety_get_status` — restart only once it shows no active firing (heating

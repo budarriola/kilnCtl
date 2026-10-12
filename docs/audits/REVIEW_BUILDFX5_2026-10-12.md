@@ -32,7 +32,7 @@ Reviewed in `C:\wt\rvbuildfx5_*` at origin/dev `103749263`.
 
 ## LOW
 
-### LOW-1 A leaked release now wedges the build directory until the MCP server restarts, and the escape is undocumented
+### LOW-1 (FIXED, buildfx6) A leaked release now wedges the build directory until the MCP server restarts, and the escape is undocumented
 
 `buildlock.py:328-337` and `:338-342`.
 
@@ -88,7 +88,7 @@ Fix (any one of these is enough; the first is the cheapest):
   from a holder thread, and allow the age path for a confirmed-alive holder
   only when the heartbeat is older than N minutes.
 
-### LOW-2 The sidecar break can still admit two reclaimers (vacancy window and unconditional `finally` removal)
+### LOW-2 (FIXED, buildfx6) The sidecar break can still admit two reclaimers (vacancy window and unconditional `finally` removal)
 
 `buildlock.py:204-215` and `:243-244`.
 
@@ -250,3 +250,8 @@ with an `AssertionError`, except where marked.
 |---|---|
 | `repro_leak.py` | LOW-1: a release whose rename keeps failing returns after 7.2 s and leaves the lock. A later caller in the same process times out against its own live PID even with the lock aged 9000 s. |
 | `repro_sidecar_vacancy.py` | LOW-2: a break that grabbed a live sidecar loses it to a third reclaimer during the vacancy. R's `finally` then deletes that third sidecar. |
+
+
+## Fix status (buildfx6)
+
+LOW-1 fixed: timeout message names the lock path and flags a same-process holder with recovery steps; aside read retried; stderr log when release gives up; recovery documented in `docs/MCP_SERVERS.md`. LOW-2 fixed: token in the reclaim sidecar; removal and restore only when the token matches, and the lock is removed only while the sidecar is still ours. INFO-5 done: confirmed-alive holder skips the sidecar. Tests: `BuildLockBuildFx6` in `test_buildlock.py`, all nine mutations CAUGHT by assertion.
