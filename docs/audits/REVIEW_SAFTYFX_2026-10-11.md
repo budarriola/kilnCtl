@@ -50,10 +50,11 @@ No. `safety_guards_try_clear()` handles `SAFETY_TRIP_TEST`
 1. It refuses until `s9_verify_elapsed_s >= trip_verify_s`.
 2. It refuses while `test_trip_masks_real_condition()` (`:181-193`) holds.
    That function covers:
-   - SENSOR_INVALID (S1)
-   - OVERTEMP (S2)
-   - OVER_SETPOINT (S3)
-   - LOAD_STUCK_ON (S5)
+   - SENSOR_INVALID (S5)
+   - OVERTEMP (S1)
+   - OVER_SETPOINT (S2)
+   - LOAD_STUCK_ON (S3)
+     (guard numbers corrected per REVIEW_SAFTYFX2 INFO-5)
    - FROZEN_SENSOR (S11)
    - ENCLOSURE_TEMP (S12)
    - BORROWED_STALE (S13)
@@ -262,8 +263,8 @@ copy was removed. Logs: `%TEMP%\negtest_logs\20261011_224620_i1dv`.
 | M2: LINK_DEAD dropped from the TEST real-condition list | CAUGHT |
 | M3: OVERTEMP dropped | CAUGHT |
 | M4: OVER_SETPOINT dropped | CAUGHT |
-| M5: poll outcome ternary always ACCEPTED | **MISSED** (LOW-2); CAUGHT after the fix, see Fix status |
-| M6: `s_tt_accepted_seq = seq` removed | **MISSED** (LOW-2); CAUGHT after the fix, see Fix status |
+| M5: poll outcome ternary always ACCEPTED | **MISSED** (LOW-2); wiring form re-run as N1 (REVIEW_SAFTYFX2 Fix status): CAUGHT at the saftyfx3 fix |
+| M6: `s_tt_accepted_seq = seq` removed | **MISSED** (LOW-2); equivalents N3/N4 (record call under `if (0)` / commented out) were MISSED at 96a033797 and are CAUGHT at the saftyfx3 fix (REVIEW_SAFTYFX2 Fix status) |
 | M7: S8 previous-post-window check disabled | CAUGHT `:3512` |
 | M8: test-trip request evaluated before S16 | CAUGHT `:4705`, `:4802` x5 |
 | M9: S8 strict clear granted after one post window | CAUGHT `:3422`, `:3599` |

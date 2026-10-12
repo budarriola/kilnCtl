@@ -267,3 +267,19 @@ removed. Logs: `%TEMP%\negtest_logs\20261011_232229_ib02` and
 | N9: S7 trip removed from tick | CAUGHT (k=10 retest) |
 | N10: `duplicate_replay` ignores `original_waiting` | CAUGHT |
 | N11: timeout-path `record_answer` removed | MISSED, equivalent mutant (INFO-6) |
+
+## Fix status (saftyfx3)
+
+All mutations run with `tools
+egtest.ps1 -Preset saftyfw-host -ExpectPattern "FAIL .*\.c:\d+|SAFTYFW HOST TESTS: FAILED"`, by the fixer, on the fix commits (final run on the tip; N4b, N5 re-run after test tweaks). Wiring mutations N1-N4 are re-expressed against the new glue (`link_task` forwards `link_frame_test_trip_reply_on_*()` results).
+
+| Item | Status |
+|---|---|
+| LOW-1 | FIXED. Reply decision moved into pure `link_frame_test_trip_reply_on_latch/_timeout/_duplicate()` (they also record the answer); `link_task` only forwards. `test_reply_glue` tests them behaviourally; the scan now strips comments, normalises whitespace and pins the exact three forwarding sites. N1 (arms ACCEPTED) CAUGHT, N2 (DUPLICATE arms ACCEPTED) CAUGHT, N3 (`if (0)`) CAUGHT, N4 (commented out) CAUGHT, plus N4b (record_answer removed in the helper) CAUGHT and N1b (stale reply id) CAUGHT. |
+| LOW-2 | FIXED. REVIEW_SAFTYFX M5/M6 rows and GUARD_TEST_MATRIX cite the runs above. |
+| LOW-3 | FIXED. The `> 0` term is gone; a window with streak >= 1 refuses on any rise since it opened (a flat or falling reading clears; refusing on the streak alone would deadlock, since S8 is frozen by the TEST latch). Tests `test_test_clear_s8_streak_zero_elapsed`. L3a (streak check disabled) CAUGHT, L3b (rise tolerance +100 C) CAUGHT. Direction is refuse-only. |
+| LOW-4 | Not touched (ESP side, tripwp4/tripfx3). |
+| INFO-1 | FIXED. Divisor is frozen elapsed + `s9_verify_elapsed_s`, floored at 5 s. The latch is held at least `trip_verify_s` before the check, so this is the true time since the window opened (frozen elapsed is exact; verify time only grows while K4 is open); the 5 s floor is the only term that can exceed truth, and only when `trip_verify_s` < 5 s. `test_test_clear_s8_divisor`. N5 (floor removed) CAUGHT, N6 (floor 100 s) CAUGHT, L3c (verify term dropped) CAUGHT. |
+| INFO-3 | FIXED. `s_tt_wait_request_id` holds the waiting request's id; `s_tt_reply_request_id` is only set by the arm call, so a refusal reply can no longer re-address the pending final answer. N1b CAUGHT. |
+| INFO-5 | FIXED in REVIEW_SAFTYFX. |
+| Re-runs | N7, N8b, N9, N10 CAUGHT. N5/N6 CAUGHT. |
