@@ -151,6 +151,9 @@ typedef struct {
 #define MAIN_OTA_CONFIRM_POLL_MS   500
 #define MAIN_OTA_CONFIRM_WARN_MS   10000
 
+/* stack_margin_register() target for the ota_confirm task; cleared by the task before it self-deletes. */
+static TaskHandle_t s_ota_confirm_task;
+
 static void main_ota_rollback_confirm_task(void *arg)
 {
     main_ota_confirm_ctx_t ctx = *(main_ota_confirm_ctx_t *)arg;
@@ -210,6 +213,7 @@ static void main_ota_rollback_confirm_task(void *arg)
              * (existing 500 ms cadence) and retrying the clear until it is
              * actually verified, rather than trusting one shot. */
             if (boot_guard_mark_healthy()) {
+                s_ota_confirm_task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -265,6 +269,7 @@ static void main_ota_rollback_confirm_task(void *arg)
                 (void)update_http_stale_stage_check(rollback_cancel_ok);
                 ESP_LOGI(MAIN_TAG, "ota_confirm stack high-water mark: %u bytes free of 5120",
                          (unsigned)(uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t)));
+                s_ota_confirm_task = NULL;
                 vTaskDelete(NULL);
                 return;
             }
@@ -764,12 +769,17 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
             ota_ctx->web_ok = (ctx->dash_err == ESP_OK);
             ota_ctx->ota_ok = (ota_http_err == ESP_OK);
             if (xTaskCreate(main_ota_rollback_confirm_task, "ota_confirm", 5120, ota_ctx,
-                             tskIDLE_PRIORITY + 1, NULL) != pdPASS) {
+                             tskIDLE_PRIORITY + 1, &s_ota_confirm_task) != pdPASS) {
+                s_ota_confirm_task = NULL;
                 ESP_LOGE(MAIN_TAG, "Failed to start OTA rollback confirmation task -- this image "
                               "will stay PENDING_VERIFY for the rest of this boot, and boot_guard's "
                               "counter will not be cleared this boot either");
                 startup_fault_note(STARTUP_FAULT_OTA_CONFIRM);
                 free(ota_ctx);
+            } else {
+                /* 5120 must match the xTaskCreate stack literal above (check_stack_margin_registration.ps1
+                 * compares them). The task loops until boot_guard's clear verifies, so it needs a measured margin. */
+                stack_margin_register("ota_confirm", &s_ota_confirm_task, 5120);
             }
         } else {
             ESP_LOGE(MAIN_TAG, "OTA rollback confirmation context alloc failed -- this image "

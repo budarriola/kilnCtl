@@ -790,6 +790,12 @@ TASKS = [
     dict(name="ota_pico_rollback", root="ota_pico_rollback_task",
          stack=lambda: extract_int_literal("drivers/http/ota_http_pico.c",
              r'xTaskCreate\(ota_pico_rollback_task,\s*"ota_pico_rollback",\s*(\d+)')),
+    dict(name="ota_confirm", root="main_ota_rollback_confirm_task",
+         # REVIEW_LCD19FX6 LOW-2: loops for(;;) until boot_guard's clear verifies and, after it, runs
+         # update_http_stale_stage_check() (PSA SHA-256, 1 KB work buffer) on a 5120 B stack.
+         # Registered as "ota_confirm" (main_network_http.c), liveness boot-once.
+         stack=lambda: extract_int_literal("main_network_http.c",
+             r'xTaskCreate\(main_ota_rollback_confirm_task,\s*"ota_confirm",\s*(\d+)')),
     dict(name="http_async_job", root="http_async_job_task",
          # docs/HTTP_POST_OWNER_MIGRATION.md slice A1: the shared
          # single-flight async-job helper (http_async_job.c). The stack size
@@ -1098,6 +1104,7 @@ CEILING_BYTES = {
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
     "ota_pico_rollback": 2896,
+    "ota_confirm": 3760,  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
     # WRONG -- it was borrowed from ota_pico_rollback on the assumption the
     # two tasks were a comparable shape, but ota_pico_rollback's OWN resolved
