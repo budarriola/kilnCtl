@@ -118,7 +118,7 @@ carry them to main, and every clone pays for them.
 
 Dev history keeps the blobs, but a squash promote after this commit will not.
 
-### LOW-1: the closedloop-to-aux assertion is raw text, satisfied by a comment or the wrong branch
+### LOW-1: the closedloop-to-aux assertion is raw text, satisfied by a comment or the wrong branch -- FIXED (devbreakfx13)
 
 `check_host_test_verdict.ps1:64` is `$src -match '\$script:auxBuildFailures \+= "sim_credibility_gate_closedloop"'`.
 That regex matches comment text, and it does not care which branch the
@@ -135,7 +135,7 @@ Fix: use the AST. Require exactly one `AssignmentStatementAst` with left
 `IfStatementAst` ancestor's first clause condition contains `$LASTEXITCODE
 -ne 0` and that the append sits in that clause body, not in `ElseClause`.
 
-### LOW-2: the counter lists and `$totalExpected` can be rewritten without tripping anything
+### LOW-2: the counter lists and `$totalExpected` can be rewritten without tripping anything -- FIXED (devbreakfx13)
 
 `:56-61` count only `+=` appends to `failedExes`/`builtExes`, and `:54`
 matches `$totalExpected` by exact left-hand text. None of these are pinned:
@@ -156,7 +156,7 @@ Fix: match on `VariableExpressionAst.VariablePath.UserPath`, with any
 - `totalExpected` has exactly the two known assignments;
 - no `Set-Variable`/`New-Variable`/`Clear-Variable` names any of them.
 
-### LOW-3: script-scope `break`/`return`/`continue` and a `catch` on the outer `try` exit 0
+### LOW-3: script-scope `break`/`return`/`continue` and a `catch` on the outer `try` exit 0 -- FIXED (devbreakfx13)
 
 The exit-set assertion (`:44-46`) scans for the `exit` keyword only:
 
@@ -175,7 +175,7 @@ function, and that every `ReturnStatementAst` has a
 `FunctionDefinitionAst`/`ScriptBlockExpressionAst` ancestor below the file
 root.
 
-### INFO-1: deliberate shadowing and non-keyword exits are out of reach
+### INFO-1: deliberate shadowing and non-keyword exits are out of reach -- FIXED (devbreakfx13)
 
 The following bypasses are MISSED, and none of them can be written by
 accident:
@@ -193,20 +193,20 @@ Cheap partial hardening:
 The fixer's own note is correct: a behavioural fixture is the only complete
 answer, and it costs a host build.
 
-### INFO-2: brittleness against legitimate edits
+### INFO-2: brittleness against legitimate edits -- left as is (devbreakfx13: a derived count would not be an independent check)
 
 - `:55` pins `$totalExpected` to the literal `'99'`. Every new host test now needs `build_host_tests.ps1:3588` and this check edited together. Suggest asserting `^\d+$` for the literal, which keeps the "not self-derived" property and drops the second edit.
 - `:36`, `:45` and `:47` pin exact source lines, including the blank line before the success `Write-Host` and the order of the exits. Any reformat fails. This is acceptable, because the messages print the lines found.
 - `:49` uses `$ast.Find(...)`, which returns the first `try`-with-`finally` in pre-order. That is the outer one today, but a `try/finally` added above line 52 (for example around vcvars import) would silently retarget the assertion. Selecting the try whose parent is the script's top-level `NamedBlockAst` would be more robust.
 
-### INFO-3: stale comments around the closedloop block
+### INFO-3: stale comments around the closedloop block -- FIXED (devbreakfx13)
 
 Two comments no longer match the code:
 
 - `build_host_tests.ps1:3051-3052` still says to "never let its build/run result affect this script's own exit code". That has been false since 2026-09-10, and the comment at :3063-3077 contradicts it.
 - `:3075-3077` says the failure goes "via the same `$script:buildFailures` list". It now goes via `$script:auxBuildFailures`.
 
-### INFO-4: `-OnlyRun` is now an unused parameter
+### INFO-4: `-OnlyRun` is now an unused parameter -- FIXED (devbreakfx13)
 
 With the dead branch removed (INFO-1 of DEVBREAKFX11), `Get-HostTestVerdict`
 (`host_test_verdict.ps1:6`) no longer reads `$OnlyRun`, but the call site
