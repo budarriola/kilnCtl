@@ -34,7 +34,22 @@ staleness is judged from the file's mtime, so a lock created by a process
 killed before it finished the write is still reclaimable; a dead or reused
 PID reclaims at once. Every reclaim goes through an O_EXCL ``.reclaim``
 sidecar that re-reads the lock, and release removes the lock only if the
-token is still the holder's own.
+token is still the holder's own. The sidecar holds a per-reclaim token;
+``_release_sidecar`` removes it only on a token match and restores a foreign
+one. A reclaim deletes the lock by rename-aside and content compare, never
+by path.
+
+Known residual windows (accepted, all need a prior eviction or reclaim of
+the releaser's own file): (1) the restore vacancy -- between a rename-aside
+and the restore of a foreign file, a third process can O_EXCL the vacant
+path and the grabbed file is then dropped; ``_release`` additionally sleeps
+up to 80 ms in this state while retrying an unreadable aside. (2) restoring a
+foreign sidecar can resurrect one whose owner just finished; it blocks
+reclaims for at most 30 s until ``_break_stale_sidecar`` removes it.
+(3) sidecar failures (token write, rename give-up) are silent and cost at
+most that same 30 s stall. (4) ``_release`` whose aside stays unreadable
+restores it, logging to stderr; if it was its own lock it is held until the
+server restarts.
 
 Stale-lock timeout: a lock older than ``stale_after`` seconds whose holder
 is NOT confirmed alive (unparseable/legacy content, unknown start time, or a
@@ -87,8 +102,9 @@ class BuildLockTimeout(Exception):
         if _holder_is_this_process(holder):
             own_note = (
                 " The holder is THIS server process (PID and start time match): "
-                "if no build is running here the lock was leaked by a failed "
-                "release. Recover by restarting the MCP server"
+                "(another thread of this server may be running a build: check "
+                "build_job_status first) if no build is running here the lock was "
+                "leaked by a failed release. Recover by restarting the MCP server"
                 + (f" or deleting {lock_path}" if lock_path else " or deleting the lock file")
                 + "."
             )
@@ -296,9 +312,35 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
             return
         if _read_holder(sidecar) != token:
             return  # our sidecar was broken and replaced: no longer exclusive
-        _remove_retry(lock_path)
+        _remove_judged(lock_path, judged)
     finally:
         _release_sidecar(sidecar, token)
+
+
+def _remove_judged(lock_path: str, judged: "str | None") -> None:
+    """Delete the lock only if it still holds the judged content: rename it
+    aside (atomic, retried through sharing violations), compare, remove on a
+    match, rename back on a mismatch. A retry therefore can never delete a
+    new holder's lock that took the path meanwhile (REVIEW_BUILDFX6 LOW-1).
+    Residual: the microsecond restore vacancy, as in ``_release``."""
+    aside = f"{lock_path}.rec.{uuid.uuid4().hex}"
+    for _ in range(400):
+        try:
+            os.rename(lock_path, aside)
+            break
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.005)
+    else:
+        return
+    if _read_holder(aside) == judged:
+        _remove_retry(aside)
+        return
+    try:
+        os.rename(aside, lock_path)
+    except OSError:
+        _remove_retry(aside)
 
 
 def _read_holder(lock_path: str) -> "str | None":
@@ -404,6 +446,11 @@ def _release(lock_path: str, my_text: str) -> None:
     if held == my_text:
         _remove_retry(aside)
         return
+    if held is None:
+        print(f"buildlock: LEAKED LOCK? could not read {aside} after retries; "
+              f"restored it to {lock_path}. If it was this server's own lock it "
+              f"stays held until the server restarts or {lock_path} is deleted",
+              file=sys.stderr, flush=True)
     try:
         os.rename(aside, lock_path)
     except OSError:

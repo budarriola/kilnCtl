@@ -888,5 +888,65 @@ class BuildTreeDiesWithServer(unittest.TestCase):
         m.assert_called_once()
 
 
+class BuildLockBuildFx7(unittest.TestCase):
+    def _path(self, tag):
+        import glob
+        path = _lock_path(f"fx7-{tag}-{time.time_ns()}")
+
+        def cleanup():
+            for f in [path, path + ".reclaim"] + glob.glob(path + ".*.*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+        self.addCleanup(cleanup)
+        return path
+
+    def test_reclaim_retry_never_deletes_a_new_holders_lock(self):
+        import mcpkit.buildlock as bl
+        path = self._path("g1")
+        judged = "99999999 0 dead"
+        with open(path, "w") as f:
+            f.write(judged + "\n")
+        real_rename, state = os.rename, {"first": True}
+
+        def rename(src, dst):
+            if src == path and state["first"]:
+                state["first"] = False
+                os.remove(path)  # dead lock vanishes, new holder H acquires
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, b"1 0 H\n")
+                os.close(fd)
+                raise PermissionError(32, "sharing violation")
+            return real_rename(src, dst)
+        with mock.patch.object(bl.os, "rename", rename),                 mock.patch.object(bl.time, "sleep"):
+            bl._try_reclaim(path, judged, force=False)
+        self.assertEqual(bl._read_holder(path), "1 0 H",
+                         "reclaim retry deleted a new holder's live lock")
+
+    def test_reclaim_removes_the_judged_lock(self):
+        import mcpkit.buildlock as bl
+        path = self._path("g1b")
+        judged = "99999999 0 dead"
+        with open(path, "w") as f:
+            f.write(judged + "\n")
+        bl._try_reclaim(path, judged, force=False)
+        self.assertFalse(os.path.exists(path))
+
+    def test_release_logs_when_aside_stays_unreadable(self):
+        import io
+        import contextlib
+        import mcpkit.buildlock as bl
+        path = self._path("g2")
+        with open(path, "w") as f:
+            f.write("1 0 mine\n")
+        err = io.StringIO()
+        with mock.patch.object(bl, "_read_holder", lambda p: None),                 mock.patch.object(bl.time, "sleep"), contextlib.redirect_stderr(err):
+            bl._release(path, "1 0 mine")
+        self.assertIn("LEAKED LOCK", err.getvalue())
+        self.assertIn(path, err.getvalue())
+        self.assertTrue(os.path.exists(path))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
