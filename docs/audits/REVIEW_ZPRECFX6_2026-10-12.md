@@ -278,3 +278,5 @@ The two MISSED results are the expected evidence for LOW-1. The clamp branch is 
 - **INFO-A FIXED:** 82 -> 83 in the test comment.
 - **INFO-B:** the zprecfx5 LOW-1 line was wrong for the version-mismatch/unknown-field producers; the clamp's real route was +-0, now closed by LOW-A. Recorded here as the correction.
 - **INFO-C:** deferred (owner question, not trivial).
+
+Landed on origin/dev as `6c0b12032` (fix), `712ae3fa0`, `e6f218d9b`, `28dfaf18f` (test hardening). Negative tests (kilnfw-host, real assertions): `no_zero_norm` CAUGHT (test_config_divergence.c:191/196/198), `head_cap_minus_40` CAUGHT (:211), `no_lcd_hint` CAUGHT (:232/233), `drop_head_clamp` CAUGHT (:212/214, after the guard-canary hardening; the first version crashed instead of asserting).
