@@ -179,6 +179,6 @@ commit rather than the tree that was tested.
 
 | Finding | Status |
 |---|---|
-| LOW-1 | OPEN (comment wording) |
-| LOW-2 | OPEN (tooling) |
+| LOW-1 | FIXED in `aba482d76` (gap (1) reworded; reviewed in `REVIEW_FLAKEFX4_2026-10-12.md` INFO-5) |
+| LOW-2 | FIXED in `032909fa1` (case 5 ready-file handshake; follow-ups in `a6e5bd18f`) |
 | INFO-1..4 | no action required |

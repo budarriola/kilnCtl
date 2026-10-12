@@ -181,3 +181,11 @@ a mismatched declaration.
 The commit can stay. LOW-1 is pre-existing and worth a small follow-up: a
 longer bound on the positive writer-start waits. LOW-2 and the INFO items are
 optional hardening.
+
+## Fix status
+
+| Finding | Status |
+|---|---|
+| LOW-1 | FIXED in `aba482d76` (30 s `WAIT_FOR_MS` at the two positive wedge waits; the iteration-counted fake fallback remains, see `REVIEW_FLAKEFX4_2026-10-12.md` INFO-2) |
+| LOW-2 | FIXED in `aba482d76` (idle-waiter handshake replaces `Sleep(50)`; negative-tested in `REVIEW_FLAKEFX4_2026-10-12.md`, A5 CAUGHT / A6 MISSED) |
+| INFO-1..3 | no action required |
