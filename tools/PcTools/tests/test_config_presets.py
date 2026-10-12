@@ -21,6 +21,23 @@ from kilnctrl import config_presets, ramp_assist_http_client, safety_cfg_http_cl
 from kilnctrl.devices import OkReason  # noqa: E402
 
 
+class ShippedPresetsValidateTest(unittest.TestCase):
+    def test_every_listed_preset_validates(self):
+        listed = config_presets.list_presets()
+        self.assertTrue(listed)
+        for entry in listed:
+            self.assertFalse(str(entry["description"]).startswith("error:"),
+                             f"{entry['name']}: {entry['description']}")
+            config_presets.load_preset_data(entry["name"])
+
+    def test_non_preset_files_are_not_listed_and_refuse_load(self):
+        names = {e["name"] for e in config_presets.list_presets()}
+        for n in config_presets.NON_PRESET_FILES:
+            self.assertNotIn(n, names)
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets.load_preset_data(n)
+
+
 class FakeControl:
     """Stands in for ControlClient: records every call, replies ok by
     default, and can be told to refuse a specific zone."""

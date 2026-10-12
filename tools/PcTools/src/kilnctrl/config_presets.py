@@ -117,6 +117,17 @@ _REQUIRED_ZONE_FIELDS = (
 _REQUIRED_TOP_FIELDS = ("name", "zones", "ramp_assist_enabled")
 
 
+#: Files that live in :func:`presets_dir` but are NOT presets (analysis output,
+#: a board backup export). They have no ``name``/``zones`` by design and are
+#: referenced by path from docs and tools, so they stay put; the listing skips
+#: them and loading one by name refuses with an explicit message.
+NON_PRESET_FILES = frozenset({
+    "noise_floor",                # noise-floor statistics (noise_floor.py output)
+    "tuned_baseline_20260831",    # raw kilnctl_backup export
+    "tuning_recommendations",     # tuning analysis report
+})
+
+
 def presets_dir() -> str:
     """``tools/PcTools/config_presets`` -- found relative to this file, not
     the caller's cwd, so it resolves the same from an MCP server, a test
@@ -147,6 +158,8 @@ def list_presets() -> "list[dict]":
         if not fname.endswith(".json"):
             continue
         name = fname[: -len(".json")]
+        if name in NON_PRESET_FILES:
+            continue
         try:
             preset = load_preset_data(name)
             out.append({"name": name, "description": preset.get("description", "")})
@@ -160,6 +173,8 @@ def load_preset_data(name: str) -> dict:
     on a missing file, bad JSON, or a schema violation -- never returns a
     partially-valid preset."""
     path = _preset_path(name)
+    if name in NON_PRESET_FILES:
+        raise ConfigPresetError(f"{name!r} is a data file in the preset directory, not a preset")
     if not os.path.isfile(path):
         raise ConfigPresetError(f"no preset named {name!r} (looked for {path})")
     try:
