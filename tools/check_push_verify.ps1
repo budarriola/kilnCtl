@@ -200,11 +200,13 @@ $holes['Launch other exe'] = 'if ($false) { [PvJob]::Launch("C:\Windows\System32
 $holes['second single-quoted Add-Type'] = "if (`$false) { Add-Type -TypeDefinition 'public class Zk { public static void K(int p){} }' }"
 $holes['qualified Get-Process ForEach Kill'] = 'if ($false) { Microsoft.PowerShell.Management\Get-Process | ForEach-Object Kill }'
 $holes['concatenated EntryPoint'] = 'if ($false) { Add-Type -TypeDefinition ''using System.Runtime.InteropServices; public class Zk { [DllImport("kernel32.dll", EntryPoint = "Open" + "Process")] public static extern int O(); }'' }'
+$holes['ForEach-Object member-name string'] = 'if ($false) { Get-CimInstance Win32_Process | ForEach-Object Terminate }'
 foreach ($k in $holes.Keys) {
     Assert ((Get-LintCount ($pvSrc + "`n" + $holes[$k]) 'script') -gt 0) "L1 hole closed (script): $k"
 }
 Assert ((Get-LintCount ($pvLibSrc + "`nif (`$false) { Stop-Process -Id 1 }") 'lib') -gt 0) "L1 hole closed (lib): Stop-Process"
 Assert ((Get-LintCount ($pvLibSrc + "`nif (`$false) { `$x.Kill() }") 'lib') -gt 0) "L1 hole closed (lib): Kill outside Stop-PvTargets"
+Assert ((Get-LintCount ($pvSrc.Replace('[PvJob]::Launch($gitExe,', '[PvJob]::Launch("taskkill.exe",')) 'script') -gt 0) "L1 hole closed: the one Launch retargeted at another exe"
 Assert ((Get-LintCount ($pvSrc.Replace('TerminateProcess(h, 1);', 'TerminateProcess(h, 1); TerminateProcess(pi.hp, 9);')) 'script') -gt 0) "L1 hole closed: extra C# TerminateProcess call site"
 Assert ((Get-LintCount ($pvSrc.Replace('static extern bool CloseHandle(IntPtr h);', 'static extern bool CloseHandle(IntPtr h); [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint a, bool b, uint c);')) 'script') -gt 0) "L1 hole closed: C# OpenProcess"
 Assert (($pvCs -match 'ResumeThread\(pi\.ht\)\s*==\s*0xFFFFFFFF') -and ($pvCs -match 'hin\s*==\s*bad') -and ($pvCs -match 'hout\s*==\s*bad') -and ($pvCs -match 'herr\s*==\s*bad')) "LOW-2: ResumeThread and every CreateFileW result is checked (INVALID_HANDLE_VALUE / 0xFFFFFFFF)"
