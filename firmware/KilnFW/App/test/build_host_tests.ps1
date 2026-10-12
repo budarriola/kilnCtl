@@ -1661,7 +1661,7 @@ try {
     $exe14t = Join-Path $outDir "kilnctl_host_tests_safety_link_tick10.exe"
     $slObjDirT = Join-Path $outDir "sl_tick10"
     New-Item -ItemType Directory -Force -Path $slObjDirT | Out-Null
-    $cmd14t = $cmd14.Replace("/Fo:`"$slObjDir\`"", "/Fo:`"$slObjDirT\`"").Replace("/Fe:`"$exe14`"", "/Fe:`"$exe14t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    $cmd14t = $cmd14.Replace("/Fo:`"$slObjDir\\`"", "/Fo:`"$slObjDirT\\`"").Replace("/Fe:`"$exe14`"", "/Fe:`"$exe14t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
     Invoke-HostTestExe -Name "safety_link_tick10" -ExePath $exe14t -BuildCmd $cmd14t
 
     # ---- test_dashboard_json.c: its own FIFTEENTH, separate executable --------
