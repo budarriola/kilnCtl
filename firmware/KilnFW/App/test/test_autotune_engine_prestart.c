@@ -289,6 +289,13 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
     }
     if (out) memset(out, 0, sizeof(*out));
     if (out) out->link_up = (s_stub_link_mode == 0);
+    /* F5HOLDERFX4: start also needs a DIAG received since the Pico's last reboot and fresh; a link-up board
+     * in this stub has one (state 0 is not TRIPPED). */
+    if (out && s_stub_link_mode == 0) {
+        out->diag_ever_received = true;
+        out->diag_since_reboot = true;
+        out->diag_frame_age_ms = 0;
+    }
     return ESP_OK;
 }
 
