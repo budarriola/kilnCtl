@@ -798,6 +798,9 @@ bool zones_config_get_pid(uint8_t zone_index, float *out_kp, float *out_ki, floa
  * discipline as the form-submit path, just for a single field group instead
  * of the whole page. */
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd);
+/* true while this boot could not decide the stored zones config (every save is refused until a clean reload).
+ * Also declared in zones_http_internal.h; HTTP writers use it to pick the zones-store remedy over a bare 500. */
+bool zones_config_is_undecided(void);
 
 bool zones_config_set_pid_no_save(uint8_t zone_index, float kp, float ki, float kd);
 

@@ -1980,15 +1980,18 @@ static void test_zones_post_blank_guard_fields_and_pc_link(void)
         float *fields[9] = {&z->guard_wrong_dir_window_s, &z->guard_wrong_dir_rate_c_per_min, &z->guard_off_settle_s,
                             &z->guard_runaway_rate_c_per_min, &z->guard_runaway_margin_c, &z->guard_drift_period_s,
                             &z->guard_sensor_fault_debounce_ticks, &z->guard_frozen_window_s, &z->cross_zone_max_delta_c};
-        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f;
+        /* Distinct seed per field (review BENCHFX4 MED-1): a cross-wired omit copy must be visible. */
+        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f + 0.25f * (float)f;
         run_zones_post(body);
         if (s_test_err_called) printf("  err: %s\n", s_test_err_msg);
         TEST_CHECK(!s_test_err_called && s_test_ok_called, keys[k]);
         for (size_t f = 0; f < 9; f++) {
+            const float want = 9.0f + 0.25f * (float)f;
+            if (*fields[f] != want) printf("  field %s (index %u) = %g, want %g\n", keys[f], (unsigned)f, (double)*fields[f], (double)want);
             if (f == k) {
-                TEST_CHECK(*fields[f] == 9.0f, "blank guard/xzone preserves the stored value (never default/disable)");
+                TEST_CHECK(*fields[f] == want, "blank guard/xzone preserves its OWN stored value (never default/disable)");
             } else {
-                TEST_CHECK(*fields[f] == 9.0f, "omitted guard/xzone keeps the stored value (review 11 MED-3: never disables a guard)");
+                TEST_CHECK(*fields[f] == want, "omitted guard/xzone keeps its OWN stored value (review 11 MED-3: never disables a guard)");
             }
         }
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
@@ -2195,6 +2198,9 @@ static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
                "persfx3 LOW-1: no Pico ceiling write at all for a POST that can never commit");
     TEST_CHECK(strstr(s_last_resp_body, "force_healthy") != NULL && strstr(s_last_resp_body, "scope kiln") != NULL,
                "persfx3 LOW-2: the 409 names the recovery routes");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL &&
+                   strstr(s_last_resp_body, "ERASES ALL cfg-stored settings") != NULL,
+               "PROFILESFX9 LOW-2: the 409 gives the ?force_healthy=1 spelling, the reboot and the erase warning");
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided POST answered 409");
     TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "refusal names the cause");
     TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault is still latched");
@@ -2388,6 +2394,31 @@ static void test_zones_pid_post_refused_while_profile_running(void)
     TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp must be untouched by a refused submit");
     TEST_CHECK_NEAR(ki, ki_before, 1e-9, "ki must be untouched by a refused submit");
     TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd must be untouched by a refused submit");
+}
+
+/* PROFILESFX10 LOW-3: the narrow PID writer answers the zones 409 (with the recovery routes), not a bare 500, when
+ * the stored zones config was unreadable at boot. */
+static void test_zones_pid_post_undecided_is_409_with_remedy(void)
+{
+    TEST_SECTION("POST /api/zones/pid -- undecided zones config answers 409 zones_config_undecided, gains unchanged (PROFILESFX10 LOW-3)");
+    seed_two_zone_pid_baseline();
+    float kp_before = 0.0f, ki_before = 0.0f, kd_before = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp_before, &ki_before, &kd_before), "baseline gains readable");
+    zones_config_load_fault_reset_for_test();
+    zones_cfg_mark_undecided("test: cannot decide", true);
+    run_zones_pid_post("zone=0&kp=0.0318&ki=0.00012&kd=0.8401");
+    TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided PID POST answered 409, not 500");
+    TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "body names the cause");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL, "body names the recovery route");
+    TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") == NULL, "no success reported");
+    float kp = 0.0f, ki = 0.0f, kd = 0.0f;
+    TEST_CHECK(zones_config_get_pid(0, &kp, &ki, &kd), "gains still readable");
+    TEST_CHECK_NEAR(kp, kp_before, 1e-6, "kp untouched");
+    TEST_CHECK_NEAR(ki, ki_before, 1e-9, "ki untouched");
+    TEST_CHECK_NEAR(kd, kd_before, 1e-6, "kd untouched");
+    zones_config_load_fault_reset_for_test();
+    s_zones_cfg_undecided = false;
+    s_zones_config_valid = true;
 }
 
 static void test_zones_pid_post_refused_while_autotune_running(void)
@@ -3409,6 +3440,22 @@ static void test_zones_http_start_refused_newer_blob_not_overwritten(void)
         const uint32_t seeds[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
                                    0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
         fake_sysinfo_script_random_sequence(seeds, 8);
+    }
+    {
+        /* REVIEW_WEBGENFX H3b: a RNG word of 0 must still give a NONZERO generation (the `| 1`). */
+        const uint32_t zero_seed[1] = {0u};
+        fake_sysinfo_script_random_sequence(zero_seed, 1);
+        (void)zones_http_start();
+        const uint32_t gen_zero = zones_config_generation();
+        const uint32_t one_seed[1] = {1u};
+        fake_sysinfo_script_random_sequence(one_seed, 1);
+        (void)zones_http_start();
+        /* seeds 0 and 1 both map to 1 through `| 1u`; without it they differ by one (startup may bump after the seed) */
+        TEST_CHECK(gen_zero != 0u && gen_zero == zones_config_generation(),
+                   "zero RNG seed gives the same nonzero zones generation as seed 1");
+        const uint32_t seeds2[8] = {0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u,
+                                    0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u, 0x2a5c1e76u};
+        fake_sysinfo_script_random_sequence(seeds2, 8);
     }
     (void)zones_http_start();
     TEST_CHECK((uint32_t)(zones_config_generation() - ((0x2a5c1e76u & 0x3fffffffu) | 1u)) < 64u,
@@ -6713,6 +6760,68 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
     TEST_CHECK(out.zone_type == 1 && out.failsafe_state == 1 && out.hyst_c == 3.0f &&
               out.min_on_s == 60 && out.min_off_s == 120,
               "omitting the on/off fields preserves every stored value, not a silent reset to HEATER/OFF/0");
+
+    /* Omitted hyst_c on a HEATER zone (zone_type 0) with a non-zero stored value still preserves it
+     * (review BENCHFX4 LOW-1): it must not depend on the current zone being on/off. */
+    zone_cfg_t current_heater = make_stored_zone();
+    current_heater.zone_type = 0;
+    current_heater.hyst_c = 3.5f;
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_omit, 0, 1, 4, 1, &current_heater, &out, &err_reason);
+    TEST_CHECK(ok, "a HEATER-zone body omitting hyst_c must be accepted");
+    TEST_CHECK(out.hyst_c == 3.5f, "omitted hyst_c on a HEATER zone preserves the stored value");
+}
+
+/* Review BENCHFX5 MED-1: five float fields POST /api/zones preserves on an omitted key had no
+ * host test. Seed each with a distinct nonzero value, omit the key, assert it survives, for
+ * HEATER (zone_type 0) and ON_OFF (1). A present-but-blank key is NOT an omit for these fields
+ * (field_present is true, the float parse then fails): it must be refused, never reset. */
+static void test_post_omitting_five_float_fields_preserves_stored_values(void)
+{
+    TEST_SECTION("parse_zone_fields -- approachratecap/errorband/rateband/progressband/coilpower: "
+                 "omitted preserves stored value (HEATER and ON_OFF), blank is refused (BENCHFX5 MED-1)");
+    static const char *const keys[] = {"approachratecap", "errorband", "rateband", "progressband", "coilpower"};
+    static const float seeds[] = {123.5f, 17.25f, 0.75f, 4.5f, 2750.0f};
+    const char *base =
+        "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+        "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+        "z0_timingprofile=0";
+    for (uint8_t zt = 0; zt <= 1; zt++) {
+        zone_cfg_t current = make_stored_zone();
+        current.zone_type = zt;
+        current.approach_rate_cap_c_per_hr = seeds[0];
+        current.error_band_c = seeds[1];
+        current.rate_band_c_per_s = seeds[2];
+        current.progress_band_c = seeds[3];
+        current.coil_power_w = seeds[4];
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(base, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a body omitting all five float fields must be accepted");
+        TEST_CHECK(out.approach_rate_cap_c_per_hr == seeds[0], "omitted approachratecap preserves the stored value");
+        TEST_CHECK(out.error_band_c == seeds[1], "omitted errorband preserves the stored value");
+        TEST_CHECK(out.rate_band_c_per_s == seeds[2], "omitted rateband preserves the stored value");
+        TEST_CHECK(out.progress_band_c == seeds[3], "omitted progressband preserves the stored value");
+        TEST_CHECK(out.coil_power_w == seeds[4], "omitted coilpower preserves the stored value");
+        /* A posted value must win over the stored one (guards a reset placed after the parse). */
+        char body[700];
+        snprintf(body, sizeof(body), "%s&z0_approachratecap=50&z0_errorband=9&z0_rateband=0.5&z0_progressband=2&z0_coilpower=1000", base);
+        memset(&out, 0, sizeof(out));
+        ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok && out.approach_rate_cap_c_per_hr == 50.0f && out.error_band_c == 9.0f &&
+                   out.rate_band_c_per_s == 0.5f && out.progress_band_c == 2.0f && out.coil_power_w == 1000.0f,
+                   "posted values for the five fields are stored verbatim");
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+            snprintf(body, sizeof(body), "%s&z0_%s=", base, keys[k]);
+            memset(&out, 0, sizeof(out));
+            err_reason = "unset";
+            ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+            TEST_CHECK(!ok, "a present-but-blank value is refused, not treated as omit");
+        }
+    }
 }
 
 /* One clean body with only the field-under-test varied, mirroring
@@ -7587,6 +7696,39 @@ static void test_get_fuzzy_model_valid_single_sourced_past_thermo_count(void)
 // max length, and asserts the actual produced length stays under json_cap
 // -- so a future field addition that finally exhausts the buffer fails
 // loudly here instead of silently truncating a live board's GET response.
+// BENCHFX3 INFO-1: cal_offset_c/max_ramp/sanity_rate/max_temp_c/min_temp_c
+// used to print at %.3f/%.2f/%.3f/%.1f/%.1f, so a GET-merge-POST re-post rounded
+// guard thresholds and a sanity_rate < 0.0005 printed 0.000 (then defaulted).
+// Pin that the printed value parses back to the exact float.
+static void test_zones_get_round_trip_precision_fields(void)
+{
+    TEST_SECTION("GET /api/zones prints cal_offset/ramp/sanity/max/min lossless (%.9g)");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    zone_cfg_t *z = &s_zones.cfg.zones[0];
+    z->cal_offset_c = 0.100000024f;
+    z->max_ramp_c_per_hr = 123.400024f;
+    z->sanity_rate_c_per_min = 0.000100027195f;
+    z->max_temp_c = 1000.00006f;
+    z->min_temp_c = -12.3000145f;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(zones_get_handler(&req) == ESP_OK, "GET ok");
+    const struct { const char *key; float want; } f[] = {
+        {"\"cal_offset_c\":", 0.100000024f}, {"\"max_ramp_c_per_hr\":", 123.400024f},
+        {"\"sanity_rate_c_per_min\":", 0.000100027195f}, {"\"max_temp_c\":", 1000.00006f},
+        {"\"min_temp_c\":", -12.3000145f}};
+    for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
+        const char *at = strstr(s_last_resp_body, f[k].key);
+        TEST_CHECK(at != NULL, "key present");
+        if (at != NULL) {
+            float got = strtof(at + strlen(f[k].key), NULL);
+            TEST_CHECK(got == f[k].want, f[k].key);
+        }
+    }
+}
+
 static void test_zones_get_handler_max_width_response_fits_json_cap(void)
 {
     TEST_SECTION("zones_get_handler -- every zone/profile/relay field at its documented max width "
@@ -7627,7 +7769,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->name[ZONE_NAME_MAX_LEN] = '\0';
         z->relay_mask = 255;
         z->thermo_mask = 255;
-        z->cal_offset_c = ZONE_CAL_OFFSET_MAX_C;
+        z->cal_offset_c = -1.23456793e-5f; /* %.9g-widest, see pid_kp below */
         /* pid_kp/ki/kd, coupling_c%u and coupling_diag_k_dc render at "%.9g"
          * (2026-09-28), where the MAX bound is NOT the widest value: 1000.0f
          * renders as "1000" (4 chars) but any in-range value below 1e-4 with
@@ -7639,11 +7781,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->pid_kp = 1.17549435e-38f;
         z->pid_ki = 1.17549435e-38f;
         z->pid_kd = 1.17549435e-38f;
-        z->max_ramp_c_per_hr = ZONE_MAX_RAMP_C_PER_HR_MAX;
-        z->sanity_rate_c_per_min = ZONE_SANITY_RATE_MAX_C_PER_MIN;
+        z->max_ramp_c_per_hr = -1.23456793e-5f; /* %.9g-widest */
+        z->sanity_rate_c_per_min = -1.23456793e-5f;
         z->control_mode = 255;
-        z->max_temp_c = ZONE_MAX_TEMP_C_MAX;
-        z->min_temp_c = ZONE_MIN_TEMP_C_MAX;
+        z->max_temp_c = -1.23456793e-5f;
+        z->min_temp_c = -1.23456793e-5f;
         z->heater_window_ms = ZONE_HEATER_WINDOW_MS_MAX;
         z->heater_min_on_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
         z->heater_min_off_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
@@ -7759,7 +7901,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * which recovered headroom to 854 bytes. `fuzzy_model_valid` (GAP 2,
      * docs/audits/observability_gaps_closed_2026-09-14.md) then spent 75 of
      * those bytes (25 bytes/zone x MAX31856_CHANNEL_COUNT=3 for
-     * `"fuzzy_model_valid":true,`), leaving 779 bytes, confirmed by this
+     * `"fuzzy_model_valid":true,`), leaving 475 bytes (re-measured 2026-10-12; the 779 figure was stale), confirmed by this
      * test. The buffer must still NOT simply be enlarged (this repo has two
      * documented panics from oversized httpd-worker stack locals and a
      * standing rule against growing httpd buffers) -- read the plan and the
@@ -7769,7 +7911,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
     snprintf(headroom_msg, sizeof(headroom_msg),
              "max-width GET /api/zones must fit inside json_cap without hitting the "
              "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
-             "measured headroom after fuzzy_model_valid (2026-09-14) was 779 bytes; this "
+             "measured headroom after fuzzy_model_valid (2026-09-14) was 475 bytes (re-measured 2026-10-12); this "
              "attempt %s). "
              "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
              "standing rule against growing httpd buffers) -- see "
@@ -17018,6 +17160,7 @@ void run_test_zones_http(void)
 
     test_zones_pid_post_refused_while_profile_running();
     test_zones_pid_post_refused_while_autotune_running();
+    test_zones_pid_post_undecided_is_409_with_remedy();
     test_zones_setters_refuse_busy_running_inside_the_lock();
     test_zones_fix_review9_atomic_pair_and_claim_gated_writers();
     test_zones_pid_post_accepts_while_idle();
@@ -17090,6 +17233,7 @@ void run_test_zones_http(void)
     test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
+    test_post_omitting_five_float_fields_preserves_stored_values();
     test_post_omitting_model_fields_preserves_them();
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
@@ -17104,6 +17248,7 @@ void run_test_zones_http(void)
     test_get_emits_fuzzy_model_valid();
     test_get_fuzzy_model_valid_single_sourced_past_thermo_count();
     test_get_and_diag_emit_matching_generation();
+    test_zones_get_round_trip_precision_fields();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();

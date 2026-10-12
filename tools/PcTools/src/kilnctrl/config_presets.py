@@ -77,6 +77,7 @@ here specifically (its 80C ceiling is a fixture limit, never a kiln one).
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -117,6 +118,17 @@ _REQUIRED_ZONE_FIELDS = (
 _REQUIRED_TOP_FIELDS = ("name", "zones", "ramp_assist_enabled")
 
 
+#: Files that live in :func:`presets_dir` but are NOT presets (analysis output,
+#: a board backup export). They have no ``name``/``zones`` by design and are
+#: referenced by path from docs and tools, so they stay put; the listing skips
+#: them and loading one by name refuses with an explicit message.
+NON_PRESET_FILES = frozenset({
+    "noise_floor",                # noise-floor statistics (noise_floor.py output)
+    "tuned_baseline_20260831",    # raw kilnctl_backup export
+    "tuning_recommendations",     # tuning analysis report
+})
+
+
 def presets_dir() -> str:
     """``tools/PcTools/config_presets`` -- found relative to this file, not
     the caller's cwd, so it resolves the same from an MCP server, a test
@@ -147,6 +159,8 @@ def list_presets() -> "list[dict]":
         if not fname.endswith(".json"):
             continue
         name = fname[: -len(".json")]
+        if name in NON_PRESET_FILES:
+            continue
         try:
             preset = load_preset_data(name)
             out.append({"name": name, "description": preset.get("description", "")})
@@ -160,6 +174,8 @@ def load_preset_data(name: str) -> dict:
     on a missing file, bad JSON, or a schema violation -- never returns a
     partially-valid preset."""
     path = _preset_path(name)
+    if name in NON_PRESET_FILES:
+        raise ConfigPresetError(f"{name!r} is a data file in the preset directory, not a preset")
     if not os.path.isfile(path):
         raise ConfigPresetError(f"no preset named {name!r} (looked for {path})")
     try:
@@ -169,6 +185,63 @@ def load_preset_data(name: str) -> dict:
         raise ConfigPresetError(f"could not read preset {name!r}: {exc}") from exc
     _validate(name, data)
     return data
+
+
+#: Zone keys that are legitimately not scalar numbers (checked separately or free text).
+_ZONE_NON_FLOAT_KEYS = frozenset({"index", "name", "coupling_coeff", "failsafe_state", "settings_source_groups"})
+
+
+#: Firmware bounds, mirrored (the firmware REFUSES out-of-range values with a 400, it never
+#: clamps, so a wider check here means a partial apply after the UART PID stage):
+#:   pc_link_abort_silence_ms in [0, 600000]: zones_http_post.c:549 +
+#:     ZONE_PC_LINK_SILENCE_MS_MAX (zones_config_accessors.h:451).
+#:   ease_off_window_mult 0 (firmware default) or [0.1, 10.0]: zones_http_post_parse.c:869-880 +
+#:     ZONE_EASE_OFF_WINDOW_MULT_MIN/MAX (zones_config_json.h:99-100).
+#:   zone name: at most ZONE_NAME_MAX_LEN = 15 bytes (zones_config_accessors.h:109;
+#:     zones_http_post_parse.c:72-80 refuses longer or control characters).
+PC_LINK_ABORT_SILENCE_MS_MAX = 600000.0
+EASE_OFF_WINDOW_MULT_MIN = 0.1
+EASE_OFF_WINDOW_MULT_MAX = 10.0
+ZONE_NAME_MAX_LEN = 15
+
+
+#: Per-zone ranges mirrored from the firmware POST parser (refused there with a 400, never
+#: clamped). (lo, hi, zero_ok): value must be 0 (when zero_ok) or in [lo, hi].
+#:   relay_type [0, 2]: zones_http_post_parse.c:208 (ZONE_RELAY_TYPE_MAX, zones_config_json.h:208)
+#:   zone_type [0, 1]: zones_http_post_parse.c:235 (ZONE_TYPE_ON_OFF = 1)
+#:   progress_band_c 0 or [0.5, 20]: zones_http_post_parse.c:956-958 (zones_config_json.h:224-225)
+#:   coil_power_w 0 or [0.1, 100000]: zones_http_post_parse.c:319-321 (zones_config_json.h:309-310)
+#:   hyst_c 0 or [0.5, 25]: zones_http_post_parse.c:261-262 (zones_config_json.h:241-242)
+#:   min_on_s / min_off_s 0 or [1, 3600]: zones_http_post_parse.c:278-281, :293-295
+#:     (zones_config_json.h:244-245)
+#:   approach_rate_cap_c_per_hr 0 or [1, 1000]: zones_http_post_parse.c:898-901
+#:     (zones_config_json.h:142-143, ZONE_MAX_RAMP_C_PER_HR_MAX zones_config_accessors.h:195)
+ZONE_RANGES = {
+    "relay_type": (0, 2, True),
+    "zone_type": (0, 1, True),
+    "progress_band_c": (0.5, 20.0, True),
+    "coil_power_w": (0.1, 100000.0, True),
+    "hyst_c": (0.5, 25.0, True),
+    "min_on_s": (1, 3600, True),
+    "min_off_s": (1, 3600, True),
+    "approach_rate_cap_c_per_hr": (1.0, 1000.0, True),
+}
+
+
+def _zone_range_ok(key: str, v: float) -> bool:
+    lo, hi, zero_ok = ZONE_RANGES[key]
+    return (zero_ok and v == 0) or lo <= v <= hi
+
+
+def _ease_off_in_range(v: float) -> bool:
+    return v == 0 or EASE_OFF_WINDOW_MULT_MIN <= v <= EASE_OFF_WINDOW_MULT_MAX
+
+
+_ZONE_NUMERIC_IGNORED_EXCEPTIONS = frozenset({"k_dc", "tau_s", "dead_time_s"})
+
+
+def _is_finite_number(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
 def _validate(name: str, data: object) -> None:
@@ -190,11 +263,87 @@ def _validate(name: str, data: object) -> None:
                     f"preset {name!r}: zones[{i}] missing required field {field!r}"
                 )
         idx = zone["index"]
-        if not isinstance(idx, int) or idx < 0:
+        if type(idx) is not int or idx < 0:
             raise ConfigPresetError(f"preset {name!r}: zones[{i}].index must be a non-negative int")
         if idx in seen_index:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
         seen_index.add(idx)
+        for key in zones_http_client._ZONE_INT_FIELDS:
+            if key in zone and type(zone[key]) is not int:
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} is an integer field but the preset gives "
+                    f"{zone[key]!r} ({type(zone[key]).__name__}); write it as a plain integer")
+        for key in zone:
+            if not zones_http_client.preset_zone_key_known(key):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} is not a zone field this tool knows "
+                    "(neither written nor deliberately ignored by zones_http_client); refusing "
+                    "before any write")
+        if "name" in zone:
+            zname = zone["name"]
+            if (not isinstance(zname, str) or not zname
+                    or len(zname.encode("utf-8")) > ZONE_NAME_MAX_LEN
+                    or any(ord(c) < 0x20 or ord(c) == 0x7F for c in zname)):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].name must be a non-empty string of at most "
+                    f"{ZONE_NAME_MAX_LEN} bytes with no control characters, got {zname!r}")
+        for key, rng in ZONE_RANGES.items():
+            if key in zone and not (_is_finite_number(zone[key]) and _zone_range_ok(key, zone[key])):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} must be 0 or in [{rng[0]}, {rng[1]}] "
+                    f"(firmware refuses anything else), got {zone[key]!r}")
+        for key, val in zone.items():
+            if (key in _ZONE_NON_FLOAT_KEYS or key in zones_http_client._ZONE_INT_FIELDS
+                    or key.startswith("_")):
+                continue
+            # Read-only GET/backup telemetry (incl. five JSON bools) is ignored, never
+            # written; k_dc/tau_s/dead_time_s ARE written over UART and stay numeric.
+            if (key in zones_http_client._PRESET_ZONE_KNOWN_IGNORED_FIELDS
+                    and key not in _ZONE_NUMERIC_IGNORED_EXCEPTIONS):
+                continue
+            if not _is_finite_number(val):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} must be a finite number (int or float, "
+                    f"not bool/str/list/NaN/inf), got {val!r}")
+            if key == "ease_off_window_mult" and not _ease_off_in_range(val):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].ease_off_window_mult must be 0 or in "
+                    f"[{EASE_OFF_WINDOW_MULT_MIN}, {EASE_OFF_WINDOW_MULT_MAX}], got {val!r}")
+        if "coupling_coeff" in zone:
+            cells = zone["coupling_coeff"]
+            if not isinstance(cells, list) or not all(_is_finite_number(c) for c in cells):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].coupling_coeff must be a list of finite numbers, "
+                    f"got {cells!r}")
+        if "failsafe_state" in zone and not isinstance(zone["failsafe_state"], bool):
+            raise ConfigPresetError(
+                f"preset {name!r}: zones[{i}].failsafe_state must be a bool (true/false), "
+                f"got {zone['failsafe_state']!r}")
+    for key in zones_http_client._TOP_INT_FIELDS:
+        if key in data and type(data[key]) is not int:
+            raise ConfigPresetError(
+                f"preset {name!r}: {key!r} is an integer field but the preset gives "
+                f"{data[key]!r} ({type(data[key]).__name__}); write it as a plain integer")
+    for key in (*(k for k in zones_http_client._TOP_FIELD_FORM_KEY
+                  if k not in zones_http_client._TOP_INT_FIELDS and k != "continue_on_zone_trip"),
+                zones_http_client.LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY):
+        if key in data and (not _is_finite_number(data[key]) or data[key] < 0):
+            raise ConfigPresetError(
+                f"preset {name!r}: {key!r} must be a finite non-negative number "
+                f"(not bool/str/NaN/inf), got {data[key]!r}")
+        if key == "pc_link_abort_silence_ms" and key in data and data[key] > PC_LINK_ABORT_SILENCE_MS_MAX:
+            raise ConfigPresetError(
+                f"preset {name!r}: 'pc_link_abort_silence_ms' must be in "
+                f"[0, {PC_LINK_ABORT_SILENCE_MS_MAX:.0f}], got {data[key]!r}")
+        if (key == zones_http_client.LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY
+                and key in data and not _ease_off_in_range(data[key])):
+            raise ConfigPresetError(
+                f"preset {name!r}: 'ease_off_window_mult' must be 0 or in "
+                f"[{EASE_OFF_WINDOW_MULT_MIN}, {EASE_OFF_WINDOW_MULT_MAX}], got {data[key]!r}")
+    if "continue_on_zone_trip" in data and not isinstance(data["continue_on_zone_trip"], bool):
+        raise ConfigPresetError(
+            f"preset {name!r}: 'continue_on_zone_trip' must be a bool (true/false), "
+            f"got {data['continue_on_zone_trip']!r}")
     if not isinstance(data["ramp_assist_enabled"], bool):
         raise ConfigPresetError(f"preset {name!r}: 'ramp_assist_enabled' must be a bool (true/false), "
                                 "not inherited or inferred -- see this field's own comment above "
@@ -451,7 +600,7 @@ def apply_preset(control: "ControlClient", preset: dict,
     except (Exception,) as exc:
         if getattr(exc, "preset_partial", None) is None:
             try:
-                exc.preset_partial = "\n".join(done) if done else "(nothing had landed yet)"
+                exc.preset_partial = "\n".join(done) if done else ""
             except Exception:  # noqa: BLE001 -- exotic exception without __dict__
                 pass
         raise
@@ -505,10 +654,16 @@ def _apply_preset_stages(control, preset, zones_host, zones_timeout, verify_zone
                 for r in landed))
         raise
 
+    def _uart_line(rs):
+        return "PID/model written over UART: " + ", ".join(
+            f"zone {r.zone} pid={'ok' if r.pid_ok else 'FAILED'}" for r in rs)
+
+    # Record the ACKed writes BEFORE the read-back: an unexpected exception from it must
+    # still report that every zone's PID landed (REVIEW_ZONESPRECFX6 LOW-2).
+    done.append(_uart_line(results))
     if verify_pid and results:
         results = _verify_pid_readback(control, preset, results)
-    done.append("PID/model written over UART: " + ", ".join(
-        f"zone {r.zone} pid={'ok' if r.pid_ok else 'FAILED'}" for r in results))
+        done[-1] = _uart_line(results)
 
     zones_result = None
     ramp_assist_result = None

@@ -176,10 +176,21 @@ def unreadable_store_refusal(status: Optional[int], detail: Optional[str]) -> Op
         which = "a stored setting"
     else:
         return None
+    if "zones_config_undecided" in detail:
+        remedy = ("the recovery routes are a factory reset with scope kiln, or a cfgfs format "
+                  "(POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL cfg-stored "
+                  "settings: every user profile, the zones config and preferences")
+    else:
+        # PROFILESFX9: a refused profile save/delete is NOT cleared by scope kiln (it never touches profiles_nvs).
+        remedy = ("if the refusal names a profile, factory_reset scope=profiles (or scope=all) clears it and ERASES "
+                  "every user profile, and a cfgfs format (POST /api/cfgfs/format_confirm?force_healthy=1, then "
+                  "reboot) clears it only when the profile file itself is unreadable; scope kiln does not clear a "
+                  "profile refusal. For any other stored setting, a factory reset with scope kiln or that cfgfs "
+                  "format applies, and the format ERASES ALL cfg-stored settings: every user profile, the zones "
+                  "config and preferences")
     return (f"refused: {which} could not be read at boot, so the board refuses this write rather than overwrite "
             f"it (HTTP 409): {detail} -- nothing was changed. Reboot to retry the read; if it persists, GET "
-            f"/api/cfgfs lists the degraded store, and the recovery routes are a factory reset with scope kiln or "
-            f"a cfgfs format_confirm with force_healthy")
+            f"/api/cfgfs lists the degraded store; {remedy}")
 
 
 def _url(host: str, path: str) -> str:
@@ -751,6 +762,8 @@ def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
         # firmware's POST parser (zones_http_post_parse.c) expects
         # z%u_failsafe as "0"/"1" via zones_config_json_parse_u8_field(),
         # not "true"/"false".
+        if not isinstance(value, bool):
+            raise ZonesHttpError(f"field {key!r} must be a bool, got {value!r}")
         return "1" if value else "0"
     if key in int_fields:
         return str(int(value))
@@ -969,6 +982,11 @@ _PRESET_ZONE_OVERRIDE_FIELDS = {
     # hysteresis/timing, none of which a preset should be forced to leave at
     # whatever the board happened to have.
     "zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s",
+    # relay_type / progress_band_c / coil_power_w: POST-accepted (omit-preserve) per
+    # zones_http_post_parse.c (z%u_relaytype :203, z%u_progressband :953, z%u_coilpower :316), and
+    # in _ZONE_FIELD_FORM_KEY, so a GET-copied preset naming them must be written, not refused
+    # (REVIEW_ZONESPRECFX6 MED-1).
+    "relay_type", "progress_band_c", "coil_power_w",
 }
 
 #: coupling_coeff is handled OUTSIDE _PRESET_ZONE_OVERRIDE_FIELDS on purpose:
@@ -1047,7 +1065,21 @@ _PRESET_ZONE_KNOWN_IGNORED_FIELDS = {
     "tuning_baseline_c", "tuning_step_ambient_c", "tuning_raw_rise_c",
     "tuning_rise_inf_c", "tuning_seq",
     "model_fit_temp_c", "model_fit_ambient_c",
+    # No POST key: fuzzy_model_valid is computed per GET (zones_http_get.c), and
+    # autotune_baseline_k_dc is copied from current_z by zones_http_post_parse.c:505.
+    "fuzzy_model_valid", "autotune_baseline_k_dc",
 }
+
+
+def preset_zone_key_known(key: str) -> bool:
+    """True when build_post_body() accepts `key` in a preset zone dict (written or
+    deliberately ignored). config_presets._validate uses this same predicate so an
+    unknown key is refused before any UART write."""
+    return (key == _PRESET_ZONE_COUPLING_FIELD
+            or key in _PRESET_ZONE_OVERRIDE_FIELDS
+            or key in _PRESET_ZONE_KNOWN_IGNORED_FIELDS
+            or bool(_ZONE_COUPLING_CELL_RE.match(key))
+            or bool(_ZONE_COUPLING_TAU_DEAD_TIME_CELL_RE.match(key)))
 
 
 #: ZONES_CFG_VERSION 16->17 backward compatibility (PID_EXPANSION_PLAN.md
@@ -1244,8 +1276,49 @@ class ZonesApplyResult:
         return "\n".join(lines)
 
 
-def _float_close(a: float, b: float, tol: float = 1e-3) -> bool:
-    return abs(float(a) - float(b)) <= tol
+#: printf format zones_http_get.c uses for each float field that
+#: _verify_against_preset compares. Pinned against the firmware source by
+#: tests/test_zones_http_float_tolerance_pin.py, so a format change there
+#: fails a test instead of silently loosening or tightening read-back.
+_FLOAT_FIELD_PRINT_FORMAT = {
+    "cal_offset_c": "%.9g", "pid_kp": "%.9g", "pid_ki": "%.9g", "pid_kd": "%.9g",
+    "max_ramp_c_per_hr": "%.9g", "sanity_rate_c_per_min": "%.9g",
+    "max_temp_c": "%.9g", "min_temp_c": "%.9g", "coupling_diag_k_dc": "%.9g",
+    "pc_link_abort_silence_ms": "%.0f",
+    "heater_window_ms": "%.0f", "heater_min_on_ms": "%.0f", "heater_min_off_ms": "%.0f",
+    "guard_sensor_fault_debounce_ticks": "%.0f",
+    "guard_wrong_dir_window_s": "%.1f", "guard_off_settle_s": "%.1f",
+    "guard_runaway_margin_c": "%.1f", "guard_drift_period_s": "%.1f",
+    "guard_frozen_window_s": "%.1f", "cross_zone_max_delta_c": "%.1f",
+    "guard_wrong_dir_rate_c_per_min": "%.3f", "guard_runaway_rate_c_per_min": "%.3f",
+    "hyst_c": "%.3f", "ease_off_window_mult": "%.3f",
+    "approach_rate_cap_c_per_hr": "%.3f", "error_band_c": "%.3f",
+    "rate_band_c_per_s": "%.4f", "fuzzy_strength_pct": "%.2f",
+    "progress_band_c": "%.3f", "coil_power_w": "%.2f",
+}
+_FLOAT_ABS_FLOOR = 1e-12
+_FLOAT_EPS_REL = 1e-6  # %.9g carries ~9 significant digits; float32 eps is ~1.2e-7
+
+
+def _float_tolerance(a: float, b: float, field: "Optional[str]") -> float:
+    """Half the field's GET print step; relative float epsilon (tiny absolute
+    floor, ZONESPREC LOW-2) for %.9g. A named field missing from
+    _FLOAT_FIELD_PRINT_FORMAT raises (ZONESPREC LOW-3): a new float field must
+    be forced into the table, not silently get the %.9g rule."""
+    if field is None:
+        fmt = "%.9g"
+    elif field in _FLOAT_FIELD_PRINT_FORMAT:
+        fmt = _FLOAT_FIELD_PRINT_FORMAT[field]
+    else:
+        raise KeyError(f"float field {field!r} has no entry in _FLOAT_FIELD_PRINT_FORMAT")
+    if fmt == "%.9g":
+        return max(_FLOAT_EPS_REL * max(abs(float(a)), abs(float(b))), _FLOAT_ABS_FLOOR)
+    decimals = int(fmt[2:-1])
+    return 0.5 * 10.0 ** -decimals
+
+
+def _float_close(a: float, b: float, field: "Optional[str]" = None) -> bool:
+    return abs(float(a) - float(b)) <= _float_tolerance(a, b, field)
 
 
 def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
@@ -1260,8 +1333,10 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
             continue
         expected = preset[key]
         actual = after.get(key)
-        if isinstance(expected, float):
-            ok = actual is not None and _float_close(expected, actual)
+        if isinstance(expected, float) and key not in _FLOAT_FIELD_PRINT_FORMAT:
+            ok = False  # int field given as a float (LOW-5): a mismatch report, never a KeyError
+        elif isinstance(expected, float):
+            ok = actual is not None and _float_close(expected, actual, key)
         else:
             ok = actual == expected
         if not ok:
@@ -1279,8 +1354,10 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
                 continue
             expected = pz[key]
             actual = az.get(key)
-            if isinstance(expected, float):
-                ok = actual is not None and _float_close(expected, actual)
+            if isinstance(expected, float) and key not in _FLOAT_FIELD_PRINT_FORMAT:
+                ok = False  # int field given as a float (LOW-5): mismatch, never a KeyError
+            elif isinstance(expected, float):
+                ok = actual is not None and _float_close(expected, actual, key)
             else:
                 ok = actual == expected
             if not ok:
@@ -1289,15 +1366,44 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
 
 
 #: POST keys parse_zone_fields() (zones_http_post_parse.c) treats as
-#: omit-PRESERVES-current (`field_present ? parse : current_z->...`): the
-#: measured plant model, the coupling cells and diagonal gain, the fuzzy/
-#: easeoff/approach/band floats, hystc and coilpower. Re-posting them at
-#: GET's coarser print (%.1f/%.2f/%.3f/%.4f) would round them; leaving them
-#: out of the body makes the firmware keep them bit-exact. Nothing else is
-#: strippable: a required field left out would 400 or zero.
+#: omit-PRESERVES-current. Two groups, both pinned against the firmware source
+#: by tests/test_zone_omit_preserved_drift.py:
+#:  - ZONE_OMIT_PRESERVED_FLOAT_KEYS: floats GET prints coarser than the
+#:    stored value (%.1f/%.2f/%.3f/%.4f/%.0f). Re-posting them would round
+#:    them (for the guard_* thresholds, loosening or tightening a guard), so
+#:    they are stripped and the firmware keeps them bit-exact. Sources in
+#:    zones_http_post_parse.c: `field_present ? parse : current_z->...`
+#:    (k, tau, deadtime, fuzzy_strength, coupling_diag_k_dc, easeoffmult,
+#:    approachratecap, errorband, rateband, progressband, hystc, coilpower,
+#:    coupling_c<j>) and `zones_http_field_nonblank` (the eight guard_*
+#:    keys wrongdirwindow..frozenwindow, plus xzone).
+#:  - ZONE_OMIT_PRESERVED_NONFLOAT_KEYS: omit-preserved enums/ints.
+#:    GET prints them losslessly, so nothing is lost by echoing them, and
+#:    several writers (zonetype, failsafe, minons, minoffs) must send them
+#:    deliberately. NOT stripped.
+#: Required fields (relay_mask, cal, kp/ki/kd, ramp, sanity, mode, maxtemp,
+#: mintemp, window, minon, minoff, timingprofile) must never be stripped: a
+#: missing one 400s or zeroes.
+ZONE_OMIT_PRESERVED_FLOAT_KEYS = (
+    "k", "tau", "deadtime", "coupling_diag_k_dc", "fuzzy_strength", "easeoffmult",
+    "approachratecap", "errorband", "rateband", "progressband", "hystc", "coilpower",
+    "wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate", "runawaymargin",
+    "driftperiod", "debounce", "frozenwindow", "xzone",
+)
+ZONE_OMIT_PRESERVED_NONFLOAT_KEYS = (
+    "tctype", "relaytype", "zonetype", "failsafe", "minons", "minoffs",
+    "settings_source",
+)
+#: Keys that have a presence check but whose OMIT branch DEFAULTS rather than
+#: preserves (thermo_mask -> 1u << i, ct_mask -> 0). Never stripped: stripping
+#: would remap every zone's thermocouple / clear every CT mapping on a narrow
+#: write (review BENCHFX3 MED-1). z%u_name is omit-preserved through a third
+#: idiom (http_form_find_field, name_len < 0 -> current_z->name); it is a
+#: string and must never be stripped either.
+ZONE_OMIT_DEFAULTED_KEYS = ("thermo_mask", "ct_mask")
+ZONE_OMIT_PRESERVED_THIRD_IDIOM_KEYS = ("name",)
 ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
-    r"^z\d+_(?:k|tau|deadtime|coupling_diag_k_dc|coupling_c\d+|fuzzy_strength|easeoffmult"
-    r"|approachratecap|errorband|rateband|progressband|hystc|coilpower)$")
+    r"^z\d+_(?:" + "|".join(ZONE_OMIT_PRESERVED_FLOAT_KEYS) + r"|coupling_c\d+)$")
 
 
 def strip_omit_preserved(body: str, keep_keys: "frozenset[str] | set[str]" = frozenset()) -> str:

@@ -66,13 +66,7 @@ static ZONES_POST_NOINLINE void zones_post_track_ceiling_lower(const float *live
  * read this boot". Names the actual recovery routes -- a reboot alone retries the same unreadable file. */
 static ZONES_POST_NOINLINE void zones_post_send_undecided_409(httpd_req_t *req)
 {
-    httpd_resp_set_status(req, "409 Conflict");
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_sendstr(req,
-                       "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config "
-                       "could not be read at boot, so a save would be lost or overwrite it; a reboot retries the read, "
-                       "and if it stays unreadable use the recovery routes: factory reset with scope kiln, or cfgfs "
-                       "format with force_healthy\"}");
+    cfg_fs_http_send_zones_undecided_409(req);
 }
 
 /* The commit-time mode-gate refusal (a firing/autotune started during the ceiling raise): undo the

@@ -81,24 +81,62 @@ if (-not $vcvars) {
 }
 Write-Host "Using vcvarsall.bat: $vcvars"
 
+$script:vcEnvDone = $false
+function Initialize-VcEnv {
+    # Import the vcvarsall x64 environment into THIS process once, instead of
+    # re-running vcvarsall (several seconds, heavy under load) per compile.
+    if ($script:vcEnvDone) { return }
+    $bat = Join-Path $workDir "vcenv.cmd"
+    Set-Content -Path $bat -Encoding ASCII -Value ("@echo off`r`nset `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`"`r`ncall `"$vcvars`" x64 >nul`r`nset")
+    $env:VSCMD_SKIP_SENDTELEMETRY = "1"
+    $lines = & cmd.exe /c "`"$bat`"" 2>$null
+    foreach ($l in $lines) {
+        if ($l -match '^([^=]+)=(.*)$') { Set-Item -Path ("env:" + $Matches[1]) -Value $Matches[2] }
+    }
+    $script:vcEnvDone = $true
+}
+
 function Invoke-ClLink {
     param([string[]]$SourceFiles, [string]$OutExe, [string[]]$IncludeDirs)
     $incFlags = ($IncludeDirs | ForEach-Object { "/I`"$_`"" }) -join " "
     $srcList = ($SourceFiles | ForEach-Object { "`"$_`"" }) -join " "
-    $cmd = "set `"PATH=%PATH%;C:\Program Files (x86)\Microsoft Visual Studio\Installer`" && call `"$vcvars`" x64 >nul && cl /nologo /W3 /WX /std:c11 $incFlags $srcList /Fe:`"$OutExe`" /Fo:`"$workDir\\`""
-    $out = cmd /c $cmd 2>&1
-    return @{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
+    Initialize-VcEnv
+    $cmd = "cl /nologo /W3 /WX /std:c11 $incFlags $srcList /Fe:`"$OutExe`" /Fo:`"$workDir\\`""
+    return Invoke-Bounded -CmdLine $cmd -TimeoutSec 300
+}
+
+function Invoke-Bounded {
+    # Runs a cmd.exe command line with stdout+stderr redirected to a FILE, not
+    # a pipe, and a bounded wait. With a pipe, PowerShell's `cmd /c` capture
+    # blocks until EVERY holder of the write end closes it, and cl.exe leaves
+    # a detached vctip.exe (VC telemetry) holding it for minutes, which made
+    # this script (and run_all_checks' 900 s cap) appear hung. A file has no
+    # such coupling; the child tree is killed on timeout.
+    param([string]$CmdLine, [int]$TimeoutSec)
+    $env:VSCMD_SKIP_SENDTELEMETRY = "1"
+    $outFile = Join-Path $workDir ("out_" + [guid]::NewGuid().ToString("N") + ".txt")
+    # A .cmd file, not a parenthesised group: the expanded %PATH% holds
+    # "Program Files (x86)", whose ")" would end the group early.
+    $batFile = [IO.Path]::ChangeExtension($outFile, ".cmd")
+    Set-Content -Path $batFile -Value "@echo off`r`n$CmdLine" -Encoding ASCII
+    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"`"$batFile`" > `"$outFile`" 2>&1`"" `
+        -NoNewWindow -PassThru
+        $null = $proc.Handle  # cache the handle so ExitCode is readable after WaitForExit
+    if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
+        & taskkill /F /T /PID $proc.Id *> $null
+        $txt = if (Test-Path $outFile) { Get-Content $outFile -Raw } else { "" }
+        return @{ ExitCode = 124; Output = "TIMEOUT after $TimeoutSec s (child tree killed)`n$txt" }
+    }
+    $proc.WaitForExit()
+    $txt = if (Test-Path $outFile) { (Get-Content $outFile -Raw) } else { "" }
+    return @{ ExitCode = $proc.ExitCode; Output = "$txt" }
 }
 
 function Run-Exe {
-    # Runs via cmd /c rather than PowerShell's native invocation: a test
-    # binary's stderr FAIL lines (expected on the negative-test mutant)
-    # would otherwise be wrapped as a terminating NativeCommandError under
-    # $ErrorActionPreference = "Stop".
+    # Bounded, file-redirected run (see Invoke-Bounded). stderr FAIL lines on
+    # the negative-test mutant are plain output here.
     param([string]$ExePath)
-    $out = cmd /c "`"$ExePath`" 2>&1"
-    $exit = $LASTEXITCODE
-    return @{ ExitCode = $exit; Output = ($out -join "`n") }
+    return Invoke-Bounded -CmdLine "`"$ExePath`"" -TimeoutSec 60
 }
 
 function Parse-Result {

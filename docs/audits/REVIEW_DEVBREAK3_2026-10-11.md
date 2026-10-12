@@ -191,8 +191,7 @@ stack bump is forced instead of remembered.
 ## Fix status (2026-10-11)
 
 - LOW-1: check_build_gate_usage.ps1 matches the repo-relative path against `build`, `build_agent`, `build_sim_*_obj`, `checkbuild_<hex>`, `.git`, `node_modules`, `.venv`; buildtools/ and build_helpers/ misuse CAUGHT (negtest), a build* parent no longer false-REDs.
-- LOW-2: check_reset_fence_hooks.ps1 main.c predicate matched with a free parameter name (backreference), macro shadowing refused; relay_authority.c pin keeps the three terms but forbids early return / reassignment and macros. All four MISSED mutations now CAUGHT, rename passes. Line-75 regex now uses [^
-].
+- LOW-2: check_reset_fence_hooks.ps1 main.c predicate matched with a free parameter name (backreference), macro shadowing refused; relay_authority.c pin keeps the three terms but forbids early return / reassignment and macros. All four MISSED mutations now CAUGHT, rename passes. Line-75 regex now uses `[^\r\n]`.
 - LOW-3: stale citations fixed (symbol reference for relay_io, link_frame.c blob refreshed, non-hash hex de-backticked).
 - LOW-4: enforced: check_system_uart_bridge_stack_budget.py fails below MIN_HONEST_HEADROOM_BYTES = 512 B (580 B today).
 - INFO: gate table row points at the DEVBREAK2 fix status.

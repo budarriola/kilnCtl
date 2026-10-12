@@ -37,17 +37,19 @@ async function scenario(btnId, resp, setup, confirmAnswer, noGen) {
             json: () => (resp.json ? Promise.resolve(resp.json) : Promise.reject(new SyntaxError('Unexpected token <'))),
           });
         }
-        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ active: false }) });
+        return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(scenario.live || { active: false }) });
       },
     },
   });
   await flush(5);
   if (!noGen) sandbox.lastGen = 1; // A2: Save needs a known generation
   if (setup) setup(els);
+  if (sandbox_dirty) { sandbox.dirty = true; sandbox_dirty = false; }
   els[btnId].fire('click');
   await flush();
-  return { els, posts, confirms, listeners };
+  return { els, posts, confirms, listeners, sandbox };
 }
+let sandbox_dirty = false;
 const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
 
 (async () => {
@@ -98,6 +100,22 @@ const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
   ok(r.posts.length === 1 && r.confirms.length === 1 && /Discard/.test(r.confirms[0]), 'Discard working copy asks for confirmation, then posts');
   r = await scenario('discardBtn', { status: 200, json: { ok: true } }, null, false);
   ok(r.posts.length === 0 && r.confirms.length === 1, 'declined discard confirmation sends nothing');
+
+  // REVIEW_PROFILESFX LOW-1: a failed decide must not null lastGen (false "Changed elsewhere" over unsaved edits).
+  scenario.live = { active: true, working_id: 3, generation: 1, pending_decision: true, editable_from_segment: 0 };
+  r = await scenario('overwriteBtn', { status: 403, json: { ok: false, error: 'origin is a built-in schedule' } },
+    (e) => { e.overwriteConfirm.checked = true; sandbox_dirty = true; });
+  scenario.live = null;
+  ok(r.sandbox.lastGen === 1 && !/Changed elsewhere/.test(txt(r.els.saveMsg) + txt(r.els.statusText)), 'failed decide keeps lastGen (got ' + r.sandbox.lastGen + ')');
+
+  // REVIEW_PROFILESFX3 INFO-1: after a failed decide, a generation that really moved while the form is dirty
+  // must still show the "Changed elsewhere" banner (the board copy changed under the unsaved edits).
+  scenario.live = { active: true, working_id: 3, generation: 2, pending_decision: true, editable_from_segment: 0 };
+  r = await scenario('overwriteBtn', { status: 403, json: { ok: false, error: 'origin is a built-in schedule' } },
+    (e) => { e.overwriteConfirm.checked = true; sandbox_dirty = true; });
+  scenario.live = null;
+  ok(/Changed elsewhere/.test(txt(r.els.saveMsg) + txt(r.els.statusText)),
+    'failed decide + moved generation + dirty form shows the Changed elsewhere banner');
 
   // D6: no mojibake in the page source, progress text is plain.
   ok(HTML.indexOf(String.fromCharCode(0xe2, 0x20ac)) < 0, 'page source has no double-encoded UTF-8 (mojibake)');

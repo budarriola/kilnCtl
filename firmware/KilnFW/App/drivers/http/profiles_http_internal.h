@@ -294,6 +294,7 @@ typedef enum {
     PROFILES_DELETE_RUNNING,        /* executor is running/paused on this slot */
     PROFILES_DELETE_BUSY,           /* another delete of this slot is in flight */
     PROFILES_DELETE_PERSIST_FAILED, /* stats prune or erase failed: slot kept, retryable */
+    PROFILES_DELETE_REV_UNKNOWN,    /* rev floor unknown this boot: refused before any side effect (409) */
 } profiles_delete_result_t;
 profiles_delete_result_t profiles_delete_slot(uint8_t id);
 

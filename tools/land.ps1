@@ -54,7 +54,8 @@
 #
 # GUARANTEES: never force-pushes; never leaves a half-rebased tree (any failed
 # rebase is aborted and the tree verified clean); push retried only on a
-# non-fast-forward rejection, at most 3 attempts.
+# lost race (non-fast-forward, or a ref-lock compare-and-swap loss; a hook or
+# protected-branch refusal is never retried), at most 3 attempts.
 #
 # EXIT: 0 landed (and requested optional steps ok), 1 refused/failed, 2 usage.
 # The LAST stdout line is always a one-line JSON result:
@@ -76,7 +77,7 @@ param(
     [string]$ChecksScript,
     [string]$PinCheckScript,
     [switch]$AllowStandaloneClone,
-    [int]$MaxPushTries = 3,
+    [ValidateRange(1,50)][int]$MaxPushTries = 3,
     [double]$McpTimeoutMin = 10
 )
 
@@ -96,6 +97,22 @@ $script:subPins = 'not-run'
 $script:pinOverride = $null
 $script:checksOverride = $null
 
+# Classify a `git push --porcelain` output: 'race' (retry), 'refused' (hook/protected branch), 'other'.
+# Only the bracketed reason of a "!<TAB>ref<TAB>[rejected|remote rejected] (reason)" status line counts.
+function Get-PushRejectVerdict([string]$out) {
+    $verdict = 'other'
+    foreach ($ln in ($out -split "`r?`n")) {
+        if ($ln -notmatch '^!\t[^\t]*\t(\[rejected\]|\[remote rejected\]) \((.*)\)\s*$') { continue }
+        $kind = $Matches[1]; $reason = $Matches[2]
+        if ($kind -eq '[rejected]') {
+            if ($reason -match '^(fetch first|non-fast-forward|stale info)$') { return 'race' }
+            $verdict = 'refused'; continue
+        }
+        if ($reason -ceq 'incorrect old value provided' -or $reason -cmatch "^cannot lock ref '[^'\r\n]+': is at [0-9a-f]{40} but expected [0-9a-f]{40}$") { return 'race' }
+        $verdict = 'refused'
+    }
+    return $verdict
+}
 function Finish([int]$code, [string]$err, [bool]$landed = $false) {
     $o = [ordered]@{
         sha           = $script:sha
@@ -256,7 +273,7 @@ if ($WaitPid -gt 0 -or $CheckLog) {
     $sm = $sms[$sms.Count - 1]
     $failedCount = [int]$sm.Groups[1].Value
     if ($text -match '(?m)^\s*\d+ passed,[^\r\n]*?, [1-9]\d* BUSY \(not run\)') { Finish 1 "check log reports BUSY checks that never ran" }
-    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
+    $failNames = @([regex]::Matches($text, '(?m)^\s*FAIL\s+(\S+)\s+\((?:exit|killed|timed out)') | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique)
     $failedLines = @([regex]::Matches($text, '(?m)^FAILED:.*$') | ForEach-Object { $_.Value.Trim() })
     $blocked = @()
     foreach ($n in $failNames) {
@@ -286,6 +303,8 @@ if ($WaitPid -gt 0 -or $CheckLog) {
                 $o = if ($outs.ContainsKey($_)) { [string]$outs[$_] } else { "" }
                 $ec = [regex]::Match($text, '(?m)^\s*FAIL\s+' + [regex]::Escape($_) + '\s+\(exit ([^)]*)\)')
                 $code = if ($ec.Success) { $ec.Groups[1].Value } else { $null }
+                # run_all_checks' per-check cap prints "FAIL <rel> (timed out: ...)"; its result Code is "timeout".
+                if (-not $ec.Success -and $text -match ('(?m)^\s*FAIL\s+' + [regex]::Escape($_) + '\s+\(timed out')) { $code = "timeout" }
                 [pscustomobject]@{ Path = $_; Status = "FAIL"; Signature = (Get-MainFailureSignature -Output $o -ExitCode $code) } })
             $cmp = Compare-MainBaseline -Current $cur -Baseline $sel.Baseline -Exact:$sel.Exact
             foreach ($w in $cmp.Warnings) { Write-Host "WARNING: $w" -ForegroundColor Yellow }
@@ -372,22 +391,21 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     }
 
     Step "push origin HEAD:$Target (attempt $try)"
-    $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
+    # --porcelain + LC_ALL=C: classify ONLY from the bracketed reason on git's own "!<TAB>ref<TAB>[..] (reason)"
+    # status lines (never from free hook prose). cmd /c merges stderr so PS 5.1 does not wrap/line-break it.
+    $oldLc = $env:LC_ALL; $oldLang = $env:LANG; $env:LC_ALL = 'C'; $env:LANG = 'C'
+    try { $pout = (& cmd /c "git push --porcelain origin HEAD:$Target 2>&1" | Out-String) } finally { $env:LC_ALL = $oldLc; $env:LANG = $oldLang }
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
-    # A concurrent-push ref-lock collision is reported as [remote rejected] (failed to update ref) but is a race: retry.
-    $refRace = $pout -match 'cannot lock ref|failed to update ref[^\r\n]*expected|is at \S+ but expected'
-    if ($refRace) {
-        Write-Host "push lost a ref-lock race (cannot lock ref); re-fetching and rebasing" -ForegroundColor Yellow
+    $script:lastPushOut = $pout
+    $verdict = Get-PushRejectVerdict $pout
+    if ($verdict -eq 'refused') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
+    if ($verdict -eq 'race') {
+        Write-Host "push lost a ref race / non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
         continue
     }
-    if ($pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
-    if ($pout -match 'non-fast-forward|fetch first|\[rejected\]') {
-        Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
-        continue
-    }
-    Finish 1 "git push failed (not a non-fast-forward rejection): $($pout.Trim())"
+    Finish 1 "git push failed (not a recognised race or remote refusal): $($pout.Trim())"
 }
-if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts" }
+if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts; last git output: $("$script:lastPushOut".Trim())" }
 
 # ---------------------------------------------------------------- 6
 Step "push_verify"

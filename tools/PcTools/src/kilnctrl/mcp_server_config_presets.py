@@ -161,6 +161,8 @@ def load_config_preset(name: str, host: Optional[str] = None,
         return f"error writing safety config over HTTP (host={resolved_safety}): {exc}{_partial_note(exc)}"
     except ramp_assist_http_client.RampAssistHttpError as exc:
         return f"error pinning ramp_assist over HTTP (host={resolved}): {exc}{_partial_note(exc)}"
+    except Exception as exc:  # noqa: BLE001 -- any failure after the PID stage must still report preset_partial
+        return f"error: {type(exc).__name__}: {exc}{_partial_note(exc)}"
     return result.describe() if result.all_ok else "FAILED (partial apply):\n" + result.describe()
 
 
@@ -169,7 +171,15 @@ def _partial_note(exc: BaseException) -> str:
     landed) to a stage failure; surface it so a failure is never read as 'no
     write happened'."""
     partial = getattr(exc, "preset_partial", None)
-    return f"\nstages that had ALREADY landed before the failure (board is partially written):\n{partial}" if partial else ""
+    if partial is None:
+        return ""
+    if not partial:
+        return ("\nno stage had confirmed landing before the failure; a write in flight "
+                "may still have applied")
+    return ("\nstages that had ALREADY landed before the failure (a line marked FAILED did not read back; "
+            "board is partially written; "
+            f"the failing stage's own write may also have applied):\n{partial}")
+
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

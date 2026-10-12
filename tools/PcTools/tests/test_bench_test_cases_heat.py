@@ -986,6 +986,10 @@ class HP03Test(unittest.TestCase):
         # zones were restored: the last POST body must be the unmodified restore
         self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
         self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
+        # review BENCHFX2 LOW-2: the CASE POST (first) is stripped and keeps the hyst it sets
+        first = self.fake_zhc.posted_bodies[0]
+        self.assertTrue(first.get("stripped"))
+        self.assertIn("z2_hystc", first["keep_keys"])
 
     def test_skips_when_not_rested(self):
         srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 40.0), _Reading(2, 24.0)])
@@ -1209,6 +1213,10 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertTrue(profiles.stop_called)
         self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
+        # review BENCHFX2 LOW-2: the CASE POST (first) is stripped and does not keep hyst
+        first = self.fake_zhc.posted_bodies[0]
+        self.assertTrue(first.get("stripped"))
+        self.assertFalse([k for k in first["keep_keys"] if k.endswith("_hystc")])
 
     def test_fails_when_never_reaches_faulted(self):
         statuses = [_ExecStatus("running", [_ZoneExecStatusHP()])]
@@ -2273,6 +2281,22 @@ class RestoreFromFreshGetTest(unittest.TestCase):
             msg = C._restore_readback_mismatch(snap, actual)
             self.assertIsNotNone(msg, field)
             self.assertIn(field, msg)
+
+    def test_readback_float_tolerance_pinned(self):
+        # review BENCHFX2 INFO-2: hyst_c prints %.3f, max_temp_c %.1f
+        snap = self.fake.get_zones("h")
+        for field, delta in (("hyst_c", 0.01), ("max_temp_c", 0.1)):
+            actual = self.fake.get_zones("h")
+            actual["zones"][2][field] = snap["zones"][2][field] + delta
+            self.assertIn(field, C._restore_readback_mismatch(snap, actual) or "", field)
+        # LOW-1: exactly one %.3f print step off must fail (tol is half a step)
+        actual = self.fake.get_zones("h")
+        actual["zones"][2]["hyst_c"] = snap["zones"][2]["hyst_c"] + 0.001
+        self.assertIn("hyst_c", C._restore_readback_mismatch(snap, actual) or "")
+        actual = self.fake.get_zones("h")
+        actual["zones"][2]["hyst_c"] = snap["zones"][2]["hyst_c"] + 0.0004
+        actual["zones"][2]["max_temp_c"] = snap["zones"][2]["max_temp_c"] + 0.04
+        self.assertIsNone(C._restore_readback_mismatch(snap, actual))
 
     def test_restore_post_strips_omit_preserved_keeping_named(self):
         snapshot = self.fake.get_zones("h")

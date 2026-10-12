@@ -302,4 +302,4 @@ Fixed in 05c6832c1 (fix) and 150d14c6a (tests), reviewed in
 | LOW-3 | Fixed. Queue busy restores the dedup/rate state and replies REFUSED_RATE_LIMIT. |
 | LOW-4 | Fixed (wording in `docs/TEST_TRIP_PLAN.md`). |
 | LOW-5 | Fixed. `test_admin_test_trip_boot_reason_latch`. |
-| LOW-6 | Not addressed. |
+| LOW-6 | FIXED in the SAFTYFX3 leftovers change: `main.c` logs free/total/min-ever-free FreeRTOS heap at boot (log-only, no test). |

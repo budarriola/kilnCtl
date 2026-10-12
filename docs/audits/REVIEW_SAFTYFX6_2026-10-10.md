@@ -293,3 +293,5 @@ recorded before that check, and the copy was removed.
 
 F1, F2, F3, F4, F5, F6 (log text only; the pause reason string `pico_fatal_reboot` is unchanged, a distinct reason needs a protocol-visible change), F7, F8 and I4 are fixed in the sfx7 batch (commits on origin/dev, see the landing report).
 F2 design: `safety_guards_tick()`'s tripped branch measures a fresh post-trip S8 rate; the clear check uses it (frozen-window fallback only before any post-trip time). F4 documented: S1/S8 clear on a bad TC is refused (the operator clears once a valid reading returns); no documented recovery path needs a blind clear. All negtests CAUGHT.
+
+**Correction (2026-10-11, REVIEW_SAFTYFX_2026-10-11):** the frozen-window fallback described above no longer exists for a real RATE trip. The S8 clear is refused outright until two full post-trip windows complete (earliest 2 x clamp(rate_window_s, 60, 600) s, 120 s by default); a NaN TC flagged valid is refused.

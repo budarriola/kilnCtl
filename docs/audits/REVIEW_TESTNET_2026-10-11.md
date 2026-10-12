@@ -226,3 +226,15 @@ what the seed exists to handle.
 - **Guard bypass probes**: a throwaway pytest module in the reviewer scratchpad, not
   committed, run on Python 3.14.6 against TEST-NET 192.0.2.1. Results are as listed
   under LOW-1 and LOW-2.
+
+## Fix status
+
+| Finding | Status | Where |
+|---|---|---|
+| MED-A | FIXED | `conftest.py` sets `KILNCTL_TEST_NO_HUB=1` unless `KILNCTRL_BENCH_HOST` is set; `link_hub.get_shared_link()` raises `LinkHubDisabled`; `mcp_server._link` falls back to `NullLink` (inert, never connects); the guard also refuses loopback connects to `HUB_PORT`. Tests in `test_network_guard.py`. |
+| MED-B | FIXED | `backup_import` returns `UNVERIFIED ... snapshot unavailable` when the pre-import snapshot fails and the backup has id-less profiles. `BackupImportSnapshotTest`. |
+| MED-C | FIXED | Tool-level case-3 tests in `BackupImportSnapshotTest`. |
+| LOW-1 | PARTLY FIXED | Closed: UDP `sendto`, proxy env vars (deleted, `NO_PROXY=*`). Not closed, by design: asyncio on Proactor (`ConnectEx`), raw `_socket.socket`, subprocess children, `setUpClass`/module-scope code (the guard is a function-scoped fixture). No in-repo use of any of them. |
+| LOW-2 | FIXED | The `live_bench` exemption also requires a non-empty `KILNCTRL_BENCH_HOST`. |
+| LOW-3 | FIXED | Snapshot skipped with all-id profiles and on dry run, both tested. |
+| LOW-4 | FIXED | Id-less-before-id-carrying readback test. |

@@ -49,7 +49,7 @@ urgent.
 | `thermo_uart_bridge` | 5 | 4096 | UART bridge subsystem task, THERMO command family — dispatches into `thermo_owner` | `App/drivers/bridge/uart_bridge_thermo.c:475` (split out of `uart_bridge.c`) |
 | `io_uart_bridge` | 5 | 4096 | UART bridge subsystem task, IO command family — dispatches into `kiln_io_owner` | `App/drivers/bridge/uart_bridge_io.c:652` (split out of `uart_bridge.c`) |
 | `touch_uart_bridge` | 5 | 4096 | UART bridge subsystem task, TOUCH command family | `App/drivers/bridge/uart_bridge_touch.c:274` (split out of `uart_bridge.c`) |
-| `safety_uart_bridge` | 5 | 4096 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/bridge/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
+| `safety_uart_bridge` | 5 | 4608 | UART bridge subsystem task, SAFETY command family (isolated-link cache reads, mostly fire-and-forget) | `App/drivers/bridge/uart_bridge_safety.c:294` (split out of `uart_bridge.c`) |
 | `system_uart_bridge` | 5 | 3072 | UART bridge subsystem task, SYSTEM command family (`FACTORY_RESET` reboots immediately after, so blocking briefly is accepted) | `App/drivers/bridge/uart_bridge_system.c:162` (split out of `uart_bridge.c`) |
 | `info_uart_bridge` | 5 | 4096 (was 3584, corrected 2026-09-30 — bench LOW reading) | UART bridge subsystem task, INFO/version command family | `App/drivers/bridge/uart_bridge_info.c:347` (split out of `uart_bridge.c`) |
 | `info_boot_push` | 5 | 3072 | One-shot: pushes firmware version/boot info to the PC link right after boot | `App/drivers/bridge/uart_bridge_info.c:369` (split out of `uart_bridge.c`) |

@@ -398,7 +398,8 @@ esp_err_t pref_cfg_fs_commit(const char *rel_path, const void *bytes, size_t ite
     esp_err_t err = pref_cfg_fs_save(rel_path, bytes, item_size, rev);
     if (err != ESP_OK) {
         ESP_LOGE(PREF_FS_TAG, "%s NOT persisted: cfg write of %s (rev %lu) failed: %s -- NVS is no longer written, "
-                              "the value lives in RAM until reboot",
+                              "a store that publishes RAM before committing "
+                              "keeps the value in RAM until reboot (favorites publish only after success)",
                  what ? what : "setting", rel_path ? rel_path : "?", (unsigned long)rev, esp_err_to_name(err));
     }
     return err;

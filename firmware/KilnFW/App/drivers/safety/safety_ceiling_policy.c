@@ -2,11 +2,6 @@
 
 #include <stdio.h>
 
-/* SAFETY_CEILING_EPSILON_C is declared in safety_ceiling_policy.h (moved
- * there 2026-09-14 so safety_ceiling_sync.c's divergence check can reuse
- * the exact same tolerance rather than defining its own -- "matches" must
- * mean the same thing in both places). */
-
 float safety_ceiling_policy_target_c(const float *max_temp_c, size_t n)
 {
     float best = 0.0f;
@@ -64,7 +59,7 @@ bool safety_ceiling_policy_guard_raise(float current_pico_ceiling_c, bool curren
      * below rather than risk skipping a needed one. */
     float effective_current = current_known ? current_pico_ceiling_c : 0.0f;
 
-    if (new_target <= effective_current + SAFETY_CEILING_EPSILON_C) {
+    if (new_target <= effective_current) {
         /* Already satisfied (or a lowering case, handled separately,
          * post-commit, by safety_ceiling_policy_apply_lower()). */
         if (out_result) {
@@ -132,7 +127,7 @@ void safety_ceiling_policy_apply_lower(float current_pico_ceiling_c, bool curren
         return;
     }
 
-    if (new_target >= current_pico_ceiling_c - SAFETY_CEILING_EPSILON_C) {
+    if (new_target >= current_pico_ceiling_c) {
         /* Not a lowering case (equal, or actually a raise that the caller
          * should have already handled via guard_raise() before commit). */
         if (out_result) {

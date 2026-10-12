@@ -54,6 +54,12 @@ bool profile_executor_run(uint8_t id, char *err, size_t cap)
 void profile_executor_halt(void) { f_halt_calls++; }
 bool profile_executor_pause(void) { f_pause_calls++; return f_pause_result; }
 bool profile_executor_resume(void) { f_resume_calls++; return f_resume_result; }
+static char f_resume_why[128];
+bool profile_executor_resume_refusal(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", f_resume_why);
+    return out[0] != 0;
+}
 bool run_state_acknowledge(void) { f_ack_calls++; return f_ack_result; }
 
 /* ---- TEST_TRIP link fakes ---- */
@@ -72,6 +78,16 @@ esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_tri
     *out_outcome = f_tt_outcome;
     *out_trip_seq = f_tt_seq;
     return f_tt_err;
+}
+static safety_link_status_t f_tt_status;
+static esp_err_t f_tt_status_err;
+esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
+{
+    (void)link;
+    if (f_tt_status_err == ESP_OK) {
+        *out = f_tt_status;
+    }
+    return f_tt_status_err;
 }
 bool boot_guard_is_recovery_mode(void) { return f_tt_recovery; }
 esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *known, bool *a, uint16_t *proto, uint16_t *b)
@@ -158,6 +174,7 @@ static void reset(void)
     f_run_calls = f_halt_calls = f_pause_calls = f_resume_calls = f_ack_calls = 0;
     f_run_result = f_pause_result = f_resume_result = f_ack_result = true;
     f_run_err = "";
+    f_resume_why[0] = 0;
     f_danger = false;
     f_run_id = 0xEE;
 }
@@ -255,6 +272,11 @@ static void test_stop_pause_resume(void)
     TEST_CHECK(post_ok(profile_exec_pause_post_handler, "") == 400 && f_pause_calls == 1, "pause with nothing running -> 400");
     f_resume_result = false;
     TEST_CHECK(post_ok(profile_exec_resume_post_handler, "") == 400 && f_resume_calls == 1, "resume with nothing paused -> 400");
+    TEST_CHECK(strstr(s_reply, "nothing paused") != NULL, "no gate refusal -> generic text");
+    snprintf(f_resume_why, sizeof(f_resume_why), "the safety processor is tripped (clear the trip first) -- resume");
+    TEST_CHECK(post_ok(profile_exec_resume_post_handler, "") == 400 && strstr(s_reply, "tripped") != NULL,
+               "F5HOLDERFX4 LOW-1: gate refusal carries its reason, not 'nothing paused'");
+    f_resume_why[0] = 0;
     f_pause_result = true;
     TEST_CHECK(post_ok(profile_exec_pause_post_handler, "") == 200 && f_pause_calls == 2, "pause ok -> 200");
     TEST_CHECK(post_ok(profile_exec_stop_post_handler, "") == 200 && f_halt_calls == 1, "stop halts exactly once");
@@ -293,9 +315,52 @@ static void test_safety_test_trip(void)
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 409 && f_tt_calls == 0 &&
                    strstr(s_reply, "recovery_mode") != NULL, "recovery mode -> 409, link never asked");
     f_tt_recovery = false;
+    /* WP3 review LOW-2: the 200 reply reports the live DIAG read-back, never constants posing as observed. */
+    memset(&f_tt_status, 0, sizeof(f_tt_status));
+    f_tt_status_err = ESP_OK;
+    f_tt_status.link_up = true;
+    f_tt_status.diag_ever_received = true;
+    f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    f_tt_status.diag_trip_reason = 4u;
+    f_tt_status.diag_trip_mask = 8u;
+    f_tt_status.diag_since_reboot = true;
+    f_tt_status.diag_trip_seq_known = true;
+    f_tt_status.diag_trip_seq = 3u;
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 && f_tt_calls == 1 &&
-                   strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"trip_reason\":4") != NULL &&
-                   strstr(s_reply, "\"trip_mask\":8") != NULL, "accepted -> 200 with seq, reason 4, mask 8");
+                   strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"readback\":true") != NULL &&
+                   strstr(s_reply, "\"trip_reason\":4") != NULL && strstr(s_reply, "\"trip_mask\":8") != NULL &&
+                   strstr(s_reply, "\"is_test\":true") != NULL, "accepted + DIAG read-back -> reason 4, mask 8, is_test");
+    f_tt_status.diag_trip_reason = 2u; /* a real guard won the same tick */
+    f_tt_status.diag_trip_mask = 2u;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"trip_reason\":2") != NULL && strstr(s_reply, "\"trip_mask\":2") != NULL &&
+                   strstr(s_reply, "\"is_test\":false") != NULL && strstr(s_reply, "\"trip_reason\":4") == NULL,
+               "real guard won -> reply reports ITS reason/mask and is_test false, never 4/8");
+    f_tt_status.diag_trip_reason = 5u; /* an older trip's DIAG (different trip_seq) is not this trip's readback */
+    f_tt_status.diag_trip_seq = 2u;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "INFO-A: DIAG with another trip_seq -> readback false");
+    f_tt_status.diag_trip_seq = 3u;
+    f_tt_status.diag_since_reboot = false;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "LOW-C: previous-boot DIAG -> readback false");
+    f_tt_status.diag_since_reboot = true;
+    f_tt_status.link_up = false;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "M4: link down -> readback false");
+    f_tt_status.link_up = true;
+    f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED; /* TRIPPED DIAG not seen yet */
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL &&
+                   strstr(s_reply, "\"requested_trip_reason\":4") != NULL &&
+                   strstr(s_reply, "\"trip_reason\"") == NULL, "no TRIPPED DIAG yet -> requested_* only, no observed claim");
+    f_tt_status_err = ESP_FAIL;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "status read fails -> readback false");
+    f_tt_status_err = ESP_OK;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_DUPLICATE, 0) == 409 &&
+                   strstr(s_reply, "\"duplicate\"") != NULL && strstr(s_reply, "\"ok\":false") != NULL,
+               "duplicate -> 409 ok:false (LOW-4)");
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, 0) == 409 &&
                    strstr(s_reply, "rate_limited") != NULL, "rate limit -> 409");
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED, 0) == 409 &&

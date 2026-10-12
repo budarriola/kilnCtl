@@ -270,6 +270,7 @@ void safety_link_send_announce_version_burst(SafetyLinkClass *link)
 static void safety_note_pico_reboot_locked(SafetyLinkClass *link)
 {
     link->cached.trip_event_ever_received = false;
+    link->cached.trip_event_after_diag = false; /* SAFETYFX10 MED-1: paired with trip_event_ever_received */
     link->cached.trip_last_seq = 0u;
     /* Safety-link fix batch 2 (MED-1, LOW-3): the last DIAG describes the
      * OLD boot. Mark it so consumers can ignore its state (an old ARMED must
@@ -425,8 +426,7 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * still the most recent thing that actually happened, and
              * blanking it would erase evidence rather than refresh it. */
             if (link->reboot_noted_by_uptime && link->pico_uptime_baseline_known &&
-                (uint32_t)((uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS) -
-                           link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS) {
+                (uint32_t)(msg->rx_ms - link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS) {
                 /* Firing audit 2 MED-1: the DIAG uptime path already counted THIS reboot (the new boot's
                  * first DIAG beat its lost FW_VERSION). A second bump would reset heat_enable's verdict
                  * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
@@ -1123,8 +1123,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     /* kilnlink audit 2026-10-09 M1: second reboot signal, independent of
      * the 8-bit FW_VERSION boot_id (which repeats 1 boot in 256). */
     bool pico_reboot_by_uptime = false;
+    bool pico_reboot_by_boot_id = false;
+    uint8_t pico_boot_id_prev = 0u;
     uint32_t pico_uptime_prev_ms = link->pico_uptime_baseline_ms;
-    uint32_t esp_now_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
+    /* REBOOTFX3 LOW-2: stamped at UART receive, not drain, so an inbox stall cannot skew elapsed. */
+    uint32_t esp_now_ms = msg->rx_ms;
     if (link->pico_uptime_baseline_known &&
         safety_pico_uptime_behind_expected(link->pico_uptime_baseline_ms,
                                            (uint32_t)(esp_now_ms - link->pico_uptime_baseline_esp_ms),
@@ -1140,12 +1143,26 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * verdict inputs and erase the T3 lost-trip latch), and keep the cached id current from every DIAG so
      * the FW_VERSION that follows the same boot sees no change. */
     if (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V3) {
-        if (link->pico_boot_id_ever_seen && p[31] != link->pico_boot_id && !pico_reboot_by_uptime) {
+        /* TEST_TRIP WP3 review LOW-1: "already counted" must outlive this one DIAG. A 30-byte DIAG that
+         * counted the reboot by uptime never updated pico_boot_id, so the first V3 DIAG of the same boot
+         * differs from the stale id and would count it again. Honour the uptime path's note for
+         * SAFETY_REBOOT_NOTE_WINDOW_MS, exactly as the FW_VERSION boot-id branch does. The cached id is
+         * adopted below either way. */
+        bool counted_by_uptime =
+            pico_reboot_by_uptime ||
+            (link->reboot_noted_by_uptime &&
+             (uint32_t)(esp_now_ms - link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS);
+        if (link->pico_boot_id_ever_seen && p[31] != link->pico_boot_id && !counted_by_uptime) {
             safety_note_pico_reboot_locked(link);
+            pico_reboot_by_boot_id = true;
+            pico_boot_id_prev = link->pico_boot_id;
         }
         link->pico_boot_id = p[31];
         link->pico_boot_id_known = true;
         link->pico_boot_id_ever_seen = true;
+        /* TRIPFX3 LOW-A: the cached id is current now; consume the uptime note like the FW_VERSION branch
+         * so a second quick reboot inside the note window is still counted. */
+        link->reboot_noted_by_uptime = false;
     }
     link->pico_uptime_baseline_ms = link->cached.diag_uptime_ms;
     link->pico_uptime_baseline_esp_ms = esp_now_ms;
@@ -1157,6 +1174,8 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
     link->cached.diag_since_reboot = true;
+    link->cached.trip_event_after_diag = false; /* SAFETYFX10 MED-1: a DIAG arrived after any TRIP_EVENT */
+    link->diag_tick = msg->rx_ms; /* TRIPFX3 LOW-B / REBOOTFX4 LOW-2: receive stamp (ms) of the DIAG itself */
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
     /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip
@@ -1250,6 +1269,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
         ESP_LOGW(TAG, "safety processor rebooted (DIAG uptime %" PRIu32 " ms -> %" PRIu32
                  " ms, boot_id unchanged): reset trip dedup and relay baseline, re-announcing",
                  pico_uptime_prev_ms, pico_uptime_now_ms);
+    }
+    if (pico_reboot_by_boot_id) {
+        /* TEST_TRIP WP3 review INFO-2: the DIAG boot-id path used to count silently. */
+        ESP_LOGW(TAG, "safety processor rebooted (DIAG boot_id %u -> new, uptime did not regress): reset trip "
+                 "dedup and relay baseline, re-announcing", (unsigned)pico_boot_id_prev);
     }
     return true;
 }
@@ -1376,6 +1400,7 @@ bool safety_apply_trip_event(SafetyLinkClass *link, const uart_proto_message_t *
         link->cached.trip_fault_sources_valid = is_genuinely_live_event;
     }
     link->cached.trip_event_ever_received = true;
+    link->cached.trip_event_after_diag = true; /* SAFETYFX10 MED-1: arrival order, not an age comparison */
     link->trip_event_tick = xTaskGetTickCount();
     safety_unlock(link);
 

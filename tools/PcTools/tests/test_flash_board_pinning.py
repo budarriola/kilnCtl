@@ -246,12 +246,28 @@ class FixtureFlashTest(unittest.TestCase):
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
 
+        self.size_mock = unittest.mock.Mock(return_value=1024)
+        self._size_patch = unittest.mock.patch.object(mf.os.path, "getsize", self.size_mock)
+        self._size_patch.start()
+        self.addCleanup(self._size_patch.stop)
+
         self._target_patch = unittest.mock.patch.object(
             mf, "_resolve_app_flash_target",
             return_value=mf.partition_table.PartitionEntry(
                 name="app", type=0, subtype=0x10, offset=0x210000, size=0x400000))
         self._target_patch.start()
         self.addCleanup(self._target_patch.stop)
+
+    def test_zero_byte_image_refused_before_any_openocd_action(self) -> None:
+        """REVIEW_BUILDFX3 LOW-3: same 0-byte refusal as flash_firmware."""
+        self.size_mock.return_value = 0
+        kill = unittest.mock.Mock(return_value="")
+        with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]),                 unittest.mock.patch.object(mf, "kill_openocd_sessions", kill):
+            result = mf.fixture_flash(app_bin="fake/App.bin")
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("0 bytes", result)
+        kill.assert_not_called()
+        self.run_mock.assert_not_called()
 
     def test_app_offset_comes_from_resolved_partition_not_hardcoded(self) -> None:
         with unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG]):
@@ -362,6 +378,10 @@ class FixtureFlashPartitionTableOffsetTest(unittest.TestCase):
         self._isfile_patch = unittest.mock.patch.object(mf.os.path, "isfile", return_value=True)
         self._isfile_patch.start()
         self.addCleanup(self._isfile_patch.stop)
+
+        self._size_patch = unittest.mock.patch.object(mf.os.path, "getsize", return_value=1024)
+        self._size_patch.start()
+        self.addCleanup(self._size_patch.stop)
 
         self._ports_patch = unittest.mock.patch.object(mf.serial_link, "list_ports", return_value=[_FIXTURE_JTAG])
         self._ports_patch.start()

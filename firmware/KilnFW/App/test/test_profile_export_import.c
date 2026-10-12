@@ -150,7 +150,10 @@ int httpd_req_recv(httpd_req_t *r, char *buf, size_t buf_len)
     return (int)n;
 }
 
-static char s_response[512];
+bool cfg_fs_is_available(void) { return true; }
+bool cfg_fs_skipped_for_recovery(void) { return false; }
+
+static char s_response[1024];
 static int s_response_len;
 static int s_response_status; // 0 = not sent
 
@@ -428,9 +431,25 @@ static void test_busy_save_refusal_is_409(void)
     TEST_CHECK(s_response_status == 400, "any other save refusal stays 400");
 }
 
+/* PROFILESFX10 MED-1: a save refused because the slot's stored profile was unreadable at boot is a 409 with the
+ * profile remedy, never 200 {"ok":true}. */
+static void test_store_unreadable_save_refusal_is_409_with_remedy(void)
+{
+    reset_state();
+    s_save_should_fail = true;
+    snprintf(s_save_fail_msg, sizeof(s_save_fail_msg), "%s", PROFILES_SAVE_ERR_STORE_UNREADABLE);
+    run_import(MAKE_BODY("30"));
+    TEST_CHECK(s_response_status == 409, "PROFILESFX10 MED-1: store-unreadable refusal is 409");
+    TEST_CHECK(strstr(s_response, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    TEST_CHECK(strstr(s_response, "factory_reset scope=profiles") != NULL, "body gives the profile remedy");
+    TEST_CHECK(strstr(s_response, "\"ok\":true") == NULL, "never reports ok:true");
+    snprintf(s_save_fail_msg, sizeof(s_save_fail_msg), "stub refusal");
+}
+
 int main(void)
 {
     TEST_SECTION("profile_export_import");
+    test_store_unreadable_save_refusal_is_409_with_remedy();
     test_aux_target_byte_round_trips_through_import();
 
     test_valid_dwell_min_is_accepted();

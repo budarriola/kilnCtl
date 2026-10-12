@@ -191,6 +191,7 @@ idf_component_register(SRCS "hw/MAX31856.c"
                        "ui/ui_profile_list_order.c"
                        "ui/ui_page_safety.c"
                        "ui/ui_page_safety_logic.c"
+                       "ui/ui_page_network_secret.c"
                        "ui/ui_page_config.c"
                        "ui/ui_page_temperature.c"
                        "ui/ui_page_temperature_safety.c"
@@ -791,3 +792,12 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     -Werror=implicit-int
     -Werror=int-conversion
 )
+
+# REVIEW_LCDFX9 HIGH-1: drivers/ui sources compile with -Werror=shadow. A block-scope
+# a local constant that redefines a gate role token as the lower role (or a local function
+# pointer named like a gate/predicate) compiles silently under -Wall, turns an ADMIN
+# gate into a USER gate and is invisible to tools/check_lcd_admin_gates.ps1's text rules.
+# That check asserts this block is present. Per-source property, so it never leaks onto
+# the rest of the component.
+file(GLOB _kiln_lcd_ui_sources "${CMAKE_CURRENT_LIST_DIR}/ui/*.c")
+set_source_files_properties(${_kiln_lcd_ui_sources} PROPERTIES COMPILE_OPTIONS "-Werror=shadow")

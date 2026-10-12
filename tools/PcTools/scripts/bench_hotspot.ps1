@@ -22,6 +22,21 @@ param(
     [string]$Action
 )
 
+# testnetfx10 LOW-1: guard, probe and backstop are the FIRST executable statements after param().
+# Review testnet3 L3 / testnet4 L3: User scope is the registry, so a test's scrubbed
+# environment cannot hide the hotspot credentials, and stop/status act on (or read) the real
+# bench hotspot. Every action is refused under the test suite, before anything is read or done.
+# KILNCTL_TEST_GUARD_PROBE=1 (tests only) exits 86 (stderr marker) just past the guard, so a regressed guard
+# cannot reach the real action (testnet4 L2).
+if ($env:KILNCTL_TEST_NO_HUB -eq '1') {
+    Write-Error "$Action refused under the test suite (KILNCTL_TEST_NO_HUB=1): it uses the real bench hotspot / User-scope credentials."
+    exit 3
+}
+if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
+# Backstop (testnetfx8 LOW-2): never read credentials or touch tethering while the test probe is set,
+# even if the probe above regressed.
+if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('GUARD-PROBE-CRED-BACKSTOP'); exit 87 }
+
 function Get-TetheringManager {
     [Windows.Networking.NetworkOperators.NetworkOperatorTetheringManager,Windows.Networking.NetworkOperators,ContentType=WindowsRuntime] | Out-Null
     [Windows.Networking.Connectivity.NetworkInformation,Windows.Networking.Connectivity,ContentType=WindowsRuntime] | Out-Null

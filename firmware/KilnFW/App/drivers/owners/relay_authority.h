@@ -339,10 +339,39 @@ bool relay_authority_reset_refuses_kiln_nvs_writer(void);
  * fault_on_link_loss is on, so a never-up / stale-within-one-period / override-off / uninitialised
  * link reads fault_sources == 0 and a run would start and enable the safety link. This refuses
  * unless no fault source is asserted AND the link is positively up and fresh
- * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down).
+ * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down) and the
+ * Pico's DIAG is fresh and does not report TRIPPED (F5HOLDERFX3 LOW-1, F5HOLDERFX4 MED-1).
  * Fail closed. Never consults fault_on_link_loss, so the bench override opens no start path.
  * Writes a decoded refusal (<128 chars) to err when non-NULL; `what` completes the sentence
  * ("autotune cannot drive the element"). Returns true when the start must be refused. */
+/* F5HOLDERFX4 MED-1: fail closed on the Pico's DIAG. "Tripped" = a DIAG was ever received and its cached state is
+ * TRIPPED, at ANY age (a stale TRIPPED never reads as OK; the Pico reboot path keeps the cache on purpose). Note
+ * st->age_ms is the STATUS frame's age, not the DIAG's, so it must not be used here. */
+static inline bool relay_authority_pico_tripped(const safety_link_status_t *st)
+{
+    if (st->diag_ever_received && st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED) {
+        return true;
+    }
+    /* SAFETYFX8 LOW-3 / SAFETYFX10 MED-1: a TRIP_EVENT that arrived after the last DIAG (or with no DIAG ever) means
+     * the Pico tripped and no DIAG has said otherwise yet -- DIAG frames can be lost while STATUS/TRIP_EVENT still
+     * arrive. Fail toward OFF. Order is arrival order (trip_event_after_diag), never a comparison of the two ages,
+     * which wrap every 2^32 ms. No auto-clear: the next DIAG of any state supersedes the event, which is exactly the
+     * normal trip-clear flow. The Pico sends one 4-copy, 750 ms TRIP_EVENT burst per new trip_seq (it does not repeat
+     * while latched), so this holds until the next DIAG (at most ~2 s); after that only diag_state matters. */
+    if (st->trip_event_ever_received &&
+        (!st->diag_ever_received || st->trip_event_after_diag)) {
+        return true;
+    }
+    return false;
+}
+
+/* A DIAG report we may act on to PERMIT heat/switch-on: received since the Pico's last reboot and no older than
+ * SAFETY_LINK_DIAG_FRESH_MS (inclusive: age == FRESH is fresh, FRESH+1 is not). */
+static inline bool relay_authority_pico_diag_fresh(const safety_link_status_t *st)
+{
+    return st->diag_ever_received && st->diag_since_reboot && st->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
+}
+
 static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *err, size_t cap, const char *what)
 {
     uint32_t sources = 0;
@@ -362,6 +391,18 @@ static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *
     if (safety_link_get_status(safety, &st) != ESP_OK || !st.link_up) {
         if (err && cap) {
             snprintf(err, cap, "safety link is down or not yet confirmed up -- %s", what);
+        }
+        return true;
+    }
+    if (relay_authority_pico_tripped(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "the safety processor is tripped (clear the trip first) -- %s", what);
+        }
+        return true;
+    }
+    if (!relay_authority_pico_diag_fresh(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "waiting for the safety processor's status report -- retry in a few seconds -- %s", what);
         }
         return true;
     }

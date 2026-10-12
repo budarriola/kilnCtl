@@ -4805,9 +4805,10 @@ static void test_test_trip_loses_to_every_real_guard(void)
 
 /* Latch a TEST trip, then let K4 read open past trip_verify_s so only the "real
  * condition" test can still refuse the clear. */
-static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard_cfg_t *cfg)
+static void latch_test_trip_and_hold_at(safety_guard_state_t *s, const safety_guard_cfg_t *cfg, float tc_c)
 {
     safety_guard_input_t in = base_input();
+    in.tc_c = tc_c; /* a continuous reading: the post-latch windows (saftyfx3 LOW-1) see no phantom jump */
     in.test_trip_requested = true;
     (void)safety_guards_tick(s, cfg, &in);
     in.test_trip_requested = false;
@@ -4817,15 +4818,21 @@ static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard
     }
 }
 
+static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard_cfg_t *cfg)
+{
+    latch_test_trip_and_hold_at(s, cfg, base_input().tc_c);
+}
+
 /* REVIEW_TRIPWP2 MED-1: a TEST latch freezes every other guard's debounce, so its clear
  * must refuse while any real guard's condition holds. */
 static void test_test_trip_clear_refuses_real_conditions(void)
 {
     TEST_SECTION("TEST trip clear refuses while a real guard condition holds (TRIPWP2 MED-1)");
-    enum { N = 9 };
+    enum { N = 12 };
     const char *names[N] = {"S1 over ceiling", "S2 over setpoint", "S3 current with nothing commanded",
                             "S5 bad TC read", "S8 mid-debounce rate", "S12 hot cold junction",
-                            "S13 stale samples", "S6b link down", "S5 NaN reading"};
+                            "S13 stale samples", "S6b link down", "S5 NaN reading", "S6a main fault (retest tick)",
+                            "S7 estop (retest tick)", "S16 config integrity (retest tick)"};
     for (int k = -1; k < N; k++) {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -4840,7 +4847,7 @@ static void test_test_trip_clear_refuses_real_conditions(void)
             pre.tc_c = 40.0f; (void)safety_guards_tick(&s, &cfg, &pre);
             TEST_CHECK(!s.is_tripped, "S8 sanity: mid-debounce, not yet tripped");
         }
-        latch_test_trip_and_hold(&s, &cfg);
+        latch_test_trip_and_hold_at(&s, &cfg, (k == 4) ? 40.0f : base_input().tc_c);
         TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
         safety_guard_input_t c = base_input();
         c.relay_deenergized = true;
@@ -4853,15 +4860,313 @@ static void test_test_trip_clear_refuses_real_conditions(void)
         if (k == 6) { c.sample_counter_advancing = false; }
         if (k == 7) { c.link_up = false; }
         if (k == 8) { c.tc_c = (float)NAN; c.tc_valid = false; }
+        if (k == 9) { c.main_fault_asserted = true; }
+        if (k == 10) { c.estop_pressed = true; }
+        if (k == 11) { c.config_integrity_trip = true; }
         if (k < 0) {
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "control: no real condition: TEST clear granted");
         } else {
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), names[k]);
+            if (k >= 9) {
+                /* retest tick: the real guard re-trips, so the latch now names it (still tripped) */
+                TEST_CHECK(s.is_tripped && s.reason != SAFETY_TRIP_TEST, "retest tick re-trips the real guard");
+                continue;
+            }
             TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "refused clear leaves the TEST latch untouched");
             safety_guard_input_t ok = base_input();
             ok.relay_deenergized = true;
             if (k == 4) { ok.tc_c = 40.0f; }
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &ok), "same latch clears once the condition is gone");
+        }
+    }
+}
+
+/* saftyfx LOW-3: a TEST latch landing moments after an S8 window opened has a tiny frozen
+ * window; the non-strict check floors the divisor so a small rise clears, a fast rise refuses. */
+static void test_test_clear_s8_tiny_window(void)
+{
+    TEST_SECTION("TEST clear S8 check with a tiny frozen window (saftyfx LOW-3)");
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 0.1f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre); /* opens a window */
+        (void)safety_guards_tick(&s, &cfg, &pre); /* elapsed 0.1 s */
+        latch_test_trip_and_hold(&s, &cfg);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 20.5f : 40.0f; /* +0.5 C: slow; +20 C: real fast rise */
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "0.5 C rise over a 0.1 s frozen window no longer refuses");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "20 C rise still refuses (S8 real condition)");
+        }
+    }
+}
+
+/* saftyfx2 INFO-1: the divisor is frozen elapsed + s9_verify_elapsed_s, floored at 5 s.
+ * trip_verify_s = 1 s so the TEST latch can be checked after only a few seconds. */
+static void test_test_clear_s8_divisor(void)
+{
+    TEST_SECTION("TEST clear S8 divisor = frozen elapsed + verify time, floored (saftyfx2 INFO-1)");
+    struct { int hold; float rise; bool clear; const char *msg; } cases[] = {
+        {2, 0.8f, true, "0.8 C, ~3 s true span: 5 s floor applies, clear"},
+        {2, 1.0f, false, "1 C over the 5 s floor is 12 C/min: refuse (floor not larger than 5 s)"},
+        {60, 1.0f, true, "1 C over 60 s of verify time is 1 C/min: clear (verify time counts)"},
+        {60, 20.0f, false, "20 C over 60 s is 20 C/min: refuse"},
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        cfg.trip_verify_s = 1;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 0.1f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre);
+        (void)safety_guards_tick(&s, &cfg, &pre); /* frozen elapsed 0.1 s */
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < cases[k].hold; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = 20.0f + cases[k].rise;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c) == cases[k].clear, cases[k].msg);
+    }
+}
+
+/* saftyfx2 LOW-3: the TEST latch lands right after S8 completed an over-rate window and
+ * slid (frozen elapsed exactly 0, streak 1): a rise since the slide must refuse, a flat
+ * reading clears. */
+static void test_test_clear_s8_streak_zero_elapsed(void)
+{
+    TEST_SECTION("TEST clear S8 check, streak 1 with a near-zero frozen window (saftyfx2 LOW-3)");
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 60.0f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre);
+        pre.tc_c = 40.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre); /* window over rate, slides: streak 1, elapsed 0 */
+        TEST_CHECK(!s.is_tripped && s.s8_over_rate_streak == 1u, "sanity: streak 1, not tripped");
+        latch_test_trip_and_hold_at(&s, &cfg, 40.0f);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 40.0f : 40.3f;
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "flat since the slide: clear granted");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "any rise since the slide with streak 1 refuses");
+        }
+    }
+}
+
+/* saftyfx3 LOW-1: a rise late in a long TEST hold must not be averaged away by the
+ * whole-hold divisor. k=0 flat hold clears; k=1 flat 9 min then +20 C in the last minute
+ * refuses; k=2 same rise but then cooling back below the window start clears (slow-warm
+ * kiln with K4 open never deadlocks). */
+static void test_test_clear_s8_late_rise(void)
+{
+    TEST_SECTION("TEST clear S8 late rise is not diluted by the hold (saftyfx3 LOW-1)");
+    for (int k = 0; k < 4; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 540; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        if (k >= 1) {
+            for (int i = 1; i <= 60; i++) {
+                in.tc_c = 20.0f + (20.0f * (float)i / 60.0f);
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+        }
+        if (k == 3) { /* partial window: rise inside the current (unfinished) window */
+            for (int i = 1; i <= 10; i++) {
+                in.tc_c = 40.0f + 4.0f * (float)i;
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 20.0f : (k == 3 ? 80.0f : 40.0f);
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "flat hold: clear granted");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "late 20 C/min rise refuses");
+        }
+        if (k == 1) {
+            /* the rise stops and the kiln cools: two quiet windows later it clears */
+            in.tc_c = 30.0f;
+            for (int i = 0; i < 130; i++) {
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+            c.tc_c = 30.0f;
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "after the post windows slide past the rise, clear granted");
+        }
+    }
+}
+
+/* saftyfx4 LOW-1/LOW-2: pin each post-window check on its own. */
+static void test_test_clear_s8_post_window_checks(void)
+{
+    TEST_SECTION("TEST clear S8 post windows: completed-window refusal and cooling (saftyfx4 LOW-1/2)");
+    /* LOW-1: 590 s flat before the latch dilutes the whole-hold average; the rise sits
+     * inside the FIRST post window (windows_done == 1 at rollover). A clear 2 s after the
+     * rollover (partial check skipped, < S8_POST_MIN_S) is refused only by the completed
+     * window check. One quiet window later it clears. */
+    {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 1.0f;
+        cfg.rate_window_s = 600.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        for (int i = 0; i < 590; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 700 && s.s8_post_windows_done < 1u; i++) {
+            if (i == 570) {
+                in.tc_c = 35.0f; /* +15 C inside the first 600 s window = 1.5 C/min */
+            }
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "LOW-1 sanity: TEST latched");
+        TEST_CHECK(s.s8_post_windows_done == 1u, "LOW-1 sanity: exactly one post window completed");
+        TEST_CHECK(s.s8_post_last_rate_c_per_min > 1.0f, "LOW-1 sanity: completed window is over the rate");
+        for (int i = 0; i < 2; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.s8_post_elapsed_s < 5.0f, "LOW-1 sanity: partial check is skipped");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = 35.0f;
+        TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c),
+                   "LOW-1: rise inside one window, clear 2 s after rollover refuses");
+        for (int i = 0; i < 600; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "LOW-1: one quiet window later it clears");
+    }
+    /* LOW-2: cooling at -20 C/min (limit 10) clears in the completed and partial states. */
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 100.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        float t = 100.0f;
+        int n = 0;
+        while (s.s8_post_windows_done < 1u && n < 200) {
+            t -= 20.0f / 60.0f;
+            in.tc_c = t;
+            (void)safety_guards_tick(&s, &cfg, &in);
+            n++;
+        }
+        TEST_CHECK(s.s8_post_windows_done == 1u && s.s8_post_last_rate_c_per_min < -15.0f,
+                   "LOW-2 sanity: completed window reads about -20 C/min");
+        int extra = (k == 0) ? 2 : 12;
+        for (int i = 0; i < extra; i++) {
+            t -= 20.0f / 60.0f;
+            in.tc_c = t;
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK((k == 0) == (s.s8_post_elapsed_s < 5.0f), "LOW-2 sanity: completed vs partial state");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = t;
+        TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c),
+                   k == 0 ? "LOW-2: cooling faster than the limit clears (completed window)"
+                          : "LOW-2: cooling faster than the limit clears (partial window)");
+    }
+}
+
+/* saftyfx5 LOW-5: pin the 5 s partial-window floor exactly and that the partial rate
+ * divides by ELAPSED time (not the window length). Limit 10 C/min, window 60 s: a 1.5 C
+ * rise is 15 C/min over 6 s (refuse) but only 1.5 C/min over the 60 s window length. */
+static void test_test_clear_s8_partial_floor_and_divisor(void)
+{
+    TEST_SECTION("TEST clear S8 partial window: 5 s floor and elapsed divisor (saftyfx5 LOW-5)");
+    for (int k = 0; k < 3; k++) {
+        int nticks = (k == 0) ? 9 : (k == 1 ? 11 : 20); /* 4.5 s, 5.5 s, 10 s after rollover */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 0.5f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 400 && s.s8_post_windows_done < 1u; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "LOW-5 sanity: TEST latched");
+        TEST_CHECK(s.s8_post_windows_done == 1u && s.s8_post_last_rate_c_per_min < 1.0f,
+                   "LOW-5 sanity: one flat completed window");
+        for (int i = 0; i < nticks; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        float e = s.s8_post_elapsed_s;
+        TEST_CHECK(k == 0 ? (e > 4.4f && e < 4.6f) : (k == 1 ? (e > 5.4f && e < 5.6f) : (e > 9.9f && e < 10.1f)),
+                   "LOW-5 sanity: elapsed after rollover");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 2) ? 22.0f : 21.5f;
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "LOW-5: 4.5 s after rollover the partial check is skipped");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c),
+                       k == 1 ? "LOW-5: 5.5 s after rollover, 15 C/min over elapsed refuses (floor 5 s)"
+                              : "LOW-5: 10 s after rollover, 12 C/min over elapsed refuses (divisor is elapsed)");
         }
     }
 }
@@ -4956,7 +5261,13 @@ void run_test_safety_guards(void)
 {
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
+    test_test_clear_s8_streak_zero_elapsed();
+    test_test_clear_s8_late_rise();
+    test_test_clear_s8_post_window_checks();
+    test_test_clear_s8_partial_floor_and_divisor();
+    test_test_clear_s8_divisor();
     test_test_trip_loses_to_every_real_guard();
+    test_test_clear_s8_tiny_window();
     test_s8_clear_followups();
     test_s1();
     test_s1_ceiling_properties();

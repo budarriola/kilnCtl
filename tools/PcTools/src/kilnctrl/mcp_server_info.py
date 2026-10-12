@@ -1304,6 +1304,7 @@ def backup_import(
         stale_note = "\n" + stale_note
 
     before_profiles = None
+    snapshot_failed = False
     if confirm is True and not dry_run:
         # Only an id-less profile needs a pre-import snapshot (see _backup_import_readback_problem).
         try:
@@ -1312,8 +1313,10 @@ def backup_import(
                 from . import backup_export_http_client as _bex
                 _bp = _bex.get_export(resolved)[1].get("profiles")
                 before_profiles = _bp if isinstance(_bp, list) else None
-        except Exception:  # noqa: BLE001 - best effort; without it case 3 stays undetected
+                snapshot_failed = before_profiles is None
+        except Exception:  # noqa: BLE001 - best effort; reported below as UNVERIFIED
             before_profiles = None
+            snapshot_failed = True
 
     t0 = time.monotonic()
     try:
@@ -1347,6 +1350,9 @@ def backup_import(
                          "live wear count, so the live (higher) count was kept (raise-only).")
         # Read back before claiming ok: a 2xx alone is the board's word, not proof.
         problem = _backup_import_readback_problem(resolved, body_text, after_readiness, before_profiles)
+        if not problem and snapshot_failed:
+            problem = ("id-less profile match UNVERIFIED (pre-import profile snapshot unavailable, so a "
+                       "profile that already existed on the board cannot be told from a restored one)")
         if problem:
             return (
                 f"UNVERIFIED - POST returned HTTP {status} but the read-back could not confirm the "
@@ -1571,6 +1577,20 @@ def get_cfgfs_status(host: Optional[str] = None) -> str:
         lines.append(f"!!! tmp_entries_now={tmp_now} -- a write may be interrupted or repeatedly failing")
     else:
         lines.append(f"tmp_entries_now={tmp_now}")
+
+    # REVIEW_PROFILESFX2 LOW-3: stores refused this boot and runtime conditions were only in the raw JSON.
+    degraded = cfgfs.get("degraded") or []
+    if degraded:
+        lines.append(
+            f"!!! degraded_count={cfgfs.get('degraded_count', len(degraded))} "
+            f"(saves refused until reboot): {', '.join(str(n) for n in degraded)}"
+        )
+    conditions = cfgfs.get("conditions") or []
+    if conditions:
+        lines.append(
+            f"!!! conditions_count={cfgfs.get('conditions_count', len(conditions))}: "
+            f"{', '.join(str(n) for n in conditions)}"
+        )
 
     subdirs = cfgfs.get("subdirs") or []
     for sd in subdirs:

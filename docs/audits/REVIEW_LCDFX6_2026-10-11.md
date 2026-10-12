@@ -159,3 +159,20 @@ All runs used `tools/negtest.ps1 -Preset check -PresetArg tools/check_lcd_admin_
   - real tree unchanged, copies removed.
 - **Vacuity set**: 49/49 CAUGHT, baseline PASS, real tree unchanged.
 - Direct run of the check on dev `4efaf2cda`: PASS, exit 0.
+
+## Fix status (LCDFX7, 2026-10-11)
+
+All changes are in `tools/check_lcd_admin_gates.ps1`; no firmware changed. Re-run with `tools/negtest.ps1 -Preset check`
+(bypass set plus 19 new mutations H1-H14 and N1-N5, and the 49-mutation vacuity set).
+
+| Finding | Status | Verdict |
+|---|---|---|
+| HIGH-1 (trip clear, X16, X17) | Fixed: anchored rows for `btn_clicked_cb` (ADMIN gate, apply `clear_action`) and `clear_action` (verdict switch with the ADMIN re-check, NEEDS_ADMIN and NOT_TRIPPED return, one `dashboard_safety_clear_trip`); clear_trip calls and `##` forbidden elsewhere in drivers/ui | X16, X17, H1-H14 CAUGHT |
+| MED-1 (X13, X14) | Fixed: code before a gate call may hold no top-level return/goto or unlisted call; each `_cb` use count must equal its registrations | X13, X14, N5 CAUGHT |
+| MED-2 (X6-X10, X15) | Fixed: string literals concatenated, alias macros refused, scan covers all of App except test, one `ui_page_safety_build` registration, trusted tokens in ESP_LOG arguments fail | X6-X10, X15, N1, N4 CAUGHT |
+| LOW-1 (X1-X5, X11, X12, X19) | Fixed: line splice, comment and `%:` tolerant macro scan, CMake scan, role enum pinned | all CAUGHT, N2, N3 CAUGHT |
+| LOW-2 (P1-P7) | Fixed: log statements ignored, strings blanked in use counts, test dir excluded, narrower trusted set, apply parameter name free, attributes tolerated, ESP_LOG before ack | P1-P7 all MISSED (check passes) |
+| X18 (apply made extern and called from another file) | Not fixed (residual): apply symbols are static by convention only; no cross-file rule | MISSED |
+| INFO-3, INFO-4 | Not changed | n/a |
+
+Vacuity set: 49/49 CAUGHT. P6 first failed (attribute made the definition count as a use) and was fixed in a follow-up commit; re-run: P6 MISSED, X13/X14 CAUGHT.

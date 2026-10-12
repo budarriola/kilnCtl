@@ -205,8 +205,110 @@ static void test_rx_chunk_sizing(void)
           "RX chunk carries several back-to-back frames per wakeup");
 }
 
+/* REBOOTFX4 LOW-3: pin the rx_ms receive stamp (uart_protocol.c is not host-compiled, so the helper is
+ * tested directly and both construction sites are checked in the source text). */
+static void test_rx_stamp(void)
+{
+    CHECK(uart_proto_rx_stamp_ms(12345u) == (uint32_t)(12345u * (TickType_t)portTICK_PERIOD_MS),
+          "rx stamp is ticks * period in ms, not seconds");
+    CHECK(uart_proto_rx_stamp_ms(0xFFFFFFFFu) == (uint32_t)(0xFFFFFFFFu * (TickType_t)portTICK_PERIOD_MS),
+          "rx stamp wraps mod 2^32");
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", __FILE__);
+    char *slash = strrchr(path, '/');
+    char *bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) {
+        slash = bslash;
+    }
+    if (slash) {
+        *slash = 0;
+    } else {
+        snprintf(path, sizeof(path), ".");
+    }
+    strncat(path, "/../../../hwAbstraction/esp/uart/uart_protocol.c", sizeof(path) - strlen(path) - 1);
+    FILE *f = fopen(path, "rb");
+    CHECK(f != NULL, "uart_protocol.c source readable");
+    if (!f) {
+        return;
+    }
+    static char buf[200000];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = 0;
+    /* REBOOTFX5 LOW-2: strip comments (a commented-out call must not count), then anchor on construction:
+     * no hand-built uart_proto_message_t initializer may remain, and exactly two uart_proto_message_init()
+     * calls (BROADCAST and DATA) must each be fed xTaskGetTickCount(). */
+    static char code[200000];
+    size_t o = 0;
+    for (size_t k = 0; k < n;) {
+        if (buf[k] == '/' && buf[k + 1] == '*') {
+            k += 2;
+            while (k < n && !(buf[k] == '*' && buf[k + 1] == '/')) {
+                k++;
+            }
+            k += 2;
+        } else if (buf[k] == '/' && buf[k + 1] == '/') {
+            while (k < n && buf[k] != '\n') {
+                k++;
+            }
+        } else {
+            code[o++] = buf[k++];
+        }
+    }
+    code[o] = 0;
+    int made = 0, with_tick = 0, handbuilt = 0;
+    for (const char *p = code; (p = strstr(p, "uart_proto_message_init(")) != NULL; p++) {
+        made++;
+        const char *end = strchr(p, ';');
+        if (end) {
+            for (const char *q = p; q < end; q++) {
+                if (strncmp(q, "xTaskGetTickCount())", 20) == 0) {
+                    with_tick++;
+                    break;
+                }
+            }
+        }
+    }
+    for (const char *p = code; (p = strstr(p, "uart_proto_message_t")) != NULL; p++) {
+        const char *q = p + strlen("uart_proto_message_t");
+        while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
+            q++;
+        }
+        while (*q == '_' || (*q >= 'a' && *q <= 'z') || (*q >= '0' && *q <= '9')) {
+            q++;
+        }
+        while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
+            q++;
+        }
+        if (q[0] == '=' && q[1] != '=') {
+            q++;
+            while (*q == ' ' || *q == '\n' || *q == '\t' || *q == '\r') {
+                q++;
+            }
+            if (*q == '{') {
+                handbuilt++;
+            }
+        }
+    }
+    CHECK(made == 2 && with_tick == 2,
+          "both receive-path message constructions go through uart_proto_message_init(&m, .., xTaskGetTickCount())");
+    CHECK(handbuilt == 0, "no hand-built uart_proto_message_t initializer (unstamped rx_ms) in uart_protocol.c");
+}
+
+static void test_message_init(void)
+{
+    uart_proto_message_t m;
+    uart_proto_message_init(&m, UART_PROTO_DEVICE_SAFETY, 7u, 0x1234u, 5u, 777u);
+    CHECK(m.device == UART_PROTO_DEVICE_SAFETY && m.task_id == 7u && m.msg_index == 0x1234u && m.length == 5u,
+          "message_init fills the header fields");
+    CHECK(m.rx_ms == uart_proto_rx_stamp_ms(777u), "message_init stamps rx_ms with the helper");
+    CHECK(m.payload[0] == 0u && m.payload[UART_PROTO_MAX_PAYLOAD - 1] == 0u, "message_init zero-initialises payload");
+}
+
 int main(void)
 {
+    test_rx_stamp();
+    test_message_init();
     test_required_cases();
     test_known_frame_wire_bytes();
     test_rx_chunk_sizing();

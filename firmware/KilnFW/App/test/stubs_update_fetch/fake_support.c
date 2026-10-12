@@ -8,6 +8,8 @@
 #include <string.h>
 
 #include "fake_support.h"
+#include "update_fetch.h"
+#include "update_http_internal.h"
 
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
@@ -44,6 +46,7 @@ char g_fr_last_url[512];
 uint8_t g_fr_flash[FR_STAGE_SIZE];
 bool g_fr_flash_write_fail;
 bool g_fr_flash_write_block;
+volatile long g_fr_wr_wait_after_wedge;
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
 static HANDLE s_flash_ev;
@@ -89,6 +92,8 @@ void fr_reset(void)
     fr_flash_erase_all();
     g_fr_flash_write_fail = false;
     g_fr_flash_write_block = false;
+    g_fr_wr_wait_after_wedge = 0;
+    g_fr_sem_idle_waiters = 0;
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
     if (s_flash_ev == NULL) {
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -244,15 +249,109 @@ bool fr_wait_tasks_idle(int ms)
     return g_fr_live_tasks == 0;
 }
 
-SemaphoreHandle_t xSemaphoreCreateBinary(void) { return CreateSemaphore(NULL, 0, 1, NULL); }
-SemaphoreHandle_t xSemaphoreCreateMutex(void) { return CreateSemaphore(NULL, 1, 1, NULL); }
+#define FR_DEL_MAX 64
+static volatile HANDLE s_deleted[FR_DEL_MAX];
+volatile long g_fr_sem_idle_waiters;
+volatile long g_fr_sem_bad_n;
+
+static void sem_note_live(HANDLE h)
+{
+    for (int i = 0; i < FR_DEL_MAX; i++) {
+        if (s_deleted[i] == h) {
+            s_deleted[i] = NULL; // the OS reused the value for a new semaphore
+        }
+    }
+}
+
+// True (and counted) for a NULL or deleted handle. Sleeps 1 ms so a task spinning on it does not burn a core,
+// and aborts the process after 5000 hits rather than looping forever.
+static bool sem_is_bad(SemaphoreHandle_t s)
+{
+    bool bad = (s == NULL);
+    for (int i = 0; !bad && i < FR_DEL_MAX; i++) {
+        bad = (s_deleted[i] == (HANDLE)s);
+    }
+    if (bad) {
+        if (InterlockedIncrement(&g_fr_sem_bad_n) > 5000) {
+            printf("  FAIL fake_support.c: semaphore used after delete/NULL, aborting\n");
+            fflush(stdout);
+            ExitProcess(1);
+        }
+        Sleep(1);
+    }
+    return bad;
+}
+
+SemaphoreHandle_t xSemaphoreCreateBinary(void)
+{
+    HANDLE h = CreateSemaphore(NULL, 0, 1, NULL);
+    sem_note_live(h);
+    return h;
+}
+SemaphoreHandle_t xSemaphoreCreateMutex(void)
+{
+    HANDLE h = CreateSemaphore(NULL, 1, 1, NULL);
+    sem_note_live(h);
+    return h;
+}
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
+    if (sem_is_bad(s)) {
+        return pdFALSE;
+    }
+    if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS) && g_fr_flash_write_block) {
+        if (update_fetch_writer_wedged()) {
+            g_fr_wr_wait_after_wedge++; // a writer-op wait begun after the wedge latched: wr_call guard missing
+        }
+        // Scaled writer-timeout wait: the (shrunk) clock starts only once a writer thread is parked in
+        // flash, so a descheduled writer under load is not declared wedged early. Polls in 1 ms slices
+        // so a semaphore given meanwhile still returns at once; wall-clock fallback after 15 s (inside the tests' 30 s ceiling).
+        DWORD budget = (DWORD)(ticks / (TickType_t)g_fr_time_div);
+        DWORD started = 0;
+        const ULONGLONG t_start = GetTickCount64(); // wall-clock fallback (not iteration-counted: starved polls are slow)
+        bool running = false;
+        for (;;) {
+            if (WaitForSingleObject((HANDLE)s, 1) == WAIT_OBJECT_0) {
+                return pdTRUE;
+            }
+            if (!running && (g_fr_flash_blocked_n >= 1 || GetTickCount64() - t_start >= 15000)) {
+                running = true;
+            }
+            if (running && ++started >= budget) {
+                return pdFALSE;
+            }
+        }
+    }
     DWORD ms = ticks == portMAX_DELAY ? INFINITE : (DWORD)(ticks / (TickType_t)g_fr_time_div);
-    return WaitForSingleObject((HANDLE)s, ms) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
+    if (ticks == portMAX_DELAY) {
+        InterlockedIncrement(&g_fr_sem_idle_waiters);
+    }
+    BaseType_t got = WaitForSingleObject((HANDLE)s, ms) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
+    if (ticks == portMAX_DELAY) {
+        InterlockedDecrement(&g_fr_sem_idle_waiters);
+    }
+    return got;
 }
-BaseType_t xSemaphoreGive(SemaphoreHandle_t s) { return ReleaseSemaphore((HANDLE)s, 1, NULL) ? pdTRUE : pdFALSE; }
-void vSemaphoreDelete(SemaphoreHandle_t s) { CloseHandle((HANDLE)s); }
+BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
+{
+    if (sem_is_bad(s)) {
+        return pdFALSE;
+    }
+    return ReleaseSemaphore((HANDLE)s, 1, NULL) ? pdTRUE : pdFALSE;
+}
+void vSemaphoreDelete(SemaphoreHandle_t s)
+{
+    if (s == NULL) {
+        return;
+    }
+    for (int i = 0; i < FR_DEL_MAX; i++) {
+        if (s_deleted[i] == NULL) {
+            s_deleted[i] = (HANDLE)s;
+            break;
+        }
+    }
+    CloseHandle((HANDLE)s);
+}
 
 void fr_crit_enter(portMUX_TYPE *m)
 {

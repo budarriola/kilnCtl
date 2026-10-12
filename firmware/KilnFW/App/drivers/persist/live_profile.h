@@ -337,7 +337,7 @@ void live_profile_get_dualwrite_status(bool *file_valid, uint32_t *file_rev, boo
 /* RAM-only generation counter, same shape as zones_config_generation() --
  * bumped by live_profile_fork()/live_profile_save_working(), polled once per
  * control-tick by profile_executor_live_pickup's caller. Never persisted,
- * and reset to 0 across a reboot -- CORRECTION (MEDIUM-2, review): a reboot
+ * and seeded randomly at boot (live_profile.c; not 0) -- CORRECTION (MEDIUM-2, review): a reboot
  * does NOT always end the run this counter is tracking, since a firing can
  * warm-start-resume across one (profile_executor_plan_warm_start()). A
  * working copy forked/saved just before that reboot is still on disk with

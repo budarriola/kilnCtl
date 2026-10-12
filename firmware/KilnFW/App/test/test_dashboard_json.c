@@ -871,6 +871,7 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         STATUS_APPEND(",\"diag_warn_mask\":%u", 65535u);
         STATUS_APPEND(",\"diag_trip_mask\":%u", 65535u);
         STATUS_APPEND(",\"diag_state\":%u", 255u);
+        STATUS_APPEND(",\"trip_is_test\":%s", "false");
         /* 2026-09-16: this mirror models the DEFAULT /api/status document.
          * diag_boot_reason and the three link frame counters
          * (diag_context_frames_ok/_bad, diag_tx_frames_dropped) are no longer
@@ -892,7 +893,6 @@ static bool render_worst_case_status_json(char *json, size_t cap, size_t channel
         uint8_t reason = worst_of_all_reasons(safety_trip_words_short, &wlen);
         STATUS_APPEND(",\"trip_reason\":%u", 255u);
         STATUS_APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(reason));
-        STATUS_APPEND(",\"trip_is_test\":%s", "false");
         {
             /* Real safety_trip_words_cause_numbered(), pathological float
              * magnitude on every numbered field it can carry (this header's

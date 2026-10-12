@@ -22,8 +22,44 @@ $seen = 0
 # Matched by repo-relative path (forward slashes), never the bare file name.
 $deliberateMisuse = @('tools/check_build_gate_reentrant.ps1')
 $innerBad = 'Start-Sleep|Enter-BuildLock|vcvarsall|Import-KilnVcvarsEnv|Enter-KilnBuildGate|&\s*\$\w*[Ee]xe\b|&\s*["''][^"'']*\.exe["'']'
-$files = Get-ChildItem -LiteralPath $Root -Recurse -Filter *.ps1 -File -ErrorAction SilentlyContinue |
-    Where-Object { (($_.FullName.Substring($Root.TrimEnd('\','/').Length + 1) -replace '\\', '/') -notmatch '(^|/)(\.git|node_modules|\.venv|build|build_agent|build_sim_[A-Za-z0-9_]*_obj|checkbuild_[0-9a-f]+)/') -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' -and (($_.FullName.Substring($Root.TrimEnd('\','/').Length + 1) -replace '\\', '/') -notin $deliberateMisuse) }
+# Enumerate with git so ignore rules (not path-segment names) decide what is skipped: ignored build output drops out,
+# every tracked or untracked-but-not-ignored script is linted (tools/build/, docs/build/ included).
+# `-z` + core.quotepath=off + a UTF-8 stdout: a non-ASCII path is NOT quoted/octal-escaped, so it resolves (REVIEW_DEVBREAK5
+# LOW-2: "tools/negtest_gate_cafe-acute.ps1" used to fail Get-Item and be silently dropped). git ls-files does not recurse
+# into submodules (tools/mykicadMcp is not linted; it holds no gate caller).
+$psi = New-Object System.Diagnostics.ProcessStartInfo
+$psi.FileName = 'git'
+$psi.Arguments = '-C "' + $Root + '" -c core.quotepath=off ls-files -z -co --exclude-standard -- "*.ps1"'
+$psi.RedirectStandardOutput = $true
+$psi.UseShellExecute = $false
+$psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+$proc = [System.Diagnostics.Process]::Start($psi)
+# Start the async read first (a full pipe cannot deadlock the child), then bound the read itself: an unbounded
+# ReadToEnd() would hang here if git never closes stdout (REVIEW_DOCFX3 LOW-1).
+$gitOutTask = $proc.StandardOutput.ReadToEndAsync()
+if (-not $gitOutTask.Wait(120000)) { try { & taskkill /T /F /PID $proc.Id | Out-Null } catch { }; Write-Host 'FAIL: git ls-files stdout not closed within 120 s'; exit 1 }
+$gitOut = $gitOutTask.Result
+if (-not $proc.WaitForExit(120000)) { try { & taskkill /T /F /PID $proc.Id | Out-Null } catch { }; Write-Host 'FAIL: git ls-files closed stdout but did not exit within 120 s'; exit 1 }
+$listed = @($gitOut -split "`0" | Where-Object { $_ -ne '' })
+if ($proc.ExitCode -ne 0 -or $listed.Count -eq 0) { Write-Host "FAIL: git ls-files -co --exclude-standard failed under $Root -- cannot enumerate scripts"; exit 1 }
+$unresolved = @()
+$byFull = @{}
+foreach ($rel in ($listed | Sort-Object -Unique)) {
+    $full = Join-Path $Root $rel
+    $it = Get-Item -LiteralPath $full -ErrorAction SilentlyContinue
+    if (-not $it) { $unresolved += $rel; continue }
+    $byFull[$it.FullName] = $it
+}
+# Union with the suite's own discovery (lib_check_discovery.ps1, shared with run_all_checks.ps1): a gitignored
+# check_*.ps1 that the suite runs is linted too (REVIEW_DEVBREAK5 LOW-3).
+. (Join-Path $PSScriptRoot 'lib_check_discovery.ps1')
+foreach ($it in @(Get-KilnCheckScripts -RepoRoot $Root.TrimEnd([char]92, [char]47))) { $byFull[$it.FullName] = $it }
+if ($unresolved.Count -gt 0) {
+    $unresolved | ForEach-Object { Write-Host "FAIL: git lists '$_' but it does not resolve on disk -- the lint would silently skip it" -ForegroundColor Red }
+    exit 1
+}
+$files = $byFull.Values | Sort-Object FullName |
+    Where-Object { $_ -and -not $_.PSIsContainer -and $_.FullName -ne $gateFile -and $_.FullName -ne $PSCommandPath -and $_.Name -ne 'run_all_checks.ps1' -and (($_.FullName.Substring($Root.TrimEnd([char]92,[char]47).Length + 1) -replace '\\', '/') -notin $deliberateMisuse) }
 foreach ($f in $files) {
     $lines = @(Get-Content -LiteralPath $f.FullName)
     $code = @()

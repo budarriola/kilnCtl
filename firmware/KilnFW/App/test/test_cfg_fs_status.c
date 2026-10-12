@@ -183,6 +183,45 @@ static void test_mounted_empty(void)
     cfg_fs_deinit();
 }
 
+/* INFO-6 (REVIEW_PROFILESFX2): conditions are rendered, counted, and clear. */
+static void test_conditions_render_and_clear(void)
+{
+    TEST_SECTION("cfg_fs_status: conditions[] / conditions_count render, every condition is listed, and a clear removes it");
+    cfg_fs_deinit();
+    const char *base = "cfg_fs_status_test_conditions";
+    reset_scratch(base);
+    TEST_CHECK(cfg_fs_init(base, NULL) == ESP_OK, "cfg_fs mounts");
+    cfg_fs_degraded_clear_for_test();
+
+    char json[2048];
+    size_t len = 0;
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    TEST_CHECK(json_has(json, "\"conditions_count\":0,\"conditions\":[]"), "no condition: empty array, count 0");
+
+    cfg_fs_condition_set("cond_a", true);
+    TEST_CHECK(cfg_fs_condition_is("cond_a"), "condition set");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    TEST_CHECK(json_has(json, "\"conditions_count\":1,\"conditions\":[\"cond_a\"]"), "condition rendered with no leading comma");
+
+    char names[8][16];
+    for (int k = 0; k < 7; k++) {
+        snprintf(names[k], sizeof(names[k]), "cond_x%d", k);
+        cfg_fs_condition_set(names[k], true);
+    }
+    TEST_CHECK(cfg_fs_condition_count() == 8, "eight conditions held");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    TEST_CHECK(json_has(json, "\"conditions_count\":8") && json_has(json, "\"cond_x6\""),
+               "the 7th and 8th conditions are listed, not silently dropped");
+
+    cfg_fs_condition_set("cond_a", false);
+    TEST_CHECK(!cfg_fs_condition_is("cond_a"), "clear removes the condition");
+    TEST_CHECK(cfg_fs_condition_count() == 7, "count drops by one");
+    TEST_CHECK(cfg_fs_status_build_json(base, NULL, NULL, 0, NULL, json, sizeof(json), &len) == ESP_OK, "build");
+    TEST_CHECK(!json_has(json, "cond_a") && json_has(json, "\"conditions_count\":7"), "cleared condition no longer rendered");
+    cfg_fs_degraded_clear_for_test();
+    cfg_fs_deinit();
+}
+
 static void test_mounted_with_files(void)
 {
     TEST_SECTION("cfg_fs_status: mounted with files present -- file_count and per-file size_bytes match what "
@@ -459,6 +498,23 @@ static void test_worst_case_fits_handler_buffer(void)
     dualwrite_window_status_t win = { .consecutive_clean_boots = UINT32_MAX, .clean_boots_target = UINT32_MAX,
                                       .firing_complete = true, .restore_verified = true, .window_may_close = true };
 
+    /* LOW-2 (REVIEW_PROFILESFX2): the degraded list (6 listed of up to 40) and the conditions list (8) are both
+     * full of maximum-length (47 char) names. */
+    cfg_fs_degraded_clear_for_test();
+    for (int k = 0; k < 9; k++) {
+        char nm[64];
+        snprintf(nm, sizeof(nm), "degraded_store_name_padded_to_the_47_char_ma%dxx", k);
+        nm[47] = '\0';
+        cfg_fs_degraded_set(nm, true);
+    }
+    for (int k = 0; k < 8; k++) {
+        char nm[64];
+        snprintf(nm, sizeof(nm), "condition_name_padded_out_to_the_47_char_ma%dxxx", k);
+        nm[47] = '\0';
+        cfg_fs_condition_set(nm, true);
+    }
+    TEST_CHECK(cfg_fs_degraded_count() == 9 && cfg_fs_condition_count() == 8, "both registries are full");
+
     static char json[WORST_CASE_HANDLER_BUF];
     size_t len = 0;
     esp_err_t err = cfg_fs_status_build_json_ex(base, &cap, items, 20, &fmt, &win, json, sizeof(json), &len);
@@ -476,8 +532,11 @@ static void test_worst_case_fits_handler_buffer(void)
                    "update_repo row carries the same fields as its siblings");
         TEST_CHECK(json_has(json, "\"name\":\"update_repo.dat\""), "update_repo.dat is in the files[] list");
         TEST_CHECK(json_has(json, "\"error\":"), "the format error string is rendered");
+        TEST_CHECK(json_has(json, "\"conditions_count\":8"), "all 8 conditions are counted");
+        TEST_CHECK(json_has(json, "condition_name_padded_out_to_the_47_char_ma7"), "the 8th condition is listed");
         TEST_CHECK(real_len + 400 <= WORST_CASE_HANDLER_BUF, "at least 400 B of margin remains before the cap");
     }
+    cfg_fs_degraded_clear_for_test();
     cfg_fs_deinit();
 }
 
@@ -572,6 +631,7 @@ void run_test_cfg_fs_status(void)
     test_format_stalled_ceiling();
     test_buffer_too_small();
     test_worst_case_fits_handler_buffer();
+    test_conditions_render_and_clear();
     test_subdirs_summarized();
     test_nvs_permanent_lists_current_stores();
     test_item_diverged_rule();

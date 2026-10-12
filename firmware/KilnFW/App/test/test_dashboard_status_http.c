@@ -314,13 +314,72 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     memset(&req, 0, sizeof(req));
     reset_fake_status_with_known_build_identity();
     stub_headers_reset();
+    /* WP3 review LOW-3: trip_is_test follows the LIVE DIAG (TRIPPED + reason 4 + fresh), not the
+     * TRIP_EVENT cache (trip_reason), so it clears with the trip. */
+    s_fake_status.diag_ever_received = true;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = true;
+    /* TRIPFX4 LOW-1: a current TEST TRIP_EVENT bound to the DIAG by trip_seq. */
     s_fake_status.trip_event_ever_received = true;
     s_fake_status.trip_reason = 4u;
+    s_fake_status.diag_trip_seq_known = true;
+    s_fake_status.diag_trip_seq = 7u;
+    s_fake_status.trip_last_seq = 7u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 4)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "reason 4 -> trip_is_test true");
-    s_fake_status.trip_reason = 2u;
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live DIAG TRIPPED reason 4 -> true");
+    s_fake_status.diag_trip_reason = 2u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 2)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "reason 2 -> trip_is_test false");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "live reason 2 -> false");
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (cleared)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "not tripped (DIAG ARMED, stale TEST cache) -> false");
+    /* TRIPFX4 LOW-1: TEST cleared, then a real trip (new seq, reason 2) before the next DIAG: the cached DIAG
+     * still says TRIPPED reason 4 but the TRIP_EVENT disagrees -> false. */
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.trip_reason = 2u;
+    s_fake_status.trip_last_seq = 8u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (real trip after TEST)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "real trip after cleared TEST, DIAG not yet refreshed -> false");
+    /* same seq bump but the new trip is ALSO reason 4: seq mismatch alone must drop the flag. */
+    s_fake_status.trip_reason = 4u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (seq mismatch)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "trip_seq mismatch -> false");
+    s_fake_status.trip_last_seq = 7u;
+    s_fake_status.diag_trip_seq_known = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (seq unknown)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG trip_seq unknown -> false");
+    s_fake_status.diag_trip_seq_known = true;
+    s_fake_status.trip_event_ever_received = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (no TRIP_EVENT)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "no TRIP_EVENT -> false (fail safe)");
+    s_fake_status.trip_event_ever_received = true;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (restored)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "all conditions hold again -> true");
+    s_fake_status.diag_frame_age_ms = 60000u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (stale)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "stale DIAG -> false");
+    /* TRIPFX3 LOW-B/M3: the bound is the DIAG's own age, pinned at SAFETY_LINK_DIAG_FRESH_MS; a fresh
+     * STATUS frame (diag_age_ms) must not keep an old DIAG alive. */
+    s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS - 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge-1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "DIAG age bound-1 -> true");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL,
+               "DIAG age == bound -> true (inclusive, matches relay_authority_pico_diag_fresh)");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge+1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG age bound+1 -> false");
+    /* LOW-C: a DIAG from the previous Pico boot never reads as a test trip. */
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (old boot)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "old-boot DIAG -> false");
 }
 
 static void test_status_emits_aux_block(void)

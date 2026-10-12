@@ -639,25 +639,9 @@ static void enforce_ceiling_divergence(float target_c, bool target_known, float 
              * Built explicitly instead: truncate the reason text to whatever
              * leaves room, then always append the full suffix. No diagnostic
              * needs silencing because nothing can truncate unexpectedly. */
-            static const char kArmedSuffix[] =
-                " (re-push refused: relay is ARMED -- disarm and retry commissioning)";
-            const size_t cap = sizeof(s_standing_warning_reason);
-            const size_t suffix_len = sizeof(kArmedSuffix) - 1u;
-            if (cap > suffix_len) {
-                size_t head_cap = cap - suffix_len - 1u;
-                size_t head_len = strlen(standing_reason);
-                if (head_len > head_cap) {
-                    head_len = head_cap;
-                }
-                memcpy(s_standing_warning_reason, standing_reason, head_len);
-                memcpy(s_standing_warning_reason + head_len, kArmedSuffix, suffix_len);
-                s_standing_warning_reason[head_len + suffix_len] = '\0';
-            } else {
-                /* Unreachable with today's sizes (160 vs ~68); kept so a
-                 * future shrink of CONFIG_DIVERGENCE_REASON_MAX degrades to
-                 * "hint only" rather than overflowing. */
-                snprintf(s_standing_warning_reason, cap, "%s", kArmedSuffix);
-            }
+            (void)config_divergence_append_suffix_truncating_head(
+                s_standing_warning_reason, sizeof(s_standing_warning_reason), standing_reason,
+                CONFIG_DIVERGENCE_ARMED_SUFFIX);
         } else {
             snprintf(s_standing_warning_reason, sizeof(s_standing_warning_reason), "%s", standing_reason);
         }

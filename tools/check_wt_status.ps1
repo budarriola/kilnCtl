@@ -212,6 +212,20 @@ try {
     Assert-True (($would -join ',') -eq 'landed,orphan,pfx,stale_clean,stale_ignored') "WhatIf should list exactly landed,orphan,pfx,stale_clean,stale_ignored; got: $($would -join ',')"
     Assert-True ((Test-Path -LiteralPath (Join-Path $ext1 "deep\sentinel.txt")) -and (Test-Path -LiteralPath (Join-Path $ext2 "deep\sentinel.txt"))) "WhatIf touched a junction target"
 
+    # Fresh child powershell, exactly how a person runs it (no PassThru, no Quiet):
+    # a type that only exists in the caller's session would show up here as
+    # "type not found". The printed preview must list every would-remove entry.
+    $cliOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:ScriptUnderTest -Root $wt -Repo $repo -Base origin/main -Prune -WhatIf 2>&1 | ForEach-Object { "$_" }
+    $cliRc = $LASTEXITCODE
+    $cliText = $cliOut -join "`n"
+    Assert-True ($cliRc -eq 0) "CLI -Prune -WhatIf exited $cliRc : $cliText"
+    Assert-True ($cliText -notmatch 'WtStatusWalk|not found|Unable to find type') "CLI -Prune -WhatIf hit a type error: $cliText"
+    Assert-True ($cliText -match 'PRUNE \(WhatIf: nothing removed\)') "CLI -Prune -WhatIf printed no WhatIf preview: $cliText"
+    foreach ($nm in 'landed', 'orphan', 'pfx', 'stale_clean', 'stale_ignored') {
+        Assert-True ($cliText -match "(?m)^\s*$nm\s+\S+\s+would remove") "CLI -Prune -WhatIf preview missing 'would remove' row for $nm"
+    }
+    $after2 = @(Get-ChildItem -LiteralPath $wt -Force | ForEach-Object { $_.Name }) | Sort-Object
+    Assert-True (($before -join ',') -eq ($after2 -join ',')) "CLI WhatIf removed or created something under the root"
     Step 'WhatIf done'
     # ======== -Prune ========
     $p = Run-Tool @{ Prune = $true }
@@ -251,6 +265,37 @@ try {
     Assert-True ($pr.Failed -ge 1) "prune failure: Failed count should be >= 1"
     Assert-True (Test-Path -LiteralPath (Join-Path $wt "failprune")) "prune failure: the refused worktree must survive"
     Remove-Item -LiteralPath $ghost -Force
+
+    # ---- Git() timeout: the stderr-holding grandchild must be killed (job object) ----
+    Step 'git timeout: stderr-holding grandchild reaped'
+    if (-not ('WtStatusWalk' -as [type])) {
+        $src = [System.IO.File]::ReadAllText($ScriptUnderTest)
+        $mt = [regex]::Match($src, "(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+        Assert-True $mt.Success "git timeout: could not extract the WtStatusWalk source"
+        if ($mt.Success) { Add-Type -TypeDefinition $mt.Groups[1].Value }
+    }
+    if ('WtStatusWalk' -as [type]) {
+        $tag = 'sleep 47'
+        $sleepFilter = { Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match 'sleep(\.exe)?"?\s+47\s*$' } }
+        # Other sessions may run this same check; only count sleeps this call started.
+        $pre = @(& $sleepFilter | ForEach-Object { $_.ProcessId })
+        $gr = $null
+        # msys fork occasionally fails to start the backgrounded sleep (git then exits 0 at once,
+        # nothing holds stderr); that is not a reap failure, so retry the setup a few times.
+        for ($try = 0; $try -lt 4; $try++) {
+            $gr = [WtStatusWalk]::Git($repo, "-c `"alias.zz=!$tag >/dev/null & git`" zz rev-parse HEAD")
+            if ($gr.ExitCode -eq -1) { break }
+        }
+        Assert-True ($gr.ExitCode -eq -1) "git timeout: stderr-held call must fail closed with -1, got $($gr.ExitCode)"
+        $left = @()
+        for ($w = 0; $w -lt 20; $w++) {
+            Start-Sleep -Milliseconds 250
+            $left = @(& $sleepFilter | Where-Object { $pre -notcontains $_.ProcessId })
+            if ($left.Count -eq 0) { break }
+        }
+        foreach ($l in $left) { try { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+        Assert-True ($left.Count -eq 0) "git timeout: $($left.Count) '$tag' grandchild(ren) survived the timeout (job kill missing)"
+    }
 }
 finally {
     foreach ($pr in $procs) { try { Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue } catch { } }

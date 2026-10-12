@@ -347,6 +347,9 @@ bool profile_executor_pause_with_reason_bounded(const char *reason)
     return pause_with_reason_impl(reason, pdMS_TO_TICKS(1000));
 }
 
+/* F5HOLDERFX4 LOW-1: why the last resume() was refused (guarded by s_exec.lock). Empty when not a gate refusal. */
+static char s_resume_refusal[128];
+
 bool profile_executor_resume(void)
 {
     /* See profile_executor_run()'s guard comment above. */
@@ -355,6 +358,7 @@ bool profile_executor_resume(void)
         return false;
     }
     xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    s_resume_refusal[0] = '\0';
     if (s_exec.state != PROFILE_EXEC_PAUSED) {
         xSemaphoreGive(s_exec.lock);
         return false;
@@ -362,7 +366,7 @@ bool profile_executor_resume(void)
     /* LD-01 follow-up (REVIEW_LD01_WWFIX MED-1): the same start gate a fresh run uses. A resume on a down or
      * unconfirmed safety link would otherwise report RUNNING and heat silently when the link returns. Shared
      * by every caller (UART, HTTP, LCD). Refused resume leaves the run PAUSED; retry once the link is up. */
-    if (relay_authority_start_blocked(s_exec.safety, NULL, 0, "resume")) {
+    if (relay_authority_start_blocked(s_exec.safety, s_resume_refusal, sizeof(s_resume_refusal), "resume")) {
         xSemaphoreGive(s_exec.lock);
         ESP_LOGW(PE_TAG, "profile_executor_resume() refused: heat is blocked or the safety link is not positively up");
         return false;
@@ -437,6 +441,15 @@ bool profile_executor_resume(void)
      * the firing as paused when it was actively driving elements. */
     run_state_note(RUN_STATE_PHASE_RUNNING, &resume_snap.snap);
     return true;
+}
+
+bool profile_executor_resume_refusal(char *out, size_t cap)
+{
+    if (!out || cap == 0 || s_exec.lock == NULL) return false;
+    xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+    snprintf(out, cap, "%s", s_resume_refusal);
+    xSemaphoreGive(s_exec.lock);
+    return out[0] != '\0';
 }
 
 void profile_executor_get_status(profile_exec_status_t *out)

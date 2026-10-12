@@ -6,6 +6,8 @@
 #include <stddef.h>
 #include <string.h>
 #include <time.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #include "test_common.h"
 
@@ -348,14 +350,30 @@ static void test_username_exactly_max_length(void)
 // unconfigured-role and wrong-password paths must both take much longer
 // than that true no-op, and be within the same order of magnitude as each
 // other, rather than one of them being near-instant like the no-op.
+// Wall time via QueryPerformanceCounter, minimum over several batches: load can only inflate a
+// batch, never shrink it, so the minimum is the least-disturbed estimate of the path's cost.
+static double qpc_s(void)
+{
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)f.QuadPart;
+}
+
 static double time_verify_calls(web_auth_role_t role, const char *password, int reps)
 {
-    clock_t start = clock();
-    for (int i = 0; i < reps; i++) {
-        (void)web_auth_store_verify_password(role, password);
+    double best = 1e30;
+    for (int rep = 0; rep < 9; rep++) {
+        double start = qpc_s();
+        for (int i = 0; i < reps; i++) {
+            (void)web_auth_store_verify_password(role, password);
+        }
+        double d = qpc_s() - start;
+        if (d < best) {
+            best = d;
+        }
     }
-    clock_t end = clock();
-    return (double)(end - start) / CLOCKS_PER_SEC;
+    return best;
 }
 
 static void test_verify_password_timing_oracle_closed(void)

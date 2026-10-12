@@ -193,6 +193,10 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
                      builtin profile (builtins are never overwritable).
 
     Refused (409, any action) if there is no pending working copy at all.
+    A 409 or 500 body that carries "saved":true,"id":N is NOT "nothing
+    decided": the slot WAS saved, but the working copy was edited during the
+    save (409) or could not be cleared (500). Do not retry save_as with a new
+    name (that makes a duplicate slot); re-read with profile_live_get.
 
     `generation`: from profile_live_get(); when given, a mismatch is refused
     409 "changed elsewhere" (nothing decided). Omitted = unconditional (compat).
@@ -221,6 +225,11 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
         else:
             obj = profile_live_http.decide_live_overwrite(resolved, generation=generation)
     except profile_live_http.ProfileLiveHttpError as exc:
+        if getattr(exc, "saved", False):
+            slot = f"slot {exc.saved_id}" if exc.saved_id is not None else "a slot (id not reported)"
+            return (f"SAVED to {slot}, but the decide did not finish: {exc.detail} (HTTP {exc.status}). "
+                    f"The profile exists; do not retry save_as (duplicate). Re-read with profile_live_get "
+                    f"(host={resolved})")
         status_bit = f" (HTTP {exc.status})" if exc.status else ""
         detail_bit = f" -- {exc.detail}" if exc.detail else ""
         return f"error: {exc}{status_bit}{detail_bit} (host={resolved})"

@@ -625,6 +625,13 @@ var KG_RELAY_COUNT = 4;        /* relay bits this board can have */
 var KG_DIAG_STATE_TRIPPED = 4; /* main_page.html SAFETY_LINK_DIAG_STATE_TRIPPED */
 var KG_DIAG_STALE_MS = 1500;   /* main_page.html SAFETY_LINK_STALE_MS */
 
+/* GET /api/zones prints cal/ramp/sanity/max/min at %.9g (lossless, BENCHFX3
+   INFO-1); show 6 significant digits so float32 noise (0.100000001) never
+   reaches an input whose step would flag it. */
+function kgR6(v) { if (v === undefined || v === null || v === '') return ''; var n = Number(v); return isFinite(n) ? parseFloat(n.toPrecision(6)) : ''; }
+/* Lossless save: input shows kgR6(raw) but remembers the exact GET value; kgPost posts raw unless the user edited the field. */
+function kgRawAttrs(v) { return (v === undefined || v === null || !isFinite(Number(v))) ? '' : ' data-raw="' + String(v) + '" data-disp="' + kgR6(v) + '"'; }
+function kgPost(el) { var r = el.getAttribute('data-raw'); return (r !== null && el.value === el.getAttribute('data-disp')) ? r : el.value; }
 function kgEsc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1426,7 +1433,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     /* Calibration offset is per SENSOR and belongs to NO inheritance group
        (saveAll()'s own comment: "tc_type yes, cal offset no"), so it sits
        outside every frame and stays visible whatever the selects say. */
-    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
+    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal"' + kgRawAttrs(z.cal_offset_c) + ' value="' + kgR6(z.cal_offset_c) + '">' +
     /* coupling_diag_k_dc: the coupling identification's own diagonal cell --
        a MEASURED quantity (see zone_cfg_t::coupling_diag_k_dc's own doc
        comment), always emitted by GET and read-back-and-reposted by POST
@@ -1477,12 +1484,12 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<details class="groupFrame" data-group="limits"><summary class="groupFrameTitle">Limits (max/min temp, ramp, rise rate)</summary>' +
     '<div class="heaterOnly">' +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
-    '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
+    '<input type="number" step="1" class="ramp"' + kgRawAttrs(z.max_ramp_c_per_hr) + ' value="' + kgR6(z.max_ramp_c_per_hr) + '">' +
     '</div>' +
     '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) ' +
     infoDetailsHtml('sanity', 'minimum rise rate') +
     '</label>' +
-    '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
+    '<input type="number" step="0.05" min="0" max="20" class="sanity"' + kgRawAttrs(z.sanity_rate_c_per_min || 0) + ' value="' + kgR6(z.sanity_rate_c_per_min || 0) + '">' +
     '<label>Coil nameplate power, W (0 = split the safety page\'s whole-kiln nameplate ' +
     'evenly across every coil)</label>' +
     /* opus review finding 9: step must match ZONE_COIL_POWER_W_MIN (0.1W) --
@@ -1492,9 +1499,9 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<input type="number" step="0.1" min="0" max="100000" class="coilpower" value="' + (z.coil_power_w || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
-      '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +
+      '<input type="number" step="1" class="maxtemp"' + kgRawAttrs(z.max_temp_c || 0) + ' value="' + kgR6(z.max_temp_c || 0) + '"></div>' +
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
-      '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
+      '<input type="number" step="1" class="mintemp"' + kgRawAttrs(z.min_temp_c) + ' value="' + kgR6(z.min_temp_c) + '"></div>' +
     '</div>' +
     '</details>' +
     '<details class="groupFrame" data-group="relaytiming"><summary class="groupFrameTitle">Relay timing (window/min-on/min-off)</summary>' +
@@ -2697,9 +2704,12 @@ document.getElementById('relayCount').addEventListener('change', renderZones);
 
 /* Optional model/tuning fields: a blank value ("z0_driftperiod=") is "present" and used to fail the
    firmware's range parse with a misleading 400, so a blank optional field is left out of the POST.
-   An omitted field is NOT generally "keep the stored value" (zones_post_apply_body starts from a
-   memset tmp); only the guard thresholds and xzone are keep-stored on omit AND blank in
-   zones_http_post_parse.c. The 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
+   Omitting a field is "keep the stored value" only for the keys zones_http_post_parse.c omit-PRESERVES
+   (guard thresholds, xzone, tc/relay/zone type, failsafe, hystc/minons/minoffs, coilpower, model
+   k/tau/deadtime, fuzzy strength, the bands and caps, coupling cells); ZONE_OPTIONAL_KEY_RE lists a
+   SUBSET of those (never an omit-defaulted key such as ct_mask/thermo_mask, never a required one), and
+   test_zone_omit_preserved_drift.py pins the regex to the firmware's omit-preserved set. Of those,
+   the 8 guard thresholds and the cross-zone limit (xzone, guard 8) are
    refused client-side when blank (blankGuardKeys), never dropped, so a cleared field is shown to
    the operator and can never silently disable a thermal guard. */
 var ZONE_GUARD_BLANK_RE = /^z\d+_(xzone|wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow)=\s*$/;
@@ -2738,7 +2748,7 @@ function guardFieldHidden(zi, suffix) {
   var wrap = el && el.closest('.heaterOnly');
   return !!(wrap && wrap.style.display === 'none');
 }
-var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|k|tau|deadtime|coupling_c\d+)=\s*$/;
+var ZONE_OPTIONAL_KEY_RE = /^z\d+_(wrongdirwindow|wrongdirrate|offsettle|runawayrate|runawaymargin|driftperiod|debounce|frozenwindow|fuzzy_strength|coupling_diag_k_dc|easeoffmult|approachratecap|errorband|rateband|progressband|coilpower|hystc|minons|minoffs|k|tau|deadtime|coupling_c\d+)=\s*$/;
 function omitBlankOptionalParams(params) {
   return params.filter(function (p) { return !ZONE_OPTIONAL_KEY_RE.test(p); });
 }
@@ -2851,7 +2861,7 @@ document.getElementById('saveBtn').addEventListener('click', function () {
        group's choice -- always this zone's own stack, per
        docs/ARCHITECTURE_DECISIONS.md#zones-page-clean-up-info-disclosure-schema-v20-v21-chartjs
        ("tc_type yes, cal offset no"). */
-    params.push('z' + i + '_cal=' + ownStack.querySelector('.cal').value);
+    params.push('z' + i + '_cal=' + kgPost(ownStack.querySelector('.cal')));
     /* coupling_diag_k_dc and the five controller-bands/shaping fields: same
        "no inheritance group, always this zone's own" treatment as cal offset
        just above -- read off ownStack, matching zones_http_post_parse.c's
@@ -2870,11 +2880,11 @@ document.getElementById('saveBtn').addEventListener('click', function () {
     params.push('z' + i + '_mode=' + controlStack.querySelector('.mode').value);
     params.push('z' + i + '_fuzzy_strength=' + controlStack.querySelector('.fuzzystrength').value);
     /* limits group. */
-    params.push('z' + i + '_ramp=' + limitsStack.querySelector('.ramp').value);
-    params.push('z' + i + '_sanity=' + limitsStack.querySelector('.sanity').value);
+    params.push('z' + i + '_ramp=' + kgPost(limitsStack.querySelector('.ramp')));
+    params.push('z' + i + '_sanity=' + kgPost(limitsStack.querySelector('.sanity')));
     params.push('z' + i + '_coilpower=' + limitsStack.querySelector('.coilpower').value);
-    params.push('z' + i + '_maxtemp=' + limitsStack.querySelector('.maxtemp').value);
-    params.push('z' + i + '_mintemp=' + limitsStack.querySelector('.mintemp').value);
+    params.push('z' + i + '_maxtemp=' + kgPost(limitsStack.querySelector('.maxtemp')));
+    params.push('z' + i + '_mintemp=' + kgPost(limitsStack.querySelector('.mintemp')));
     /* relay timing group. */
     params.push('z' + i + '_window=' + relayTimingStack.querySelector('.window').value);
     params.push('z' + i + '_minon=' + relayTimingStack.querySelector('.minon').value);

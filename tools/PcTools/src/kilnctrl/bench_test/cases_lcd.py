@@ -2984,11 +2984,13 @@ def _lcd19_relock(ctx: dict, client, orig: dict, ui, state: dict) -> bool:
     (the edge makes firmware call ui_lcd_lock_force_lock(), same as the
     allow_heat relock), then wait for the home page to settle past the 1 Hz
     lock tick. Returns True only when both POSTs confirmed and home settled."""
-    off_status, _ = client.set_policy(
+    off_status, off_resp = client.set_policy(
         orig["web_enabled"], False, orig["web_timeout_min"], orig["lcd_timeout_min"])
     on_status, on_resp = client.set_policy(
         orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
-    ok = (off_status == 200 and on_status == 200 and bool(on_resp) and on_resp.get("ok") is True)
+    ok = (off_status == 200 and on_status == 200
+          and bool(off_resp) and off_resp.get("ok") is True
+          and bool(on_resp) and on_resp.get("ok") is True)
     state["unverified_relock_ok"] = ok
     if not ok:
         return False
@@ -3000,15 +3002,108 @@ def _lcd19_relock(ctx: dict, client, orig: dict, ui, state: dict) -> bool:
 _LOCKOUT_RE = re.compile(r"try again in (\d+)\s*s", re.IGNORECASE)
 
 
-def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> Dict[str, Any]:
-    """If `names` (the stable read after a refused PIN) shows the keypad's
-    "Wrong PIN -- try again in %us" text, sleep that long (plus a margin) and
-    re-read until it is gone or `max_wait_s` is spent."""
+#: First rung of the firmware's login_backoff ladder, in seconds: the
+#: ``5000u`` in ``LOGIN_BACKOFF_LADDER_MS`` (firmware/KilnFW/App/drivers/net/
+#: login_backoff.c:3). ``login_backoff_record_failure()`` starts this lock on
+#: EVERY wrong PIN, but the keypad shows only plain "Wrong PIN" for it
+#: (ui_lcd_keypad.c:194-198); the "try again in %us" text appears only for a
+#: submit made DURING the lock (LCD_KEYPAD_SUBMIT_LOCKED_OUT). A test pins
+#: this constant to the C source so the two cannot drift silently.
+_LCD19_LOCKOUT_FIRST_STEP_S = 5.0
+_LCD19_LOCKOUT_MARGIN_S = 1.5
+
+
+#: Client-side ceiling for a "try again in %us" N, pinned by a test to the
+#: firmware's last ladder rung (``LOGIN_BACKOFF_LADDER_MS[4]`` in
+#: login_backoff.c, 300000 ms). ``ui_lcd_keypad.c`` computes N =
+#: ceil(remaining/1000) at submit time, so it can never print more; a larger
+#: number is a misread label and is never slept on.
+_LCD19_LOCKOUT_MAX_S = 300
+#: Progress is logged at least this often during a long lockout wait.
+_LCD19_WAIT_LOG_EVERY_S = 60.0
+# LONG RUNGS: the 300 s rung alone outlasts the MCP client's 300 s idle
+# watchdog (the 60 s rung does not, but the wait plus the rest of the case
+# can); log.info progress lines do not keep the client alive. So LCD-19 on a
+# board whose ladder is at rung 4 should be run through ``bench_test_start``
+# (background job + ``bench_test_job_status``), not ``bench_test_run``.
+
+
+def _lcd19_sleep(ctx: dict, total_s: float, what: str) -> None:
+    """Sleep `total_s` in chunks of at most _LCD19_WAIT_LOG_EVERY_S, logging
+    progress between chunks."""
     sleep = ctx.get("_sleep", time.sleep)
+    left = float(total_s)
+    done = 0.0
+    while left > 0:
+        step = min(_LCD19_WAIT_LOG_EVERY_S, left)
+        sleep(step)
+        left -= step
+        done += step
+        if left > 0:
+            log.info("LCD-19: %s: waited %.0f s of %.0f s", what, done, total_s)
+
+
+def _lcd19_wake_if_blanked(ctx: dict) -> Optional[bool]:
+    """After a long wait the display may have blanked (shortest timeout 1
+    min); screen_idle then swallows the next touch, which would be the first
+    digit of the retyped PIN. Wake ONLY when the panel is confirmed off: a
+    tap on an awake panel at x<40 is the keypad backdrop and cancels the
+    keypad. An unreadable state never taps. Returns None (no touch / state
+    unreadable / inject failed), False (already on, no tap sent), True (a
+    wake tap was sent)."""
+    touch = getattr(_srv(ctx), "_touch", None)
+    if touch is None:
+        return None
+    sleep = ctx.get("_sleep", time.sleep)
+    try:
+        st = touch.get_state()
+        on = _power_state_is_on(st)
+        if on is None:
+            so = getattr(st, "screen_on", None)
+            if so is None:
+                return None  # unreadable: never tap
+            on = bool(so)
+    except Exception:
+        return None
+    if on:
+        return False
+    try:
+        x, y = _WAKE_TOUCH_XY
+        touch.inject(x, y, True)
+        touch.inject(x, y, False)
+    except Exception:
+        return None
+    for _ in range(max(1, int(math.ceil(_WAKE_SCREEN_ON_TIMEOUT_S / _WAKE_SCREEN_ON_POLL_S)))):
+        try:
+            st = touch.get_state()
+            on = _power_state_is_on(st)
+            if on is None:
+                on = bool(st.screen_on)
+            if on:
+                break
+        except Exception:
+            break
+        sleep(_WAKE_SCREEN_ON_POLL_S)
+    return True
+
+
+def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0,
+                            first_sleep_s: Optional[float] = None) -> Dict[str, Any]:
+    """Wait out the lock a wrong PIN just started. ALWAYS sleeps at least the
+    firmware's first ladder step plus a margin (the lock is invisible on
+    screen after a wrong PIN), or `first_sleep_s` when given (the retry path
+    passes N+1 s for a lock whose N it already read). The first sleep is
+    clamped to `max_wait_s`. If `names` additionally shows the "try again
+    in %us" text (a submit that landed inside the lock), keep sleeping that
+    long and re-reading. Total elapsed time, reads included, is bounded by
+    `max_wait_s`."""
+    now = ctx.get("_now", time.monotonic)
+    start = now()
     info: Dict[str, Any] = {"lockout_seen": False, "waited_s": 0.0}
-    waited = 0.0
+    first = (_LCD19_LOCKOUT_FIRST_STEP_S + _LCD19_LOCKOUT_MARGIN_S) if first_sleep_s is None else first_sleep_s
+    _lcd19_sleep(ctx, min(first, max_wait_s), "lockout")
     cur = names
-    while waited < max_wait_s:
+    while now() - start < max_wait_s:
         secs = None
         for n in (cur or []):
             m = _LOCKOUT_RE.search(str(n))
@@ -3018,11 +3113,9 @@ def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> D
         if secs is None:
             break
         info["lockout_seen"] = True
-        step = min(secs + 1.0, max_wait_s - waited)
-        sleep(step)
-        waited += step
+        _lcd19_sleep(ctx, min(secs + 1.0, max(0.0, max_wait_s - (now() - start))), "lockout")
         cur, _, _, _, _ = _wait_stable_names(ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
-    info["waited_s"] = waited
+    info["waited_s"] = now() - start
     return info
 
 
@@ -3518,6 +3611,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     pin_cfg["bad"] = True
                                 state["unverified_right_first_refused"] = True
                                 wrong_pin = None
+                    # INFO-4: only the verified right-PIN path waits and retries. The unverified
+                    # right-PIN-first path and the wrong-PIN-during-lock path stay fail-safe
+                    # INCONCLUSIVE on purpose: a retry there would have to retype a PIN whose
+                    # correctness is unproven (or a second wrong PIN, which counts another ladder
+                    # failure), so the operator reruns after the lockout instead.
                     if wrong_pin:
                         # enter_pin_verified() (2026-09-30, LCD-19), not the
                         # older enter_pin(): confirms each digit's tap was
@@ -3572,7 +3670,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # (2026-09-30 fix) still missed the
                             # still-changing case; gating on `stabilized`
                             # (2026-09-30 review fix) covers both.
-                            if stabilized:
+                            if stabilized and any("try again in" in str(n).lower() for n in names):
+                                # LOW-B: a lock was already running, so firmware
+                                # never evaluated this PIN; no conclusion.
+                                state["wrong_pin_during_lock"] = True
+                            elif stabilized:
                                 if "OK" in names and "Cancel" in names:
                                     # "OK"+"Cancel" present alone doesn't
                                     # prove the wrong PIN was refused and
@@ -3584,8 +3686,13 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     # wrong_pin_refused stays at its initial
                                     # None (INCONCLUSIVE) rather than a
                                     # fabricated True.
+                                    # LOW-4: a positive "Wrong PIN" label is required;
+                                    # cleared dots alone also read after a re-shown keypad.
                                     if _dots_have_cleared(names):
-                                        wrong_pin_refused = True
+                                        if "Wrong PIN" in names:
+                                            wrong_pin_refused = True
+                                        else:
+                                            state["wrong_pin_no_label"] = True
                                 else:
                                     wrong_pin_refused = False
                         # else: leave wrong_pin_refused at None -- the PIN
@@ -3604,51 +3711,97 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # `_wait_stable_names` above) showing "OK"+"Cancel"
                         # -- the same keypad, still open, not re-raised --
                         # immediately before this entry starts.
-                        entry = ui.enter_pin_verified(right_pin)
-                        state["right_pin_entry"] = _entry_result_summary(entry)
-                        if entry is not None and entry.get("entry_incomplete"):
-                            # Same "never re-tap, never guess" rule as the
-                            # wrong-PIN entry above: right_pin_started stays
-                            # at its initial None (INCONCLUSIVE).
-                            pass
-                        elif entry is not None and _entry_all_digits_not_found(entry):
-                            state["entry_all_not_found"] = True
-                        if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
-                            # A correct PIN closes the keypad in favour of
-                            # the Confirm Start dialog -- "OK" disappears.
-                            # 2026-09-30 bench evidence (two runs): the
-                            # screen is still mid-transition after submit --
-                            # ~14 non-repeating reads then an empty one at
-                            # the default 2.0s timeout -- so this poll gets
-                            # its own longer, named timeout rather than
-                            # racing the transition.
-                            names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
-                                ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
-                            state["after_right_pin_names"] = sorted(names) if names is not None else None
-                            if empty_polls:
-                                state["after_right_pin_empty_polls"] = empty_polls
-                            if truncated_seen:
-                                state["after_right_pin_truncated"] = truncated_seen
-                            if not stabilized:
-                                state["after_right_pin_stabilized"] = False
-                            # A non-stabilized last read -- `None` (every
-                            # read empty/timeout) OR a real, still-changing
-                            # read that never repeated -- must leave
-                            # `right_pin_started` at its initial `None`,
-                            # never a fabricated "did not start" False. See
-                            # the `wrong_pin_refused` comment above: gating
-                            # on `names is not None` alone (2026-09-30 fix)
-                            # still let a still-transitioning, never-
-                            # repeating non-empty read at timeout produce a
-                            # false FAIL ("the correct PIN did not start the
-                            # firing"); gating on `stabilized` (2026-09-30
-                            # review fix) covers that case too.
-                            if stabilized:
-                                if any("try again in" in str(n).lower() for n in names):
-                                    # Locked out, not rejected on merit: cannot judge.
-                                    state["pin_lockout"] = True
-                                else:
-                                    right_pin_started = "OK" not in names and "Cancel" in names
+                        for _attempt in range(2):
+                            state.pop('pin_lockout', None)
+                            # INFO-7: attempt-0 entry diagnostics must not leak into attempt 1.
+                            for _k in ("right_pin_entry", "after_right_pin_names",
+                                       "after_right_pin_empty_polls", "after_right_pin_truncated",
+                                       "after_right_pin_stabilized", "right_pin_outcome"):
+                                if _k in state:
+                                    state["attempt0_" + _k] = state.pop(_k)
+                            entry = ui.enter_pin_verified(right_pin)
+                            state["right_pin_entry"] = _entry_result_summary(entry)
+                            if entry is not None and entry.get("entry_incomplete"):
+                                # Same "never re-tap, never guess" rule as the
+                                # wrong-PIN entry above: right_pin_started stays
+                                # at its initial None (INCONCLUSIVE).
+                                pass
+                            elif entry is not None and _entry_all_digits_not_found(entry):
+                                state["entry_all_not_found"] = True
+                            if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
+                                # A correct PIN closes the keypad in favour of
+                                # the Confirm Start dialog -- "OK" disappears.
+                                # 2026-09-30 bench evidence (two runs): the
+                                # screen is still mid-transition after submit --
+                                # ~14 non-repeating reads then an empty one at
+                                # the default 2.0s timeout -- so this poll gets
+                                # its own longer, named timeout rather than
+                                # racing the transition.
+                                names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
+                                    ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+                                state["after_right_pin_names"] = sorted(names) if names is not None else None
+                                if empty_polls:
+                                    state["after_right_pin_empty_polls"] = empty_polls
+                                if truncated_seen:
+                                    state["after_right_pin_truncated"] = truncated_seen
+                                if not stabilized:
+                                    state["after_right_pin_stabilized"] = False
+                                # A non-stabilized last read -- `None` (every
+                                # read empty/timeout) OR a real, still-changing
+                                # read that never repeated -- must leave
+                                # `right_pin_started` at its initial `None`,
+                                # never a fabricated "did not start" False. See
+                                # the `wrong_pin_refused` comment above: gating
+                                # on `names is not None` alone (2026-09-30 fix)
+                                # still let a still-transitioning, never-
+                                # repeating non-empty read at timeout produce a
+                                # false FAIL ("the correct PIN did not start the
+                                # firing"); gating on `stabilized` (2026-09-30
+                                # review fix) covers that case too.
+                                if stabilized:
+                                    if any("try again in" in str(n).lower() for n in names):
+                                        # Locked out, not rejected on merit: cannot judge.
+                                        state["pin_lockout"] = True
+                                    elif "OK" not in names and "Cancel" in names:
+                                        right_pin_started = True
+                                    elif "OK" in names and not _dots_have_cleared(names):
+                                        # LOW-1: OK reported ok but never applied
+                                        # (full dots, no status): instrument failure.
+                                        state["right_pin_outcome"] = "submit_not_applied"
+                                    elif "OK" in names and "Wrong PIN" in names:
+                                        # Dots cleared + "Wrong PIN": genuine DENIED.
+                                        right_pin_started = False
+                                    elif names and "OK" not in names and "Cancel" not in names:
+                                        # MED-1: keypad closed and no Start/Cancel confirm
+                                        # followed: the right PIN did not start the firing.
+                                        # Start needs the lowest role (USER), so a role
+                                        # shortfall is not a cause. Real causes: a firmware
+                                        # defect, confirm OOM, LCD session timeout, a forced
+                                        # relock after a policy/credential change, or
+                                        # network_manage closing the overlay. The judge has no
+                                        # signal for the last four, so all FAIL (INFO-2).
+                                        right_pin_started = False
+                                        state["right_pin_outcome"] = "closed_no_confirm"
+                                    else:
+                                        # Keypad still open, dots cleared, no label (or other
+                                        # unrecognized shape): firmware always labels DENIED.
+                                        state["right_pin_outcome"] = "indeterminate"
+                            # LOW-A: the ladder is kept per boot and may be past rung 0; a right
+                            # PIN that lands in a still-running lock is waited out once and retyped
+                            # (a LOCKED_OUT submit does not count as a failure).
+                            if _attempt == 0 and state.get('pin_lockout'):
+                                _secs = [int(_m.group(1)) for _n in (names or []) for _m in [_LOCKOUT_RE.search(str(_n))] if _m]
+                                if _secs and max(_secs) > _LCD19_LOCKOUT_MAX_S:
+                                    # LOW-2: firmware never prints more; a misread label. No sleep.
+                                    state['pin_lockout_n_out_of_range'] = max(_secs)
+                                elif _secs:
+                                    state['right_pin_lockout_retry'] = max(_secs)
+                                    state['right_pin_lockout_retry_wait'] = _lcd19_wait_out_lockout(
+                                        ctx, ui, None, max_wait_s=_LCD19_LOCKOUT_MAX_S + 5.0,
+                                        first_sleep_s=max(_secs) + 1.0)
+                                    state['right_pin_retry_wake'] = _lcd19_wake_if_blanked(ctx)
+                                    continue
+                            break
 
                 # Owner decision 2026-09-30: stop_gated has never been
                 # reachable in practice -- `firing_active_with_lock` is not
@@ -3875,6 +4028,38 @@ def _case_lcd19(ctx: dict) -> CaseResult:
             result = J.judge_lcd_pin_lock(keypad_raised, wrong_pin_refused, right_pin_started, stop_gated)
             result.observed = dict(result.observed or {})
             result.observed.update(state)
+            if result.verdict == Verdict.INCONCLUSIVE:
+                if state.get("wrong_pin_during_lock"):
+                    _ln = [int(_m.group(1)) for _n in (state.get("after_wrong_pin_names") or [])
+                           for _m in [_LOCKOUT_RE.search(str(_n))] if _m]
+                    result.reason = (
+                        "a login lockout from an earlier run was still active when the wrong PIN was "
+                        "typed, so firmware never evaluated it"
+                        + (f"; wait it out (about {max(_ln)} s) and rerun" if _ln else "; wait it out and rerun"))
+                elif state.get("pin_lockout_n_out_of_range"):
+                    result.reason = (
+                        f"the keypad lockout label read {state['pin_lockout_n_out_of_range']} s, above the "
+                        f"firmware ceiling of {_LCD19_LOCKOUT_MAX_S} s (misread label); not waited out")
+                elif state.get("pin_lockout") and state.get("right_pin_lockout_retry"):
+                    result.reason = (
+                        f"the right PIN was still locked out after waiting its own countdown "
+                        f"({state['right_pin_lockout_retry']} s) plus 1 s on the retry; "
+                        "wait it out and rerun")
+                elif state.get("pin_lockout"):
+                    result.reason = ("the right PIN landed in a login lockout whose duration could not "
+                                     "be read; wait it out and rerun")
+                elif state.get("right_pin_outcome") == "submit_not_applied":
+                    result.reason = "the right PIN's OK click was reported but not applied (dots still full); rerun"
+                elif state.get("right_pin_outcome") == "indeterminate":
+                    result.reason = (
+                        "after the right PIN the keypad stayed open with cleared dots and no status "
+                        "label (firmware labels a denial), so the outcome is unknown; names seen: "
+                        + ", ".join(map(str, state.get("after_right_pin_names") or [])) + "; rerun")
+            elif result.verdict == Verdict.FAIL and state.get("right_pin_outcome") == "closed_no_confirm":
+                result.reason = (
+                    "the right PIN closed the keypad but no Start/Cancel confirm appeared, so the "
+                    "firing was not started; names seen: "
+                    + ", ".join(map(str, state.get("after_right_pin_names") or [])))
             if state.get("pin_unlock_verified"):
                 result.observed["pin_unverified"] = False
             if state.get("unverified_right_first_refused"):

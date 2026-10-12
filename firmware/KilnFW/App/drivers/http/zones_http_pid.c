@@ -10,6 +10,7 @@
 #include <string.h>
 #include "esp_log.h"
 #include "relay_authority.h"
+#include "cfg_fs_refusal_http.h"
 #include "kiln_cfg_swap.h"
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
@@ -185,6 +186,11 @@ esp_err_t zones_pid_post_handler(httpd_req_t *req)
         return system_mode_gate_http_send_refusal(req, "a profile or autotune run is active");
     }
     if (set_result != ZONES_SET_OK) {
+        if (zones_config_is_undecided()) {
+            /* PROFILESFX10 LOW-3: the setter refused because the stored zones config was unreadable at boot. */
+            cfg_fs_http_send_zones_undecided_409(req);
+            return ESP_OK;
+        }
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"failed to apply/persist PID gains\"}");

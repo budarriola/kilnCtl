@@ -472,6 +472,11 @@ extern "C" {
  * must not silently loosen along with it. safety_link_is_stale() below is
  * the pure, host-testable comparison against this constant. */
 #define SAFETY_LINK_STALE_MS 1500u
+/* Freshness bound for a cached DIAG itself (two 2000 ms DIAG periods plus jitter); trip_is_test uses it. */
+/* INFO-1: 4500 = 2 x 2000 + 500, where 2000 mirrors the Pico's LINK_DIAG_TX_PERIOD_MS
+ * (firmware/SaftyFW/src/tasks/link_task.c:214). Tolerates one lost DIAG. If the Pico period changes,
+ * revisit this bound (a period above 2250 ms makes trip_is_test flap false on a healthy link). */
+#define SAFETY_LINK_DIAG_FRESH_MS 4500u
 
 /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: 30 s of continued silence aborts a
  * running firing (distinct from, and much larger than, SAFETY_LINK_STALE_MS
@@ -1079,6 +1084,10 @@ typedef struct {
      * the same event refresh trip_event_age_ms but are not logged as a new
      * event (see safety_apply_trip_event() in safety_link.c). */
     bool     trip_event_ever_received;
+    /* SAFETYFX10 MED-1: arrival order of the last TRIP_EVENT versus the last DIAG. Set when a TRIP_EVENT is applied,
+     * cleared when a DIAG is applied and on a Pico reboot. True = no DIAG has arrived since the last TRIP_EVENT.
+     * Replaces comparing trip_event_age_ms with diag_frame_age_ms, which wrap every 2^32 ms. */
+    bool     trip_event_after_diag;
     uint8_t  trip_last_seq;
     uint8_t  trip_reason;              /* SAFETY_TRIP_* at the moment of this trip */
     uint32_t trip_uptime_ms;           /* Pico uptime at trip */
@@ -1125,6 +1134,9 @@ typedef struct {
      * why the two are not conflated). 0 if trip_event_ever_received is
      * false. */
     uint32_t trip_event_age_ms;
+    /* TRIPFX3 LOW-B: age of the last DIAG frame itself (age_ms is the STATUS frame's). 0 until
+     * diag_ever_received. */
+    uint32_t diag_frame_age_ms;
 } safety_link_status_t;
 
 /* Counters for the PC's GET_LINK_STATS. All monotonic since start. */
@@ -1429,6 +1441,10 @@ typedef struct {
      * cached.trip_event_ever_received is true. */
     TickType_t            trip_event_tick;
 
+    /* When the last DIAG (Frame B) was applied; cached_tick only moves on STATUS (Frame A).
+     * Becomes safety_link_status_t::diag_frame_age_ms. Meaningless until diag_ever_received. */
+    uint32_t              diag_tick; /* ms receive stamp (uart_proto_message_t::rx_ms), not a tick count */
+
     /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
      * one, kept so safety_link_get_config_page() can still find it.
      *
@@ -1668,7 +1684,7 @@ typedef struct {
      * a link-down with a repeated boot_id is caught only by this); cleared on a boot_id change,
      * since the new boot's baseline is not yet known. Under state_lock. */
     uint32_t pico_uptime_baseline_ms;
-    uint32_t pico_uptime_baseline_esp_ms; /* ESP tick (ms) when the baseline DIAG was applied */
+    uint32_t pico_uptime_baseline_esp_ms; /* ESP receive stamp (ms, DIAG rx_ms) of the baseline DIAG */
     bool     pico_uptime_baseline_known;
     /* Firing audit 2 MED-1: the uptime path already counted this boot's reboot (seq+1) and no FW_VERSION
      * has accounted for it yet. A FW_VERSION boot_id change that arrives while this is set records the

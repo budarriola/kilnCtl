@@ -370,6 +370,10 @@ def safety_clear_trip(allow_unexpected_mask: bool = False) -> str:
             f"({'STILL LATCHED -- cause may persist or the post-trip dwell applies' if still else 'cleared'})")
 
 _TEST_TRIP_REASON = 4  # SAFETY_TRIP_TEST
+# TRIPFX4 INFO-2: the Pico sends DIAG every 2000 ms (LINK_DIAG_TX_PERIOD_MS) and none on a trip, so the
+# TRIPPED DIAG can lag the trip by a full period (a lost one: two). The window must exceed
+# SAFETY_LINK_DIAG_FRESH_MS (4500 ms).
+_TEST_TRIP_VERIFY_WINDOW_S = 6.0
 
 
 @_core._tool()
@@ -416,16 +420,33 @@ def safety_test_trip(confirm: bool = False, host: Optional[str] = None) -> str:
         return f"refused -- HTTP {status} {outcome}: {body}; no test trip latched by this call"
     trip_seq = body.get("trip_seq")
     expected = devices.safety_trip_mask_for_reason(_TEST_TRIP_REASON)
-    deadline = time.monotonic() + _CLEAR_TRIP_READBACK_WINDOW_S
+    deadline = time.monotonic() + _TEST_TRIP_VERIFY_WINDOW_S
+    via_event = False
     while True:
         try:
             after = _srv._safety.get_diag()
         except SafetyQueryError as exc:
             return (f"UNVERIFIED -- board accepted (trip_seq={trip_seq}) but read-back failed ({exc}); "
                     f"check safety_get_status()")
-        if after.trip_reason == _TEST_TRIP_REASON or time.monotonic() >= deadline:
+        if after.trip_reason == _TEST_TRIP_REASON:
+            break
+        # The DIAG may simply not have refreshed yet; TRIP_EVENT (STATUS side) arrives at once. It confirms the
+        # trip only if it carries THIS call's trip_seq and reason 4 -- never an older or different trip.
+        try:
+            ev = _srv._safety.get_trip_event()
+        except SafetyQueryError:
+            ev = None
+        if (ev is not None and isinstance(trip_seq, int) and ev.ever_received
+                and ev.last_seq == trip_seq and ev.trip_reason == _TEST_TRIP_REASON):
+            via_event = True
+            break
+        if time.monotonic() >= deadline:
             break
         time.sleep(_CLEAR_TRIP_READBACK_POLL_S)
+    if via_event:
+        return (f"ok - test trip latched (confirmed by TRIP_EVENT: trip_reason={_TEST_TRIP_REASON} "
+                f"trip_seq={trip_seq}; DIAG had not refreshed yet, last DIAG trip_reason={after.trip_reason}) "
+                f"(host={resolved}). Not cleared; use safety_clear_trip().")
     if after.trip_reason != _TEST_TRIP_REASON or after.trip_mask != expected:
         return (f"FAILED VERIFY -- board accepted (trip_seq={trip_seq}) but read-back shows "
                 f"trip_reason={after.trip_reason} trip_mask=0x{after.trip_mask:04X}, expected reason "

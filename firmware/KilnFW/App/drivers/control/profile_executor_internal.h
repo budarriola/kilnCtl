@@ -730,7 +730,8 @@ typedef struct {
                         * start (relay_io_target_is_zone_owned() below) */
     bool blocking;    /* copy of profile_segment_t.io_blocking, decoded once at start so
                         * io_segs_tick() doesn't need the profile segment back */
-    bool state_on;    /* what this segment commanded */
+    bool state_on;    /* what is physically driven: false while a gated ON was dropped (F5HOLDER LOW-4) */
+    bool wants_on;    /* what the profile asked for; io_segs_tick() retries a dropped ON through the gate */
     bool leave_on_at_end; /* copy of profile_segment_t.io_leave_on_at_end -- see
                             * io_seg_finish()'s doc comment for exactly when this is honored */
     float remaining_s;    /* counts down from dwell_min*60 while active && !blocking;
@@ -1316,10 +1317,17 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);
 void io_seg_start(uint8_t idx, const profile_segment_t *seg);
+void profile_executor_stale_log_reset(void); /* SAFETYFX10 I-3: re-arm the log-once stale-DIAG warnings per run */
+void io_seg_start_pico(uint8_t idx, const profile_segment_t *seg, bool pico_tripped); /* F5HOLDERFX2 LOW-3 */
+void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since, bool pico_tripped);
+bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped);
+void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap,
+                                    bool pico_tripped);
 void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since);
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);
 void io_segs_tick(float dt_s);
+void io_segs_retry_on(bool pico_tripped);
 /* Sets s_exec.state and clears the per-run scratch flags (dwelling,
  * ramp_lock_held) that only mean anything inside RUNNING/PAUSED -- see the
  * definition in profile_executor_relay_io.c for the full rationale. Use this
@@ -1330,8 +1338,13 @@ void exec_enter_terminal_state(profile_exec_state_t st);
 bool escalate_guard_trip(uint8_t zi, thermal_guard_trip_t reason, const char *detail);
 void guard9_assert_stale_tick_fault(void);
 /* K7 review F5: per-owner tracking for the shared SAFETY_FAULT_SRC_APP link bit (profile_executor.c). */
-extern bool pe_app_owner_foreign;
+extern volatile bool pe_app_owner_foreign;
 bool pe_app_owner_relay_unknown(void);
+/* F5HOLDER LOW-3: true while guard 9's lock-free half has asserted APP and the locked half has not run. */
+bool pe_app_guard9_pending(void);
+/* F5HOLDER LOW-2: call right AFTER a deassert of APP: if a boot latch registered in the window between
+ * the caller's foreign check and its deassert, re-assert (idempotent, cancels a deferred deassert). */
+void pe_app_release_recheck(SafetyLinkClass *safety);
 void clear_this_runs_faults(void);
 /* Run-START counterpart to clear_this_runs_faults() (run-HALT): releases
  * relay_authority's per-zone latch for every zone this NEW run activates,

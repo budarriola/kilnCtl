@@ -137,8 +137,9 @@ static bool s5_bad_read_now(const safety_guard_input_t *in)
 }
 
 /* S8 clear test. strict=true: a RATE trip is latched (post-trip window state valid).
- * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1) -- no post state exists,
- * only the last pre-latch tripping window, if any, is a usable basis. */
+ * strict=false: called for a TEST latch (REVIEW_TRIPWP2 MED-1). The s8_post_* windows are
+ * tracked for TEST latches too (saftyfx3 LOW-1) and are checked here, in addition to the
+ * last pre-latch tripping window and the whole-hold average. */
 static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_input_t *in,
                             const safety_guard_state_t *state, bool strict)
 {
@@ -168,8 +169,63 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
         }
         return false;
     }
-    if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
-        float elapsed_min = state->s8_window_elapsed_s / 60.0f;
+    /* saftyfx2 LOW-3: a window that completed over the rate (streak >= 1) is the
+     * mid-debounce state (frozen window elapsed may be exactly 0 right after a slide).
+     * In doubt, refuse: any rise at all since that window opened refuses, so the clear
+     * is granted only for a reading that is flat or falling (the streak itself cannot
+     * decay while the TEST latch freezes S8, so refusing on it alone would deadlock). */
+    if (state->s8_over_rate_streak >= 1u && state->s8_window_active &&
+        in->tc_c > state->s8_window_start_c) {
+        return true;
+    }
+    /* saftyfx3 LOW-1: the whole-hold average below dilutes a late rise, so also test the
+     * sliding post-latch windows (tracked for TEST latches too, see safety_guards_tick()).
+     * Refuse while the latest completed post window, or the current partial window once
+     * it is S8_POST_MIN_S long, is over the rate. The windows are TUMBLING (fixed, back to
+     * back from the first tripped tick), not sliding. Rates are signed, so a kiln that
+     * warmed slowly and then cools (K4 open) still clears. Additive: only more refusals.
+     * Known gaps (REVIEW_SAFTYFX5; OWNER Q whether to close any), none of which changes the
+     * window algorithm:
+     * (1) a burst that straddles a window boundary is forgotten once it has passed: the
+     * check sees only the last completed window and the partial window, so the net rise is
+     * at most max_rate x W per window at ANY burst rate (not "2x"), and the clear is granted
+     * once the burst has left the partial window, or earlier under (2) and (3) (the partial
+     * window refuses only a burst it still sees, after the first S8_POST_MIN_S);
+     * (2) a rise in progress, at any rate, passes in the first S8_POST_MIN_S seconds after
+     * each rollover (the partial check is skipped); only the whole-hold average sees it;
+     * (3) the partial average runs from the window start over ELAPSED time and so includes
+     * the flat time before a rise that starts mid-window: a rise still in progress passes
+     * while the net rise so far is no more than max_rate x elapsed;
+     * (4) the post window is clamped to 60..600 s while rate_window_s is unbounded: below a
+     * 60 s rate_window_s this check is COARSER than S8 itself (no "same resolution as S8"
+     * claim holds there). The clear itself restarts S8 from zero and S1 abs_max is
+     * independent. The window algorithm is a safety
+     * design and is unchanged; see REVIEW_SAFTYFX4 INFO-2 for the owner question. */
+    if (state->s8_post_active) {
+        if (state->s8_post_windows_done >= 1u &&
+            state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {
+            return true;
+        }
+        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+            float pm = state->s8_post_elapsed_s / 60.0f;
+            if (((in->tc_c - state->s8_post_start_c) / pm) > cfg->max_rate_c_per_min) {
+                return true;
+            }
+        }
+    }
+    if (state->s8_window_active) {
+        /* saftyfx LOW-3 / saftyfx2 INFO-1: the window is frozen at latch time and may be
+         * tiny. The TEST latch has been held for s9_verify_elapsed_s since (it only grows
+         * while K4 is de-energised), so frozen elapsed + that is the true time since the
+         * window opened; floor it at S8_POST_MIN_S so a moments-old window does not divide
+         * by ~0. With trip_verify_s >= 5 s the divisor never exceeds the true elapsed
+         * time; below that the floor can, which only lowers the rate over a span S8
+         * itself would not trip on (it needs two full windows). */
+        float elapsed_s = state->s8_window_elapsed_s + state->s9_verify_elapsed_s;
+        if (elapsed_s < S8_POST_MIN_S) {
+            elapsed_s = S8_POST_MIN_S;
+        }
+        float elapsed_min = elapsed_s / 60.0f;
         return ((in->tc_c - state->s8_window_start_c) / elapsed_min) > cfg->max_rate_c_per_min;
     }
     return false;
@@ -472,7 +528,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
          * clear refusal in guard_condition_still_immediate() is bounded in time.
          * Only used by the clear check; never touches the trip path. */
-        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid && !isnan(in->tc_c)) {
+        if ((state->reason == SAFETY_TRIP_RATE || state->reason == SAFETY_TRIP_TEST) &&
+            in->tc_valid && !isnan(in->tc_c)) {
             if (!state->s8_post_active) {
                 state->s8_post_active = true;
                 state->s8_post_start_c = in->tc_c;

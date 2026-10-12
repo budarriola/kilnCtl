@@ -170,3 +170,5 @@ These runs used `-ExpectPattern "(?m)^\s+FAIL |FAIL .*\.c:\d+|RUN FAILURES|BUILD
 
 - MED-1, LOW-1, LOW-2: fixed in 055d34833/6e7470c95. The S8 clear is decided only from a completed full post-trip window; until then the frozen trip window refuses; afterwards it refuses if EITHER the last full rate or the partial window (>= 5 s) is over the limit. Negtests (partial shortcut restored, last-full check disabled, EITHER -> newest-only) all CAUGHT.
 - I-5: FIXED in 75eee94b2 (ESP_LOGE on the claim-less lost-trip resolve; not host-tested).
+
+**Correction (2026-10-11, REVIEW_SAFTYFX_2026-10-11):** the frozen-window fallback described above no longer exists for a real RATE trip. The S8 clear is refused outright until two full post-trip windows complete (earliest 2 x clamp(rate_window_s, 60, 600) s, 120 s by default); a NaN TC flagged valid is refused.

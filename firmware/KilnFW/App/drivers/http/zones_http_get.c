@@ -90,7 +90,8 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                       * "fuzzy_model_valid":true, (25 bytes) x
                       * MAX31856_CHANNEL_COUNT (3) = 75 bytes, spent out of
                       * the 854-byte headroom the zones_diag split (below)
-                      * recovered, leaving 779 -- confirmed by
+                      * recovered, leaving 779 on paper; re-measured 475 bytes
+                      * on 2026-10-12 (6885 of 7360 used) -- confirmed by
                       * test_zones_get_handler_max_width_response_fits_
                       * json_cap().
                       * STILL 7360 as of the 2026-09-14 zones_diag
@@ -442,10 +443,10 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                                                 &ht_model_dead_time_s) &&
                                   pid_fuzzy_derive_bands(ht_model_k_dc, ht_model_tau_s, NULL, NULL);
         APPEND(
-            "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.3f,"
-            "\"pid_kp\":%.9g,\"pid_ki\":%.9g,\"pid_kd\":%.9g,\"max_ramp_c_per_hr\":%.2f,"
-            "\"sanity_rate_c_per_min\":%.3f,\"control_mode\":%u,\"max_temp_c\":%.1f,"
-            "\"min_temp_c\":%.1f,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
+            "%s{\"index\":%u,\"name\":\"%s\",\"relay_mask\":%u,\"thermo_mask\":%u,\"cal_offset_c\":%.9g,"
+            "\"pid_kp\":%.9g,\"pid_ki\":%.9g,\"pid_kd\":%.9g,\"max_ramp_c_per_hr\":%.9g,"
+            "\"sanity_rate_c_per_min\":%.9g,\"control_mode\":%u,\"max_temp_c\":%.9g,"
+            "\"min_temp_c\":%.9g,\"heater_window_ms\":%.0f,\"heater_min_on_ms\":%.0f,"
             "\"heater_min_off_ms\":%.0f,"
             "\"guard_wrong_dir_window_s\":%.1f,\"guard_wrong_dir_rate_c_per_min\":%.3f,"
             "\"guard_off_settle_s\":%.1f,\"guard_runaway_rate_c_per_min\":%.3f,"

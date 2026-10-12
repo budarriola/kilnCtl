@@ -345,7 +345,65 @@ uint8_t link_frame_decide_test_trip(link_test_trip_state_t *state, uint32_t now_
     state->have_accept = true;
     state->last_accept_ms = now_ms;
     state->last_request_id = request_id;
+    state->answer_outcome = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+    state->answer_seq = 0u;
     return KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+}
+
+uint8_t link_frame_test_trip_latched_outcome(bool latch_is_test)
+{
+    return latch_is_test ? KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED : KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
+}
+
+void link_frame_test_trip_record_answer(link_test_trip_state_t *state, uint8_t outcome, uint8_t trip_seq)
+{
+    state->answer_outcome = outcome;
+    state->answer_seq = trip_seq;
+}
+
+bool link_frame_test_trip_duplicate_replay(const link_test_trip_state_t *state, bool original_waiting,
+                                           uint8_t *out_outcome, uint8_t *out_seq)
+{
+    if (original_waiting) {
+        return false;
+    }
+    *out_outcome = state->answer_outcome;
+    *out_seq = state->answer_seq;
+    return true;
+}
+
+bool link_frame_test_trip_reply_on_latch(link_test_trip_state_t *state, uint8_t request_id, bool latch_is_test,
+                                         uint8_t trip_seq, link_test_trip_reply_t *reply)
+{
+    uint8_t o = link_frame_test_trip_latched_outcome(latch_is_test);
+    link_frame_test_trip_record_answer(state, o, trip_seq);
+    reply->request_id = request_id;
+    reply->outcome = o;
+    reply->trip_seq = trip_seq;
+    return true;
+}
+
+bool link_frame_test_trip_reply_on_timeout(link_test_trip_state_t *state, uint8_t request_id,
+                                           link_test_trip_reply_t *reply)
+{
+    link_frame_test_trip_record_answer(state, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
+    reply->request_id = request_id;
+    reply->outcome = KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED;
+    reply->trip_seq = 0u;
+    return true;
+}
+
+bool link_frame_test_trip_reply_on_duplicate(const link_test_trip_state_t *state, bool original_waiting,
+                                             uint8_t request_id, link_test_trip_reply_t *reply)
+{
+    uint8_t o = 0u, q = 0u;
+    if (!link_frame_test_trip_duplicate_replay(state, original_waiting, &o, &q)) {
+        return false;
+    }
+    reply->request_id = request_id;
+    reply->outcome = o;
+    reply->trip_seq = q;
+    return true;
 }
 
 void link_frame_apply_set_config(const config_store_record_t *committed, uint8_t tc_type,

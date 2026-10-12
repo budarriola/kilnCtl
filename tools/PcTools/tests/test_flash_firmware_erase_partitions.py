@@ -329,3 +329,24 @@ class EraseFlashFirmwareEndToEndTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EmptyBuildOutputRefusedTest(EraseFlashFirmwareEndToEndTest):
+    """flash_firmware refuses a 0-byte image, matching the build gate."""
+
+    def _check(self, rel):
+        with open(os.path.join(self.build_dir, *rel), "wb"):
+            pass
+        result = mf.flash_firmware(confirm=True, kiln_fw_root=self.kiln_fw_root, verify=False)
+        self.assertTrue(result.startswith("error:"))
+        self.assertIn("0 bytes", result)
+        self.run_mock.assert_not_called()
+
+    def test_empty_bootloader_refused(self):
+        self._check(("bootloader", "bootloader.bin"))
+
+    def test_empty_partition_table_refused(self):
+        self._check(("partition_table", "partition-table.bin"))
+
+    def test_empty_app_bin_refused(self):
+        self._check(("KilnCtrl.bin",))

@@ -160,6 +160,8 @@ void fake_kv_script_next_write_status(hal_status_t status);
 /* The next `count` hal_kv_key_exists() probes (any handle) return `status` instead of looking the key up.
  * Cleared by fake_kv_reset_all(). Added for legacy_nvs_erase_keys' probe-error handling (review web7 LOW-9). */
 void fake_kv_script_key_exists_status(unsigned count, hal_status_t status);
+/* Same, but the first `skip` probes succeed normally (REVIEW_WEBGENFX H5b: fail only the verify-loop probe). */
+void fake_kv_script_key_exists_status_after(unsigned skip, unsigned count, hal_status_t status);
 
 /* Like fake_kv_script_next_write_status(), but lets the first `skip` write-class
  * calls (set_blob/set_str/erase_key/commit, any handle) succeed and fails the

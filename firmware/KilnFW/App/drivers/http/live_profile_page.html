@@ -491,6 +491,10 @@ function decide(body) {
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
         msg.innerHTML = '<span class="err">' + escapeHtml(res.data.reason || res.data.error || 'that failed') + '</span>';
+        /* REVIEW_WEBFX8 LOW-2: a failed decide may still have saved (saved:true) or changed state; re-read.
+         * REVIEW_PROFILESFX LOW-1: do NOT null lastGen -- refreshLive() reloads only if the generation really
+         * moved; nulling it showed a false "Changed elsewhere" banner over unsaved edits. */
+        refreshLive();
         return;
       }
       msg.textContent = 'Done.';

@@ -66,6 +66,7 @@ import base64
 import json
 import logging
 import queue
+import os
 import socket
 import threading
 import time
@@ -763,6 +764,29 @@ class RemoteUartLink:
 # ---------------------------------------------------------------------------
 # factory
 # ---------------------------------------------------------------------------
+class LinkHubDisabled(OSError):
+    """The link hub is disabled (KILNCTL_TEST_NO_HUB=1, set by the PcTools test suite)."""
+
+
+class NullLink:
+    """Stand-in for the hub client when the hub is disabled: never connected, every
+    operation raises LinkHubDisabled."""
+    is_connected = False
+    port = None
+    baudrate = DEFAULT_BAUD_RATE
+
+    def register_task(self, *_a, **_k):
+        return queue.Queue()  # inert inbox: nothing is ever delivered
+
+    def __getattr__(self, name):
+        if name.startswith("__"):
+            raise AttributeError(name)
+
+        def _disabled(*_a, **_k):
+            raise LinkHubDisabled(f"link hub disabled (KILNCTL_TEST_NO_HUB): {name}")
+        return _disabled
+
+
 def get_shared_link(own_device: Device = Device.HOST) -> RemoteUartLink:
     """Become the hub if nobody already is, then return a client of it.
 
@@ -771,6 +795,8 @@ def get_shared_link(own_device: Device = Device.HOST) -> RemoteUartLink:
     directly. Safe to call more than once per process, though there is
     normally just one caller (gui.py / mcp_server.py, at startup).
     """
+    if os.environ.get("KILNCTL_TEST_NO_HUB") == "1":
+        raise LinkHubDisabled("link hub disabled (KILNCTL_TEST_NO_HUB=1): tests must not reach the bench")
     listen_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # The whole "first one to bind wins" election below depends on bind()
     # genuinely FAILING when a hub already holds the port. On Windows,

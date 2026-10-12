@@ -211,6 +211,7 @@
 // for exactly the frame that has no deadline riding on it, without making
 // the diagnostics stale on any timescale a human bench-watching them would
 // notice.
+/* Mirrored by KilnFW's SAFETY_LINK_DIAG_FRESH_MS (safety_link.h) = 2 x this + 500; change both together. */
 #define LINK_DIAG_TX_PERIOD_MS     2000
 // Frame E (SAFETY_CMD_POWER) cadence: "No guard reads any of this. It exists
 // to be displayed" (kilnlink_power.h) -- same reasoning as Frame B above, a
@@ -309,7 +310,6 @@ static uint8_t s_boot_id = 0;
 // unknown" is now - this, whichever site forgot the version. Initialised at
 // boot (link_task_start) so the 30 s fallback is measured from boot.
 static uint32_t s_last_peer_known_ms = 0;
-static uint8_t s_tt_accepted_seq = 0; // trip_seq answered for the last ACCEPTED test trip (0 = unknown)
 
 // TEST_TRIP state (docs/TEST_TRIP_PLAN.md section 4): acceptance/rate-limit
 // memory, plus the reply burst. The reply is non-blocking: an ACCEPTED reply
@@ -317,10 +317,11 @@ static uint8_t s_tt_accepted_seq = 0; // trip_seq answered for the last ACCEPTED
 #define LINK_TEST_TRIP_REPLY_COPIES      3u
 #define LINK_TEST_TRIP_REPLY_PERIOD_MS   40u
 #define LINK_TEST_TRIP_SEQ_WAIT_MS       300u
-static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u};
+static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u, 0u, 0u};
 static bool s_tt_waiting_seq = false;      // ACCEPTED, waiting for the latch to show a new trip_seq
 static uint8_t s_tt_seq_base = 0;
 static uint32_t s_tt_wait_deadline_ms = 0;
+static uint8_t s_tt_wait_request_id = 0;   // saftyfx2 INFO-3: id of the request waiting for its seq, never shared with an armed refusal
 static uint8_t s_tt_reply_request_id = 0;
 static uint8_t s_tt_reply_outcome = 0;
 static uint8_t s_tt_reply_trip_seq = 0;
@@ -1655,8 +1656,9 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         // when the original was answered (REVIEW_TRIPWP2 LOW-2: never the current trip_seq,
         // which may belong to a later, real trip). While the original is still waiting for
         // its seq, its own reply covers it.
-        if (!s_tt_waiting_seq) {
-            link_task_arm_test_trip_reply(msg.request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, s_tt_accepted_seq);
+        link_test_trip_reply_t dup;
+        if (link_frame_test_trip_reply_on_duplicate(&s_test_trip_state, s_tt_waiting_seq, msg.request_id, &dup)) {
+            link_task_arm_test_trip_reply(dup.request_id, dup.outcome, dup.trip_seq);
         }
         return;
     }
@@ -1676,7 +1678,7 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         log_task_log(LOG_LEVEL_WARN, "test_trip", "ACCEPTED, test trip requested");
         s_tt_waiting_seq = true;
         s_tt_seq_base = base;
-        s_tt_reply_request_id = msg.request_id;
+        s_tt_wait_request_id = msg.request_id;
         s_tt_wait_deadline_ms = link_task_now_ms() + LINK_TEST_TRIP_SEQ_WAIT_MS;
         return;
     }
@@ -1697,14 +1699,15 @@ static void link_task_poll_test_trip_reply(void)
             s_tt_waiting_seq = false;
             // REVIEW_TRIPWP2 LOW-1: only a TEST latch is "your test trip"; a real guard that
             // won the race is reported as already tripped (with its seq), never as ACCEPTED.
-            uint8_t o = (reason == SAFETY_TRIP_TEST) ? KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED
-                                                     : KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED;
-            s_tt_accepted_seq = seq;
-            link_task_arm_test_trip_reply(s_tt_reply_request_id, o, seq);
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_latch(&s_test_trip_state, s_tt_wait_request_id,
+                                                      reason == SAFETY_TRIP_TEST, seq, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
         } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
             s_tt_waiting_seq = false;
-            s_tt_accepted_seq = 0u;
-            link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_timeout(&s_test_trip_state, s_tt_wait_request_id, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
         }
     }
     if (s_tt_reply_pending > 0u && (now_ms - s_tt_reply_last_ms) >= LINK_TEST_TRIP_REPLY_PERIOD_MS) {
@@ -3605,7 +3608,7 @@ bool link_task_start(void)
     s_degraded_no_context = false;
     link_peer_announce_clear(&s_peer_announce); // version 0 = unknown until this boot's own ANNOUNCE_VERSION arrives
     s_last_peer_known_ms = link_task_now_ms(); // F6: the 30 s unknown-peer grace runs from boot
-    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u};
+    s_test_trip_state = (link_test_trip_state_t){false, 0u, 0u, 0u, 0u};
     s_tt_waiting_seq = false;
     s_tt_reply_pending = 0u;
     s_msg_index = 0;

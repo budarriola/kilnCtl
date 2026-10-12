@@ -1129,21 +1129,21 @@ lv_obj_t *ui_page_home_build(void)
         lv_obj_set_style_text_color(temp, UI_THEME_COLOR_TEXT_PRIMARY, 0);
         lv_obj_set_style_bg_opa(temp, LV_OPA_TRANSP, 0);
 
-        lv_obj_t *bar = lv_bar_create(zrow);
-        lv_obj_set_width(bar, lv_pct(100));
-        lv_obj_set_height(bar, 8);
-        lv_bar_set_range(bar, 0, 100);
-        lv_obj_set_style_bg_color(bar, UI_THEME_COLOR_BG, LV_PART_MAIN);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
-        lv_obj_set_style_bg_color(bar, UI_THEME_ACCENT_1, LV_PART_INDICATOR);
-        lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
-        lv_obj_set_style_radius(bar, 3, LV_PART_MAIN);
-        lv_obj_set_style_radius(bar, 3, LV_PART_INDICATOR);
+        lv_obj_t *zbar = lv_bar_create(zrow);
+        lv_obj_set_width(zbar, lv_pct(100));
+        lv_obj_set_height(zbar, 8);
+        lv_bar_set_range(zbar, 0, 100);
+        lv_obj_set_style_bg_color(zbar, UI_THEME_COLOR_BG, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(zbar, LV_OPA_COVER, LV_PART_MAIN);
+        lv_obj_set_style_bg_color(zbar, UI_THEME_ACCENT_1, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_opa(zbar, LV_OPA_COVER, LV_PART_INDICATOR);
+        lv_obj_set_style_radius(zbar, 3, LV_PART_MAIN);
+        lv_obj_set_style_radius(zbar, 3, LV_PART_INDICATOR);
 
         s_ui_home_rail_zone_row[i] = zrow;
         s_ui_home_rail_zone_name[i] = name;
         s_ui_home_rail_zone_temp[i] = temp;
-        s_ui_home_rail_zone_bar[i] = bar;
+        s_ui_home_rail_zone_bar[i] = zbar;
     }
 
     /* Kiln-total watts line -- owner decision 6.8 item 1: shown only when

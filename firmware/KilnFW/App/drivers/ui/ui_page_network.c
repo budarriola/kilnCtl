@@ -1,4 +1,5 @@
 #include "ui_page_network.h"
+#include "ui_page_network_secret.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -548,7 +549,8 @@ static void refresh_cb(lv_timer_t *timer)
         if (!show_secret) {
             lv_label_set_text(s_ap_password_label, ap_password[0] ? "******** (admin)" : "(open network)");
             lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN);
-            s_ap_qr_last[0] = '\0';
+            ui_page_network_secret_wipe(s_ap_qr_uri, sizeof(s_ap_qr_uri), s_ap_qr_last, sizeof(s_ap_qr_last));
+            lv_qrcode_update(s_ap_qr, UI_PAGE_NETWORK_AP_QR_BLANK, sizeof(UI_PAGE_NETWORK_AP_QR_BLANK) - 1);
             return;
         }
         lv_obj_remove_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN);
@@ -594,6 +596,12 @@ static void ap_edit_modal_close(void)
  * shown to the next operator. Hide it and wipe the typed SSID/password. Safe before the page is built. */
 void ui_page_network_relock_close(void)
 {
+    /* REVIEW_LCDFX13 INFO-1: a relock also drops the cached AP join secret and blanks the hidden QR widget. */
+    ui_page_network_secret_wipe(s_ap_qr_uri, sizeof(s_ap_qr_uri), s_ap_qr_last, sizeof(s_ap_qr_last));
+    if (s_ap_qr) {
+        lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN);
+        lv_qrcode_update(s_ap_qr, UI_PAGE_NETWORK_AP_QR_BLANK, sizeof(UI_PAGE_NETWORK_AP_QR_BLANK) - 1);
+    }
     if (!s_ap_edit_modal) {
         return;
     }

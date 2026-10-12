@@ -30,6 +30,57 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(__file__))
 
+# Review testnet MED-A: mcp_server.py connects to the link hub at import time
+# (bridged to the real bench board by the running kilnctrl MCP server). Disable
+# the hub for the whole run, bench host or not (LOW-2: no live_bench test uses
+# mcp_server's hub link; bench_fixture_session opens its own serial link).
+# Review testnet2 LOW-3 / testnet3 L1: subprocess children must not inherit the real
+# board address or any secret unless a bench host is deliberately selected. Dropping is
+# by PREFIX (every KILNCTL_* variable plus MOUSER_API_KEY and GITHUB_TOKEN), not by an
+# enumerated list, so a newly added secret is covered by default. Exceptions:
+#   * test control variables the runners set (KILNCTL_TEST_*, KILNCTL_SLOW_TESTS,
+#     KILNCTL_BUILD_*, KILNCTL_LIGHT_GATE_*, ...): see _CONTROL_*;
+#   * with a bench host (KILNCTRL_BENCH_HOST, note the CTRL spelling): ONLY what the
+#     live_bench tests use -- KILNCTL_HOST (host_resolve) and the web login pair
+#     KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD (http_auth). bench_fixture_session reads
+#     only KILNCTRL_BENCH_HOST/_PORT. Every other secret is dropped even then.
+# Caveat (testnet3 L3): PowerShell helpers that read the User-scope registry
+# ([Environment]::GetEnvironmentVariable(..., 'User')) bypass this drop; they refuse to
+# run live under KILNCTL_TEST_NO_HUB=1 (tests/test_network_guard.py proves it).
+_CONTROL_PREFIXES = ("KILNCTL_TEST_", "KILNCTL_BUILD_", "KILNCTL_LIGHT_GATE_")
+_CONTROL_NAMES = frozenset({
+    "KILNCTL_SLOW_TESTS", "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS", "KILNCTL_GZIP_ASSETS",
+    "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"})
+_BENCH_KEEP = frozenset({"KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD"})
+_EXTRA_SECRETS = ("MOUSER_API_KEY", "GITHUB_TOKEN", "KC_REUSE_SID")
+
+
+def _scrub_board_env(environ, bench_host_set):
+    for name in list(environ):
+        if name in _EXTRA_SECRETS:
+            pass
+        elif not name.startswith("KILNCTL_"):
+            continue
+        elif name in _CONTROL_NAMES or name.startswith(_CONTROL_PREFIXES):
+            continue
+        elif bench_host_set and name in _BENCH_KEEP:
+            continue
+        environ.pop(name, None)
+
+
+_scrub_board_env(os.environ, bool(os.environ.get("KILNCTRL_BENCH_HOST")))
+# Review testnet MED-A: disable the hub bench host or not. Set, never setdefault (testnet3 I2): an inherited KILNCTL_TEST_NO_HUB=0 must not re-enable the hub.
+os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+# Review testnet4 L1: redirect the settings.json host/port cache (last_host, last_port) to a
+# per-run temp path BEFORE any kilnctrl module is imported (22 *_AP_DEFAULT_HOST constants
+# resolve the host at import time). Set outright; children inherit it (KILNCTL_TEST_ prefix kept).
+import atexit as _atexit
+import shutil as _shutil
+import tempfile as _tempfile
+_SETTINGS_TMP = _tempfile.mkdtemp(prefix="kilnctl_test_settings_")
+_atexit.register(_shutil.rmtree, _SETTINGS_TMP, ignore_errors=True)
+os.environ["KILNCTL_TEST_SETTINGS_PATH"] = os.path.join(_SETTINGS_TMP, "settings.json")
+
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,
     BenchSession,
@@ -274,6 +325,21 @@ class NetworkGuardError(RuntimeError):
     """Raised (and recorded) when a test tries to reach a non-loopback address."""
 
 
+_MCP_SERVER_PORTS = (8766, 8767)
+
+
+def _is_hub_addr(address) -> bool:
+    """True for a loopback address on the shared link hub's port."""
+    from kilnctrl.link_hub import HUB_PORT
+    # Testnet4 I1: the long-running MCP servers (kicad 8766, kilnctrl 8767) hold the real
+    # environment and board link; loopback to them is refused like the hub port.
+    return (isinstance(address, tuple) and len(address) >= 2
+            and address[1] in (HUB_PORT, *_MCP_SERVER_PORTS) and _is_loopback_addr(address))
+
+
+_PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY")
+
+
 def _is_loopback_addr(address) -> bool:
     """True for AF_UNIX paths, loopback IPs and 'localhost'; False otherwise."""
     if not isinstance(address, tuple) or not address:
@@ -300,10 +366,17 @@ def _no_outbound_network(request, monkeypatch):
     exception (``except Exception``) cannot hide it. Loopback stays open for
     local test servers; ``live_bench`` tests opt out.
     """
-    if request.node.get_closest_marker("live_bench"):
+    # LOW-2: the exemption needs the marker AND a selected bench host.
+    if request.node.get_closest_marker("live_bench") and os.environ.get("KILNCTRL_BENCH_HOST"):
         yield
         return
+    # LOW-1: a proxy variable would send "direct" HTTP through a loopback listener.
+    for _v in _PROXY_VARS + tuple(v.lower() for v in _PROXY_VARS):
+        monkeypatch.delenv(_v, raising=False)
+    monkeypatch.setenv("NO_PROXY", "*")
+    monkeypatch.setenv("no_proxy", "*")
     attempts = []
+    real_sendto = socket.socket.sendto
     real_connect = socket.socket.connect
     real_connect_ex = socket.socket.connect_ex
     real_create = socket.create_connection
@@ -318,23 +391,66 @@ def _no_outbound_network(request, monkeypatch):
             "client (conftest _no_outbound_network)")
 
     def guarded_connect(self, address):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_connect(self, address)
 
     def guarded_connect_ex(self, address):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_connect_ex(self, address)
 
     def guarded_create(address, *a, **k):
-        if not _is_loopback_addr(address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
             _refuse(address)
         return real_create(address, *a, **k)
 
+    def guarded_sendto(self, data, *a):
+        address = a[-1] if a else None
+        if address is not None and (not _is_loopback_addr(address) or _is_hub_addr(address)):
+            _refuse(address)
+        return real_sendto(self, data, *a)
+
+    monkeypatch.setattr(socket.socket, "sendto", guarded_sendto)
     monkeypatch.setattr(socket.socket, "connect", guarded_connect)
     monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
     monkeypatch.setattr(socket, "create_connection", guarded_create)
+
+    # asyncio bypasses socket.socket.connect: Windows' ProactorEventLoop calls ConnectEx on the
+    # raw fd via IocpProactor.connect, and the selector loop awaits sock_connect (oldpoolb MED-1).
+    import asyncio.selector_events as _ase
+    real_sock_connect = _ase.BaseSelectorEventLoop.sock_connect
+
+    async def guarded_sock_connect(self, sock, address):
+        if not _is_loopback_addr(address) or _is_hub_addr(address):
+            _refuse(address)
+        return await real_sock_connect(self, sock, address)
+
+    monkeypatch.setattr(_ase.BaseSelectorEventLoop, "sock_connect", guarded_sock_connect)
+    try:
+        import asyncio.windows_events as _awe
+    except ImportError:
+        _awe = None
+    if _awe is not None:
+        real_iocp_connect = _awe.IocpProactor.connect
+
+        def guarded_iocp_connect(self, conn, address):
+            if not _is_loopback_addr(address) or _is_hub_addr(address):
+                _refuse(address)
+            return real_iocp_connect(self, conn, address)
+
+        monkeypatch.setattr(_awe.IocpProactor, "connect", guarded_iocp_connect)
+
+        # testnetfx7 LOW-2: Proactor UDP (datagram transport sendto, loop.sock_sendto) calls
+        # IocpProactor.sendto -> WSASendTo on the raw fd, never socket.socket.sendto.
+        real_iocp_sendto = _awe.IocpProactor.sendto
+
+        def guarded_iocp_sendto(self, conn, buf, flags=0, addr=None):
+            if addr is not None and (not _is_loopback_addr(addr) or _is_hub_addr(addr)):
+                _refuse(addr)
+            return real_iocp_sendto(self, conn, buf, flags, addr)
+
+        monkeypatch.setattr(_awe.IocpProactor, "sendto", guarded_iocp_sendto)
     yield attempts
     if attempts:
         pytest.fail(f"test attempted real outbound network connection(s): {attempts}",

@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path $tmpWork | Out-Null
 # Mode "probe_after" sleeps first, then probes.
 $child = Join-Path $tmpWork "child.ps1"
 Set-Content -Path $child -Encoding ascii -Value @'
-param([string]$Mode, [string]$Name, [int]$Seconds = 0)
+param([string]$Mode, [string]$Name, [int]$Seconds = 0, [string]$ReadyFile = "")
 $m = New-Object System.Threading.Mutex($false, $Name)
 if ($Mode -eq "probe_after") { Start-Sleep -Seconds $Seconds; $Mode = "probe" }
 $got = $false
@@ -53,21 +53,22 @@ if ($Mode -eq "probe") {
     if ($got) { $m.ReleaseMutex(); $m.Dispose(); exit 0 }
     $m.Dispose(); exit 1
 }
+if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path "$ReadyFile.tmp" -Value "got=$got" -Encoding ascii; Move-Item -Path "$ReadyFile.tmp" -Destination $ReadyFile -Force }
 if (-not $got) { exit 2 }
 Start-Sleep -Seconds $Seconds
 $m.ReleaseMutex(); $m.Dispose(); exit 0
 '@
 
 function Start-Child {
-    param([string]$Mode, [string]$Name, [int]$Seconds = 0)
+    param([string]$Mode, [string]$Name, [int]$Seconds = 0, [string]$ReadyFile = "")
     $p = Start-Process -FilePath powershell -PassThru -NoNewWindow -ArgumentList @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $child, $Mode, $Name, $Seconds)
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $child, $Mode, $Name, $Seconds, $(if ($ReadyFile) { $ReadyFile } else { "none" }))
     $null = $p.Handle
     return $p
 }
 function Test-SlotHeld {
     $p = Start-Child -Mode probe -Name $slotName
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw "check_build_gate_reentrant: probe child did not exit within 120 s" }
     return ($p.ExitCode -ne 0)
 }
 
@@ -121,14 +122,22 @@ try {
 
     Write-Host "case 5: timeouts"
     $env:KILNCTL_BUILD_GATE_TIMEOUT_SEC = "2"
-    $holder = Start-Child -Mode hold -Name $slotName -Seconds 8
-    Start-Sleep -Seconds 2
+    $ready = Join-Path $tmpWork "holder_ready"
+    Remove-Item $ready -ErrorAction SilentlyContinue   # stale file from a killed run (INFO-5)
+    $holder = Start-Child -Mode hold -Name $slotName -Seconds 8 -ReadyFile $ready
+    $dl = [DateTime]::UtcNow.AddSeconds(60)
+    while (-not (Test-Path $ready) -and [DateTime]::UtcNow -lt $dl -and -not $holder.HasExited) { Start-Sleep -Milliseconds 100 }
+    Assert-True (Test-Path $ready) "holder child wrote the ready file"
+    # The child records its own WaitOne result, so "about to try" (file written
+    # before the acquire) is told apart from "holds the mutex".
+    $readyTxt = if (Test-Path $ready) { "$(Get-Content $ready -Raw)".Trim() } else { "" }
+    Assert-True ($readyTxt -eq "got=True") "holder child reports it holds the mutex (ready file says '$readyTxt')"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $msg = ""
     try { $g = Enter-KilnBuildGate -Label "t_timeout" -Lane light -PollIntervalSeconds 1; Exit-KilnBuildGate -Gate $g } catch { $msg = "$_" }
     Assert-True ($sw.Elapsed.TotalSeconds -lt 6) "env timeout bounded the slot wait ($([int]$sw.Elapsed.TotalSeconds)s)"
     Assert-True ($msg -match $busyPattern) "slot timeout message matches the BUSY pattern"
-    $holder.WaitForExit()
+    if (-not $holder.WaitForExit(120000)) { try { $holder.Kill() } catch { }; throw "check_build_gate_reentrant: holder child did not exit within 120 s" }
     Remove-Item Env:KILNCTL_BUILD_GATE_TIMEOUT_SEC -ErrorAction SilentlyContinue
 }
 catch {
@@ -149,3 +158,4 @@ if ($failures.Count -gt 0) {
 }
 Write-Host "check_build_gate_reentrant: PASS"
 exit 0
+

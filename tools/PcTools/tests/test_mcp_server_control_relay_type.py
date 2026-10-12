@@ -128,10 +128,13 @@ class HappyPathTest(_Base):
         self.assertEqual(posted["relay2_type"], "3")
         self.assertEqual([k for k in posted if re.match(r"^relay\d+_", k)], ["relay2_type"])
         stripped = {k for k in echo if mc._ZONE_OMIT_PRESERVED_KEY_RE.match(k)}
-        # 3 cells + k/tau/deadtime/diag + six omit-preserved tuning floats, per zone
-        self.assertEqual(len(stripped), 3 * (3 + 4 + 6))
+        # 3 cells + k/tau/deadtime/diag + six tuning floats + nine guard floats (BENCHFX2 LOW-1), per zone
+        self.assertEqual(len(stripped), 3 * (3 + 4 + 6 + 9))
         for tuning in ("fuzzy_strength", "easeoffmult", "approachratecap", "errorband", "rateband", "progressband"):
             self.assertNotIn(f"z0_{tuning}", posted, tuning)
+        for g in ("wrongdirwindow", "wrongdirrate", "offsettle", "runawayrate", "runawaymargin",
+                  "driftperiod", "debounce", "frozenwindow", "xzone"):
+            self.assertNotIn(f"z0_{g}", posted, g)
         self.assertEqual(set(echo) - set(posted), stripped)
         self.assertEqual(set(posted) - set(echo), {"relay2_type"})
         for k, v in posted.items():

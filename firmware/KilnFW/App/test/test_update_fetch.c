@@ -143,6 +143,9 @@ static int do_req(const char *uri, int method, const char *query)
 static DWORD g_t0;
 #define WAIT_FOR(cond) for (g_t0 = GetTickCount(); !(cond) && GetTickCount() - g_t0 < 5000;) Sleep(2)
 
+// bounded condition wait with a caller-chosen ceiling; exits as soon as cond holds
+#define WAIT_FOR_MS(cond, ms) for (g_t0 = GetTickCount(); !(cond) && GetTickCount() - g_t0 < (DWORD)(ms);) Sleep(2)
+
 static bool resp_has(const char *s) { return strstr(g_rq.resp, s) != NULL; }
 
 static void wait_idle(void)
@@ -459,11 +462,13 @@ static void test_writer_wedge(void)
     g_fr_time_div = 1000; // the writer wait becomes milliseconds
     g_fr_flash_write_block = true;
     CHECK(POST("/api/update/download", NULL) == 202, "download accepted");
-    WAIT_FOR(update_fetch_writer_wedged());
+    WAIT_FOR_MS(update_fetch_writer_wedged(), 30000); // writer start-up is starvation-sensitive
     CHECK(update_fetch_writer_wedged(), "a timed-out writer op marks the writer wedged");
-    WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0));
+    WAIT_FOR_MS((job_result(), strcmp(g_state, "failed") == 0), 30000);
     CHECK(strcmp(g_state, "failed") == 0, "wedged job reported failed");
     CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0, "wedged job names writer_wedged_reboot_required");
+    CHECK(strstr(g_rq.resp, "\"bytes_total\":20000") != NULL && IMG_LEN == 20000u,
+          "wedge hit after WR_BEGIN, so the post-wedge WR_ABORT path is exercised");
     WAIT_FOR(!g_fr_claim_held);
     expect_claim_balanced("wedged job");
     CHECK(g_fr_flash_blocked_n >= 1, "the abandoned writer is still parked in flash");
@@ -480,10 +485,12 @@ static void test_writer_wedge(void)
           "new download refused: writer_wedged_reboot_required");
     expect_claim_balanced("second wedged job");
     WAIT_FOR(g_fr_live_tasks <= 1); // only the parked writer remains
+    CHECK(g_fr_live_tasks <= 1, "no second writer task started after the wedge (wr_start guard)");
     CHECK(g_fr_heap_live == heap_before, "a job started after the wedge frees its buffers (never handed to the writer)");
     CHECK(POST("/api/update/check", NULL) == 202, "check after the wedge accepted");
     WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0 || strcmp(g_state, "done") == 0));
     WAIT_FOR(g_fr_live_tasks <= 1);
+    CHECK(g_fr_live_tasks <= 1, "a check after the wedge starts no second writer task");
     CHECK(g_fr_heap_live == heap_before, "a check after the wedge frees its buffers");
 
     CHECK(stage_phase() == UPDATE_STAGE_UPLOADING, "wedged writer holds the stage in UPLOADING");
@@ -496,6 +503,10 @@ static void test_writer_wedge(void)
           "stage clear reports writer_wedged_reboot_required");
     expect_claim_balanced("clear while wedged");
 
+    // wr_call()'s wedge guard: once wedged, no further writer op may be issued (the job's final WR_ABORT would
+    // overwrite wr.cmd under the parked op). A guardless wr_call starts another bounded wait here.
+    CHECK(g_fr_wr_wait_after_wedge == 0, "no writer op issued after the wedge latched (wr_call guard)");
+
     // release the parked writer: its abandoned op must undo itself, never leave a stage behind
     fr_flash_release();
     WAIT_FOR(g_fr_flash_blocked_n == 0);
@@ -504,6 +515,11 @@ static void test_writer_wedge(void)
     CHECK(stage_phase() == UPDATE_STAGE_IDLE, "abandoned op aborted its own upload (stage back to idle)");
     CHECK(!stage_staged(), "abandoned op left no valid stage");
     CHECK(update_fetch_writer_wedged(), "wedge itself is permanent until reboot");
+    // handshake: the released writer finished its abandoned op (final give included) and is back parked in its
+    // idle command wait (unbounded take), so nothing it does later can race the check below
+    WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
+    CHECK(g_fr_sem_idle_waiters >= 1, "released writer is back at its idle wait");
+    CHECK(g_fr_sem_bad_n == 0, "no semaphore take/give on a NULL or deleted handle (wr_stop kept the parked writer's semaphores)");
 }
 
 int main(void)

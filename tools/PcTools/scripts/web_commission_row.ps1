@@ -22,6 +22,18 @@ param(
     [string]$ScreenshotDir = (Join-Path $PSScriptRoot '..\..\..\logs\web_commission')
 )
 
+# testnetfx10 LOW-1: the guard and probe are the FIRST executable statements after param(), so
+# nothing can run (or disarm the probe) before them; tests/test_network_guard.py pins this.
+# Review testnet3 L3: live mode re-reads credentials from User scope (the registry), which a
+# test's scrubbed environment cannot hide. Refuse live mode under the PcTools test suite.
+if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
+    Write-Error 'live mode refused under the test suite (KILNCTL_TEST_NO_HUB=1): it reads credentials from User scope'
+    exit 3
+}
+# KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past the guard so a regressed guard cannot
+# load credentials or contact a board (testnet4 L2).
+if (-not $DryRun -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
+
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
@@ -45,6 +57,9 @@ if ($DryRun) {
     # Credentials are read from the environment by the Python module itself
     # (KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD, User scope) -- never passed
     # on this command line, per docs/agent_rules/COMMON.md.
+    # Backstop (testnetfx7 LOW-3): never load User-scope credentials while the test probe is set,
+    # even if the probe above regressed.
+    if ($env:KILNCTL_TEST_GUARD_PROBE) { [Console]::Error.WriteLine('GUARD-PROBE-CRED-BACKSTOP'); exit 87 }
     $env:KILNCTL_WEB_USERNAME = [Environment]::GetEnvironmentVariable('KILNCTL_WEB_USERNAME', 'User')
     $env:KILNCTL_WEB_PASSWORD = [Environment]::GetEnvironmentVariable('KILNCTL_WEB_PASSWORD', 'User')
 }

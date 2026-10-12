@@ -129,6 +129,7 @@ static profile_t g_fake_slots[PROFILES_MAX_COUNT];
 static bool g_fake_profiles_http_get_fail = false;
 static bool g_fake_profiles_http_save_fail = false;
 static bool g_fake_profiles_http_save_unpersisted = false;
+static bool g_fake_profiles_http_save_unreadable = false;
 static void (*g_fake_save_hook)(void) = NULL; /* runs once inside the fake save: another task acting mid-decide */
 
 bool profiles_http_get(uint8_t id, profile_t *out)
@@ -156,6 +157,10 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     }
     if (out_persisted) {
         *out_persisted = !g_fake_profiles_http_save_unpersisted;
+    }
+    if (g_fake_profiles_http_save_unreadable) {
+        snprintf(err_msg, err_cap, "%s", PROFILES_SAVE_ERR_STORE_UNREADABLE);
+        return false;
     }
     if (g_fake_profiles_http_save_fail) {
         snprintf(err_msg, err_cap, "save refused (test)");
@@ -491,6 +496,7 @@ static void reset_fakes(void)
     g_fake_profiles_http_get_fail = false;
     g_fake_profiles_http_save_fail = false;
     g_fake_profiles_http_save_unpersisted = false;
+    g_fake_profiles_http_save_unreadable = false;
     g_fake_save_hook = NULL;
     g_fake_parse_ok = true;
     g_fake_builtin_on = false;
@@ -760,6 +766,27 @@ static void test_decide_save_as_persist_failure_is_500_and_keeps_edit(void)
     TEST_CHECK(profiles_slot_used(1), "retry landed in the freed slot");
 }
 
+/* PROFILESFX10 LOW-1: save_as / overwrite onto a rev-unknown slot is a sticky 409 with the profile remedy, not a
+ * retryable 500, and keeps the working copy. */
+static void test_decide_store_unreadable_is_409_with_remedy(void)
+{
+    TEST_SECTION("POST /api/profile/live/decide -- save_as and overwrite refused by an unreadable store answer 409 with the remedy");
+    for (int pass = 0; pass < 2; pass++) {
+        reset_fakes();
+        fork_for_tests(0);
+        g_fake_profiles_http_save_unreadable = true;
+        httpd_req_t req = make_req(pass == 0 ? "action=save_as&name=NewOne" : "action=overwrite&confirm=1");
+        (void)api_profile_live_decide_post_handler(&req);
+        TEST_CHECK(strstr(s_resp_status, "409") != NULL, "409, not 500");
+        TEST_CHECK(strstr(s_resp_body, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+        TEST_CHECK(strstr(s_resp_body, "factory_reset scope=profiles") != NULL, "body gives the profile remedy");
+        TEST_CHECK(strstr(s_resp_body, "\"error\":\"retry") == NULL, "not the retryable 500 text");
+        TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "not ok:true");
+        live_edit_record_t rec;
+        TEST_CHECK(live_profile_load_record(&rec) && rec.pending, "the pending edit is kept");
+    }
+}
+
 /* REVIEW_WEBFX7 MED-1: an LCD Apply landing during the decide's slot save must not be erased by the clear. */
 static void mid_decide_lcd_apply(void)
 {
@@ -779,6 +806,8 @@ static void check_edit_survived(const char *what)
     TEST_CHECK(strstr(s_resp_status, "409") != NULL, "409 Conflict");
     TEST_CHECK(strstr(s_resp_body, "working copy edited during save, decide again") != NULL, "text names the race");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "not ok:true");
+    TEST_CHECK(strstr(s_resp_body, "\"saved\":true") != NULL, "REVIEW_WEBFX8 LOW-2: body carries saved:true");
+    TEST_CHECK(strstr(s_resp_body, "\"id\":") != NULL, "REVIEW_WEBFX8 LOW-2: body carries the slot id");
 }
 
 static void test_decide_save_as_edit_during_save_keeps_edit(void)
@@ -824,6 +853,17 @@ static void test_decide_clear_failure_after_save_is_reported(void)
     fake_kv_set_write_safe_here(true);
     TEST_CHECK(r == LIVE_DECIDE_SERVER_ERROR, "SERVER_ERROR, not OK");
     TEST_CHECK(strstr(err, "clearing the working copy failed") != NULL, "err says the clear failed");
+
+    /* REVIEW_WEBFX8 LOW-2: the HTTP 500 body says the slot WAS saved, as fields. */
+    reset_fakes();
+    fork_for_tests(0);
+    fake_kv_set_write_safe_here(false);
+    httpd_req_t req = make_req("action=save_as&name=ClrFail2");
+    (void)api_profile_live_decide_post_handler(&req);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 Internal Server Error");
+    TEST_CHECK(strstr(s_resp_body, "\"saved\":true") != NULL, "500 body carries saved:true");
+    TEST_CHECK(strstr(s_resp_body, "\"id\":") != NULL, "500 body carries the slot id");
 }
 
 static void test_decide_overwrite_builtin_403(void)
@@ -1481,6 +1521,7 @@ int main(void)
     test_decide_discard();
     test_decide_save_as_missing_name_400();
     test_decide_save_as_persist_failure_is_500_and_keeps_edit();
+    test_decide_store_unreadable_is_409_with_remedy();
     test_decide_save_as_success();
     test_decide_save_as_edit_during_save_keeps_edit();
     test_decide_overwrite_edit_during_save_keeps_edit();

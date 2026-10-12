@@ -99,6 +99,7 @@ void run_test_ui_page_home_rail(void);
 void run_test_ui_profile_builder_segment_logic(void);
 void run_test_ui_profile_list_order(void);
 void run_test_ui_page_safety_logic(void);
+void run_test_ui_page_network_secret(void);
 void run_test_ui_page_temperature_safety(void);
 void run_test_ui_page_profile_picker_format(void);
 void run_test_max31856_codec(void);
@@ -233,6 +234,7 @@ int main(void)
     run_test_ui_profile_builder_segment_logic();
     run_test_ui_profile_list_order();
     run_test_ui_page_safety_logic();
+    run_test_ui_page_network_secret();
     run_test_ui_page_temperature_safety();
     run_test_ui_page_profile_picker_format();
     run_test_max31856_codec();

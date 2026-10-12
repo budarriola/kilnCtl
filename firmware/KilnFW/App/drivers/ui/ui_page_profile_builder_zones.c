@@ -55,14 +55,35 @@ static lv_obj_t *s_caption;
 static lv_obj_t *s_next_btn;
 static lv_obj_t *s_zone_chips[MAX31856_CHANNEL_COUNT];
 
+static uint8_t s_source_slot = 0xFF;
+static uint32_t s_source_rev;
+
+uint8_t ui_page_profile_builder_source_slot(void)
+{
+    return s_source_slot;
+}
+
+uint32_t ui_page_profile_builder_source_rev(void)
+{
+    return s_source_rev;
+}
+
 void ui_page_profile_builder_start_new(void)
 {
     memset(&s_draft, 0, sizeof(s_draft));
+    s_source_slot = 0xFF;
+    s_source_rev = 0;
 }
 
 void ui_page_profile_builder_start_edit(uint8_t source_id)
 {
     memset(&s_draft, 0, sizeof(s_draft));
+    s_source_slot = 0xFF;
+    s_source_rev = 0;
+    if (source_id < PROFILES_MAX_COUNT) {
+        s_source_rev = profiles_http_slot_rev(source_id); /* before the read, so a racing save fails the later check */
+        s_source_slot = source_id;
+    }
     bool ok = (source_id >= PROFILE_BUILTIN_ID_BASE) ? profiles_builtin_get(source_id, &s_draft)
                                                      : profiles_http_get(source_id, &s_draft);
     (void)ok; /* leave a blank draft if the source vanished -- Step 1 still works, just empty */

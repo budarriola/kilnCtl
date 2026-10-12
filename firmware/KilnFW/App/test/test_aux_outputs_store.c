@@ -141,6 +141,19 @@ static void test_legacy_erase_probe_error_is_not_absent(void)
                "retry with healthy probe erases");
 }
 
+/* REVIEW_WEBGENFX H5b: the first probe passes, the VERIFY-loop probe errors -> still a failure. */
+static void test_legacy_erase_verify_probe_error_is_failure(void)
+{
+    fresh_board();
+    const unsigned char bytes[4] = {1, 2, 3, 4};
+    stash_blob(bytes, sizeof(bytes), 1);
+    const char *const keys[1] = {NVS_KEY_AUX_OUT};
+    fake_kv_script_key_exists_status_after(1u, 1u, HAL_IO);
+    TEST_CHECK(legacy_nvs_erase_keys("t", KILN_NVS_PARTITION, NVS_NAMESPACE, keys, 1) == ESP_FAIL,
+               "a verify-loop probe error is a failure, not 'gone'");
+    fake_kv_script_key_exists_status(0u, HAL_OK); /* clear the script */
+}
+
 static void test_predicate(void)
 {
     TEST_SECTION("aux_outputs_relay_conflict: pure predicate, bit i = relay i+1");
@@ -669,6 +682,7 @@ void run_test_aux_outputs_store(void)
     test_pico_mask_call_site_shape();
     test_raw_verify_and_journal();
     test_legacy_erase_probe_error_is_not_absent();
+    test_legacy_erase_verify_probe_error_is_failure();
 
     cfg_fs_deinit();
     pref_cfg_fs_reset_write_fn_for_test();

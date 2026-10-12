@@ -104,6 +104,12 @@ re-check with `status` rather than assuming it failed.
    a live one holds a `*.lock` file under
    `%TEMP%\kilnctl-builds\locks\` (age vs. the 2100s stale timeout tells you
    if it's a live holder or an abandoned one — see that file's docstring).
+   A lock held by a confirmed-alive PID (this server) is never age-reclaimed,
+   so a *leaked* lock (release rename gave up; `buildlock: LEAKED LOCK` on
+   stderr) blocks that build directory until the server restarts. The
+   `BuildLockTimeout` message names the lock file and, when the holder is this
+   same server process, says so. Recover by restarting the MCP server or
+   deleting the named `*.lock` file once no build is running.
    Tail the newest `tools/PcTools/logs/session_*.log` for recent
    `flash_firmware`/`build_kilnfw` activity as a second signal. Then call
    `safety_get_status` — restart only once it shows no active firing (heating
@@ -750,7 +756,9 @@ it exists to prevent). None of them assert anything standing about the
 repository's current state, so none is wired into `run_all_checks.ps1` --
 they are invoked by hand at the workflow moment they apply.
 
-**Landing and promotion evidence (2026-10-09, `docs/audits/DEV_FLOW_SCRIPTS_REVIEW_2026-10-09.md` F1-F3, F6-F12).** `run_all_checks.ps1` prints a `Run tree: <HEAD^{tree}> dirty=<0|1> partial=<0|1>` line before `Run mode:`; `land.ps1 -CheckLog` and `dev_promote.ps1 -CheckLog` bind a log to a tree through it (last run in the file wins; missing line, other tree, dirty or filtered run is refused). `land.ps1 -Target main` is refused unless `-Coordinator` AND `-CheckLog` are both given; the parsed FAIL-line count must equal the summary count; a `[remote rejected]` push is not retried. `dev_promote.ps1 -Push` requires `-CheckLog` (full, clean, unfiltered run of exactly that commit tree, no NEW failures) and checks afterwards that origin/main CONTAINS the promote commit. `push_verify.ps1` resolves `-Branch` against `origin/<branch>` after a fetch; `commit_guard.ps1` fetches before comparing. Baseline lookup (`main_baseline_lib.ps1`) also accepts a baseline whose recorded tree equals a tree in HEAD history (squash-promoted main). `land -RestartMcp` runs `mcp_servers.ps1 restart|status` through `Run-Bounded`, which now exists.
+`tools/check_push_verify.ps1` pins the SHA-256 of `push_verify.ps1` + `lib_push_verify_walk.ps1`; a pin bump needs a review: the pin line carries `# reviewed: docs/audits/<file>.md`, that file must exist and contain the hash, and exact-count asserts on the kill surface (one Add-Type/Launch, Kill/KillProc once, no OpenProcess/EntryPoint) must still pass.
+
+**Landing and promotion evidence (2026-10-09, `docs/audits/DEV_FLOW_SCRIPTS_REVIEW_2026-10-09.md` F1-F3, F6-F12).** `run_all_checks.ps1` prints a `Run tree: <HEAD^{tree}> dirty=<0|1> partial=<0|1>` line before `Run mode:`; `land.ps1 -CheckLog` and `dev_promote.ps1 -CheckLog` bind a log to a tree through it (last run in the file wins; missing line, other tree, dirty or filtered run is refused). `land.ps1 -Target main` is refused unless `-Coordinator` AND `-CheckLog` are both given; the parsed FAIL-line count must equal the summary count; a push is retried (at most 3 attempts) only when `git push --porcelain` reports a lost race (`[rejected] (fetch first|non-fast-forward|stale info)`, or `[remote rejected]` with `incorrect old value provided` / GitHub's `cannot lock ref ...: is at <sha> but expected <sha>`); hook, protected-branch and every other `[remote rejected]` reason is refused at once. `dev_promote.ps1 -Push` requires `-CheckLog` (full, clean, unfiltered run of exactly that commit tree, no NEW failures) and checks afterwards that origin/main CONTAINS the promote commit. `push_verify.ps1` resolves `-Branch` against `origin/<branch>` after a fetch; `commit_guard.ps1` fetches before comparing. Baseline lookup (`main_baseline_lib.ps1`) also accepts a baseline whose recorded tree equals a tree in HEAD history (squash-promoted main). `land -RestartMcp` runs `mcp_servers.ps1 restart|status` through `Run-Bounded`, which now exists.
 
 **`tools/worktree_mint.ps1`** -- mint or remove a short-lived worktree at
 `origin/dev` (default; `-Base <ref>` overrides, e.g. `-Base origin/main` for the coordinator) under `C:\wt\`. `C:\wt\` is a flat namespace shared by every
@@ -878,12 +886,12 @@ refuses on tracked modifications or no commits ahead of the target branch;
 optionally waits (`-WaitPid`, `-CheckLog`, bounded, UTF-16-aware) for a
 `run_all_checks` run and refuses on any `FAIL`/`FAILED:`/BUSY not matched by
 `-AllowFail <regex>` (allowed FAILs are echoed loudly and listed in the result);
-runs `git fetch` + `git rebase origin/main` (a conflict or Windows "unable to
+runs `git fetch` + `git rebase origin/<target>` (`-Target dev` by default, `main` only with `-Coordinator` and `-CheckLog`; a conflict or Windows "unable to
 unlink" error aborts the rebase, lists the files and exits nonzero, never
 leaving a half-rebased tree); re-runs a NARROW post-rebase set via
 `run_all_checks -Only` (`check_mcp_tool_count_doc`, `check_mcp_facade_coverage`
 plus `-PostRebaseChecks <regex>`; not the full suite); `git push origin
-HEAD:main` (never force; a non-fast-forward rejection loops back to the
+HEAD:<target>` (never force; a lost race loops back to the
 rebase, at most 3 tries); `push_verify.ps1` must say LANDED; then optionally
 `-RestartMcp` (restart then status, bounded by `-McpTimeoutMin`, default 10)
 and `-RemoveWorktree` (only after LANDED). `-DryRun` does the refusals, log

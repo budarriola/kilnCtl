@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,16 @@ log = logging.getLogger(__name__)
 
 #: tools/PcTools/src/kilnctrl/settings.json (next to this file)
 SETTINGS_PATH = Path(__file__).resolve().with_name("settings.json")
+
+#: Review testnet4 L1: the PcTools test suite points this at a temp file (tests/conftest.py)
+#: so the real board address (last_host) and COM port (last_port) cached in the gitignored
+#: settings.json never reach tests or their subprocess children. The KILNCTL_TEST_ prefix
+#: survives conftest's env scrub, so children inherit it.
+_TEST_OVERRIDE = os.environ.get("KILNCTL_TEST_SETTINGS_PATH")
+if _TEST_OVERRIDE:
+    SETTINGS_PATH = Path(_TEST_OVERRIDE)
+    # Testnet5 L4: never silent -- a leaked variable would otherwise hide saved settings.
+    sys.stderr.write("kilnctrl.settings: KILNCTL_TEST_SETTINGS_PATH is set, using %s instead of settings.json\n" % _TEST_OVERRIDE)
 
 
 def load(path: Path = SETTINGS_PATH) -> dict:

@@ -91,6 +91,8 @@ started.
 
 ### LOW-3: ESP-side drain delay or a frozen DIAG now reads as a reboot
 
+**FIXED in 78d3082d8**: `safety_pico_uptime_behind_expected()` also requires `now_ms <= esp_elapsed_ms + tol`; tests rewritten with physical values. (LOW-2 was already fixed on dev by the `SAFETY_REBOOT_NOTE_WINDOW_MS` time bound.)
+
 Where: `safety_apply_diag` stamps `esp_now_ms` when the frame is drained from
 `link->inbox`, not when the UART task received it.
 

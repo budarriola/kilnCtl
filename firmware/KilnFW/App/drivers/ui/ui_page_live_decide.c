@@ -142,11 +142,11 @@ static void run_decision_apply(void *user_data)
     (void)user_data;
     live_edit_decision_kind_t kind = s_pending_kind;
     const char *name = s_pending_has_name ? s_pending_name : NULL;
-    char err[96] = {0};
+    char err[160] = {0};
     uint8_t id = 0;
     profiles_live_decide_result_t r =
         profiles_live_decide_apply(kind, name, kind == LIVE_EDIT_DECISION_OVERWRITE, &id, err, sizeof(err));
-    char msg[128];
+    char msg[192];
     if (r == LIVE_DECIDE_OK) {
         if (kind == LIVE_EDIT_DECISION_DISCARD) {
             snprintf(msg, sizeof(msg), "Edit discarded.");
@@ -155,7 +155,8 @@ static void run_decision_apply(void *user_data)
         } else {
             snprintf(msg, sizeof(msg), "Saved as %s.", name ? name : "new profile");
         }
-    } else if (r == LIVE_DECIDE_SAVED_BUT_EDITED) {
+    } else if (r == LIVE_DECIDE_SAVED_BUT_EDITED || (r == LIVE_DECIDE_SERVER_ERROR && strncmp(err, "saved to slot", 13) == 0)) {
+        /* REVIEW_WEBFX8 LOW-1: the slot was saved; showing "Refused:" contradicts it. */
         snprintf(msg, sizeof(msg), "%s", err);
     } else {
         snprintf(msg, sizeof(msg), "Refused: %s", err[0] ? err : "failed");

@@ -97,6 +97,20 @@ static esp_err_t send_err_json(httpd_req_t *req, const char *status, const char 
     return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
 }
 
+/* REVIEW_WEBFX8 LOW-2: a "saved, but" decide outcome carries "saved":true and the slot id as fields, so a client
+ * never has to parse the prose to learn the slot exists. */
+static esp_err_t send_err_json_saved(httpd_req_t *req, const char *status, const char *msg, uint8_t id)
+{
+    char escaped[320];
+    json_escape(msg ? msg : "", escaped, sizeof(escaped));
+    char json[420];
+    int n = snprintf(json, sizeof(json), "{\"ok\":false,\"saved\":true,\"id\":%u,\"error\":\"%s\"}", (unsigned)id,
+                     escaped);
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_send(req, json, n < 0 ? 0 : (size_t)n);
+}
+
 static esp_err_t send_conflict(httpd_req_t *req, const char *msg)
 {
     return send_err_json(req, "409 Conflict", msg);
@@ -647,6 +661,15 @@ static profiles_live_decide_result_t decide_finish_clear(uint32_t work_gen, uint
     return LIVE_DECIDE_OK;
 }
 
+/* PROFILESFX10 LOW-1: a rev-unknown target slot is a sticky 409 with a remedy, not a retryable error. */
+static profiles_live_decide_result_t decide_save_refusal(const char *err)
+{
+    if (strcmp(err, PROFILES_SAVE_ERR_STORE_UNREADABLE) == 0) {
+        return LIVE_DECIDE_STORE_UNREADABLE;
+    }
+    return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+}
+
 static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind_t kind, const char *name, bool confirm,
                                                           uint8_t *out_id, char *err, size_t err_cap)
 {
@@ -695,7 +718,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
                                            &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+            return decide_save_refusal(err);
         }
         if (!persisted) {
             /* S5: the slot is live in RAM but not in storage; keep the working copy (do NOT clear it) so the
@@ -735,7 +758,7 @@ static profiles_live_decide_result_t decide_apply_locked(live_edit_decision_kind
         bool saved = profiles_http_save_ex(rec.origin_id, working, &id, &warn_count, &persisted, err, err_cap);
         heap_caps_free(working);
         if (!saved) {
-            return strncmp(err, "busy:", 5) == 0 ? LIVE_DECIDE_BUSY : LIVE_DECIDE_BAD_REQUEST;
+            return decide_save_refusal(err);
         }
         if (!persisted) {
             snprintf(err, err_cap, "storage save failed; the edit is kept, retry");
@@ -764,16 +787,22 @@ profiles_live_decide_result_t profiles_live_decide_apply(live_edit_decision_kind
     return r;
 }
 
-static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_result_t r, const char *err)
+static esp_err_t send_decide_failure(httpd_req_t *req, profiles_live_decide_result_t r, const char *err, uint8_t id)
 {
     switch (r) {
     case LIVE_DECIDE_NOTHING_PENDING:
     case LIVE_DECIDE_BUSY:
-    case LIVE_DECIDE_SAVED_BUT_EDITED:
         return send_conflict(req, err);
+    case LIVE_DECIDE_SAVED_BUT_EDITED:
+        return send_err_json_saved(req, "409 Conflict", err, id);
+    case LIVE_DECIDE_STORE_UNREADABLE:
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     case LIVE_DECIDE_FORBIDDEN:
         return send_forbidden(req, err);
     case LIVE_DECIDE_SERVER_ERROR:
+        if (strncmp(err, "saved to slot", 13) == 0) {
+            return send_err_json_saved(req, "500 Internal Server Error", err, id);
+        }
         return send_server_error(req, err);
     default:
         return send_bad_request(req, err);
@@ -833,7 +862,7 @@ static esp_err_t api_profile_live_decide_post_handler(httpd_req_t *req)
     profiles_live_decide_result_t r =
         profiles_live_decide_apply(kind, have_name ? name : NULL, confirmed, &out_id, err, sizeof(err));
     if (r != LIVE_DECIDE_OK) {
-        return send_decide_failure(req, r, err);
+        return send_decide_failure(req, r, err, out_id);
     }
     if (kind == LIVE_EDIT_DECISION_SAVE_AS) {
         char json[128];

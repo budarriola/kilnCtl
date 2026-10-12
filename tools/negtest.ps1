@@ -715,7 +715,13 @@ switch ($Preset) {
             $tracked = @(& git -C $RepoRoot ls-files -- "*$bare" 2>$null)
             $hits = @($tracked | Where-Object { ($_ -split '/')[-1] -eq $bare -and $_ -like '*check_*.ps1' -and $_ -notmatch '(^|/)(build|node_modules)/' -and $_ -notmatch '(^|/)\.[^/]+/' } |
                 ForEach-Object { Get-Item -LiteralPath (Join-Path $RepoRoot $_) -ErrorAction SilentlyContinue } | Where-Object { $_ })
-            if ($hits.Count -eq 0) { Finish 2 "no such check: $PresetArg" }
+            if ($hits.Count -eq 0) {
+                $hint = ''
+                if ($PresetArg -match '^tools(check_\S+)$') {
+                    $hint = " -- looks like a backslash eaten by Bash quoting ('tools\$($Matches[1])'). Pass the bare name ($($Matches[1])), a single-quoted path, or forward slashes."
+                }
+                Finish 2 "no such check: $PresetArg$hint"
+            }
             if ($hits.Count -gt 1) { Finish 2 "ambiguous check name $PresetArg matches: $(($hits | ForEach-Object { $_.FullName.Substring($RepoRoot.Length).TrimStart('\') }) -join ', ')" }
             $PresetArg = $hits[0].FullName.Substring($RepoRoot.Length).TrimStart('\')
         }

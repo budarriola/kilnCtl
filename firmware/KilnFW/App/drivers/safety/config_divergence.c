@@ -14,7 +14,50 @@ float config_identity_normalize_f32(float value)
      * text itself represents. */
     char buf[32];
     snprintf(buf, sizeof(buf), "%.9g", (double)value);
-    return strtof(buf, NULL);
+    float out = strtof(buf, NULL);
+    /* REVIEW_ZPRECFX6 LOW-A: "%.9g" keeps the sign of zero ("-0"), but
+     * -0.0f == 0.0f while their bytes differ, so the hash and the
+     * first-difference compare disagreed (false, never-clearing "hash
+     * mismatch"). Canonicalise to +0.0f. The Pico (SaftyFW) does not compute
+     * this identity hash, so no paired change is needed there. */
+    if (out == 0.0f) {
+        out = 0.0f;
+    }
+    return out;
+}
+
+size_t config_divergence_append_suffix_truncating_head(char *dst, size_t cap, const char *head, const char *suffix)
+{
+    if (dst == NULL || cap == 0u) {
+        return 0u;
+    }
+    const size_t suffix_len = strlen(suffix);
+    if (cap <= suffix_len) {
+        /* Hint only, never overflow. */
+        snprintf(dst, cap, "%s", suffix);
+        return strlen(dst);
+    }
+    size_t head_cap = cap - suffix_len - 1u;
+    size_t head_len = strlen(head);
+    if (head_len > head_cap) {
+        head_len = head_cap;
+    }
+    memcpy(dst, head, head_len);
+    memcpy(dst + head_len, suffix, suffix_len);
+    dst[head_len + suffix_len] = '\0';
+    return head_len + suffix_len;
+}
+
+void config_divergence_lcd_notice(const char *reason, char *out, size_t cap)
+{
+    if (out == NULL || cap == 0u) {
+        return;
+    }
+    if (reason != NULL && strstr(reason, CONFIG_DIVERGENCE_ARMED_MARK) != NULL) {
+        snprintf(out, cap, "Pico config mismatch: disarm, retry commissioning");
+    } else {
+        snprintf(out, cap, "Config mismatch (Pico): %s", reason != NULL ? reason : "");
+    }
 }
 
 /* FNV-1a, 32-bit. Not a cryptographic hash -- this is a "did anything in
@@ -114,12 +157,12 @@ static bool format_first_field_difference(const config_identity_field_t *esp_fie
             char esp_side[32];
             char pico_side[32];
             if (e->known) {
-                snprintf(esp_side, sizeof(esp_side), "%.2f", (double)e->value);
+                snprintf(esp_side, sizeof(esp_side), "%.9g", (double)e->value);
             } else {
                 snprintf(esp_side, sizeof(esp_side), "%s", "unconfirmed");
             }
             if (p->known) {
-                snprintf(pico_side, sizeof(pico_side), "%.2f", (double)p->value);
+                snprintf(pico_side, sizeof(pico_side), "%.9g", (double)p->value);
             } else {
                 snprintf(pico_side, sizeof(pico_side), "%s", "unconfirmed");
             }

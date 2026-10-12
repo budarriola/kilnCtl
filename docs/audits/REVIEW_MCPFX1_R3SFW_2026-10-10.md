@@ -210,3 +210,15 @@ The section "Link handler refusal-path coverage, round 3" matches the scenarios 
 - PcTools negtest (preset pytest, the aux and pico-write test files, 7 mutations):
   - CAUGHT: `aux_unknown_check_removed`, `aux_ip_compare_removed`, `wm_halted_ignored`, `pico_gate_unknown_allowed`.
   - MISSED: `aux_not_connected_check_removed`, `aux_wifi_exception_swallowed_as_match`, `wm_failed_run_halted_not_flagged_baseline`. See MED-1 and MED-2.
+
+## Fix status (LOW-5..7)
+
+All three were fixed in test code before this table was added; this pass verified them against current dev (`9ba88735`) and negative-tested each assertion with `tools/negtest.ps1 -Preset saftyfw-host` (baseline = full SaftyFW host tests, PASS; 5 of 5 mutations CAUGHT).
+
+| Finding | Fix | Assertion | Mutation | Result |
+|---|---|---|---|---|
+| LOW-5 g_cw_ret leak | `g_cw_ret = false` at end of `scenario_set_ct_cal`, plus an explicit check in main | `test_link_task_fuzz.c:1376` | remove the reset | CAUGHT |
+| LOW-6 edge pairs | ch2/gain 10/off +50, off -50, gain 0 accepted; 10.01, +-50.01 refused | `:1211-1219` | ch2 gain 10.5; off -50.5; refused gain 10.01 -> 9.99 | CAUGHT x3 |
+| LOW-7 ROLLBACK accepted | accepting-rollback case asserts no result frame; announce version saved and restored | `:1346` | `g_rb_accept` forced false | CAUGHT |
+
+The announce-version restore itself has no dedicated assertion (it prevents a latent order dependence only).

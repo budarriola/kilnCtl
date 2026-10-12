@@ -83,6 +83,29 @@ static void test_equal_ceiling_is_satisfied_no_write(void)
     TEST_CHECK((w.calls == 0), "the Pico must NOT be re-written when its ceiling already exactly equals the target");
 }
 
+// 1c. Boundary (REVIEW_ZPRECFX4 LOW-1): firmware's divergence check is
+//     exact, so a sub-0.01 difference must be acted on, never skipped --
+//     otherwise a latched divergence could not be healed by reconcile.
+static void test_sub_epsilon_differences_are_written_both_directions(void)
+{
+    float zones[1] = { 1260.305f };
+    fake_writer_state_t w = { .result_to_return = true };
+    safety_ceiling_sync_result_t result;
+    char reason[128] = { 0 };
+    bool ok = safety_ceiling_policy_guard_raise(1260.3f, true, zones, 1, fake_writer, &w, &result, reason,
+                                                 sizeof(reason), NULL);
+    TEST_CHECK((ok), "raise of 0.005 must succeed");
+    TEST_CHECK((result == SAFETY_CEILING_SYNC_RAISED), "zone max 0.005 above the Pico ceiling must raise");
+    TEST_CHECK((w.calls == 1), "the raise must be written");
+
+    float zones2[1] = { 1260.3f };
+    fake_writer_state_t w2 = { .result_to_return = true };
+    safety_ceiling_sync_result_t r2;
+    safety_ceiling_policy_apply_lower(1260.305f, true, zones2, 1, fake_writer, &w2, &r2, reason, sizeof(reason));
+    TEST_CHECK((r2 == SAFETY_CEILING_SYNC_LOWERED), "Pico ceiling 0.005 above the zone max must be lowered to match");
+    TEST_CHECK((w2.calls == 1), "the lowering must be written");
+}
+
 // ---------------------------------------------------------------------
 // 2. Lowering: ESP first (caller applies its own commit before calling
 //    apply_lower -- this test proves apply_lower never blocks and is only
@@ -356,6 +379,7 @@ void run_test_safety_ceiling_policy(void)
 {
     test_raise_writes_pico_first_and_confirms();
     test_equal_ceiling_is_satisfied_no_write();
+    test_sub_epsilon_differences_are_written_both_directions();
     test_lower_is_esp_first_pico_best_effort_after();
     test_failed_pico_raise_blocks_and_leaves_esp_unchanged();
     test_zero_ceiling_zone_excluded_from_maximum();

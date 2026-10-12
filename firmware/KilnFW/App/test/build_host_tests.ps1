@@ -43,6 +43,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . (Join-Path $PSScriptRoot "../../../../tools/build_lock.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/host_test_exec.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/build_gate.ps1")
+. (Join-Path $PSScriptRoot "../../../../tools/host_test_verdict.ps1")
 $buildLockName = "kilnfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
 # vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
 Import-KilnVcvarsEnv -Vcvars $vcvars
@@ -157,6 +158,7 @@ try {
         (Join-Path $testDir "test_ui_profile_builder_segment_logic.c"),
         (Join-Path $testDir "test_ui_profile_list_order.c"),
         (Join-Path $testDir "test_ui_page_safety_logic.c"),
+        (Join-Path $testDir "test_ui_page_network_secret.c"),
         # UI_PLAN.md 6.3 -- the LCD Temperature page's safety-relay label text.
         (Join-Path $testDir "test_ui_page_temperature_safety.c"),
         (Join-Path $testDir "test_ui_page_profile_picker_format.c"),
@@ -274,6 +276,7 @@ try {
         (Join-Path $driversDir "ui/ui_profile_builder_segment_logic.c"),
         (Join-Path $driversDir "ui/ui_profile_list_order.c"),
         (Join-Path $driversDir "ui/ui_page_safety_logic.c"),
+        (Join-Path $driversDir "ui/ui_page_network_secret.c"),
         (Join-Path $driversDir "ui/ui_page_temperature_safety.c"),
         (Join-Path $driversDir "ui/ui_page_profile_picker_format.c"),
         (Join-Path $driversDir "hw/max31856_codec.c"),
@@ -511,6 +514,9 @@ try {
     $script:builtExes = @()
     $script:buildFailures = @()
     $script:failedExes = @()
+    # Compile-only signals built outside Invoke-HostTestExe: NOT one of the $totalExpected
+    # executables, so kept out of -BuildFailures (Built+BuildFailures must equal Expected exactly).
+    $script:auxBuildFailures = @()
     $script:onlySelected = @()
 
     # Parallel compile, serial run. KILNCTL_HOST_BUILD_JOBS (default 4; 1 = the
@@ -1650,6 +1656,14 @@ try {
 
     Invoke-HostTestExe -Name "safety_link" -ExePath $exe14 -BuildCmd $cmd14
 
+    # REBOOTFX5 LOW-1: the same TU again with a 10 ms tick period, running only the tick-vs-ms DIAG age test.
+    # The stub's period is 1, so no other executable can tell a tick count from a millisecond count.
+    $exe14t = Join-Path $outDir "kilnctl_host_tests_safety_link_tick10.exe"
+    $slObjDirT = Join-Path $outDir "sl_tick10"
+    New-Item -ItemType Directory -Force -Path $slObjDirT | Out-Null
+    $cmd14t = $cmd14.Replace("/Fo:`"$slObjDir\\`"", "/Fo:`"$slObjDirT\\`"").Replace("/Fe:`"$exe14`"", "/Fe:`"$exe14t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    Invoke-HostTestExe -Name "safety_link_tick10" -ExePath $exe14t -BuildCmd $cmd14t
+
     # ---- test_dashboard_json.c: its own FIFTEENTH, separate executable --------
     # Opus review round 3, blocker 1: dashboard_http.c's /api/control handler was
     # silently emitting truncated (invalid) JSON at 3 zones once ff_hold_used_
@@ -2238,6 +2252,20 @@ try {
             "`"$(Join-Path $driversDir 'owners/relay_authority.c')`""
 
     Invoke-HostTestExe -Name "link_watchdog" -ExePath $exe30 -BuildCmd $cmd30
+
+    # ---- test_main_reset_fence.c: compiles the REAL main.c (REVIEW_DEVBREAKFX6 MED-1) ----
+    # app_main() is run with recording stubs for the bring-up phases and the four fence setters; the test
+    # asserts each hook was installed before the first phase. Defeats every dead-install shape regardless
+    # of syntax (tools/check_reset_fence_hooks.ps1 is only a text check).
+    $exeMrf = Join-Path $outDir "kilnctl_host_tests_main_reset_fence.exe"
+    $mrfObjDir = Join-Path $outDir "mrf"
+    New-Item -ItemType Directory -Force -Path $mrfObjDir | Out-Null
+    $cmdMrf = "cl @`"$hostTestsRsp`" /std:c11 " +
+            "/Fo:`"$mrfObjDir\\`" /Fe:`"$exeMrf`" " +
+            "`"$(Join-Path $testDir 'test_main_reset_fence.c')`" " +
+            "`"$(Join-Path $driversDir 'owners/relay_authority.c')`""
+
+    Invoke-HostTestExe -Name "main_reset_fence" -ExePath $exeMrf -BuildCmd $cmdMrf
 
     # ---- test_time_sync.c: its own THIRTY-FIRST, separate executable ---------
     # docs/FILESYSTEM_USER_DATA.md item 14 (TZ) close-out: this file used
@@ -3030,11 +3058,10 @@ try {
     # signal, printed loudly either way -- if pid.c/heater_output.c/
     # zone_coupling_solve.c/profile_executor_feedforward.c's signatures
     # drift, "BUILD FAILED" now appears in this script's output instead of
-    # nothing appearing at all), but never run it automatically and never
-    # let its build/run result affect this script's own exit code -- same
-    # non-gate posture as sim_iter_tune/sim_wide_temp_sweep above, for the
-    # same reason sim_credibility_gate's own gains-uncertain conclusions
-    # are informational rather than blocking.
+    # nothing appearing at all), but never run it automatically. Its run results are
+    # informational (same posture as sim_iter_tune/sim_wide_temp_sweep above),
+    # but a COMPILE break fails this script via $script:auxBuildFailures
+    # (see below).
     $exeClosedloop = Join-Path $outDir "kilnctl_sim_credibility_gate_closedloop.exe"
     $cmdClosedloop = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exeClosedloop`" `"$(Join-Path $testDir 'sim_credibility_gate_closedloop.c')`" " +
@@ -3056,10 +3083,10 @@ try {
         # that cannot fail" class this repo is eliminating. Its RESULTS stay
         # non-gating (it is still never run automatically, and no PASS/FAIL
         # verdict from it is ever consulted) -- only a compile break now
-        # fails this script, via the same $script:buildFailures list every
-        # other Invoke-HostTestExe-tracked source uses.
+        # fails this script, via $script:auxBuildFailures (kept out of
+        # $script:buildFailures so Built + BuildFailures == $totalExpected stays exact).
         Write-Host "BUILD FAILED: sim_credibility_gate_closedloop -- this DOES fail this script (compile-only signal; the file is still never run automatically and its results, when it does run, stay non-gating -- see file header)"
-        $script:buildFailures += "sim_credibility_gate_closedloop"
+        $script:auxBuildFailures += "sim_credibility_gate_closedloop"
     } else {
         Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
     }
@@ -3566,7 +3593,9 @@ try {
     # 93 -> 94: added test_dashboard_http_relay.c (round 2, R2-A)
     # 94 -> 95: added test_kiln_io_owner_sx_dispatch.c (round 2, R2-A)
     # 95 -> 98: test_cfg_fs_format_http.c, test_setup_progress_http.c, test_dashboard_settings_http.c (round 3)
-    $totalExpected = 98
+    # 98 -> 99: test_main_reset_fence.c (REVIEW_DEVBREAKFX6 MED-1)
+    # 99 -> 100: safety_link_tick10 (REBOOTFX5 LOW-1, 10 ms tick period build of test_safety_link_compile.c)
+    $totalExpected = 100
     if ($Only) {
         if ($script:onlySelected.Count -eq 0) {
             Write-Host "-Only '$Only' matched no host-test executable"
@@ -3595,16 +3624,14 @@ try {
         foreach ($f in $script:failedExes) { Write-Host "  $f" }
     }
 
-    if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
-        exit 1
+    if ($script:auxBuildFailures.Count -gt 0) {
+        Write-Host "AUX BUILD FAILURES ($($script:auxBuildFailures.Count)) -- compile-only, not counted in Built/Expected:"
+        foreach ($f in $script:auxBuildFailures) { Write-Host "  $f" }
     }
-
-    if ($script:builtExes.Count -ne $totalExpected) {
-        Write-Host ("MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
-            "at least one was silently never attempted (not a build failure, not a run failure). Refusing to " +
-            "report success.")
-        exit 1
-    }
+    $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count
+    if ($verdict.Mismatch) { Write-Host $verdict.MismatchText }
+    if ($verdict.ExitCode -ne 0) { exit $verdict.ExitCode }
+    if ($script:auxBuildFailures.Count -gt 0) { exit 1 }
 
     Write-Host "all $totalExpected host test executables built and passed"
     exit 0

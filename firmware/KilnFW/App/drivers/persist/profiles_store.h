@@ -52,6 +52,18 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
 bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                            uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
 
+/* REVIEW_WEBGENFX LOW-B: like profiles_http_save() but, for a user slot (requested_id < PROFILES_MAX_COUNT),
+ * refuses with "That slot changed since you opened it" unless profiles_http_slot_rev(requested_id) still equals
+ * expected_rev. The compare runs under the profiles save lock, so it cannot race another save. */
+/* REVIEW_PROFILESFX3 LOW-1: the LCD save dialog shows the refusal text verbatim; its buffer must hold the longest one. */
+#define PROFILES_SAVE_ERR_MSG_LEN 192
+/* PROFILESFX10 MED-1: the exact err_msg every save entry point returns (with false, RAM untouched) when the target
+ * slot's stored profile was unreadable at boot (rev-unknown, sticky for the whole boot). Callers compare with
+ * strcmp() to pick their remedy text; HTTP routes answer 409 with the profile store-unreadable reason. */
+#define PROFILES_SAVE_ERR_STORE_UNREADABLE "profile store unreadable at boot; reboot, or factory reset scope=profiles"
+bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
+                                   uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap);
+
 /* With out_persisted != NULL and requested_id >= PROFILES_MAX_COUNT (fresh slot), a failed storage save rolls the
  * new slot back inside save_ex's own critical section, so no phantom RAM-only profile remains (*out_persisted is
  * false, *out_id still names the rolled-back slot). */

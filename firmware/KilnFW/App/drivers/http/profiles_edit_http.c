@@ -703,7 +703,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
     } else {
         int free_slot = -1;
         for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
-            if (!profiles_slot_used(i)) {
+            if (!profiles_slot_used(i) && !s_profile_rev_unknown[i]) {
                 free_slot = i;
                 break;
             }
@@ -716,6 +716,15 @@ esp_err_t profile_post_handler(httpd_req_t *req)
             return ESP_OK;
         }
         target_id = (uint8_t)free_slot;
+    }
+
+    /* PROFILESFX11 MED-1: an unreadable-rev slot cannot be persisted; refuse BEFORE the RAM copy (mirrors
+     * profiles_http_save_impl), with the same 409 profile text. */
+    if (s_profile_rev_unknown[target_id]) {
+        profiles_save_unlock();
+        free(warn_json);
+        free(tmp);
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     }
 
     /* Owner request 2026-09-19: saving must never silently create/overwrite a
@@ -779,7 +788,7 @@ esp_err_t profile_post_handler(httpd_req_t *req)
         ESP_LOGE(PROFILES_TAG, "nvs_save_slot(%u) failed: %s -- profile applied live but will not survive a reboot",
                  target_id, esp_err_to_name(err));
         free(warn_json);
-        return cfg_fs_http_persist_failed_state(req, s_profile_rev_unknown[target_id], err, -1);
+        return cfg_fs_http_persist_failed_state_profiles(req, s_profile_rev_unknown[target_id], err, -1);
     }
 
     /* HEAP (PSRAM), same reasoning as warn_json above -- embeds warn_json's
@@ -869,8 +878,9 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         /* Review web7 LOW-6: the store erase refuses (ESP_ERR_INVALID_STATE) on a slot whose rev floor is unknown
          * this boot; that is the store_unreadable_at_boot 409, not a flash write failure. Any other failure keeps
          * the plain 500 (persfx3 MED-2). */
-        return cfg_fs_http_persist_failed_state(req, s_profile_rev_unknown[id],
-                                                s_profile_rev_unknown[id] ? ESP_ERR_INVALID_STATE : ESP_FAIL, -1);
+        return cfg_fs_http_persist_failed_state(req, false, ESP_FAIL, -1);
+    case PROFILES_DELETE_REV_UNKNOWN:
+        return cfg_fs_http_persist_failed_state_profiles(req, true, ESP_ERR_INVALID_STATE, -1);
     default:
         return cfg_fs_http_persist_failed(req);
     }
@@ -932,7 +942,7 @@ esp_err_t builtin_hide_post_handler(httpd_req_t *req)
 
     esp_err_t err = profiles_builtin_set_hidden((uint8_t)id, hidden);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
+        return cfg_fs_http_persist_failed_profiles_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
     }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":%s,\"id\":%ld,\"hidden\":%s,\"persisted\":%s}",
@@ -953,7 +963,7 @@ esp_err_t builtin_restore_post_handler(httpd_req_t *req)
     }
     esp_err_t err = profiles_builtin_restore_all();
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
+        return cfg_fs_http_persist_failed_profiles_for(req, "profiles/hidden.json" /* profiles_builtin.c PROFILES_HIDDEN_FILE_PATH */, err);
     }
     char json[96];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"persisted\":%s}", err == ESP_OK ? "true" : "false");
@@ -1016,7 +1026,7 @@ esp_err_t profile_favorite_post_handler(httpd_req_t *req)
 
     esp_err_t err = profiles_favorites_set((uint8_t)id, favorite);
     if (err != ESP_OK) {
-        return cfg_fs_http_persist_failed_for(req, PROFILES_FAVORITES_FILE_PATH, err);
+        return cfg_fs_http_persist_failed_favorites(req, PROFILES_FAVORITES_FILE_PATH, err);
     }
     char json[128];
     int n = snprintf(json, sizeof(json), "{\"ok\":true,\"id\":%ld,\"favorite\":%s,\"persisted\":%s}", id,

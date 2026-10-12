@@ -185,6 +185,9 @@ static float s_last_set_pid_kp, s_last_set_pid_ki, s_last_set_pid_kd;
 static uint8_t s_last_set_pid_zone;
 static bool s_reserved_during_set_pid = false;
 
+static bool s_fake_zones_undecided = false;
+bool zones_config_is_undecided(void) { return s_fake_zones_undecided; }
+
 bool zones_config_set_pid(uint8_t zone_index, float kp, float ki, float kd)
 {
     s_set_pid_calls++;
@@ -285,7 +288,7 @@ esp_err_t httpd_query_key_value(const char *qs, const char *key, char *val, size
 
 esp_err_t httpd_resp_set_type(httpd_req_t *r, const char *type) { (void)r; (void)type; return ESP_OK; }
 
-static char s_resp_body[512];
+static char s_resp_body[1024];
 
 // iter_tune_status_get_handler() (GET /api/iter_tune/status) chunks its body
 // via httpd_resp_sendstr_chunk() (the "httpd stack blob class" convention,
@@ -340,6 +343,7 @@ static void reset_capture(void)
     s_resp_status = 200; // no explicit set_status call means httpd's real default, 200
     s_set_pid_calls = 0;
     s_set_pid_result = true;
+    s_fake_zones_undecided = false;
     s_fake_schema_refused = false;
     s_fake_schema_refused_version = 0;
     s_reserved_during_set_pid = false;
@@ -721,10 +725,34 @@ static void test_status_reports_shadow_summary(void)
     fake_kv_reset_all();
 }
 
+/* PROFILESFX10 LOW-3: a set_pid refusal caused by an unreadable-at-boot zones config answers the zones 409 with the
+ * recovery routes, not a bare 500. */
+static void test_refused_apply_undecided_zones_is_409_with_remedy(void)
+{
+    reset_capture();
+    iter_tune_store_zone_t before = make_commissioned_zone(12.0f, 99.0f);
+    s_fake_store[0] = before;
+    s_fake_present[0] = true;
+    s_fake_query = "zone=0";
+    s_set_pid_result = false;
+    s_fake_zones_undecided = true;
+
+    httpd_req_t req = {0};
+    esp_err_t err = iter_tune_restore_post_handler(&req);
+    TEST_CHECK(err == ESP_OK, "handler returns ESP_OK");
+    TEST_CHECK(s_resp_status == 409, "PROFILESFX10 LOW-3: undecided zones config answers 409, not 500");
+    TEST_CHECK(strstr(s_resp_body, "zones_config_undecided") != NULL, "body names zones_config_undecided");
+    TEST_CHECK(strstr(s_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL, "body names the recovery route");
+    TEST_CHECK(strstr(s_resp_body, "preferences\"}") != NULL, "body is not truncated");
+    TEST_CHECK(s_set_zone_calls == 0, "persisted record untouched");
+    TEST_CHECK(s_release_calls == 1 && !s_fake_reservation_held, "reservation released");
+}
+
 int main(void)
 {
     TEST_SECTION("iter_tune_http");
 
+    test_refused_apply_undecided_zones_is_409_with_remedy();
     test_successful_restore_persists_new_baseline();
     test_restore_refused_while_profile_running();
     test_restore_refused_while_autotune_running();

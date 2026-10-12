@@ -342,6 +342,14 @@ typedef struct {
      * SAFETY_LINK_STALE_MS (safety_link.h), same threshold
      * safety_link_send_clear_trip() already uses to judge the same data. */
     uint16_t diag_age_ms;
+    /* TRIPFX3 LOW-B/C: age of the DIAG frame itself, and whether it is from the current Pico boot. */
+    uint32_t diag_frame_age_ms;
+    bool     diag_since_reboot;
+    /* TRIPFX4 LOW-1: the DIAG's trip_seq and the TRIP_EVENT's trip_last_seq, so trip_is_test can bind the
+     * two (a TRIP_EVENT newer than the DIAG disagrees on seq and drops the flag). */
+    bool     diag_trip_seq_known;
+    uint8_t  diag_trip_seq;
+    uint8_t  trip_last_seq;
     uint8_t  diag_context_age_100ms;
     uint32_t diag_context_frames_ok;
     uint32_t diag_context_frames_bad;

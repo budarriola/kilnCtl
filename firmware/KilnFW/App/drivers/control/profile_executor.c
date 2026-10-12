@@ -741,13 +741,19 @@ void executor_task_entry(void *arg)
         if (s_exec.safety) {
             safety_link_status_t pre_st;
             if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
-                pre_lock_pico_tripped = pre_st.diag_ever_received &&
-                                        !safety_link_is_stale(pre_st.age_ms, SAFETY_LINK_STALE_MS) &&
-                                        pre_st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+                pre_lock_pico_tripped = relay_authority_pico_tripped(&pre_st);
             }
         }
 
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+        /* F5HOLDERFX4 LOW-2: re-sample after the (unbounded) lock wait and OR it in, so a trip that landed while
+         * waiting is seen by aux_fault_drop, io_seg_start_pico and aux_tick_pico this tick. */
+        if (s_exec.safety) {
+            safety_link_status_t post_st;
+            if (safety_link_get_status(s_exec.safety, &post_st) == ESP_OK) {
+                pre_lock_pico_tripped = pre_lock_pico_tripped || relay_authority_pico_tripped(&post_st);
+            }
+        }
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
 
@@ -1046,7 +1052,7 @@ void executor_task_entry(void *arg)
              * dwelling/segment_elapsed_s (the ZONE_RAMP machine's own state)
              * are deliberately left untouched here. */
             if (!s_exec.io_segs[s_exec.segment_index].active) {
-                io_seg_start(s_exec.segment_index, seg); /* first tick this segment is current */
+                io_seg_start_pico(s_exec.segment_index, seg, pre_lock_pico_tripped); /* first tick this segment is current */
             }
             bool ready_to_advance;
             if (seg->io_blocking) {
@@ -1984,11 +1990,11 @@ void executor_task_entry(void *arg)
          * actually left. Skipped if this tick already ended the run -- the
          * terminal transition has turned every aux OFF. */
         if (s_exec.state == PROFILE_EXEC_RUNNING) {
-            profile_executor_aux_tick(dt_s, stretched_this_tick, relays_on_count, on_off_cap);
+            profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, on_off_cap, pre_lock_pico_tripped);
         }
 
         /* --- Unowned-relay sweep (TODO.md 6A.7) -----------------------------
-         * Last thing in the tick that touches copper, deliberately: it must
+         * Last of the tick's relay-OFF work, deliberately (only the gated ON retry below runs after it): it must
          * judge the relay state this tick actually left behind, including a
          * guard trip's force-off above that reported an error. Running it
          * before the apply pass would have it clearing contacts the same tick
@@ -2073,6 +2079,21 @@ void executor_task_entry(void *arg)
 #endif
             (void)mode_violation; /* only read by assert()'s message above on a debug build, or by
                                     * exec_handle_mode_state_violation() on ESP_PLATFORM */
+        }
+
+        /* F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs last -- after segment stepping, the zone loop, the
+         * thermal guards, the aux tick and the mode-state check -- so a guard trip this tick never
+         * has an ON write after it. Still gated on RUNNING (a trip/abort already forced everything off). */
+        if (s_exec.state == PROFILE_EXEC_RUNNING && !run_faulted_this_tick) {
+            /* F5HOLDERFX3 LOW-2: re-sample the Pico state under the lock, right before the write. */
+            bool retry_pico_tripped = pre_lock_pico_tripped;
+            if (s_exec.safety) {
+                safety_link_status_t retry_st;
+                if (safety_link_get_status(s_exec.safety, &retry_st) == ESP_OK) {
+                    retry_pico_tripped = retry_pico_tripped || relay_authority_pico_tripped(&retry_st);
+                }
+            }
+            io_segs_retry_on(retry_pico_tripped);
         }
 
         run_snapshot_buf_t tick_snap;
@@ -2194,7 +2215,7 @@ static bool s_relay_unknown_fault_asserted = false;
  *   - foreign: APP was already asserted on the link by something this module does not track
  *     (the boot safe-state latch in main*.c); never released here.
  * clear_this_runs_faults() and relay_unknown_release_locked() both consult these. */
-bool pe_app_owner_foreign = false;
+volatile bool pe_app_owner_foreign = false;
 
 bool pe_app_owner_relay_unknown(void)
 {
@@ -2209,6 +2230,18 @@ bool pe_app_owner_relay_unknown(void)
 void profile_executor_note_external_app_hold(void)
 {
     pe_app_owner_foreign = true;
+}
+
+bool pe_app_guard9_pending(void)
+{
+    return s_guard9_bookkeeping_pending;
+}
+
+void pe_app_release_recheck(SafetyLinkClass *safety)
+{
+    if (pe_app_owner_foreign && safety) {
+        safety_link_set_fault_source(safety, SAFETY_FAULT_SRC_APP, true);
+    }
 }
 
 static void relay_unknown_prelock_check(void)
@@ -2240,6 +2273,7 @@ static void relay_unknown_release_locked(void)
     if ((s_exec.global_fault_source & SAFETY_FAULT_SRC_APP) == 0 && !s_guard9_bookkeeping_pending &&
         !pe_app_owner_foreign && s_exec.safety) {
         safety_link_set_fault_source(s_exec.safety, SAFETY_FAULT_SRC_APP, false);
+        pe_app_release_recheck(s_exec.safety); /* F5HOLDER LOW-2 */
     }
 }
 
@@ -2286,6 +2320,7 @@ void watchdog_task_entry(void *arg)
          * larger threshold. */
         uint16_t safety_age_ms = SAFETY_LINK_AGE_NEVER;
         bool safety_diag_valid = false;
+        bool safety_diag_tripped_any_age = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
         bool safety_k4_closed = false;
@@ -2298,22 +2333,22 @@ void watchdog_task_entry(void *arg)
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_status_ok = true;
                 safety_age_ms = safety_status.age_ms;
-                /* A trip report is only actionable while the DIAG frame it
-                 * came from is fresh -- diag_age_ms shares the same
-                 * cached_tick as age_ms (safety_link.c), so age_ms doubles as
-                 * the diag frame's own age here. Anything stale beyond
-                 * SAFETY_LINK_STALE_MS is exactly the "link went silent"
-                 * case the 30s check below already owns; this branch must
-                 * never act on a trip read off data that old, or a silent
-                 * link's LAST-KNOWN diag_state would get relabeled as a
-                 * fresh trip. */
+                /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
+                 * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
+                 * acted on at any age (safety_diag_tripped_any_age), never relabeled as OK. */
                 safety_diag_valid = safety_status.diag_ever_received &&
-                                     !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
+                                     safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
+                safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status);
                 safety_diag_state = safety_status.diag_state;
                 safety_reboot_seq = safety_status.pico_reboot_seq;
                 safety_diag_since_reboot = safety_status.diag_since_reboot;
                 safety_boot_reason = safety_status.diag_boot_reason;
                 safety_diag_trip_reason = safety_status.diag_trip_reason;
+                /* SAFETYFX10 LOW-1: a trip inferred from a TRIP_EVENT newer than the DIAG has no DIAG reason;
+                 * name the event's own reason instead of "none". */
+                if (safety_diag_tripped_any_age && safety_status.diag_state != SAFETY_LINK_DIAG_STATE_TRIPPED) {
+                    safety_diag_trip_reason = safety_status.trip_reason;
+                }
                 safety_k4_closed = safety_status.link_up && (safety_status.flags & SAFETY_FLAG_RELAY) != 0u;
             }
         }
@@ -2326,8 +2361,8 @@ void watchdog_task_entry(void *arg)
          * blocked new relay-on, but the run itself kept advancing its
          * schedule and both GUIs kept showing a firing in progress while the
          * kiln cooled. */
-        bool safety_processor_tripped = safety_diag_valid &&
-                                         safety_diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+        /* F5HOLDERFX4 MED-1: a cached TRIPPED counts at any age (fail closed). */
+        bool safety_processor_tripped = safety_diag_tripped_any_age;
 
         /* PC link loss (profile_executor.h's PROFILE_EXECUTOR_PC_LINK_ABORT_
          * SILENCE_MS): uart_bridge.c's link_watchdog_task asserts

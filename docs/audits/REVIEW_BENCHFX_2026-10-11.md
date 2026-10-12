@@ -177,7 +177,7 @@ added to the preset must go.
 
 ## Fix status
 
-All findings fixed in the follow-up commit that carries this table (see `git log -- docs/audits/REVIEW_BENCHFX_2026-10-11.md`).
+All findings fixed in `9a085e44f`.
 
 | Finding | Status | Fix |
 |---|---|---|

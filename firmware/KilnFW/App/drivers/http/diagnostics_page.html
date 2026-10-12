@@ -1176,6 +1176,15 @@ here:</p>
     rows += '<div class="row"><span class="label">Stale-temp reaped</span><span class="value" style="color:' +
             tmpColor + '">' + (tmp != null ? tmp : 'n/a') + '</span></div>';
 
+    // REVIEW_PROFILESFX2 LOW-3: stores frozen this boot (saves refused until reboot) and runtime conditions.
+    [['degraded', 'Stores refused this boot'], ['conditions', 'Runtime conditions']].forEach(function (k) {
+      var names = Array.isArray(j[k[0]]) ? j[k[0]] : [];
+      if (names.length) {
+        rows += '<div class="row"><span class="label">' + k[1] + '</span><span class="value" style="color:var(--ui-accent-5)">' +
+                names.map(window.kcEscapeHtml).join(', ') + '</span></div>';
+      }
+    });
+
     var dw = j.dual_write || {};
     // 2026-09-08 widening: dual_write.items is now a flat array, one row per
     // migrated item across EVERY persist/'*'_cfg_fs.c bridge (zones,
