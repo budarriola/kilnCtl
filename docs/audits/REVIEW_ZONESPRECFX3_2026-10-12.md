@@ -13,7 +13,7 @@ into a mismatch report instead of a `KeyError`. No HIGH or MED findings.
 
 **Counts: HIGH 0, MED 0, LOW 2, INFO 6.**
 
-## LOW-1: the validator checks only `float`; bool and string values on int fields still get past it
+## LOW-1 (FIXED 2026-10-12): the validator checks only `float`; bool and string values on int fields still get past it
 
 `tools/PcTools/src/kilnctrl/config_presets.py:199` and `:204` test only
 `isinstance(..., float)`. Other non-int JSON types still pass:
@@ -43,7 +43,7 @@ value type in the 8 real presets: all int-field values are plain `int`.
 Fix: require `type(v) is int` for int fields. That one check rejects float,
 bool and str, and NaN/inf with them. Add a test for `True` and for `"2"`.
 
-## LOW-2: bool-encoded fields (`failsafe_state`, `continue_on_zone_trip`) are not validated, and truthiness inverts a string `"false"`
+## LOW-2 (FIXED 2026-10-12): bool-encoded fields (`failsafe_state`, `continue_on_zone_trip`) are not validated, and truthiness inverts a string `"false"`
 
 `_format_scalar` (`zones_http_client.py:748`) encodes these two fields as
 `"1" if value else "0"`. The validator checks neither of them:
