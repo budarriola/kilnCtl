@@ -177,3 +177,21 @@ The check pins the shape of the gate and verdict calls, not what they do:
 - `ui_lcd_lock_run_gated` and `ui_lcd_lock_has_role` are tested by `test_ui_lcd_lock.c`.
 
 A regression there passes this check. This is LCDFX6 INFO-4, unchanged.
+
+## Fix status
+
+Fixed in `tools/check_lcd_admin_gates.ps1` (lcdfx8). Verified with `tools\negtest.ps1 -Preset check`: baseline passes,
+every bypass mutation below CAUGHT, the formatting-only mutations pass.
+
+| Id | Status | Fix |
+|----|--------|-----|
+| HIGH-1 | fixed | `__attribute__((...))` is stripped in `Get-CodeFromText`; the `(?<!\)\)\s+)` lookbehind is gone. R5, R6, R7 CAUGHT. |
+| MED-1 | fixed | `$sinkAllow` pins each of `dashboard_set_relay`, `wifi_prov_forget_network`, `unit_pref_set*`, `touch_cal_store_save`, `dashboard_safety_clear_trip` to one call inside one named function per file (and bans `safety_link_send_clear_trip`); use-count rows for `delete_do` (2), `crash_ack_do` (2), `forget_worker_task` (1); bare gate statements are end-anchored (`$afterGateOk` lists the one exception). R3, R15, R16, R17 CAUGHT. |
+| MED-2 | fixed | The pre-gate call allow-list now runs over the whole pre-gate text (guard conditions and braced blocks) before they are stripped for the return/goto test. R1, R2 CAUGHT. |
+| LOW-1 | fixed | NOT_TRIPPED/NEEDS_ADMIN case bodies must be straight-line statements then an unconditional `return;`. R4 CAUGHT. |
+| LOW-2 | fixed | `Get-FuncDefs` requires `static`. R8 CAUGHT. |
+| LOW-3 | partly | R9 (break after `(`), R10 (nested call in the registration target) and R14 (unrelated `*clear_trip*` name; only the real sinks are banned) now pass. R12 (verdict held in a local) still fails loudly; the message says to update the row. |
+| INFO-3 | open | Gate semantics still rest on host tests. |
+
+The original X/H/N/P mutation files were not preserved, so the regression set was rebuilt (R1-R8, R15-R17, 12 extra
+bypasses, a role-to-USER sweep over every ADMIN gate, and P-cases R9, R10, R11, R13, R14).
