@@ -164,3 +164,15 @@ test:508, which is where this review's M2 caught. Cite the assertion text, not t
    "replace":"#define FETCH_WR_TIMEOUT_MS 20000u"}
 ]
 ```
+
+## Fix status
+
+| Finding | Status |
+|---|---|
+| LOW-1 | fixed: `CHECK(g_fr_live_tasks <= 1)` after both waits in `test_writer_wedge()` |
+| LOW-2 | fixed: fake counts take/give on NULL or deleted semaphores (`g_fr_sem_bad_n`), sleeps 1 ms and exits after 5000 hits instead of spinning; test checks it is 0 after the release |
+| LOW-3 | fixed: failed job status must show `"bytes_total":20000` (IMG_LEN) |
+| INFO-1 | fixed: FIRELOWFX3 line cites the assertion text |
+| INFO-2 | fixed: indent corrected; the forward declaration is replaced by `#include "update_http_internal.h"` (it is not in `update_fetch.h`, so the review's "redundant" claim was wrong) |
+
+Negtest M1..M4: see the landing commit message.

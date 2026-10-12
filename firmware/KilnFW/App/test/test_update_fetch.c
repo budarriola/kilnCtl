@@ -464,6 +464,8 @@ static void test_writer_wedge(void)
     WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0));
     CHECK(strcmp(g_state, "failed") == 0, "wedged job reported failed");
     CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0, "wedged job names writer_wedged_reboot_required");
+    CHECK(strstr(g_rq.resp, "\"bytes_total\":20000") != NULL && IMG_LEN == 20000u,
+          "wedge hit after WR_BEGIN, so the post-wedge WR_ABORT path is exercised");
     WAIT_FOR(!g_fr_claim_held);
     expect_claim_balanced("wedged job");
     CHECK(g_fr_flash_blocked_n >= 1, "the abandoned writer is still parked in flash");
@@ -480,10 +482,12 @@ static void test_writer_wedge(void)
           "new download refused: writer_wedged_reboot_required");
     expect_claim_balanced("second wedged job");
     WAIT_FOR(g_fr_live_tasks <= 1); // only the parked writer remains
+    CHECK(g_fr_live_tasks <= 1, "no second writer task started after the wedge (wr_start guard)");
     CHECK(g_fr_heap_live == heap_before, "a job started after the wedge frees its buffers (never handed to the writer)");
     CHECK(POST("/api/update/check", NULL) == 202, "check after the wedge accepted");
     WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0 || strcmp(g_state, "done") == 0));
     WAIT_FOR(g_fr_live_tasks <= 1);
+    CHECK(g_fr_live_tasks <= 1, "a check after the wedge starts no second writer task");
     CHECK(g_fr_heap_live == heap_before, "a check after the wedge frees its buffers");
 
     CHECK(stage_phase() == UPDATE_STAGE_UPLOADING, "wedged writer holds the stage in UPLOADING");
@@ -508,6 +512,8 @@ static void test_writer_wedge(void)
     CHECK(stage_phase() == UPDATE_STAGE_IDLE, "abandoned op aborted its own upload (stage back to idle)");
     CHECK(!stage_staged(), "abandoned op left no valid stage");
     CHECK(update_fetch_writer_wedged(), "wedge itself is permanent until reboot");
+    Sleep(50); // a writer spinning on deleted semaphores would show up here
+    CHECK(g_fr_sem_bad_n == 0, "no semaphore take/give on a NULL or deleted handle (wr_stop kept the parked writer's semaphores)");
 }
 
 int main(void)
