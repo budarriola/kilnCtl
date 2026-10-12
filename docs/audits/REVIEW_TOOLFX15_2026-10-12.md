@@ -127,7 +127,7 @@ plus an AST assert that line 95's left operand is `$pvHash`.
 
 ## Fix status
 
-Open: LOW-1, LOW-2, LOW-3, INFO-1, INFO-2 (pooled for a fixer).
+LOW-1: FIXED in 8381e658a (K1-K13 positive counts; case/spelling gaps closed by toolfx17, see REVIEW_TOOLFX16). LOW-2: FIXED in 872348b7c. LOW-3: FIXED in 8381e658a. INFO-1: FIXED (K11 added; made AST-based by toolfx17, see REVIEW_TOOLFX16 INFO-1). INFO-2: open, no action recommended.
 
 ## Pin record
 

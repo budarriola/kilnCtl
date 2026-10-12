@@ -135,4 +135,6 @@ F7 mutation. Update both when LOW-1/LOW-2 are fixed.
 
 ## Fix status
 
-Open: LOW-1, LOW-2, INFO-1, INFO-4 (pooled for a fixer). INFO-2 and INFO-3: no action recommended.
+LOW-1: FIXED (toolfx17: Count-Re is case-insensitive). LOW-2: FIXED (K7 gains spps/kill/iex/Invoke-Expression/ForEach-Object Kill/% Kill/.Terminate with spaces over comment-stripped code, K5 .Kill\s*(, K2b any scope prefix/braces plus Set-Variable ban; K7 message reworded as a tripwire). INFO-1: FIXED (K11 is an AST check: exactly one top-level pin Assert, K11b: one assignment each to $pvHash and $PvPinSha256). INFO-4: FIXED (TOOLFX15 Fix status and the GATE_NEGATIVE_TEST_EVIDENCE row updated). INFO-2 and INFO-3: no action recommended. B8/B9 (comments mentioning a kill word) now pass because K7 scans token-stripped code, not raw text.
+
+Kill-surface pin reviewed: this fix changes only check_push_verify.ps1, not push_verify.ps1 or lib_push_verify_walk.ps1, so the pin is unchanged: `51b9bb56ed585d30347ba3e132610e4617f034b6872880a51e569861033c9869`.
