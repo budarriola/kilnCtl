@@ -56,7 +56,7 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
  * refuses with "That slot changed since you opened it" unless profiles_http_slot_rev(requested_id) still equals
  * expected_rev. The compare runs under the profiles save lock, so it cannot race another save. */
 /* REVIEW_PROFILESFX3 LOW-1: the LCD save dialog shows the refusal text verbatim; its buffer must hold the longest one. */
-#define PROFILES_SAVE_ERR_MSG_LEN 128
+#define PROFILES_SAVE_ERR_MSG_LEN 192
 bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
                                    uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap);
 

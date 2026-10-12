@@ -4462,6 +4462,41 @@ static void test_validate_io_segment_zone_ownership(void)
                         "(a gate that refuses everything is not a fix)");
 }
 
+/* REVIEW_PROFILESFX5 INFO-1: the longest io-segment refusals must leave >= 16 bytes of margin in the
+ * LCD save dialog's buffer, so a slightly longer future message is not silently cut short. */
+static void test_validate_io_segment_longest_refusal_margin(void)
+{
+    TEST_SECTION("validate_io_segment -- longest refusals fit PROFILES_SAVE_ERR_MSG_LEN with margin");
+    profile_segment_t seg;
+    char err_msg[PROFILES_SAVE_ERR_MSG_LEN];
+    size_t longest = 0;
+    memset(&seg, 0, sizeof(seg));
+    seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    seg.io_state = 1;
+    seg.io_blocking = 1;
+
+    memset(g_stub_aux, 0, sizeof(g_stub_aux));
+    g_zone_relay_mask_zone0 = 0x00;
+    g_stub_aux[3].enabled = true;
+    seg.io_target = 4;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "aux-bound relay refused");
+    TEST_CHECK(strstr(err_msg, "bound to an aux output") != NULL, "aux refusal text produced");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+    g_stub_aux[3].enabled = false;
+
+    g_zone_relay_mask_zone0 = 0x08;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "zone-owned relay refused");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+    g_zone_relay_mask_zone0 = 0x00;
+
+    seg.io_target = 255;
+    TEST_CHECK(!validate_io_segment(&seg, 255, err_msg, sizeof(err_msg)), "bad io_target refused");
+    if (strlen(err_msg) > longest) longest = strlen(err_msg);
+
+    TEST_CHECK(longest + 16 <= PROFILES_SAVE_ERR_MSG_LEN,
+               "longest io-segment refusal leaves >= 16 bytes of margin in PROFILES_SAVE_ERR_MSG_LEN");
+}
+
 // ---------------------------------------------------------------------------
 // Test 6 -- validate_io_segment(): the encoding gap between the relay range
 // (1-4) and the IO range (11-17) -- where a ~DRDY or LCD pin would have to
@@ -6234,6 +6269,7 @@ void run_test_profiles_http(void)
     test_validate_on_off_rules_aux_targets();
     test_aux_rule_survives_real_save_and_load();
     test_validate_io_segment_refuses_aux_bound_relay();
+    test_validate_io_segment_longest_refusal_margin();
     test_validate_io_segment_drdy_lcd_gap_refused();
     test_profiles_http_save_accepts_cone10_profile_on_80c_zone();
     test_profiles_http_save_accepts_in_range_profile();

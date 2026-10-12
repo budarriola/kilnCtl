@@ -264,6 +264,11 @@ class DecideSavedLoopbackTest(unittest.TestCase):
         self.assertTrue(e.saved)
         self.assertIsNone(e.saved_id)
 
+    def test_real_saved_true_bool_id_is_not_an_id(self):
+        e = self._decide(500, b'{"ok":false,"saved":true,"id":true,"error":"x"}')
+        self.assertTrue(e.saved)
+        self.assertIsNone(e.saved_id)
+
     def test_mcp_decide_prints_saved_do_not_retry(self):
         from kilnctrl import mcp_server_profile_live as mpl
         board = _LoopbackBoard(409, b'{"ok":false,"saved":true,"id":7,"error":"saved to slot 7; edited during save"}')

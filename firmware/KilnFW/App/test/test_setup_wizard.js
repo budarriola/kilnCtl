@@ -532,6 +532,12 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
 
   const belowCeiling = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1100, max_ramp_c_per_hr: 200 }], 1200);
   assert(belowCeiling.valid === true, 'step6: a zone max_temp_c below the Pico ceiling is allowed');
+
+  // Raw %.9g zone max vs the Pico ceiling printed %.6g (review PROFILESFX5 MED-1).
+  const fracEqual = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.30005, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracEqual.valid === true, 'step6: raw 1260.30005 vs printed ceiling 1260.3 is accepted');
+  const fracOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.5, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracOver.valid === false, 'step6: a genuinely over fractional max (1260.5 vs 1260.3) is refused');
 })();
 
 // ---- getAbsMaxTempC(): reads the Pico's abs_max_temp_c off GET
@@ -963,6 +969,13 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(ctx.validateStep7(aboveCeiling, [1200]).valid === true,
     'step7: abs_max_temp_c above every zone ceiling is accepted');
 
+  const fracEq = Object.assign({}, base, { absMaxTempC: 1260.3 });
+  assert(ctx.validateStep7(fracEq, [1260.30005]).valid === true,
+    'step7: typed 1260.3 vs raw zone max 1260.30005 is accepted');
+  const fracUnder = Object.assign({}, base, { absMaxTempC: 1260.1 });
+  assert(ctx.validateStep7(fracUnder, [1260.30005]).valid === false,
+    'step7: a genuinely lower ceiling (1260.1 vs 1260.30005) is refused');
+
   const belowCeiling = Object.assign({}, base, { absMaxTempC: 1000 });
   const v = ctx.validateStep7(belowCeiling, [1200]);
   assert(v.valid === false, 'step7: abs_max_temp_c BELOW a zone max_temp_c is refused, not clamped');
@@ -1120,8 +1133,10 @@ function fakeStep6El(htmlByZone) {
     'step6: edited max_temp posts the edited value');
   assert(ctx.step6LimitConfirmLines(zones, live2, 1).length === 1, 'step6: edited max_temp gives a confirm line');
   // Revert puts the displayed (rounded) value back and the field reads unedited again.
+  el.cards[0].s6ramp.value = '999';
   ctx.step6RevertInputsOn(el, zones, 1);
   assert(String(el.cards[0].s6maxtemp.value) === '123.4', 'step6RevertInputs restores the displayed value');
+  assert(String(el.cards[0].s6ramp.value) === '123.4', 'step6RevertInputs restores the displayed ramp value');
   assert(ctx.step6LimitConfirmLines(zones, ctx.step6ReadLiveZones(el, zones, 1), 1).length === 0,
     'step6RevertInputs: reverted fields read as unedited');
 })();
