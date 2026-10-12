@@ -898,15 +898,15 @@ class RestoreFreshGenerationTest(unittest.TestCase):
 
     def test_restore_after_case_post_bumped_generation_succeeds(self):
         snapshot = self.fake.get_zones("h")
-        restore_body = self.fake.build_post_body(snapshot, {})
+        restore_preset = {"zones": [{"index": 2, "zone_type": 0}]}
         # the case's own change commits and bumps the generation
         self.assertEqual(self.fake.post_zones("h", self.fake.build_post_body(
             snapshot, {"zones": [{"index": 2, "zone_type": 1}]})), "ok")
         ctx = {"_sleep": lambda s: None}
-        err = C._post_zones_restore(ctx, "h", restore_body, expected_snapshot=snapshot)
+        err = C._post_zones_restore(ctx, "h", restore_preset, expected_snapshot=snapshot)
         self.assertIsNone(err)
         self.assertEqual(self.fake.stale_refusals, 0)
-        self.assertEqual(self.fake.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake.posted_bodies[-1]["preset"], restore_preset)
 
     def test_stale_body_alone_would_be_refused(self):
         snapshot = self.fake.get_zones("h")
@@ -967,7 +967,7 @@ class HP03Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         # zones were restored: the last POST body must be the unmodified restore
         self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
     def test_skips_when_not_rested(self):
         srv = _FakeSrv(readings=[_Reading(0, 24.0), _Reading(1, 40.0), _Reading(2, 24.0)])
@@ -1069,7 +1069,7 @@ class HP03Test(unittest.TestCase):
         self.assertEqual(len(self.fake_pehc.calls), 0)
         self.assertEqual(profiles.started, [])
         # the on/off zone config was still restored
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
     def test_on_off_rule_attached_with_correct_fields(self):
         """The defect under fix: HP-03 must attach an enabled on/off rule for
@@ -1123,7 +1123,7 @@ class HP03Test(unittest.TestCase):
         # the on/off zone config POST happened before the profile POST, so a
         # restore POST must follow it regardless of the profile POST's fate
         self.assertGreaterEqual(len(self.fake_zhc.posted_bodies), 2)
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
         self.assertEqual(profiles.deleted, [C.BENCH_PROFILE_SLOT_ID])
         self.assertEqual(profiles.started, [])
 
@@ -1146,7 +1146,7 @@ class HP03Test(unittest.TestCase):
         result = C._case_hp03(ctx)
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertEqual(profiles.started, [])
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
 
 class HP07Test(unittest.TestCase):
@@ -1190,7 +1190,7 @@ class HP07Test(unittest.TestCase):
         result = C._case_hp07(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertTrue(profiles.stop_called)
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
     def test_fails_when_never_reaches_faulted(self):
         statuses = [_ExecStatus("running", [_ZoneExecStatusHP()])]
@@ -1240,7 +1240,7 @@ class HP07Test(unittest.TestCase):
         # restore it (after stop, in `finally`).
         self.assertEqual(len(self.fake_zhc.post_calls), 2)
         self.assertEqual(self.fake_zhc.post_calls[0]["body"]["preset"]["zones"][0]["max_temp_c"], 27.0)
-        self.assertEqual(self.fake_zhc.post_calls[1]["body"]["preset"], {})
+        self.assertEqual(self.fake_zhc.post_calls[1]["body"]["preset"]["zones"][0]["max_temp_c"], 300.0)
 
     def test_target_pinned_to_limit_despite_ambient_drift(self):
         """The limit comes from one ambient reading; `_start_bench_profile`
@@ -1292,7 +1292,7 @@ class HP07Test(unittest.TestCase):
         self.assertEqual(result.verdict, Verdict.FAIL)
         self.assertIn("lowered max_temp_c", result.reason)
         self.assertEqual(n["calls"], 2, "restore POST did not run after the lowering POST raised")
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
         self.assertEqual(profiles.started, [])
 
     def test_multizone_lookup_uses_zone_field_not_position(self):
@@ -1329,7 +1329,7 @@ class HP07Test(unittest.TestCase):
         self.assertIn("RuntimeError", result.reason)
         # the restore POST (empty preset) must still have gone out
         self.assertTrue(self.fake_zhc.posted_bodies)
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
     def test_restore_failure_after_exception_is_surfaced_with_values(self):
         """A restore failure must never be silently dropped, whether or not
@@ -1385,7 +1385,7 @@ class HP07Test(unittest.TestCase):
         result = C._case_hp07(ctx)
         self.assertEqual(result.verdict, Verdict.PASS, result.reason)
         self.assertEqual(calls["n"], 3, "expected lower + failed-restore + retried-restore")
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
 
     def test_actual_c_samples_captured_in_observed(self):
         """A future knife-edge failure (never reaching FAULTED) must be
@@ -1443,7 +1443,7 @@ class HP07Test(unittest.TestCase):
         ctx = self._ctx(profiles)
         with self.assertRaises(KeyboardInterrupt) as cm:
             C._case_hp07(ctx)
-        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"], {})
+        self.assertEqual(self.fake_zhc.posted_bodies[-1]["preset"]["zones"][0]["zone_type"], 0)
         self.assertFalse(getattr(cm.exception, "__notes__", []))
 
     def test_refuses_to_bake_a_leftover_low_ceiling_into_its_restore(self):
@@ -2196,6 +2196,39 @@ class HP02OnOffTypedZonePreconditionTest(unittest.TestCase):
         self.assertFalse(sample_zone["relay_on"])
 
 
+class RestoreFromFreshGetTest(unittest.TestCase):
+    """WEBGENFX LOW-A: the restore overlays ONLY the case-changed fields on a
+    fresh GET, so mid-case edits survive; a failed GET is reported, not posted."""
+
+    def setUp(self):
+        self.fake = _GenerationFakeZhc()
+        self._saved = _install_fake_zones_http_client(self.fake)
+        self.ctx = {"_sleep": lambda s: None}
+
+    def tearDown(self):
+        _restore_zones_http_client(self._saved)
+
+    def test_mid_case_edit_survives_restore(self):
+        snapshot = self.fake.get_zones("h")
+        preset = C._restore_preset(snapshot, 2, C._HP03_CHANGED_FIELDS)
+        self.assertEqual(preset, {"zones": [{"index": 2, "zone_type": 0}]})
+        # mid-case: the case's change plus an unrelated edit (adaptive gain)
+        self.fake.snapshot["zones"][2]["zone_type"] = 1
+        self.fake.snapshot["zones"][2]["adaptive_kp"] = 9.5
+        err = C._post_zones_restore(self.ctx, "h", preset, expected_snapshot=snapshot)
+        self.assertIsNone(err)
+        posted = self.fake.posted_bodies[-1]["merged"][2]
+        self.assertEqual(posted["zone_type"], 0)
+        self.assertEqual(posted["adaptive_kp"], 9.5)
+
+    def test_get_failure_is_reported_and_nothing_posted(self):
+        self.ctx["_get_zones_config"] = lambda h: (_ for _ in ()).throw(OSError("boom"))
+        err = C._post_zones_restore(self.ctx, "h", {"zones": [{"index": 2, "zone_type": 0}]})
+        self.assertIn("GET /api/zones failed", err)
+        self.assertIn("boom", err)
+        self.assertEqual(self.fake.posted_bodies, [])
+
+
 class ZonesRestoreReadbackTest(unittest.TestCase):
     """`_post_zones_restore` with `expected_snapshot`: an "ok" POST is only
     believed once GET /api/zones reads the original `zone_type`/`max_temp_c`
@@ -2215,25 +2248,25 @@ class ZonesRestoreReadbackTest(unittest.TestCase):
         _restore_zones_http_client(self._saved)
 
     def test_matching_readback_is_success(self):
-        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", {"zones": []}, expected_snapshot=self.expected)
         self.assertIsNone(err)
         self.assertEqual(len(self.fake_zhc.posted_bodies), 1)
 
     def test_zone_type_left_on_off_is_reported_and_retried(self):
         self.fake_zhc.snapshot["zones"][2]["zone_type"] = 1
-        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", {"zones": []}, expected_snapshot=self.expected)
         self.assertIsNotNone(err)
         self.assertIn("zone 2 zone_type is 1, expected 0", err)
         self.assertEqual(len(self.fake_zhc.posted_bodies), C._HP07_RESTORE_ATTEMPTS)
 
     def test_max_temp_mismatch_is_reported(self):
         self.fake_zhc.snapshot["zones"][0]["max_temp_c"] = 36.4
-        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body", expected_snapshot=self.expected)
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", {"zones": []}, expected_snapshot=self.expected)
         self.assertIn("zone 0 max_temp_c is 36.4, expected 300.0", err)
 
     def test_no_expected_snapshot_keeps_old_behaviour(self):
         self.fake_zhc.snapshot["zones"][2]["zone_type"] = 1
-        err = C._post_zones_restore(self.ctx, "10.0.0.5", "body")
+        err = C._post_zones_restore(self.ctx, "10.0.0.5", {"zones": []})
         self.assertIsNone(err)
 
     def test_hp03_surfaces_a_restore_that_did_not_land(self):

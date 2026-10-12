@@ -960,6 +960,64 @@ class AuxC03RestoreGenerationTest(unittest.TestCase):
         self.assertTrue(restore())
         self.assertIn("restore POST error", restore.detail)
 
+    def test_failed_post_with_bad_readback_is_false(self):
+        """M3: a POST error must not count as restored when the read-back still shows the bad mask."""
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        state, (_post, restore) = self._board()
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        with um.patch.object(zhc, "post_zones", side_effect=zhc.ZonesHttpError("409 zones_config_stale")):
+            self.assertFalse(restore())
+        self.assertIn("restore POST error", restore.detail)
+        self.assertIn("differs", restore.detail)
+
+    def test_readback_get_raising_is_false_and_keeps_post_error(self):
+        """M6b: a failed read-back is never True; the POST error stays in detail (INFO-3)."""
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        state, (_post, restore) = self._board(fail_post_after_commit=True)
+        real_get = zhc.get_zones
+        calls = {"n": 0}
+
+        def flaky(host):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                raise OSError("read-back down")
+            return real_get(host)
+        with um.patch.object(zhc, "get_zones", side_effect=flaky):
+            self.assertFalse(restore())
+        self.assertIn("restore POST error", restore.detail)
+        self.assertIn("read-back GET failed", restore.detail)
+
+    def test_live_get_without_generation_posts_without_token(self):
+        state, (_post, restore) = self._board()
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        state["cap"].pop("generation")
+        # snapshot (taken in _board) still carries generation 5; the live GET has none
+        self.assertTrue(restore())
+        self.assertNotIn("expected_generation", state["posts"][-1])
+        self.assertIn("no generation", restore.detail)
+
+    def test_2xx_message_includes_restore_detail(self):
+        def rfn():
+            return False
+        rfn.detail = "restore POST error (boom), read-back differs"
+        ctx = AuxC03ReviewFx3Test._ctx(self, lambda: (200, "ok"), rfn)
+        r = C._case_ax_c03(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertIn("NOT confirmed", r.reason)
+        self.assertIn("restore POST error (boom)", r.reason)
+
+    def test_teardown_error_includes_detail(self):
+        def rfn():
+            return False
+        rfn.detail = "read-back GET failed (x)"
+        with self.assertRaises(RuntimeError) as cm:
+            C.c03_teardown_hook({"_c03_restore_fn": rfn})
+        self.assertIn("read-back GET failed (x)", str(cm.exception))
+
     def test_save_failure_with_failed_restore_registers_teardown_once(self):
         ctx = AuxC03ReviewFx3Test._ctx(self, lambda: (None, 'error: POST /api/zones failed (HTTP 503): '
                                        'settings storage (cfg) not mounted - x'), lambda: False)

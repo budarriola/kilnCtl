@@ -475,18 +475,26 @@ def _default_zone_mask_fns(ctx: dict):
             # Every commit bumps the generation, so the snapshot's expected_generation is stale by now
             # (409 zones_config_stale, nothing written): take the live one just before the POST.
             live = zhc.get_zones(host)
-            body = zhc.build_post_body(dict(snapshot, generation=live.get("generation")), {})
+            if live.get("generation") is None:
+                # Older firmware without the lost-update token: post without one (INFO-2).
+                restore.detail = "live GET has no generation (older firmware): posted without expected_generation; "
+                base = {k: v for k, v in snapshot.items() if k != "generation"}
+            else:
+                base = dict(snapshot, generation=live.get("generation"))
+            body = zhc.build_post_body(base, {})
             # omit-preserved fields stay out of the body so the firmware keeps them bit-exact (MED-1)
             zhc.post_zones(host, zhc.strip_omit_preserved(body))
         except Exception as e:  # noqa: BLE001
             err = e
+        err_note = f"restore POST error ({str(err)[:80]}); " if err is not None else ""
         try:
             after = zhc.get_zones(host)
             ok = not _zone_collateral_diff(snapshot, after, zone, set())
-        except Exception:  # noqa: BLE001
+        except Exception as e2:  # noqa: BLE001
+            restore.detail += f"{err_note}read-back GET failed ({str(e2)[:80]})"
             return False
         if err is not None:
-            restore.detail = f"restore POST error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
+            restore.detail += f"restore POST error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
         return ok
 
     restore.detail = ""
@@ -526,7 +534,9 @@ def c03_teardown_hook(ctx: dict) -> None:
         return
     if not _try_restore(rfn):
         ctx["_tainted"] = True
-        raise RuntimeError("AX-C03 zone config restore NOT confirmed after teardown retry")
+        detail = getattr(rfn, "detail", "") or ""
+        raise RuntimeError("AX-C03 zone config restore NOT confirmed after teardown retry"
+                           + (f" ({detail})" if detail else ""))
 
 
 def _case_ax_c03(ctx: dict) -> CaseResult:
@@ -598,7 +608,9 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
         ctx.setdefault("teardown_hooks", [])
         if c03_teardown_hook not in ctx["teardown_hooks"]:
             ctx["teardown_hooks"].append(c03_teardown_hook)
-    note = f"; original mask restore {'ok' if restored else 'NOT confirmed'} -- run tainted"
+    rdetail = getattr(rfn, "detail", "") or ""
+    note = (f"; original mask restore {'ok' if restored else 'NOT confirmed'}"
+            + (f" ({rdetail})" if rdetail else "") + " -- run tainted")
     if status is not None and 200 <= status < 300:
         return CaseResult(Verdict.FAIL, reason=f"zone relay_mask containing relay 4 answered {status}, expected 409"
                           + note, observed={"status": status, "restored": restored})

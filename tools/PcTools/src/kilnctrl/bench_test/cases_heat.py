@@ -954,10 +954,7 @@ def _case_hp03(ctx: dict) -> CaseResult:
         snapshot = zones_http_client.get_zones(host)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/zones failed: {type(exc).__name__}: {exc}")
-    try:
-        restore_body = zones_http_client.build_post_body(snapshot, {})
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
+    restore_preset = _restore_preset(snapshot, target_zone, _HP03_CHANGED_FIELDS)
     ambient = min(_zone_temps(ctx).values()) if _zone_temps(ctx) else None
     if ambient is None:
         return CaseResult(Verdict.FAIL, reason="no valid thermo reading to use as an ambient reference")
@@ -995,7 +992,7 @@ def _case_hp03(ctx: dict) -> CaseResult:
         raise
     finally:
         _cleanup_bench_profile(ctx)
-        restore_error = _post_zones_restore(ctx, host, restore_body, expected_snapshot=snapshot)
+        restore_error = _post_zones_restore(ctx, host, restore_preset, expected_snapshot=snapshot)
         if restore_error is not None:
             restore_note = (
                 f"zone {target_zone} zones config restore failed ({restore_error}) -- "
@@ -1137,13 +1134,35 @@ def _restore_readback_mismatch(expected_snapshot: dict, actual_snapshot: dict) -
     return None
 
 
+_HP03_CHANGED_FIELDS = ("zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s")
+_HP07_CHANGED_FIELDS = ("max_temp_c", "zone_type", "failsafe_state", "min_on_s", "min_off_s")
+
+
+def _restore_preset(snapshot: dict, zone_index: int, fields: "tuple[str, ...]") -> dict:
+    """A preset naming ONLY the fields a case changed on one zone, with their
+    pre-case values. Merged onto a fresh GET at restore time, so anything
+    edited during the case (adaptive gains, an autotune accept, a rename)
+    survives (WEBGENFX LOW-A)."""
+    entry: dict = {"index": zone_index}
+    for zone in snapshot.get("zones", []) or []:
+        if zone.get("index") == zone_index:
+            for key in fields:
+                if key in zone:
+                    entry[key] = zone[key]
+            break
+    return {"zones": [entry]}
+
+
 def _post_zones_restore(
-    ctx: dict, host: str, restore_body: str, expected_snapshot: Optional[dict] = None,
+    ctx: dict, host: str, restore_preset: dict, expected_snapshot: Optional[dict] = None,
 ) -> Optional[str]:
-    """POSTs a GET-snapshot-derived `restore_body` back to /api/zones,
-    retrying once after `_HP07_RESTORE_RETRY_DELAY_S`. Returns None on an
-    "ok" response, else the last attempt's error text. Shared by HP-03 and
-    HP-07, the two cases that change persistent zone config.
+    """Puts back the fields a case changed: each attempt does a FRESH
+    GET /api/zones, overlays `restore_preset` (only the case-changed fields)
+    on it and POSTs that, retrying once after `_HP07_RESTORE_RETRY_DELAY_S`.
+    Returns None on success, else the last attempt's error text. A failed
+    GET is reported as such and nothing is posted (never a stale body).
+    Shared by HP-03 and HP-07, the two cases that change persistent zone
+    config.
 
     With `expected_snapshot` (the pre-case GET), an "ok" is only believed
     once a fresh GET /api/zones reads back the same `zone_type`/`max_temp_c`
@@ -1158,38 +1177,30 @@ def _post_zones_restore(
     last_error = ""
     for attempt in range(1, _HP07_RESTORE_ATTEMPTS + 1):
         try:
-            body = restore_body
-            if expected_snapshot is not None and "generation" in expected_snapshot:
-                # webfx5 lost-update guard: the case's own POST bumped the
-                # board's generation, so the pre-case token baked into
-                # `restore_body` is stale (409 zones_config_stale). Keep the
-                # snapshot's values, take the generation from a fresh GET.
-                try:
-                    fresh = get_zones(host)
-                    if isinstance(fresh, dict) and "generation" in fresh:
-                        merged = dict(expected_snapshot)
-                        merged["generation"] = fresh["generation"]
-                        body = zones_http_client.build_post_body(merged, {})
-                except Exception:
-                    body = restore_body
-            restore_result = zones_http_client.post_zones(host, body)
+            fresh = get_zones(host)
         except Exception as exc:
-            last_error = f"{type(exc).__name__}: {exc}"
+            last_error = f"GET /api/zones failed: {type(exc).__name__}: {exc}"
         else:
-            if restore_result == "ok":
-                if expected_snapshot is None:
-                    return None
-                try:
-                    actual = get_zones(host)
-                except Exception as exc:
-                    last_error = f"read-back GET /api/zones failed: {type(exc).__name__}: {exc}"
-                else:
-                    mismatch = _restore_readback_mismatch(expected_snapshot, actual)
-                    if mismatch is None:
-                        return None
-                    last_error = mismatch
+            try:
+                restore_result = zones_http_client.post_zones(
+                    host, zones_http_client.build_post_body(fresh, restore_preset))
+            except Exception as exc:
+                last_error = f"{type(exc).__name__}: {exc}"
             else:
-                last_error = f"refused: {restore_result}"
+                if restore_result == "ok":
+                    if expected_snapshot is None:
+                        return None
+                    try:
+                        actual = get_zones(host)
+                    except Exception as exc:
+                        last_error = f"read-back GET /api/zones failed: {type(exc).__name__}: {exc}"
+                    else:
+                        mismatch = _restore_readback_mismatch(expected_snapshot, actual)
+                        if mismatch is None:
+                            return None
+                        last_error = mismatch
+                else:
+                    last_error = f"refused: {restore_result}"
         if attempt < _HP07_RESTORE_ATTEMPTS:
             sleep(_HP07_RESTORE_RETRY_DELAY_S)
     return last_error
@@ -1214,11 +1225,11 @@ def _surface_restore_failure_on_inflight(inflight: Optional[BaseException], note
 
 
 def _restore_zone_limit(
-    ctx: dict, host: str, restore_body: str, target_zone: int,
+    ctx: dict, host: str, restore_preset: dict, target_zone: int,
     lowered_limit_c: float, original_max_temp_c: Optional[float],
     expected_snapshot: Optional[dict] = None,
 ) -> Optional[str]:
-    """POSTs `restore_body` to put zone `target_zone`'s `max_temp_c` back to
+    """POSTs `restore_preset` (merged onto a FRESH GET) to put zone `target_zone`'s `max_temp_c` back to
     its pre-HP-07 value, retrying once after a short delay in case the board
     rebooted mid-run and simply is not ready to accept an HTTP POST yet on
     the first attempt. Returns None on a confirmed "ok" restore, or a
@@ -1227,7 +1238,7 @@ def _restore_zone_limit(
     this loudly (never swallow it): a zone left at `lowered_limit_c` refuses
     every subsequent case's own profile start (see `_check_zone_ceilings`,
     which exists specifically to catch this class of leftover)."""
-    last_error = _post_zones_restore(ctx, host, restore_body, expected_snapshot=expected_snapshot)
+    last_error = _post_zones_restore(ctx, host, restore_preset, expected_snapshot=expected_snapshot)
     if last_error is None:
         return None
     original_note = f"{original_max_temp_c:.1f}C" if original_max_temp_c is not None else "unknown"
@@ -1519,10 +1530,7 @@ def _case_hp07(ctx: dict) -> CaseResult:
         snapshot = zones_http_client.get_zones(host)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"GET /api/zones failed: {type(exc).__name__}: {exc}")
-    try:
-        restore_body = zones_http_client.build_post_body(snapshot, {})
-    except Exception as exc:
-        return CaseResult(Verdict.FAIL, reason=f"could not build a restore body from the snapshot: {exc}")
+    restore_preset = _restore_preset(snapshot, target_zone, _HP07_CHANGED_FIELDS)
     # `validate_on_off_rules()` (profiles_http.c) refuses an on/off rule
     # attached to any zone whose `zone_type` is not ZONE_TYPE_ON_OFF (1) at
     # save time, and the executor's tick loop only evaluates on/off actuation
@@ -1604,7 +1612,7 @@ def _case_hp07(ctx: dict) -> CaseResult:
         # hidden slot before touching zone config again.
         _cleanup_bench_profile(ctx)
         restore_note = _restore_zone_limit(
-            ctx, host, restore_body, target_zone, limit_c, original_max_temp_c,
+            ctx, host, restore_preset, target_zone, limit_c, original_max_temp_c,
             expected_snapshot=snapshot,
         )
         if restore_note:
