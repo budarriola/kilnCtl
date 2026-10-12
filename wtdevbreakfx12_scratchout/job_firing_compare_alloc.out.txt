@@ -1,0 +1,2 @@
+test_firing_compare_alloc.c
+firing_score.c

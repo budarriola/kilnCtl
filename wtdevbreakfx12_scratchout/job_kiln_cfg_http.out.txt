@@ -1,0 +1,16 @@
+test_kiln_cfg_http.c
+system_mode_gate.c
+ota_image_crc.c
+cfg_fs_status.c
+test_stub_cfg_fs_status_deps.c
+system_mode_gate_http.c
+test_stub_cfg_fs_degraded.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(118): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(258): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(316): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_stub_cfg_fs_degraded.c(12): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(345): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_stub_cfg_fs_degraded.c(27): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(354): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(388): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_http.c(460): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.

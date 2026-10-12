@@ -1,0 +1,29 @@
+build gate: waiting (label=kilnfw_host_tests, lane=heavy, 0s, queue position 20 of 20, slots=8)
+Get-Content : Could not find file 'C:\wt\.buildgate\heavy\queue\001791818715387-35272-89e07ebf.ticket'.
+At C:\wt\devbreakfx12_kgeelr\tools\build_gate.ps1:360 char:22
++ ...           $t = Get-Content -LiteralPath $c.File.FullName -Raw | Conve ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (C:\wt\.buildgat...89e07ebf.ticket:String) [Get-Content], FileNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : GetContentReaderFileNotFoundError,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+Get-Content : Cannot find path 'C:\wt\.buildgate\heavy\queue\001791818715763-29044-6f12ba77.ticket' because it does 
+not exist.
+At C:\wt\devbreakfx12_kgeelr\tools\build_gate.ps1:360 char:22
++ ...           $t = Get-Content -LiteralPath $c.File.FullName -Raw | Conve ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (C:\wt\.buildgat...6f12ba77.ticket:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+Get-Content : Cannot find path 'C:\wt\.buildgate\heavy\queue\001791818718108-52524-cc248cbb.ticket' because it does 
+not exist.
+At C:\wt\devbreakfx12_kgeelr\tools\build_gate.ps1:360 char:22
++ ...           $t = Get-Content -LiteralPath $c.File.FullName -Raw | Conve ...
++                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : ObjectNotFound: (C:\wt\.buildgat...cc248cbb.ticket:String) [Get-Content], ItemNotFoundEx 
+   ception
+    + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetContentCommand
+ 
+build gate: acquired heavy slot 2 for 'kilnfw_host_tests' after 14s wait (slots=8)
+build gate: released heavy slot 2 for 'kilnfw_host_tests' (held 2s)

@@ -1,0 +1,1 @@
+cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\stw\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_safety_trip_words.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_safety_trip_words.c"

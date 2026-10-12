@@ -1,0 +1,22 @@
+test_run_state.c
+test_relay_cycles.c
+cfg_fs.c
+pref_cfg_fs.c
+cfg_fs_status.c
+flash_worker_wait.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\../drivers/control/run_state.c(300): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_run_state.c)
+fake_kv.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_run_state.c(48): warning C4996: 'strcpy': This function or variable may be unsafe. Consider using strcpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\pref_cfg_fs.c(320): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+fake_time.c
+hal_status.c
+hal_esp_common.c
+legacy_default_nvs.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(221): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(321): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(357): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(413): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(449): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(497): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(825): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\cfg_fs.c(853): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.

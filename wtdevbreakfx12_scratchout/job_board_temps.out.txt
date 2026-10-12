@@ -1,0 +1,4 @@
+test_board_temps.c
+fake_sysinfo.c
+hal_status.c
+hal_esp_common.c

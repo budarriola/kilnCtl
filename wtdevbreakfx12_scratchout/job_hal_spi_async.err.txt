@@ -1,0 +1,11 @@
+Test-Path : Access is denied
+At C:\wt\devbreakfx12_kgeelr\tools\build_gate.ps1:299 char:23
++             if (-not (Test-Path -LiteralPath $f.FullName)) { continue ...
++                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : PermissionDenied: (C:\wt\.buildgate\heavy\slot1.json:String) [Test-Path], UnauthorizedAc 
+   cessException
+    + FullyQualifiedErrorId : ItemExistsUnauthorizedAccessError,Microsoft.PowerShell.Commands.TestPathCommand
+ 
+build gate: waiting (label=kilnfw_host_tests, lane=heavy, 0s, queue position 22 of 22, slots=8)
+build gate: acquired heavy slot 1 for 'kilnfw_host_tests' after 14s wait (slots=8)
+build gate: released heavy slot 1 for 'kilnfw_host_tests' (held 1s)

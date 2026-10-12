@@ -1,0 +1,12 @@
+test_crash_report.c
+fake_kv.c
+fake_sysinfo.c
+fake_time.c
+hal_status.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\../drivers/safety/crash_report.c(234): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c)
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c(415): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c(425): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c(519): warning C4996: 'strcpy': This function or variable may be unsafe. Consider using strcpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+hal_esp_common.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c(884): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_crash_report.c(885): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.

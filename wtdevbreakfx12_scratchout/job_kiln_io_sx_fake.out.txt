@@ -1,0 +1,6 @@
+test_kiln_io_sx_fake.c
+kiln_io.c
+SX1509.c
+fake_time.c
+stack_margin.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\common\stack_margin.c(63): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.

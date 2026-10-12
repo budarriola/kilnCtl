@@ -512,6 +512,9 @@ try {
     $script:builtExes = @()
     $script:buildFailures = @()
     $script:failedExes = @()
+    # Compile-only signals built outside Invoke-HostTestExe: NOT one of the $totalExpected
+    # executables, so kept out of -BuildFailures (Built+BuildFailures must equal Expected exactly).
+    $script:auxBuildFailures = @()
     $script:onlySelected = @()
 
     # Parallel compile, serial run. KILNCTL_HOST_BUILD_JOBS (default 4; 1 = the
@@ -3074,7 +3077,7 @@ try {
         # fails this script, via the same $script:buildFailures list every
         # other Invoke-HostTestExe-tracked source uses.
         Write-Host "BUILD FAILED: sim_credibility_gate_closedloop -- this DOES fail this script (compile-only signal; the file is still never run automatically and its results, when it does run, stay non-gating -- see file header)"
-        $script:buildFailures += "sim_credibility_gate_closedloop"
+        $script:auxBuildFailures += "sim_credibility_gate_closedloop"
     } else {
         Write-Host "sim_credibility_gate_closedloop: BUILD OK (not run automatically -- diagnostic with unresolved gains provenance, see file header; run by hand with the two capture paths as argv)"
     }
@@ -3611,9 +3614,14 @@ try {
         foreach ($f in $script:failedExes) { Write-Host "  $f" }
     }
 
+    if ($script:auxBuildFailures.Count -gt 0) {
+        Write-Host "AUX BUILD FAILURES ($($script:auxBuildFailures.Count)) -- compile-only, not counted in Built/Expected:"
+        foreach ($f in $script:auxBuildFailures) { Write-Host "  $f" }
+    }
     $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count -OnlyRun ([bool]$Only)
     if ($verdict.Mismatch) { Write-Host $verdict.MismatchText }
     if ($verdict.ExitCode -ne 0) { exit $verdict.ExitCode }
+    if ($script:auxBuildFailures.Count -gt 0) { exit 1 }
 
     Write-Host "all $totalExpected host test executables built and passed"
     exit 0

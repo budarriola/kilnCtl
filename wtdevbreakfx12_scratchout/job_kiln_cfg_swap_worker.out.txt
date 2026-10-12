@@ -1,0 +1,2 @@
+test_kiln_cfg_swap_worker.c
+safety_cfg_writer_guard.c

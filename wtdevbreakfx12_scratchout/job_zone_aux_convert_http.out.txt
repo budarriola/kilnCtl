@@ -1,0 +1,6 @@
+test_zone_aux_convert_http.c
+system_mode_gate.c
+fake_kv.c
+fake_time.c
+hal_status.c
+hal_esp_common.c

@@ -1,0 +1,1 @@
+cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\kcsw\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_kiln_cfg_swap_worker.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_swap_worker.c" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\safety\safety_cfg_writer_guard.c"

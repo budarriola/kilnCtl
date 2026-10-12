@@ -1,0 +1,4 @@
+test_cfg_fs_mount_state.c
+cfg_fs_format_gate.c
+fake_time.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\../drivers/persist/cfg_fs_mount.c(433): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_cfg_fs_mount_state.c)

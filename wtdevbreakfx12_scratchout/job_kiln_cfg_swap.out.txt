@@ -1,0 +1,10 @@
+test_kiln_cfg_swap.c
+fake_kv.c
+web_auth_store.c
+hal_status.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(112): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_swap.c)
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(112): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\web_auth_store.c)
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(123): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_swap.c)
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(123): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\persist\web_auth_store.c)
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\../drivers/persist/kiln_cfg_swap.c(119): warning C4996: 'strncpy': This function or variable may be unsafe. Consider using strncpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details. (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_kiln_cfg_swap.c)
+hal_esp_common.c

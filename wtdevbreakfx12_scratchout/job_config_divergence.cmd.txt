@@ -1,0 +1,1 @@
+cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\obj_config_divergence\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_config_divergence.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_config_divergence.c" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\..\drivers\safety\config_divergence.c"

@@ -1,0 +1,1 @@
+cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\uartbridgeworker\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_uart_bridge_ext_worker.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_uart_bridge_ext_worker.c"

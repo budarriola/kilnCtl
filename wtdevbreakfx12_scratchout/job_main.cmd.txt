@@ -1,0 +1,1 @@
+cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /experimental:c11atomics /Fo:"C:wtdevbreakfx12_scratchout\obj_main\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests.exe" @"C:wtdevbreakfx12_scratchout\host_tests_main_sources.rsp"

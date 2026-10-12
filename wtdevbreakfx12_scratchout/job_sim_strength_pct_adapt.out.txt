@@ -1,0 +1,11 @@
+sim_strength_pct_adapt.c
+sim_scenario_table.c
+sim_plant.c
+sim_high_temp.c
+sim_mistune.c
+pid.c
+pid_fuzzy.c
+pid_autotune.c
+firing_score.c
+C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\sim_strength_pct_adapt.c(172): warning C4244: 'function': conversion from 'float' to 'uint8_t', possible loss of data
+firing_compare.c
