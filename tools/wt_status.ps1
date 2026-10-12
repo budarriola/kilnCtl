@@ -1,4 +1,4 @@
-﻿# wt_status.ps1 -- report on, and safely prune, the worktrees/dirs under C:\wt.
+# wt_status.ps1 -- report on, and safely prune, the worktrees/dirs under C:\wt.
 #
 # WHY THIS EXISTS. C:\wt is a flat namespace shared by every concurrent
 # session (several hundred entries by 2026-10-07). Cleanup passes recur, and
@@ -235,6 +235,7 @@ function Get-ProcCount([string]$dirFull, $texts) {
 $gather = {
     param($dir, $registered, $base, $wantSize)
     $ErrorActionPreference = 'Continue'
+    if (-not ('WtStatusWalk' -as [type])) { throw 'WtStatusWalk helper type is not loaded (Add-Type at script top did not run in this session)' }
     $f = @{ Dir = $dir; GitOk = $true; Head = ''; Ahead = @(); Unlanded = 0; Ignored = 0; GitState = ''; Mod = 0; Untr = 0; Newest = 0; Bytes = 0; Kicad = $false; Errors = 0; HasGit = $false }
     $w = [WtStatusWalk]::Walk($dir, [bool]$wantSize)
     $f.Newest = $w.NewestTicksUtc; $f.Bytes = $w.Bytes; $f.Kicad = $w.HasKicad; $f.Errors = $w.Errors

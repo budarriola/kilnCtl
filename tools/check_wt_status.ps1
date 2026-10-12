@@ -212,6 +212,20 @@ try {
     Assert-True (($would -join ',') -eq 'landed,orphan,pfx,stale_clean,stale_ignored') "WhatIf should list exactly landed,orphan,pfx,stale_clean,stale_ignored; got: $($would -join ',')"
     Assert-True ((Test-Path -LiteralPath (Join-Path $ext1 "deep\sentinel.txt")) -and (Test-Path -LiteralPath (Join-Path $ext2 "deep\sentinel.txt"))) "WhatIf touched a junction target"
 
+    # Fresh child powershell, exactly how a person runs it (no PassThru, no Quiet):
+    # a type that only exists in the caller's session would show up here as
+    # "type not found". The printed preview must list every would-remove entry.
+    $cliOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $script:ScriptUnderTest -Root $wt -Repo $repo -Base origin/main -Prune -WhatIf 2>&1 | ForEach-Object { "$_" }
+    $cliRc = $LASTEXITCODE
+    $cliText = $cliOut -join "`n"
+    Assert-True ($cliRc -eq 0) "CLI -Prune -WhatIf exited $cliRc : $cliText"
+    Assert-True ($cliText -notmatch 'WtStatusWalk|not found|Unable to find type') "CLI -Prune -WhatIf hit a type error: $cliText"
+    Assert-True ($cliText -match 'PRUNE \(WhatIf: nothing removed\)') "CLI -Prune -WhatIf printed no WhatIf preview: $cliText"
+    foreach ($nm in 'landed', 'orphan', 'pfx', 'stale_clean', 'stale_ignored') {
+        Assert-True ($cliText -match "(?m)^\s*$nm\s+\S+\s+would remove") "CLI -Prune -WhatIf preview missing 'would remove' row for $nm"
+    }
+    $after2 = @(Get-ChildItem -LiteralPath $wt -Force | ForEach-Object { $_.Name }) | Sort-Object
+    Assert-True (($before -join ',') -eq ($after2 -join ',')) "CLI WhatIf removed or created something under the root"
     Step 'WhatIf done'
     # ======== -Prune ========
     $p = Run-Tool @{ Prune = $true }

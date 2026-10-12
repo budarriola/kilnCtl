@@ -93,9 +93,9 @@ param(
 # `--recursive` in case either submodule nests its own (lvgl in particular
 # has had submodules of its own upstream). `-NoSubmodules` opts back out for
 # a caller who wants a bare checkout fast and does not need the check suite
-# to pass -- the mint itself never fails because of this step; a submodule
-# init failure is printed loudly but the worktree that was already created
-# is still handed back.
+# to pass -- the mint FAILS (exit 1, naming the step) if the init fails or leaves tools/mykicadMcp empty; a submodule
+# init is retried (lock races between concurrent mints) and then verified; the worktree that was already created
+# is left in place for a by-hand re-run.
 
 # NOTE: deliberately "Continue", not "Stop". PowerShell 5.1 treats a native
 # command's stderr output as a terminating NativeCommandError under
@@ -304,12 +304,31 @@ if ($LASTEXITCODE -ne 0) {
 
 if (-not $NoSubmodules) {
     Write-Host "Initializing submodules in $target (git submodule update --init --recursive) ..." -ForegroundColor Cyan
-    git -C $target submodule update --init --recursive *>$null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: git submodule update --init --recursive failed (exit $LASTEXITCODE) in $target -- KilnFW target builds and mykicadMcp-dependent checks will fail until this is resolved by hand (e.g. re-run: git -C `"$target`" submodule update --init --recursive). The worktree itself was created successfully; this does not fail the mint." -ForegroundColor Yellow
-    } else {
-        Write-Host "Submodules initialized." -ForegroundColor Green
+    # Concurrent mints share one .git/modules store, so an init can lose a lock race
+    # (config.lock / index.lock) and fail transiently. Capture the output (it used to
+    # be discarded), retry with backoff, then VERIFY the result; a failed or empty
+    # init fails the mint loudly instead of leaving an empty tools/mykicadMcp.
+    $subOut = @(); $subRc = 1
+    for ($try = 1; $try -le 4; $try++) {
+        $subOut = @(git -C $target submodule update --init --recursive 2>&1 | ForEach-Object { "$_" })
+        $subRc = $LASTEXITCODE
+        if ($subRc -eq 0) { break }
+        Write-Host "submodule init attempt $try failed (exit $subRc); retrying ..." -ForegroundColor Yellow
+        Start-Sleep -Seconds (2 * $try)
     }
+    $subProblem = ''
+    if ($subRc -ne 0) { $subProblem = "git submodule update --init --recursive exited $subRc after retries" }
+    else {
+        $subMissing = @('tools/mykicadMcp') | Where-Object { -not (Test-Path -LiteralPath (Join-Path $target ($_ + '/.git'))) -or @(Get-ChildItem -LiteralPath (Join-Path $target $_) -Force | Where-Object { $_.Name -ne '.git' }).Count -eq 0 }
+        if ($subMissing) { $subProblem = "init reported success but submodule(s) not populated: $($subMissing -join ', ')" }
+    }
+    if ($subProblem) {
+        Write-Host "ERROR: step 'submodule init' failed in ${target}: $subProblem" -ForegroundColor Red
+        $subOut | Select-Object -Last 8 | ForEach-Object { Write-Host "  git: $_" -ForegroundColor Red }
+        Write-Host "The worktree exists at $target but is not usable. Re-run: git -C `"$target`" submodule update --init --recursive" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Submodules initialized and verified." -ForegroundColor Green
 } else {
     Write-Host "Skipping submodule initialization (-NoSubmodules). KilnFW target builds and mykicadMcp-dependent checks will fail until 'git submodule update --init --recursive' is run by hand in $target." -ForegroundColor Yellow
 }
