@@ -1126,7 +1126,8 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     bool pico_reboot_by_boot_id = false;
     uint8_t pico_boot_id_prev = 0u;
     uint32_t pico_uptime_prev_ms = link->pico_uptime_baseline_ms;
-    uint32_t esp_now_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
+    /* REBOOTFX3 LOW-2: stamped at UART receive, not drain, so an inbox stall cannot skew elapsed. */
+    uint32_t esp_now_ms = msg->rx_ms;
     if (link->pico_uptime_baseline_known &&
         safety_pico_uptime_behind_expected(link->pico_uptime_baseline_ms,
                                            (uint32_t)(esp_now_ms - link->pico_uptime_baseline_esp_ms),

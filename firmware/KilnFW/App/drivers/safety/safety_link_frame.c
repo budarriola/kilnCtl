@@ -63,8 +63,8 @@ bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elaps
         return false;
     }
     /* REBOOTFX2 LOW-3: physical bound. A reboot happens after the baseline, so the new boot's uptime cannot
-     * exceed the ESP time elapsed since it. A late-drained DIAG or a frozen uptime makes `diff` very negative
-     * with a large now_ms; that is not a reboot. */
+     * exceed the ESP time elapsed since it. A late-drained DIAG or a frozen uptime puts now_ms far from expected
+     * (ahead of it); that is not a reboot. */
     return now_ms <= esp_elapsed_ms + tol;
 }
 

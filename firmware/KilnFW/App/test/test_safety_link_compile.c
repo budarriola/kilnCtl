@@ -1208,14 +1208,51 @@ static void test_k4_edge_counting_boot_id_change_counts_zero(void)
 
 // kilnlink audit 2026-10-09 M1: the 8-bit boot_id repeats 1 boot in 256, so
 // a Pico reboot must ALSO be caught by its DIAG uptime_ms stepping backwards.
-static void apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms)
+static void apply_diag_uptime_rx(SafetyLinkClass *link, uint32_t uptime_ms, uint32_t rx_ms)
 {
     uart_proto_message_t msg;
     memset(&msg, 0, sizeof(msg));
+    msg.rx_ms = rx_ms; /* REBOOTFX3 LOW-2: receive-time stamp, independent of the (fake) drain tick */
     set_diag_frame(msg.payload, 0u, 0u);
     safety_put_u32_le(&msg.payload[6], uptime_ms);
     msg.length = SAFETY_LINK_DIAG_FRAME_LEN;
     TEST_CHECK(safety_apply_diag(link, &msg) == true, "DIAG frame applied");
+}
+
+static void apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms)
+{
+    apply_diag_uptime_rx(link, uptime_ms, (uint32_t)s_fake_tick_count);
+}
+
+// REBOOTFX3 LOW-2 / INFO-1: elapsed comes from the UART receive stamp, not the drain tick.
+static void test_pico_uptime_uses_receive_time_not_drain_time(void)
+{
+    TEST_SECTION("safety_apply_diag -- baseline DIAG drained late but received on time is not a reboot "
+                 "across the Pico's 2^32 wrap (REBOOTFX3 INFO-1)");
+    SafetyLinkClass link = make_link();
+    uart_proto_message_t fw_msg;
+    memset(&fw_msg, 0, sizeof(fw_msg));
+    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
+                                          /*config_version=*/0, /*config_crc=*/0);
+    safety_apply_fw_version(&link, &fw_msg);
+    link.reannounce_pending = false;
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    TickType_t saved_tick = s_fake_tick_count;
+
+    // Baseline: Pico uptime 1 s before its wrap, received at t=1000 but drained 2.5 s late (t=3500).
+    s_fake_tick_count = 3500u;
+    apply_diag_uptime_rx(&link, UINT32_MAX - 999u, 1000u);
+    // Current DIAG: 5 s after the baseline reception, Pico on schedule (wrapped to 4000), drained at t=6000.
+    s_fake_tick_count = 6000u;
+    apply_diag_uptime_rx(&link, 4000u, 6000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 0u,
+               "late-drained baseline, on-time receive: Pico wrap is not a reboot");
+
+    // A real reboot is still caught by receive-time elapsed.
+    s_fake_tick_count = 7000u;
+    apply_diag_uptime_rx(&link, 100u, 7000u);
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u, "real reboot still counted with receive stamps");
+    s_fake_tick_count = saved_tick;
 }
 
 static void test_pico_reboot_detected_by_uptime_regression(void)
@@ -1250,6 +1287,12 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
                "LOW/MED-2: on-schedule 31-day baseline is not a reboot");
     TEST_CHECK(!safety_pico_uptime_behind_expected(1000u, 0u, 500u),
                "small step back inside tolerance on a young Pico is not a reboot");
+    // REBOOTFX3 INFO-2: continuity-window boundaries (kills back<tol, dropped 200 ppm term, fwd<tol).
+    TEST_CHECK(!safety_pico_uptime_behind_expected(2000u, 0u, 0u), "INFO-2: back == tol is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(0u, 1000000u, 1000000u - 2100u),
+               "INFO-2: tol includes the 200 ppm term (2200 at 1000 s)");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(UINT32_MAX - 999u, 1000u, 2000u),
+               "INFO-2: fwd == tol across the wrap is not a reboot");
     // INFO-4: bound boundary (tol = 2000 at elapsed 1000).
     TEST_CHECK(safety_pico_uptime_behind_expected(600000u, 1000u, 1000u + 2000u),
                "INFO-4: now == elapsed + tol is a reboot");
@@ -3724,6 +3767,7 @@ int main(void)
     test_pico_boot_id_change_logs_once();
     test_k4_edge_counting_boot_id_change_counts_zero();
     test_pico_reboot_detected_by_uptime_regression();
+    test_pico_uptime_uses_receive_time_not_drain_time();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();
     test_fw_version_frame_too_short_for_min_compatible_leaves_peer_unknown();

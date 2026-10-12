@@ -283,6 +283,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
             .task_id = src_task,
             .msg_index = msg_index,
             .length = length,
+            .rx_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
         };
         memcpy(bmsg.payload, &raw[HEADER_LEN], length);
         /* No dedup, no reply either way: a lost or duplicated broadcast is
@@ -337,6 +338,7 @@ static void handle_raw_frame(uart_protocol_t *proto, const uint8_t *raw, size_t 
         .task_id = src_task,
         .msg_index = msg_index,
         .length = length,
+        .rx_ms = (uint32_t)(xTaskGetTickCount() * portTICK_PERIOD_MS),
     };
     memcpy(msg.payload, &raw[HEADER_LEN], length);
 

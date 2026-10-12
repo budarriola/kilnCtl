@@ -218,3 +218,7 @@ assertion.
 | INFO-1 | INFO | `safety_link_frame.c:62-68` new FP at the Pico 2^32 wrap with a late-drained baseline |
 | INFO-2 | INFO | `test_safety_link_compile.c:1226-1259` R1/R2/R3 MISSED |
 | INFO-3 | INFO | inherent miss when the old boot was `<= tol` old, unchanged |
+
+## Fix status
+
+LOW-1, LOW-2, INFO-1 and INFO-2 fixed (REBOOTFX4): header contract rewritten; `uart_proto_message_t.rx_ms` stamped at both UART receive sites and used as the DIAG timestamp (`safety_link_frames.c`); new host test `test_pico_uptime_uses_receive_time_not_drain_time`; three INFO-2 edge pins added. INFO-3 is inherent, unchanged.

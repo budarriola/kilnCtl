@@ -121,6 +121,7 @@ typedef struct {
     uint16_t msg_index;
     uint8_t length;
     uint8_t payload[UART_PROTO_MAX_PAYLOAD];
+    uint32_t rx_ms; /* ESP tick (ms) when the frame was received, not when the inbox was drained */
 } uart_proto_message_t;
 
 typedef struct {
