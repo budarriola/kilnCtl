@@ -271,8 +271,83 @@ except ImportError:  # pragma: no cover
 
 @_timeout30
 class BuildLockReviewFixes(unittest.TestCase):
+    def setUp(self):
+        # A busy-spin or an ignored wait_timeout must FAIL as an assertion in
+        # the test that hits it. pytest-timeout's Windows (thread) method
+        # kills the whole pytest process, so it never prints a FAILED line
+        # (REVIEW_BUILDFX5 LOW-3). Every test here keeps reclaiming for well
+        # under a second; 10 s or 2000 calls means the loop never ends.
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        real = bl._try_reclaim
+        state = {"n": 0, "t0": None}
+
+        def guarded(*a, **k):
+            state["n"] += 1
+            if state["t0"] is None:
+                state["t0"] = time.monotonic()
+            if state["n"] > 2000 or time.monotonic() - state["t0"] > 10.0:
+                raise AssertionError(
+                    f"build_lock kept reclaiming ({state['n']} calls in "
+                    f"{time.monotonic() - state['t0']:.1f}s): busy-spin or "
+                    "wait_timeout ignored")
+            return real(*a, **k)
+
+        patcher = mock.patch.object(bl, "_try_reclaim", guarded)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _key(self):
         return f"fx5-{os.getpid()}-{time.time_ns()}"
+
+    def test_unknown_start_time_holder_is_still_age_reclaimed(self):
+        # Documented: alive but start time unknown (e.g. OpenProcess access
+        # denied) is NOT confirmed alive, so the age path still applies.
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        key = self._key()
+        path = _lock_path(key)
+        with open(path, "w") as f:
+            f.write("4242 1700000000 tok\n")
+        old = time.time() - 5000
+        os.utime(path, (old, old))
+        real_info = bl._pid_info
+
+        def info(pid):
+            return (True, None) if pid == 4242 else real_info(pid)
+
+        with mock.patch.object(bl, "_pid_info", info):
+            with build_lock(key, wait_timeout=3, poll_interval=0.05, stale_after=10):
+                self.assertNotIn("4242", open(path).read())
+
+    def test_release_restore_never_overwrites_a_newer_lock(self):
+        # Our lock was reclaimed and replaced by A's; between our rename-aside
+        # and restore, B creates a lock. The restore must not clobber B's, and
+        # the grabbed aside file must not be left behind.
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        key = self._key()
+        path = _lock_path(key)
+        with open(path, "w") as f:
+            f.write("1 2 tokenA\n")
+        real_rename = os.rename
+        seen = {"n": 0}
+
+        def rename(src, dst):
+            real_rename(src, dst)
+            seen["n"] += 1
+            if seen["n"] == 1:
+                with open(path, "w") as f:
+                    f.write("3 4 tokenB\n")
+
+        try:
+            with mock.patch.object(bl.os, "rename", rename):
+                bl._release(path, "1 2 mine")
+            self.assertEqual(open(path).read().strip(), "3 4 tokenB")
+            self.assertEqual([n for n in os.listdir(os.path.dirname(path))
+                              if n.startswith(os.path.basename(path) + ".rel.")], [])
+        finally:
+            os.remove(path)
 
     def test_alive_holder_old_lock_is_never_age_reclaimed(self):
         key = self._key()
