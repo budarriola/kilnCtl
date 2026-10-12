@@ -286,6 +286,23 @@ class BuildLockReleaseAndReclaimGuards(unittest.TestCase):
             os.remove(path)
         self.assertFalse(os.path.exists(path + ".reclaim"), "sidecar leaked")
 
+    def test_reclaim_requires_identical_content_even_if_new_holder_also_dead(self):
+        """The judged file and the file about to be removed must be the same
+        file: a different (even dead) lock is left for its own judgement."""
+        import mcpkit.buildlock as bl
+        key = f"test-samecontent-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write("99999998 0 tokenB\n")
+        try:
+            bl._try_reclaim(path, "99999997 0 tokenA", force=False)
+            self.assertTrue(os.path.exists(path))
+            bl._try_reclaim(path, "99999998 0 tokenB", force=False)
+            self.assertFalse(os.path.exists(path), "identical dead lock not reclaimed")
+        finally:
+            if os.path.exists(path):
+                os.remove(path)
+
     def test_reclaim_sidecar_held_by_another_blocks_removal(self):
         import mcpkit.buildlock as bl
         key = f"test-sidecar-{os.getpid()}-{time.time_ns()}"

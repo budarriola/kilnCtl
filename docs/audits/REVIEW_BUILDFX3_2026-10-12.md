@@ -224,11 +224,11 @@ the defect. They were shown with the two scratch scripts described above.
 
 | Finding | Status |
 |---|---|
-| MED-1 reclaim check-then-act | open |
-| MED-2 orphaned build after server death | open |
-| LOW-1 reuse guard vs clock step | open |
-| LOW-2 `_pid_info` branch tests | open |
-| LOW-3 `fixture_flash` 0-byte | open |
+| MED-1 reclaim check-then-act | fixed (BUILDFX4): reclaim through an O_EXCL `.reclaim` sidecar that re-reads and re-judges the lock; lock carries a unique token and release removes only its own; Windows PermissionError on create/remove treated as contention/retried; 8-process x 20-round dead-PID stress test |
+| MED-2 orphaned build after server death | fixed (BUILDFX4): option (a), `mcpkit/jobtree.py` puts every `workbench._run` child in a process-wide KILL_ON_JOB_CLOSE Job object. Chosen over (b) because it also closes the orphan-after-stall gap and needs no descendant tracking; tested by killing a holder that has a live child |
+| LOW-1 reuse guard vs clock step | fixed (BUILDFX4): lock records the holder's own process start; reclaim only when the live PID's start differs by more than 2 s (buildgate's tolerance) |
+| LOW-2 `_pid_info` branch tests | fixed (BUILDFX4): `PidInfoBranches` (access denied, other open failure, STILL_ACTIVE, exit-code failure, GetProcessTimes failure); `_pid_info` now uses buildgate's declared kernel32 prototypes |
+| LOW-3 `fixture_flash` 0-byte | fixed (BUILDFX4): refused before `kill_openocd_sessions` |
 
 ## Full -Fast suite (review worktree at c17c9ef1a)
 
