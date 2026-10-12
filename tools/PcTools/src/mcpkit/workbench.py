@@ -148,6 +148,12 @@ _CONTENTION_SIGNATURES = (
 )
 
 
+def _clean_env(base: "Optional[dict[str, str]]" = None) -> "dict[str, str]":
+    """Copy of ``base`` (default os.environ) without the Git Bash MSYS vars."""
+    src = os.environ if base is None else base
+    return {k: v for k, v in src.items() if k.upper() not in _MSYS_ENV_VARS}
+
+
 def _contention_note(output: str) -> "Optional[str]":
     for pattern, explanation in _CONTENTION_SIGNATURES:
         if pattern.search(output):
@@ -176,8 +182,7 @@ def _run(tag: str, argv: "Sequence[str]", *, cwd: Optional[str] = None,
     """
     argv = list(argv)
     started = time.monotonic()
-    if env is None:
-        env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+    env = _clean_env(env)
     proc = None
     try:
         proc = subprocess.Popen(
@@ -343,7 +348,7 @@ def _run_locked(tag: str, resource_key: str, argv: "Sequence[str]", *,
                 return _run(tag, argv, **kwargs)
             try:
                 with kiln_build_gate(gate_label, wait_result=gate_wait):
-                    kwargs["env"] = child_env(kwargs.get("env"))
+                    kwargs["env"] = child_env(_clean_env(kwargs.get("env")))
                     return _run(tag, argv, **kwargs)
             except TimeoutError as exc:
                 return f"{tag}: FAILED (lock contention) -- {exc}"
@@ -410,7 +415,7 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
             sdk_path = resolve_pico_sdk_path()
         except PicoSdkNotFoundError as exc:
             return f"{tag}: error: {exc}"
-        configure_env = {k: v for k, v in os.environ.items() if k not in _MSYS_ENV_VARS}
+        configure_env = _clean_env()
         configure_env["PICO_SDK_PATH"] = sdk_path
         configure_argv = ["cmake", "-S", src, "-B", build_dir, "-G", "Ninja"]
         result = _run_locked(f"{tag}-configure", build_dir, configure_argv, cwd=src, env=configure_env)
@@ -433,6 +438,39 @@ def _cmake_build(tag: str, build_dir: str, jobs: int, source_dir: str) -> str:
 #: Puts idf.py, cmake, ninja and the Xtensa toolchain on PATH in one step.
 #: Everything else is a partial environment that fails later and less clearly.
 _IDF_PROFILE = r"C:\Espressif\tools\Microsoft.v6.0.2.PowerShell_profile.ps1"
+
+
+_KILNFW_ARTIFACTS = (
+    ("KilnCtrl.bin",),
+    ("bootloader", "bootloader.bin"),
+    ("partition_table", "partition-table.bin"),
+)
+
+
+def _enforce_fresh_artifacts(report: str, tag: str, build_dir: str, since: float) -> str:
+    """Downgrade an OK ``tag`` report unless every KilnFW binary exists with an
+    mtime at or after ``since`` (wall clock job start). An exit code alone is
+    not trusted: idf.py can print an error and still leave exit 0 upstream."""
+    ok_prefix = f"{tag}: OK"
+    if ok_prefix not in report:
+        return report
+    problems = []
+    for parts in _KILNFW_ARTIFACTS:
+        path = os.path.join(build_dir, *parts)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            problems.append(f"missing: {path}")
+            continue
+        if mtime < since - 2.0:
+            problems.append(f"stale (older than job start): {path}")
+    if "MSys/Mingw is no longer supported" in report:
+        problems.append("idf.py reported 'MSys/Mingw is no longer supported'")
+    if not problems:
+        return report
+    tail = "\n".join(report.splitlines()[1:][-25:])
+    return (f"{tag}: FAILED (exit code OK but build artifacts not fresh): "
+            + "; ".join(problems) + f"\n--\noutput tail:\n{tail}")
 
 
 def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = False,
@@ -589,6 +627,7 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
     command = f"& '{_IDF_PROFILE}' *>&1 | Out-Null; {inner}; exit $LASTEXITCODE"
     elf_path = os.path.join(build_dir, "KilnCtrl.elf")
     elf_before = _stat_snapshot(elf_path)
+    job_start_wall = time.time()
     wait_result = GateWaitResult()
     # Lock first, slot only around the compile (inside _run_locked).
     kilnfw_report = _run_locked(
@@ -597,6 +636,9 @@ def build_kilnfw(target: str = "build", jobs: int = 0, skip_saftyfw: bool = Fals
         timeout=_build_ceiling_seconds(),
         stall_seconds=_env_seconds("KILNCTL_BUILD_STALL_S", 900),
         gate_label=f"kilnfw-{target}", gate_wait=wait_result)
+    if target == "build":
+        kilnfw_report = _enforce_fresh_artifacts(kilnfw_report, "kilnfw-build", build_dir,
+                                                 job_start_wall)
     if "FAILED (lock contention)" in kilnfw_report and saftyfw_report:
         return f"{saftyfw_report}\n\n{kilnfw_report}"
     if wait_result.waited_seconds > 0:

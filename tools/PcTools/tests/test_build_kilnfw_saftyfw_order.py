@@ -11,6 +11,18 @@ import os
 from mcpkit import workbench
 
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _no_artifact_gate(monkeypatch):
+    """These tests stub the toolchain; artifact freshness has its own tests
+    (test_build_kilnfw_artifact_gate.py)."""
+    from mcpkit import workbench as _wb
+    monkeypatch.setattr(_wb, "_enforce_fresh_artifacts", lambda report, *a, **k: report)
+
+
+
 def test_saftyfw_runs_before_kilnfw_and_both_reported(monkeypatch, tmp_path):
     calls = []
 

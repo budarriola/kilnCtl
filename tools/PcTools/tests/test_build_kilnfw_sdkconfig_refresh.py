@@ -35,6 +35,18 @@ import os
 from mcpkit import workbench
 
 
+import pytest as _pytest
+
+
+@_pytest.fixture(autouse=True)
+def _no_artifact_gate(monkeypatch):
+    """These tests stub the toolchain; artifact freshness has its own tests
+    (test_build_kilnfw_artifact_gate.py)."""
+    from mcpkit import workbench as _wb
+    monkeypatch.setattr(_wb, "_enforce_fresh_artifacts", lambda report, *a, **k: report)
+
+
+
 def _fake_ok_run_locked_relinks_elf(tag, resource_key, argv, **kwargs):
     """Simulates a build that actually relinks build/KilnCtrl.elf."""
     elf = os.path.join(resource_key, "KilnCtrl.elf")
