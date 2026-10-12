@@ -375,19 +375,22 @@ for ($try = 1; $try -le $MaxPushTries; $try++) {
     $pout = (& git push origin HEAD:$Target 2>&1 | Out-String)
     if ($LASTEXITCODE -eq 0) { $pushed = $true; break }
     # A concurrent-push ref-lock collision is reported as [remote rejected] (failed to update ref) but is a race: retry.
-    $refRace = $pout -match 'cannot lock ref|failed to update ref[^\r\n]*expected|is at \S+ but expected'
+    # Anchored to git's own receive-pack line (optionally behind "remote: "), so free text in a hook refusal or a
+    # lock that never clears ("File exists") that merely mentions "cannot lock ref" is NOT taken for a race.
+    $script:lastPushOut = $pout
+    $refRace = $pout -match "(?m)(?:^|\s)(?:remote: )?error: cannot lock ref '[^'\r\n]+': is at \S+ but expected \S+\s*$"
+    if (-not $refRace -and $pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
     if ($refRace) {
         Write-Host "push lost a ref-lock race (cannot lock ref); re-fetching and rebasing" -ForegroundColor Yellow
         continue
     }
-    if ($pout -match '\[remote rejected\]') { Finish 1 "git push was refused by the remote (hook / protected branch), not a race: $($pout.Trim())" }
     if ($pout -match 'non-fast-forward|fetch first|\[rejected\]') {
         Write-Host "push rejected as non-fast-forward; re-fetching and rebasing" -ForegroundColor Yellow
         continue
     }
     Finish 1 "git push failed (not a non-fast-forward rejection): $($pout.Trim())"
 }
-if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts" }
+if (-not $pushed) { Finish 1 "push still rejected after $MaxPushTries attempts; last git output: $("$script:lastPushOut".Trim())" }
 
 # ---------------------------------------------------------------- 6
 Step "push_verify"

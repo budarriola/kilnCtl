@@ -223,8 +223,7 @@ try {
     Commit-File $c "rej.txt" "x" "rej"
     $hook = Join-Path $origin "hooks/pre-receive"
     [IO.File]::WriteAllText($hook, "#!/bin/sh`necho 'no pushes today' >&2`nexit 1`n")
-    $r = Run-Land $c @("-ChecksScript", $okStub)
-    Remove-Item -LiteralPath $hook -Force
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
     Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote') "remote rejection fails with its message"
     Assert ($rebases -le 1) "no retry loop on remote rejection (rebases: $rebases)"
@@ -235,11 +234,26 @@ try {
     $lm = (Join-Path $tmp "lockref.marker") -replace '\\','/'
     $hook = Join-Path $origin "hooks/pre-receive"
     [IO.File]::WriteAllText($hook, "#!/bin/sh`nif [ ! -f '$lm' ]; then touch '$lm'; echo `"error: cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb`" >&2; exit 1; fi`nexit 0`n")
-    $r = Run-Land $c @("-ChecksScript", $okStub)
-    Remove-Item -LiteralPath $hook -Force
+    try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after cannot-lock-ref retry"
     Assert ($rebases -eq 2) "rebased twice after ref-lock race (got $rebases)"
+
+    # LOW-1: a genuine refusal whose free text mentions the race phrases, or a lock that never clears, is NOT a race.
+    foreach ($variant in @(
+        @{ n = 'refusal text'; msg = 'no pushes today: signed commit expected; cannot lock ref until review' },
+        @{ n = 'is at but expected in prose'; msg = 'policy: tip is at review but expected approval' },
+        @{ n = 'stale lock'; msg = "error: cannot lock ref 'refs/heads/dev': Unable to create dev.lock: File exists" })) {
+        Write-Host "case: hook refusal ($($variant.n)) is not a race; message kept"
+        $c = New-Clone ("c_lk_" + ($variant.n -replace '\W', ''))
+        Commit-File $c "lk.txt" "x" "lk"
+        $hook = Join-Path $origin "hooks/pre-receive"
+        [IO.File]::WriteAllText($hook, "#!/bin/sh`necho `"$($variant.msg)`" >&2`nexit 1`n")
+        try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
+        $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+        Assert ($r.Code -eq 1 -and $r.Out -match 'refused by the remote' -and $r.Out -match [regex]::Escape($variant.msg)) "$($variant.n): refused with its message"
+        Assert ($rebases -le 1) "$($variant.n): not retried (rebases: $rebases)"
+    }
     Write-Host "case: -RestartMcp really runs mcp_servers.ps1 restart then status (F3)"
     $c = New-Clone "c_mcp"
     Commit-File $c "mcp.txt" "x" "mcp"

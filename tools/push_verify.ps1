@@ -136,43 +136,73 @@ public static class PvJob {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr CreateFileW(string f, uint acc, uint share, ref SA sa, uint disp, uint fl, IntPtr t);
     [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr t);
     [DllImport("kernel32.dll")] static extern bool TerminateProcess(IntPtr p, uint c);
-    public static System.Diagnostics.Process Launch(string cmdLine, string outPath, string errPath, IntPtr job, int assignDelayMs, out bool assigned) {
-        assigned = false;
+    [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr h, uint ms);
+    [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr h, out long c, out long e, out long k, out long u);
+    // The caller owns the returned native process handle (hp) and uses it for the wait, the exit code and the
+    // kill, so the exit code is never lost to a child that exits early and a PID is never re-opened.
+    // INFO-2: bInheritHandles stays TRUE without PROC_THREAD_ATTRIBUTE_HANDLE_LIST (needs STARTUPINFOEX plus
+    // attribute-list marshalling); the job kill covers the normal path, so inheritance is left as documented.
+    public static IntPtr Launch(string gitExe, string cmdLine, string outPath, string errPath, IntPtr job, int assignDelayMs, out bool assigned, out int pid) {
+        assigned = false; pid = 0;
         SA sa = new SA(); sa.n = Marshal.SizeOf(typeof(SA)); sa.inh = 1;
+        IntPtr bad = new IntPtr(-1);
         IntPtr hin = CreateFileW("NUL", 0x80000000, 3, ref sa, 3, 0x80, IntPtr.Zero);
+        int e1 = Marshal.GetLastWin32Error();
         IntPtr hout = CreateFileW(outPath, 0x40000000, 7, ref sa, 2, 0x80, IntPtr.Zero);
+        int e2 = Marshal.GetLastWin32Error();
         IntPtr herr = CreateFileW(errPath, 0x40000000, 7, ref sa, 2, 0x80, IntPtr.Zero);
+        int e3 = Marshal.GetLastWin32Error();
         try {
+            if (hin == bad) throw new System.ComponentModel.Win32Exception(e1, "CreateFileW(NUL) failed");
+            if (hout == bad) throw new System.ComponentModel.Win32Exception(e2, "CreateFileW(stdout temp) failed");
+            if (herr == bad) throw new System.ComponentModel.Win32Exception(e3, "CreateFileW(stderr temp) failed");
             SI si = new SI(); si.cb = Marshal.SizeOf(typeof(SI)); si.flags = 0x100; si.hin = hin; si.hout = hout; si.herr = herr;
             PI pi;
-            if (!CreateProcessW(null, new System.Text.StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, true, 0x4, IntPtr.Zero, null, ref si, out pi))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            if (!CreateProcessW(gitExe, new System.Text.StringBuilder(cmdLine), IntPtr.Zero, IntPtr.Zero, true, 0x4, IntPtr.Zero, null, ref si, out pi))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW failed");
+            bool keep = false;
             try {
                 if (assignDelayMs > 0) System.Threading.Thread.Sleep(assignDelayMs);
                 if (job != IntPtr.Zero) assigned = AssignProcessToJobObject(job, pi.hp);
-                System.Diagnostics.Process p = System.Diagnostics.Process.GetProcessById(pi.pid); // handle still held: PID cannot be reused
-                ResumeThread(pi.ht);
-                return p;
+                if (ResumeThread(pi.ht) == 0xFFFFFFFF) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "ResumeThread failed");
+                pid = pi.pid; keep = true;
+                return pi.hp;
             } catch { TerminateProcess(pi.hp, 1); throw; }
-            finally { CloseHandle(pi.ht); CloseHandle(pi.hp); }
-        } finally { CloseHandle(hin); CloseHandle(hout); CloseHandle(herr); }
-    }    public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
+            finally { CloseHandle(pi.ht); if (!keep) CloseHandle(pi.hp); }
+        } finally {
+            if (hin != bad) CloseHandle(hin);
+            if (hout != bad) CloseHandle(hout);
+            if (herr != bad) CloseHandle(herr);
+        }
+    }
+    public static bool WaitExit(IntPtr h, int ms) { return WaitForSingleObject(h, (uint)ms) == 0; }
+    public static long ExitCode(IntPtr h) { uint c; if (!GetExitCodeProcess(h, out c)) return -1; return c; }
+    public static void KillProc(IntPtr h) { TerminateProcess(h, 1); }
+    public static long StartFileTime(IntPtr h) { long c, e, k, u; return GetProcessTimes(h, out c, out e, out k, out u) ? c : 0; }
+    public static void CloseProc(IntPtr h) { CloseHandle(h); }
+    public static void Kill(IntPtr j) { TerminateJobObject(j, 1); }
     public static void Close(IntPtr j) { CloseHandle(j); }
 }
 "@
 }
 $fetchJob = [PvJob]::Create()
 $outTmp = [IO.Path]::GetTempFileName(); $errTmp = [IO.Path]::GetTempFileName()
-$fetchOk = $false; $fetchMsg = ""
+$fetchOk = $false; $fetchMsg = ""; $fetchH = [IntPtr]::Zero
 try {
     $fetchCmd = "git -C `"$repoRoot`" fetch --no-tags $remote +refs/heads/${branchName}:refs/remotes/$remote/$branchName"
-    $assignDelay = 0; if ($env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -match '^\d+$') { $assignDelay = [int]$env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS }  # env hook: check_push_verify widens the create->assign window
+    # env hook: check_push_verify widens the create->assign window. Honored only with PUSH_VERIFY_TEST_MODE=1, capped at 5000 ms, parsed safely.
+    $assignDelay = 0
+    if ($env:PUSH_VERIFY_TEST_MODE -eq '1' -and $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -match '^\d{1,5}$') { $assignDelay = [math]::Min(5000, [int]$env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS) }
+    $gitExe = (Get-Command git -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
     $jobAssigned = $false
     $useJob = ($fetchJob -ne [IntPtr]::Zero -and $env:PUSH_VERIFY_TEST_NO_JOB -ne '1')  # env hook: check_push_verify forces the no-job fallback
     # Created suspended, assigned to the job, then resumed (M1). Assign result is checked: if the job cannot hold the process, a timeout falls back to the snapshot walk.
-    $fetchProc = [PvJob]::Launch($fetchCmd, $outTmp, $errTmp, $(if ($useJob) { $fetchJob } else { [IntPtr]::Zero }), $assignDelay, [ref]$jobAssigned)
-    $null = $fetchProc.Handle
-    if (-not $fetchProc.WaitForExit($FetchTimeoutSec * 1000)) {
+    $fetchPid = 0
+    $fetchH = [PvJob]::Launch($gitExe, $fetchCmd, $outTmp, $errTmp, $(if ($useJob) { $fetchJob } else { [IntPtr]::Zero }), $assignDelay, [ref]$jobAssigned, [ref]$fetchPid)
+    # test seam: let git exit before the first read (MED-1 regression case)
+    if ($env:PUSH_VERIFY_TEST_MODE -eq '1' -and $env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS -match '^\d{1,4}$') { Start-Sleep -Milliseconds ([int]$env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS) }
+    if (-not [PvJob]::WaitExit($fetchH, $FetchTimeoutSec * 1000)) {
         if ($jobAssigned) { [PvJob]::Kill($fetchJob) }
         else {
             # no job membership: walk ALL descendants (git -> git-remote-http -> helpers) from one
@@ -184,10 +214,10 @@ try {
             Write-Host "push_verify: no job membership; killing the fetch process tree by snapshot (handle-checked)."
             try {
                 $snap = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
-                $rootCreated = $fetchProc.StartTime
-                $rootSnap = $snap | Where-Object { [int]$_.ProcessId -eq $fetchProc.Id } | Select-Object -First 1
+                $rootCreated = [DateTime]::FromFileTime([PvJob]::StartFileTime($fetchH))
+                $rootSnap = $snap | Where-Object { [int]$_.ProcessId -eq $fetchPid } | Select-Object -First 1
                 if ($rootSnap -and $rootSnap.CreationDate) { $rootCreated = $rootSnap.CreationDate }
-                $walk = Get-PvDescendantOrder -Snap $snap -RootId ([int]$fetchProc.Id) -RootCreated $rootCreated
+                $walk = Get-PvDescendantOrder -Snap $snap -RootId ([int]$fetchPid) -RootCreated $rootCreated
                 $order = New-Object System.Collections.ArrayList; $keep = @{}
                 foreach ($w in $walk) { [void]$order.Add($w.Id); $keep[$w.Id] = $w.Created }
                 $handles = Open-PvTargets -Ids ([int[]]@($order)) -Created $keep
@@ -196,13 +226,14 @@ try {
                 Stop-PvTargets -Order ([int[]]@($order)) -Handles $handles   # lib: kills only via the handles opened above, never by bare PID
             } catch { }
         }
-        try { if (-not $fetchProc.HasExited) { $fetchProc.Kill() } } catch { }
-        $null = $fetchProc.WaitForExit(5000)
+        [PvJob]::KillProc($fetchH)   # via the held native handle, never by PID
+        $null = [PvJob]::WaitExit($fetchH, 5000)
         $fetchMsg = "timed out after ${FetchTimeoutSec}s"
-    } elseif ($fetchProc.ExitCode -ne 0) {
-        $fetchMsg = "failed (exit $($fetchProc.ExitCode))"
+    } elseif ([PvJob]::ExitCode($fetchH) -ne 0) {
+        $fetchMsg = "failed (exit $([PvJob]::ExitCode($fetchH)))"
     } else { $fetchOk = $true }
 } finally {
+    if ($fetchH -ne [IntPtr]::Zero) { [PvJob]::CloseProc($fetchH) }
     if ($fetchJob -ne [IntPtr]::Zero) { [PvJob]::Close($fetchJob) }
     foreach ($tf in @($outTmp, $errTmp)) {
         # a killed fetch child can still hold the file for a moment: best-effort retry

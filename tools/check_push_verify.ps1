@@ -78,12 +78,22 @@ try {
     Assert (-not $sacB.WaitForExit(1000)) "S2: process whose StartTime differs from the snapshot is NOT killed by bare PID"
 } finally { foreach ($sp in @($sacA, $sacB)) { try { if (-not $sp.HasExited) { $sp.Kill() } } catch { } } }
 $pvSrc = Get-Content -LiteralPath (Join-Path $here "push_verify.ps1") -Raw
-# L1: strip the Add-Type here-string and comments, then forbid every bare-PID kill primitive (alias, .NET, taskkill); the only kills left are Stop-PvTargets, the job kill and $fetchProc.Kill().
-$pvCode = [regex]::Replace($pvSrc, '(?s)@"\r?\n.*?\r?\n"@', '')
-$pvCode = [regex]::Replace($pvCode, '(?m)(^|\s)#[^\r\n]*', '$1')
-$pvCode = $pvCode.Replace('$fetchProc.Kill()', '').Replace('[PvJob]::Kill(', '')
-$pvBad = '(?im)Stop-Process|taskkill|GetProcessById|\.Kill\(|(^|[;|{(&]\s*)(kill|spps|saps)\b'
-Assert (($pvCode -notmatch $pvBad) -and ($pvCode -match 'Stop-PvTargets\s+-Order[^\r\n]*-Handles')) "S2/L1: push_verify.ps1 code (comments and Add-Type stripped) has no bare-PID kill primitive and kills via Stop-PvTargets"
+# L1 (LOW-3): parse push_verify.ps1 with the PowerShell AST (no regex comment stripping, so a '#' inside a string cannot hide a kill),
+# forbid every bare-PID kill command / member call, and scan the C# here-string with its own rules.
+$pvTok = $null; $pvErr = $null
+$pvAst = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$pvTok, [ref]$pvErr)
+$pvBadCmds = @('stop-process', 'kill', 'spps', 'taskkill', 'taskkill.exe')
+$pvCmdHits = @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and ($pvBadCmds -contains ([string]$n.GetCommandName()).ToLowerInvariant()) }, $true))
+$pvMemHits = @($pvAst.FindAll({ param($n)
+    $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $n.Expression.Extent.Text -ne '[PvJob]' -and
+    ([string]$n.Member.Extent.Text) -match '^(Kill|GetProcessById|GetProcessesByName|GetProcesses|GetProcess)$' }, $true))
+$pvStopCalls = @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] -and $n.GetCommandName() -eq 'Stop-PvTargets' }, $true))
+$pvCs = ''
+foreach ($hs in @($pvAst.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
+$pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
+$pvCsBad = '(?i)GetProcessById|Process\.GetProcess\w*|\.Kill\s*\(|taskkill|Process\.Start\b|TerminateProcess\s*\((?!\s*(IntPtr\s+p\b|pi\.hp\s*,|h\s*,))'
+Assert ($pvErr.Count -eq 0 -and $pvCmdHits.Count -eq 0 -and $pvMemHits.Count -eq 0 -and $pvStopCalls.Count -ge 1) "S2/L1: push_verify.ps1 (AST) has no bare-PID kill command or member call and kills via Stop-PvTargets"
+Assert ($pvCs.Length -gt 200 -and $pvCs -notmatch $pvCsBad) "L1: C# block has no GetProcessById / Process.GetProcess* / .Kill( / taskkill, and TerminateProcess only on held handles"
 $me = Get-Process -Id $PID
 $hm = Open-PvTargets -Ids @($PID) -Created @{ $PID = $me.StartTime }
 Assert ($hm.ContainsKey($PID)) "R2: a live process whose StartTime matches the snapshot is opened"
@@ -158,13 +168,21 @@ try {
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -match "no job membership" -and $r.Out -match "walk found [1-9]\d* descendant") "no-job fallback: hung fetch -> UNKNOWN, and the fallback path (not the job) ran"
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "no-job fallback: no git process (incl. git-remote-http grandchild) survives the timeout"
         # M1 (toolfx10): job path with the create->assign window widened by 300 ms. The child is created suspended, so no descendant can escape the job.
-        $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "300"
-        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -ErrorAction SilentlyContinue }
+        $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "300"
+        try { $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2") } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
         Assert ($r.Rc -eq 1 -and $r.Out -match "VERDICT: UNKNOWN" -and $r.Out -match "timed out" -and $r.Out -notmatch "no job membership") "late job assign (300 ms): job path still used, hung fetch -> UNKNOWN"
         Assert-NoSurvivors $port (Split-Path -Leaf $tmp) "late job assign (300 ms): no git process (wrapper, git, remote-http) survives the timeout"
-        # I2: the no-job walk reports how many descendants it found.
-        Assert ($true) "placeholder"    } finally { $lis.Stop() }
+        # LOW-4: the delay hook is ignored without the test-mode flag (production env var stray), and capped with it.
+        $env:PUSH_VERIFY_TEST_ASSIGN_DELAY_MS = "99999999999"
+        try { $sw = [Diagnostics.Stopwatch]::StartNew(); $r = Run-PV @("-Commit", $c1, "-FetchTimeoutSec", "2"); $sw.Stop() } finally { Remove-Item Env:\PUSH_VERIFY_TEST_ASSIGN_DELAY_MS -ErrorAction SilentlyContinue }
+        Assert ($r.Rc -eq 1 -and $r.Out -match "timed out" -and $sw.Elapsed.TotalSeconds -lt 30) "stray huge PUSH_VERIFY_TEST_ASSIGN_DELAY_MS without test mode: ignored, no stall, no crash"
+    } finally { $lis.Stop() }
     git -C $work remote set-url origin $goodUrl *>$null
+
+    Write-Host "case: fetch exits before the first handle read (MED-1)"
+    $env:PUSH_VERIFY_TEST_MODE = "1"; $env:PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS = "1500"
+    try { $r = Run-PV @("-Commit", $c1) } finally { Remove-Item Env:\PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS, Env:\PUSH_VERIFY_TEST_MODE -ErrorAction SilentlyContinue }
+    Assert ($r.Rc -eq 0 -and $r.Out -match "VERDICT: LANDED") "git exits 0 long before the exit code is read -> still LANDED (native handle held, no null ExitCode)"
 
     Write-Host "case: explicit refspec beats a narrowed fetch refspec (P1)"
     git -C $other push -q origin HEAD:refs/heads/side *>$null                          # a branch that exists, so the narrowed fetch itself succeeds
