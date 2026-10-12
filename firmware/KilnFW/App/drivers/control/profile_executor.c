@@ -1046,7 +1046,7 @@ void executor_task_entry(void *arg)
              * dwelling/segment_elapsed_s (the ZONE_RAMP machine's own state)
              * are deliberately left untouched here. */
             if (!s_exec.io_segs[s_exec.segment_index].active) {
-                io_seg_start(s_exec.segment_index, seg); /* first tick this segment is current */
+                io_seg_start_pico(s_exec.segment_index, seg, pre_lock_pico_tripped); /* first tick this segment is current */
             }
             bool ready_to_advance;
             if (seg->io_blocking) {
@@ -1241,11 +1241,6 @@ void executor_task_entry(void *arg)
                     segment_changed = true;
                 }
             }
-        }
-
-        /* F5HOLDERFX LOW-1/2: retry gate-dropped relay ONs only now -- after guards and the blocking finish. */
-        if (s_exec.state == PROFILE_EXEC_RUNNING) {
-            io_segs_retry_on(pre_lock_pico_tripped);
         }
 
         /* --- Firing quality stats accumulation (PID_EXPANSION_PLAN.md Phase
@@ -1989,7 +1984,7 @@ void executor_task_entry(void *arg)
          * actually left. Skipped if this tick already ended the run -- the
          * terminal transition has turned every aux OFF. */
         if (s_exec.state == PROFILE_EXEC_RUNNING) {
-            profile_executor_aux_tick(dt_s, stretched_this_tick, relays_on_count, on_off_cap);
+            profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, on_off_cap, pre_lock_pico_tripped);
         }
 
         /* --- Unowned-relay sweep (TODO.md 6A.7) -----------------------------
@@ -2078,6 +2073,13 @@ void executor_task_entry(void *arg)
 #endif
             (void)mode_violation; /* only read by assert()'s message above on a debug build, or by
                                     * exec_handle_mode_state_violation() on ESP_PLATFORM */
+        }
+
+        /* F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs last -- after segment stepping, the zone loop, the
+         * thermal guards, the aux tick and the mode-state check -- so a guard trip this tick never
+         * has an ON write after it. Still gated on RUNNING (a trip/abort already forced everything off). */
+        if (s_exec.state == PROFILE_EXEC_RUNNING && !run_faulted_this_tick) {
+            io_segs_retry_on(pre_lock_pico_tripped);
         }
 
         run_snapshot_buf_t tick_snap;

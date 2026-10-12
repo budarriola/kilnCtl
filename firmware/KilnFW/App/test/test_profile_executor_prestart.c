@@ -2965,6 +2965,106 @@ static void test_f5holderfx_retry_semantics(void)
     io_segs_force_all_off(false);
 }
 
+static char *profile_executor_c_read_source(void);
+static char *pe_strip_c_comments(const char *src);
+
+static const char *pe_last_occurrence(const char *hay, const char *needle)
+{
+    const char *last = NULL;
+    for (const char *q = strstr(hay, needle); q; q = strstr(q + 1, needle)) {
+        last = q;
+    }
+    return last;
+}
+
+static void test_f5holderfx2_retry_placement_and_pico_gate(void)
+{
+    TEST_SECTION("F5HOLDERFX2 LOW-1/3/4 -- retry is the last relay write of the RUNNING tick; other-relay ON survives; Pico TRIPPED gates starts");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+    profile_segment_t other_on = on_seg;
+    other_on.io_target = 3;
+    profile_segment_t other_off = other_on;
+    other_off.io_state = 0;
+
+    /* LOW-4 H6: a pending ON on relay 2 survives a start and a finish on relay 3. */
+    reset_io_seg_test_state();
+    s_test_relay_authority_blocked = true;
+    s_test_relay_authority_blocked_sources = SAFETY_FAULT_SRC_SAFETY_LINK;
+    io_seg_start(0, &on_seg);
+    io_seg_start(1, &other_off);
+    TEST_CHECK(s_exec.io_segs[0].wants_on, "H6: a start on relay 3 keeps relay 2's pending ON");
+    io_seg_finish(1, false);
+    TEST_CHECK(s_exec.io_segs[0].wants_on, "H6: a finish on relay 3 keeps relay 2's pending ON");
+    s_test_relay_authority_blocked = false;
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0 && s_exec.io_segs[0].state_on,
+               "H6: relay 2's pending ON is still retried after relay 3's segment ended");
+    io_segs_force_all_off(false);
+
+    /* LOW-3: a fresh Pico TRIPPED report makes a normal segment start drive OFF and keep the request. */
+    reset_io_seg_test_state();
+    io_seg_start_pico(0, &on_seg, true);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on &&
+                   s_exec.io_segs[0].wants_on,
+               "LOW-3: Pico TRIPPED -> segment ON driven OFF, wants_on kept for the retry");
+    io_segs_force_all_off(false);
+    reset_io_seg_test_state();
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK(g_relay_write_calls == 1 && (g_last_relay_write_value & 0x02u) != 0, "LOW-3: not tripped -> ON as before");
+    io_segs_force_all_off(false);
+
+    /* LOW-3: aux relay ON refused while the Pico is TRIPPED; OFF never gated. */
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "LOW-3: aux ON with Pico TRIPPED writes OFF");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value != 0, "LOW-3: aux ON without TRIPPED writes ON");
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, false, true);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0, "LOW-3: aux OFF under TRIPPED still written");
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    /* LOW-1 / LOW-4 H5: placement of the retry inside profile_executor.c's tick loop. */
+    char *src = profile_executor_c_read_source();
+    TEST_CHECK(src != NULL, "could locate profile_executor.c");
+    if (src) {
+        char *code = pe_strip_c_comments(src);
+        free(src);
+        const char *retry = code ? strstr(code, "io_segs_retry_on(pre_lock_pico_tripped);") : NULL;
+        TEST_CHECK(retry != NULL, "MUST GO RED if the executor loop stops calling io_segs_retry_on()");
+        if (retry) {
+            const char *tg = pe_last_occurrence(code, "thermal_guard_tick(");
+            const char *eg = pe_last_occurrence(code, "escalate_guard_trip(");
+            const char *aux = pe_last_occurrence(code, "profile_executor_aux_tick_pico(");
+            const char *mc = pe_last_occurrence(code, "exec_mode_state_check(");
+            const char *give = strstr(retry, "xSemaphoreGive(s_exec.lock)");
+            TEST_CHECK(tg && eg && aux && mc && retry > tg && retry > eg && retry > aux && retry > mc,
+                       "LOW-1: retry comes after the thermal guards, guard escalation, aux tick and mode check "
+                       "(a same-tick guard trip never has an ON write after it)");
+            TEST_CHECK(give != NULL && (give - retry) < 400, "LOW-1: retry is before the lock is released");
+            char gate[200];
+            size_t n = (size_t)(retry - code) < sizeof(gate) - 1 ? (size_t)(retry - code) : sizeof(gate) - 1;
+            memcpy(gate, retry - n, n);
+            gate[n] = '\0';
+            TEST_CHECK(strstr(gate, "PROFILE_EXEC_RUNNING") != NULL, "MUST GO RED if the retry loses its state == RUNNING gate");
+            const char *st = strstr(code, "io_seg_start_pico(s_exec.segment_index, seg, pre_lock_pico_tripped)");
+            TEST_CHECK(st != NULL, "LOW-3: the normal segment start receives the tick's Pico TRIPPED report");
+            TEST_CHECK(strstr(code, "profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, on_off_cap, pre_lock_pico_tripped)") != NULL,
+                       "LOW-3: the aux tick receives the tick's Pico TRIPPED report");
+        }
+        free(code);
+    }
+}
+
 static void test_io_seg_finish_default_forces_off_on_done(void)
 {
     TEST_SECTION("io_seg_finish -- leave_on_at_end UNSET (the mandatory default) is forced off even on the "
@@ -12865,6 +12965,7 @@ void run_test_profile_executor_prestart(void)
     test_io_seg_start_on_gated_by_relay_authority();
     test_io_seg_dropped_on_retried_through_gate();
     test_f5holderfx_retry_semantics();
+    test_f5holderfx2_retry_placement_and_pico_gate();
     test_io_seg_finish_default_forces_off_on_done();
     test_io_seg_finish_leave_on_honored_only_on_done();
     test_io_segs_force_all_off_sweeps_general_io_too();

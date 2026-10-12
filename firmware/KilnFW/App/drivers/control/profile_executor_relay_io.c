@@ -672,6 +672,12 @@ void force_all_relays_off(void)
  * Must be called with s_exec.lock held. */
 bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 {
+    return aux_apply_relay_pico(aux_idx, want_on, false);
+}
+
+/* F5HOLDERFX2 LOW-3: as aux_apply_relay(), refusing an ON while the tick's Pico report says TRIPPED. */
+bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
+{
     if (aux_idx >= AUX_OUTPUTS_COUNT) {
         return false;
     }
@@ -682,7 +688,7 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
 
     const uint32_t off_epoch_since = kiln_io_relay_off_epoch(); /* LOW-E */
     uint32_t sources = 0;
-    if (want_on && relay_authority_on_blocked(s_exec.safety, &sources)) {
+    if (want_on && (pico_tripped || relay_authority_on_blocked(s_exec.safety, &sources))) {
         ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X", (unsigned)aux_idx + 1u,
                  (unsigned)sources);
         want_on = false;
@@ -981,12 +987,20 @@ on_off_trigger_input_t profile_executor_aux_on_off_input(uint8_t aux_idx, const 
  * reach it, which is what makes a pause hold the last aux state. */
 void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap)
 {
+    profile_executor_aux_tick_pico(dt_s, stretched_this_tick, relays_on_count, cap, false);
+}
+
+/* F5HOLDERFX2 LOW-3: pico_tripped (the tick's fresh Pico TRIPPED report) is treated like an authority block
+ * for every ON; OFF is never gated. */
+void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap,
+                                    bool pico_tripped)
+{
     if (s_exec.aux_claim_mask == 0) {
         return;
     }
     uint8_t enabled_now = aux_outputs_cfg_enabled_mask();
     uint32_t sources = 0;
-    bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources);
+    bool authority_blocked = relay_authority_on_blocked(s_exec.safety, &sources) || pico_tripped;
 
     for (uint8_t i = 0; i < AUX_OUTPUTS_COUNT; i++) {
         uint8_t bit = (uint8_t)(1u << i);
@@ -1041,7 +1055,7 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
         } else {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
         }
-        aux_apply_relay(i, r.actuated_on);
+        aux_apply_relay_pico(i, r.actuated_on, pico_tripped);
         if (s_exec.aux[i].commanded_on && dt_s > 0.0f) s_exec.aux[i].on_time_s += dt_s;
     }
 }
@@ -1155,11 +1169,24 @@ static void io_segs_clear_wants_on_others(uint8_t except_idx, uint8_t target)
  * ownership claim below exists to prevent for the blocking/relay case. */
 void io_seg_start(uint8_t idx, const profile_segment_t *seg)
 {
-    io_seg_start_since(idx, seg, kiln_io_relay_off_epoch()); /* LOW-E: before the start decision */
+    io_seg_start_pico(idx, seg, false);
+}
+
+/* F5HOLDERFX2 LOW-3: as io_seg_start(), refusing an ON while the tick's fresh Pico report says TRIPPED. */
+void io_seg_start_pico(uint8_t idx, const profile_segment_t *seg, bool pico_tripped)
+{
+    io_seg_start_since_pico(idx, seg, kiln_io_relay_off_epoch(), pico_tripped); /* LOW-E: before the start decision */
 }
 
 /* As io_seg_start(), with the all-off epoch sampled by the caller before its own gate decision. */
 void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since)
+{
+    /* Warm-replay start (profile_executor_run.c) has no fresh Pico report; it is gated by
+     * relay_authority_start_blocked() just before. F5HOLDERFX2 LOW-3: documented, not gated here. */
+    io_seg_start_since_pico(idx, seg, off_epoch_since, false);
+}
+
+void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since, bool pico_tripped)
 {
     io_seg_runtime_t *r = &s_exec.io_segs[idx];
     memset(r, 0, sizeof(*r));
@@ -1192,7 +1219,7 @@ void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_
          * io_segs_retry_on() through the same gate (plus a fresh Pico TRIPPED refusal), never ungated. */
         bool drive_on = r->state_on;
         uint32_t blocked_sources = 0;
-        if (drive_on && relay_authority_on_blocked(s_exec.safety, &blocked_sources)) {
+        if (drive_on && (pico_tripped || relay_authority_on_blocked(s_exec.safety, &blocked_sources))) {
             ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT IS BLOCKED: sources 0x%02X -- commanded OFF",
                      idx + 1, r->target, (unsigned)blocked_sources);
             drive_on = false;
@@ -1329,8 +1356,9 @@ void io_segs_tick(float dt_s)
     }
 }
 
-/* F5HOLDER LOW-4 / F5HOLDERFX LOW-1,2: retry gate-dropped relay ONs. Called once per RUNNING tick AFTER the
- * guard checks and the blocking-segment finish, so a relay is never switched ON then OFF in one tick. Refuses
+/* F5HOLDER LOW-4 / F5HOLDERFX2 LOW-1: retry gate-dropped relay ONs. Called once per RUNNING tick as the LAST
+ * relay-writing step of the RUNNING body (after segment stepping, zone loop, thermal guards, aux tick and the
+ * mode-state check), so a guard trip that tick never leaves an ON write after it. Refuses
  * while the authority gate is blocked OR a fresh Pico TRIPPED report is pending (fail-safe). s_exec.lock held. */
 void io_segs_retry_on(bool pico_tripped)
 {

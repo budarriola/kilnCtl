@@ -1317,6 +1317,11 @@ void profile_executor_aux_tick(float dt_s, bool stretched_this_tick, uint8_t rel
 void release_profile_relay_claim(void);
 bool relay_io_target_is_zone_owned(uint8_t relay_1_4, uint8_t *out_zone_index);
 void io_seg_start(uint8_t idx, const profile_segment_t *seg);
+void io_seg_start_pico(uint8_t idx, const profile_segment_t *seg, bool pico_tripped); /* F5HOLDERFX2 LOW-3 */
+void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since, bool pico_tripped);
+bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped);
+void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_t relays_on_count, uint8_t cap,
+                                    bool pico_tripped);
 void io_seg_start_since(uint8_t idx, const profile_segment_t *seg, uint32_t off_epoch_since);
 void io_seg_finish(uint8_t idx, bool honor_leave_on);
 void io_segs_force_all_off(bool honor_leave_on);

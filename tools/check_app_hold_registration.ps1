@@ -30,10 +30,25 @@ foreach ($f in $files) {
         if ($asrt -eq 'false') { continue }
         if ($mask -match '^SAFETY_FAULT_SRC_(?!APP\b)\w+$') { continue }
         if ($mask -match '^[A-Za-z_]\w*$') {
-            # F5HOLDERFX LOW-3: a local variable is resolved to its assignment in the same file; accepted
-            # only when that assignment names SAFETY_FAULT_SRC_* constants and none of them is APP.
-            $am = [regex]::Match($s, '\b' + [regex]::Escape($mask) + '\s*=\s*([^;]+);')
-            if ($am.Success -and $am.Groups[1].Value -match 'SAFETY_FAULT_SRC_\w+' -and $am.Groups[1].Value -notmatch 'SAFETY_FAULT_SRC_APP\b') { continue }
+            # F5HOLDERFX2 LOW-2: a local variable is accepted only when EVERY assignment to it inside the
+            # enclosing function (=, |=, ternaries; declaration or later) is built solely from non-APP
+            # SAFETY_FAULT_SRC_* constants, ?, :, |, parentheses and condition identifiers that are not
+            # called. Any APP term, call (identifier followed by "("), or no assignment at all falls through
+            # to the registration requirement (fail loud).
+            $fnStart = $s.LastIndexOf("`n{", $m.Index)
+            if ($fnStart -lt 0) { $fnStart = 0 }
+            $fnEnd = $s.IndexOf("`n}", $m.Index)
+            if ($fnEnd -lt 0) { $fnEnd = $s.Length }
+            $body = $s.Substring($fnStart, $fnEnd - $fnStart)
+            $arx = [regex]('(?<![\w.>])' + [regex]::Escape($mask) + '\s*(\|=|=(?!=))\s*([^;]+);')
+            $assigns = $arx.Matches($body)
+            $allOk = ($assigns.Count -gt 0)
+            foreach ($am in $assigns) {
+                $rhs = $am.Groups[2].Value
+                if ($rhs -notmatch 'SAFETY_FAULT_SRC_\w+' -or $rhs -match 'SAFETY_FAULT_SRC_APP\b' -or $rhs -match '\w\s*\(' -or
+                    $rhs -match '[^\w\s?:|()&!<>=.\-\[\]]') { $allOk = $false }
+            }
+            if ($allOk) { continue }
         }
         $checked++
         $line = ($s.Substring(0, $m.Index) -split "`n").Count
