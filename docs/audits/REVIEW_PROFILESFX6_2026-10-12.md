@@ -69,7 +69,7 @@ the three files).
 
 ## Findings
 
-### MED-1: the new 409 text tells the operator to "retry" in a case where retry cannot work, then escalates to a cfg format without saying the format erases every profile and every other cfg-backed setting
+### MED-1 (FIXED, profilesfx7): the new 409 text tells the operator to "retry" in a case where retry cannot work, then escalates to a cfg format without saying the format erases every profile and every other cfg-backed setting
 
 - **Where:** `firmware/KilnFW/App/drivers/common/cfg_fs_refusal_http.h:53-57` (`CFG_FS_FAVORITES_FILE_UNREADABLE_REASON`),
   sent from `:106-108`.
@@ -105,7 +105,7 @@ the three files).
   - Write the parameter as `?force_healthy=1`.
   - Add a test for the adopted case that pins "reboot" and forbids "each time".
 
-### LOW-1: dropping `s_fav_dirty` lets a reversed request report OK while the file keeps the change (demonstrated)
+### LOW-1 (FIXED, profilesfx7): dropping `s_fav_dirty` lets a reversed request report OK while the file keeps the change (demonstrated)
 
 - **Where:** `firmware/KilnFW/App/drivers/persist/profiles_favorites.c:364` (`s_fav_dirty = false;` on every path)
   with `:347` (`if (!changed && !s_fav_dirty) return ESP_OK;`).
@@ -131,7 +131,7 @@ the three files).
     of OK, which is more honest.
   - Mutation N4 (below) shows that restoring this line breaks no existing test.
 
-### LOW-2: stale contract text after the behaviour change
+### LOW-2 (FIXED, profilesfx7): stale contract text after the behaviour change
 
 - `profiles_favorites.h:51-52`: "A save while cfg is unmounted fails ...; the change still applies live and reverts
   on reboot." This is no longer true.

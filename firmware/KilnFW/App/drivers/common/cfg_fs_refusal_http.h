@@ -50,10 +50,7 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
 /* PROFILESFX4 LOW-A: prof_fav.bin itself is unreadable (rev-unknown). A cfg format erases the file, and factory reset
  * scope profiles/all deletes it (profiles_scope_cfg_files.c kRootPaths); scope kiln does NOT touch it. */
 #define CFG_FS_FAVORITES_FILE_UNREADABLE_REASON \
-    "the favorites file could not be read, so saves to it are refused to avoid overwriting it; this request " \
-    "re-reads it each time, so retry (a reboot also retries); if it keeps failing, clear it with a cfg format " \
-    "(POST /api/cfgfs/format_confirm force_healthy=1) or factory_reset scope=profiles (or scope=all, which ALSO " \
-    "erases every user profile); factory reset scope kiln does not clear it"
+    "the favorites file could not be read, so saves to it are refused to avoid overwriting it; reboot to "     "re-read it; if it keeps failing, factory_reset scope=profiles deletes it (and ERASES every user profile), or a "     "cfg format (POST /api/cfgfs/format_confirm?force_healthy=1) clears it but ERASES ALL cfg-stored settings: "     "every user profile, the zones config and preferences (scope=all does that too); factory reset scope kiln "     "does not clear it"
 
 /* Post-failure response for a save that failed. 503 with the cfg text when the partition is unmounted; 409
  * store_unreadable_at_boot ONLY when the caller says THIS store is refused (`store_refused`) and the error is the

@@ -2275,10 +2275,37 @@ static void test_favorites_unreadable_file_gets_generic_409(void)
     TEST_CHECK(strstr(s_last_sendstr, "scope=profiles") != NULL && strstr(s_last_sendstr, "scope=all") != NULL,
                "PROFILESFX4 LOW-A: names scope=profiles / scope=all, which delete prof_fav.bin");
     TEST_CHECK(strstr(s_last_sendstr, "scope kiln does not") != NULL, "says scope kiln does not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "reboot to re-read") != NULL, "REVIEW_PROFILESFX6 MED-1: first remedy is a reboot");
+    TEST_CHECK(strstr(s_last_sendstr, "each time") == NULL && strstr(s_last_sendstr, "retry") == NULL,
+               "does not promise a per-request re-read");
+    TEST_CHECK(strstr(s_last_sendstr, "?force_healthy=1") != NULL, "force_healthy is the query string");
+    TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "cfg format warns it erases everything");
+    TEST_CHECK(strlen(s_last_sendstr) < PROFILES_SAVE_ERR_MSG_LEN * 4, "reason text stays bounded");
     TEST_CHECK(strstr(s_last_sendstr, "reason\":\"a stored setting") == NULL, "not the generic scope-kiln text");
     cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
     pref_cfg_fs_clear_rev_unknown_for_test();
     cfg_fs_degraded_clear_for_test();
+    (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
+    (void)profiles_favorites_start();
+}
+
+static esp_err_t s_fail_after_rename_fn(const char *rel_path, const void *data, size_t len)
+{
+    (void)cfg_fs_write_atomic(rel_path, data, len); /* bytes land, then the caller is told it failed */
+    return ESP_FAIL;
+}
+
+static void test_favorites_failed_commit_keeps_dirty_so_reverse_still_writes(void)
+{
+    TEST_SECTION("profile favorites -- REVIEW_PROFILESFX6 LOW-1: a failed commit leaves the file unknown, the reverse change still writes");
+    fuzz_small_setup();
+    pref_cfg_fs_set_write_fn(s_fail_after_rename_fn);
+    TEST_CHECK(profiles_favorites_set(3, true) != ESP_OK, "favorite 3: write lands, commit reports failure");
+    TEST_CHECK(!profiles_favorites_is(3), "RAM not published after the failed commit");
+    pref_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(profiles_favorites_set(3, false) == ESP_OK, "unfavorite 3 reports OK");
+    (void)profiles_favorites_start(); /* simulated reboot */
+    TEST_CHECK(!profiles_favorites_is(3), "after reboot 3 is not a favorite (the reverse change was written)");
     (void)cfg_fs_delete(PROFILES_FAVORITES_FILE_PATH);
     (void)profiles_favorites_start();
 }
@@ -6418,6 +6445,7 @@ void run_test_profiles_http(void)
     test_used_bitmap_1_byte_blob_is_wrong_size();
     test_favorites_refused_retry_keeps_published_masks();
     test_favorites_refused_commit_leaves_ram_unchanged();
+    test_favorites_failed_commit_keeps_dirty_so_reverse_still_writes();
     test_favorites_unresolved_is_degraded_409_and_retry_heals();
     test_favorites_success_load_clears_unresolved_flag();
     test_favorites_unreadable_file_gets_generic_409();
