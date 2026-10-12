@@ -80,3 +80,10 @@ Every run's baseline passed, the real tree was unchanged, and every copy was rem
 | W2 | check_wt_status | W1 + the timeout path returns `ExitCode = 0` and continues | CAUGHT (exit 1) | 433.3 s | same as W1: an empty `rev-parse` still fails closed (INFO-1) | 0 |
 | D1 | check_doc_hash_citations | git -> `-c "alias.zz=!sleep 177" zz` (never reads stdin) | MISSED (exit 1 for another reason) | 188.7 s | `git cat-file --batch-check returned 0 lines for 6037 inputs`: the stdin write blocked for the whole hang (LOW-1) | 0 |
 | D2 | check_doc_hash_citations | git -> `-c "alias.zz=!cat >/dev/null; sleep 171" zz` (reads stdin, then hangs) | CAUGHT (exit 1) | 129.6 s | `git cat-file --batch-check did not exit within 120 s` | 0 |
+
+## Fix status
+
+- LOW-1 fixed: `Invoke-BatchCheck` writes stdin with `WriteAsync` and bounds it with `Wait(120000)`; on timeout it tree-kills git and throws "did not exit within 120 s (stdin write blocked ...)". Re-run of D1 (git replaced by `!sleep 177`, never reads stdin) by hand in the worktree: fails at 134 s with that message, 0 surviving `sleep`. Not scored by `negtest.ps1`, because its baseline fails on dev for an unrelated reason: `REVIEW_LCDFX13_2026-10-12.md:108` cites `30301fbe48`, which does not resolve in the parent repo.
+- LOW-2 fixed: `err.Wait(15000)`; a timeout tree-kills git and returns ExitCode -1 with no lines (UNKNOWN, fail closed). Negtest W3 (grandchild holds stderr, bound cut to 2 s) CAUGHT on the UNKNOWN classification assertions.
+- INFO-3 fixed (git tree-killed on a throw after start), INFO-5 fixed (taskkill output captured; taskkill and git resolved by full path, PATH entry equal to the cwd skipped). Re-run of W1 (every git call hangs, bound cut to 3 s) CAUGHT on `expected STALE_CLEAN got UNKNOWN`. check_wt_status passes unmutated (129 assertions).
+- Not done: INFO-1, 2, 4, 6, 7, 8 (informational).
