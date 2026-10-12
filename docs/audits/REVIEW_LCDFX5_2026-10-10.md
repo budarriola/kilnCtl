@@ -236,3 +236,14 @@ per-function rules ignore any text before the function.
 None of these is live in the current source: the shipped code is correctly
 gated, and the check passes on it. Every finding needs a deliberate or careless
 edit that the check would fail to flag.
+
+## Fix status (2026-10-11)
+
+LOW-1..LOW-5 and INFO-1..INFO-3 are FIXED in 50bfa5948 (`tools/check_lcd_admin_gates.ps1` only; firmware unchanged):
+repo-wide `#define`/`#undef` scan of the trusted tokens (LOW-1); opener inventory and pinned `*_open_apply` bodies
+plus use counts and registrar ban in `ui_page_config.c` (LOW-2, INFO-2); C4 conditional, duplicate, reference-count
+and `kiln_ui_show("safety")` refusals (LOW-3); drivers/ui allowlist of `kiln_ui_show`, `ui_page_safety_open` and
+`back_page` (LOW-4); every L-rule matched inside its named function body with apply-use counts (LOW-5); prototypes,
+`lv_event_t* e`, and `ESP_LOG*` lines no longer false-flagged (INFO-1); `#warning/#error/#pragma/#line` lines blanked
+before comment stripping (INFO-3). Negtest: B1-B10 and an INFO-3 mutation all CAUGHT; F1, F2, F4, F5 now pass the
+check; LCDFX4 N1-N8 all still CAUGHT.
