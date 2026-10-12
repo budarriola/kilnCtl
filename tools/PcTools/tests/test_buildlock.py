@@ -351,8 +351,13 @@ class BuildLockReviewFixes(unittest.TestCase):
             with mock.patch.object(bl.os, "rename", rename):
                 bl._release(path, "1 2 mine")
             self.assertEqual(open(path).read().strip(), "3 4 tokenB")
-            # A differing grabbed file is left as an aside (swept after
-            # stale_after) rather than deleted; it must not be at the lock path.
+            # The grabbed (differing) file is left as an aside, not deleted.
+            d = os.path.dirname(path)
+            asides = [n for n in os.listdir(d)
+                      if n.startswith(os.path.basename(path) + ".rel.")]
+            self.assertEqual(len(asides), 1)
+            self.assertEqual(open(os.path.join(d, asides[0])).read().strip(),
+                             "1 2 tokenA")
         finally:
             os.remove(path)
             for n in os.listdir(os.path.dirname(path)):
@@ -466,8 +471,10 @@ class BuildLockReviewFixes(unittest.TestCase):
         try:
             bl._release(path, "1 2 mine")
             self.assertEqual(open(path).read().strip(), "1 2 othertoken")
-            # A differing grabbed file is left as an aside (swept after
-            # stale_after) rather than deleted; it must not be at the lock path.
+            d = os.path.dirname(path)
+            self.assertEqual([n for n in os.listdir(d)
+                              if n.startswith(os.path.basename(path) + ".rel.")], [],
+                             "no .rel. aside may remain after a successful put-back")
         finally:
             os.remove(path)
             for n in os.listdir(os.path.dirname(path)):
@@ -958,6 +965,54 @@ class BuildLockBuildFx7(unittest.TestCase):
 
 
 class BuildLockBuildFx8(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import mcpkit.buildlock as bl
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        p = mock.patch.object(bl, "_lock_dir", lambda: tmp.name)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_leaked_free_path_honours_wait_timeout(self):
+        import mcpkit.buildlock as bl
+        key = f"fx9-low1-{time.time_ns()}"
+        path = _lock_path(key)
+        text = f"{os.getpid()} 0 low1token"
+        self._write(path, text)
+        bl._maybe_leaked.add((path, text))
+        self.addCleanup(bl._maybe_leaked.discard, (path, text))
+        real_rename = os.rename
+
+        def rename(src, dst):
+            if src == path:
+                raise PermissionError(32, "sharing violation")
+            return real_rename(src, dst)
+        t0 = time.monotonic()
+        with mock.patch.object(bl.os, "rename", rename), \
+                mock.patch.object(bl.time, "sleep"), _quiet_stderr():
+            with self.assertRaises(BuildLockTimeout):
+                with build_lock(key, wait_timeout=0.3, poll_interval=0.01):
+                    pass
+        self.assertLess(time.monotonic() - t0, 30.0)
+
+    def test_fresh_aside_of_long_held_lock_is_not_swept(self):
+        import mcpkit.buildlock as bl
+        path = self._path("low2")
+        self._write(path, "1 0 held")
+        old = time.time() - 3000
+        os.utime(path, (old, old))
+        real_read = bl._read_holder
+
+        def read(p):
+            # a concurrent builder sweeps while the lock sits aside
+            if ".rel." in p:
+                bl._sweep_asides(os.path.dirname(path), 2100.0)
+            return real_read(p)
+        with mock.patch.object(bl, "_read_holder", read):
+            bl._release(path, "1 0 mine")
+        self.assertEqual(real_read(path), "1 0 held",
+                         "aside of a long-held lock was swept mid-put-back")
     def _path(self, tag):
         import glob
         path = _lock_path(f"fx8-{tag}-{time.time_ns()}")

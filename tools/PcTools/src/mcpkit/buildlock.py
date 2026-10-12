@@ -260,6 +260,16 @@ def _put_back(aside: str, path: str, attempts: int = 400) -> bool:
     return False
 
 
+def _touch_aside(aside: str) -> None:
+    """os.rename keeps the moved file's mtime, so stamp the aside with the
+    move time: _sweep_asides ages asides from the move, not from how long the
+    lock had been held."""
+    try:
+        os.utime(aside, None)
+    except OSError:
+        pass
+
+
 def _sweep_asides(directory: str, stale_after: float) -> None:
     """Remove moved-aside .rec./.rel./.dead. files older than stale_after."""
     now = time.time()
@@ -380,9 +390,15 @@ def _remove_judged(lock_path: str, judged: "str | None",
     holder's not-yet-written lock is never deleted. Residuals: the put-back
     vacancy (module docstring, windows 1 and 5)."""
     aside = f"{lock_path}.rec.{uuid.uuid4().hex}"
+    lock_mtime = None
     for _ in range(400):
         try:
             os.rename(lock_path, aside)
+            try:
+                lock_mtime = os.path.getmtime(aside)  # before the re-stamp
+            except OSError:
+                pass
+            _touch_aside(aside)
             break
         except FileNotFoundError:
             return
@@ -394,7 +410,8 @@ def _remove_judged(lock_path: str, judged: "str | None",
         old = True
         if judged is None:
             try:
-                old = time.time() - os.path.getmtime(aside) > stale_after
+                old = (lock_mtime is not None and
+                       time.time() - lock_mtime > stale_after)
             except OSError:
                 old = False
         if old:
@@ -466,6 +483,10 @@ def build_lock(
                 # our own earlier release leaked this exact lock (unique token)
                 _maybe_leaked.discard((lock_path, judged))
                 _release(lock_path, judged)
+                waited = time.monotonic() - started
+                if waited >= wait_timeout:
+                    raise BuildLockTimeout(resource_key, waited,
+                                           _read_holder(lock_path), lock_path)
                 continue
             if age > stale_after or _text_is_dead_holder(judged):
                 _try_reclaim(lock_path, judged, force=age > stale_after,
@@ -494,6 +515,7 @@ def _release(lock_path: str, my_text: str) -> None:
     for _ in range(400):
         try:
             os.rename(lock_path, aside)
+            _touch_aside(aside)
             break
         except FileNotFoundError:
             return
@@ -501,8 +523,9 @@ def _release(lock_path: str, my_text: str) -> None:
             time.sleep(0.005)
     else:
         print(f"buildlock: LEAKED LOCK -- could not rename {lock_path} aside after "
-              f"400 attempts; later builds on this directory will wait until the "
-              f"server restarts or the file is deleted", file=sys.stderr, flush=True)
+              f"400 attempts; this process frees it on its next contention for the "
+              f"same lock; other processes wait until then, until the lock is "
+              f"older than stale_after, or until the file is deleted", file=sys.stderr, flush=True)
         _maybe_leaked.add((lock_path, my_text))
         return
     held = _read_holder(aside)
