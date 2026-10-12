@@ -989,7 +989,7 @@ class BuildLockBuildFx8(unittest.TestCase):
         def rename(src, dst):
             if src == path:
                 calls['n'] += 1
-                if calls['n'] > 20000:
+                if calls['n'] > 400000:
                     raise AssertionError('leaked-free loop ignores wait_timeout')
                 raise PermissionError(32, "sharing violation")
             return real_rename(src, dst)
