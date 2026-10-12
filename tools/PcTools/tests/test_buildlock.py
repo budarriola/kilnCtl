@@ -306,6 +306,8 @@ class BuildLockReviewFixes(unittest.TestCase):
         real = bl._try_reclaim
         def counting(*a, **k):
             calls.append(1)
+            if len(calls) > 500:
+                raise AssertionError("busy-spin: reclaim retried without sleeping")
             return real(*a, **k)
         try:
             with mock.patch.object(bl, "_try_reclaim", counting):
