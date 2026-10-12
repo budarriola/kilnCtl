@@ -3957,13 +3957,7 @@ static void test_diag_frame_age_tick_period_10(void)
     TEST_CHECK(portTICK_PERIOD_MS == 10u, "this executable is built with a 10 ms tick period");
     TEST_CHECK(uart_proto_rx_stamp_ms(300u) == 3000u, "rx stamp helper multiplies by the tick period");
     SafetyLinkClass link = make_link();
-    uart_proto_message_t fw_msg;
-    memset(&fw_msg, 0, sizeof(fw_msg));
-    fw_msg.length = set_fw_version_frame(fw_msg.payload, false, NULL, 0, NULL, 0, /*boot_id=*/42,
-                                          /*config_version=*/0, /*config_crc=*/0);
-    safety_apply_fw_version(&link, &fw_msg);
-    link.reannounce_pending = false;
-    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    link.initialized = true;
     TickType_t saved_tick = s_fake_tick_count;
     s_fake_tick_count = 500u; /* 5000 ms */
     apply_diag_uptime_rx(&link, 1000u, uart_proto_rx_stamp_ms(300u)); /* received at 3000 ms */
