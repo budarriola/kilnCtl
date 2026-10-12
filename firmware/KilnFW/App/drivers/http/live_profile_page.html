@@ -491,6 +491,10 @@ function decide(body) {
     .then(function (res) {
       if (!res.ok || res.data.ok === false) {
         msg.innerHTML = '<span class="err">' + escapeHtml(res.data.reason || res.data.error || 'that failed') + '</span>';
+        /* REVIEW_WEBFX8 LOW-2: a failed decide may still have saved (saved:true) or changed state; re-read so
+         * lastGen is current and the next decide does not hit the gen-stale 409. */
+        lastGen = null;
+        refreshLive();
         return;
       }
       msg.textContent = 'Done.';

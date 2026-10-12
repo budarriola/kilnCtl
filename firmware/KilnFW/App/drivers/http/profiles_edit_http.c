@@ -869,8 +869,9 @@ esp_err_t profile_delete_post_handler(httpd_req_t *req)
         /* Review web7 LOW-6: the store erase refuses (ESP_ERR_INVALID_STATE) on a slot whose rev floor is unknown
          * this boot; that is the store_unreadable_at_boot 409, not a flash write failure. Any other failure keeps
          * the plain 500 (persfx3 MED-2). */
-        return cfg_fs_http_persist_failed_state(req, s_profile_rev_unknown[id],
-                                                s_profile_rev_unknown[id] ? ESP_ERR_INVALID_STATE : ESP_FAIL, -1);
+        return cfg_fs_http_persist_failed_state(req, false, ESP_FAIL, -1);
+    case PROFILES_DELETE_REV_UNKNOWN:
+        return cfg_fs_http_persist_failed_state(req, true, ESP_ERR_INVALID_STATE, -1);
     default:
         return cfg_fs_http_persist_failed(req);
     }

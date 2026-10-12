@@ -779,6 +779,8 @@ static void check_edit_survived(const char *what)
     TEST_CHECK(strstr(s_resp_status, "409") != NULL, "409 Conflict");
     TEST_CHECK(strstr(s_resp_body, "working copy edited during save, decide again") != NULL, "text names the race");
     TEST_CHECK(strstr(s_resp_body, "\"ok\":true") == NULL, "not ok:true");
+    TEST_CHECK(strstr(s_resp_body, "\"saved\":true") != NULL, "REVIEW_WEBFX8 LOW-2: body carries saved:true");
+    TEST_CHECK(strstr(s_resp_body, "\"id\":") != NULL, "REVIEW_WEBFX8 LOW-2: body carries the slot id");
 }
 
 static void test_decide_save_as_edit_during_save_keeps_edit(void)
@@ -824,6 +826,17 @@ static void test_decide_clear_failure_after_save_is_reported(void)
     fake_kv_set_write_safe_here(true);
     TEST_CHECK(r == LIVE_DECIDE_SERVER_ERROR, "SERVER_ERROR, not OK");
     TEST_CHECK(strstr(err, "clearing the working copy failed") != NULL, "err says the clear failed");
+
+    /* REVIEW_WEBFX8 LOW-2: the HTTP 500 body says the slot WAS saved, as fields. */
+    reset_fakes();
+    fork_for_tests(0);
+    fake_kv_set_write_safe_here(false);
+    httpd_req_t req = make_req("action=save_as&name=ClrFail2");
+    (void)api_profile_live_decide_post_handler(&req);
+    fake_kv_set_write_safe_here(true);
+    TEST_CHECK(strstr(s_resp_status, "500") != NULL, "500 Internal Server Error");
+    TEST_CHECK(strstr(s_resp_body, "\"saved\":true") != NULL, "500 body carries saved:true");
+    TEST_CHECK(strstr(s_resp_body, "\"id\":") != NULL, "500 body carries the slot id");
 }
 
 static void test_decide_overwrite_builtin_403(void)

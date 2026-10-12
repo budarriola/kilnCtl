@@ -193,6 +193,10 @@ def profile_live_decide(action: str, name: Optional[str] = None, confirm: bool =
                      builtin profile (builtins are never overwritable).
 
     Refused (409, any action) if there is no pending working copy at all.
+    A 409 or 500 body that carries "saved":true,"id":N is NOT "nothing
+    decided": the slot WAS saved, but the working copy was edited during the
+    save (409) or could not be cleared (500). Do not retry save_as with a new
+    name (that makes a duplicate slot); re-read with profile_live_get.
 
     `generation`: from profile_live_get(); when given, a mismatch is refused
     409 "changed elsewhere" (nothing decided). Omitted = unconditional (compat).

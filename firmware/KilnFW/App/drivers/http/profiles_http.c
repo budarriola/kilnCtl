@@ -1853,8 +1853,27 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
     return profiles_http_save_ex(requested_id, candidate, out_id, out_warning_count, NULL, err_msg, err_cap);
 }
 
+static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                                    uint8_t *out_warning_count, bool *out_persisted, bool check_rev,
+                                    uint32_t expected_rev, char *err_msg, size_t err_cap);
+
 bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                            uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap)
+{
+    return profiles_http_save_impl(requested_id, candidate, out_id, out_warning_count, out_persisted, false, 0, err_msg,
+                                   err_cap);
+}
+
+bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
+                                   uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap)
+{
+    return profiles_http_save_impl(requested_id, candidate, out_id, out_warning_count, NULL, true, expected_rev,
+                                   err_msg, err_cap);
+}
+
+static bool profiles_http_save_impl(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
+                                    uint8_t *out_warning_count, bool *out_persisted, bool check_rev,
+                                    uint32_t expected_rev, char *err_msg, size_t err_cap)
 {
     if (out_persisted) {
         *out_persisted = true;
@@ -1975,6 +1994,13 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
     uint8_t target_id;
     if (requested_id < PROFILES_MAX_COUNT) {
         target_id = requested_id;
+        /* REVIEW_WEBGENFX LOW-B: the caller's expected slot revision is compared HERE, under the save lock, the
+         * same place the web path (profiles_edit_http.c) does it, so no save can slip in between check and write. */
+        if (check_rev && profiles_http_slot_rev(target_id) != expected_rev) {
+            profiles_save_unlock();
+            snprintf(err_msg, err_cap, "That slot changed since you opened it. Pick the slot again.");
+            return false;
+        }
     } else {
         /* profiles_http_first_free_slot() (Opus review nit N5) -- shared with
          * backup_import.c's pass-1 commit simulation so the two allocation
@@ -2046,7 +2072,7 @@ bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uin
                 if (file_valid && file_rev == s_profile_rev[target_id] + 1) {
                     esp_err_t derr = profiles_cfg_fs_delete(target_id);
                     if (derr != ESP_OK && derr != ESP_ERR_NOT_FOUND) {
-                        ESP_LOGE(PROFILES_TAG, "save rollback: slot %u phantom cfg file delete failed: %s -- slot may reappear at next boot",
+                        ESP_LOGE(PROFILES_TAG, "save rollback: slot %u phantom cfg file delete failed: %s -- the stale cfg file WILL reappear at next boot (reconcile adopts its higher rev over NVS)",
                                  (unsigned)target_id, esp_err_to_name(derr));
                     }
                 }
@@ -2193,6 +2219,12 @@ profiles_delete_result_t profiles_delete_slot(uint8_t id)
     if (profile_executor_get_active_id(&active_id) && active_id == id) {
         delete_pending_release(id);
         return PROFILES_DELETE_RUNNING;
+    }
+    /* REVIEW_WEBGENFX LOW-C: a rev-unknown slot's erase is refused by the store anyway; refuse HERE, before the
+     * favorite clear and the firing-stats prune, so a delete that cannot succeed wipes nothing. */
+    if (s_profile_rev_unknown[id]) {
+        delete_pending_release(id);
+        return PROFILES_DELETE_REV_UNKNOWN;
     }
     /* Clear the favorite mark BEFORE erasing the slot (review fold-in,
      * PROFILE_SLOTS_100.md section 7): erase-then-clear left a window

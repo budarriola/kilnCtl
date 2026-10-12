@@ -57,6 +57,9 @@ docs/LIVE_PROFILE_EDIT.md section 10. Mirrored here, not re-derived:
           origin (live_edit_can_overwrite()'s own refusal text).
        -> 409 {"ok":false,"error":"nothing pending"} if there is no pending
           working copy at all.
+       -> 409/500 {"ok":false,"saved":true,"id":N,"error":"saved to slot N; ..."}
+          when the slot WAS saved but the working copy was edited during the
+          save (409) or could not be cleared (500).
        -> 500 {"ok":false,"error":"..."} when the pending record could not be
           cleared (discard, e.g. an NVS failure), on out of memory / an
           unreadable working copy, or when another decision (web or LCD) holds
@@ -286,7 +289,10 @@ def decide_live_save_as(host: str, name: str, timeout: float = PROFILE_LIVE_HTTP
     """POST /api/profile/live/decide action=save_as&name=... ->
     {"ok":true,"id":uint} (the new profile slot). Raises
     ProfileLiveHttpError(status=400) on a missing/invalid name or a save
-    failure, status=409 if there is nothing pending."""
+    failure, status=409 if there is nothing pending. A 409/500 body with
+    "saved":true,"id":N means the slot WAS saved but the working copy was
+    edited during the save / could not be cleared: do not retry with a new
+    name (duplicate slot)."""
     return _post_form(host, _gen_path("/api/profile/live/decide", generation), {"action": "save_as", "name": name}, timeout)
 
 

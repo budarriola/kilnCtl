@@ -97,7 +97,7 @@ static void do_save_apply(void *user_data)
     if (s_pick_slot == slot && (s_pick_rev & 1u) != 0u) {
         s_pick_slot = 0xFF; /* picked mid-write: stale by definition */
     }
-    if (s_pick_slot != slot || profiles_http_slot_rev(slot) != s_pick_rev) {
+    if (s_pick_slot != slot) {
         ESP_LOGW(TAG, "slot %u changed since it was picked; save refused", (unsigned)slot);
         s_pick_slot = 0xFF;
         ui_confirm_params_t stale = {
@@ -120,7 +120,8 @@ static void do_save_apply(void *user_data)
      * uart_bridge_ext.c documents for its own NVS-writing call) -- an
      * external-PSRAM stack is what NVS's flash operations cannot tolerate,
      * and that isn't this task's stack. */
-    bool ok = profiles_http_save(slot, d, &out_id, &warn_count, err_msg, sizeof(err_msg));
+    /* The rev compare runs inside the save, under the profiles save lock (LOW-B). */
+    bool ok = profiles_http_save_expect_rev(slot, d, s_pick_rev, &out_id, &warn_count, err_msg, sizeof(err_msg));
 
     if (!ok) {
         ESP_LOGW(TAG, "profiles_http_save(%u) refused: %s", (unsigned)slot, err_msg);
@@ -177,6 +178,11 @@ static void slot_clicked_cb(lv_event_t *e)
     uint8_t slot = (uint8_t)(uintptr_t)lv_event_get_user_data(e);
     profile_t existing;
     s_pick_rev = profiles_http_slot_rev(slot); /* before the read, so a racing save makes the later check fail */
+    if (slot == ui_page_profile_builder_source_slot()) {
+        /* LOW-B: overwriting the slot this edit was loaded from -- compare against the rev at LOAD time, so a
+         * save made during the whole edit is caught, not just one after this pick. */
+        s_pick_rev = ui_page_profile_builder_source_rev();
+    }
     s_pick_slot = slot;
     bool occupied = profiles_http_get(slot, &existing);
     if (!occupied) {

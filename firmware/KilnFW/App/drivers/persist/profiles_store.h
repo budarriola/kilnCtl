@@ -52,6 +52,12 @@ bool profiles_http_save(uint8_t requested_id, const profile_t *candidate, uint8_
 bool profiles_http_save_ex(uint8_t requested_id, const profile_t *candidate, uint8_t *out_id,
                            uint8_t *out_warning_count, bool *out_persisted, char *err_msg, size_t err_cap);
 
+/* REVIEW_WEBGENFX LOW-B: like profiles_http_save() but, for a user slot (requested_id < PROFILES_MAX_COUNT),
+ * refuses with "That slot changed since you opened it" unless profiles_http_slot_rev(requested_id) still equals
+ * expected_rev. The compare runs under the profiles save lock, so it cannot race another save. */
+bool profiles_http_save_expect_rev(uint8_t requested_id, const profile_t *candidate, uint32_t expected_rev,
+                                   uint8_t *out_id, uint8_t *out_warning_count, char *err_msg, size_t err_cap);
+
 /* With out_persisted != NULL and requested_id >= PROFILES_MAX_COUNT (fresh slot), a failed storage save rolls the
  * new slot back inside save_ex's own critical section, so no phantom RAM-only profile remains (*out_persisted is
  * false, *out_id still names the rolled-back slot). */

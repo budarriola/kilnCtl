@@ -2538,6 +2538,59 @@ static void test_save_ex_rollback_unlinks_written_file(void)
     TEST_CHECK(!valid, "rolled-back slot's file is gone (would resurrect at next boot)");
 }
 
+static void test_save_ex_rollback_delete_failure_logs_reappear(void)
+{
+    TEST_SECTION("REVIEW_SUITEFX INFO-2: failed rollback delete is logged as WILL reappear, file stays");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    bool persisted = true;
+    char err[128];
+    esp_log_test_capture_reset();
+    profiles_cfg_fs_set_write_fn(write_then_fail_fn);
+    profiles_cfg_fs_set_delete_fn(pcfg_failing_delete_fn);
+    bool ok = profiles_http_save_ex(PROFILES_MAX_COUNT, &p, &out_id, &warn, &persisted, err, sizeof(err));
+    profiles_cfg_fs_reset_delete_fn_for_test();
+    profiles_cfg_fs_reset_write_fn_for_test();
+    TEST_CHECK(ok && !persisted && out_id < PROFILES_MAX_COUNT, "save still reports persisted=false");
+    TEST_CHECK(!profiles_slot_used(out_id), "RAM slot cleared by the rollback");
+    TEST_CHECK(esp_log_test_capture_contains("WILL reappear"), "log says the stale cfg file WILL reappear");
+    profile_t loaded;
+    uint32_t rev = 0;
+    bool valid = false;
+    profiles_cfg_fs_load_raw(out_id, &loaded, &rev, &valid);
+    TEST_CHECK(valid, "the undeletable file is still on flash (documented residual)");
+}
+
+static void test_save_expect_rev_under_lock(void)
+{
+    TEST_SECTION("REVIEW_WEBGENFX LOW-B: profiles_http_save_expect_rev compares the slot rev inside the save");
+    pcfg_reset_all();
+    size_t reaped = 0;
+    cfg_fs_init(PCFG_SCRATCH_BASE, &reaped);
+    g_fake_exec_state = PROFILE_EXEC_IDLE;
+    g_fake_exec_profile_id = 0xFF;
+    profile_t p = make_stored_profile();
+    uint8_t out_id = 0xFF, warn = 0;
+    char err[128] = "";
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, &warn, err, sizeof(err)), "seed slot 4");
+    uint32_t loaded_rev = profiles_http_slot_rev(4);
+    TEST_CHECK(profiles_http_save(4, &p, &out_id, &warn, err, sizeof(err)), "a second save (the 'web save')");
+    TEST_CHECK(profiles_http_slot_rev(4) != loaded_rev, "rev moved");
+    uint32_t before = profiles_http_slot_rev(4);
+    TEST_CHECK(!profiles_http_save_expect_rev(4, &p, loaded_rev, &out_id, &warn, err, sizeof(err)),
+               "stale expected rev is refused");
+    TEST_CHECK(strstr(err, "changed") != NULL, "refusal names the change");
+    TEST_CHECK(profiles_http_slot_rev(4) == before, "refused save wrote nothing");
+    TEST_CHECK(profiles_http_save_expect_rev(4, &p, before, &out_id, &warn, err, sizeof(err)),
+               "current expected rev saves");
+    TEST_CHECK(profiles_http_slot_rev(4) != before, "accepted save bumped the rev");
+}
+
 static void rvfx_prepare_free_slot0_with_file(uint32_t file_rev)
 {
     pcfg_reset_all();
@@ -2725,9 +2778,13 @@ static void test_profiles_delete_start_race_l23(void)
     g_fake_exec_profile_id = 0xFF;
 
     /* A failed erase releases the mark too. */
+    /* REVIEW_WEBGENFX LOW-C: a rev-unknown slot is refused BEFORE any side effect (favorite kept). */
+    TEST_CHECK(profiles_favorites_set(4, true) == ESP_OK, "favorite slot 4");
     s_profile_rev_unknown[4] = true;
-    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_PERSIST_FAILED, "erase refusal reported");
+    TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_REV_UNKNOWN, "rev-unknown delete answers REV_UNKNOWN");
+    TEST_CHECK(profiles_favorites_is(4), "refused rev-unknown delete leaves the favorite mark");
     s_profile_rev_unknown[4] = false;
+    (void)profiles_favorites_set(4, false);
     TEST_CHECK(profiles_http_slot_runnable(4), "failed delete leaves the slot runnable");
     TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_OK, "retry succeeds");
     TEST_CHECK(profiles_delete_slot(4) == PROFILES_DELETE_NOT_FOUND, "deleting it again is NOT_FOUND");
@@ -2845,8 +2902,10 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
     if (lcd_text) {
         TEST_CHECK(strstr(lcd_text, "s_pick_rev = profiles_http_slot_rev(slot)") != NULL,
                    "LCD slot pick captures the slot revision");
-        TEST_CHECK(strstr(lcd_text, "profiles_http_slot_rev(slot) != s_pick_rev") != NULL,
-                   "LCD save compares the captured revision before writing");
+        TEST_CHECK(strstr(lcd_text, "profiles_http_save_expect_rev(slot, d, s_pick_rev") != NULL,
+                   "LCD save compares the captured revision inside the save (under the save lock)");
+        TEST_CHECK(strstr(lcd_text, "ui_page_profile_builder_source_rev()") != NULL,
+                   "LCD overwrite of the edited slot uses the rev captured at edit load");
         free(lcd_text);
     }
 }
@@ -6067,6 +6126,8 @@ void run_test_profiles_http(void)
     test_profiles_delete_start_race_l23();
     test_profiles_slot_gen_seqlock();
     test_save_ex_rollback_unlinks_written_file();
+    test_save_ex_rollback_delete_failure_logs_reappear();
+    test_save_expect_rev_under_lock();
     test_rvfx_rollback_keeps_unexamined_file();
     test_rvfx_rollback_keeps_file_with_other_rev();
     test_save_ex_fresh_slot_rolled_back_in_lock();

@@ -38,6 +38,11 @@ void ui_page_profile_builder_start_new(void);
  * No-op (draft left blank) if source_id does not resolve to a real profile. */
 void ui_page_profile_builder_start_edit(uint8_t source_id);
 
+/* REVIEW_WEBGENFX LOW-B: the user slot start_edit() loaded (0xFF for start_new or a builtin source) and that
+ * slot's revision captured BEFORE the load, so the final save can detect a save made during the whole edit. */
+uint8_t ui_page_profile_builder_source_slot(void);
+uint32_t ui_page_profile_builder_source_rev(void);
+
 /* The shared working draft -- ui_page_profile_builder_segment.c and
  * ui_page_profile_builder_review.c both mutate/read through this pointer
  * rather than keeping their own copy, so the three steps can never disagree
