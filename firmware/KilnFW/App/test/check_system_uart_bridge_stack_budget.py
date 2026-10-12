@@ -81,6 +81,10 @@ CEILING_BYTES = 3216
 
 UNMODELED_OVERHEAD_BYTES = 300
 
+# Honest headroom floor, enforced (2026-10-11, REVIEW_DEVBREAK3 LOW-4): retightening CEILING_BYTES upward must not walk
+# the stack into the margin with the check green; a breach forces a stack bump. Same value as the all-task checker's absolute floor.
+MIN_HONEST_HEADROOM_BYTES = 512
+
 
 def main():
     import argparse
@@ -125,6 +129,12 @@ def main():
     for fn in [ROOT] + path:
         running += frames.get(fn, 0)
         print(f"    {frames.get(fn, 0):>6} B  {running:>6} B cumulative  {fn}")
+
+    if honest_headroom < MIN_HONEST_HEADROOM_BYTES:
+        print()
+        print(f"check_system_uart_bridge_stack_budget: FAIL -- honest headroom {honest_headroom} B is below the "
+              f"{MIN_HONEST_HEADROOM_BYTES} B floor; raise the system_uart_bridge stack instead of raising the ceiling.")
+        return 1
 
     if total > ceiling:
         print()
