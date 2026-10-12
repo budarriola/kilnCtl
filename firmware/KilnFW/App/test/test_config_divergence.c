@@ -204,14 +204,17 @@ static void test_append_suffix_truncating_head(void)
     char head[200];
     memset(head, 'h', sizeof(head) - 1);
     head[sizeof(head) - 1] = '\0';
-    char dst[CONFIG_DIVERGENCE_REASON_MAX];
-    memset(dst, 'X', sizeof(dst));
-    size_t n = config_divergence_append_suffix_truncating_head(dst, sizeof(dst), head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    /* Guard tail past the nominal cap so an overflow is an assertion, not a crash. */
+    char guarded[CONFIG_DIVERGENCE_REASON_MAX + 64];
+    char *dst = guarded;
+    memset(guarded, 'X', sizeof(guarded));
+    size_t n = config_divergence_append_suffix_truncating_head(dst, CONFIG_DIVERGENCE_REASON_MAX, head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    TEST_CHECK(guarded[CONFIG_DIVERGENCE_REASON_MAX] == 'X' && guarded[sizeof(guarded) - 1] == 'X', "nothing written past cap");
     size_t sl = strlen(CONFIG_DIVERGENCE_ARMED_SUFFIX);
-    TEST_CHECK(n == sizeof(dst) - 1u && strlen(dst) == n, "result exactly fills the buffer (159 chars), NUL-terminated");
+    TEST_CHECK(n == CONFIG_DIVERGENCE_REASON_MAX - 1u && strlen(dst) == n, "result exactly fills the buffer (159 chars), NUL-terminated");
     TEST_CHECK(strcmp(dst + n - sl, CONFIG_DIVERGENCE_ARMED_SUFFIX) == 0, "suffix intact at the tail");
     TEST_CHECK(dst[n - sl - 1u] == 'h' && dst[0] == 'h', "head kept up to cap - suffix - 1 chars");
-    n = config_divergence_append_suffix_truncating_head(dst, sizeof(dst), "short", CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    n = config_divergence_append_suffix_truncating_head(dst, CONFIG_DIVERGENCE_REASON_MAX, "short", CONFIG_DIVERGENCE_ARMED_SUFFIX);
     TEST_CHECK(n == 5u + sl && strncmp(dst, "short", 5) == 0, "short head is kept whole");
     char tiny[10];
     n = config_divergence_append_suffix_truncating_head(tiny, sizeof(tiny), "abc", CONFIG_DIVERGENCE_ARMED_SUFFIX);
