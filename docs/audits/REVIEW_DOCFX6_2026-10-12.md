@@ -87,3 +87,9 @@ Both baselines passed: doc_hash in 47 s, wt_status in 117.2 s. Both runs reporte
 Every CAUGHT came from a mutant that ran and failed on the check's own assertion or timeout message. Neither was a parse or compile error: PowerShell and C# compile at run time, and both mutant logs show the fixture or the batch running before the matched line.
 
 The hand measurement behind LOW-1 is described there. It was run outside negtest, because no standing check can observe the grandchild.
+
+## Fix status
+
+- **LOW-1** fixed in 1a5342a8c: `WtStatusWalk.Git` starts git inside a Win32 Job Object (`KILL_ON_JOB_CLOSE`) and terminates it on every exit path, so a stderr-holding grandchild is reaped even after the launcher exited. `check_wt_status.ps1` now asserts it (a `sleep 47` grandchild must be gone after the timeout); negtest `nojob` (job assign removed) CAUGHT on that assertion in f2c484d2c's tree. A first version of the assertion matched the wrong command line and was vacuous (MISSED); fixed in f2c484d2c.
+- **INFO-3** fixed in 1a5342a8c: `check_doc_hash_citations.ps1` resolves `git.exe` from PATH skipping the current directory (bare `git` fallback only when none found, documented).
+- **INFO-4** fixed in 1a5342a8c: the write-timeout message now says writing stdin did not complete.
