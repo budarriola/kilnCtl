@@ -3,10 +3,18 @@ firmware/KilnFW/App/drivers/http/zones_http_post_parse.c really treats as
 omit-preserves-current (review BENCHFX2 LOW-1).
 
 The later-override scan is a cheap second line, not a C parser. It covers plain and compound
-assignment (spaced `z -> f`, `(z)->f`, `(*z).f`), ++/-- and memset with or without `&`. It does
-NOT see writes through a macro, memcpy/helper calls, or a conditional default nested inside the
-omit `else` itself; those are covered by the KilnFW host tests in
-firmware/KilnFW/App/test/test_zones_http.c (BENCHFX7 review LOW-1)."""
+assignment, ++/--, and memset/memmove/strncpy (with or without `&`, a cast, or a space before
+the paren), on these left-hand sides: `z->f`, spaced `z -> f`, `(z)->f`, `((z))->f`,
+`(z + 0)->f`, `(*z).f` with any inner spacing, `z[k].f`, and an index after the field with
+spaces or one level of nesting (`z->f [s[0]]`).
+
+It does NOT see, and these remain UNCOVERED here: pointer aliases (`zp = z; zp->f = ..`,
+`float *hp = &z->f; *hp = ..`), whole-struct assignment (`*z = tmp;`), compound literals
+(`*z = (zone_cfg_t){...}`), ternary lvalues (`*(c ? &z->f : &x) = ..`), writes through a macro,
+memcpy or any other helper that is given `&z->f`, a two-level index, and a conditional default
+nested inside the omit `else` itself. The backstop for all of those is the per-field
+omit-preserve assertions in firmware/KilnFW/App/test/test_zones_http.c (BENCHFX7 review LOW-1,
+BENCHFX8 review LOW-2)."""
 import re
 import unittest
 from pathlib import Path
@@ -30,6 +38,14 @@ _EXACT_ELSE_RE = re.compile(
 # src_raw in the gkey loop (its else-if on have_legacy is legitimate, so the else-if rule skips it);
 # tc_type_raw is the parsed value on the present branch. Any other assignment to these fields is still a violation.
 _ALLOWED_RHS = {"settings_source": {"src_raw"}, "tc_type": {"preserved_tc_type", "tc_type_raw"}}
+
+
+# Left-hand-side shapes the scan understands: `z->`, `(z)->`, `((z))->`, `(z + 0)->`,
+# `( * z ).`, `z[k].`; optional spaced and one-level-nested `[index]` after the field.
+_Z_DEREF = (r"(?:(?:\bz|\(+\s*z\s*\)+|\(\s*z\s*\+\s*0\s*\))\s*->"
+            r"|\(\s*\*\s*z\s*\)\s*\."
+            r"|\bz\s*\[[^\]]*\]\s*\.)")
+_IDX = r"(?:\s*\[(?:[^\[\]]|\[[^\]]*\])*\])?"
 
 
 def strip_c_comments(text: str) -> str:
@@ -73,7 +89,7 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
             violations.append(f"{name}: `else if` in the omit branch chain")
         fields_to_check.append((name, field, span, block_start))
     for name, field, span, bstart in fields_to_check:
-        lhs = r"(?:\bz\s*->|\(\s*z\s*\)\s*->|\(\*z\)\s*\.)\s*" + re.escape(field) + r"(?:\[[^\]]*\])?"
+        lhs = _Z_DEREF + r"\s*" + re.escape(field) + _IDX
         # Real compound operators only: `>=` / `<=` comparisons are not assignments (LOW-2).
         pat = re.compile(lhs + r"\s*((?:<<|>>|[-+*/%&|^])?)=(?!=)\s*([^;]*);")
         incdec = re.compile(r"(?:\+\+|--)\s*" + lhs + "|" + lhs + r"\s*(?:\+\+|--)")
@@ -96,9 +112,9 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
         for m in incdec.finditer(whole):
             if not (span[0] <= m.start() < span[1]):
                 violations.append(f"{name}: ++/-- on z->{field} outside the omit branch")
-        for m in re.finditer(r"\bmemset\(\s*&?\s*" + lhs, whole):
+        for m in re.finditer(r"\b(?:memset|memmove|strncpy)\s*\(\s*(?:\([^)]*\)\s*)?&?\s*" + lhs, whole):
             if not (span[0] <= m.start() < span[1]):
-                violations.append(f"{name}: memset of z->{field} outside the omit branch")
+                violations.append(f"{name}: memset/memmove/strncpy of z->{field} outside the omit branch")
     return preserved, defaulted, violations
 
 
@@ -222,6 +238,16 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         for stmt in ("z->foo++;", "--z->foo;", "z -> foo = 0.0f;", "(z)->foo = 0.0f;",
                      "memset(z->foo, 0, sizeof(z->foo));", "memset(&z->foo, 0, 4);"):
             self.assertEqual(len(cls(ok + chr(10) + stmt)[2]), 1, stmt)
+        # BENCHFX8 LOW-1: one self-test per spacing/parenthesis form
+        for stmt in ("z->foo [1] = 0.0f;", "( *z ).foo = 0.0f;", "(* z).foo = 0.0f;",
+                     "((z))->foo = 0.0f;", "(z + 0)->foo = 0.0f;", "z->foo[s[0]] = 0.0f;",
+                     "memset (z->foo, 0, 4);", "memset((void *)z->foo, 0, 4);",
+                     "memset ((void *) &z->foo, 0, 4);",
+                     # BENCHFX8 LOW-2 (cheap extras): indexed z and memmove/strncpy
+                     "z[0].foo = 0.0f;", "memmove(z->foo, src, 4);", "strncpy(z->foo, src, 4);"):
+            self.assertEqual(len(cls(ok + chr(10) + stmt)[2]), 1, stmt)
+        # and none of them is a false positive when it is only read or compared
+        self.assertEqual(cls(ok + chr(10) + "if (z->foo [1] == 0.0f && ( *z ).foo >= 1.0f) { y = 1; }")[2], [])
         # indexed form must match on both sides
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[k]; }")[1], {"foo"})
@@ -265,7 +291,15 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertGreater(len(keys), 15)
         fw = firmware_omit_preserved_keys(_SRC.read_text(encoding="utf-8"))
         self.assertEqual(keys - fw, set(), "page drops a blank for a key the firmware does not omit-preserve")
-        self.assertEqual(keys & set(zhc.ZONE_OMIT_DEFAULTED_KEYS), set())
+        # (a defaulted key can never be in `fw`, so the assertion above already implies this
+        # one; it is kept only as an explicit statement of the intent.)
+        # BENCHFX8 INFO-2: a second filter or a reassignment of the regex would bypass the pin.
+        self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*=", page)), 1,
+                         "ZONE_OPTIONAL_KEY_RE must be assigned exactly once")
+        ob = re.search(r"function omitBlankOptionalParams\b.*?\n\s*\}\n", page, flags=re.S)
+        self.assertIsNotNone(ob, "omitBlankOptionalParams not found in zones_page.html")
+        self.assertEqual(len(re.findall(r"\.test\(", ob.group(0))), 1,
+                         "omitBlankOptionalParams must filter with exactly one regex test")
 
     def test_guard_keys_stripped_from_body(self):
         body = "z0_runawaymargin=12.2&z0_xzone=5.0&z0_debounce=3&z0_kp=1&z0_zonetype=1"
