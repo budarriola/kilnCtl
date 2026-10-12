@@ -77,6 +77,7 @@ here specifically (its 80C ceiling is a fixture limit, never a kiln one).
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
@@ -186,6 +187,14 @@ def load_preset_data(name: str) -> dict:
     return data
 
 
+#: Zone keys that are legitimately not scalar numbers (checked separately or free text).
+_ZONE_NON_FLOAT_KEYS = frozenset({"name", "coupling_coeff", "failsafe_state", "settings_source_groups"})
+
+
+def _is_finite_number(v: object) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
 def _validate(name: str, data: object) -> None:
     if not isinstance(data, dict):
         raise ConfigPresetError(f"preset {name!r}: top level must be a JSON object")
@@ -205,7 +214,7 @@ def _validate(name: str, data: object) -> None:
                     f"preset {name!r}: zones[{i}] missing required field {field!r}"
                 )
         idx = zone["index"]
-        if not isinstance(idx, int) or idx < 0:
+        if type(idx) is not int or idx < 0:
             raise ConfigPresetError(f"preset {name!r}: zones[{i}].index must be a non-negative int")
         if idx in seen_index:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
@@ -215,6 +224,20 @@ def _validate(name: str, data: object) -> None:
                 raise ConfigPresetError(
                     f"preset {name!r}: zones[{i}].{key} is an integer field but the preset gives "
                     f"{zone[key]!r} ({type(zone[key]).__name__}); write it as a plain integer")
+        for key, val in zone.items():
+            if (key in _ZONE_NON_FLOAT_KEYS or key in zones_http_client._ZONE_INT_FIELDS
+                    or key.startswith("_")):
+                continue
+            if not _is_finite_number(val):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].{key} must be a finite number (int or float, "
+                    f"not bool/str/list/NaN/inf), got {val!r}")
+        if "coupling_coeff" in zone:
+            cells = zone["coupling_coeff"]
+            if not isinstance(cells, list) or not all(_is_finite_number(c) for c in cells):
+                raise ConfigPresetError(
+                    f"preset {name!r}: zones[{i}].coupling_coeff must be a list of finite numbers, "
+                    f"got {cells!r}")
         if "failsafe_state" in zone and not isinstance(zone["failsafe_state"], bool):
             raise ConfigPresetError(
                 f"preset {name!r}: zones[{i}].failsafe_state must be a bool (true/false), "

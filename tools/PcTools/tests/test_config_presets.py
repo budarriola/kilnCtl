@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
@@ -33,9 +34,12 @@ class ShippedPresetsValidateTest(unittest.TestCase):
     def test_non_preset_files_are_not_listed_and_refuse_load(self):
         names = {e["name"] for e in config_presets.list_presets()}
         for n in config_presets.NON_PRESET_FILES:
+            self.assertTrue(os.path.isfile(os.path.join(config_presets.presets_dir(), f"{n}.json")),
+                            f"stale NON_PRESET_FILES entry {n!r}: no such file")
             self.assertNotIn(n, names)
-            with self.assertRaises(config_presets.ConfigPresetError):
+            with self.assertRaises(config_presets.ConfigPresetError) as cm:
                 config_presets.load_preset_data(n)
+            self.assertIn("is a data file", str(cm.exception))
 
 
 class FakeControl:
@@ -115,12 +119,90 @@ class IntFieldFloatValueTest(unittest.TestCase):
                 config_presets._validate("t", d)
 
     def test_bad_bool_field_never_writes(self):
+        """A bad preset on disk, driven through load_config_preset(confirm=True):
+        refused with no PID write and no zones POST."""
+        from kilnctrl import mcp_server_config_presets as mcp_
         d = self._preset()
         d["zones"][0]["failsafe_state"] = "false"
-        with unittest.mock.patch.object(zones_http_client, "post_zones") as post:
-            with self.assertRaises(config_presets.ConfigPresetError):
-                config_presets._validate("t", d)
+        directory = tempfile.mkdtemp()
+        with open(os.path.join(directory, "badbool.json"), "w", encoding="utf-8") as fh:
+            json.dump(d, fh)
+        fake = FakeControl()
+        with unittest.mock.patch.object(config_presets, "presets_dir", lambda: directory),              unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
+                                 return_value=None),              unittest.mock.patch.object(mcp_, "_srv", types.SimpleNamespace(_control=fake)),              unittest.mock.patch.object(zones_http_client, "post_zones") as post,              unittest.mock.patch.object(zones_http_client, "apply_zone_preset") as zapply:
+            out = mcp_.load_config_preset("badbool", host="h", confirm=True)
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("failsafe_state", out)
+        self.assertEqual(fake.pid_calls, [])
         post.assert_not_called()
+        zapply.assert_not_called()
+
+    def test_validator_rejects_non_finite_or_non_numeric_floats(self):
+        import copy
+        cases = [
+            ("max_temp_c", [80]), ("pid_kp", "1.0"), ("pid_ki", float("nan")),
+            ("sanity_rate_c_per_min", float("inf")), ("min_temp_c", True),
+            ("coupling_c1", "x"),
+        ]
+        for key, bad in cases:
+            d = copy.deepcopy(self._preset())
+            d["zones"][0][key] = bad
+            with self.assertRaises(config_presets.ConfigPresetError, msg=(key, bad)) as cm:
+                config_presets._validate("t", d)
+            self.assertIn(key, str(cm.exception))
+        for bad_cells in (["x", 0.0], [True, 0.0], [float("nan")], "abc"):
+            d = copy.deepcopy(self._preset())
+            d["zones"][0]["coupling_coeff"] = bad_cells
+            with self.assertRaises(config_presets.ConfigPresetError, msg=bad_cells) as cm:
+                config_presets._validate("t", d)
+            self.assertIn("coupling_coeff", str(cm.exception))
+
+    def test_validator_rejects_bool_index(self):
+        d = self._preset()
+        d["zones"][0]["index"] = True
+        with self.assertRaises(config_presets.ConfigPresetError) as cm:
+            config_presets._validate("t", d)
+        self.assertIn("index", str(cm.exception))
+
+    def test_bad_float_preset_through_loader_never_writes(self):
+        from kilnctrl import mcp_server_config_presets as mcp_
+        for key, bad in (("max_temp_c", [80]), ("pid_kp", "1.0")):
+            d = self._preset()
+            d["zones"][0][key] = bad
+            directory = tempfile.mkdtemp()
+            with open(os.path.join(directory, "badfloat.json"), "w", encoding="utf-8") as fh:
+                json.dump(d, fh)
+            fake = FakeControl()
+            with unittest.mock.patch.object(config_presets, "presets_dir", lambda: directory),                  unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
+                                     return_value=None),                  unittest.mock.patch.object(mcp_, "_srv", types.SimpleNamespace(_control=fake)),                  unittest.mock.patch.object(zones_http_client, "apply_zone_preset") as zapply:
+                out = mcp_.load_config_preset("badfloat", host="h", confirm=True)
+            self.assertTrue(out.startswith("error:"), out)
+            self.assertEqual(fake.pid_calls, [])
+            zapply.assert_not_called()
+
+    def test_unexpected_exception_after_pid_stage_reports_partial(self):
+        """LOW-1: a TypeError (not in the handler's typed list) raised after the
+        PID stage must still carry the partial-apply note."""
+        from kilnctrl import mcp_server_config_presets as mcp_
+        fake = FakeControl()
+        with unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
+                                 return_value=None),              unittest.mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"),              unittest.mock.patch.object(mcp_, "_srv", types.SimpleNamespace(_control=fake)),              unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
+                                        side_effect=TypeError("float() argument must be a string")):
+            out = mcp_.load_config_preset("bench_fixture", host="h", confirm=True)
+        self.assertTrue(fake.pid_calls)
+        self.assertIn("TypeError", out)
+        self.assertIn("ALREADY landed", out)
+        self.assertIn("board is partially written", out)
+
+    def test_value_error_after_pid_stage_reports_partial(self):
+        from kilnctrl import mcp_server_config_presets as mcp_
+        fake = FakeControl()
+        with unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
+                                 return_value=None),              unittest.mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"),              unittest.mock.patch.object(mcp_, "_srv", types.SimpleNamespace(_control=fake)),              unittest.mock.patch.object(zones_http_client, "apply_zone_preset",
+                                        side_effect=ValueError("bad literal")):
+            out = mcp_.load_config_preset("bench_fixture", host="h", confirm=True)
+        self.assertIn("ValueError", out)
+        self.assertIn("ALREADY landed", out)
 
     def test_format_scalar_refuses_non_bool_failsafe(self):
         for bad in ("false", 1.0):
