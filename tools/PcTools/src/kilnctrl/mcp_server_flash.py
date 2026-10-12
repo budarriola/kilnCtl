@@ -1291,6 +1291,10 @@ def flash_firmware(
         os.path.join(build_dir, "KilnCtrl.bin"),
     ]
     missing = [p for p in required if not os.path.isfile(p)]
+    empty = [p for p in required if p not in missing and os.path.getsize(p) <= 0]
+    if empty:
+        return ("error: refusing to flash -- empty (0 bytes) build output(s): "
+                + ", ".join(empty) + ". Rebuild with `build_kilnfw`.")
     if missing:
         override_note = " (kiln_fw_root override)" if kiln_fw_root else ""
         stale_publish_names = ("bootloader.bin", "partition_table" + os.sep + "partition-table.bin")

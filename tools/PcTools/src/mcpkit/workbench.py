@@ -468,29 +468,26 @@ def _msys_output_problems(output: str) -> "list[str]":
     return []
 
 
-def _app_bin_build_wall(path: str) -> "tuple[Optional[float], Optional[str]]":
-    """(build wall time from the image's esp_app_desc_t, problem). The desc time
-    is local ``__DATE__ __TIME__``. Problem is set for a bad/short image."""
+def _app_image_problem(path: str) -> "Optional[str]":
+    """Problem text for a bad/short image (esp_app_desc_t magic), else None.
+    The desc build time is deliberately NOT read: an incremental build does not
+    recompile app_desc's TU, so it is old while the link rewrites the .bin."""
     from kilnctrl.esp_app_desc import AppDescError, parse_app_desc_file
     try:
-        desc = parse_app_desc_file(path)
+        parse_app_desc_file(path)
     except AppDescError as exc:
-        return None, f"not a valid app image: {path} ({exc})"
+        return f"not a valid app image: {path} ({exc})"
     except OSError as exc:
-        return None, f"unreadable: {path} ({exc})"
-    try:
-        stamp = time.strptime(" ".join(desc.build_timestamp.split()), "%b %d %Y %H:%M:%S")
-        return time.mktime(stamp), None
-    except ValueError:
-        return None, None
+        return f"unreadable: {path} ({exc})"
+    return None
 
 
 def _enforce_fresh_artifacts(report: str, tag: str, build_dir: str, since: float) -> str:
     """Downgrade an OK ``tag`` report unless the build produced a usable app.
 
     ``KilnCtrl.bin`` must exist, be non-empty, carry the esp_app_desc_t magic and
-    be fresh (its embedded build time, else its mtime, at or after ``since`` less
-    2 s). ``bootloader.bin`` and ``partition-table.bin`` only have to exist and be
+    be fresh (its mtime at or after ``since`` less 2 s; never the embedded build
+    time, which an incremental build leaves old). ``bootloader.bin`` and ``partition-table.bin`` only have to exist and be
     non-empty: an incremental build legitimately leaves them old."""
     ok_prefix = f"{tag}: OK"
     if ok_prefix not in report:
@@ -506,7 +503,7 @@ def _enforce_fresh_artifacts(report: str, tag: str, build_dir: str, since: float
         if app_size <= 0:
             problems.append(f"empty (0 bytes): {app}")
         else:
-            built, bad = _app_bin_build_wall(app)
+            bad = _app_image_problem(app)
             if bad:
                 problems.append(bad)
             else:

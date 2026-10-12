@@ -136,3 +136,49 @@ class BuildLockSerializesConcurrentProcesses(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class BuildLockDeadHolder(unittest.TestCase):
+    """Reclaim by recorded PID, not only by age."""
+
+    def _plant(self, text):
+        key = f"test-pid-{os.getpid()}-{time.time_ns()}"
+        path = _lock_path(key)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="ascii") as handle:
+            handle.write(text)
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        return key
+
+    def _dead_pid(self):
+        import subprocess
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def test_dead_pid_lock_is_reclaimed_at_once(self):
+        key = self._plant(f"{self._dead_pid()} {time.time():.0f}\n")
+        t0 = time.monotonic()
+        with build_lock(key, wait_timeout=5.0, stale_after=3600.0, poll_interval=0.05):
+            pass
+        self.assertLess(time.monotonic() - t0, 3.0)
+
+    def test_live_pid_lock_is_respected(self):
+        key = self._plant(f"{os.getpid()} {time.time():.0f}\n")
+        with self.assertRaises(BuildLockTimeout):
+            with build_lock(key, wait_timeout=0.5, stale_after=3600.0, poll_interval=0.05):
+                self.fail("took a lock held by a live process")
+
+    def test_reused_pid_started_after_lock_is_reclaimed(self):
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        key = self._plant(f"{os.getpid()} {time.time() - 1000:.0f}\n")
+        with mock.patch.object(bl, "_pid_info", return_value=(True, time.time())):
+            with build_lock(key, wait_timeout=5.0, stale_after=3600.0, poll_interval=0.05):
+                pass
+
+    def test_unparseable_holder_is_not_treated_as_dead(self):
+        key = self._plant("")
+        with self.assertRaises(BuildLockTimeout):
+            with build_lock(key, wait_timeout=0.4, stale_after=3600.0, poll_interval=0.05):
+                self.fail("reclaimed an empty (being-written) lock")

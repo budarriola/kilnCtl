@@ -323,7 +323,7 @@ Results: baseline PASS (25.9 s).
 
 | Finding | Status | Where |
 |---|---|---|
-| HIGH-1 incremental build reported FAILED | fixed | `_enforce_fresh_artifacts`: only `KilnCtrl.bin` is judged fresh (esp_app_desc build time, mtime fallback, 2 s tolerance); bootloader/partition-table need exist + size > 0 |
+| HIGH-1 incremental build reported FAILED | fixed | `_enforce_fresh_artifacts`: only `KilnCtrl.bin` is judged fresh, by mtime only (2 s tolerance); the esp_app_desc build time must not be used, since an incremental build does not recompile app_desc's TU and so leaves it old while the link rewrites the .bin (observed false FAILED); bootloader/partition-table need exist + size > 0 |
 | MED-1 non-build targets OK when nothing ran | fixed | `_idf_command` (ErrorActionPreference Stop, `Get-Command` check, null `$LASTEXITCODE` = failure), `output_check` on every kilnfw step, `_enforce_target_effect` (reconfigure CMakeCache fresh, fullclean empty/absent) |
 | LOW-1 baseline before lock | fixed | `lock_info["start_wall"]` taken after `build_lock` acquired |
 | LOW-2 env strips untested alone | fixed | tests for `_run`, ungated `_run_locked`, gated strip, saftyfw-configure env |

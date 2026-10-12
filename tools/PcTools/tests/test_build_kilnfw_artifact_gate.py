@@ -367,3 +367,40 @@ def test_incremental_old_desc_time_fresh_mtime_is_ok(harness):
 
     state["after"] = incremental
     assert "kilnfw-build: OK" in _build(fw)
+
+
+# -- review BUILDFX2 LOW-1: guards that must bite -----------------------------
+
+def test_clean_env_strip_is_case_insensitive():
+    env = workbench._clean_env({"msystem": "MINGW64", "Msystem_Prefix": "/x", "KEEP": "1"})
+    assert "msystem" not in env and "Msystem_Prefix" not in env and env["KEEP"] == "1"
+
+
+def test_real_run_locked_records_start_wall_after_lock_acquired(monkeypatch):
+    """Drives the REAL _run_locked (fake lock + fake _run) and checks the
+    baseline is taken once the lock is held, not before the wait."""
+    seen = {}
+
+    @contextlib.contextmanager
+    def slow_lock(key, **kw):
+        time.sleep(0.2)
+        seen["acquired"] = time.time()
+        yield
+
+    monkeypatch.setattr(workbench, "build_lock", slow_lock)
+    monkeypatch.setattr(workbench, "_run", lambda tag, argv, **kw: f"{tag}: OK")
+    info = {}
+    t0 = time.time()
+    workbench._run_locked("t", "k", ["x"], lock_info=info)
+    assert info["start_wall"] >= seen["acquired"] >= t0 + 0.2
+
+
+def test_wrapper_resets_lastexitcode_before_inner_command():
+    cmd = workbench._idf_command("idf.py build")
+    assert "$global:LASTEXITCODE=$null;" in cmd
+    assert cmd.index("$global:LASTEXITCODE=$null") < cmd.index("idf.py build;")
+
+
+def test_downgrade_head_carries_full_log_line():
+    out = workbench._downgrade("t: OK\nfull log: C:/x.log\nmore", "t", "why", ["p"])
+    assert "full log: C:/x.log" in out.split("\n--\n")[0]

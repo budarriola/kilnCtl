@@ -86,6 +86,72 @@ def _lock_path(resource_key: str) -> str:
     return os.path.join(_lock_dir(), f"{safe}.lock")
 
 
+def _parse_holder(text: "str | None") -> "tuple[int, float] | None":
+    """(pid, acquired unix time) from a lock file's content, or None."""
+    if not text:
+        return None
+    parts = text.split()
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[0]), float(parts[1])
+    except ValueError:
+        return None
+
+
+def _pid_info(pid: int) -> "tuple[bool, float | None]":
+    """(alive, process start unix time or None when unknown)."""
+    if pid <= 0:
+        return False, None
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFORMATION
+        if not handle:
+            # 5 = access denied: the process exists. Anything else: gone.
+            return ctypes.get_last_error() == 5, None
+        try:
+            code = wintypes.DWORD()
+            if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True, None
+            if code.value != 259:  # STILL_ACTIVE
+                return False, None
+            c, e, k, u = (wintypes.FILETIME() for _ in range(4))
+            if not k32.GetProcessTimes(handle, ctypes.byref(c), ctypes.byref(e),
+                                       ctypes.byref(k), ctypes.byref(u)):
+                return True, None
+            ticks = (c.dwHighDateTime << 32) | c.dwLowDateTime
+            return True, ticks / 1e7 - 11644473600.0
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False, None
+    except OSError:
+        return True, None
+    return True, None
+
+
+# A process that started this much after the lock was written cannot be its holder.
+_PID_REUSE_SLACK_S = 5.0
+
+
+def _holder_is_dead(lock_path: str) -> bool:
+    """True when the lock file names a PID that is gone, or alive but started
+    after the lock was written (PID reuse). Unparseable content: False."""
+    parsed = _parse_holder(_read_holder(lock_path))
+    if parsed is None:
+        return False
+    pid, acquired = parsed
+    alive, started = _pid_info(pid)
+    if not alive:
+        return True
+    return started is not None and started > acquired + _PID_REUSE_SLACK_S
+
+
 def _read_holder(lock_path: str) -> "str | None":
     try:
         with open(lock_path, "r", encoding="ascii", errors="replace") as handle:
@@ -132,7 +198,9 @@ def build_lock(
                 # the holder just released it. Retry immediately, no sleep,
                 # no timeout charged.
                 continue
-            if age > stale_after:
+            # The recorded PID being dead (or reused by a younger process) also
+            # reclaims at once, so a killed holder does not wedge waiters.
+            if age > stale_after or _holder_is_dead(lock_path):
                 # Holder is presumed dead. Best-effort reclaim: if another
                 # waiter wins the race to remove+recreate it first, our next
                 # open() attempt just loops back into ordinary contention.
