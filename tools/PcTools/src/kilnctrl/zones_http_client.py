@@ -1300,7 +1300,7 @@ def _verify_against_preset(after: dict, preset: dict) -> "list[str]":
 #:    approachratecap, errorband, rateband, progressband, hystc, coilpower,
 #:    coupling_c<j>) and `zones_http_field_nonblank` (the eight guard_*
 #:    keys wrongdirwindow..frozenwindow, plus xzone).
-#:  - ZONE_OMIT_PRESERVED_NONFLOAT_KEYS: omit-preserved enums/ints/masks.
+#:  - ZONE_OMIT_PRESERVED_NONFLOAT_KEYS: omit-preserved enums/ints.
 #:    GET prints them losslessly, so nothing is lost by echoing them, and
 #:    several writers (zonetype, failsafe, minons, minoffs) must send them
 #:    deliberately. NOT stripped.
@@ -1315,8 +1315,16 @@ ZONE_OMIT_PRESERVED_FLOAT_KEYS = (
 )
 ZONE_OMIT_PRESERVED_NONFLOAT_KEYS = (
     "tctype", "relaytype", "zonetype", "failsafe", "minons", "minoffs",
-    "thermo_mask", "ct_mask", "settings_source",
+    "settings_source",
 )
+#: Keys that have a presence check but whose OMIT branch DEFAULTS rather than
+#: preserves (thermo_mask -> 1u << i, ct_mask -> 0). Never stripped: stripping
+#: would remap every zone's thermocouple / clear every CT mapping on a narrow
+#: write (review BENCHFX3 MED-1). z%u_name is omit-preserved through a third
+#: idiom (http_form_find_field, name_len < 0 -> current_z->name); it is a
+#: string and must never be stripped either.
+ZONE_OMIT_DEFAULTED_KEYS = ("thermo_mask", "ct_mask")
+ZONE_OMIT_PRESERVED_THIRD_IDIOM_KEYS = ("name",)
 ZONE_OMIT_PRESERVED_KEY_RE = re.compile(
     r"^z\d+_(?:" + "|".join(ZONE_OMIT_PRESERVED_FLOAT_KEYS) + r"|coupling_c\d+)$")
 

@@ -1112,7 +1112,7 @@ _HP07_RESTORE_RETRY_DELAY_S = 5.0
 
 #: Per-field float tolerance for the read-back: the GET print step is
 #: %.1f for max_temp_c (half a step = 0.05) and %.3f for hyst_c (0.001).
-_READBACK_FLOAT_TOL = {"max_temp_c": 0.05, "hyst_c": 0.001}
+_READBACK_FLOAT_TOL = {"max_temp_c": 0.05, "hyst_c": 0.0005}
 _READBACK_FLOAT_TOL_DEFAULT = 0.05
 
 _READBACK_FIELDS = ("zone_type", "max_temp_c", "failsafe_state", "hyst_c", "min_on_s", "min_off_s")

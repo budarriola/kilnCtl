@@ -13,21 +13,35 @@ _KEY_RE = re.compile(r'snprintf\(\s*g?key,\s*sizeof\(g?key\),\s*"z%u_([a-z_0-9]+
 _PRESERVE_RE = re.compile(r"zones_config_json_field_present\(body, key\)|zones_http_field_nonblank\(body, key\)")
 
 
-def firmware_omit_preserved_keys(text: str) -> "set[str]":
-    """Zone POST keys whose snprintf is followed within 4 lines by a
-    field_present / field_nonblank guard. coupling_c%u is normalised to
-    coupling_c; settings_source's group sub-keys are ignored (gkey)."""
+_OMIT_PRESERVE_RE = re.compile(r"\belse[^{]*\{[^{}]*?current_z->")
+
+
+def _classify(text: str) -> "tuple[set[str], set[str]]":
+    """(preserved, defaulted). A key is a candidate when a field_present /
+    field_nonblank call follows its snprintf within 4 lines. It is
+    omit-PRESERVED only if its block (up to the next key snprintf) has an
+    else branch assigning from current_z->; otherwise omit-DEFAULTED.
+    coupling_c%u is normalised to coupling_c; gkey sub-keys are ignored."""
     lines = text.splitlines()
-    out = set()
-    for n, line in enumerate(lines):
-        m = _KEY_RE.search(line)
-        if not m:
+    starts = [n for n, line in enumerate(lines) if _KEY_RE.search(line)]
+    preserved, defaulted = set(), set()
+    for idx, n in enumerate(starts):
+        end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
+        if not _PRESERVE_RE.search("\n".join(lines[n + 1:n + 5])):
             continue
-        window = "\n".join(lines[n + 1:n + 5])
-        if _PRESERVE_RE.search(window):
-            name = m.group(1)
-            out.add("coupling_c" if name.startswith("coupling_c") else name)
-    return out
+        name = _KEY_RE.search(lines[n]).group(1)
+        name = "coupling_c" if name.startswith("coupling_c") else name
+        block = "\n".join(lines[n + 1:end])
+        (preserved if _OMIT_PRESERVE_RE.search(block) else defaulted).add(name)
+    return preserved, defaulted
+
+
+def firmware_omit_preserved_keys(text: str) -> "set[str]":
+    return _classify(text)[0]
+
+
+def firmware_omit_defaulted_keys(text: str) -> "set[str]":
+    return _classify(text)[1]
 
 
 def python_omit_preserved_keys() -> "set[str]":
@@ -45,6 +59,25 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         py = python_omit_preserved_keys()
         self.assertEqual(fw - py, set(), "omit-preserved in firmware but unlisted in Python")
         self.assertEqual(py - fw, set(), "listed in Python but not omit-preserved in firmware")
+
+    def test_defaulted_keys_match_firmware_and_are_never_stripped(self):
+        text = _SRC.read_text(encoding="utf-8")
+        self.assertEqual(firmware_omit_defaulted_keys(text), set(zhc.ZONE_OMIT_DEFAULTED_KEYS))
+        self.assertEqual(set(zhc.ZONE_OMIT_DEFAULTED_KEYS) & set(zhc.ZONE_OMIT_PRESERVED_FLOAT_KEYS), set())
+        self.assertEqual(set(zhc.ZONE_OMIT_DEFAULTED_KEYS) & set(zhc.ZONE_OMIT_PRESERVED_NONFLOAT_KEYS), set())
+        for k in tuple(zhc.ZONE_OMIT_DEFAULTED_KEYS) + tuple(zhc.ZONE_OMIT_PRESERVED_THIRD_IDIOM_KEYS):
+            self.assertFalse(zhc.ZONE_OMIT_PRESERVED_KEY_RE.match(f"z1_{k}"), k)
+            body = f"z1_{k}=3&z1_kp=1"
+            self.assertIn(f"z1_{k}", zhc.strip_omit_preserved(body), k)
+
+    def test_omit_branch_must_assign_from_current(self):
+        def blk(name, assign):
+            return [f'snprintf(key, sizeof(key), "z%u_{name}", i);', "{",
+                    " if (zones_config_json_field_present(body, key)) { x = 1; }",
+                    " else {", f" {assign}", " }", "}"]
+        src = chr(10).join(blk("foo", "z->foo = 0.0f;") + blk("bar", "z->bar = current_z->bar;"))
+        self.assertEqual(firmware_omit_preserved_keys(src), {"bar"})
+        self.assertEqual(firmware_omit_defaulted_keys(src), {"foo"})
 
     def test_regex_matches_exactly_the_float_keys(self):
         for k in zhc.ZONE_OMIT_PRESERVED_FLOAT_KEYS:

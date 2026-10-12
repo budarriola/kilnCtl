@@ -2289,6 +2289,10 @@ class RestoreFromFreshGetTest(unittest.TestCase):
             actual = self.fake.get_zones("h")
             actual["zones"][2][field] = snap["zones"][2][field] + delta
             self.assertIn(field, C._restore_readback_mismatch(snap, actual) or "", field)
+        # LOW-1: exactly one %.3f print step off must fail (tol is half a step)
+        actual = self.fake.get_zones("h")
+        actual["zones"][2]["hyst_c"] = snap["zones"][2]["hyst_c"] + 0.001
+        self.assertIn("hyst_c", C._restore_readback_mismatch(snap, actual) or "")
         actual = self.fake.get_zones("h")
         actual["zones"][2]["hyst_c"] = snap["zones"][2]["hyst_c"] + 0.0004
         actual["zones"][2]["max_temp_c"] = snap["zones"][2]["max_temp_c"] + 0.04

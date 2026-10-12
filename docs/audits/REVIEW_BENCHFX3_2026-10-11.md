@@ -125,5 +125,5 @@ commit neither makes it better nor worse.
 
 | Finding | Status | Where |
 |---|---|---|
-| MED-1 drift test does not check the omit branch; `thermo_mask`/`ct_mask` mislabelled | OPEN | |
-| LOW-1 `hyst_c` tolerance is a full print step | OPEN | |
+| MED-1 drift test does not check the omit branch; `thermo_mask`/`ct_mask` mislabelled | FIXED | drift test now requires an `else` assigning `current_z->`; `ZONE_OMIT_DEFAULTED_KEYS` (thermo_mask, ct_mask) never stripped and asserted; `name` recorded as third-idiom key. Negtests N1, N2, N9 CAUGHT (see commit message) |
+| LOW-1 `hyst_c` tolerance is a full print step | FIXED | tolerance 0.0005, exactly-one-step test added; N6 CAUGHT |
