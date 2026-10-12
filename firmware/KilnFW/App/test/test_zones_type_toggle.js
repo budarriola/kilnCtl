@@ -244,7 +244,7 @@ function renderZoneFragment(zoneType, overrides) {
 }
 
 // Real kgR6 helper from the page (fragment calls it for cal/ramp/sanity/max/min).
-const KGR6_SRC = LINES.find((l) => l.startsWith('function kgR6(')).replace(/\r$/, '');
+const KGR6_SRC = ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].map((p) => LINES.find((l) => l.startsWith(p)).replace(/\r$/, '')).join('\n');
 
 function buildZoneDiv(zoneType, overrides) {
   const html = renderZoneFragment(zoneType, overrides);
