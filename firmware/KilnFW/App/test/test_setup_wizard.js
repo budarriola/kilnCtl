@@ -1134,7 +1134,8 @@ function fakeStep6El(htmlByZone) {
   assert(String(inputs.s3cal.value) === '0.1', 'step3: cal input displays the rounded value');
   assert(ctx.kgPost(inputs.s3cal) === '0.100000024', 'step3: unedited cal posts raw');
   const card = { querySelector: (cs) => (cs === '.s3type' ? { value: '3' } : inputs[cs.replace(/^\./, '')]) };
-  ctx.document = { querySelector: () => card };
+  const doc0 = ctx.document;
+  ctx.document = Object.assign({}, doc0, { querySelector: () => card });
   assert(ctx.step3ReadCurrentZones(1, [{}])[0].cal_offset_c === 0.100000024, 'step3: unedited read-back keeps the raw cal');
   inputs.s3cal.value = '0.5';
   assert(ctx.step3ReadCurrentZones(1, [{}])[0].cal_offset_c === 0.5, 'step3: edited read-back uses the edited cal');
