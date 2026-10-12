@@ -517,14 +517,26 @@ foreach ($wf in $uiAll) {
 # source uses one; a stringizing macro such as _Pragma(#x) hides its argument). The scan also covers every App header a drivers/ui
 # source #includes by quoted name (a header outside drivers/ui is compiled into the same -Werror=shadow translation unit).
 $hdrIndex = @{}
-foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorAction SilentlyContinue)) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
+# REVIEW_LCDFX12 INFO-3: App/test stub headers repeat real header names (lvgl_port.h, nvs.h); never index them.
+foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\/]test[\/]' })) { if (-not $hdrIndex.ContainsKey($hf.Name)) { $hdrIndex[$hf.Name] = $hf.FullName } }
 $pragmaScan = @{}
-foreach ($pf in $uiAll) { $pragmaScan[$pf.FullName] = $pf.Name }
-foreach ($pf in $uiAll) {
-    $inc = (Get-Content -Raw -Path $pf.FullName) -replace '\\\r?\n', ''
-    foreach ($im in [regex]::Matches($inc, '(?m)^\s*#\s*include\s*"([^"]+)"')) {
+$pragmaText = @{}
+function Get-PragmaText([string]$path) {
+    if (-not $pragmaText.ContainsKey($path)) { $pragmaText[$path] = Remove-CComments ((Get-Content -Raw -Path $path) -replace "`r", '') }
+    $pragmaText[$path]
+}
+# REVIEW_LCDFX12 LOW-2: follow #include "..." transitively (bounded depth, visited set), not just the direct includes.
+$pragQ = New-Object System.Collections.Queue
+foreach ($pf in $uiAll) { $pragmaScan[$pf.FullName] = $pf.Name; $pragQ.Enqueue(@($pf.FullName, $pf.Name, 0)) }
+while ($pragQ.Count -gt 0) {
+    $cur = $pragQ.Dequeue()
+    if ($cur[2] -ge 12) { continue }
+    foreach ($im in [regex]::Matches((Get-PragmaText $cur[0]), '(?m)^\s*#\s*include\s*"([^"]+)"')) {
         $hn = [IO.Path]::GetFileName($im.Groups[1].Value)
-        if ($hdrIndex.ContainsKey($hn) -and -not $pragmaScan.ContainsKey($hdrIndex[$hn])) { $pragmaScan[$hdrIndex[$hn]] = "$hn (included by $($pf.Name))" }
+        if ($hdrIndex.ContainsKey($hn) -and -not $pragmaScan.ContainsKey($hdrIndex[$hn])) {
+            $pragmaScan[$hdrIndex[$hn]] = "$hn (included via $($cur[1]))"
+            $pragQ.Enqueue(@($hdrIndex[$hn], $hn, ($cur[2] + 1)))
+        }
     }
 }
 foreach ($pk in $pragmaScan.Keys) {
@@ -548,22 +560,47 @@ else {
     # Only the emptiness test of the local may be exempt: !X[0], X[0] ? .., X[0] ==/!= 0 or '\0', if/while (X[0]), X[0] &&/||.
     # Never &X[0] (the full password), and never X[0] passed as a value.
     $exRx = "(?<![&\w])(?:!\s*$pw\[0\]|$pw\[0\](?=\s*(?:\?|&&|\|\||[=!]=\s*(?:0|'[^']*')))|(?<=\b(?:if|while)\s*\(\s*)$pw\[0\](?=\s*\)))"
-    $mm = [regex]::Match($rcb.body, 'if\s*\(!show_secret\)\s*\{([^{}]*)\}')
-    if (-not $mm.Success) { Write-Host "FAIL: L-secret: refresh_cb has no recognisable masked '!show_secret' block"; $fail++ }
+    # REVIEW_LCDFX12 LOW-1: string literals are blanked (same length) before brace matching; exactly one gate declaration and one
+    # `if (!show_secret)` must exist in refresh_cb.
+    $rb = Blank-Strings $rcb.body
+    $nDecl = @([regex]::Matches($rb, '\bbool\s+show_secret\b')).Count
+    $ifMs = @([regex]::Matches($rb, 'if\s*\(\s*!\s*show_secret\s*\)\s*\{'))
+    if ($nDecl -ne 1 -or $ifMs.Count -ne 1) { Write-Host "FAIL: L-secret: refresh_cb must declare 'bool show_secret' exactly once and contain exactly one 'if (!show_secret) {' block (found $nDecl declaration(s), $($ifMs.Count) block(s))"; $fail++ }
     else {
-        $mb = [regex]::Replace($mm.Groups[1].Value, $exRx, '')
+        $ob = $ifMs[0].Index + $ifMs[0].Length - 1
+        $depth = 0; $cb = -1
+        for ($ci = $ob; $ci -lt $rb.Length; $ci++) { if ($rb[$ci] -eq '{') { $depth++ } elseif ($rb[$ci] -eq '}') { $depth--; if ($depth -eq 0) { $cb = $ci; break } } }
+        if ($cb -lt 0) { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block has no closing brace"; $fail++ }
+        else {
+        $mbRaw = $rcb.body.Substring($ob + 1, $cb - $ob - 1)
+        $mbBlank = $rb.Substring($ob + 1, $cb - $ob - 1)
+        $mb = [regex]::Replace($mbRaw, $exRx, '')
         if ($mb -match "\b$pw\b|\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
-        # REVIEW_LCDFX10 MED-4 (P2) / REVIEW_LCDFX11 MED-2: the masked block's last statement must be a bare, unconditional return;
-        # (the text after the previous ';' is exactly 'return'), or it falls through into the reveal.
-        $stmts = @($mm.Groups[1].Value -split ';')
+        # REVIEW_LCDFX12 MED-1: allowlist. The masked block is exactly these four statements, in order (labels keep the previous
+        # refresh's text, so the masked-label write and the QR hide are required; nothing else may be read or shown).
+        $stmtsRaw = New-Object System.Collections.ArrayList
+        $st = 0
+        for ($ci = 0; $ci -lt $mbBlank.Length; $ci++) { if ($mbBlank[$ci] -eq ';') { [void]$stmtsRaw.Add(($mbRaw.Substring($st, $ci - $st) -replace '\s+', ' ').Trim()); $st = $ci + 1 } }
+        $tail = ($mbRaw.Substring($st) -replace '\s+', ' ').Trim()
+        $wantStmts = @(
+            ('lv_label_set_text(s_ap_password_label, ' + $pwNames[0] + '[0] ? "******** (admin)" : "(open network)")'),
+            'lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN)',
+            "s_ap_qr_last[0] = '\0'",
+            'return')
+        $okShape = ($tail -eq '' -and $stmtsRaw.Count -eq $wantStmts.Count)
+        if ($okShape) { for ($wi = 0; $wi -lt $wantStmts.Count; $wi++) { if ($stmtsRaw[$wi] -ne $wantStmts[$wi]) { $okShape = $false } } }
+        if (-not $okShape) { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block must be exactly: the masked password-label write with the two literals keyed on $($pwNames[0])[0], lv_obj_add_flag(s_ap_qr, LV_OBJ_FLAG_HIDDEN), s_ap_qr_last[0] = '\0', return; (found: $(($stmtsRaw -join '; ')))"; $fail++ }
+        # REVIEW_LCDFX10 MED-4 (P2) / REVIEW_LCDFX11 MED-2: the last statement must be a bare, unconditional return;.
+        $stmts = @($mbRaw -split ';')
         $lastIdx = -1
         for ($si = $stmts.Count - 1; $si -ge 0; $si--) { if ($stmts[$si].Trim() -ne '') { $lastIdx = $si; break } }
-        if ($lastIdx -lt 0 -or $stmts[$lastIdx].Trim() -ne 'return' -or $mm.Groups[1].Value -notmatch '\breturn\s*;\s*$') { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block does not end with an unconditional 'return;' (it would fall through into the ADMIN reveal)"; $fail++ }
+        if ($lastIdx -lt 0 -or $stmts[$lastIdx].Trim() -ne 'return' -or $mbRaw -notmatch '\breturn\s*;\s*$') { Write-Host "FAIL: L-secret: refresh_cb's masked '!show_secret' block does not end with an unconditional 'return;' (it would fall through into the ADMIN reveal)"; $fail++ }
+        }
     }
     # REVIEW_LCDFX10 MED-4 (P1): before the gate, the password may only be fetched into its local and emptiness-tested.
-    $gi = $rcb.body.IndexOf('bool show_secret')
+    $gi = $rb.IndexOf('bool show_secret')
     if ($gi -ge 0) {
-        $pre = $rcb.body.Substring(0, $gi)
+        $pre = $rb.Substring(0, $gi)
         $pre = [regex]::Replace($pre, $fetchRx, '')
         $pre = [regex]::Replace($pre, $exRx, '')
         if ($pre -match "\b$pw\b|\bap_password\b|\bs_ap_qr_uri\b|build_wifi_qr_uri") { Write-Host "FAIL: L-secret: refresh_cb uses '$($Matches[0])' before the show_secret gate (only the single fetch declaration is allowed there)"; $fail++ }

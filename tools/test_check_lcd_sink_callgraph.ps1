@@ -14,6 +14,7 @@
 #   N: ui reaches sink via a static helper chain inside an allowlisted object (node-keyed reverse walk) -> exit 1
 #   O: gate clear_action no longer references any sink (gate renamed/hollowed)  -> exit 1
 #   P: two symbols share one section in a ui object (hidden 2nd function)        -> exit 1
+#   Q: non-ui alias shares a section with an allowlisted sink caller; a ui function calls the alias -> exit 1 (R: alias unused -> exit 0)
 #   K: unattributable numeric section without a symbol-table entry             -> exit 1
 # -ScriptUnderTest lets negtest.ps1 point this at a mutated copy (must live in tools\).
 # checkcache: ok
@@ -124,6 +125,15 @@ try {
     $ps = Dump "ps.txt" ("SYMBOL TABLE:`n00000000 l     F .text.btn_clicked_cb`t0000000e btn_clicked_cb`n00000010 l     F .text.btn_clicked_cb`t0000000b evil`n")
     $r = Run ($base + "drivers/ui/ui_page_safety.c.obj=$safetyOk") @("drivers/ui/ui_page_safety.c.obj=$ps")
     Check ($r.Code -eq 1 -and $r.Out -match 'shared by btn_clicked_cb, evil') "P two symbols sharing a section in a ui object fail"
+
+    # Q (REVIEW_LCDFX12 LOW-3): in an allowlisted non-UI object an alias shares a section with the sink caller; ui calls the alias.
+    $qs = Dump "qs.txt" ("SYMBOL TABLE:`n00000000 g     F .text.safety_clear_trip_post_handler`t0000000e safety_clear_trip_post_handler`n00000000 g     F .text.safety_clear_trip_post_handler`t0000000e evil_alias`n")
+    $qh = Dump "qh.txt" (Sec ".text.home_cb" @("evil_alias"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$qh")) @("drivers/http/dashboard_exec_http.c.obj=$qs")
+    Check ($r.Code -eq 1 -and $r.Out -match 'home_cb') "Q ui call to a non-ui alias sharing a sink caller's section fails"
+    $qh2 = Dump "qh2.txt" (Sec ".text.home_cb" @("memcpy"))
+    $r = Run ($base + @("drivers/ui/ui_page_safety.c.obj=$safetyOk", "drivers/ui/ui_page_home.c.obj=$qh2")) @("drivers/http/dashboard_exec_http.c.obj=$qs")
+    Check ($r.Code -eq 0) "R unused non-ui alias passes (no false positive): $($r.Out)"
 
     $nb = Join-Path $d "nobuild"
     New-Item -ItemType Directory -Force -Path $nb | Out-Null

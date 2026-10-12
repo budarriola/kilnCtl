@@ -48,7 +48,7 @@ def parse_syms(sym_text):
     return m
 
 
-def node_name(sec, secmap, unattrib, strict=False):
+def node_name(sec, secmap, unattrib, strict=False, objkey=None, aliases=None):
     """Section name -> node name. A symbol-table hit wins (e.g. .iram1.5 -> the function)."""
     if secmap and sec in secmap:
         names = secmap[sec]
@@ -57,6 +57,9 @@ def node_name(sec, secmap, unattrib, strict=False):
             # Two symbols share one section (e.g. -fno-toplevel-reorder, hand-written section attributes): relocations
             # cannot be split between them, so a hidden second function would inherit the first one's edges. Fail closed.
             unattrib.append(sec + " (shared by " + ", ".join(names) + ")")
+        elif len(names) > 1 and aliases is not None and objkey is not None:
+            # REVIEW_LCDFX12 LOW-3: a non-UI section holding several symbols: a caller of ANY alias reaches this node.
+            aliases.setdefault(f"{objkey}::{names[0]}", set()).update(names[1:])
         return names[0]
     lm = LOCAL_SEC.match(sec)
     if lm:
@@ -71,7 +74,7 @@ def node_name(sec, secmap, unattrib, strict=False):
     return sec  # plain .rodata/.data/...: its own node, never the previous section
 
 
-def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
+def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None, aliases=None):
     unattrib = unattrib if unattrib is not None else []
     cur = None
     ui = is_ui(objkey + "::")
@@ -82,7 +85,7 @@ def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
             if sec.startswith((".xt.", ".debug", ".comment", ".note", ".xtensa")):  # metadata/debug info, not code
                 cur = None
                 continue
-            cur = f"{objkey}::{node_name(sec, secmap, unattrib, ui)}"
+            cur = f"{objkey}::{node_name(sec, secmap, unattrib, ui, objkey, aliases)}"
             if defined is not None:
                 defined.add(cur)
             continue
@@ -96,7 +99,7 @@ def parse(dump_text, objkey, rev, defined=None, secmap=None, unattrib=None):
             continue
         val = m.group(1)
         if val.startswith("."):
-            tgt = f"{objkey}::{node_name(val, secmap, unattrib, ui)}"
+            tgt = f"{objkey}::{node_name(val, secmap, unattrib, ui, objkey, aliases)}"
         else:
             tgt = val
         if tgt != cur:
@@ -107,7 +110,8 @@ def is_ui(node):
     return "/ui/" in node.split("::")[0]
 
 
-def analyse(rev, defined=None):
+def analyse(rev, defined=None, aliases=None):
+    aliases = aliases or {}
     fails, notes = [], []
     # REVIEW_LCDFX10 MED-3: renaming/removing a sink or the gate edge must fail, not turn the check into a no-op.
     if defined is not None:
@@ -156,6 +160,11 @@ def analyse(rev, defined=None):
             work.append((c, node))
         for c in rev.get(fn, ()):  # global symbol referenced by bare name
             work.append((c, node))
+        for al in sorted(aliases.get(node, ())):  # other symbols sharing this node's section
+            for c in rev.get(al, ()):
+                work.append((c, node))
+            for c in rev.get(f"{obj}::{al}", ()):
+                work.append((c, node))
     return fails
 
 
@@ -186,7 +195,7 @@ def main():
     ap.add_argument("--reloc-dump", action="append", default=[],
                     help="OBJKEY=FILE: pre-dumped objdump -r text (test mode)")
     a = ap.parse_args()
-    rev, defined, unattrib = {}, set(), []
+    rev, defined, unattrib, aliases = {}, set(), [], {}
     if a.reloc_dump:
         syms = {}
         for spec in a.sym_dump:
@@ -194,7 +203,7 @@ def main():
             syms[k] = parse_syms(open(f, encoding="utf-8").read())
         for spec in a.reloc_dump:
             k, f = spec.split("=", 1)
-            parse(open(f, encoding="utf-8").read(), k, rev, defined, syms.get(k), unattrib)
+            parse(open(f, encoding="utf-8").read(), k, rev, defined, syms.get(k), unattrib, aliases)
     else:
         root = a.build_dir or os.environ.get("KILNCTL_KILNFW_BUILD") or os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "firmware", "KilnFW", "build")
@@ -215,8 +224,8 @@ def main():
             if r.returncode != 0:
                 print(f"FAIL: objdump failed on {p}: {r.stderr.strip()[:200]}")
                 return 1
-            parse(r.stdout, objkey_of(p), rev, defined, parse_syms(t.stdout), unattrib)
-    fails = analyse(rev, defined)
+            parse(r.stdout, objkey_of(p), rev, defined, parse_syms(t.stdout), unattrib, aliases)
+    fails = analyse(rev, defined, aliases)
     for u in sorted(set(unattrib)):
         fails.append(f"relocation section {u} cannot be attributed to a single function (no symbol-table entry, or several symbols share it)")
     if fails:
