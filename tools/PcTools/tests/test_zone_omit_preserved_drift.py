@@ -8,8 +8,11 @@ the paren), on these left-hand sides: `z->f`, spaced `z -> f`, `(z)->f`, `((z))-
 `(z + 0)->f`, `(*z).f` with any inner spacing, `z[k].f`, and an index after the field with
 spaces or one level of nesting (`z->f [s[0]]`).
 
-It does NOT see, and these remain UNCOVERED here: pointer aliases (`zp = z; zp->f = ..`,
-`float *hp = &z->f; *hp = ..`), whole-struct assignment (`*z = tmp;`), compound literals
+It does NOT see, and these remain UNCOVERED here (BENCHFX9 LOW-2, contrived forms, left as is):
+`(&*z)->f`, `(*(z)).f`, `(&z[0])->f`, `(z + 0u)->f` / `(0 + z)->f` (only the literal `z + 0`),
+`z[idx[0]].f` (nested index inside the brackets before the field), `memset(&(z->f), ..)`,
+`memset((uint8_t *)(z->f), ..)`, `memset(z, 0, sizeof *z)`, pointer aliases (`zp = z; zp->f = ..`,
+`float *hp = &z->f; *hp = ..`), whole-struct assignment (`*z = tmp;` or via a helper), compound literals
 (`*z = (zone_cfg_t){...}`), ternary lvalues (`*(c ? &z->f : &x) = ..`), writes through a macro,
 memcpy or any other helper that is given `&z->f`, a two-level index, and a conditional default
 nested inside the omit `else` itself. The backstop for all of those is the per-field
@@ -46,6 +49,23 @@ _Z_DEREF = (r"(?:(?:\bz|\(+\s*z\s*\)+|\(\s*z\s*\+\s*0\s*\))\s*->"
             r"|\(\s*\*\s*z\s*\)\s*\."
             r"|\bz\s*\[[^\]]*\]\s*\.)")
 _IDX = r"(?:\s*\[(?:[^\[\]]|\[[^\]]*\])*\])?"
+
+
+def _js_function_body(text: str, name: str):
+    """Brace-balanced body of `function <name>(...) {...}` (skips strings and regex literals
+    only crudely: none of the pinned function's body holds an unbalanced brace)."""
+    m = re.search(r"function\s+" + re.escape(name) + r"\b[^{]*\{", text)
+    if not m:
+        return None
+    depth = 0
+    for i in range(m.end() - 1, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[m.end():i]
+    return None
 
 
 def strip_c_comments(text: str) -> str:
@@ -291,15 +311,31 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertGreater(len(keys), 15)
         fw = firmware_omit_preserved_keys(_SRC.read_text(encoding="utf-8"))
         self.assertEqual(keys - fw, set(), "page drops a blank for a key the firmware does not omit-preserve")
-        # (a defaulted key can never be in `fw`, so the assertion above already implies this
-        # one; it is kept only as an explicit statement of the intent.)
+        # (The old `keys & ZONE_OMIT_DEFAULTED_KEYS` assertion was removed: the subset check
+        # above already implies it, since a defaulted key can never be in `fw`.)
         # BENCHFX8 INFO-2: a second filter or a reassignment of the regex would bypass the pin.
-        self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*=", page)), 1,
+        # `=` not followed by `=`, so `===`/`==` comparisons do not count (BENCHFX9 INFO-3).
+        self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*=(?!=)", page)), 1,
                          "ZONE_OPTIONAL_KEY_RE must be assigned exactly once")
-        ob = re.search(r"function omitBlankOptionalParams\b.*?\n\s*\}\n", page, flags=re.S)
-        self.assertIsNotNone(ob, "omitBlankOptionalParams not found in zones_page.html")
-        self.assertEqual(len(re.findall(r"\.test\(", ob.group(0))), 1,
+        body = _js_function_body(page, "omitBlankOptionalParams")
+        self.assertIsNotNone(body, "omitBlankOptionalParams not found in zones_page.html")
+        # BENCHFX9 LOW-1: exactly one regex call, and it is ZONE_OPTIONAL_KEY_RE.test(...).
+        self.assertEqual(len(re.findall(r"\.\s*test\s*\(", body)), 1,
                          "omitBlankOptionalParams must filter with exactly one regex test")
+        self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*\.\s*test\s*\(", body)), 1,
+                         "the single test must be ZONE_OPTIONAL_KEY_RE.test(")
+        self.assertIsNone(re.search(r"\.\s*(?:match|compile|exec|replace|search)\s*\(|/\^", body),
+                          "omitBlankOptionalParams must not use another regex or call")
+        self.assertEqual(len(re.findall(r"\.\s*filter\s*\(", body)), 1, "exactly one .filter in the function")
+        self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*\.\s*(?:compile|lastIndex)", page)), 0,
+                         "ZONE_OPTIONAL_KEY_RE must not be rewritten in place")
+        # Call site: one call, and no second filter on params between it and the POST.
+        self.assertEqual(len(re.findall(r"=\s*omitBlankOptionalParams\s*\(\s*params\s*\)", page)), 1,
+                         "exactly one `params = omitBlankOptionalParams(params)` call")
+        call = re.search(r"omitBlankOptionalParams\(params\);(.*?)fetch\('/api/zones'", page, flags=re.S)
+        self.assertIsNotNone(call, "Save handler call site not found")
+        self.assertIsNone(re.search(r"\bparams\s*=\s*params\s*\.|\bparams\s*\.\s*(?:filter|splice|length\s*=)",
+                                    call.group(1)), "no second filter on params at the call site")
 
     def test_guard_keys_stripped_from_body(self):
         body = "z0_runawaymargin=12.2&z0_xzone=5.0&z0_debounce=3&z0_kp=1&z0_zonetype=1"

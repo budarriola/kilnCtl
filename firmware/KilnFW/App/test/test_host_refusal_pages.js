@@ -53,6 +53,10 @@ assert(out.join(',') === 'z0_kp=,z0_driftperiod=30,z0_name=,thermo_count=',
   'blank optional fields dropped, required blanks and set values kept: ' + out.join(','));
 assert(omit(['z0_coilpower=','z1_hystc= ','z0_minons=','z0_minoffs=','z0_coilpower=5']).join(',') === 'z0_coilpower=5',
   'blank coilpower/hystc/minons/minoffs dropped (keep stored), set value kept');
+// BENCHFX9 LOW-1: ct_mask/thermo_mask are omit-DEFAULTED by the firmware, so a blank must be KEPT in the
+// POST (dropping it would silently default the mask instead of refusing).
+assert(omit(['z0_ct_mask=', 'z0_thermo_mask=']).join(',') === 'z0_ct_mask=,z0_thermo_mask=',
+  'blank ct_mask/thermo_mask entries are kept, not dropped');
 assert(/saveBtnEl\.disabled = true;[\s\S]*?omitBlankOptionalParams\(params\)[\s\S]*?fetch\('\/api\/zones'/.test(ZONES),
   'Save disables the button and filters params before the POST');
 assert(/\.then\(function \(r\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);\s*saveBtnEl\.disabled = false;/.test(ZONES), 'button re-enabled on response');

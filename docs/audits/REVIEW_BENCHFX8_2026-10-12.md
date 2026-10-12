@@ -26,7 +26,7 @@ tests was caught by a real assertion in `test_zones_http.c`. 2 LOW, 4 INFO.
 
 ### LOW-1: cheap spacing and parenthesis forms still bypass the scan
 
-**Fixed in 7e9bde161** (every form except nested-index-in-pointer-arith is now scanned and pinned by a self-test; negtested CAUGHT). The SHA was first recorded as the pre-rebase b0b739347. REVIEW_BENCHFX9 LOW-2 lists forms that are still missed.
+**Fixed in 7e9bde161** (the forms in the BENCHFX8 table are scanned and pinned by a self-test; negtested CAUGHT; NOT every form: the uncovered list in the test docstring is authoritative). The SHA was first recorded as the pre-rebase b0b739347. REVIEW_BENCHFX9 LOW-2 lists forms that are still missed.
 
 `test_zone_omit_preserved_drift.py:76` builds the left-hand side as
 `(?:\bz\s*->|\(\s*z\s*\)\s*->|\(\*z\)\s*\.)\s*FIELD(?:\[[^\]]*\])?`, and line 99

@@ -25,6 +25,8 @@ docstring lists. Both are backstopped only in part. 2 LOW, 4 INFO.
 
 ### LOW-1: the page pin counts `.test(` but not which regex it calls
 
+**Fixed in benchfx10** (pin requires the single call to be `ZONE_OPTIONAL_KEY_RE.test(`, refuses `.match(`/`.compile(`/other regex or a second filter in the function or at the call site; node test asserts blank `z0_ct_mask=`/`z0_thermo_mask=` are KEPT. P3-P7, J2, J3 re-negtested CAUGHT, see below.)
+
 `test_zone_omit_preserved_drift.py:299-302` extracts `omitBlankOptionalParams` and requires
 exactly one `\.test\(`. It does not require that call to be `ZONE_OPTIONAL_KEY_RE.test(`. Line
 288 pins only the `var ZONE_OPTIONAL_KEY_RE = /.../` literal, so the filter can stop using it
@@ -50,6 +52,8 @@ assertion that `omitBlankOptionalParams(['z0_ct_mask=', 'z0_thermo_mask='])` kee
 That second check is behavioural and covers every syntactic variant at once.
 
 ### LOW-2: the scan still misses left-hand-side forms the docstring does not list
+
+**Fixed in benchfx10** (docstring uncovered list now names the forms and the whole-struct helper clear; BENCHFX8 LOW-1 status line corrected; C scan deliberately not extended)
 
 The docstring (lines 5-17) and the BENCHFX8 LOW-1 status line ("every form except
 nested-index-in-pointer-arith") suggest the deref forms are covered. These still give no
@@ -78,6 +82,8 @@ Scanning `\(\s*&\s*\*\s*z\s*\)` and `\(\s*\*\s*\(\s*z\s*\)\s*\)` is cheap if wan
 
 ### INFO-1: a comment says the DEFAULTED assertion is kept, but it was deleted
 
+**Fixed in benchfx10** (comment now says the assertion was removed)
+
 `test_zone_omit_preserved_drift.py:294-295` says the `keys & ZONE_OMIT_DEFAULTED_KEYS`
 assertion "is kept only as an explicit statement of the intent". The commit removed that
 assertion. The reasoning is right (line 293 already implies it), but the comment describes code
@@ -85,12 +91,16 @@ that is not there. Fix: say that the assertion was dropped because line 293 impl
 
 ### INFO-2: strncpy coverage is vacuous today
 
+**Fixed in benchfx10** (left as is: harmless until a char-array field becomes omit-preserved)
+
 No omit-preserved field is a `char` array. `name` is the only char array in the zone struct
 (`zones_config_json.h:313`), and it is not omit-preserved, so `strncpy(z->name, ...)` is never
 checked. The rule is harmless, and it would start to matter only if a string field became
 omit-preserved.
 
 ### INFO-3: the function extraction stops at the first closing-brace line; `==` counts as an assignment
+
+**Fixed in benchfx10** (body extraction is brace-balanced; `=(?!=)` ignores `==`/`===`)
 
 - `test_zone_omit_preserved_drift.py:299`: `function omitBlankOptionalParams\b.*?\n\s*\}\n`
   ends at the first line that is only `}`. If the body is reformatted so an inner callback
