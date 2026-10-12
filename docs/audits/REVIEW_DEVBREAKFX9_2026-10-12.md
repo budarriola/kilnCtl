@@ -5,6 +5,7 @@ Adversarial review of one dev commit:
 | SHA | Subject |
 |---|---|
 | `e5c057fe5` | autotune host test: link-up stub reports a fresh DIAG so the start gate passes |
+| `f844f041b` | autotune host test: ARMED DIAG in the link-up stub, plus a stale-DIAG start refusal case (added after the first pass of this review; see "Follow-up" below) |
 
 Background: `docs/audits/REVIEW_SAFETYFX7_2026-10-12.md` MED-1. Since `7592416a0`, `autotune_begin_run_locked()` (`autotune_engine.c:1102`) goes through `relay_authority_start_blocked()`. That gate now needs a DIAG received since the Pico's last reboot, no older than `SAFETY_LINK_DIAG_FRESH_MS` (`relay_authority_pico_diag_fresh()`, `relay_authority.h`). The stub `safety_link_get_status()` in `test_autotune_engine_prestart.c` never reported a DIAG, so every positive-control autotune start was refused and the KilnFW host suite was red.
 
@@ -12,15 +13,24 @@ The fix makes the stub report `diag_ever_received = diag_since_reboot = true` an
 
 The review was done in worktree `C:\wt\rvdevbreakfx9_vsgnum` at `origin/dev` = `e5c057fe5`.
 
-**Verdict: 0 HIGH, 0 MED, 1 LOW, 2 INFO.** The fix is correct and turns the suite green. It does not weaken any test that was meaningful before `7592416a0`. The DIAG-freshness rule is still pinned, but only in `test_profile_executor_prestart.c`, not at the autotune call site.
+**Verdict: 0 HIGH, 0 MED, 1 LOW (fixed in `f844f041b` for the age shape), 3 INFO.**
+
+- `e5c057fe5` is correct and turns the suite green. It does not weaken any test that was meaningful before `7592416a0`.
+- At `e5c057fe5` alone, the DIAG-freshness rule was pinned only in `test_profile_executor_prestart.c`, not at the autotune call site. That is LOW-1.
+- `f844f041b` adds an autotune-level stale-DIAG test, and it is negtest-CAUGHT. What remains is INFO-3.
 
 ## Full suite
 
-`build_host_tests.ps1` with no `-Only`, private `-OutDir`, at `e5c057fe5`: `Built: 99/99 executables`, `all 99 host test executables built and passed`, exit 0. No `FAIL` line, no `RUN FAILURES`, no `BUILD FAILURES`.
+`build_host_tests.ps1` was run with no `-Only` and a private `-OutDir`, twice:
+
+- At `e5c057fe5`.
+- At `1142b1899`, the dev tip that contains `f844f041b`.
+
+Both runs ended `Built: 99/99 executables`, `all 99 host test executables built and passed`, exit 0. Neither had a `FAIL` line, `RUN FAILURES` or `BUILD FAILURES`.
 
 ## Question 1: is the autotune DIAG-freshness gate now untested?
 
-### LOW-1: no autotune-level test refuses a start on a stale, pre-reboot or never-received DIAG
+### LOW-1 (fixed for the age shape in `f844f041b`): no autotune-level test refuses a start on a stale, pre-reboot or never-received DIAG
 
 - **Where:** `test_autotune_engine_prestart.c:280-300`. The stub has only three modes: 0 = up with a fresh DIAG, 1 = never up, 2/3 = error return. No mode reports "link up, DIAG stale" or "link up, DIAG not since reboot". So no test in this executable can reach the gate's `!relay_authority_pico_diag_fresh()` branch.
 - **Proof (negtest, `-Only "autotune_engine_prestart|relay_authority"`):** that selects `autotune_engine_prestart`, `link_watchdog` and `main_reset_fence`.
@@ -77,3 +87,45 @@ All were run with `tools\negtest.ps1`, a `-Command` of `build_host_tests.ps1 -Ou
 | M3 (same) | `relay_authority.h` | `profile_executor_prestart` | CAUGHT (adds `:13790-13796`) |
 
 The first attempt at the last two rows used `-Only "^profile_executor_prestart$"`. That matched no executable, so the baseline errored and the run was discarded. The rerun with an unanchored selector is the one reported.
+
+## Follow-up: `f844f041b` (stale-DIAG start refusal test)
+
+What `f844f041b` changes:
+
+- **Stub DIAG state:** the stub now sets `diag_state = SAFETY_LINK_DIAG_STATE_ARMED` explicitly, which closes INFO-2.
+- **New stub mode 5:** link up, with `diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1`.
+- **New test:** `test_begin_run_refuses_stale_diag()` (`test_autotune_engine_prestart.c:3886-3913`).
+  - It asserts that the start is refused, that no heat-enable request is made, and that `errbuf` contains "status report".
+  - Every other gate is left passable, so the stale age is the only reason left to refuse. M5 below proves this.
+
+The stub change is safe:
+
+- Mode 5 is excluded from the error-return branch, so modes 2 and 3 still return errors.
+- Mode 1 still reads link down.
+
+### Negtest at `1142b1899`
+
+Same command and pattern as above, `-Only "autotune_engine_prestart|relay_authority"`. The baseline passed, the real tree was unchanged, and the copies were removed.
+
+| Mutation | Verdict |
+|---|---|
+| M2 DIAG age check always true (`relay_authority.h`) | CAUGHT (`:3910`, `:3911`, `:3912`) |
+| M3 `relay_authority_pico_diag_fresh()` always true | CAUGHT (`:3910-3912`) |
+| M5 `if (0 && !relay_authority_pico_diag_fresh(&st))` in `relay_authority_start_blocked()` | CAUGHT (`:3910-3912`) |
+| M4 drop the `diag_since_reboot &&` term | **MISSED** at the autotune level (INFO-3) |
+
+- **M2, M3 and M5:** each is a compiled mutant whose failing assertions are in the new test. So LOW-1 is fixed for the stale-age shape.
+- **M1:** still caught by the link-down tests, as shown above.
+
+### INFO-3: the autotune-level test covers only the stale-age shape
+
+Mode 5 keeps `diag_since_reboot` and `diag_ever_received` true. So two DIAG shapes are not exercised through `autotune_engine_run()`:
+
+- "DIAG not since the Pico reboot".
+- "no DIAG ever received".
+
+Dropping either term of `relay_authority_pico_diag_fresh()` passes the autotune executable. M4 above is the since-reboot case.
+
+Both terms are pinned on the shared inline helper by `test_profile_executor_prestart.c:13790-13796`. The earlier M3 run showed this, and the 7592416a0-era negtest on `diag_since_reboot` did too.
+
+Both engines call the same helper, and M1 and M5 show the autotune path really goes through it. So the remaining risk is low. A one-line extension would close it: modes 6 and 7, plus a loop in the new test.
