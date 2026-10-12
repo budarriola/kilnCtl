@@ -680,16 +680,30 @@ bool aux_apply_relay(uint8_t aux_idx, bool want_on)
  * that happened after it, so it must not PERMIT a new switch-ON. Used by the ON gates ONLY: never by an OFF,
  * fault, drop or abort path (a DIAG gap must not drop an output that is already on or abort a run). No
  * safety link bound (host/sim) means nothing to gate on. An unreadable status counts as not fresh. */
+/* SAFETYFX8 I-2: the stale-DIAG warnings log once per stale episode; a fresh read (or no link) re-arms them. */
+static uint8_t s_stale_logged_aux_mask;
+static bool s_stale_logged_seg;
+
 static bool pico_diag_stale_for_on(void)
 {
+    /* SAFETYFX8 I-1: NULL means "no link bound" -- host/sim, or on a target the safety link failed to start
+     * (main_control_bringup.c). The latter is safe ONLY because every ON path calls relay_authority_on_blocked(NULL),
+     * which blocks every ON, BEFORE this check: do not move this check ahead of that one. */
     if (!s_exec.safety) {
+        s_stale_logged_aux_mask = 0;
+        s_stale_logged_seg = false;
         return false;
     }
     safety_link_status_t st;
     if (safety_link_get_status(s_exec.safety, &st) != ESP_OK) {
         return true;
     }
-    return !relay_authority_pico_diag_fresh(&st);
+    bool stale = !relay_authority_pico_diag_fresh(&st);
+    if (!stale) {
+        s_stale_logged_aux_mask = 0;
+        s_stale_logged_seg = false;
+    }
+    return stale;
 }
 
 bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
@@ -711,7 +725,10 @@ bool aux_apply_relay_pico(uint8_t aux_idx, bool want_on, bool pico_tripped)
     }
     /* SAFETYFX7 LOW-1: a stale DIAG refuses a NEW ON only; an aux already on is held (no drop on a DIAG gap). */
     if (want_on && !s_exec.aux[aux_idx].commanded_on && pico_diag_stale_for_on()) {
-        ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT PICO DIAG IS STALE -- not switched on", (unsigned)aux_idx + 1u);
+        if (!(s_stale_logged_aux_mask & mask)) {
+            ESP_LOGW(PE_TAG, "aux relay %u WANTS ON BUT PICO DIAG IS STALE -- not switched on", (unsigned)aux_idx + 1u);
+            s_stale_logged_aux_mask |= mask;
+        }
         want_on = false;
     }
     static uint8_t s_write_fail_logged_mask; /* review 4 L1: log a failing write once, not every retry tick */
@@ -1048,7 +1065,12 @@ void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_
             ax.tc_zone = AUX_TC_ZONE_NONE;
         }
         bool bypass_hold = false;
-        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, authority_blocked,
+        /* SAFETYFX8 LOW-2: a stale DIAG will refuse this aux's NEW ON inside aux_apply_relay_pico(); feed it into the
+         * trigger as a block now so actuated_on/held_s/min_on follow the real (OFF) state and rule_reason says why.
+         * An aux already on is never blocked by staleness (held). */
+        bool stale_hold = !s_exec.aux[i].commanded_on && pico_diag_stale_for_on();
+        bool blocked_i = authority_blocked || stale_hold;
+        on_off_trigger_input_t oin = profile_executor_aux_on_off_input(i, &ax, cfg_ok, blocked_i,
                                                                        stretched_this_tick, dt_s, &bypass_hold);
         bool failsafe = oin.failsafe_override;
         on_off_zone_tick_result_t r = profile_executor_on_off_zone_tick(
@@ -1065,7 +1087,7 @@ void profile_executor_aux_tick_pico(float dt_s, bool stretched_this_tick, uint8_
          * the cap, then (aux only) an unevaluable input, then no rule. */
         if (r.actuated_on) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_NONE;
-        } else if (authority_blocked) {
+        } else if (blocked_i) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUTHORITY;
         } else if (r.cap_denied) {
             s_exec.aux[i].rule_reason = (uint8_t)PROFILE_EXEC_RELAY_DENIED_LOAD_CAP;
@@ -1247,8 +1269,11 @@ void io_seg_start_since_pico(uint8_t idx, const profile_segment_t *seg, uint32_t
             r->state_on = false; /* F5HOLDER LOW-4: physical truth; wants_on keeps the request for the gated retry */
         } else if (drive_on && pico_diag_stale_for_on()) {
             /* SAFETYFX7 LOW-1: stale DIAG refuses the ON; wants_on keeps it for the retry once DIAG is fresh. */
-            ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT PICO DIAG IS STALE -- commanded OFF", idx + 1,
-                     r->target);
+            if (!s_stale_logged_seg) {
+                ESP_LOGW(PE_TAG, "relay/IO segment %u: relay %u WANTS ON BUT PICO DIAG IS STALE -- commanded OFF",
+                         idx + 1, r->target);
+                s_stale_logged_seg = true;
+            }
             drive_on = false;
             r->state_on = false;
         }

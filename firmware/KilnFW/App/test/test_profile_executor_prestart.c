@@ -3054,6 +3054,7 @@ static void test_f5holderfx3_start_gate_pico_tripped(void);
 static void test_f5holderfx3_aux_tick_pico_gate(void);
 static void test_safetyfx7_stale_diag_on_gates(void);
 static void test_safetyfx7_watchdog_any_age_tripped(void);
+static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void);
 
 static void test_f5holderfx2_retry_placement_and_pico_gate(void)
 {
@@ -12826,6 +12827,7 @@ static void run_test_aux_wp3(void)
     test_f5holderfx3_aux_tick_pico_gate();
     test_safetyfx7_stale_diag_on_gates();
     test_safetyfx7_watchdog_any_age_tripped();
+    test_safetyfx9_unreadable_and_trip_event_and_stale_accounting();
     test_aux_disabled_mid_run_opens_once_and_stops_driving();
     test_aux_pause_holds_state_resume_continues();
     test_aux_off_on_every_end_path();
@@ -13960,6 +13962,79 @@ static void test_safetyfx7_watchdog_any_age_tripped(void)
     TEST_CHECK(st == PROFILE_EXEC_FAULTED, "old cached TRIPPED DIAG faults the run (MUST GO RED if the any-age wiring is gated on freshness)");
     safetyfx7_wd_case(SAFETY_LINK_DIAG_STATE_ARMED, &st);
     TEST_CHECK(st == PROFILE_EXEC_RUNNING, "an equally old non-tripped DIAG does NOT fault the run");
+}
+
+/* SAFETYFX8 LOW-1 / LOW-2 / LOW-3 / I-2. */
+static void test_safetyfx9_unreadable_and_trip_event_and_stale_accounting(void)
+{
+    TEST_SECTION("SAFETYFX8 LOW-1: unreadable link status counts as stale (aux/segment/retry ON refused)");
+    profile_segment_t on_seg;
+    memset(&on_seg, 0, sizeof(on_seg));
+    on_seg.seg_kind = PROFILE_SEG_KIND_RELAY_IO;
+    on_seg.io_target = 2;
+    on_seg.io_state = 1;
+    on_seg.dwell_min = 5;
+
+    reset_io_seg_test_state();
+    s_exec.aux_claim_mask = 0;
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_stub_safety_rc = ESP_FAIL; /* link bound, status unreadable */
+    g_relay_write_calls = 0;
+    (void)aux_apply_relay_pico(0, true, false);
+    TEST_CHECK(g_relay_write_calls == 1 && g_last_relay_write_value == 0 && !s_exec.aux[0].commanded_on,
+               "unreadable status: aux ON refused (writes OFF)");
+    io_seg_start_pico(0, &on_seg, false);
+    TEST_CHECK((g_last_relay_write_value & 0x02u) == 0 && !s_exec.io_segs[0].state_on && s_exec.io_segs[0].wants_on,
+               "unreadable status: segment ON driven OFF, wants_on kept");
+    g_relay_write_calls = 0;
+    io_segs_retry_on(false);
+    TEST_CHECK(g_relay_write_calls == 0 && !s_exec.io_segs[0].state_on, "unreadable status: retry skipped");
+    safetyfx7_clear_diag();
+    memset(&s_exec, 0, sizeof(s_exec));
+
+    TEST_SECTION("SAFETYFX8 LOW-2: stale-DIAG refusal keeps actuated_on idle and names a rule_reason");
+    char err[192];
+    TEST_CHECK(aux_test_start_run(err, sizeof(err)), "run starts");
+    safetyfx7_set_diag(SAFETY_LINK_DIAG_FRESH_MS + 1u, SAFETY_LINK_DIAG_STATE_ARMED);
+    g_aux_write_log_n = 0;
+    for (int i = 0; i < 6; i++) aux_test_tick(2.0f);
+    TEST_CHECK(!aux_test_wrote(0x01, 0x01), "stale DIAG: no ON written");
+    TEST_CHECK(!s_exec.aux[0].commanded_on && !s_exec.aux[0].actuated_on, "stale DIAG: not commanded/actuated on");
+    TEST_CHECK(s_exec.aux[0].rule_reason == (uint8_t)PROFILE_EXEC_RELAY_DENIED_AUTHORITY,
+               "stale DIAG: rule_reason names the denial");
+    safetyfx7_set_diag(0, SAFETY_LINK_DIAG_STATE_ARMED);
+    aux_test_settle();
+    aux_test_settle();
+    TEST_CHECK(s_exec.aux[0].commanded_on && s_exec.aux[0].actuated_on, "fresh DIAG: aux switches ON");
+    safetyfx7_clear_diag();
+    profile_executor_halt();
+
+    TEST_SECTION("SAFETYFX8 LOW-3: a TRIP_EVENT newer than the last DIAG reads as Pico tripped (aux already on is dropped)");
+    safety_link_status_t st;
+    memset(&st, 0, sizeof(st));
+    st.diag_ever_received = true;
+    st.diag_since_reboot = true;
+    st.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+    st.diag_frame_age_ms = 5000;
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "no trip event: not tripped");
+    st.trip_event_ever_received = true;
+    st.trip_event_age_ms = 100; /* event after the DIAG, DIAG still ARMED */
+    TEST_CHECK(relay_authority_pico_tripped(&st), "trip event newer than DIAG: tripped");
+    st.diag_frame_age_ms = 50; /* fresh DIAG after the event: normal clear flow, no latch */
+    TEST_CHECK(!relay_authority_pico_tripped(&st), "newer DIAG ARMED supersedes the event (no sticky latch)");
+    st.diag_ever_received = false;
+    TEST_CHECK(relay_authority_pico_tripped(&st), "trip event with no DIAG ever: tripped");
+
+    aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
+    memset(&st, 0, sizeof(st));
+    st.diag_ever_received = true;
+    st.diag_since_reboot = true;
+    st.diag_frame_age_ms = 60000;
+    st.trip_event_ever_received = true;
+    st.trip_event_age_ms = 10;
+    profile_executor_aux_fault_drop(relay_authority_pico_tripped(&st));
+    TEST_CHECK(aux_test_wrote(0x01, 0x00), "trip event with no new DIAG drops an on aux");
+    memset(&s_exec, 0, sizeof(s_exec));
 }
 
 static void test_task_entry_reads_before_taking_s_exec_lock(void)

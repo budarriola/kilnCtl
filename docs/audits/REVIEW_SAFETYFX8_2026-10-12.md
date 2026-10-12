@@ -99,7 +99,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
 
 ## Findings
 
-### LOW-1: the "unreadable status = stale" branch is untested (mutant M01 survives)
+### LOW-1: the "unreadable status = stale" branch is untested (mutant M01 survives) -- FIXED (safetyfx9)
 
 - **Where:** `control/profile_executor_relay_io.c:689-690`.
 - **What:** mutant M01 changes `return true;` to `return false;` and passes all 99 executables. A regression would let an aux or segment newly switch ON while the link status cannot be read.
@@ -109,7 +109,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
   - a segment ON is driven OFF with `wants_on` kept;
   - a retry is skipped.
 
-### LOW-2: a stale-DIAG aux refusal is invisible to the aux trigger state and the status JSON
+### LOW-2: a stale-DIAG aux refusal is invisible to the aux trigger state and the status JSON -- FIXED (safetyfx9)
 
 - **Where:** `control/profile_executor_relay_io.c:1016-1081` (`profile_executor_aux_tick_pico`).
 - **What:** the aux tick feeds only `authority_blocked` (on_blocked or pico_tripped) into `profile_executor_aux_on_off_input()`. It does not feed in the stale-DIAG refusal, which happens later, inside `aux_apply_relay_pico`. While the DIAG is stale and the rule wants ON:
@@ -120,7 +120,7 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
 - **Safety:** none. The output fails toward OFF. This is an accounting and display issue.
 - **Fix:** compute `pico_diag_stale_for_on() && !s_exec.aux[i].commanded_on` once per aux in the tick and OR it into the trigger's blocked input for that aux, so that `actuated_on`, `held_s` and `rule_reason` follow the real state. Give `rule_reason` a distinct value such as `AUTHORITY` or a new `PICO_STALE`.
 
-### LOW-3 (pre-existing): a Pico trip during a DIAG gap does not drop an aux that is already on
+### LOW-3 (pre-existing): a Pico trip during a DIAG gap does not drop an aux that is already on -- FIXED (safetyfx9)
 
 - **Where:**
   - `safety/safety_link_frames.c:803` masks `SAFETY_FLAG_FAULT` out of the STATUS flags.
@@ -133,8 +133,8 @@ The behavioural test `test_safetyfx7_watchdog_any_age_tripped` pins the watchdog
 
 ### INFO
 
-- **I-1. Misleading comment.** `control/profile_executor_relay_io.c:682` says "No safety link bound (host/sim) means nothing to gate on." On a target build, a NULL link also happens when the safety link fails to start (`main_control_bringup.c:363-365`). That case is safe only because `relay_authority_on_blocked(NULL)` blocks every ON first. The comment should say so, so that a later refactor does not move the DIAG check ahead of the authority check.
-- **I-2. Log flood.** The stale-DIAG `ESP_LOGW` at `:714` and `:1250` fires every executor tick for as long as the DIAG stays stale. The neighbouring write-failure log uses a log-once mask (`s_write_fail_logged_mask`). The same pattern would do here.
+- **I-1. FIXED (safetyfx9). Misleading comment.** `control/profile_executor_relay_io.c:682` says "No safety link bound (host/sim) means nothing to gate on." On a target build, a NULL link also happens when the safety link fails to start (`main_control_bringup.c:363-365`). That case is safe only because `relay_authority_on_blocked(NULL)` blocks every ON first. The comment should say so, so that a later refactor does not move the DIAG check ahead of the authority check.
+- **I-2. FIXED (safetyfx9). Log flood.** The stale-DIAG `ESP_LOGW` at `:714` and `:1250` fires every executor tick for as long as the DIAG stays stale. The neighbouring write-failure log uses a log-once mask (`s_write_fail_logged_mask`). The same pattern would do here.
 - **I-3. Manual writes still have no DIAG check.** Carried from SAFETYFX7 LOW-1. `kiln_io_owner`'s `relay_on_blocked` still has no Pico TRIPPED or DIAG-freshness check. It is reachable only when idle, because of the system-mode gate.
 - **I-4. `trip_is_test` ignores `diag_ever_received`.** `http/dashboard_status_http.c:757-759` checks `diag_since_reboot` and the age, but not `diag_ever_received`, as `relay_authority_pico_diag_fresh()` does. This is harmless in practice, since a frame since reboot implies one was received. It is display only.
 
