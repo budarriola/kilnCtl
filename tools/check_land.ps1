@@ -120,11 +120,14 @@ try {
     Commit-File $c "nff.txt" "x" "nff"
     $racer = New-Clone "c_racer"; git -C $racer checkout -b r origin/dev *>$null
     $marker = Join-Path $tmp "racer.marker"
-    $racerStub = Stub ("if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; Set-Content -LiteralPath '$racer\race.txt' -Value r; git -C '$racer' add race.txt; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:dev }`nexit 0")
+    $cnt = Join-Path $tmp "racer.count"
+    $racerStub = Stub ("Add-Content -LiteralPath '$cnt' -Value x`n" + "if (-not (Test-Path '$marker')) { New-Item '$marker' -ItemType File | Out-Null; Set-Content -LiteralPath '$racer\race.txt' -Value r; git -C '$racer' add race.txt; git -C '$racer' commit -m race; git -C '$racer' push origin HEAD:dev }`nexit 0")
     $r = Run-Land $c @("-ChecksScript", $racerStub)
     $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
     Assert ($r.Code -eq 0 -and $r.Json.landed -eq $true) "landed after retry"
     Assert ($rebases -eq 2) "rebased twice (got $rebases)"
+    $checkRuns = @(Get-Content -LiteralPath $cnt -ErrorAction SilentlyContinue).Count
+    Assert ($checkRuns -eq 2) "LOW-3: the post-rebase narrow checks re-ran on the retry against the newly rebased tree (stub runs: $checkRuns, want 2)"
     git -C $origin merge-base --is-ancestor $r.Json.sha dev *>$null
     Assert ($LASTEXITCODE -eq 0) "sha is on origin/dev"
 
@@ -258,6 +261,8 @@ try {
     [IO.File]::WriteAllText($hook, (Race-Hook "true"))
     try { $r = Run-Land $c @("-ChecksScript", $okStub) } finally { Remove-Item -LiteralPath $hook -Force -ErrorAction SilentlyContinue }
     Assert ($r.Code -eq 1 -and $r.Out -match 'still rejected after' -and $r.Out -match 'incorrect old value provided') "persistent race: final error keeps the git output"
+    $rebases = @($r.Json.steps | Where-Object { $_ -like 'rebase onto*' }).Count
+    Assert ($rebases -eq 3) "LOW-3: a persistent race stops after exactly 3 attempts (rebases: $rebases)"
 
     Write-Host "case: Get-PushRejectVerdict classification (porcelain status lines only)"
     $fnText = [regex]::Match([IO.File]::ReadAllText($land), '(?ms)^function Get-PushRejectVerdict.*?^\}').Value
@@ -274,6 +279,7 @@ try {
         @{ n = 'stale lock file exists'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': Unable to create dev.lock: File exists)`n"; v = 'refused' },
         @{ n = 'prose in remote: line only'; o = "remote: policy says error: cannot lock ref 'x': is at $h40a but expected $h40b`nremote: (incorrect old value provided)`n!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
         @{ n = 'prose with no status line'; o = "error: cannot lock ref 'refs/heads/dev': is at $h40a but expected $h40b`nfatal: the remote end hung up`n"; v = 'other' },
+        @{ n = 'forged remote:-prefixed status line before a real decline'; o = "remote: !`tHEAD:refs/heads/dev`t[rejected] (fetch first)`n!`tHEAD:refs/heads/dev`t[remote rejected] (pre-receive hook declined)`n"; v = 'refused' },
         @{ n = 'status-looking prose without the porcelain prefix'; o = "remote: [remote rejected] (incorrect old value provided)`n"; v = 'other' },
         @{ n = 'short sha is not git form'; o = "!`tHEAD:refs/heads/dev`t[remote rejected] (cannot lock ref 'refs/heads/dev': is at aaaa but expected bbbb)`n"; v = 'refused' })
     foreach ($vc in $verdictCases) { Assert ((Get-PushRejectVerdict $vc.o) -eq $vc.v) "verdict $($vc.n) -> $($vc.v)" }

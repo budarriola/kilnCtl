@@ -54,7 +54,8 @@
 #
 # GUARANTEES: never force-pushes; never leaves a half-rebased tree (any failed
 # rebase is aborted and the tree verified clean); push retried only on a
-# non-fast-forward rejection, at most 3 attempts.
+# lost race (non-fast-forward, or a ref-lock compare-and-swap loss; a hook or
+# protected-branch refusal is never retried), at most 3 attempts.
 #
 # EXIT: 0 landed (and requested optional steps ok), 1 refused/failed, 2 usage.
 # The LAST stdout line is always a one-line JSON result:
