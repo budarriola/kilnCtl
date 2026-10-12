@@ -260,25 +260,92 @@ def _repo_file(*parts):
     return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", *parts))
 
 
+_PROBE = "GUARD-PROBE-PAST-GUARD"
+
+
 @pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
 @pytest.mark.parametrize("script_parts,args", [
     (("tools", "PcTools", "scripts", "web_commission_row.ps1"), ["-Row", "W28", "-BoardHost", "192.0.2.1", "-ScreenshotDir", "unused"]),
     (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "start"]),
+    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "stop"]),
+    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "status"]),
     (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-Publish"]),
+    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-DevDryRun"]),
 ])
 def test_user_scope_credential_scripts_refuse_under_test_env(script_parts, args):
-    """L3: these scripts re-read credentials from the User-scope registry, which the
-    conftest env drop cannot hide. Under KILNCTL_TEST_NO_HUB=1 they must refuse before the
-    read, so no real credential can leak into a test run. A sentinel secret is planted in
-    the process env; the output must never contain it."""
+    """Testnet3 L3 / testnet4 L2+L3: these scripts use User-scope credentials or the real
+    hotspot / git credential manager, which the conftest env drop cannot hide. Under
+    KILNCTL_TEST_NO_HUB=1 each must refuse before the action.
+
+    Safe on failure: KILNCTL_TEST_GUARD_PROBE=1 makes every script exit 0 printing the probe
+    marker just PAST its guard, so a regressed guard cannot start the hotspot, publish, fetch
+    or load credentials. The marker's absence plus a nonzero exit proves the guard fired first.
+    (No sentinel-secret assertion: the scripts read the User-scope registry, never the process
+    env, so a process-env sentinel could not leak and the check would be vacuous.)"""
     import subprocess, os
-    secret = "SENTINEL-NOT-A-REAL-SECRET"
-    env = {**os.environ, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_WEB_PASSWORD": secret,
-           "KILNCTL_HOTSPOT_PASSWORD": secret, "KILNCTL_GITHUB_TOKEN": secret}
+    env = {**os.environ, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_TEST_GUARD_PROBE": "1"}
     r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
                         _repo_file(*script_parts), *args],
                        capture_output=True, text=True, env=env, timeout=120)
     out = r.stdout + r.stderr
+    assert _PROBE not in out, "guard regressed (stopped only by the probe): " + out
     assert r.returncode != 0, out
     assert "refused" in out.lower() and "KILNCTL_TEST_NO_HUB" in out, out
-    assert secret not in out
+
+
+@pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
+def test_guard_probe_reaches_past_guard_without_no_hub():
+    """Control for the test above: with the guard condition off, the probe marker appears, so
+    the refusal test cannot pass merely because the probe path is dead."""
+    import subprocess, os
+    env = {k: v for k, v in os.environ.items() if k != "KILNCTL_TEST_NO_HUB"}
+    env["KILNCTL_TEST_GUARD_PROBE"] = "1"
+    r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        _repo_file("tools", "PcTools", "scripts", "bench_hotspot.ps1"),
+                        "-Action", "stop"], capture_output=True, text=True, env=env, timeout=120)
+    assert r.returncode == 0 and _PROBE in r.stdout, r.stdout + r.stderr
+
+
+def test_settings_override_hides_real_host_in_process(tmp_path):
+    """Testnet4 L1: conftest points settings at a temp file, so a real-looking settings.json
+    planted elsewhere cannot supply last_host. resolve_default_host() falls back."""
+    import json, os
+    from kilnctrl import host_resolve, settings
+    assert os.environ["KILNCTL_TEST_SETTINGS_PATH"] == str(settings.SETTINGS_PATH)
+    assert "kilnctl_test_settings_" in str(settings.SETTINGS_PATH)
+    os.environ.pop("KILNCTL_HOST", None)
+    assert settings.get_last_host() is None
+    planted = tmp_path / "settings.json"
+    planted.write_text(json.dumps({"last_host": "192.168.1.156", "last_port": "COM14"}))
+    assert settings.get_last_host() is None and settings.get_last_port() is None
+    assert host_resolve.resolve_default_host() == host_resolve.FALLBACK_HOST
+
+
+def test_settings_override_inherited_by_subprocess():
+    """Testnet4 L1: a child process (no conftest) also sees the override, so its settings path
+    is the temp file and it resolves the fallback host."""
+    import subprocess, sys, os
+    here = os.path.dirname(__file__)
+    code = ("import os\n"
+            "from kilnctrl import host_resolve, settings\n"
+            "os.environ.pop('KILNCTL_HOST', None)\n"
+            "print('PATH=' + str(settings.SETTINGS_PATH))\n"
+            "print('HOST=' + host_resolve.resolve_default_host())\n"
+            "print('FALLBACK=' + host_resolve.FALLBACK_HOST)\n")
+    env = {**os.environ, "PYTHONPATH": os.path.join(here, "..", "src")}
+    assert env.get("KILNCTL_TEST_SETTINGS_PATH")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+    assert lines["PATH"] == env["KILNCTL_TEST_SETTINGS_PATH"], r.stdout
+    assert lines["HOST"] == lines["FALLBACK"], r.stdout
+
+
+def test_scrub_keep_prefix_boundary():
+    """Testnet4 I2: only the exact control prefix KILNCTL_TEST_ is kept; a name that merely
+    starts with KILNCTL_TEST (no underscore) is secret-shaped and is dropped."""
+    import conftest
+    env = {"KILNCTL_TESTPASSWORD": "x", "KILNCTL_TEST_FLAG": "1", "KILNCTL_BUILDER_TOKEN": "x",
+           "KILNCTL_BUILD_FLAG": "1"}
+    conftest._scrub_board_env(env, False)
+    assert env == {"KILNCTL_TEST_FLAG": "1", "KILNCTL_BUILD_FLAG": "1"}

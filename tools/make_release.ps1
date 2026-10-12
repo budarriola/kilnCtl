@@ -78,6 +78,9 @@ function Fail([string]$msg) {
 if ($Publish -and $env:KILNCTL_TEST_NO_HUB -eq "1") {
     Fail "-Publish refused under the test suite (KILNCTL_TEST_NO_HUB=1): it would read the GitHub token from the User-scope registry."
 }
+# KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past a guard so a regressed guard cannot
+# publish, fetch or build (testnet4 L2).
+if ($Publish -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Host 'GUARD-PROBE-PAST-GUARD'; exit 0 }
 
 # ---------------------------------------------------------------- publish helpers
 # Invoke-ReleasePublish calls Invoke-RestMethod and Get-AssetToFile by plain name so a
@@ -227,6 +230,12 @@ $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
 # Releases are built from the TAGGED RELEASE COMMIT (tools/release_merge.ps1 -Push puts the single-parent
 # commit M on origin/release and the annotated tag on M), not from origin/main: HEAD must be the commit
 # the tag peels to, and that commit must be the origin/release tip.
+# testnet4 L3: fetch / ls-remote below use the Windows git credential manager (a secret store
+# outside the environment), so even without -Publish they are refused under the test suite.
+if ($env:KILNCTL_TEST_NO_HUB -eq "1") {
+    Fail "network git access refused under the test suite (KILNCTL_TEST_NO_HUB=1): fetch/ls-remote would use the git credential manager."
+}
+if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Host 'GUARD-PROBE-PAST-GUARD'; exit 0 }
 & git -C $repoRoot fetch --quiet origin release --tags
 if ($LASTEXITCODE -ne 0) { Fail "git fetch origin release --tags failed." }
 $tagCommit = (& git -C $repoRoot rev-parse --verify --quiet "refs/tags/$Tag^{commit}")

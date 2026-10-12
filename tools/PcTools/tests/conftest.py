@@ -71,6 +71,15 @@ def _scrub_board_env(environ, bench_host_set):
 _scrub_board_env(os.environ, bool(os.environ.get("KILNCTRL_BENCH_HOST")))
 # Review testnet MED-A: disable the hub bench host or not. Set, never setdefault (testnet3 I2): an inherited KILNCTL_TEST_NO_HUB=0 must not re-enable the hub.
 os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+# Review testnet4 L1: redirect the settings.json host/port cache (last_host, last_port) to a
+# per-run temp path BEFORE any kilnctrl module is imported (22 *_AP_DEFAULT_HOST constants
+# resolve the host at import time). Set outright; children inherit it (KILNCTL_TEST_ prefix kept).
+import atexit as _atexit
+import shutil as _shutil
+import tempfile as _tempfile
+_SETTINGS_TMP = _tempfile.mkdtemp(prefix="kilnctl_test_settings_")
+_atexit.register(_shutil.rmtree, _SETTINGS_TMP, ignore_errors=True)
+os.environ["KILNCTL_TEST_SETTINGS_PATH"] = os.path.join(_SETTINGS_TMP, "settings.json")
 
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,

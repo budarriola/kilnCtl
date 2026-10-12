@@ -83,14 +83,19 @@ function Disable-AutoOffIfPossible {
     }
 }
 
+# Review testnet3 L3 / testnet4 L3: User scope is the registry, so a test's scrubbed
+# environment cannot hide the hotspot credentials, and stop/status act on (or read) the real
+# bench hotspot. Every action is refused under the test suite, before anything is read or done.
+# KILNCTL_TEST_GUARD_PROBE=1 (tests only) exits 0 just past the guard, so a regressed guard
+# cannot reach the real action (testnet4 L2).
+if ($env:KILNCTL_TEST_NO_HUB -eq '1') {
+    Write-Error "$Action refused under the test suite (KILNCTL_TEST_NO_HUB=1): it uses the real bench hotspot / User-scope credentials."
+    exit 3
+}
+if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Output 'GUARD-PROBE-PAST-GUARD'; exit 0 }
+
 switch ($Action) {
     'start' {
-        # Review testnet3 L3: User scope is the registry, so a test's scrubbed environment
-        # cannot hide these credentials. Refuse before reading them under the test suite.
-        if ($env:KILNCTL_TEST_NO_HUB -eq '1') {
-            Write-Error "start refused under the test suite (KILNCTL_TEST_NO_HUB=1): it reads the hotspot credentials from User scope."
-            exit 3
-        }
         $ssid = [Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_SSID', 'User')
         $pw = [Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_PASSWORD', 'User')
         if ([string]::IsNullOrEmpty($ssid) -or [string]::IsNullOrEmpty($pw)) {

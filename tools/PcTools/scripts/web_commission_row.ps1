@@ -30,6 +30,9 @@ if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
     Write-Error 'live mode refused under the test suite (KILNCTL_TEST_NO_HUB=1): it reads credentials from User scope'
     exit 3
 }
+# KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past the guard so a regressed guard cannot
+# load credentials or contact a board (testnet4 L2).
+if (-not $DryRun -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Output 'GUARD-PROBE-PAST-GUARD'; exit 0 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $venvPython = Join-Path $repoRoot 'tools\PcTools\.venv\Scripts\python.exe'
