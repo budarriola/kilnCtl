@@ -479,7 +479,7 @@ class BackupImportSnapshotTest(_Base):
     def test_idless_before_idcarrying_does_not_reuse_its_slot(self):  # LOW-4
         P = self.P
         self.assertIsNotNone(ReadbackContentTest._idless(
-            ReadbackContentTest, [dict(P), dict(P, id=1)], [dict(P, id=1)]))
+            ReadbackContentTest, [dict(P), dict(P, id=1)], [dict(P, id=1), dict(P, id=2, name="x")]))
 
 
 if __name__ == "__main__":

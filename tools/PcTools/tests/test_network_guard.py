@@ -109,11 +109,29 @@ def test_udp_sendto_loopback_allowed():
         s.close()
 
 
-def test_proxy_env_removed_and_no_proxy_star():
-    import os
-    for v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
-        assert v not in os.environ
-    assert os.environ.get("NO_PROXY") == "*"
+def test_proxy_env_removed_inside_guarded_test():
+    """LOW-1: a proxy variable set in the outer environment is deleted per test."""
+    import subprocess, sys, textwrap, os, tempfile, shutil
+    here = os.path.dirname(__file__)
+    code = textwrap.dedent("""
+        import os
+        def test_x():
+            for v in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+                assert v not in os.environ, v
+    """)
+    d = tempfile.mkdtemp()
+    try:
+        shutil.copy(os.path.join(here, "conftest.py"), d)
+        shutil.copy(os.path.join(here, "bench_fixture_session.py"), d)
+        open(os.path.join(d, "test_x.py"), "w").write(code)
+        env = {**os.environ, "PYTHONPATH": os.path.join(here, "..", "src"),
+               "HTTP_PROXY": "http://127.0.0.1:1", "HTTPS_PROXY": "http://127.0.0.1:1",
+               "ALL_PROXY": "http://127.0.0.1:1", "http_proxy": "http://127.0.0.1:1"}
+        r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                            "-p", "no:xdist", d], capture_output=True, text=True, cwd=d, env=env)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert r.returncode == 0, r.stdout + r.stderr
 
 
 @pytest.mark.live_bench
