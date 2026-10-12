@@ -231,3 +231,22 @@ If the first `git` on PATH is a batch shim, `CreateProcessW` with it as `lpAppli
 - CAUGHT: `probe_race_full_40hex_shas` and `probe_race_github_remote_rejected_form`. These two are
   probes, not mutants of the code under review. CAUGHT here means land.ps1 does not retry those
   realistic race forms.
+
+## Fix status
+
+| Finding | Status | Fix / evidence |
+|---|---|---|
+| MED-1 | fixed | `land.ps1` uses `git push --porcelain` under `LC_ALL=C`/`LANG=C`; `Get-PushRejectVerdict` classifies only `!<TAB>` status lines from the bracketed reason (`incorrect old value provided`, `cannot lock ref ... is at <40hex> but expected <40hex>`, fetch first, non-fast-forward = race, retried). `check_land.ps1` now has a real race against a scratch bare origin (pre-receive hook advancing the ref) plus 11 verdict unit cases with real shas and the GitHub form. |
+| LOW-1 | fixed | Hook / protected-branch / stale-lock declines and `remote:` prose classify as refused or other, never retried. Short-sha and unanchored-status-line cases in the verdict table. |
+| LOW-2 | fixed | New no-job case in `check_push_verify.ps1`: mingw64 `git.exe` (no descendant) against a hanging `git://` remote; the root process must be killed. |
+| LOW-3 | fixed | Kill lint is a PowerShell-AST allowlist over `push_verify.ps1` and `lib_push_verify_walk.ps1`, with pinned C# `TerminateProcess`/`TerminateJobObject`/`KillProc` sites; in-test hole cases for every demonstrated hole. |
+| LOW-4 | fixed | `PUSH_VERIFY_TEST_NO_JOB` is honoured only with `PUSH_VERIFY_TEST_MODE=1`; stray-NO_JOB test added. |
+| INFO-1 | equivalent, left | Hook removal outside `finally` has no observable effect in the check. |
+| INFO-2 | fixed (comment) | Post-launch-sleep seam documented as test-load-bearing. |
+| INFO-3 | fixed | `LC_ALL`/`LANG` set around the push. Mutant `land_no_lc_all` MISSED: equivalent, the test host locale is already English. |
+| INFO-4 | fixed | `-FetchTimeoutSec` above 2000000 exits 2; test added. |
+| INFO-5 | open | `.cmd`/`.bat` git shim resolution not addressed. |
+
+Mutation evidence (`tools/negtest.ps1 -Preset check`):
+- `check_land.ps1`: 8 mutants, 7 CAUGHT, 1 MISSED (`land_no_lc_all`, equivalent).
+- `check_push_verify.ps1`: 6 lint-hole mutants CAUGHT; `pv_killproc_noop` CAUGHT (pinned `KillProc` body in the lint); dead-call `pv_killproc_call_dead_lint_clean` CAUGHT by the runtime root-only test ("root git itself is killed").
