@@ -117,4 +117,4 @@ The `-not $looseExists` term in the unborn test can be removed and `check_worktr
 | MED-A | Fixed | `_lcd19_wait_out_lockout` always sleeps `_LCD19_LOCKOUT_FIRST_STEP_S` (5 s, pinned by a test to `LOGIN_BACKOFF_LADDER_MS[0]` in `login_backoff.c`) plus a 1.5 s margin; the text-driven wait is now only an extra. `BackoffUi` fake shows plain "Wrong PIN" on DENIED and the countdown only for a submit inside the lock. |
 | LOW-A | Fixed | `_lcd19_relock` also requires the off-POST body `ok:true`; four failed-relock tests (on-POST not ok, off-POST status, off-POST body, home not settled) catch P1, P3, P4. |
 | LOW-B | Fixed | Bound uses elapsed clock time (reads included); `test_lockout_wait_bound_counts_read_time` catches P11. |
-| LOW-C | Fixed | `check_worktree_mint.ps1` case: zero-byte loose ref + empty reflog is refused, not unborn (M2). |
+| LOW-C | Fixed | `check_worktree_mint.ps1` case: loose ref path (directory) + empty reflog is refused, not unborn (M2). |

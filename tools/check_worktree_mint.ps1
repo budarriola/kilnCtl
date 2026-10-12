@@ -90,18 +90,18 @@ try {
     $r = Run-MintRemove @("-Path", $w6, "-Force", "-ForceUnverifiable")
     Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w6) -and $r.Out -match "WARNING.*-ForceUnverifiable") "zero-byte ref: -ForceUnverifiable removes with a warning"
     Remove-Item -LiteralPath $zeroRef -Force
-    # unborn-looking worktree (HEAD -> absent-looking branch, empty reflog) whose branch ref is a
-    # zero-byte LOOSE file: show-ref says "not found" (rc 1) but the file exists, so it must NOT be
+    # unborn-looking worktree (HEAD -> absent-looking branch, empty reflog) whose branch ref path is a
+    # DIRECTORY (symbolic-ref still resolves, show-ref says "not found" rc 1, but the path exists), so it must NOT be
     # classed unborn (sweepfx3 LOW-C; the `-not $looseExists` clause). Refused, worktree kept.
     $w6b = MintPath
     git -C $w6b symbolic-ref HEAD refs/heads/zerounborn *>$null
     $w6bGit = (git -C $w6b rev-parse --absolute-git-dir).Trim()
     Set-Content -LiteralPath (Join-Path $w6bGit "logs/HEAD") -Value $null -NoNewline
     $zeroRef2 = Join-Path $gc "refs/heads/zerounborn"
-    New-Item -ItemType File -Path $zeroRef2 -Force | Out-Null
+    New-Item -ItemType Directory -Path $zeroRef2 -Force | Out-Null
     $r = Run-MintRemove @("-Path", $w6b, "-Force")
-    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w6b) -and $r.Out -match "REFUSED" -and $r.Out -notmatch "unborn HEAD") "zero-byte loose ref + empty reflog: not unborn, refused"
-    Remove-Item -LiteralPath $zeroRef2 -Force
+    Assert ($r.Rc -ne 0 -and (Test-Path -LiteralPath $w6b) -and $r.Out -match "REFUSED" -and $r.Out -notmatch "unborn HEAD") "loose ref path present + empty reflog: not unborn, refused"
+    Remove-Item -LiteralPath $zeroRef2 -Recurse -Force
     $r = Run-MintRemove @("-Path", $w6b, "-Force")
     Assert ($r.Rc -eq 0 -and -not (Test-Path -LiteralPath $w6b)) "same worktree with the ref file gone: genuinely unborn, removed"
     # remote ref pointing at a missing object
