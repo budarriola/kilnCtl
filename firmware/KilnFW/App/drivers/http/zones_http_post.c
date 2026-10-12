@@ -71,8 +71,9 @@ static ZONES_POST_NOINLINE void zones_post_send_undecided_409(httpd_req_t *req)
     httpd_resp_sendstr(req,
                        "{\"ok\":false,\"error\":\"zones_config_undecided\",\"reason\":\"the stored zones config "
                        "could not be read at boot, so a save would be lost or overwrite it; a reboot retries the read, "
-                       "and if it stays unreadable use the recovery routes: factory reset with scope kiln, or cfgfs "
-                       "format with force_healthy\"}");
+                       "and if it stays unreadable use the recovery routes: factory reset with scope kiln, or a cfgfs "
+                       "format (POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL "
+                       "cfg-stored settings: every user profile, the zones config and preferences\"}");
 }
 
 /* The commit-time mode-gate refusal (a firing/autotune started during the ceiling raise): undo the

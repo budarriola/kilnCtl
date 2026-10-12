@@ -176,10 +176,21 @@ def unreadable_store_refusal(status: Optional[int], detail: Optional[str]) -> Op
         which = "a stored setting"
     else:
         return None
+    if "zones_config_undecided" in detail:
+        remedy = ("the recovery routes are a factory reset with scope kiln, or a cfgfs format "
+                  "(POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL cfg-stored "
+                  "settings: every user profile, the zones config and preferences")
+    else:
+        # PROFILESFX9: a refused profile save/delete is NOT cleared by scope kiln (it never touches profiles_nvs).
+        remedy = ("if the refusal names a profile, factory_reset scope=profiles (or scope=all) clears it and ERASES "
+                  "every user profile, and a cfgfs format (POST /api/cfgfs/format_confirm?force_healthy=1, then "
+                  "reboot) clears it only when the profile file itself is unreadable; scope kiln does not clear a "
+                  "profile refusal. For any other stored setting, a factory reset with scope kiln or that cfgfs "
+                  "format applies, and the format ERASES ALL cfg-stored settings: every user profile, the zones "
+                  "config and preferences")
     return (f"refused: {which} could not be read at boot, so the board refuses this write rather than overwrite "
             f"it (HTTP 409): {detail} -- nothing was changed. Reboot to retry the read; if it persists, GET "
-            f"/api/cfgfs lists the degraded store, and the recovery routes are a factory reset with scope kiln or "
-            f"a cfgfs format_confirm with force_healthy")
+            f"/api/cfgfs lists the degraded store; {remedy}")
 
 
 def _url(host: str, path: str) -> str:

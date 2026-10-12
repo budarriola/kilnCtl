@@ -6188,7 +6188,9 @@ static void test_delete_rev_unknown_is_409(void)
     TEST_CHECK(strstr(s_last_sendstr, "format_confirm?force_healthy=1, then reboot") != NULL, "PROFILESFX8 LOW-3: generic text uses the query spelling and says reboot");
     TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "PROFILESFX8 LOW-3: generic text warns the format erases");
     TEST_CHECK(strstr(s_last_sendstr, "format_confirm force_healthy") == NULL, "PROFILESFX8 LOW-3: no space spelling");
-    TEST_CHECK(strstr(s_last_sendstr, "(scope kiln)\"}") != NULL, "PROFILESFX8: generic body not truncated by the stub");
+    TEST_CHECK(strstr(s_last_sendstr, "factory_reset scope=profiles") != NULL, "PROFILESFX9 MED-1: names scope=profiles");
+    TEST_CHECK(strstr(s_last_sendstr, "does not clear it\"}") != NULL, "PROFILESFX9 MED-1: profile body not truncated, says scope kiln does not clear it");
+    TEST_CHECK(strstr(s_last_sendstr, "or a factory reset (scope kiln)") == NULL, "PROFILESFX9 MED-1: never offers scope kiln as the cure");
     s_profile_rev_unknown[8] = false;
 }
 

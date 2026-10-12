@@ -1396,11 +1396,17 @@ class UnreadableStoreRefusalTest(unittest.TestCase):
         msg = zh.unreadable_store_refusal(
             409, '{"ok":false,"error":"zones_config_undecided","reason":"x"}')
         self.assertIn("zones config", msg)
-        self.assertIn("force_healthy", msg)
+        self.assertIn("?force_healthy=1, then reboot", msg)
+        self.assertIn("ERASES ALL", msg)
+        self.assertNotIn("scope=profiles", msg)
 
     def test_store_unreadable(self):
         msg = zh.unreadable_store_refusal(409, '{"error":"store_unreadable_at_boot"}')
         self.assertIn("stored setting", msg)
+        self.assertIn("factory_reset scope=profiles", msg)
+        self.assertIn("scope kiln does not clear a profile refusal", msg)
+        self.assertIn("?force_healthy=1, then reboot", msg)
+        self.assertIn("ERASES ALL", msg)
 
     def test_other_409_and_other_status_untouched(self):
         self.assertIsNone(zh.unreadable_store_refusal(409, "safety_ceiling_raise_failed"))

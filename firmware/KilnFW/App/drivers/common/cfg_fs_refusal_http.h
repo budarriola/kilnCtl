@@ -37,7 +37,18 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
 
 /* Recovery text shared by every store_unreadable_at_boot 409 (persfx3 LOW-2). A reboot retries the read; if
  * the cause persists, GET /api/cfgfs names the store and these two routes clear it. */
-#define CFG_FS_STORE_UNREADABLE_REASON "a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded), then clear it with a cfg format (POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL cfg-stored settings: every user profile, the zones config and preferences, or a factory reset (scope kiln)"
+#define CFG_FS_STORE_UNREADABLE_REASON "a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded), then clear it with a cfg format (POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL cfg-stored settings: every user profile, the zones config and preferences; alternatively use a factory reset (scope kiln)"
+
+/* PROFILESFX9 MED-1: the profile routes (save, delete, hidden.json) get their own text. Scope kiln erases only
+ * kiln_nvs and the kiln cfg mirrors, never profiles_nvs, the profile files or hidden.json. A cfg format clears the
+ * refusal only when the profile FILE is unreadable; an unreadable rev-floor blob in profiles_nvs survives it and is
+ * cleared only by factory_reset scope=profiles (or all). */
+#define CFG_FS_PROFILES_UNREADABLE_REASON \
+    "a stored profile could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the " \
+    "controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded); factory_reset scope=profiles " \
+    "(or scope=all) clears it and ERASES every user profile; a cfg format (POST /api/cfgfs/format_confirm?force_healthy=1, " \
+    "then reboot) clears it only when the profile file itself is unreadable, and ERASES ALL cfg-stored settings: every " \
+    "user profile, the zones config and preferences; a factory reset with scope kiln does not clear it"
 
 /* FIRELOWFX3 LOW-1: the favorites store (prof_favusr in profiles_nvs) is cleared by NEITHER cfg format (erases the cfg
  * partition only) NOR factory reset scope kiln (does not touch profiles_nvs): only scope profiles erases it, and that
@@ -57,8 +68,20 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
  * refusal's ESP_ERR_INVALID_STATE (persfx3 MED-2: a flash write error or OOM on another store is a 500, and a
  * different store being degraded must not rename it); else 500 naming a flash write failure. Never a fake
  * success. `adopted` < 0 omits the field. Returns ESP_OK so a handler can `return` it directly. */
-static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool store_refused, esp_err_t err,
-                                                         int adopted)
+#define CFG_FS_SEND_409_REASON(req, adopted, REASON)                                                              \
+    do {                                                                                                          \
+        if ((adopted) < 0) {                                                                                      \
+            httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" REASON "\"}"); \
+        } else if (adopted) {                                                                                     \
+            httpd_resp_sendstr(req, "{\"ok\":false,\"adopted\":true,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" REASON "\"}"); \
+        } else {                                                                                                  \
+            httpd_resp_sendstr(req, "{\"ok\":false,\"adopted\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" REASON "\"}"); \
+        }                                                                                                         \
+    } while (0)
+
+/* `profiles` selects CFG_FS_PROFILES_UNREADABLE_REASON over the generic text for the 409. */
+static inline esp_err_t cfg_fs_http_persist_failed_state_impl(httpd_req_t *req, bool store_refused, esp_err_t err,
+                                                              int adopted, bool profiles)
 {
     if (!cfg_fs_is_available()) {
         cfg_fs_http_send_not_mounted(req);
@@ -67,12 +90,10 @@ static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool 
     httpd_resp_set_type(req, "application/json");
     if (store_refused && err == ESP_ERR_INVALID_STATE) {
         httpd_resp_set_status(req, "409 Conflict");
-        if (adopted < 0) {
-            httpd_resp_sendstr(req, "{\"ok\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_STORE_UNREADABLE_REASON "\"}");
-        } else if (adopted) {
-            httpd_resp_sendstr(req, "{\"ok\":false,\"adopted\":true,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_STORE_UNREADABLE_REASON "\"}");
+        if (profiles) {
+            CFG_FS_SEND_409_REASON(req, adopted, CFG_FS_PROFILES_UNREADABLE_REASON);
         } else {
-            httpd_resp_sendstr(req, "{\"ok\":false,\"adopted\":false,\"error\":\"store_unreadable_at_boot\",\"reason\":\"" CFG_FS_STORE_UNREADABLE_REASON "\"}");
+            CFG_FS_SEND_409_REASON(req, adopted, CFG_FS_STORE_UNREADABLE_REASON);
         }
         return ESP_OK;
     }
@@ -85,6 +106,24 @@ static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool 
         httpd_resp_sendstr(req, "{\"ok\":false,\"adopted\":false,\"error\":\"could not be saved to flash\"}");
     }
     return ESP_OK;
+}
+
+static inline esp_err_t cfg_fs_http_persist_failed_state(httpd_req_t *req, bool store_refused, esp_err_t err,
+                                                         int adopted)
+{
+    return cfg_fs_http_persist_failed_state_impl(req, store_refused, err, adopted, false);
+}
+
+/* Profile routes: same, with the profile-specific 409 reason (PROFILESFX9 MED-1). */
+static inline esp_err_t cfg_fs_http_persist_failed_state_profiles(httpd_req_t *req, bool store_refused, esp_err_t err,
+                                                                  int adopted)
+{
+    return cfg_fs_http_persist_failed_state_impl(req, store_refused, err, adopted, true);
+}
+
+static inline esp_err_t cfg_fs_http_persist_failed_profiles_for(httpd_req_t *req, const char *store, esp_err_t err)
+{
+    return cfg_fs_http_persist_failed_state_profiles(req, cfg_fs_degraded_is(store), err, -1);
 }
 
 /* Per-store form: `store` is the cfg path the handler's own store registers in the degraded table

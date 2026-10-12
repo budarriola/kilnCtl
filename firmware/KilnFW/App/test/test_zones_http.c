@@ -2198,6 +2198,9 @@ static void test_zones_post_refused_while_load_undecided_keeps_fault(void)
                "persfx3 LOW-1: no Pico ceiling write at all for a POST that can never commit");
     TEST_CHECK(strstr(s_last_resp_body, "force_healthy") != NULL && strstr(s_last_resp_body, "scope kiln") != NULL,
                "persfx3 LOW-2: the 409 names the recovery routes");
+    TEST_CHECK(strstr(s_last_resp_body, "format_confirm?force_healthy=1, then reboot") != NULL &&
+                   strstr(s_last_resp_body, "ERASES ALL cfg-stored settings") != NULL,
+               "PROFILESFX9 LOW-2: the 409 gives the ?force_healthy=1 spelling, the reboot and the erase warning");
     TEST_CHECK(strncmp(s_test_last_status, "409", 3) == 0, "undecided POST answered 409");
     TEST_CHECK(strstr(s_last_resp_body, "zones_config_undecided") != NULL, "refusal names the cause");
     TEST_CHECK(zones_config_get_load_fault(&lf), "the load fault is still latched");
