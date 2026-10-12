@@ -462,6 +462,7 @@ class BackupImportSnapshotTest(_Base):
         for bad in ({"profiles": None}, {}, {"profiles": "x"}):
             out, _ = self._run([dict(self.P)], [("", bad), after])
             self.assertTrue(out.startswith("UNVERIFIED"), (bad, out))
+            self.assertIn("snapshot unavailable", out)
             self.assertNotIn("ok - restored", out)
 
     def test_preexisting_identical_profile_is_unverified_via_tool(self):  # MED-C

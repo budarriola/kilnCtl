@@ -24,6 +24,13 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+# Review testnet3 L3: live mode re-reads credentials from User scope (the registry), which a
+# test's scrubbed environment cannot hide. Refuse live mode under the PcTools test suite.
+if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
+    Write-Error 'live mode refused under the test suite (KILNCTL_TEST_NO_HUB=1): it reads credentials from User scope'
+    exit 3
+}
+
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $venvPython = Join-Path $repoRoot 'tools\PcTools\.venv\Scripts\python.exe'
 if (-not (Test-Path $venvPython)) {

@@ -72,6 +72,13 @@ function Fail([string]$msg) {
     exit 1
 }
 
+# Review testnet3 L3: the token read below falls back to the User-scope registry, which a
+# test's scrubbed environment cannot hide. Under the PcTools test suite
+# (KILNCTL_TEST_NO_HUB=1, set by tests/conftest.py) -Publish is refused before anything runs.
+if ($Publish -and $env:KILNCTL_TEST_NO_HUB -eq "1") {
+    Fail "-Publish refused under the test suite (KILNCTL_TEST_NO_HUB=1): it would read the GitHub token from the User-scope registry."
+}
+
 # ---------------------------------------------------------------- publish helpers
 # Invoke-ReleasePublish calls Invoke-RestMethod and Get-AssetToFile by plain name so a
 # test can shadow them (tools/check_release_manifest.ps1 does; it also exercises the real

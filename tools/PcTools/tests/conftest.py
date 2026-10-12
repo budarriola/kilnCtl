@@ -34,14 +34,43 @@ sys.path.insert(0, os.path.dirname(__file__))
 # (bridged to the real bench board by the running kilnctrl MCP server). Disable
 # the hub for the whole run, bench host or not (LOW-2: no live_bench test uses
 # mcp_server's hub link; bench_fixture_session opens its own serial link).
-os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+# Review testnet2 LOW-3 / testnet3 L1: subprocess children must not inherit the real
+# board address or any secret unless a bench host is deliberately selected. Dropping is
+# by PREFIX (every KILNCTL_* variable plus MOUSER_API_KEY and GITHUB_TOKEN), not by an
+# enumerated list, so a newly added secret is covered by default. Exceptions:
+#   * test control variables the runners set (KILNCTL_TEST_*, KILNCTL_SLOW_TESTS,
+#     KILNCTL_BUILD_*, KILNCTL_LIGHT_GATE_*, ...): see _CONTROL_*;
+#   * with a bench host (KILNCTRL_BENCH_HOST, note the CTRL spelling): ONLY what the
+#     live_bench tests use -- KILNCTL_HOST (host_resolve) and the web login pair
+#     KILNCTL_WEB_USERNAME/KILNCTL_WEB_PASSWORD (http_auth). bench_fixture_session reads
+#     only KILNCTRL_BENCH_HOST/_PORT. Every other secret is dropped even then.
+# Caveat (testnet3 L3): PowerShell helpers that read the User-scope registry
+# ([Environment]::GetEnvironmentVariable(..., 'User')) bypass this drop; they refuse to
+# run live under KILNCTL_TEST_NO_HUB=1 (tests/test_network_guard.py proves it).
+_CONTROL_PREFIXES = ("KILNCTL_TEST_", "KILNCTL_BUILD_", "KILNCTL_LIGHT_GATE_")
+_CONTROL_NAMES = frozenset({
+    "KILNCTL_SLOW_TESTS", "KILNCTL_REGEN_CONFIG_CONVERT_GOLDENS", "KILNCTL_GZIP_ASSETS",
+    "KILNCTL_ALLOW_TEST_ARCHIVE_WRITE"})
+_BENCH_KEEP = frozenset({"KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD"})
+_EXTRA_SECRETS = ("MOUSER_API_KEY", "GITHUB_TOKEN")
 
-# Review testnet2 LOW-3: subprocess children must not inherit the real board
-# address or web credentials unless a bench host is deliberately selected.
-if not os.environ.get("KILNCTRL_BENCH_HOST"):
-    for _v in ("KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD",
-               "KILNCTL_WEB_PASSWORD_NEW"):
-        os.environ.pop(_v, None)
+
+def _scrub_board_env(environ, bench_host_set):
+    for name in list(environ):
+        if name in _EXTRA_SECRETS:
+            pass
+        elif not name.startswith("KILNCTL_"):
+            continue
+        elif name in _CONTROL_NAMES or name.startswith(_CONTROL_PREFIXES):
+            continue
+        elif bench_host_set and name in _BENCH_KEEP:
+            continue
+        environ.pop(name, None)
+
+
+_scrub_board_env(os.environ, bool(os.environ.get("KILNCTRL_BENCH_HOST")))
+# Review testnet MED-A: disable the hub bench host or not. Set, never setdefault (testnet3 I2): an inherited KILNCTL_TEST_NO_HUB=0 must not re-enable the hub.
+os.environ["KILNCTL_TEST_NO_HUB"] = "1"
 
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,

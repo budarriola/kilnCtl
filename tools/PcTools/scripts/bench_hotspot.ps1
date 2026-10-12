@@ -85,6 +85,12 @@ function Disable-AutoOffIfPossible {
 
 switch ($Action) {
     'start' {
+        # Review testnet3 L3: User scope is the registry, so a test's scrubbed environment
+        # cannot hide these credentials. Refuse before reading them under the test suite.
+        if ($env:KILNCTL_TEST_NO_HUB -eq '1') {
+            Write-Error "start refused under the test suite (KILNCTL_TEST_NO_HUB=1): it reads the hotspot credentials from User scope."
+            exit 3
+        }
         $ssid = [Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_SSID', 'User')
         $pw = [Environment]::GetEnvironmentVariable('KILNCTL_HOTSPOT_PASSWORD', 'User')
         if ([string]::IsNullOrEmpty($ssid) -or [string]::IsNullOrEmpty($pw)) {

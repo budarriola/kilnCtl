@@ -171,21 +171,114 @@ def _run_child_pytest(code, extra_env, drop=()):
 
 _CRED = {"KILNCTL_HOST": "10.9.9.9", "KILNCTL_WEB_USERNAME": "u",
          "KILNCTL_WEB_PASSWORD": "p", "KILNCTL_WEB_PASSWORD_NEW": "q"}
+# Names live tests use: kept when a bench host is set (conftest._BENCH_KEEP).
+_KEPT = ("KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD")
+# Testnet3 L1: secrets/gates NOT in the old enumerated list, plus the other spellings.
+_OTHER_SECRETS = {
+    "KILNCTL_LCD_PIN": "1", "KILNCTL_STA_SSID": "s", "KILNCTL_STA_PASSWORD": "s",
+    "KILNCTL_HOTSPOT_SSID": "s", "KILNCTL_HOTSPOT_PASSWORD": "s", "KILNCTL_AP_PASSWORD": "s",
+    "KILNCTL_AUX_BENCH_CONFIRM": "1", "KILNCTL_WEB_USER_USERNAME": "s",
+    "KILNCTL_WEB_USER_PASSWORD": "s", "KILNCTL_TOTP_CODE": "1", "KILNCTL_WIFI_PASSWORD": "s",
+    "KILNCTL_BOARD_HOST": "s", "KILNCTL_RECOVERY_AP_PASSPHRASE": "s",
+    "KILNCTL_GITHUB_TOKEN": "s", "KILNCTL_FUTURE_NEW_SECRET": "s",
+    "MOUSER_API_KEY": "s", "GITHUB_TOKEN": "s"}
+_CONTROL = {"KILNCTL_TEST_FOO": "1", "KILNCTL_SLOW_TESTS": "1"}
 
 
 def test_conftest_drops_board_env_without_bench_host():
-    """LOW-3: no bench host -> children cannot inherit the board address/credentials."""
+    """LOW-3/L1: no bench host -> children inherit no board address or secret."""
     code = ("import os\ndef test_x():\n"
             "    for v in %r:\n        assert v not in os.environ, v\n"
-            "    assert os.environ['KILNCTL_TEST_NO_HUB'] == '1'\n" % (tuple(_CRED),))
-    r = _run_child_pytest(code, _CRED)
+            "    assert os.environ['KILNCTL_TEST_NO_HUB'] == '1'\n"
+            "    assert os.environ['KILNCTL_TEST_FOO'] == '1'\n"
+            "    assert os.environ['KILNCTL_SLOW_TESTS'] == '1'\n"
+            % (tuple(_CRED) + tuple(_OTHER_SECRETS),))
+    r = _run_child_pytest(code, {**_CRED, **_OTHER_SECRETS, **_CONTROL})
     assert r.returncode == 0, r.stdout + r.stderr
 
 
 def test_conftest_keeps_board_env_with_bench_host_but_no_hub():
-    """LOW-3/LOW-2: a selected bench host keeps the env, and the hub stays disabled."""
+    """LOW-3/LOW-2/L2: a bench host keeps exactly what live tests use (every kept name
+    asserted, with its value), drops every other secret, and the hub stays disabled."""
     code = ("import os\ndef test_x():\n"
-            "    assert os.environ['KILNCTL_HOST'] == '10.9.9.9'\n"
-            "    assert os.environ['KILNCTL_TEST_NO_HUB'] == '1'\n")
-    r = _run_child_pytest(code, {**_CRED, "KILNCTRL_BENCH_HOST": "10.9.9.9"})
+            "    kept = %r\n"
+            "    for v, val in kept.items():\n        assert os.environ[v] == val, v\n"
+            "    assert os.environ['KILNCTRL_BENCH_HOST'] == '10.9.9.9'\n"
+            "    for v in %r:\n        assert v not in os.environ, v\n"
+            "    assert os.environ['KILNCTL_TEST_NO_HUB'] == '1'\n"
+            "    assert os.environ['KILNCTL_TEST_FOO'] == '1'\n"
+            % ({k: _CRED[k] for k in _KEPT},
+               ("KILNCTL_WEB_PASSWORD_NEW",) + tuple(_OTHER_SECRETS)))
+    r = _run_child_pytest(code, {**_CRED, **_OTHER_SECRETS, **_CONTROL,
+                                 "KILNCTRL_BENCH_HOST": "10.9.9.9"})
     assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_conftest_forces_no_hub_over_inherited_zero():
+    """I2: an inherited KILNCTL_TEST_NO_HUB=0 must read back "1" (set, not setdefault)."""
+    code = "import os\ndef test_x():\n    assert os.environ['KILNCTL_TEST_NO_HUB'] == '1'\n"
+    import subprocess, sys, tempfile, shutil, os
+    here = os.path.dirname(__file__)
+    d = tempfile.mkdtemp()
+    try:
+        shutil.copy(os.path.join(here, "conftest.py"), d)
+        shutil.copy(os.path.join(here, "bench_fixture_session.py"), d)
+        open(os.path.join(d, "test_x.py"), "w").write(code)
+        env = {k: v for k, v in os.environ.items() if k != "KILNCTRL_BENCH_HOST"}
+        env["KILNCTL_TEST_NO_HUB"] = "0"
+        env["PYTHONPATH"] = os.path.join(here, "..", "src")
+        r = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                            "-p", "no:xdist", d], capture_output=True, text=True, cwd=d, env=env)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_nulllink_fallback_warning_logged():
+    """I1: importing mcp_server with the hub disabled logs the NullLink fallback warning."""
+    import subprocess, sys, os
+    here = os.path.dirname(__file__)
+    code = ("import logging, io, sys\n"
+            "buf = io.StringIO()\n"
+            "logging.basicConfig(stream=buf, level=logging.WARNING)\n"
+            "import kilnctrl.mcp_server\n"
+            "sys.stdout.write('CAPTURED:' + buf.getvalue())\n")
+    env = {**os.environ, "KILNCTL_TEST_NO_HUB": "1",
+           "PYTHONPATH": os.path.join(here, "..", "src")}
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "link hub disabled, using NullLink" in r.stdout, r.stdout + r.stderr
+
+
+def _ps_exe():
+    import shutil
+    return shutil.which("powershell") or shutil.which("pwsh")
+
+
+def _repo_file(*parts):
+    import os
+    return os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", *parts))
+
+
+@pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
+@pytest.mark.parametrize("script_parts,args", [
+    (("tools", "PcTools", "scripts", "web_commission_row.ps1"), ["-Row", "W28", "-BoardHost", "192.0.2.1", "-ScreenshotDir", "unused"]),
+    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "start"]),
+    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-Publish"]),
+])
+def test_user_scope_credential_scripts_refuse_under_test_env(script_parts, args):
+    """L3: these scripts re-read credentials from the User-scope registry, which the
+    conftest env drop cannot hide. Under KILNCTL_TEST_NO_HUB=1 they must refuse before the
+    read, so no real credential can leak into a test run. A sentinel secret is planted in
+    the process env; the output must never contain it."""
+    import subprocess, os
+    secret = "SENTINEL-NOT-A-REAL-SECRET"
+    env = {**os.environ, "KILNCTL_TEST_NO_HUB": "1", "KILNCTL_WEB_PASSWORD": secret,
+           "KILNCTL_HOTSPOT_PASSWORD": secret, "KILNCTL_GITHUB_TOKEN": secret}
+    r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                        _repo_file(*script_parts), *args],
+                       capture_output=True, text=True, env=env, timeout=120)
+    out = r.stdout + r.stderr
+    assert r.returncode != 0, out
+    assert "refused" in out.lower() and "KILNCTL_TEST_NO_HUB" in out, out
+    assert secret not in out
