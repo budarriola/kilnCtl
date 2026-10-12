@@ -280,3 +280,10 @@ Mutation JSON:
   "replace":"io_seg_start_pico(s_exec.segment_index, seg, false);"}
 ]
 ```
+
+## Fix status (2026-10-12)
+
+MED-1, LOW-1 and LOW-2 fixed: cached TRIPPED counts at any age (`relay_authority_pico_tripped`), starts and
+resume need `relay_authority_pico_diag_fresh` (ever received, since reboot, `diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS`),
+the watchdog uses `diag_frame_age_ms` and any-age TRIPPED, one post-lock re-sample feeds all tick consumers, and
+resume refusals carry their reason (`profile_executor_resume_refusal`, HTTP 400 text).
