@@ -237,6 +237,23 @@ In `REVIEW_FIRELOWFX3_2026-10-11.md` Fix status, the text `tools\negtest.ps1` re
   re-read from the published value.
 - **Recovery image.** It links none of these files.
 
+## Fix status
+
+All findings fixed on origin/dev in the commit that adds this table (pfx2fix). Negtest: 15 of 15 mutations CAUGHT (the reviewer's M1-M9, M1b, plus L2 buffer shrink, L1 and L1b text/unreadable-file mutations and I4), baseline passed; full KilnFW host suite 98/98 passed.
+
+| Finding | Status | Fix |
+|---|---|---|
+| LOW-1 | FIXED | Favorites 409 now names `factory_reset scope=profiles` or `scope=all` (both erase every user profile). When prof_fav.bin itself is unreadable (rev-unknown) the 409 falls back to the generic text (a reboot retries, a cfg format clears it) and `favorites_load` stays unresolved instead of publishing a zero mask. Retry now heals once the read works. |
+| LOW-2 | FIXED | `CFG_FS_STATUS_HANDLER_JSON_BUF` 5632 to 6656 B (heap scratch). Worst-case test fills 9 degraded and 8 conditions with 47-char names: 5856 B rendered (5886 B with the longest esp_err name), at least 400 B margin. Fails against the old 5632 B. |
+| LOW-3 | FIXED | Diagnostics page shows "Stores refused this boot" and "Runtime conditions"; MCP `get_cfgfs_status` prints degraded and conditions lines. Python tests added. |
+| INFO-1 | FIXED | Conditions loop lists all (table max 8) and emits `conditions_count`. |
+| INFO-2 | FIXED | `emitted` flag replaces `i == 0` for comma placement in both loops. |
+| INFO-3 | FIXED | `used_bitmap_load_or_rebuild` clears `profiles_used_bitmap` on any successful load as well as after rebuild. |
+| INFO-4 | FIXED | Builtin key HAL_NOT_FOUND sets the mask to 0 rather than keeping the stale RAM value. |
+| INFO-5 | FIXED | Both masks published together through `fav_publish()` under a spinlock; readers copy under it. |
+| INFO-6 | FIXED | Tests added so M1, M2, M3, M4, M6 are CAUGHT (see negtest results above). |
+| INFO-7 | FIXED | Typo in REVIEW_FIRELOWFX3 (`tools` newline `egtest`) restored. |
+
 ## Appendix: negtest mutations (JSON)
 
 ```json
