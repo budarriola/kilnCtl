@@ -265,6 +265,24 @@ try {
     Assert-True ($pr.Failed -ge 1) "prune failure: Failed count should be >= 1"
     Assert-True (Test-Path -LiteralPath (Join-Path $wt "failprune")) "prune failure: the refused worktree must survive"
     Remove-Item -LiteralPath $ghost -Force
+
+    # ---- Git() timeout: the stderr-holding grandchild must be killed (job object) ----
+    Step 'git timeout: stderr-holding grandchild reaped'
+    if (-not ('WtStatusWalk' -as [type])) {
+        $src = [System.IO.File]::ReadAllText($ScriptUnderTest)
+        $mt = [regex]::Match($src, "(?s)Add-Type -TypeDefinition @'\r?\n(.*?)\r?\n'@")
+        Assert-True $mt.Success "git timeout: could not extract the WtStatusWalk source"
+        if ($mt.Success) { Add-Type -TypeDefinition $mt.Groups[1].Value }
+    }
+    if ('WtStatusWalk' -as [type]) {
+        $tag = 'sleep 47'
+        $gr = [WtStatusWalk]::Git($repo, "-c `"alias.zz=!$tag >/dev/null & git`" zz rev-parse HEAD")
+        Assert-True ($gr.ExitCode -eq -1) "git timeout: stderr-held call must fail closed with -1, got $($gr.ExitCode)"
+        Start-Sleep -Milliseconds 500
+        $left = @(Get-CimInstance Win32_Process -Filter "Name='sleep.exe'" | Where-Object { $_.CommandLine -match [regex]::Escape($tag) })
+        foreach ($l in $left) { try { Stop-Process -Id $l.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
+        Assert-True ($left.Count -eq 0) "git timeout: $($left.Count) '$tag' grandchild(ren) survived the timeout (job kill missing)"
+    }
 }
 finally {
     foreach ($pr in $procs) { try { Stop-Process -Id $pr.Id -Force -ErrorAction SilentlyContinue } catch { } }

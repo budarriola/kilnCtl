@@ -69,6 +69,7 @@ if (-not ('WtStatusWalk' -as [type])) {
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Runtime.InteropServices;
 public class WtGitResult {
     public int ExitCode;
     public List<string> Lines = new List<string>();
@@ -79,6 +80,26 @@ public class WtWalkResult {
     public int Files;
     public bool HasKicad;
     public int Errors;
+}
+public static class WtJob {
+    [StructLayout(LayoutKind.Sequential)] struct BASIC { public long a, b; public uint LimitFlags; public UIntPtr c, d; public uint e; public UIntPtr f; public uint g, h; }
+    [StructLayout(LayoutKind.Sequential)] struct IOC { public ulong a, b, c, d, e, f; }
+    [StructLayout(LayoutKind.Sequential)] struct EXT { public BASIC Basic; public IOC Io; public UIntPtr p, j, pm, jm; }
+    [DllImport("kernel32.dll", SetLastError = true)] static extern IntPtr CreateJobObject(IntPtr a, string n);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetInformationJobObject(IntPtr j, int c, ref EXT i, int l);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool AssignProcessToJobObject(IntPtr j, IntPtr p);
+    [DllImport("kernel32.dll", SetLastError = true)] static extern bool TerminateJobObject(IntPtr j, uint c);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+    // Job with KILL_ON_JOB_CLOSE: reaches descendants even after the launcher exited.
+    public static IntPtr Create() {
+        IntPtr j = CreateJobObject(IntPtr.Zero, null);
+        if (j == IntPtr.Zero) return IntPtr.Zero;
+        EXT e = new EXT(); e.Basic.LimitFlags = 0x2000;
+        if (!SetInformationJobObject(j, 9, ref e, Marshal.SizeOf(typeof(EXT)))) { CloseHandle(j); return IntPtr.Zero; }
+        return j;
+    }
+    public static void Assign(IntPtr j, System.Diagnostics.Process p) { if (j != IntPtr.Zero) AssignProcessToJobObject(j, p.Handle); }
+    public static void Kill(IntPtr j) { if (j != IntPtr.Zero) { TerminateJobObject(j, 1); CloseHandle(j); } }
 }
 public static class WtStatusWalk {
     // Runs git with stdin closed (a pooled runspace has no usable console stdin,
@@ -114,9 +135,11 @@ public static class WtStatusWalk {
         System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(GitExe(), "-C \"" + dir + "\" " + args);
         psi.UseShellExecute = false; psi.CreateNoWindow = true;
         psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
+        IntPtr job = WtJob.Create();
         try {
             using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi)) {
                 try {
+                WtJob.Assign(job, p);
                 p.StandardInput.Close();
                 System.Threading.Tasks.Task<string> err = p.StandardError.ReadToEndAsync();
                 System.Threading.Tasks.Task<string> outT = p.StandardOutput.ReadToEndAsync();
@@ -137,6 +160,7 @@ public static class WtStatusWalk {
                 } catch (Exception) { KillTree(p); throw; }
             }
         } catch (Exception) { r.ExitCode = -1; }
+        finally { WtJob.Kill(job); } // also reaps a stderr-holding grandchild of an already-exited git
         return r;
     }
 
