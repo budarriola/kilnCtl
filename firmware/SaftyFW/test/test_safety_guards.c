@@ -4910,7 +4910,7 @@ static void test_test_clear_s8_divisor(void)
 {
     TEST_SECTION("TEST clear S8 divisor = frozen elapsed + verify time, floored (saftyfx2 INFO-1)");
     struct { int hold; float rise; bool clear; const char *msg; } cases[] = {
-        {2, 0.5f, true, "0.5 C, 2.1 s true span: 5 s floor applies, clear"},
+        {2, 0.8f, true, "0.8 C, ~3 s true span: 5 s floor applies, clear"},
         {2, 1.0f, false, "1 C over the 5 s floor is 12 C/min: refuse (floor not larger than 5 s)"},
         {60, 1.0f, true, "1 C over 60 s of verify time is 1 C/min: clear (verify time counts)"},
         {60, 20.0f, false, "20 C over 60 s is 20 C/min: refuse"},
