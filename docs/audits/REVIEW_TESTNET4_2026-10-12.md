@@ -120,6 +120,8 @@ would pin it.
 
 ### I3 (INFO): other answers to the questions asked
 
+Status: the actionable item (`KC_REUSE_SID` survives the scrub) is fixed: it is in `_EXTRA_SECRETS`, `test_scrub_drops_reuse_sid`. The `.env` path bug is in the mykicadMcp submodule, outside this tree's scope, and stays open there.
+
 - `KILNCTRL_*` (with an R) is never dropped. Every such name in the repo is
   a bench tuning knob: `BENCH_HOST`, `BENCH_PORT` and the `BENCH_*_S`/`_C`
   budgets. None is a secret, and `BENCH_HOST` must survive by design.
@@ -204,5 +206,5 @@ Mutation JSON:
 | L1 | fixed | `KILNCTL_TEST_SETTINGS_PATH` override in `settings.py`; `conftest.py` points it at a temp file before kilnctrl imports; in-process and subprocess tests |
 | L2 | fixed | scripts exit just past their guard under `KILNCTL_TEST_GUARD_PROBE=1`, so a regressed guard cannot act; vacuous sentinel assertion dropped (registry, not env) |
 | L3 | fixed | `bench_hotspot.ps1` refuses every action; `make_release.ps1` refuses fetch/ls-remote path; `check_release_manifest.ps1` clears the vars |
-| I1 | open | |
+| I1 | fixed | conftest `_MCP_SERVER_PORTS` (8766, 8767) refused on loopback; `test_guard_refuses_mcp_server_ports_on_loopback` (fix SHA 4a4b1ef39) |
 | I2 | fixed | `test_scrub_keep_prefix_boundary` | |

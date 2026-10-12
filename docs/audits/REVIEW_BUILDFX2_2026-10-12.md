@@ -218,6 +218,6 @@ Baseline PASS (46.5 s). Overall verdict MISSED. `real_tree_unchanged: true`, `co
 |---|---|---|
 | LOW-1 N2/N3/N7/N8 untested guards | fixed | four new tests in `test_build_kilnfw_artifact_gate.py` (lowercase env key; real `_run_locked` with a fake lock and fake `_run`; wrapper reset text and order; `full log:` in the downgraded head); each re-negative-tested CAUGHT |
 | LOW-2 dead desc-time parse, stale texts | fixed | `_app_bin_build_wall` replaced by `_app_image_problem` (magic/validity only); docstring corrected; HIGH-1 row of REVIEW_BUILDFX now says mtime-only and why the desc time must not return |
-| LOW-3 static bins vs tree config | not changed | documented, `flash_firmware` is the place for a cross-check if wanted |
+| LOW-3 static bins vs tree config | accepted, not changed | reviewed as optional ("Not required"): a successful ninja run leaves both bins current, and the publish step uses the same tree state; a `gen_esp32part.py` cross-check belongs in `flash_firmware` if ever wanted (re-verified 2026-10-12, no defect) |
 | INFO: flash accepts 0-byte bins | fixed | `flash_firmware` refuses an empty bootloader/partition-table/app bin; tests in `test_flash_firmware_erase_partitions.py` |
 | INFO: build_lock reclaims only by age | fixed | `build_lock` also reclaims when the recorded PID is dead or the live process started after the lock was written (PID reuse); tests in `test_buildlock.py` |
