@@ -209,3 +209,18 @@ Logs: `%TEMP%\negtest_logs\20261012_071931_xzw8`. ALL_CAUGHT.
 | INFO-3 | INFO | no | `safety_link_frame.c:65` frozen uptime early in boot |
 | INFO-4 | INFO | yes (test gap) | `test_safety_link_compile.c` ~1226-1240, C2/C4 MISSED |
 | LOW-5 | LOW | yes (fixed) | `zones_http_client.py:1280` via `:1304`/`:1323`, after POST in `:1409` |
+
+## Fix status (rebootfx3)
+
+- LOW/MED-2: FIXED. `safety_pico_uptime_behind_expected` now compares the forward and backward modular
+  differences separately (review's suggested form); 31-day-baseline tests added to
+  `test_safety_link_compile.c`.
+- INFO-4: FIXED. Boundary tests at `elapsed + tol` (reboot) and `elapsed + tol + 1` (not a reboot).
+  Negtest: dropping the backward term, reverting to the signed diff, `<=` to `<`, and tol to `2*tol` are all
+  CAUGHT by a compiled mutant failing an assertion (a young-Pico small-step-back case was added after the first
+  run showed the backward-term drop MISSED).
+- LOW-1: NOT FIXED, deliberate trade-off. Stamping the receive time at UART receive instead of at drain would
+  mean carrying a timestamp through the DIAG message/inbox path from the link task to `safety_apply_diag`,
+  not a contained change. It needs two coincidences (a multi-second inbox stall on exactly the baseline frame
+  plus a boot_id repeat, 1 in 256), and the FW_VERSION and V3 DIAG boot_id signals still cover 255 of 256 reboots.
+  The current bound deliberately trades this rare false negative for removing the late-drain false positive.

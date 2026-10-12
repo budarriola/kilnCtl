@@ -1243,6 +1243,18 @@ static void test_pico_reboot_detected_by_uptime_regression(void)
                "LOW-2: outage spanning the wrap (-600 s .. +300 s) is not a reboot");
     TEST_CHECK(safety_pico_uptime_behind_expected(UINT32_MAX - 600000u, 900000u, 1500u),
                "a reboot across the wrap is still caught");
+    // OLDPOOLA LOW/MED-2: 31-day baseline (> 2^31 ms) then reboot to a small uptime is still caught.
+    TEST_CHECK(safety_pico_uptime_behind_expected(0xA0000000u, 100000u, 500u),
+               "LOW/MED-2: reboot from a 31-day baseline is caught");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(0xA0000000u, 100000u, 0xA0000000u + 100000u + 50u),
+               "LOW/MED-2: on-schedule 31-day baseline is not a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(1000u, 0u, 500u),
+               "small step back inside tolerance on a young Pico is not a reboot");
+    // INFO-4: bound boundary (tol = 2000 at elapsed 1000).
+    TEST_CHECK(safety_pico_uptime_behind_expected(600000u, 1000u, 1000u + 2000u),
+               "INFO-4: now == elapsed + tol is a reboot");
+    TEST_CHECK(!safety_pico_uptime_behind_expected(600000u, 1000u, 1000u + 2000u + 1u),
+               "INFO-4: now == elapsed + tol + 1 is not a reboot");
     TEST_CHECK(safety_pico_uptime_behind_expected(1000u, 0x90000000u, 1000u + 0x90000000u),
                "elapsed >= 2^31 ms: modular difference meaningless, in doubt count a reboot");
 

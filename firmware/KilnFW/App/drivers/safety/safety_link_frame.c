@@ -54,15 +54,18 @@ bool safety_pico_uptime_behind_expected(uint32_t baseline_ms, uint32_t esp_elaps
         return true; /* modular difference no longer meaningful (~24.8 days): in doubt, count a reboot */
     }
     uint32_t expected = baseline_ms + esp_elapsed_ms; /* modular: handles the 32-bit wrap */
-    int32_t diff = (int32_t)(now_ms - expected);
-    int32_t tol = (int32_t)(SAFETY_PICO_UPTIME_TOL_BASE_MS + esp_elapsed_ms / SAFETY_PICO_UPTIME_TOL_PPM_DIV);
-    if (diff >= -tol) {
+    uint32_t tol = SAFETY_PICO_UPTIME_TOL_BASE_MS + esp_elapsed_ms / SAFETY_PICO_UPTIME_TOL_PPM_DIV;
+    /* OLDPOOLA LOW/MED-2: compare forward and backward modular differences separately; a signed diff
+     * misreads a reboot from a 24.9-49.7 day baseline as a large forward step. */
+    uint32_t fwd = now_ms - expected;
+    uint32_t back = expected - now_ms;
+    if (fwd <= tol || back <= tol) {
         return false;
     }
     /* REBOOTFX2 LOW-3: physical bound. A reboot happens after the baseline, so the new boot's uptime cannot
      * exceed the ESP time elapsed since it. A late-drained DIAG or a frozen uptime makes `diff` very negative
      * with a large now_ms; that is not a reboot. */
-    return now_ms <= esp_elapsed_ms + (uint32_t)tol;
+    return now_ms <= esp_elapsed_ms + tol;
 }
 
 bool safety_link_versions_compatible(uint16_t self_protocol, uint16_t self_min_compatible,
