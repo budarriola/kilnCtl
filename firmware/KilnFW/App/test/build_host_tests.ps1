@@ -3048,11 +3048,10 @@ try {
     # signal, printed loudly either way -- if pid.c/heater_output.c/
     # zone_coupling_solve.c/profile_executor_feedforward.c's signatures
     # drift, "BUILD FAILED" now appears in this script's output instead of
-    # nothing appearing at all), but never run it automatically and never
-    # let its build/run result affect this script's own exit code -- same
-    # non-gate posture as sim_iter_tune/sim_wide_temp_sweep above, for the
-    # same reason sim_credibility_gate's own gains-uncertain conclusions
-    # are informational rather than blocking.
+    # nothing appearing at all), but never run it automatically. Its run results are
+    # informational (same posture as sim_iter_tune/sim_wide_temp_sweep above),
+    # but a COMPILE break fails this script via $script:auxBuildFailures
+    # (see below).
     $exeClosedloop = Join-Path $outDir "kilnctl_sim_credibility_gate_closedloop.exe"
     $cmdClosedloop = "cl @`"$hostTestsRsp`" /std:c11 " +
             "/Fo:`"$outDir\\`" /Fe:`"$exeClosedloop`" `"$(Join-Path $testDir 'sim_credibility_gate_closedloop.c')`" " +
@@ -3074,8 +3073,8 @@ try {
         # that cannot fail" class this repo is eliminating. Its RESULTS stay
         # non-gating (it is still never run automatically, and no PASS/FAIL
         # verdict from it is ever consulted) -- only a compile break now
-        # fails this script, via the same $script:buildFailures list every
-        # other Invoke-HostTestExe-tracked source uses.
+        # fails this script, via $script:auxBuildFailures (kept out of
+        # $script:buildFailures so Built + BuildFailures == $totalExpected stays exact).
         Write-Host "BUILD FAILED: sim_credibility_gate_closedloop -- this DOES fail this script (compile-only signal; the file is still never run automatically and its results, when it does run, stay non-gating -- see file header)"
         $script:auxBuildFailures += "sim_credibility_gate_closedloop"
     } else {
@@ -3618,7 +3617,7 @@ try {
         Write-Host "AUX BUILD FAILURES ($($script:auxBuildFailures.Count)) -- compile-only, not counted in Built/Expected:"
         foreach ($f in $script:auxBuildFailures) { Write-Host "  $f" }
     }
-    $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count -OnlyRun ([bool]$Only)
+    $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count
     if ($verdict.Mismatch) { Write-Host $verdict.MismatchText }
     if ($verdict.ExitCode -ne 0) { exit $verdict.ExitCode }
     if ($script:auxBuildFailures.Count -gt 0) { exit 1 }

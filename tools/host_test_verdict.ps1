@@ -3,7 +3,7 @@
 # executables failed: a silent dropout must not hide behind a red test.
 # Tested by tools/check_host_test_verdict.ps1.
 function Get-HostTestVerdict {
-    param([int]$Built, [int]$Expected, [int]$BuildFailures, [int]$RunFailures, [bool]$OnlyRun)
+    param([int]$Built, [int]$Expected, [int]$BuildFailures, [int]$RunFailures)
     # Built excludes build failures, so a compile break is not a dropout: compare Built + BuildFailures.
     $accounted = $Built + $BuildFailures
     $mismatch = ($accounted -ne $Expected)
