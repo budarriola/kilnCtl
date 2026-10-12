@@ -7587,6 +7587,39 @@ static void test_get_fuzzy_model_valid_single_sourced_past_thermo_count(void)
 // max length, and asserts the actual produced length stays under json_cap
 // -- so a future field addition that finally exhausts the buffer fails
 // loudly here instead of silently truncating a live board's GET response.
+// BENCHFX3 INFO-1: cal_offset_c/max_ramp/sanity_rate/max_temp_c/min_temp_c
+// used to print at %.3f/%.2f/%.3f/%.1f/%.1f, so a GET-merge-POST re-post rounded
+// guard thresholds and a sanity_rate < 0.0005 printed 0.000 (then defaulted).
+// Pin that the printed value parses back to the exact float.
+static void test_zones_get_round_trip_precision_fields(void)
+{
+    TEST_SECTION("GET /api/zones prints cal_offset/ramp/sanity/max/min lossless (%.9g)");
+    memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
+    s_zones.cfg.thermo_count = 1;
+    zone_cfg_t *z = &s_zones.cfg.zones[0];
+    z->cal_offset_c = 0.1234567f;
+    z->max_ramp_c_per_hr = 123.456789f;
+    z->sanity_rate_c_per_min = 0.00031f;
+    z->max_temp_c = 1234.5678f;
+    z->min_temp_c = -12.3456f;
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    s_last_resp_body[0] = '\0';
+    TEST_CHECK(zones_get_handler(&req) == ESP_OK, "GET ok");
+    const struct { const char *key; float want; } f[] = {
+        {"\"cal_offset_c\":", 0.1234567f}, {"\"max_ramp_c_per_hr\":", 123.456789f},
+        {"\"sanity_rate_c_per_min\":", 0.00031f}, {"\"max_temp_c\":", 1234.5678f},
+        {"\"min_temp_c\":", -12.3456f}};
+    for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
+        const char *at = strstr(s_last_resp_body, f[k].key);
+        TEST_CHECK(at != NULL, "key present");
+        if (at != NULL) {
+            float got = strtof(at + strlen(f[k].key), NULL);
+            TEST_CHECK(got == f[k].want, f[k].key);
+        }
+    }
+}
+
 static void test_zones_get_handler_max_width_response_fits_json_cap(void)
 {
     TEST_SECTION("zones_get_handler -- every zone/profile/relay field at its documented max width "
@@ -7627,7 +7660,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->name[ZONE_NAME_MAX_LEN] = '\0';
         z->relay_mask = 255;
         z->thermo_mask = 255;
-        z->cal_offset_c = ZONE_CAL_OFFSET_MAX_C;
+        z->cal_offset_c = -1.23456793e-5f; /* %.9g-widest, see pid_kp below */
         /* pid_kp/ki/kd, coupling_c%u and coupling_diag_k_dc render at "%.9g"
          * (2026-09-28), where the MAX bound is NOT the widest value: 1000.0f
          * renders as "1000" (4 chars) but any in-range value below 1e-4 with
@@ -7639,11 +7672,11 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
         z->pid_kp = 1.17549435e-38f;
         z->pid_ki = 1.17549435e-38f;
         z->pid_kd = 1.17549435e-38f;
-        z->max_ramp_c_per_hr = ZONE_MAX_RAMP_C_PER_HR_MAX;
-        z->sanity_rate_c_per_min = ZONE_SANITY_RATE_MAX_C_PER_MIN;
+        z->max_ramp_c_per_hr = -1.23456793e-5f; /* %.9g-widest */
+        z->sanity_rate_c_per_min = -1.23456793e-5f;
         z->control_mode = 255;
-        z->max_temp_c = ZONE_MAX_TEMP_C_MAX;
-        z->min_temp_c = ZONE_MIN_TEMP_C_MAX;
+        z->max_temp_c = -1.23456793e-5f;
+        z->min_temp_c = -1.23456793e-5f;
         z->heater_window_ms = ZONE_HEATER_WINDOW_MS_MAX;
         z->heater_min_on_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
         z->heater_min_off_ms = ZONE_HEATER_MIN_ON_OFF_MS_MAX;
@@ -17104,6 +17137,7 @@ void run_test_zones_http(void)
     test_get_emits_fuzzy_model_valid();
     test_get_fuzzy_model_valid_single_sourced_past_thermo_count();
     test_get_and_diag_emit_matching_generation();
+    test_zones_get_round_trip_precision_fields();
     test_zones_get_handler_max_width_response_fits_json_cap();
     test_zones_diag_get_handler_max_width_response_fits_json_cap();
     test_tuning_rec_body_len_strips_the_idf_appended_nul();

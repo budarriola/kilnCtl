@@ -625,6 +625,10 @@ var KG_RELAY_COUNT = 4;        /* relay bits this board can have */
 var KG_DIAG_STATE_TRIPPED = 4; /* main_page.html SAFETY_LINK_DIAG_STATE_TRIPPED */
 var KG_DIAG_STALE_MS = 1500;   /* main_page.html SAFETY_LINK_STALE_MS */
 
+/* GET /api/zones prints cal/ramp/sanity/max/min at %.9g (lossless, BENCHFX3
+   INFO-1); show 6 significant digits so float32 noise (0.100000001) never
+   reaches an input whose step would flag it. */
+function kgR6(v) { var n = Number(v); return isFinite(n) ? parseFloat(n.toPrecision(6)) : 0; }
 function kgEsc(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
@@ -1426,7 +1430,7 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     /* Calibration offset is per SENSOR and belongs to NO inheritance group
        (saveAll()'s own comment: "tc_type yes, cal offset no"), so it sits
        outside every frame and stays visible whatever the selects say. */
-    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + z.cal_offset_c + '">' +
+    '<label>Calibration offset (&deg;C)</label><input type="number" step="0.1" class="cal" value="' + kgR6(z.cal_offset_c) + '">' +
     /* coupling_diag_k_dc: the coupling identification's own diagonal cell --
        a MEASURED quantity (see zone_cfg_t::coupling_diag_k_dc's own doc
        comment), always emitted by GET and read-back-and-reposted by POST
@@ -1477,12 +1481,12 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<details class="groupFrame" data-group="limits"><summary class="groupFrameTitle">Limits (max/min temp, ramp, rise rate)</summary>' +
     '<div class="heaterOnly">' +
     '<label>Max ramp rate (&deg;C/hr) -- user-entered feasibility ceiling for the Profiles page</label>' +
-    '<input type="number" step="1" class="ramp" value="' + z.max_ramp_c_per_hr + '">' +
+    '<input type="number" step="1" class="ramp" value="' + kgR6(z.max_ramp_c_per_hr) + '">' +
     '</div>' +
     '<label>Minimum rise rate (&deg;C/min, 0 = firmware default 0.5) ' +
     infoDetailsHtml('sanity', 'minimum rise rate') +
     '</label>' +
-    '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + (z.sanity_rate_c_per_min || 0) + '">' +
+    '<input type="number" step="0.05" min="0" max="20" class="sanity" value="' + kgR6(z.sanity_rate_c_per_min || 0) + '">' +
     '<label>Coil nameplate power, W (0 = split the safety page\'s whole-kiln nameplate ' +
     'evenly across every coil)</label>' +
     /* opus review finding 9: step must match ZONE_COIL_POWER_W_MIN (0.1W) --
@@ -1492,9 +1496,9 @@ function zoneBlock(z, i, relayCount, thermoCount) {
     '<input type="number" step="0.1" min="0" max="100000" class="coilpower" value="' + (z.coil_power_w || 0) + '">' +
     '<div class="row2">' +
       '<div><label>Max temp &deg;C (0 = no ceiling) -- hard safety trip, no debounce</label>' +
-      '<input type="number" step="1" class="maxtemp" value="' + (z.max_temp_c || 0) + '"></div>' +
+      '<input type="number" step="1" class="maxtemp" value="' + kgR6(z.max_temp_c || 0) + '"></div>' +
       '<div><label>Min temp &deg;C -- below this reads as a broken/disconnected sensor</label>' +
-      '<input type="number" step="1" class="mintemp" value="' + z.min_temp_c + '"></div>' +
+      '<input type="number" step="1" class="mintemp" value="' + kgR6(z.min_temp_c) + '"></div>' +
     '</div>' +
     '</details>' +
     '<details class="groupFrame" data-group="relaytiming"><summary class="groupFrameTitle">Relay timing (window/min-on/min-off)</summary>' +

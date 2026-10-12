@@ -735,6 +735,17 @@ class AuxC03ReviewLowTest(unittest.TestCase):
         extra = {"aux_zone_mask_restore_fn": restore} if restore else {}
         return _ctx(srv, aux_zone_mask_post_fn=post, **extra)
 
+    def test_2xx_branch_reason_carries_restore_detail(self):
+        """AUXC03FX4 LOW-2: a 2xx saved-bad-mask plus a failed restore must name restore.detail."""
+        def restore():
+            return False
+        restore.detail = "restore POST error (boom), read-back differs"
+        ctx = self._ctx(lambda: (200, "ok - zone 0: relay_mask=9"), restore)
+        res = C._case_ax_c03(ctx)
+        self.assertEqual(res.verdict, Verdict.FAIL)
+        self.assertIn("NOT confirmed", res.reason)
+        self.assertIn("restore POST error (boom), read-back differs", res.reason)
+
     def test_pre_aux_409s_are_inconclusive(self):
         for body in ("a backup restore or configuration change is in progress -- retry when it finishes",
                      "a kiln-config rollback is pending (saving the active kiln failed); reboot",
