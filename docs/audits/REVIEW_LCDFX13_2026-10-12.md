@@ -172,6 +172,25 @@ A better rule fails only when the symbols in a shared UI section have different 
 
 This is Q2: the brittleness pushes new code out of the pinned block and into the unconstrained area. Fixing MED-1 removes the incentive.
 
+## Fix status (lcdfx14)
+
+All six findings FIXED in the lcdfx14 commit (SHA recorded in the landing note below; local commit 97f940af8 before rebase).
+
+- **MED-1 FIXED.** `check_lcd_admin_gates.ps1` L-secret now counts every mention of `s_ap_qr_uri`, `s_ap_qr_last`, `s_ap_qr` and `s_ap_password_label` per enclosing function across the whole file and fails on any change (`$invWant`). The masked block is pinned to 5 statements, and `lv_obj_remove_flag(s_ap_qr, ...)` must appear exactly once, after the masked block. E1, E2, E3 CAUGHT.
+- **INFO-1 FIXED.** `ui_page_network_secret_wipe()` (new `ui_page_network_secret.c`) zeroes `s_ap_qr_uri` and `s_ap_qr_last` through a volatile loop; the masked branch and `ui_page_network_relock_close` call it and re-encode the hidden QR to the blank payload `WIFI:;;`. Host test `test_ui_page_network_secret.c` asserts the buffers are zeroed.
+- **LOW-1 FIXED.** L-macro scan: any `#define`/`#undef` of an `lv_*` name, `LV_OBJ_FLAG_*` or a secret-path helper in a UI file or a header it includes fails. E5 CAUGHT.
+- **LOW-2 FIXED.** The header index now covers hwAbstraction and CommonFW headers (`<...>` includes too), and every KilnFW CMakeLists/*.cmake is scanned for `-w`, `-Wno-shadow`, `-Wno-error`. P2, C1 CAUGHT. Also fixed the test-directory exclusion regex (`[\/]test[\/]`).
+- **LOW-3 FIXED.** `check_lcd_sink_callgraph.py` seeds the walk from each sink's own definition and treats aliases and `.constprop/.isra/.part/.cold/.lto_priv` clones as sinks. Cases S, T added to `test_check_lcd_sink_callgraph.ps1`.
+- **INFO-2 FIXED.** A shared strict UI section fails only when the symbols differ in address or size. Case U added.
+
+Negative tests (lcdfx14, `tools\negtest.ps1`, baseline passed and real tree unchanged in every run):
+
+| Check / preset | Mutant | Verdict |
+|---|---|---|
+| check_lcd_admin_gates.ps1 | E1 else caption, E2 peek timer, E3 alias, E5 macro, P2 hal_time pragma, C1 `-w`, C2 `-w` in root CMakeLists, K_drop_wipe, K_unhide_early | 9 of 9 CAUGHT by the check's own `FAIL: L-` line |
+| test_check_lcd_sink_callgraph.ps1 | S_no_sink_nodes, T_no_clone_sinks, U_icf_strict | 3 of 3 CAUGHT (FAIL S/T/U lines) |
+| kilnfw-host | H1 wipe loop `i < 1`, H2 skip `last` wipe | 2 of 2 CAUGHT; both compiled, `test_ui_page_network_secret.c` assertions failed |
+
 ## Negative tests
 
 All runs were `tools\negtest.ps1 -Preset check` from `C:\wt\rvlcdfx13_fbwkjc` at `ce18b24bb`. In every run the unmutated baseline passed, `real_tree_unchanged` was true and the copies were removed. Every CAUGHT is a real `FAIL:` assertion line, not a parse error.
