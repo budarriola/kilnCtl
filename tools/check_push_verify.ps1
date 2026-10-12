@@ -84,7 +84,7 @@ $pvLibSrc = Get-Content -LiteralPath (Join-Path $here "lib_push_verify_walk.ps1"
 # push_verify.ps1 + lib_push_verify_walk.ps1 (CRLF normalised to LF) is compared to a pin. ANY edit to either file fails here until a
 # reviewer has read the kill surface (the Add-Type C# block, the one [PvJob]::Launch call and what feeds $gitExe/$fetchCmd,
 # [PvJob]::Kill/KillProc, Stop-PvTargets .Kill, Open-PvTargets GetProcessById) and updated $PvPinSha256 below.
-$PvPinSha256 = '51b9bb56ed585d30347ba3e132610e4617f034b6872880a51e569861033c9869'
+$PvPinSha256 = '51b9bb56ed585d30347ba3e132610e4617f034b6872880a51e569861033c9869'  # reviewed: docs/audits/REVIEW_TOOLFX15_2026-10-12.md
 function Get-PvSurfaceHash([string]$a, [string]$b) {
     $t = (($a -replace "`r`n", "`n") + "`n--LIB--`n" + ($b -replace "`r`n", "`n"))
     $sha = [Security.Cryptography.SHA256]::Create()
@@ -98,6 +98,25 @@ $pvCs = ''
 $pvAst0 = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$null, [ref]$null)
 foreach ($hs in @($pvAst0.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
+# toolfx16 (review TOOLFX15 LOW-1/INFO-1): positive exact-count asserts on the kill surface. A bumped pin cannot satisfy these.
+function Count-Re([string]$s, [string]$re) { return [regex]::Matches($s, $re).Count }
+$pvSelf = Get-Content -LiteralPath $MyInvocation.MyCommand.Path -Raw
+Assert ((Count-Re $pvSrc 'Add-Type\b') -eq 1) "K1: exactly one Add-Type in push_verify.ps1"
+Assert ((Count-Re $pvSrc '\[PvJob\]::Launch\(') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::Launch\(\$gitExe,') -eq 1) "K2: exactly one [PvJob]::Launch, and it takes `$gitExe"
+Assert ((Count-Re $pvSrc '\$gitExe\s*=') -eq 1) "K2b: `$gitExe is assigned exactly once"
+Assert ((Count-Re $pvSrc '\[PvJob\]::Kill\(\$fetchJob\)') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::Kill\(') -eq 1) "K3: [PvJob]::Kill(`$fetchJob) exactly once, no other Kill caller"
+Assert ((Count-Re $pvSrc '\[PvJob\]::KillProc\(\$fetchH\)') -eq 1 -and (Count-Re $pvSrc '\[PvJob\]::KillProc\(') -eq 1) "K4: [PvJob]::KillProc(`$fetchH) exactly once, no other KillProc caller"
+Assert (((Count-Re $pvSrc '\.Kill\(\)') -eq 0) -and ((Count-Re $pvLibSrc '\.Kill\(\)') -eq 1)) "K5: .Kill() only at its named site (Stop-PvTargets in the lib)"
+Assert (((Count-Re $pvSrc 'GetProcessById') -eq 0) -and ((Count-Re $pvLibSrc 'GetProcessById') -eq 1)) "K6: GetProcessById only at its named site (Open-PvTargets in the lib)"
+Assert ((Count-Re ($pvSrc -replace '(?m)^\s*#.*$', '') '(Stop-Process|taskkill|Invoke-CimMethod|\.Terminate\(|WScript\.Shell)') -eq 0) "K7: no other process-kill spelling in push_verify.ps1"
+Assert (((Count-Re $pvCs 'TerminateProcess\(') -eq 3) -and ((Count-Re $pvCs 'TerminateProcess\((pi\.hp|h),\s*1\)') -eq 2)) "K8: C# TerminateProcess: the extern plus exactly (pi.hp,1) and (h,1)"
+Assert (((Count-Re $pvCs 'TerminateJobObject\(') -eq 2) -and ((Count-Re $pvCs 'TerminateJobObject\(j,\s*1\)') -eq 1)) "K9: C# TerminateJobObject: the extern plus exactly (j,1)"
+Assert ((Count-Re $pvCs 'OpenProcess|GetProcessById|DuplicateHandle|EntryPoint') -eq 0) "K10: no OpenProcess/GetProcessById/DuplicateHandle/EntryPoint in the C#"
+Assert ((Count-Re $pvSelf 'Assert \(\$pvHash -eq \$PvPinSha256\)') -eq 1) "K11: the pin assert compares the COMPUTED hash to the pin (not the pin to itself)"
+$pvRev = [regex]::Match($pvSelf, "\`$PvPinSha256 = '([0-9a-f]{64})'\s*#\s*reviewed:\s*(docs/audits/\S+\.md)")
+Assert $pvRev.Success "K12: the pin line carries '# reviewed: docs/audits/<file>.md'"
+$pvRevDoc = if ($pvRev.Success) { Join-Path (Split-Path -Parent $here) $pvRev.Groups[2].Value } else { '' }
+Assert ($pvRev.Success -and (Test-Path -LiteralPath $pvRevDoc) -and ((Get-Content -LiteralPath $pvRevDoc -Raw) -match $pvRev.Groups[1].Value)) "K13: the reviewed doc exists and contains the pinned hash"
 Assert (($pvCs -match 'ResumeThread\(pi\.ht\)\s*==\s*0xFFFFFFFF') -and ($pvCs -match 'hin\s*==\s*bad') -and ($pvCs -match 'hout\s*==\s*bad') -and ($pvCs -match 'herr\s*==\s*bad')) "LOW-2: ResumeThread and every CreateFileW result is checked (INVALID_HANDLE_VALUE / 0xFFFFFFFF)"
 Assert (($pvCs -match 'CreateProcessW\(gitExe,') -and ($pvSrc -match 'Get-Command git -CommandType Application')) "INFO-3: CreateProcessW gets the resolved git.exe path as lpApplicationName"
 $me = Get-Process -Id $PID

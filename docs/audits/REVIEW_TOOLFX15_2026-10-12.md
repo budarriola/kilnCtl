@@ -128,3 +128,7 @@ plus an AST assert that line 95's left operand is `$pvHash`.
 ## Fix status
 
 Open: LOW-1, LOW-2, LOW-3, INFO-1, INFO-2 (pooled for a fixer).
+
+## Pin record
+
+Kill-surface pin reviewed in this document (read by `tools/check_push_verify.ps1`): `51b9bb56ed585d30347ba3e132610e4617f034b6872880a51e569861033c9869`
