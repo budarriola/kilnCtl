@@ -82,7 +82,7 @@ caught (LOW-3).
 
 ## Findings
 
-### LOW-1: FW_VERSION note window now mixes a receive stamp with the drain tick (regression)
+### LOW-1: FW_VERSION note window now mixes a receive stamp with the drain tick (regression) -- FIXED (rebootfx5)
 
 `safety_link_frames.c:427-429` (`safety_apply_fw_version()`) tests
 `drain_now - reboot_noted_by_uptime_esp_ms <= SAFETY_REBOOT_NOTE_WINDOW_MS`
@@ -112,7 +112,7 @@ Fix: stamp the FW_VERSION side with its own `msg->rx_ms`. Add a test with
 stalled-drain stamps (DIAG rx 20000, FW_VERSION rx 20100, fake tick 23500)
 that requires one bump.
 
-### LOW-2: DIAG freshness age is still drain-stamped
+### LOW-2: DIAG freshness age is still drain-stamped -- FIXED (rebootfx5)
 
 `safety_link_frames.c:1177` sets `diag_tick = xTaskGetTickCount()` at drain.
 `safety_link.c:702` turns that into `diag_frame_age_ms`, which gates relay
@@ -129,7 +129,7 @@ Fix: derive `diag_frame_age_ms` from `msg->rx_ms` (store a ms stamp, not a
 `TickType_t`) and update `test_tripfx3_lowa...`'s
 `diag_tick == 2000u` pin accordingly.
 
-### LOW-3: the receive stamp itself is unpinned; most test DIAG builders leave rx_ms = 0
+### LOW-3: the receive stamp itself is unpinned; most test DIAG builders leave rx_ms = 0 -- FIXED (rebootfx5)
 
 `uart_protocol.c` is not compiled by any host test. Mutants N1 (BROADCAST site
 unstamped), N2 (DATA site unstamped) and N3 (BROADCAST site in seconds) all
@@ -158,7 +158,7 @@ receive does. Add a small host-compiled seam (e.g. a static inline
 `uart_proto_stamp_rx()` used at both sites) or a source check that both
 designated initializers in `handle_raw_frame()` name `.rx_ms`.
 
-### INFO-1: the units contract is pinned only incidentally
+### INFO-1: the units contract is pinned only incidentally -- FIXED (rebootfx5)
 
 N5 (`esp_now_ms = msg->rx_ms / 1000u`) is CAUGHT, but only by the older
 `test_safety_link_compile.c:3555` pin ("uptime >= old baseline hides the
@@ -169,7 +169,7 @@ depends on a test written for a different purpose. A direct pin would close
 this: a large receive gap with an on-schedule uptime, e.g. rx 0 -> 600000 and
 uptime +600000, must not count as a reboot.
 
-### INFO-2: stale comments
+### INFO-2: stale comments -- FIXED (rebootfx5)
 
 `safety_link.h:1680` still says `pico_uptime_baseline_esp_ms` is "ESP tick
 (ms) when the baseline DIAG was applied". It is now the receive stamp.
@@ -223,3 +223,7 @@ drain-time consumer. It is not committed.
 The negtest baseline is the full KilnFW host suite (`build_host_tests.ps1`, no
 filter) at 44289aa41: "all 99 host test executables built and passed", plus
 18/18 and 97/97 checks.
+
+## Fix status (rebootfx5)
+
+LOW-1, LOW-2, LOW-3, INFO-1 and INFO-2 fixed. FW_VERSION note window and `diag_tick`/`diag_frame_age_ms` use the receive stamp (`diag_tick` is now a ms `uint32_t`); `uart_proto_rx_stamp_ms()` is the shared stamp helper, pinned by `test_uart_protocol_link_delegate.c` (helper value plus a source check of both construction sites). N1-N3 and the new mutants are CAUGHT by compiled assertions.
