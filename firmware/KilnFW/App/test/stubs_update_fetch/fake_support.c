@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "fake_support.h"
+#include "update_fetch.h"
 
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
@@ -44,6 +45,8 @@ char g_fr_last_url[512];
 uint8_t g_fr_flash[FR_STAGE_SIZE];
 bool g_fr_flash_write_fail;
 bool g_fr_flash_write_block;
+volatile long g_fr_wr_wait_after_wedge;
+bool update_fetch_writer_wedged(void);
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
 static HANDLE s_flash_ev;
@@ -70,7 +73,7 @@ static int s_handler_n;
 void fr_flash_release(void)
 {
     g_fr_flash_write_block = false;
-    if (s_flash_ev != NULL) {
+        if (s_flash_ev != NULL) {
         SetEvent(s_flash_ev);
     }
 }
@@ -89,6 +92,7 @@ void fr_reset(void)
     fr_flash_erase_all();
     g_fr_flash_write_fail = false;
     g_fr_flash_write_block = false;
+    g_fr_wr_wait_after_wedge = 0;
     g_fr_flash_erase_n = g_fr_flash_write_n = 0;
     if (s_flash_ev == NULL) {
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -248,7 +252,10 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void) { return CreateSemaphore(NULL, 0,
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return CreateSemaphore(NULL, 1, 1, NULL); }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
-    if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= 30000 && g_fr_flash_write_block) {
+    if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS) && g_fr_flash_write_block) {
+        if (update_fetch_writer_wedged()) {
+            g_fr_wr_wait_after_wedge++; // a writer-op wait begun after the wedge latched: wr_call guard missing
+        }
         // Scaled writer-timeout wait: the (shrunk) clock starts only once a writer thread is parked in
         // flash, so a descheduled writer under load is not declared wedged early. Polls in 1 ms slices
         // so a semaphore given meanwhile still returns at once; unscaled fallback after 15 s.

@@ -60,7 +60,7 @@ static const char *TAG = "update_fetch";
 #define FETCH_MANIFEST_CAP 16384u            // release.json; matches update_release.c's size cap
 #define FETCH_CHUNK_LEN 4096u                // PSRAM read chunk
 #define FETCH_SCRATCH_LEN FETCH_HEAP_SCRATCH_BYTES // stager scratch; INTERNAL RAM (MED-1), see update_fetch_heap.h
-#define FETCH_WR_TIMEOUT_MS 30000u           // bounded wait for one flash-writer op (64 KiB erase+write is well under 1 s)
+// FETCH_WR_TIMEOUT_MS (bounded wait for one flash-writer op) lives in update_fetch.h: the host-test fake keys on it.
 // The request buffer: a signed release-assets URL carries a JWT query, so the GET line alone can be
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.

@@ -136,7 +136,7 @@ Suggested fix: have the test wait until the fake flash write is actually
 blocked (`g_fr_flash_blocked_n >= 1`) before letting the scaled timeout run.
 Alternatively, gate the scaled clock on that event.
 
-**Fix status:** fixed (test stub only). The fake `xSemaphoreTake` now starts the scaled writer-timeout clock only once a writer thread is parked in flash (`g_fr_flash_blocked_n >= 1`, 15 s fallback), in `stubs_update_fetch/fake_support.c`. Stress: 128 runs at 32 parallel, 0 failures. Negtest: forcing `wedged = false` in `update_fetch.c` is CAUGHT.
+**Fix status:** fixed (test stub only). The fake `xSemaphoreTake` now starts the scaled writer-timeout clock only once a writer thread is parked in flash (`g_fr_flash_blocked_n >= 1`, 15 s fallback), in `stubs_update_fetch/fake_support.c`. Stress: 128 runs at 32 parallel, 0 failures. Negtest: forcing `wedged = false` in `update_fetch.c` AND dropping the `update_wr_arb_caller_timeout()` call is CAUGHT (test:504); with the arbiter call kept it is MISSED (almost-equivalent mutant: the 1000-tick L1 grace take latches the wedge the same way; REVIEW_FLAKEFX LOW-2/INFO-1).
 
 ### LOW-5: `profiles_used_bitmap` in the degraded registry is reported as an unreadable boot store
 

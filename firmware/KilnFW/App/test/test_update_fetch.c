@@ -496,6 +496,10 @@ static void test_writer_wedge(void)
           "stage clear reports writer_wedged_reboot_required");
     expect_claim_balanced("clear while wedged");
 
+    // wr_call()'s wedge guard: once wedged, no further writer op may be issued (the job's final WR_ABORT would
+    // overwrite wr.cmd under the parked op). A guardless wr_call starts another bounded wait here.
+    CHECK(g_fr_wr_wait_after_wedge == 0, "no writer op issued after the wedge latched (wr_call guard)");
+
     // release the parked writer: its abandoned op must undo itself, never leave a stage behind
     fr_flash_release();
     WAIT_FOR(g_fr_flash_blocked_n == 0);
