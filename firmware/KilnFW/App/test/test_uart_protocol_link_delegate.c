@@ -236,7 +236,7 @@ static void test_rx_stamp(void)
     fclose(f);
     buf[n] = 0;
     /* REBOOTFX5 LOW-2: strip comments (a commented-out call must not count), then anchor on construction:
-     * no hand-built uart_proto_message_t initializer may remain, and exactly two uart_proto_message_make()
+     * no hand-built uart_proto_message_t initializer may remain, and exactly two uart_proto_message_init()
      * calls (BROADCAST and DATA) must each be fed xTaskGetTickCount(). */
     static char code[200000];
     size_t o = 0;
@@ -257,7 +257,7 @@ static void test_rx_stamp(void)
     }
     code[o] = 0;
     int made = 0, with_tick = 0, handbuilt = 0;
-    for (const char *p = code; (p = strstr(p, "uart_proto_message_make(")) != NULL; p++) {
+    for (const char *p = code; (p = strstr(p, "uart_proto_message_init(")) != NULL; p++) {
         made++;
         const char *end = strchr(p, ';');
         if (end) {
@@ -291,23 +291,24 @@ static void test_rx_stamp(void)
         }
     }
     CHECK(made == 2 && with_tick == 2,
-          "both receive-path message constructions go through uart_proto_message_make(.., xTaskGetTickCount())");
+          "both receive-path message constructions go through uart_proto_message_init(&m, .., xTaskGetTickCount())");
     CHECK(handbuilt == 0, "no hand-built uart_proto_message_t initializer (unstamped rx_ms) in uart_protocol.c");
 }
 
-static void test_message_make(void)
+static void test_message_init(void)
 {
-    uart_proto_message_t m = uart_proto_message_make(UART_PROTO_DEVICE_SAFETY, 7u, 0x1234u, 5u, 777u);
+    uart_proto_message_t m;
+    uart_proto_message_init(&m, UART_PROTO_DEVICE_SAFETY, 7u, 0x1234u, 5u, 777u);
     CHECK(m.device == UART_PROTO_DEVICE_SAFETY && m.task_id == 7u && m.msg_index == 0x1234u && m.length == 5u,
-          "message_make fills the header fields");
-    CHECK(m.rx_ms == uart_proto_rx_stamp_ms(777u), "message_make stamps rx_ms with the helper");
-    CHECK(m.payload[0] == 0u && m.payload[UART_PROTO_MAX_PAYLOAD - 1] == 0u, "message_make zero-initialises payload");
+          "message_init fills the header fields");
+    CHECK(m.rx_ms == uart_proto_rx_stamp_ms(777u), "message_init stamps rx_ms with the helper");
+    CHECK(m.payload[0] == 0u && m.payload[UART_PROTO_MAX_PAYLOAD - 1] == 0u, "message_init zero-initialises payload");
 }
 
 int main(void)
 {
     test_rx_stamp();
-    test_message_make();
+    test_message_init();
     test_required_cases();
     test_known_frame_wire_bytes();
     test_rx_chunk_sizing();
