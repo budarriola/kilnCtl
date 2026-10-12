@@ -12,7 +12,7 @@ Counts: HIGH 0, MED 0, LOW 1, INFO 5.
 
 ## LOW
 
-- **LOW-1** (`tools/check_build_gate_usage.ps1:37-38`): the new bound does not cover the hang it is meant to catch.
+- **LOW-1** (FIXED: async read bounded by Wait(120000), kill + FAIL) (`tools/check_build_gate_usage.ps1:37-38`): the new bound does not cover the hang it is meant to catch.
   - Line 37 calls `$proc.StandardOutput.ReadToEnd()`, which has no bound. ReadToEnd returns only at stdout EOF, and stdout normally closes when git exits. The bounded `WaitForExit(120000)` on line 38 therefore covers only the short gap between EOF and process exit.
   - Failure scenario: git stalls while holding stdout open, for example on a OneDrive or antivirus filesystem stall while it walks the tree. The check then hangs at line 37 forever and never reaches the FAIL line.
   - Negtest evidence: mutant U1 changes the bound to `WaitForExit(0)` and is MISSED (exit 0). By the time ReadToEnd returns, git has already exited, so even a 0 ms wait succeeds and the timeout branch cannot be reached.
@@ -32,7 +32,7 @@ Counts: HIGH 0, MED 0, LOW 1, INFO 5.
   - Negtest P1 adds a second dot-source line to `tools/push_verify.ps1:60`. Negtest P2 adds `. (Join-Path $PSScriptRoot "other.ps1")` to `tools/lib_push_verify_walk.ps1`. Both are CAUGHT by `FAIL: L1: push_verify.ps1 + lib_push_verify_walk.ps1 match the pinned kill-surface hash`.
   - The wording nit: the assert that catches an appended dot-source is the pin-equality assert (`tools/check_push_verify.ps1:95`). The "hash changes when the script changes" assert (`:96`) only self-tests hash sensitivity, and it appends a `$gitExe` line, not a dot-source.
   - The cited `check_push_verify.ps1:99-103` now points at the LOW-2/INFO-3 asserts. That is acceptable, because the item is marked not applicable.
-- **INFO-4** (`tools/check_push_verify.ps1:96`, pre-existing from `3c806102c`): `$pvCs = ''` is glued onto the end of the L1 Assert line.
+- **INFO-4** (FIXED: `$pvCs = ''` on its own line) (`tools/check_push_verify.ps1:96`, pre-existing from `3c806102c`): `$pvCs = ''` is glued onto the end of the L1 Assert line.
   - A PS 5.1 test shows the parse: `Assert $true "msg"$pvCs = ''` passes `$pvCs`, `=` and `''` as three extra `$args`, and `$pvCs` is never assigned.
   - This is harmless today. Line 98's `$pvCs += ...` starts from `$null`, so it builds the same string. However, the intended reset is dead code: if `$pvCs` were ever set before line 96, stale text would leak into the LOW-2/INFO-3 regex asserts.
   - Fix: move the assignment onto its own line.

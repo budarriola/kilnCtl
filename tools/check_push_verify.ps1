@@ -93,7 +93,8 @@ function Get-PvSurfaceHash([string]$a, [string]$b) {
 $pvHash = Get-PvSurfaceHash $pvSrc $pvLibSrc
 Write-Host "  push_verify surface sha256: $pvHash"
 Assert ($pvHash -eq $PvPinSha256) "L1: push_verify.ps1 + lib_push_verify_walk.ps1 match the pinned kill-surface hash (review the kill surface, then set `$PvPinSha256 to $pvHash)"
-Assert ((Get-PvSurfaceHash ($pvSrc + "`n`$gitExe = 'x'") $pvLibSrc) -ne $PvPinSha256) "L1: the hash changes when the script changes"$pvCs = ''
+Assert ((Get-PvSurfaceHash ($pvSrc + "`n`$gitExe = 'x'") $pvLibSrc) -ne $PvPinSha256) "L1: the hash changes when the script changes"
+$pvCs = ''
 $pvAst0 = [System.Management.Automation.Language.Parser]::ParseInput($pvSrc, [ref]$null, [ref]$null)
 foreach ($hs in @($pvAst0.FindAll({ param($n) $n -is [System.Management.Automation.Language.StringConstantExpressionAst] -and $n.StringConstantType -eq 'DoubleQuotedHereString' }, $true))) { $pvCs += $hs.Value + "`n" }
 $pvCs = [regex]::Replace($pvCs, '//[^\r\n]*', '')
