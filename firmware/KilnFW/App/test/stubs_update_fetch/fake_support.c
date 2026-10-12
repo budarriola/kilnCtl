@@ -249,10 +249,22 @@ SemaphoreHandle_t xSemaphoreCreateMutex(void) { return CreateSemaphore(NULL, 1, 
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
     if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= 30000 && g_fr_flash_write_block) {
-        // Scaled writer-timeout wait: start the (shrunk) clock only once the writer thread is
-        // actually parked in flash, so a descheduled writer under load is not declared wedged early.
-        for (int i = 0; i < 10000 && g_fr_flash_blocked_n < 1; i++) {
-            Sleep(1);
+        // Scaled writer-timeout wait: the (shrunk) clock starts only once a writer thread is parked in
+        // flash, so a descheduled writer under load is not declared wedged early. Polls in 1 ms slices
+        // so a semaphore given meanwhile still returns at once; unscaled fallback after 15 s.
+        DWORD budget = (DWORD)(ticks / (TickType_t)g_fr_time_div);
+        DWORD waited = 0, started = 0;
+        bool running = false;
+        for (;;) {
+            if (WaitForSingleObject((HANDLE)s, 1) == WAIT_OBJECT_0) {
+                return pdTRUE;
+            }
+            if (!running && (g_fr_flash_blocked_n >= 1 || ++waited > 15000)) {
+                running = true;
+            }
+            if (running && ++started >= budget) {
+                return pdFALSE;
+            }
         }
     }
     DWORD ms = ticks == portMAX_DELAY ? INFINITE : (DWORD)(ticks / (TickType_t)g_fr_time_div);

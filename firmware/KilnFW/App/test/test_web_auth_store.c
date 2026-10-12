@@ -350,26 +350,25 @@ static void test_username_exactly_max_length(void)
 // unconfigured-role and wrong-password paths must both take much longer
 // than that true no-op, and be within the same order of magnitude as each
 // other, rather than one of them being near-instant like the no-op.
-// Thread CPU time (user+kernel) in seconds: preemption by other processes does not count.
-static double thread_cpu_s(void)
+// Wall time via QueryPerformanceCounter, minimum over several batches: load can only inflate a
+// batch, never shrink it, so the minimum is the least-disturbed estimate of the path's cost.
+static double qpc_s(void)
 {
-    FILETIME c, e, k, u;
-    GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
-    ULONGLONG t = (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) +
-                  (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
-    return (double)t / 1.0e7;
+    LARGE_INTEGER f, c;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&c);
+    return (double)c.QuadPart / (double)f.QuadPart;
 }
 
-// Minimum over several batches: load can only inflate a batch, never shrink it.
 static double time_verify_calls(web_auth_role_t role, const char *password, int reps)
 {
     double best = 1e30;
-    for (int rep = 0; rep < 5; rep++) {
-        double start = thread_cpu_s();
+    for (int rep = 0; rep < 9; rep++) {
+        double start = qpc_s();
         for (int i = 0; i < reps; i++) {
             (void)web_auth_store_verify_password(role, password);
         }
-        double d = thread_cpu_s() - start;
+        double d = qpc_s() - start;
         if (d < best) {
             best = d;
         }
