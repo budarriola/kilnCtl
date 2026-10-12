@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 202.
+Gate rows: 203.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 190 |
+| NEGATIVE-TESTED | 191 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
@@ -158,6 +158,7 @@ Maintenance: when `tools/check_gate_negative_test_table.ps1` fails, a discovered
 | `tools/check_heartbeat_contract.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] heartbeat thread start call commented out in link_hub.py ; [09-16g] heartbeat producer start commented out | [09-16d] RED; hand-restored; PASS (re-tested in 09-16g) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_heat_enable_wiring.ps1` | NEGATIVE-TESTED | 09-16d, 09-16g | [09-16d] both heat_enable_acquire_since call sites commented out ; [09-16g] three heat_enable_release calls commented out | [09-16d] RED; both hand-restored; PASS (re-tested in 09-16g, release side) ; [09-16g] RED; hand-restored; PASS |
 | `tools/check_host_embed_symbols_defined.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | test_zones_http.c: removed tuning_recommendations_json_start definition | RED (HOST EMBED SYMBOLS CHECK FAILED); check returned to PASS on restore |
+| `tools/check_host_test_verdict.ps1` | NEGATIVE-TESTED | 10-12 | `tools\negtest.ps1 -Preset check`, base ff4b2f78c, three mutations: (1) `host_test_verdict.ps1` `$accounted = $Built + $BuildFailures` -> `$accounted = $Built`; (2) same file, exit-code condition drops `-or $RunFailures -gt 0`; (3) `build_host_tests.ps1` call site `-RunFailures $script:failedExes.Count` -> `-RunFailures 0` | (1) CAUGHT (exit 1, 2 FAILs: `build failure under -Only`, `one build failure, no dropout`); (2) CAUGHT (exit 1, `FAIL: failure without dropout: no MISMATCH, nonzero`); (3) CAUGHT (exit 1, `FAIL: verdict assigned once, straight from Get-HostTestVerdict with the real counters`); baseline PASS; real tree unchanged |
 | `tools/check_html_escape_helpers.ps1` | NEGATIVE-TESTED | 10-02 | violating construct added to app.js | RED on the right rule; restored |
 | `tools/check_iter_tune_write_surface.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c calls iter_tune_enable; iter_tune.c calls nvs_set_blob (two mutations; a first try with undeclared iter_tune_reset stayed GREEN by design, name list is parsed from the header) | RED both; check returned to PASS on restore |
 | `tools/check_kiln_auth_config_isolation.ps1` | NEGATIVE-TESTED | docs/audits/release_gate_vacuity_audit_tools_2026-10-08.md | profile_executor.c: added identifier `web_auth` (a first try with web_auth_zz is GREEN by design, word-boundary match) | RED; check returned to PASS on restore; 10-08 hardening: header leak `#define LCD_AUTH_LEAK lcd_auth` in backup_http.h PASSED (scan was *.c only), now *.c and *.h, negtest CAUGHT |
