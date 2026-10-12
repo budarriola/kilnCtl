@@ -613,33 +613,36 @@ Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count)
 # and the skipped set is a RATCHET: it must equal $stackSkipAllowed exactly. A new skip fails until someone edits
 # that table; an entry that now compares (or vanished) fails too, so the table can only shrink by deleting lines.
 $stackSkipAllowed = @{
-    'cfg_autofmt' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'factory_reset_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'i2c_owner_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'info_boot_push' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'monitor_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'ota_pico_relay' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'recovery_exit_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'spi_owner_task' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'sw_reset_reboot' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'wifi_ap_id_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'wifi_connect_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'wifi_forget_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'wifi_mode_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
-    'wifi_scan_ui' = 'create site only: created under a name the register call does not use (dynamic/on-demand task, no stack_margin_register under this name)'
+    'cfg_autofmt' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'factory_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'i2c_owner_task' = 'create site only: FreeRTOS name behind i2c_owner_sx1509/i2c_owner_ns2009; the size arrives through the stack_depth parameter, not a literal'
+    'info_boot_push' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'monitor_task' = 'create site only: permanent boot heartbeat task (monitor_task.c), not yet registered for stack-margin reporting (see $exemptCreatedNames)'
+    'ota_pico_relay' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'spi_owner_task' = 'create site only: FreeRTOS name behind the spi_owner registration; the size arrives through the stack_depth parameter, not a literal'
+    'sw_reset_reboot' = 'create site only: one-shot/on-demand helper task, never registered with stack_margin'
+    'wifi_ap_id_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_connect_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_forget_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_mode_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
+    'wifi_scan_ui' = 'create site only: short-lived UI helper task, never registered with stack_margin'
     'http_async_job' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'httpd_worker' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'i2c_owner_ns2009' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'i2c_owner_sx1509' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'recovery_exit' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'i2c_owner_ns2009' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
+    'i2c_owner_sx1509' = 'register site only: created by i2c_owner_init() under the name i2c_owner_task with a parameter size (see i2c_owner_task)'
     'safety_owner_evt' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'safety_proto_rx' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
-    'spi_owner' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
+    'spi_owner' = 'register site only: created by spi_owner init under the name spi_owner_task with a parameter size (see spi_owner_task)'
     'uart_owner_evt_task' = 'register site only: task created through a wrapper or macro whose name is not a string literal at the xTaskCreate site'
     'lvgl' = 'create size is sizeof(static stack array)/sizeof(StackType_t): not a literal'
     'uart_proto_rx' = 'create size is a function parameter (stack_depth) in uart_protocol.c: not a literal'
 }
-$minStackCompared = 5
+# FreeRTOS create name -> stack_margin_register name, for ONE task created and registered under two names (the
+# FreeRTOS name is truncated to configMAX_TASK_NAME_LEN, so the register name is shorter). Pairs are compared as one.
+$stackNameAlias = @{
+    'recovery_exit_reboot' = 'recovery_exit'
+}
+$minStackCompared = 32   # 32 pairs compare today; a blind regex must not hide behind a low floor
 
 $macroValues = @{}
 $macroFiles = @(Get-ChildItem -Path $driversDir -Include "*.c","*.h" -Recurse -File) + $mainFiles
@@ -682,6 +685,7 @@ foreach ($f in $sourceFiles) {
     $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
     foreach ($m in [regex]::Matches($joined, $createStackRe)) {
         $n = $m.Groups[1].Value
+        if ($stackNameAlias.ContainsKey($n)) { $n = $stackNameAlias[$n] }
         if (-not $createdStacks.ContainsKey($n)) { $createdStacks[$n] = @() }
         $createdStacks[$n] += [pscustomobject]@{ Eval = (Resolve-StackExpr $m.Groups[2].Value); Tok = $m.Groups[2].Value.Trim(); File = $f.Name }
     }
@@ -694,6 +698,7 @@ foreach ($f in $sourceFiles) {
 $stackMismatch = @()
 $stackCompared = 0
 $skipped = @{}   # name -> reason
+$partial = @()   # unevaluable sites under a name where another pair DID compare
 foreach ($n in (@($createdStacks.Keys) + @($registeredStacks.Keys) | Sort-Object -Unique)) {
     if (-not $createdStacks.ContainsKey($n)) { $skipped[$n] = 'register site only (no create site with this task name)'; continue }
     if (-not $registeredStacks.ContainsKey($n)) { $skipped[$n] = 'create site only (registered under another name or not at all)'; continue }
@@ -710,11 +715,17 @@ foreach ($n in (@($createdStacks.Keys) + @($registeredStacks.Keys) | Sort-Object
         }
     }
     if ($pairs -eq 0) { $skipped[$n] = (($why | Select-Object -Unique) -join '; ') }
+    elseif ($why.Count -gt 0) { $partial += "$n : $((($why | Select-Object -Unique) -join '; '))" }
 }
 if ($stackMismatch.Count -gt 0) {
     Write-Host "STACK MARGIN STACK-SIZE CHECK FAILED:" -ForegroundColor Red
     foreach ($v in $stackMismatch) { Write-Host "    $v" -ForegroundColor Red }
     throw "A task's xTaskCreate*() stack size and its stack_margin_register() size disagree -- get_stack_margin grades free space against the wrong denominator. Make both the same value."
+}
+if ($partial.Count -gt 0) {
+    Write-Host "STACK MARGIN STACK-SIZE CHECK: unevaluable site(s) beside an evaluated pair:" -ForegroundColor Red
+    foreach ($v in $partial) { Write-Host "    $v" -ForegroundColor Red }
+    throw "A task name has a create or register site whose stack size cannot be evaluated while another pair under the same name compared -- the unevaluated site is unchecked. Make it a literal or a uniquely defined literal #define."
 }
 if ($stackCompared -lt $minStackCompared) {
     throw "check_stack_margin_registration.ps1: only $stackCompared create/register stack pair(s) compared (ratchet floor $minStackCompared) -- the patterns have probably gone blind."

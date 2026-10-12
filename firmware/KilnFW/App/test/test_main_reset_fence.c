@@ -15,7 +15,7 @@ int g_test_count = 0;
 
 // main_internal.h pulls in driver headers (uart_owner, panel_spi, ...) that collide with this suite's stubs, and
 // app_main() uses none of them. Pre-define its include guard and supply only the declarations main.c needs
-// (the phase prototypes below must match main_internal.h or the real main.c fails to compile against them).
+// (the phase prototypes below are NOT compared against main_internal.h here; drift is caught only by the target build).
 #define MAIN_INTERNAL_H
 #include <stdbool.h>
 #include <stdint.h>
@@ -104,6 +104,10 @@ static void test_installed_hooks_behave(void)
     TEST_CHECK(!s_hook_kv("nvs"), "other partition not refused");
     TEST_CHECK(!s_hook_kv(NULL), "NULL partition not refused");
     TEST_CHECK(s_hook_pref(), "pref_cfg_fs hook refuses while the mark is set");
+    relay_authority_reset_in_flight_end();
+    relay_authority_reset_set_erases_kiln_nvs(false);
+    relay_authority_reset_in_flight_begin();
+    TEST_CHECK(!s_hook_kv("kiln_nvs"), "reset NOT erasing kiln_nvs: kiln_nvs write allowed");
     relay_authority_reset_in_flight_end();
     TEST_CHECK(!s_hook_kv("kiln_nvs"), "mark cleared: allowed again");
     TEST_CHECK(!s_hook_pref(), "pref_cfg_fs hook allows after the mark clears");
