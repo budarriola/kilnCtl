@@ -1,2 +1,0 @@
-test_s8_rate_guard_estimate.c
-s8_rate_guard_estimate.c

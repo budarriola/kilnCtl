@@ -1,6 +1,0 @@
-test_safety_ceiling_sync_divergence.c
-safety_ceiling_sync.c
-safety_ceiling_policy.c
-config_divergence.c
-safety_cfg_writer_guard.c
-fake_time.c

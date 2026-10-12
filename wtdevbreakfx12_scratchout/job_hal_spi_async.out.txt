@@ -1,3 +1,0 @@
-test_hal_spi_async.c
-fake_spi.c
-hal_status.c

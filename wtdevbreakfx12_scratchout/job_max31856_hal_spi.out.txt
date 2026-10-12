@@ -1,6 +1,0 @@
-test_max31856_hal_spi.c
-MAX31856.c
-max31856_codec.c
-fake_spi.c
-fake_time.c
-hal_status.c

@@ -1,7 +1,0 @@
-test_dashboard_autotune_http_handlers.c
-test_dashboard_autotune_http_link_stubs.c
-system_mode_gate.c
-fake_kv.c
-fake_time.c
-hal_status.c
-hal_esp_common.c

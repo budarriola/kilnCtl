@@ -1,3 +1,0 @@
-test_hal_i2c_adopt.c
-fake_i2c.c
-hal_status.c

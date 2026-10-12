@@ -1,2 +1,0 @@
-test_flash_worker_boot_order.c
-flash_worker_wait.c

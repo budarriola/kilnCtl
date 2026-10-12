@@ -1,1 +1,0 @@
-test_safety_link_endian.c

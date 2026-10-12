@@ -1,1 +1,0 @@
-cl /I"C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs_recovery_switch" @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\rsw\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_recovery_switch.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_recovery_switch.c"

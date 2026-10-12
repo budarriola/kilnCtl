@@ -1,2 +1,0 @@
-test_zone_coupling_solve.c
-zone_coupling_solve.c

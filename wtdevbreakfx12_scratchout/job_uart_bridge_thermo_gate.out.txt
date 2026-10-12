@@ -1,2 +1,0 @@
-test_uart_bridge_thermo_gate.c
-system_mode_gate.c

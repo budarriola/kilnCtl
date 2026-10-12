@@ -1,2 +1,0 @@
-test_system_mode_gate.c
-system_mode_gate.c

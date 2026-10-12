@@ -1,4 +1,0 @@
-sim_fuzzy_closedloop.c
-sim_plant.c
-pid.c
-pid_fuzzy.c

@@ -1,6 +1,0 @@
-test_web_auth_store.c
-fake_kv.c
-hal_status.c
-hal_esp_common.c
-C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(112): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_web_auth_store.c)
-C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\stubs\psa/crypto.h(123): warning C4267: '=': conversion from 'size_t' to 'uint32_t', possible loss of data (compiling source file C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_web_auth_store.c)

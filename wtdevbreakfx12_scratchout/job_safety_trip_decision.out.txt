@@ -1,2 +1,0 @@
-test_safety_trip_decision.c
-safety_trip_decision.c

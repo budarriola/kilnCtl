@@ -1,1 +1,0 @@
-test_safety_trip_words.c

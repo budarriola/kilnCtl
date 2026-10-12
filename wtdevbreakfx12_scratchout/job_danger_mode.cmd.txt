@@ -1,1 +1,0 @@
-cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\dm\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_danger_mode.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_danger_mode.c"

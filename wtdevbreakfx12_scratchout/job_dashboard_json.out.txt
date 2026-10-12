@@ -1,2 +1,0 @@
-test_dashboard_json.c
-C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_dashboard_json.c(1434): warning C4996: 'strcpy': This function or variable may be unsafe. Consider using strcpy_s instead. To disable deprecation, use _CRT_SECURE_NO_WARNINGS. See online help for details.

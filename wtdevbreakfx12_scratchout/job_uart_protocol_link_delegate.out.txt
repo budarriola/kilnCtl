@@ -1,3 +1,0 @@
-test_uart_protocol_link_delegate.c
-kilnlink_frame.c
-kilnlink_crc.c

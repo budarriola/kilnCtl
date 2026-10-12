@@ -1,3 +1,0 @@
-test_link_watchdog.c
-link_watchdog_decide.c
-relay_authority.c

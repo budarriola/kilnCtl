@@ -1,9 +1,0 @@
-sim_scenarios.c
-sim_scenario_table.c
-sim_plant.c
-sim_high_temp.c
-sim_mistune.c
-pid.c
-pid_fuzzy.c
-pid_autotune.c
-firing_score.c

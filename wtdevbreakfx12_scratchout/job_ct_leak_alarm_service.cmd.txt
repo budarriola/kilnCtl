@@ -1,1 +1,0 @@
-cl @"C:wtdevbreakfx12_scratchout\host_tests_common_flags.rsp" /std:c11 /Fo:"C:wtdevbreakfx12_scratchout\cls\\" /Fe:"C:wtdevbreakfx12_scratchout\kilnctl_host_tests_ct_leak_alarm_service.exe" "C:\wt\devbreakfx12_kgeelr\firmware\KilnFW\App\test\test_ct_leak_alarm_service.c"

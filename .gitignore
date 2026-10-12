@@ -140,5 +140,9 @@ build_sim_*_obj/
 # one-off compiler scratch). Not build output anyone commits on purpose.
 /*.obj
 
+# Root-level host-test -OutDir scratch (b6dc626f6 committed 1406 .obj/.exe files
+# from wtdevbreakfx12_scratchout/, REVIEW_DEVBREAKFX12 MED-1).
+/*_scratchout/
+
 # make_release.ps1 output (assets, notes, gate record); never committed.
 logs/release/

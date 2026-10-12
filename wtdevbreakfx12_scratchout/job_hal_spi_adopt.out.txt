@@ -1,3 +1,0 @@
-test_hal_spi_adopt.c
-fake_spi.c
-hal_status.c

@@ -1,4 +1,0 @@
-test_cfg_fs_format_http.c
-system_mode_gate.c
-system_mode_gate_http.c
-cfg_fs_format_gate.c

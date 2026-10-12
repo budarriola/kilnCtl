@@ -1,2 +1,0 @@
-build gate: acquired heavy slot 7 for 'kilnfw_host_tests' (slots=8)
-build gate: released heavy slot 7 for 'kilnfw_host_tests' (held 2s)

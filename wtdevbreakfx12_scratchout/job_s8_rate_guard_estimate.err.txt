@@ -1,3 +1,0 @@
-build gate: waiting (label=kilnfw_host_tests, lane=heavy, 0s, queue position 15 of 15, slots=8)
-build gate: acquired heavy slot 0 for 'kilnfw_host_tests' after 11s wait (slots=8)
-build gate: released heavy slot 0 for 'kilnfw_host_tests' (held 1s)
