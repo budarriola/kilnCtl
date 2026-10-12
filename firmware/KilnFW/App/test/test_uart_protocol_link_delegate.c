@@ -238,7 +238,7 @@ static void test_rx_stamp(void)
     int stamped = 0, total = 0;
     for (const char *p = buf; (p = strstr(p, ".rx_ms")) != NULL; p++) {
         total++;
-        if (strncmp(p, ".rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount())", 51) == 0) {
+        if (strncmp(p, ".rx_ms = uart_proto_rx_stamp_ms(xTaskGetTickCount()),", 53) == 0) {
             stamped++;
         }
     }
