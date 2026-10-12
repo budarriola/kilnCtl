@@ -176,3 +176,11 @@ Not run, for safety:
 - any `:238` dead-probe mutation under the full file, because the control would fetch from GitHub (MED-1)
 - dropping the Iocp patch, because the test would connect to the live hub and MCP ports and SYN `192.0.2.1` (INFO-1)
 - web mutations under the full file in a tree with a venv (LOW-3)
+
+## Fix status (testnetfx8, c16b3f385 before rebase)
+
+- MED-1 fixed: `_NOFETCH_ENV` resets `remote.origin.url` with an empty value first, adds `GIT_ALLOW_PROTOCOL=file` and `GCM_INTERACTIVE=never`; `test_nofetch_env_is_network_dead` pins `git ls-remote --get-url origin` (no github.com, file-only protocols).
+- LOW-1 fixed: static pin strips `<# #>` blocks, requires the guard block to close with `}` right before the probe, and refuses probe-variable writes and network commands in that span. S1-S5 now CAUGHT with AssertionError.
+- LOW-2 fixed: `IocpProactor.sendto` guarded; `test_guard_refuses_asyncio_udp_sendto` uses a self-bound UDP port (the datagram-transport path refuses asynchronously in the loop callback, so only `loop.sock_sendto` is asserted).
+- LOW-3 fixed: `web_commission_row.ps1` exits 87 (`GUARD-PROBE-CRED-BACKSTOP`) before credential load while the probe variable is set; pinned statically, and the control asserts the marker never appears. `_DUMMY_CREDS` dropped.
+- INFO-1 fixed: asyncio/selector refusal tests use a loopback listener the test binds and registers as a refused port; no 8765-8767, no 192.0.2.1.
