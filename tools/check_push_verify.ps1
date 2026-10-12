@@ -277,7 +277,7 @@ try {
 
     # LOW-2: no-job path where the ROOT git has no descendant (mingw64 git.exe, git:// connects in process). Only KillProc can kill it.
     Write-Host "case: no-job fallback, root git without descendants (git://), KillProc is load-bearing"
-    $mingwBin = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent ((git --exec-path) -replace '/', '\')))) 'bin'
+    $mingwBin = Join-Path (Split-Path -Parent (Split-Path -Parent ((git --exec-path) -replace "/", "\"))) 'bin'
     $lis2 = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
     $lis2.Start(); $port2 = $lis2.LocalEndpoint.Port
     $oldPath = $env:PATH
