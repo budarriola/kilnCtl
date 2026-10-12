@@ -18,11 +18,12 @@ _PRESERVE_RE = re.compile(r"zones_config_json_field_present\(body, key\)|zones_h
 # first, so a constant with the field named in a comment no longer counts (review BENCHFX4).
 _EXACT_ELSE_RE = re.compile(
     r"\belse\s*\{\s*z->(\w+)((?:\[\w+\])?)\s*=\s*current_z->(\w+)((?:\[\w+\])?)\s*;\s*(?:continue;\s*)?\}")
-# Keys whose field is legitimately assigned again after the omit branch (the parse path of a
-# per-group loop; tc_type is restored after the `*z = *current_z` bulk copy of the
-# i >= thermo_count early return). settings_source is pinned directly by
-# test_legacy_settings_source_*.
-_LATER_ASSIGN_EXEMPT = {"settings_source", "tc_type"}
+# Fields legitimately assigned again elsewhere, mapped to the ONLY right-hand side allowed
+# (review BENCHFX5 LOW-1): tc_type is restored from preserved_tc_type after the
+# `*z = *current_z` bulk copy of the i >= thermo_count early return; settings_source[g] takes
+# src_raw in the gkey loop (its else-if on have_legacy is legitimate, so the else-if rule skips it);
+# tc_type_raw is the parsed value on the present branch. Any other assignment to these fields is still a violation.
+_ALLOWED_RHS = {"settings_source": {"src_raw"}, "tc_type": {"preserved_tc_type", "tc_type_raw"}}
 
 
 def strip_c_comments(text: str) -> str:
@@ -37,7 +38,9 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
     current_z; otherwise omit-DEFAULTED. violations lists any later plain assignment to the
     same field after that else. coupling_c%u is normalised to coupling_c; gkey sub-keys are
     ignored."""
-    lines = strip_c_comments(text).splitlines()
+    whole = strip_c_comments(text)
+    lines = whole.splitlines()
+    fields_to_check = []
     starts = [n for n, line in enumerate(lines) if _KEY_RE.search(line)]
     preserved, defaulted, violations = set(), set(), []
     for idx, n in enumerate(starts):
@@ -54,11 +57,28 @@ def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
             continue
         preserved.add(name)
         field = exact[-1].group(1)
-        if field in _LATER_ASSIGN_EXEMPT:
-            continue
-        tail = block[exact[-1].end():]
-        if re.search(r"\bz->" + re.escape(field) + r"(?:\[\w+\])?\s*=(?!=)", tail):
-            violations.append(f"{name}: later assignment to z->{field} after the omit branch")
+        block_start = len(chr(10).join(lines[:n + 1])) + 1
+        em = exact[-1]
+        span = (block_start + em.start(), block_start + em.end())
+        # `else if` chained onto this key's presence check (conditional default, BENCHFX5 X1)
+        if field not in _ALLOWED_RHS and re.search(r"\belse\s+if\b", block[:em.start()]):
+            violations.append(f"{name}: `else if` in the omit branch chain")
+        fields_to_check.append((name, field, span))
+    for name, field, span in fields_to_check:
+        pat = re.compile(r"\bz->" + re.escape(field) + r"(?:\[\w+\])?\s*([-+*/|&]?)=(?!=)\s*([A-Za-z_]\w*)?")
+        for m in pat.finditer(whole):
+            if span[0] <= m.start() < span[1]:
+                continue
+            if m.group(1):
+                violations.append(f"{name}: compound assignment to z->{field}")
+            elif m.group(2) in _ALLOWED_RHS.get(field, ()):
+                continue
+            elif m.start() >= span[0]:
+                violations.append(f"{name}: later assignment to z->{field} after the omit branch")
+            elif field in _ALLOWED_RHS or m.start() >= 0:
+                # an assignment before its own omit branch: only exempt fields have legitimate ones
+                if field in _ALLOWED_RHS:
+                    violations.append(f"{name}: unexpected assignment to z->{field}")
     return preserved, defaulted, violations
 
 
@@ -129,6 +149,17 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         # post-branch override of the same field
         self.assertEqual(len(cls(ok + chr(10) + "z->foo = 0.0f;")[2]), 1)
         self.assertEqual(cls(ok + chr(10) + "if (z->foo == 1.0f) { y = 1; }")[2], [])
+        # BENCHFX5: else-if default, compound assignment, override in a later block
+        self.assertEqual(len(cls("else if (current_z->t == 0u) { z->foo = 0.0f; } " + ok)[2]), 1)
+        self.assertEqual(len(cls(ok + chr(10) + "z->foo *= 0.0f;")[2]), 1)
+        later = (blk("foo", ok) + chr(10) + 'snprintf(key, sizeof(key), "z%u_bar", i);' + chr(10)
+                 + "if (zones_config_json_field_present(body, key)) { x = 1; }" + chr(10)
+                 + "else { z->bar = current_z->bar; }" + chr(10) + "z->foo = 0.0f;")
+        self.assertEqual(len(_classify_full(later)[2]), 1)
+        # BENCHFX5 LOW-1: exempt fields only allow their known right-hand side
+        tc = blk("tc_type", "else { z->tc_type = current_z->tc_type; }")
+        self.assertEqual(_classify_full(tc + chr(10) + "z->tc_type = preserved_tc_type;")[2], [])
+        self.assertEqual(len(_classify_full(tc + chr(10) + "z->tc_type = 5u;")[2]), 1)
         # indexed form must match on both sides
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
         self.assertEqual(cls("else { z->foo[j] = current_z->foo[k]; }")[1], {"foo"})

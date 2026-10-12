@@ -6745,6 +6745,57 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
     TEST_CHECK(out.hyst_c == 3.5f, "omitted hyst_c on a HEATER zone preserves the stored value");
 }
 
+/* Review BENCHFX5 MED-1: five float fields POST /api/zones preserves on an omitted key had no
+ * host test. Seed each with a distinct nonzero value, omit the key, assert it survives, for
+ * HEATER (zone_type 0) and ON_OFF (1). A present-but-blank key is NOT an omit for these fields
+ * (field_present is true, the float parse then fails): it must be refused, never reset. */
+static void test_post_omitting_five_float_fields_preserves_stored_values(void)
+{
+    TEST_SECTION("parse_zone_fields -- approachratecap/errorband/rateband/progressband/coilpower: "
+                 "omitted preserves stored value (HEATER and ON_OFF), blank is refused (BENCHFX5 MED-1)");
+    static const char *const keys[] = {"approachratecap", "errorband", "rateband", "progressband", "coilpower"};
+    static const float seeds[] = {123.5f, 17.25f, 0.75f, 4.5f, 2750.0f};
+    const char *base =
+        "z0_name=Top&z0_tctype=2&z0_relay_mask=1&z0_thermo_mask=1&"
+        "z0_cal=0&z0_kp=1&z0_ki=0&z0_kd=0&z0_ramp=100&z0_sanity=0&z0_mode=3&"
+        "z0_maxtemp=1300&z0_mintemp=-20&z0_window=0&z0_minon=0&z0_minoff=0&"
+        "z0_timingprofile=0";
+    for (uint8_t zt = 0; zt <= 1; zt++) {
+        zone_cfg_t current = make_stored_zone();
+        current.zone_type = zt;
+        current.approach_rate_cap_c_per_hr = seeds[0];
+        current.error_band_c = seeds[1];
+        current.rate_band_c_per_s = seeds[2];
+        current.progress_band_c = seeds[3];
+        current.coil_power_w = seeds[4];
+        zone_cfg_t out;
+        memset(&out, 0, sizeof(out));
+        const char *err_reason = "unset";
+        bool ok = zones_http_parse_zone_fields(base, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok, "a body omitting all five float fields must be accepted");
+        TEST_CHECK(out.approach_rate_cap_c_per_hr == seeds[0], "omitted approachratecap preserves the stored value");
+        TEST_CHECK(out.error_band_c == seeds[1], "omitted errorband preserves the stored value");
+        TEST_CHECK(out.rate_band_c_per_s == seeds[2], "omitted rateband preserves the stored value");
+        TEST_CHECK(out.progress_band_c == seeds[3], "omitted progressband preserves the stored value");
+        TEST_CHECK(out.coil_power_w == seeds[4], "omitted coilpower preserves the stored value");
+        /* A posted value must win over the stored one (guards a reset placed after the parse). */
+        char body[700];
+        snprintf(body, sizeof(body), "%s&z0_approachratecap=50&z0_errorband=9&z0_rateband=0.5&z0_progressband=2&z0_coilpower=1000", base);
+        memset(&out, 0, sizeof(out));
+        ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+        TEST_CHECK(ok && out.approach_rate_cap_c_per_hr == 50.0f && out.error_band_c == 9.0f &&
+                   out.rate_band_c_per_s == 0.5f && out.progress_band_c == 2.0f && out.coil_power_w == 1000.0f,
+                   "posted values for the five fields are stored verbatim");
+        for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+            snprintf(body, sizeof(body), "%s&z0_%s=", base, keys[k]);
+            memset(&out, 0, sizeof(out));
+            err_reason = "unset";
+            ok = zones_http_parse_zone_fields(body, 0, 1, 4, 1, &current, &out, &err_reason);
+            TEST_CHECK(!ok, "a present-but-blank value is refused, not treated as omit");
+        }
+    }
+}
+
 /* One clean body with only the field-under-test varied, mirroring
  * post_body_with_minon()'s own pattern above. */
 static bool post_body_with_fuzzy_strength(const char *literal, const char **err_reason_out, float *out_value)
@@ -17153,6 +17204,7 @@ void run_test_zones_http(void)
     test_post_on_off_fields_optional_range_and_preserve();
     test_post_fuzzy_strength_out_of_range_refused_not_clamped();
     test_post_omitting_new_fields_preserves_stored_values();
+    test_post_omitting_five_float_fields_preserves_stored_values();
     test_post_omitting_model_fields_preserves_them();
     test_post_new_fields_present_but_unparseable_are_refused();
     test_post_coupling_diagonal_must_be_zero();
