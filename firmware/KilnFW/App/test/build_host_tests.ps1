@@ -43,6 +43,7 @@ New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 . (Join-Path $PSScriptRoot "../../../../tools/build_lock.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/host_test_exec.ps1")
 . (Join-Path $PSScriptRoot "../../../../tools/build_gate.ps1")
+. (Join-Path $PSScriptRoot "../../../../tools/host_test_verdict.ps1")
 $buildLockName = "kilnfw_host_tests_" + ([System.Text.RegularExpressions.Regex]::Replace($outDir, '[^A-Za-z0-9]+', '_'))
 # vcvarsall runs ONCE (outside any gate slot); the slot is then taken only around each cl invocation (Invoke-KilnGatedCmd).
 Import-KilnVcvarsEnv -Vcvars $vcvars
@@ -3610,16 +3611,9 @@ try {
         foreach ($f in $script:failedExes) { Write-Host "  $f" }
     }
 
-    if ($script:buildFailures.Count -gt 0 -or $script:failedExes.Count -gt 0) {
-        exit 1
-    }
-
-    if ($script:builtExes.Count -ne $totalExpected) {
-        Write-Host ("MISMATCH: $($script:builtExes.Count) executables built but $totalExpected were expected -- " +
-            "at least one was silently never attempted (not a build failure, not a run failure). Refusing to " +
-            "report success.")
-        exit 1
-    }
+    $verdict = Get-HostTestVerdict -Built $script:builtExes.Count -Expected $totalExpected -BuildFailures $script:buildFailures.Count -RunFailures $script:failedExes.Count -OnlyRun ([bool]$Only)
+    if ($verdict.Mismatch) { Write-Host $verdict.MismatchText }
+    if ($verdict.ExitCode -ne 0) { exit $verdict.ExitCode }
 
     Write-Host "all $totalExpected host test executables built and passed"
     exit 0

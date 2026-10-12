@@ -53,8 +53,8 @@ if ($Mode -eq "probe") {
     if ($got) { $m.ReleaseMutex(); $m.Dispose(); exit 0 }
     $m.Dispose(); exit 1
 }
+if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path $ReadyFile -Value "got=$got" -Encoding ascii }
 if (-not $got) { exit 2 }
-if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path $ReadyFile -Value "ready" -Encoding ascii }
 Start-Sleep -Seconds $Seconds
 $m.ReleaseMutex(); $m.Dispose(); exit 0
 '@
@@ -123,10 +123,15 @@ try {
     Write-Host "case 5: timeouts"
     $env:KILNCTL_BUILD_GATE_TIMEOUT_SEC = "2"
     $ready = Join-Path $tmpWork "holder_ready"
+    Remove-Item $ready -ErrorAction SilentlyContinue   # stale file from a killed run (INFO-5)
     $holder = Start-Child -Mode hold -Name $slotName -Seconds 8 -ReadyFile $ready
     $dl = [DateTime]::UtcNow.AddSeconds(60)
     while (-not (Test-Path $ready) -and [DateTime]::UtcNow -lt $dl -and -not $holder.HasExited) { Start-Sleep -Milliseconds 100 }
-    Assert-True (Test-Path $ready) "holder child acquired the slot (ready-file handshake)"
+    Assert-True (Test-Path $ready) "holder child wrote the ready file"
+    # The child records its own WaitOne result, so "about to try" (file written
+    # before the acquire) is told apart from "holds the mutex".
+    $readyTxt = if (Test-Path $ready) { (Get-Content $ready -Raw).Trim() } else { "" }
+    Assert-True ($readyTxt -eq "got=True") "holder child reports it holds the mutex (ready file says '$readyTxt')"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $msg = ""
     try { $g = Enter-KilnBuildGate -Label "t_timeout" -Lane light -PollIntervalSeconds 1; Exit-KilnBuildGate -Gate $g } catch { $msg = "$_" }
