@@ -46,7 +46,7 @@ direction are unchanged, and they still match the guard (`tools/push_verify.ps1:
   `Invoke-HostTestExe` call made the script print
   `MISMATCH: 98 executables built but 99 were expected ...` and exit 1
   (line 3617). This is the check's real failing assertion, not a build error.
-- **LOW-1** (lines 3613-3615 return before line 3617, pre-existing). The MISMATCH
+- **LOW-1** FIXED (verdict moved to tools/host_test_verdict.ps1; MISMATCH now reported alongside failures; tested by tools/check_host_test_verdict.ps1, negtest CAUGHT) (lines 3613-3615 return before line 3617, pre-existing). The MISMATCH
   comparison runs only when there are no build or run failures. While any executable
   fails, a silent dropout is masked. It shows up only as a `Built: 98/99` line (line
   3603), which nothing asserts on. At this tip one already fails (INFO-4), so the dropout
@@ -82,7 +82,7 @@ as an `  FAIL:` assertion line.
 | h2 (item 3) drop one `Invoke-HostTestExe` call, `-NoBaseline` | CAUGHT | `MISMATCH: 98 executables built but 99 were expected ...` (exit 1) |
 | h1 (item 3) drop `main_reset_fence` call | not run | baseline red on `autotune_engine_prestart` (INFO-4) |
 
-- **LOW-2** (lines 125-129). m1 MISSED: if the handshake is inverted, the check does
+- **LOW-2** FIXED (child writes got=$got; parent asserts got=True; negtest CAUGHT) (lines 125-129). m1 MISSED: if the handshake is inverted, the check does
   not notice under normal timing. The ready-file assertion (line 129) cannot tell
   "acquired" from "about to try". Only the downstream BUSY assertion (line 134)
   catches the inversion, and only when acquisition is slow (m1b). The m3 MISSED
@@ -90,7 +90,7 @@ as an `  FAIL:` assertion line.
   is acceptable, but the comment should say so. A stronger handshake would have the
   child write its `WaitOne` result into the file (for example `got=True`) and have
   the parent assert that content.
-- **INFO-5** (lines 125-126). `$ready` is not deleted before `Start-Child`. `$tmpWork`
+- **INFO-5** FIXED ($ready removed before Start-Child) (lines 125-126). `$ready` is not deleted before `Start-Child`. `$tmpWork`
   is PID-keyed and removed in `finally` (line 146), but a run that is hard-killed
   skips `finally`. A later run that reuses that PID would then find a stale
   `holder_ready`, `New-Item -Force` (line 40) keeps it, and the handshake passes
