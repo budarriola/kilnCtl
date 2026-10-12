@@ -984,8 +984,13 @@ class BuildLockBuildFx8(unittest.TestCase):
         self.addCleanup(bl._maybe_leaked.discard, (path, text))
         real_rename = os.rename
 
+        calls = {'n': 0}
+
         def rename(src, dst):
             if src == path:
+                calls['n'] += 1
+                if calls['n'] > 20000:
+                    raise AssertionError('leaked-free loop ignores wait_timeout')
                 raise PermissionError(32, "sharing violation")
             return real_rename(src, dst)
         t0 = time.monotonic()
