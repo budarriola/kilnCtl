@@ -346,7 +346,7 @@ if (Test-Path $dupSymbolsTest) {
 
 # test_check_lcd_sink_callgraph.ps1: synthetic-dump test of check_lcd_sink_callgraph.ps1
 # (REVIEW_LCDFX9 HIGH-2); named test_*, wired explicitly.
-$lcdCgTest = Join-Path $repoRoot "tools	est_check_lcd_sink_callgraph.ps1"
+$lcdCgTest = Join-Path $repoRoot "tools\test_check_lcd_sink_callgraph.ps1"
 if (Test-Path $lcdCgTest) {
     $checks += Get-Item $lcdCgTest
     $checks = $checks | Sort-Object FullName
