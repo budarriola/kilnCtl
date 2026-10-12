@@ -11,8 +11,8 @@ Review tree: `C:\wt\rvprofilesfx4_lrnd51` at `3063da377` (origin/dev at the time
 
 No HIGH or MED findings. Two LOWs and seven INFO items. The spinlock is correct. The unresolved state heals as claimed. The NOT_FOUND mapping is sound. The 6656 B worst case is honest. Both LOWs are in the favorites "unreadable file" path that LOW-1 was about.
 
-- LOW-A: the 409 for an unreadable `prof_fav.bin` now sends the operator to "factory reset (scope kiln)", which does not delete that file. The test pins that wrong text.
-- LOW-B: when the file is unreadable but a valid legacy NVS copy exists, `set()` still publishes an unsaved favorite before the refused save. LOW-1's second symptom ("the UI shows a favorite that is not saved") is therefore fixed only for the no-NVS case.
+- LOW-A (fixed in `bebc85025`; see `REVIEW_PROFILESFX6_2026-10-12.md` MED-1 for the new text): the 409 for an unreadable `prof_fav.bin` now sends the operator to "factory reset (scope kiln)", which does not delete that file. The test pins that wrong text.
+- LOW-B (fixed in `bebc85025`): when the file is unreadable but a valid legacy NVS copy exists, `set()` still publishes an unsaved favorite before the refused save. LOW-1's second symptom ("the UI shows a favorite that is not saved") is therefore fixed only for the no-NVS case.
 
 ## Evidence
 
@@ -79,7 +79,7 @@ The comment at `diagnostics_http.c:1469-1472` (">= 400 B of margin in 4608 B") a
 
 ## Findings
 
-### LOW-A: an unreadable `prof_fav.bin` gets recovery advice that does not work
+### LOW-A: an unreadable `prof_fav.bin` gets recovery advice that does not work (fixed in `bebc85025`)
 
 - **Where:**
   - `firmware/KilnFW/App/drivers/common/cfg_fs_refusal_http.h:96-98`: when `pref_cfg_fs_rev_unknown(store)`, `cfg_fs_http_persist_failed_favorites()` falls through to the generic `cfg_fs_http_persist_failed_for()`.
@@ -98,7 +98,7 @@ The comment at `diagnostics_http.c:1469-1472` (">= 400 B of margin in 4608 B") a
   - Use it in the rev-unknown branch of `cfg_fs_http_persist_failed_favorites()`.
   - Flip the test at `:2277` to require `scope=profiles` and forbid `scope kiln`.
 
-### LOW-B: an unsaved favorite is still shown when the file is unreadable but a legacy NVS copy exists
+### LOW-B: an unsaved favorite is still shown when the file is unreadable but a legacy NVS copy exists (fixed in `bebc85025`)
 
 - **Where:** `firmware/KilnFW/App/drivers/persist/profiles_favorites.c:345` (`fav_publish(&cur_user, cur_builtin);` runs before `pref_cfg_fs_commit()` at `:359`). The other half is `pref_cfg_fs.c:473-480`: when the file is unreadable and the NVS copy is valid, the NVS copy is adopted, the call returns `have=true`, and rev-unknown stays set.
 - **Scenario:**
