@@ -37,7 +37,7 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
 
 /* Recovery text shared by every store_unreadable_at_boot 409 (persfx3 LOW-2). A reboot retries the read; if
  * the cause persists, GET /api/cfgfs names the store and these two routes clear it. */
-#define CFG_FS_STORE_UNREADABLE_REASON     "a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the "     "controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded), then clear it with a cfg "     "format (POST /api/cfgfs/format_confirm force_healthy=1) or a factory reset (scope kiln)"
+#define CFG_FS_STORE_UNREADABLE_REASON "a stored setting could not be read at boot, so saves to it are refused to avoid overwriting it; reboot the controller to retry; if it persists after a reboot see GET /api/cfgfs (degraded), then clear it with a cfg format (POST /api/cfgfs/format_confirm?force_healthy=1, then reboot), which ERASES ALL cfg-stored settings: every user profile, the zones config and preferences, or a factory reset (scope kiln)"
 
 /* FIRELOWFX3 LOW-1: the favorites store (prof_favusr in profiles_nvs) is cleared by NEITHER cfg format (erases the cfg
  * partition only) NOR factory reset scope kiln (does not touch profiles_nvs): only scope profiles erases it, and that
@@ -50,7 +50,7 @@ static inline bool cfg_fs_http_refuse_if_unmounted(httpd_req_t *req)
 /* PROFILESFX4 LOW-A: prof_fav.bin itself is unreadable (rev-unknown). A cfg format erases the file, and factory reset
  * scope profiles/all deletes it (profiles_scope_cfg_files.c kRootPaths); scope kiln does NOT touch it. */
 #define CFG_FS_FAVORITES_FILE_UNREADABLE_REASON \
-    "the favorites file could not be read, so saves to it are refused to avoid overwriting it; reboot to "     "re-read it; if it keeps failing, factory_reset scope=profiles deletes it (and ERASES every user profile), or a "     "cfg format (POST /api/cfgfs/format_confirm?force_healthy=1) clears it but ERASES ALL cfg-stored settings: "     "every user profile, the zones config and preferences (scope=all does that too); factory reset scope kiln "     "does not clear it"
+    "the favorites file could not be read, so saves to it are refused to avoid overwriting it; reboot to "     "re-read it; if it keeps failing, factory_reset scope=profiles deletes it (and ERASES every user profile), or a "     "cfg format (POST /api/cfgfs/format_confirm?force_healthy=1) clears it (then reboot) but ERASES ALL cfg-stored settings: "     "every user profile, the zones config and preferences (scope=all does that too, and also wipes Wi-Fi and kiln NVS); factory reset scope kiln "     "does not clear it"
 
 /* Post-failure response for a save that failed. 503 with the cfg text when the partition is unmounted; 409
  * store_unreadable_at_boot ONLY when the caller says THIS store is refused (`store_refused`) and the error is the

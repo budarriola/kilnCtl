@@ -78,6 +78,8 @@ The FILE text names scope=profiles first, so an operator who follows it in order
 
 ### LOW-1: "a cfg format ... clears it" does not end the 409 without a second reboot
 
+**Status: FIXED in PROFILESFX8: format remedy says "(then reboot)"; asserted.**
+
 `cfg_fs_confirm_format_job_run()` formats, re-registers and remounts, but nothing re-runs the stores' resolves. In
 particular it does not clear `pref_cfg_fs.c`'s `s_unknown_paths[]` or the degraded table. Consider the usual
 FILE-text case:
@@ -96,6 +98,8 @@ Then add a `strstr` assertion for that phrase. Watch LOW-2's 13 B margin when do
 
 ### LOW-2: the length assertion does not test anything; the real limit is a 512 B test buffer with 13 B to spare
 
+**Status: FIXED in PROFILESFX8: stub buffer 2048, real not-truncated assertion.**
+
 `TEST_CHECK(strlen(s_last_sendstr) < PROFILES_SAVE_ERR_MSG_LEN * 4, ...)` compares against 768, but
 `s_last_sendstr` is `char[512]` and filled by snprintf, so `strlen` can never exceed 511. The assertion cannot fail.
 
@@ -113,6 +117,8 @@ Then the next wording change fails with an accurate message instead of a mislead
 
 ### LOW-3: the generic `CFG_FS_STORE_UNREADABLE_REASON` still has both MED-1 defects (out of this commit's scope)
 
+**Status: FIXED in PROFILESFX8: generic text uses ?force_healthy=1, warns ERASES ALL, says then reboot; asserted in test_delete_rev_unknown_is_409.**
+
 The sibling generic text, used for every other store's `store_unreadable_at_boot` 409, still:
 
 - sends the operator to "a cfg format (POST /api/cfgfs/format_confirm force_healthy=1)" with no warning that the
@@ -126,6 +132,8 @@ same LOW-1 caveat also applies: after a format, a rev-unknown store stays refuse
 
 ### INFO-1: no test pins "a clean no-op does not write"
 
+**Status: Deferred.**
+
 M4 (`s_fav_dirty = true` always) is MISSED. A regression that leaves the flag stuck would add one cfg write per
 favorites no-op, including every web or LCD delete of a non-favorited profile, and no test would notice. That is cheap
 (user-triggered only, see (4)), so this is not a defect.
@@ -135,21 +143,29 @@ Pinning it would take one assertion: count writes through `pref_cfg_fs_set_write
 
 ### INFO-2: after one refusal, no-op favorite requests answer 409 for the rest of the boot
 
+**Status: Deferred.**
+
 This is intended (see (4)). It is noted because before this change an unfavorite of a non-favorite answered 200 even
 on a refused store.
 
 ### INFO-3: `s_fav_dirty` is not reset between host tests
+
+**Status: Deferred.**
 
 Each test's setup inherits the previous test's flag. This is harmless today. A `profiles_favorites_start()` in
 `fuzz_small_setup()` would make each test independent of the order tests run in.
 
 ### INFO-4: the web page drops the favorite POST's response
 
+**Status: Deferred.**
+
 `favToggleBtn()` (`profiles_page.html`) reloads the favorites and re-renders, but never reads the status or body. A
 409 or 503 looks like "the star did not change", and the long reason text reaches only API and MCP clients. This
 predates the change.
 
 ### INFO-5: "(scope=all does that too)" understates scope=all
+
+**Status: FIXED in PROFILESFX8: wording now mentions Wi-Fi and kiln NVS.**
 
 Besides formatting cfg, scope=all also erases Wi-Fi and kiln NVS. The mixed case from (3), where the file is
 unreadable and the NVS read also fails, is cleared only by scope profiles or all. A format alone moves that store to

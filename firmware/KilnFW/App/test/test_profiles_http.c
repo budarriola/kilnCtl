@@ -349,7 +349,7 @@ esp_err_t httpd_resp_send_err(httpd_req_t *r, httpd_err_code_t error, const char
     return ESP_OK;
 }
 static char s_last_status_str[48];
-static char s_last_sendstr[512];
+static char s_last_sendstr[2048];
 esp_err_t httpd_resp_set_status(httpd_req_t *r, const char *status)
 {
     (void)r;
@@ -2280,7 +2280,10 @@ static void test_favorites_unreadable_file_gets_generic_409(void)
                "does not promise a per-request re-read");
     TEST_CHECK(strstr(s_last_sendstr, "?force_healthy=1") != NULL, "force_healthy is the query string");
     TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "cfg format warns it erases everything");
-    TEST_CHECK(strlen(s_last_sendstr) < PROFILES_SAVE_ERR_MSG_LEN * 4, "reason text stays bounded");
+    TEST_CHECK(strlen(s_last_sendstr) < sizeof(s_last_sendstr) - 1 && strstr(s_last_sendstr, CFG_FS_FAVORITES_FILE_UNREADABLE_REASON "\"}") != NULL,
+               "PROFILESFX8 LOW-2: whole reason captured, not truncated by the stub");
+    TEST_CHECK(strstr(s_last_sendstr, "(then reboot)") != NULL, "PROFILESFX8 LOW-1: cfg format remedy says to reboot afterwards");
+    TEST_CHECK(strstr(s_last_sendstr, "also wipes Wi-Fi and kiln NVS") != NULL, "PROFILESFX8 INFO-5: scope=all wording");
     TEST_CHECK(strstr(s_last_sendstr, "reason\":\"a stored setting") == NULL, "not the generic scope-kiln text");
     cfg_fs_test_inject_read_error(NULL, ESP_OK, 0);
     pref_cfg_fs_clear_rev_unknown_for_test();
@@ -6182,6 +6185,10 @@ static void test_delete_rev_unknown_is_409(void)
     TEST_CHECK(profiles_slot_used(8), "refused delete keeps the slot");
     TEST_CHECK(strncmp(s_last_status_str, "409", 3) == 0, "status is 409");
     TEST_CHECK(strstr(s_last_sendstr, "store_unreadable_at_boot") != NULL, "body names store_unreadable_at_boot");
+    TEST_CHECK(strstr(s_last_sendstr, "format_confirm?force_healthy=1, then reboot") != NULL, "PROFILESFX8 LOW-3: generic text uses the query spelling and says reboot");
+    TEST_CHECK(strstr(s_last_sendstr, "ERASES ALL cfg-stored settings") != NULL, "PROFILESFX8 LOW-3: generic text warns the format erases");
+    TEST_CHECK(strstr(s_last_sendstr, "format_confirm force_healthy") == NULL, "PROFILESFX8 LOW-3: no space spelling");
+    TEST_CHECK(strstr(s_last_sendstr, "(scope kiln)\"}") != NULL, "PROFILESFX8: generic body not truncated by the stub");
     s_profile_rev_unknown[8] = false;
 }
 
