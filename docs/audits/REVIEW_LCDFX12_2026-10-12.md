@@ -62,7 +62,7 @@ No firmware or `ui_page_*.c` file changed. The negtest baseline PASS on `44289aa
 
 ## Findings
 
-### MED-1: the masked block is pinned by a denylist, so omissions and other secret holders pass
+### MED-1: the masked block is pinned by a denylist, so omissions and other secret holders pass -- FIXED (lcdfx13)
 
 **Location:**
 
@@ -109,7 +109,7 @@ Every promote run then carries a failing standing check that hides new failures 
 
 **Fixed in this commit.** The row is joined, and the regex is written as `'\\r?\n'` with an explanation. The check's other failure in this worktree (no row for `check_host_test_verdict.ps1`) is already fixed on newer dev in `2cd62abc5`.
 
-### LOW-1: the masked-block and pre-gate scans can be steered with a decoy or a brace inside a string
+### LOW-1: the masked-block and pre-gate scans can be steered with a decoy or a brace inside a string -- FIXED (lcdfx13)
 
 **Location:** `tools/check_lcd_admin_gates.ps1:551` and `:564`.
 
@@ -126,7 +126,7 @@ Both mutants compile, and both show the password to a USER. This is deliberate o
 - Blank string literals before the brace scan.
 - Require exactly one `bool show_secret` declaration and exactly one `if (!show_secret)` in `refresh_cb`.
 
-### LOW-2: L-shadow scans only headers included directly
+### LOW-2: L-shadow scans only headers included directly -- FIXED (lcdfx13)
 
 **Location:** `tools/check_lcd_admin_gates.ps1:519-528`.
 
@@ -136,7 +136,7 @@ The row's own "known gap" mentions only headers outside App, not transitive App 
 
 **Fix:** follow `#include "..."` recursively, keeping a visited set, inside App.
 
-### LOW-3: non-UI shared sections are walked through the first symbol only
+### LOW-3: non-UI shared sections are walked through the first symbol only -- FIXED (lcdfx13)
 
 **Location:**
 
@@ -165,7 +165,7 @@ It fails closed: the real-build path would fail on the 116 non-UI shared section
 
 **Fix:** add a synthetic case with an allowed non-UI alias.
 
-### INFO-3: possible false positives in L-shadow (`hdrIndex` and the raw scan)
+### INFO-3: possible false positives in L-shadow (`hdrIndex` and the raw scan) -- FIXED (lcdfx13)
 
 **Location:** `tools/check_lcd_admin_gates.ps1:519-520` and `:532`.
 
