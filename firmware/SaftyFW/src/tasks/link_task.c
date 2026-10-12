@@ -3596,7 +3596,7 @@ bool link_task_start(void)
     // board's unique id and time, so the 8 bits are close to uniform. An
     // 8-bit id can still collide (1 in 256), so the ESP does not rely on it
     // alone: it also treats a backwards step in this Pico's DIAG uptime_ms
-    // as a reboot (safety_pico_uptime_regressed(), KilnFW). Not a security
+    // as a reboot (safety_pico_uptime_behind_expected(), KilnFW). Not a security
     // value -- kilnlink has no authentication either way.
     {
         uint32_t r = get_rand_32();

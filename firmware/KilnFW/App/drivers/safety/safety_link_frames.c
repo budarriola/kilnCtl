@@ -424,7 +424,9 @@ void safety_apply_fw_version(SafetyLinkClass *link, const uart_proto_message_t *
              * cached trip DATA: a trip reported just before the reboot is
              * still the most recent thing that actually happened, and
              * blanking it would erase evidence rather than refresh it. */
-            if (link->reboot_noted_by_uptime && link->pico_uptime_baseline_known) {
+            if (link->reboot_noted_by_uptime && link->pico_uptime_baseline_known &&
+                (uint32_t)((uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS) -
+                           link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS) {
                 /* Firing audit 2 MED-1: the DIAG uptime path already counted THIS reboot (the new boot's
                  * first DIAG beat its lost FW_VERSION). A second bump would reset heat_enable's verdict
                  * inputs (reboot_fatal_latched, was_tripped) and erase the T3 lost-trip latch. Keep the
@@ -1130,7 +1132,20 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
         safety_note_pico_reboot_locked(link);
         link->pico_reboot_by_uptime_count++;
         link->reboot_noted_by_uptime = true;
+        link->reboot_noted_by_uptime_esp_ms = esp_now_ms;
         pico_reboot_by_uptime = true;
+    }
+    /* Protocol 18: a 32-byte DIAG carries the Pico boot id. A changed id is a third reboot signal;
+     * count at most ONE reboot per DIAG across uptime / boot id (a second bump would reset heat_enable's
+     * verdict inputs and erase the T3 lost-trip latch), and keep the cached id current from every DIAG so
+     * the FW_VERSION that follows the same boot sees no change. */
+    if (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V3) {
+        if (link->pico_boot_id_ever_seen && p[31] != link->pico_boot_id && !pico_reboot_by_uptime) {
+            safety_note_pico_reboot_locked(link);
+        }
+        link->pico_boot_id = p[31];
+        link->pico_boot_id_known = true;
+        link->pico_boot_id_ever_seen = true;
     }
     link->pico_uptime_baseline_ms = link->cached.diag_uptime_ms;
     link->pico_uptime_baseline_esp_ms = esp_now_ms;

@@ -135,13 +135,15 @@
       "link_frame.h:LINK_FRAME_SET_FIRING_CEILING_CMD=0x09u",
       "link_frame.h:LINK_FRAME_STACK_MARGIN_CMD=0x2Cu",
       "link_frame.h:LINK_FRAME_STATUS_CMD=KILNLINK_FRAME_A_CMD",
+      "link_frame.h:LINK_FRAME_TEST_TRIP_CMD=0x2Eu",
+      "link_frame.h:LINK_FRAME_TEST_TRIP_RESULT_CMD=0x2Fu",
       "link_frame.h:LINK_FRAME_UPDATE_ABORT_CMD=0x13u",
       "link_frame.h:LINK_FRAME_UPDATE_BEGIN_CMD=0x10u",
       "link_frame.h:LINK_FRAME_UPDATE_DATA_CMD=0x11u",
       "link_frame.h:LINK_FRAME_UPDATE_END_CMD=0x12u",
       "link_frame.h:LINK_FRAME_UPDATE_STATUS_CMD=0x14u"
     ],
-    "fingerprint": "b3957dc3e25a7f1f",
+    "fingerprint": "7d657c5268e202b0",
     "version": 18
   },
   "uart": {

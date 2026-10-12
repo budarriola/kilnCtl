@@ -799,6 +799,8 @@ typedef enum {
  * safety_link_update_state_t / SAFETY_LINK_UPDATE_ERR_* by the caller) --
  * kept as plain uint8_t here so an unrecognised future state/bit value from
  * a newer Pico build round-trips instead of being silently coerced. */
+#define SAFETY_REBOOT_NOTE_WINDOW_MS 3000u /* a lost FW_VERSION is accounted for within this */
+
 typedef struct {
     uint8_t  state;
     uint8_t  last_error;
@@ -1659,7 +1661,7 @@ typedef struct {
     bool    pico_boot_id_ever_seen;
     /* kilnlink audit 2026-10-09 M1: the last DIAG uptime_ms seen from the
      * Pico, the baseline safety_apply_diag() compares each new DIAG against
-     * (safety_pico_uptime_regressed()). A backwards step means the Pico
+     * (safety_pico_uptime_behind_expected()). A backwards step means the Pico
      * rebooted even when its 8-bit boot_id happened to repeat, and runs the
      * same safety_note_pico_reboot_locked() bookkeeping a boot_id change
      * does. KEPT across link-down (firing audit 2 MED-1: a reboot that spans
@@ -1674,6 +1676,7 @@ typedef struct {
      * verdict inputs and erase the T3 lost-trip latch). Cleared by any FW_VERSION and on link-down
      * (when in doubt, count). Under state_lock. */
     bool     reboot_noted_by_uptime;
+    uint32_t reboot_noted_by_uptime_esp_ms; /* ESP tick (ms) when that flag was set; honoured for SAFETY_REBOOT_NOTE_WINDOW_MS only */
     /* Count of Pico reboots detected ONLY by the uptime regression (boot_id
      * unchanged at that point) -- evidence the second signal does work. */
     uint32_t pico_reboot_by_uptime_count;

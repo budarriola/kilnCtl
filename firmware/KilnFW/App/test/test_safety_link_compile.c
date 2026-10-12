@@ -3302,6 +3302,53 @@ static void fw_version_with_boot_id(SafetyLinkClass *link, uint8_t boot_id)
     safety_apply_fw_version(link, &fw);
 }
 
+static void apply_diag_v3(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t boot_id)
+{
+    uart_proto_message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    set_diag_frame(msg.payload, 0u, 0u);
+    safety_put_u32_le(&msg.payload[6], uptime_ms);
+    msg.payload[31] = boot_id;
+    msg.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &msg) == true, "V3 DIAG applied");
+}
+
+static void test_reboot_counted_once_per_diag_all_signals(void)
+{
+    TEST_SECTION("rebootfx2 review items 1+2 -- at most ONE reboot count per DIAG across uptime regression "
+                 "and DIAG boot_id change; the cached id follows every V3 DIAG");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    fw_version_with_boot_id(&link, 42u);
+    apply_diag_v3(&link, 600000u, 42u);
+    uint32_t s0 = link.cached.pico_reboot_seq;
+    /* both signals fire on the same DIAG: uptime regressed AND boot id changed */
+    apply_diag_v3(&link, 1500u, 77u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "MUST GO RED if uptime+boot_id count twice");
+    TEST_CHECK(link.pico_boot_id == 77u, "cached boot id follows the DIAG");
+    fw_version_with_boot_id(&link, 77u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 1u, "FW_VERSION with the already-cached id does not recount");
+
+    /* boot_id change alone (uptime did not regress) counts once, and the DIAG cache is rebuilt after */
+    apply_diag_v3(&link, 3500u, 77u);
+    apply_diag_v3(&link, 5500u, 78u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "boot_id change alone counts once");
+    TEST_CHECK(link.cached.diag_boot_id_known && link.cached.diag_boot_id == 78u, "diag cache re-established");
+    fw_version_with_boot_id(&link, 78u);
+    TEST_CHECK(link.cached.pico_reboot_seq == s0 + 2u, "following FW_VERSION: no second count");
+
+    /* time bound: a stale uptime note does not suppress a later, independent boot_id change */
+    SafetyLinkClass t = make_link();
+    fw_version_with_boot_id(&t, 42u);
+    apply_diag_uptime(&t, 600000u);
+    apply_diag_uptime(&t, 1500u); /* counted by uptime, flag set */
+    uint32_t t0 = t.cached.pico_reboot_seq;
+    s_fake_tick_count = 60000u; /* well past SAFETY_REBOOT_NOTE_WINDOW_MS */
+    fw_version_with_boot_id(&t, 43u);
+    TEST_CHECK(t.cached.pico_reboot_seq == t0 + 1u, "MUST GO RED if a stale flag still suppresses the count");
+    s_fake_tick_count = 0;
+}
+
 static void test_reboot_counted_once_diag_before_fw_version(void)
 {
     TEST_SECTION("firing audit 2 MED-1 (P1) -- a reboot across a link-down whose FW_VERSION burst was "
@@ -3635,6 +3682,7 @@ int main(void)
     test_send_test_trip();
     test_low4_link_down_invalidates_uptime_baseline();
     test_reboot_counted_once_diag_before_fw_version();
+    test_reboot_counted_once_per_diag_all_signals();
     test_long_outage_repeat_boot_id_reboot_detected();
     test_boot_clear_persistent_refusal_gives_up_after_bound();
     test_boot_clear_never_fires_for_a_non_s6a_trip();
