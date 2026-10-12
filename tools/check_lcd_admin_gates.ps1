@@ -476,10 +476,10 @@ $gateHome = @(
     @('^lcd_touch_cal_\w*exit_target$', @('ui_page_touch_cal.c', 'ui_page_touch_cal.h', 'ui_page_touch_cal_logic.c', 'ui_page_touch_cal_logic.h', 'lcd_auth_state.c', 'lcd_auth_state.h'))
 )
 $declRx = @(
-    '\b(?!return\b|case\b|else\b|goto\b|do\b|sizeof\b|typeof\b|defined\b)[A-Za-z_]\w*[\s\*]+(' + $gateTok + ')\b\s*(?:=(?!=)|;|\[|,|\)|\()',   # `type T = / ; / , / ) / (`
-    '\(\s*\*\s*(' + $gateTok + ')\s*\)',                                                                                                 # function-pointer declarator
-    '[{,]\s*(' + $gateTok + ')\s*=(?!=)',                                                                                                # enumerator
-    '\btypedef\b[^;]*\b(' + $gateTok + ')\s*;'
+    ('\b(?!return\b|case\b|else\b|goto\b|do\b|sizeof\b|typeof\b|defined\b)[A-Za-z_]\w*[\s\*]+(' + $gateTok + ')\b\s*(?:=(?!=)|;|\[|,|\)|\()'),   # `type T = / ; / , / ) / (`
+    ('\(\s*\*\s*(' + $gateTok + ')\s*\)'),   # function-pointer declarator
+    ('[{,]\s*(' + $gateTok + ')\s*=(?!=)'),   # enumerator
+    ('\btypedef\b[^;]*\b(' + $gateTok + ')\s*;')
 )
 foreach ($uf in $uiAll) {
     $dc = Blank-Strings (Get-KeepLogsCode $uf.FullName)
