@@ -826,6 +826,13 @@ class _FakeZonesHttpClient:
             merged[z["index"]].update(z)
         return {"current": current, "preset": preset, "merged": merged}
 
+    def strip_omit_preserved(self, body, keep_keys=frozenset()):
+        # records that the case/restore stripped, and which keys it kept (LOW-2)
+        out = dict(body)
+        out["stripped"] = True
+        out["keep_keys"] = set(keep_keys)
+        return out
+
     def post_zones(self, host, body):
         was_running = bool(
             self.profiles is not None and self.profiles.started and not self.profiles.stop_called
@@ -850,16 +857,17 @@ class _FakeProfilesClientHP(_FakeProfilesClient):
 
 def _install_fake_zones_http_client(fake):
     import kilnctrl.zones_http_client as real
-    saved = (real.get_zones, real.build_post_body, real.post_zones)
+    saved = (real.get_zones, real.build_post_body, real.post_zones, real.strip_omit_preserved)
     real.get_zones = fake.get_zones
     real.build_post_body = fake.build_post_body
     real.post_zones = fake.post_zones
+    real.strip_omit_preserved = fake.strip_omit_preserved
     return saved
 
 
 def _restore_zones_http_client(saved):
     import kilnctrl.zones_http_client as real
-    real.get_zones, real.build_post_body, real.post_zones = saved
+    real.get_zones, real.build_post_body, real.post_zones, real.strip_omit_preserved = saved
 
 
 class _GenerationFakeZhc(_FakeZonesHttpClient):
@@ -871,10 +879,17 @@ class _GenerationFakeZhc(_FakeZonesHttpClient):
         super().__init__()
         self.gen = 5
         self.snapshot["generation"] = 5
+        # distinct per-zone values for every case-changed field (LOW-1)
+        for z in self.snapshot["zones"]:
+            i = z["index"]
+            z.update(failsafe_state=bool(i % 2 == 1), hyst_c=1.0 + i,
+                     min_on_s=10 + i, min_off_s=20 + i)
+            z["max_temp_c"] = 300.0 + i
         self.stale_refusals = 0
 
     def get_zones(self, host):
-        snap = dict(self.snapshot)
+        import copy
+        snap = copy.deepcopy(self.snapshot)
         snap["generation"] = self.gen
         return snap
 
@@ -884,6 +899,9 @@ class _GenerationFakeZhc(_FakeZonesHttpClient):
             return "refused: HTTP 409: zones_config_stale"
         result = super().post_zones(host, body)
         if result == "ok":
+            # apply the posted body to the board state so a read-back is real (MED-1)
+            for idx, z in body["merged"].items():
+                self.snapshot["zones"][idx].update(z)
             self.gen += 1
         return result
 
@@ -2211,15 +2229,65 @@ class RestoreFromFreshGetTest(unittest.TestCase):
     def test_mid_case_edit_survives_restore(self):
         snapshot = self.fake.get_zones("h")
         preset = C._restore_preset(snapshot, 2, C._HP03_CHANGED_FIELDS)
-        self.assertEqual(preset, {"zones": [{"index": 2, "zone_type": 0}]})
+        self.assertEqual(preset, {"zones": [{
+            "index": 2, "zone_type": 0, "failsafe_state": False, "hyst_c": 3.0,
+            "min_on_s": 12, "min_off_s": 22}]})
         # mid-case: the case's change plus an unrelated edit (adaptive gain)
         self.fake.snapshot["zones"][2]["zone_type"] = 1
         self.fake.snapshot["zones"][2]["adaptive_kp"] = 9.5
+        self.assertNotIn("adaptive_kp", snapshot["zones"][2])  # snapshot is not aliased
         err = C._post_zones_restore(self.ctx, "h", preset, expected_snapshot=snapshot)
         self.assertIsNone(err)
         posted = self.fake.posted_bodies[-1]["merged"][2]
         self.assertEqual(posted["zone_type"], 0)
         self.assertEqual(posted["adaptive_kp"], 9.5)
+        # the board state really ends restored, with the edit intact
+        self.assertEqual(self.fake.snapshot["zones"][2]["zone_type"], 0)
+        self.assertEqual(self.fake.snapshot["zones"][2]["adaptive_kp"], 9.5)
+
+    def test_hp03_changed_fields_pinned(self):
+        self.assertEqual(set(C._HP03_CHANGED_FIELDS),
+                         {"zone_type", "failsafe_state", "hyst_c", "min_on_s", "min_off_s"})
+        snap = self.fake.get_zones("h")
+        for idx in (0, 1, 2):
+            entry = C._restore_preset(snap, idx, C._HP03_CHANGED_FIELDS)["zones"][0]
+            expect = {"index": idx}
+            expect.update({k: snap["zones"][idx][k] for k in C._HP03_CHANGED_FIELDS})
+            self.assertEqual(entry, expect)
+            self.assertEqual(entry["hyst_c"], 1.0 + idx)
+
+    def test_hp07_changed_fields_pinned(self):
+        self.assertEqual(set(C._HP07_CHANGED_FIELDS),
+                         {"max_temp_c", "zone_type", "failsafe_state", "min_on_s", "min_off_s"})
+        snap = self.fake.get_zones("h")
+        entry = C._restore_preset(snap, 1, C._HP07_CHANGED_FIELDS)["zones"][0]
+        self.assertEqual(entry, {"index": 1, "max_temp_c": 301.0, "zone_type": 0,
+                                 "failsafe_state": True, "min_on_s": 11, "min_off_s": 21})
+
+    def test_readback_checks_every_restored_field(self):
+        snap = self.fake.get_zones("h")
+        for field, bad in (("failsafe_state", True), ("hyst_c", 99.0),
+                           ("min_on_s", 0), ("min_off_s", 0)):
+            actual = self.fake.get_zones("h")
+            actual["zones"][2][field] = bad
+            msg = C._restore_readback_mismatch(snap, actual)
+            self.assertIsNotNone(msg, field)
+            self.assertIn(field, msg)
+
+    def test_restore_post_strips_omit_preserved_keeping_named(self):
+        snapshot = self.fake.get_zones("h")
+        preset = C._restore_preset(snapshot, 2, C._HP03_CHANGED_FIELDS)
+        self.assertIsNone(C._post_zones_restore(self.ctx, "h", preset))
+        body = self.fake.posted_bodies[-1]
+        self.assertTrue(body["stripped"])
+        self.assertIn("z2_hystc", body["keep_keys"])
+
+    def test_case_post_body_strips_and_keeps_hyst(self):
+        import kilnctrl.zones_http_client as real
+        body = C._case_post_body(real, self.fake.get_zones("h"),
+                                 {"zones": [{"index": 2, "zone_type": 1, "hyst_c": 2.0}]})
+        self.assertTrue(body["stripped"])
+        self.assertIn("z2_hystc", body["keep_keys"])
 
     def test_get_failure_is_reported_and_nothing_posted(self):
         self.ctx["_get_zones_config"] = lambda h: (_ for _ in ()).throw(OSError("boom"))

@@ -174,3 +174,17 @@ attempt's text. This affects diagnostics only.
 {})`), which already puts `zone_type` (and these other fields) back". The restore now overlays
 `_HP07_CHANGED_FIELDS` on a fresh GET. The comment should name that list, which is also where a future field
 added to the preset must go.
+
+## Fix status
+
+All findings fixed in the follow-up commit that carries this table (see `git log -- docs/audits/REVIEW_BENCHFX_2026-10-11.md`).
+
+| Finding | Status | Fix |
+|---|---|---|
+| MED-1 | fixed | `_GenerationFakeZhc.get_zones` deep-copies; its `post_zones` applies the body to the fake state; the test asserts the mid-case `adaptive_kp` survives and the snapshot is not aliased (H5 CAUGHT) |
+| LOW-1 | fixed | Canned zones carry distinct per-zone values for all five fields; both `*_CHANGED_FIELDS` and `_restore_preset` per zone are pinned; `_restore_readback_mismatch` now checks `_READBACK_FIELDS` (H1, H3, H8 CAUGHT) |
+| LOW-2 | fixed | `_case_post_body` strips omit-preserved fields (keeping the preset-named ones, e.g. `z{i}_hystc`) for the HP-03/HP-07 case POSTs and the restore POST; tests added |
+| INFO-1 | fixed | AX-C03 fake bumps the generation only when present; the no-generation test asserts no "restore POST error" |
+| INFO-2 | fixed | Test pins the `restore.detail` reset per call (A8 CAUGHT) |
+| INFO-3 | fixed | A failing live GET is labelled "restore live GET (no POST was sent)"; a non-int generation is noted and posted without a token |
+| INFO-4 | fixed | HP-07 comment names `_HP07_CHANGED_FIELDS` |

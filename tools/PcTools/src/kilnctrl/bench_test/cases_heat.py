@@ -965,7 +965,7 @@ def _case_hp03(ctx: dict) -> CaseResult:
         "hyst_c": hyst_c, "min_on_s": 0, "min_off_s": 0,
     }]}
     try:
-        on_off_body = zones_http_client.build_post_body(snapshot, preset)
+        on_off_body = _case_post_body(zones_http_client, snapshot, preset)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the on/off preset body: {exc}")
     result: Optional[CaseResult] = None
@@ -1110,9 +1110,20 @@ _HP07_RESTORE_ATTEMPTS = 2
 _HP07_RESTORE_RETRY_DELAY_S = 5.0
 
 
+_READBACK_FIELDS = ("zone_type", "max_temp_c", "failsafe_state", "hyst_c", "min_on_s", "min_off_s")
+
+
+def _case_post_body(zones_http_client, base: dict, preset: dict) -> str:
+    """build_post_body + strip of omit-preserved fields (k/tau/deadtime/coupling/...) so the
+    firmware keeps them bit-exact instead of taking the rounded GET print; fields the preset
+    names (e.g. z{i}_hystc) are kept (review LOW-2)."""
+    body = zones_http_client.build_post_body(base, preset)
+    return zones_http_client.strip_omit_preserved(
+        body, zones_http_client._preset_named_omit_preserved_keys(preset))
+
+
 def _restore_readback_mismatch(expected_snapshot: dict, actual_snapshot: dict) -> Optional[str]:
-    """Compares the persistent-config fields HP-03/HP-07 change (`zone_type`,
-    `max_temp_c`) between the pre-case GET snapshot and a post-restore GET.
+    """Compares the persistent-config fields HP-03/HP-07 change (`_READBACK_FIELDS`) between the pre-case GET snapshot and a post-restore GET.
     Returns None when every zone matches, else one line naming the first
     mismatch. Only fields present in BOTH snapshots are compared, so an
     older firmware that omits one never trips this."""
@@ -1122,7 +1133,7 @@ def _restore_readback_mismatch(expected_snapshot: dict, actual_snapshot: dict) -
         if idx is None or idx not in actual_by_idx:
             continue
         actual = actual_by_idx[idx]
-        for key in ("zone_type", "max_temp_c"):
+        for key in _READBACK_FIELDS:
             if key not in zone or key not in actual:
                 continue
             exp, act = zone[key], actual[key]
@@ -1183,7 +1194,7 @@ def _post_zones_restore(
         else:
             try:
                 restore_result = zones_http_client.post_zones(
-                    host, zones_http_client.build_post_body(fresh, restore_preset))
+                    host, _case_post_body(zones_http_client, fresh, restore_preset))
             except Exception as exc:
                 last_error = f"{type(exc).__name__}: {exc}"
             else:
@@ -1538,16 +1549,15 @@ def _case_hp07(ctx: dict) -> CaseResult:
     # SAME preset that lowers `max_temp_c` must also type `target_zone` as
     # on/off, in the same POST, as HP-03 does. `failsafe_state=False` and
     # `min_on_s`/`min_off_s`=0 avoid any on/off gating delaying the relay
-    # from following the rule immediately. The restore below POSTs the whole
-    # original snapshot (`build_post_body(snapshot, {})`), which already puts
-    # `zone_type` (and these other fields) back -- no separate restore logic
-    # is needed for them.
+    # from following the rule immediately. The restore below overlays
+    # `_HP07_CHANGED_FIELDS` (pre-case values) on a FRESH GET; a field added to
+    # the preset above must also be added to that list.
     preset = {"zones": [{
         "index": target_zone, "max_temp_c": limit_c, "zone_type": 1,
         "failsafe_state": False, "min_on_s": 0, "min_off_s": 0,
     }]}
     try:
-        limited_body = zones_http_client.build_post_body(snapshot, preset)
+        limited_body = _case_post_body(zones_http_client, snapshot, preset)
     except Exception as exc:
         return CaseResult(Verdict.FAIL, reason=f"could not build the lowered-limit preset body: {exc}")
 

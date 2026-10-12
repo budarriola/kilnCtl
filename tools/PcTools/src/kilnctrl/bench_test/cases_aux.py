@@ -471,22 +471,29 @@ def _default_zone_mask_fns(ctx: dict):
         restored (the error is noted in restore.detail)."""
         restore.detail = ""
         err = None
+        phase = "restore POST"
         try:
             # Every commit bumps the generation, so the snapshot's expected_generation is stale by now
             # (409 zones_config_stale, nothing written): take the live one just before the POST.
+            phase = "restore live GET (no POST was sent)"
             live = zhc.get_zones(host)
-            if live.get("generation") is None:
+            phase = "restore POST"
+            gen = live.get("generation")
+            if gen is not None and (not isinstance(gen, int) or isinstance(gen, bool)):
+                restore.detail = f"live GET generation {gen!r} is not an int: posted without expected_generation; "
+                base = {k: v for k, v in snapshot.items() if k != "generation"}
+            elif gen is None:
                 # Older firmware without the lost-update token: post without one (INFO-2).
                 restore.detail = "live GET has no generation (older firmware): posted without expected_generation; "
                 base = {k: v for k, v in snapshot.items() if k != "generation"}
             else:
-                base = dict(snapshot, generation=live.get("generation"))
+                base = dict(snapshot, generation=gen)
             body = zhc.build_post_body(base, {})
             # omit-preserved fields stay out of the body so the firmware keeps them bit-exact (MED-1)
             zhc.post_zones(host, zhc.strip_omit_preserved(body))
         except Exception as e:  # noqa: BLE001
             err = e
-        err_note = f"restore POST error ({str(err)[:80]}); " if err is not None else ""
+        err_note = f"{phase} error ({str(err)[:80]}); " if err is not None else ""
         try:
             after = zhc.get_zones(host)
             ok = not _zone_collateral_diff(snapshot, after, zone, set())
@@ -494,7 +501,7 @@ def _default_zone_mask_fns(ctx: dict):
             restore.detail += f"{err_note}read-back GET failed ({str(e2)[:80]})"
             return False
         if err is not None:
-            restore.detail += f"restore POST error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
+            restore.detail += f"{phase} error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
         return ok
 
     restore.detail = ""

@@ -922,7 +922,8 @@ class AuxC03RestoreGenerationTest(unittest.TestCase):
                 raise zhc.ZonesHttpError("409 zones_config_stale")
             if "z0_relay_mask" in q:
                 state["cap"]["zones"][0]["relay_mask"] = int(q["z0_relay_mask"])
-            state["cap"]["generation"] += 1
+            if "generation" in state["cap"]:
+                state["cap"]["generation"] += 1
             if fail_post_after_commit:
                 raise zhc.ZonesHttpError("500 could not be saved to flash")
             return "ok"
@@ -999,6 +1000,43 @@ class AuxC03RestoreGenerationTest(unittest.TestCase):
         self.assertTrue(restore())
         self.assertNotIn("expected_generation", state["posts"][-1])
         self.assertIn("no generation", restore.detail)
+        # INFO-1: a clean older-firmware POST, not the POST-error path
+        self.assertNotIn("restore POST error", restore.detail)
+
+    def test_detail_is_reset_on_each_call(self):
+        """INFO-2: a retry's detail must not carry the first attempt's text."""
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        state, (_post, restore) = self._board()
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        with um.patch.object(zhc, "post_zones", side_effect=zhc.ZonesHttpError("first-attempt-boom")):
+            self.assertFalse(restore())
+        self.assertIn("first-attempt-boom", restore.detail)
+        self.assertTrue(restore())
+        self.assertNotIn("first-attempt-boom", restore.detail)
+        self.assertEqual(restore.detail, "")
+
+    def test_live_get_raising_says_no_post_sent(self):
+        """INFO-3: nothing was posted when the live GET itself fails."""
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        state, (_post, restore) = self._board()
+        with um.patch.object(zhc, "get_zones", side_effect=OSError("down")):
+            self.assertFalse(restore())
+        self.assertIn("no POST was sent", restore.detail)
+        self.assertNotIn("restore POST error", restore.detail)
+        self.assertEqual(state["posts"], [])
+
+    def test_non_int_generation_is_noted_and_posted_without_token(self):
+        """INFO-3: a present-but-not-int generation is noted, never pinned."""
+        state, (_post, restore) = self._board()
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        state["cap"]["generation"] = "7"
+        restore()
+        self.assertNotIn("expected_generation", state["posts"][-1])
+        self.assertIn("not an int", restore.detail)
 
     def test_2xx_message_includes_restore_detail(self):
         def rfn():
