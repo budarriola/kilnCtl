@@ -594,8 +594,10 @@ function isZoneCommissioned(zone) {
   return !!zone && zone.max_temp_c !== 0 && zone.max_ramp_c_per_hr !== 0;
 }
 
+function kgR6(v) { if (v === undefined || v === null || v === '') return ''; var n = Number(v); return isFinite(n) ? parseFloat(n.toPrecision(6)) : ''; }
+
 function formatZoneLimitC(v) {
-  return (v === 0) ? 'NOT SET' : (v + '°C');
+  return (v === 0) ? 'NOT SET' : (kgR6(v) + '°C');
 }
 
 // Step 1 (network/time/units) commit-time validator. Mirrors, at the
@@ -910,7 +912,7 @@ function validateStep6(zones, absMaxTempC) {
       }
     }
     if (typeof absMaxTempC === 'number' && z.max_temp_c > 0 && z.max_temp_c > absMaxTempC) {
-      errors.push('Zone ' + (i + 1) + ' max temp (' + z.max_temp_c + ' °C) exceeds the safety ' +
+      errors.push('Zone ' + (i + 1) + ' max temp (' + kgR6(z.max_temp_c) + ' °C) exceeds the safety ' +
         'processor\'s abs_max_temp_c ceiling (' + absMaxTempC + ' °C). The Pico\'s ceiling is a ' +
         'second set of eyes and must never be tighter than the ESP\'s -- lower this zone\'s max temp, or ' +
         'raise abs_max_temp_c in step 7 first. Refused, not clamped.');
@@ -2137,7 +2139,7 @@ function step3ZoneRowHtml(i, z) {
     '<div class="wfield"><label>Thermocouple type</label><select class="s3type" data-zone="' + i + '">' +
     tcTypeOptionsHtml(z.tc_type) + '</select></div>' +
     '<div class="wfield"><label>Calibration offset (&deg;C)</label>' +
-    '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '" value="' + z.cal_offset_c + '"></div>' +
+    '<input type="number" step="0.1" class="s3cal" data-zone="' + i + '" value="' + kgR6(z.cal_offset_c) + '"></div>' +
     '<p class="hint">Verify: <span class="s3verify" data-zone="' + i + '">not yet checked</span></p></div>';
 }
 
@@ -2580,14 +2582,14 @@ function renderStep5() {
 function step6ZoneRowHtml(i, z) {
   var rampField = (z.zone_type === 1) ? '' :
     '<div class="wfield"><label>Max ramp rate (&deg;C/hr) -- required for a heater zone, 0 = NOT SET</label>' +
-    '<input type="number" step="1" class="s6ramp" data-zone="' + i + '" value="' + (z.max_ramp_c_per_hr || 0) + '"></div>';
+    '<input type="number" step="1" class="s6ramp" data-zone="' + i + '" value="' + kgR6(z.max_ramp_c_per_hr || 0) + '"></div>';
   return '<div class="zonecard" data-zone="' + i + '">' +
     '<h4>Zone ' + (i + 1) + (z.name ? ' -- ' + window.kcEscapeHtml(z.name) : '') + '</h4>' +
     '<div class="wfield"><label>Max temp (&deg;C) -- required, hard safety trip, no debounce, 0 = NOT SET</label>' +
-    '<input type="number" step="1" class="s6maxtemp" data-zone="' + i + '" value="' + (z.max_temp_c || 0) + '"></div>' +
+    '<input type="number" step="1" class="s6maxtemp" data-zone="' + i + '" value="' + kgR6(z.max_temp_c || 0) + '"></div>' +
     rampField +
     '<div class="wfield"><label>Min temp (&deg;C) -- below this reads as a broken/disconnected sensor</label>' +
-    '<input type="number" step="1" class="s6mintemp" data-zone="' + i + '" value="' + z.min_temp_c + '"></div>' +
+    '<input type="number" step="1" class="s6mintemp" data-zone="' + i + '" value="' + kgR6(z.min_temp_c) + '"></div>' +
     '<p class="hint">Currently stored: max temp ' + formatZoneLimitC(z.max_temp_c) + ', max ramp ' +
     formatZoneLimitC(z.max_ramp_c_per_hr) + (z.max_ramp_c_per_hr ? '/hr' : '') + '.</p></div>';
 }
@@ -2652,9 +2654,9 @@ function renderStep6() {
         var card = el.querySelector('.zonecard[data-zone="' + i + '"]');
         var z = zones[i] || {};
         var maxTempInput = card.querySelector('.s6maxtemp');
-        if (maxTempInput) maxTempInput.value = z.max_temp_c || 0;
+        if (maxTempInput) maxTempInput.value = kgR6(z.max_temp_c || 0);
         var rampInput = card.querySelector('.s6ramp');
-        if (rampInput) rampInput.value = z.max_ramp_c_per_hr || 0;
+        if (rampInput) rampInput.value = kgR6(z.max_ramp_c_per_hr || 0);
       }
     }
 

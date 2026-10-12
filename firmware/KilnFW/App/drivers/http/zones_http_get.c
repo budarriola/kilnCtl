@@ -90,7 +90,8 @@ esp_err_t zones_get_handler(httpd_req_t *req)
                       * "fuzzy_model_valid":true, (25 bytes) x
                       * MAX31856_CHANNEL_COUNT (3) = 75 bytes, spent out of
                       * the 854-byte headroom the zones_diag split (below)
-                      * recovered, leaving 779 -- confirmed by
+                      * recovered, leaving 779 on paper; re-measured 475 bytes
+                      * on 2026-10-12 (6885 of 7360 used) -- confirmed by
                       * test_zones_get_handler_max_width_response_fits_
                       * json_cap().
                       * STILL 7360 as of the 2026-09-14 zones_diag

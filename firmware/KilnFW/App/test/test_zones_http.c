@@ -7621,19 +7621,19 @@ static void test_zones_get_round_trip_precision_fields(void)
     memset(&s_zones.cfg, 0, sizeof(s_zones.cfg));
     s_zones.cfg.thermo_count = 1;
     zone_cfg_t *z = &s_zones.cfg.zones[0];
-    z->cal_offset_c = 0.1234567f;
-    z->max_ramp_c_per_hr = 123.456789f;
+    z->cal_offset_c = 0.100000024f;
+    z->max_ramp_c_per_hr = 123.400024f;
     z->sanity_rate_c_per_min = 0.00031f;
-    z->max_temp_c = 1234.5678f;
-    z->min_temp_c = -12.3456f;
+    z->max_temp_c = 1000.00006f;
+    z->min_temp_c = -12.3000145f;
     httpd_req_t req;
     memset(&req, 0, sizeof(req));
     s_last_resp_body[0] = '\0';
     TEST_CHECK(zones_get_handler(&req) == ESP_OK, "GET ok");
     const struct { const char *key; float want; } f[] = {
-        {"\"cal_offset_c\":", 0.1234567f}, {"\"max_ramp_c_per_hr\":", 123.456789f},
-        {"\"sanity_rate_c_per_min\":", 0.00031f}, {"\"max_temp_c\":", 1234.5678f},
-        {"\"min_temp_c\":", -12.3456f}};
+        {"\"cal_offset_c\":", 0.100000024f}, {"\"max_ramp_c_per_hr\":", 123.400024f},
+        {"\"sanity_rate_c_per_min\":", 0.00031f}, {"\"max_temp_c\":", 1000.00006f},
+        {"\"min_temp_c\":", -12.3000145f}};
     for (size_t k = 0; k < sizeof(f) / sizeof(f[0]); k++) {
         const char *at = strstr(s_last_resp_body, f[k].key);
         TEST_CHECK(at != NULL, "key present");
@@ -7816,7 +7816,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
      * which recovered headroom to 854 bytes. `fuzzy_model_valid` (GAP 2,
      * docs/audits/observability_gaps_closed_2026-09-14.md) then spent 75 of
      * those bytes (25 bytes/zone x MAX31856_CHANNEL_COUNT=3 for
-     * `"fuzzy_model_valid":true,`), leaving 779 bytes, confirmed by this
+     * `"fuzzy_model_valid":true,`), leaving 475 bytes (re-measured 2026-10-12; the 779 figure was stale), confirmed by this
      * test. The buffer must still NOT simply be enlarged (this repo has two
      * documented panics from oversized httpd-worker stack locals and a
      * standing rule against growing httpd buffers) -- read the plan and the
@@ -7826,7 +7826,7 @@ static void test_zones_get_handler_max_width_response_fits_json_cap(void)
     snprintf(headroom_msg, sizeof(headroom_msg),
              "max-width GET /api/zones must fit inside json_cap without hitting the "
              "handler's own truncation path (rendered %zu bytes; json_cap is %zu bytes; "
-             "measured headroom after fuzzy_model_valid (2026-09-14) was 779 bytes; this "
+             "measured headroom after fuzzy_model_valid (2026-09-14) was 475 bytes (re-measured 2026-10-12); this "
              "attempt %s). "
              "Do NOT enlarge json_cap (two documented httpd-worker-stack-local panics + a "
              "standing rule against growing httpd buffers) -- see "
