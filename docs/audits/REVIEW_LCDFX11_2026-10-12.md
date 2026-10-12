@@ -32,6 +32,8 @@ The evidence rows are truthful.
 ## Findings
 
 ### MED-1: renaming the fetch local turns every L-secret token rule off
+
+**Status: Fixed (lcdfx12): the fetch local is derived from the single `wifi_prov_get_ap_password()` assignment (fail loud otherwise); B4 CAUGHT.**
 Location: `tools/check_lcd_admin_gates.ps1:530-541`.
 
 - Every L-secret rule keys on the identifier `ap_password`: the masked-branch token list at line 531 and the pre-gate rule at lines 538-541.
@@ -46,6 +48,8 @@ Fix: key the rules on whatever local the single `wifi_prov_get_ap_password()` re
 3. Substitute that name into lines 531 and 539-541.
 
 ### MED-2: a conditional return satisfies "masked block ends with return;"
+
+**Status: Fixed (lcdfx12): the masked block must end with a bare `return;` statement; B3 and an `else return` variant CAUGHT.**
 Location: `tools/check_lcd_admin_gates.ps1:533`.
 
 - Mutation B3 replaced the masked block's final `return;` with `if (!ap_password[0]) return;`.
@@ -58,6 +62,8 @@ Fix:
 - Alternatively, forbid `if` and `?` inside the masked block entirely. It holds only label writes today.
 
 ### LOW-1: stripping `ap_password[0]` also hides `&ap_password[0]`
+
+**Status: Fixed (lcdfx12): only emptiness tests of the local are exempt, never `&X[0]` or a value use; B1, B2 CAUGHT.**
 Location: `tools/check_lcd_admin_gates.ps1:530` and `:540`.
 
 Both rules delete every `ap_password[0]` before scanning.
@@ -72,6 +78,8 @@ Both put the full password on screen for a USER. This needs a deliberate spellin
 Fix: strip only the truth-test form. Use a negative lookbehind for `&`, and require a following `?`, `)` or `&&`/`||`. Better, apply the MED-1 local-name approach and allow `X[0]` only in conditional position.
 
 ### LOW-2: one symbol per section hides a second global in the gate's section
+
+**Status: Fixed (lcdfx12): `parse_syms` keeps every symbol; a section shared by several symbols in a UI object is unattributable and fails (non-UI objects keep first-symbol attribution: aliases and `$part$0` clones share legitimately). T5 now FAILS; case P covers it.**
 Location: `tools/check_lcd_sink_callgraph.py:45`, `parse_syms` with `setdefault`.
 
 - Experiment T5 compiled a replacement `ui_page_safety.c` with `-fno-toplevel-reorder`. In it, `btn_clicked_cb` and a global `evil_entry` share the section `.text.btn_clicked_cb`, with `btn_clicked_cb` first.
@@ -83,6 +91,8 @@ Location: `tools/check_lcd_sink_callgraph.py:45`, `parse_syms` with `setdefault`
 Fix: when a code section holds more than one `F` symbol, either fail it as unattributable or split it by symbol value against the relocation offsets.
 
 ### LOW-3: two pragma spellings slip past L-shadow
+
+**Status: Fixed (lcdfx12): line splices are joined, any `_Pragma` is refused, and App headers included by drivers/ui sources are scanned; B5, B6, B8, B9 CAUGHT. Gap: headers outside App (ESP-IDF, LVGL) are not scanned.**
 Location: `tools/check_lcd_admin_gates.ps1:518`.
 
 | Mutation | Spelling | Result |
@@ -103,6 +113,8 @@ Fix:
 Scope gap, not mutated: the scan covers only `drivers/ui/*.{c,h}` (`$uiAll`, non-recursive). A pragma or weak redeclaration in a non-UI header that a UI file includes is not seen.
 
 ### LOW-4: the gate-references-sink check has no negative test
+
+**Status: Fixed (lcdfx12): case O added; S8 CAUGHT.**
 Location: `tools/check_lcd_sink_callgraph.py:116-118`.
 
 - Mutation S8 replaced its `fails.append(...)` with `pass`.
