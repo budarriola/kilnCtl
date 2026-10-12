@@ -17,7 +17,13 @@ $admin = 'LCD_PIN_ROLE_ADMIN'
 # that must match the body, label, and optionally an apply identifier whose non-definition occurrences in
 # the file must equal the expected count (a direct, ungated call of the apply adds an occurrence).
 # To change a gated call site: edit its row here (function / apply name / count) in the same change.
-function GateRx([string]$prompt, [string]$role, [string]$apply) { 'ui_lcd_lock_run_gated\("' + $prompt + '",\s*' + $role + ',\s*' + $apply + ',' }
+# LCDFX8 LOW-1: a case body is straight-line statements then an UNCONDITIONAL return (no if/?:/loops/jumps before it).
+$uncond = '(?:(?!\bif\b|\bwhile\b|\bfor\b|\bswitch\b|\bgoto\b|\breturn\b|\?)[^{}])*?\breturn\s*;'
+# Bare-gate callbacks allowed to have code after the gate statement (none today; add with a reason).
+# Keyed by row label. apply_cb carries two gates (apply, then decide), so each row sees the other gate.
+$afterGateOk = @('L11 live-edit decide')
+$preCallOk = @{ 'L11 touch cal nav' = 'kiln_ui_show'; 'L11 live-edit apply' = 'ui_lcd_lock_run_gated' }   # call names allowed before this row's gate
+function GateRx([string]$prompt, [string]$role, [string]$apply) { 'ui_lcd_lock_run_gated\(\s*"' + $prompt + '",\s*' + $role + ',\s*' + $apply + ',' }
 $rules = @(
     @('ui_page_network_manage.c', 'connect_submit_cb', (GateRx 'Admin PIN to add network' $admin 'connect_submit_apply'), 'L1 connect/add', 'connect_submit_apply', 1),
     @('ui_page_network_manage.c', 'scan_row_clicked_cb', (GateRx 'Admin PIN to add network' $admin 'scan_row_open_apply'), 'L1 scan row', 'scan_row_open_apply', 1),
@@ -46,7 +52,7 @@ $rules = @(
     # clear_action's verdict is fed the live ADMIN role, NEEDS_ADMIN/NOT_TRIPPED return before the send, and the send
     # (dashboard_safety_clear_trip) appears once, after the switch. Other files in drivers/ui may not call it (below).
     @('ui_page_safety.c', 'btn_clicked_cb', ('^\s*\(void\)\s*e\s*;\s*' + (GateRx 'Enter admin PIN to clear trip' $admin 'clear_action') + '\s*NULL\)\s*;\s*$'), 'D2 trip clear gate', 'clear_action', 1),
-    @('ui_page_safety.c', 'clear_action', ('^\s*\(void\)\s*user\s*;\s*switch\s*\(ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\)\s*\{\s*case\s+UI_SAFETY_CLEAR_NOT_TRIPPED\s*:[^}]*?\breturn\s*;\s*case\s+UI_SAFETY_CLEAR_NEEDS_ADMIN\s*:[^}]*?\breturn\s*;\s*case\s+UI_SAFETY_CLEAR_SEND\s*:\s*default\s*:\s*break\s*;\s*\}[\s\S]*dashboard_safety_clear_trip\('), 'D2 trip clear re-check', 'dashboard_safety_clear_trip', 1)
+    @('ui_page_safety.c', 'clear_action', ('^\s*\(void\)\s*user\s*;\s*switch\s*\(ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\)\s*\{\s*case\s+UI_SAFETY_CLEAR_NOT_TRIPPED\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_NEEDS_ADMIN\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_SEND\s*:\s*default\s*:\s*break\s*;\s*\}[\s\S]*dashboard_safety_clear_trip\('), 'D2 trip clear re-check', 'dashboard_safety_clear_trip', 1)
 )
 
 # Review LCDFX2/DEVBREAK INFO: rules match code only. A gate call left inside a comment must not
@@ -92,6 +98,8 @@ function Get-CodeFromText([string]$raw, [string]$name) {
     $t = $t.Replace("\`n", '')
     $t = [regex]::Replace($t, '(?m)^[ \t]*(#|%:)[ \t]*(warning|error|pragma|line)\b[^\n]*', '')
     $t = Remove-CComments $t
+    # LCDFX8 HIGH-1: attributes are removed here, so Count-Uses needs no `))` lookbehind (which hid every use after `if (f(x))`).
+    $t = [regex]::Replace($t, '__attribute__\s*\(\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\)', ' ')
     $bl = Blank-Strings $t
     $ms = @([regex]::Matches($bl, '\bESP_LOG[IWEDVN]\s*\([^;]*\)\s*;'))
     for ($k = $ms.Count - 1; $k -ge 0; $k--) {
@@ -119,7 +127,7 @@ function Get-BraceBody([string]$code, [int]$open) {
 # Definitions only (a type token at line start, then NAME(...) {), so prototypes and calls never count.
 function Get-FuncDefs([string]$code, [string]$name) {
     $at = '(?:__attribute__\s*\(\([^;{}]*?\)\)\s*)*'   # P6: attributes before/after the return type
-    @([regex]::Matches($code, '(?m)^(?:static\s+)?(?:inline\s+)?' + $at + '\w+[\s\*]+' + $at + [regex]::Escape($name) + '\s*\([^;{}]*\)\s*\{'))
+    @([regex]::Matches($code, '(?m)^static\s+(?:inline\s+)?' + $at + '\w+[\s\*]+' + $at + [regex]::Escape($name) + '\s*\([^;{}]*\)\s*\{'))
 }
 function Get-FuncBody([string]$code, [string]$name) {
     $defs = Get-FuncDefs $code $name
@@ -133,7 +141,7 @@ function Get-FuncBody([string]$code, [string]$name) {
 $script:blankCache = @{}
 function Count-Uses([string]$code, [string]$name) {
     if (-not $script:blankCache.ContainsKey($code)) { $script:blankCache[$code] = Blank-Strings $code }
-    @([regex]::Matches($script:blankCache[$code], '(?<!void\s+)(?<!\)\)\s+)\b' + [regex]::Escape($name) + '\b')).Count }
+    @([regex]::Matches($script:blankCache[$code], '(?<!void\s+)\b' + [regex]::Escape($name) + '\b')).Count }
 
 $fail = 0
 $codeCache = @{}
@@ -186,22 +194,30 @@ foreach ($r in $rules) {
     if (-not (Test-Path $path)) { Write-Host "FAIL: $($r[3]): missing $($r[0])"; $fail++; continue }
     $txt = Get-CachedCode $r[0]
     $fb = Get-FuncBody $txt $r[1]
-    if (-not $fb.ok) { Write-Host "FAIL: $($r[3]): $($r[0]) has $($fb.n) definitions of $($r[1])() (expected exactly 1; if you renamed it, edit its row in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
-    if ($fb.body -notmatch $r[2]) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) lacks the gate matching /$($r[2])/"; $fail++ }
+    if (-not $fb.ok) { Write-Host "FAIL: $($r[3]): $($r[0]) has $($fb.n) static definitions of $($r[1])() (expected exactly 1, and it must be `static` so no other file can call it; if you renamed it, edit its row in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
+    if ($fb.body -notmatch $r[2]) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) lacks the gate matching /$($r[2])/ (if you only reformatted the code, update this row's regex in tools/check_lcd_admin_gates.ps1)"; $fail++ }
     elseif ($r[2].StartsWith('ui_lcd_lock_run_gated')) {
         # MED-1 (X13): a bare gate row is anchored to the function body: nothing before the gate may return/jump
         # (a call plus `return;` ahead of an intact gate leaves the gate as dead code) or call anything.
-        $pre = $fb.body.Substring(0, [regex]::Match($fb.body, $r[2]).Index)
+        $gm = [regex]::Match($fb.body, $r[2])
+        $pre = $fb.body.Substring(0, $gm.Index)
+        # LCDFX8 MED-2: the call allow-list runs over ALL pre-gate text, including guard conditions and braced
+        # blocks, BEFORE they are stripped for the return/goto test.
+        $callRx = '\b(?!if\b|while\b|for\b|switch\b|sizeof\b|snprintf\b|lv_event_get_\w+|touch_cal_store_is_calibrated\b)\w+\s*\('
+        $preChk = if ($preCallOk.ContainsKey($r[3])) { [regex]::Replace($pre, '\b' + $preCallOk[$r[3]] + '\s*\(', '(') } else { $pre }
+        if ($preChk -match $callRx) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) calls '$($Matches[0])' before the gate (also inside guards/blocks); the gate must be the first call (edit the row if this is intended)"; $fail++ }
+        # LCDFX8 MED-1: the gate statement ends the function body unless the row is a known exception.
+        if ($r[3] -notin $afterGateOk -and $fb.body.Substring($gm.Index + $gm.Length) -notmatch '^[^;]*;\s*$') { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) has code after the gate statement (the gate must be the last statement; if intended add the function to `$afterGateOk in tools/check_lcd_admin_gates.ps1)"; $fail++ }
         $pre = [regex]::Replace($pre, '\bif\s*\([^;{}]*\)\s*return\s*;', ' ')   # single-statement refusal guards are fine
         while ($pre -match '\{[^{}]*\}') { $pre = [regex]::Replace($pre, '\{[^{}]*\}', ' ') }   # nested blocks (early-out branches) are fine
-        if ($pre -match '\b(return|goto)\b' -or $pre -match '\b(?!if\b|while\b|for\b|switch\b|sizeof\b|snprintf\b|lv_event_get_\w+|touch_cal_store_is_calibrated\b)\w+\s*\(') { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) runs code before the gate at top level that returns or calls something ('$($pre.Trim())'); the gate must be the first call (edit the row if this is intended)"; $fail++ }
+        if ($pre -match '\b(return|goto)\b') { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) runs code before the gate at top level that returns or calls something ('$($pre.Trim())'); the gate must be the first call (edit the row if this is intended)"; $fail++ }
     }
     # MED-1 (X14): a gated event callback must be registered, and ONLY through lv_obj_add_event_cb (no ungated twin
     # registered instead, no `(void)cb;` dummy reference keeping the dead gated copy alive).
     if ($r[1] -match '_cb$' -and $r[1] -notmatch '_unlocked_cb$|^refresh_cb$|^open_decide_gated_cb$|^touch_cal_nav_cb$' -and -not $regChecked.ContainsKey($r[0] + ':' + $r[1])) {
         $regChecked[$r[0] + ':' + $r[1]] = 1
         $nu = Count-Uses $txt $r[1]
-        $nr = @([regex]::Matches($txt, '(?:\blv_obj_add_event_cb\s*\(\s*[^,;()]+,|\.on_confirm\s*=)\s*' + [regex]::Escape($r[1]) + '\s*,')).Count
+        $nr = @([regex]::Matches($txt, '(?:\blv_obj_add_event_cb\s*\(\s*(?:[^,;()]|\([^()]*\))+,|\.on_confirm\s*=)\s*' + [regex]::Escape($r[1]) + '\s*,')).Count
         if ($nr -lt 1 -or $nr -ne $nu) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) has $nu use(s) outside its definition but $nr lv_obj_add_event_cb registration(s); the gated callback must be what the widget registers, and nothing else may reference it"; $fail++ }
     }
     if ($r[4]) {
@@ -305,7 +321,7 @@ foreach ($f in $appFiles) {
         $sb = @([regex]::Matches($code, '\bui_page_safety_build\b')).Count
         if ($sb -gt 0 -and $nm -ne 'kiln_ui.c') { Write-Host "FAIL: L4: $nm references ui_page_safety_build (only kiln_ui.c's single kiln_ui_register_page(`"safety`", ...) may; a second registration is a second name for the Safety page)"; $fail++ }
         if ($nm -eq 'kiln_ui.c') { $safetyBuildRefs = $sb; if ($sb -ne 1 -or $code -notmatch 'kiln_ui_register_page\(\s*"safety"\s*,\s*ui_page_safety_build\s*\)') { Write-Host "FAIL: L4: kiln_ui.c must reference ui_page_safety_build exactly once, as kiln_ui_register_page(`"safety`", ui_page_safety_build) (found $sb)"; $fail++ } }
-        if ($nm -ne 'ui_page_safety.c' -and $f.FullName.StartsWith($UiDir) -and $code -match '\b\w*clear_trip\w*\s*\(') { Write-Host "FAIL: L4: $nm calls a clear_trip function '$($Matches[0])' (the LCD trip clear is only ui_page_safety.c's gated clear_action; non-UI callers belong in http/ or bridge code, not under App/drivers/ui)"; $fail++ }
+        if ($nm -ne 'ui_page_safety.c' -and $f.FullName.StartsWith($UiDir) -and $code -match '\b(dashboard_safety_clear_trip|safety_link_send_clear_trip)\s*\(') { Write-Host "FAIL: L4: $nm calls a clear_trip function '$($Matches[0])' (the LCD trip clear is only ui_page_safety.c's gated clear_action; non-UI callers belong in http/ or bridge code, not under App/drivers/ui)"; $fail++ }
     }
     if ($f.FullName.StartsWith($UiDir) -and $code -match '##') { Write-Host "FAIL: L4: $nm uses the ## token-paste operator (it can build an opener name this check cannot see)"; $fail++ }
     foreach ($mm in [regex]::Matches($code, 'kiln_ui_show\s*\(\s*"(' + $userPages + ')"')) { $k = $nm + ':' + $mm.Groups[1].Value; $seen[$k] = 1 + [int]$seen[$k] }
@@ -324,6 +340,39 @@ foreach ($k in $seen.Keys) { if ($seen[$k] -ne [int]$showAllow[$k]) { Write-Host
 foreach ($k in $showAllow.Keys) { if (-not $seen.ContainsKey($k)) { Write-Host "FAIL: L4: allowlisted opener $k no longer present (update the allowlist)"; $fail++ } }
 
 foreach ($lf in ($script:logFails | Select-Object -Unique)) { Write-Host "FAIL: L-log: $lf"; $fail++ }
+
+# REVIEW_LCDFX7 MED-1: sink inventory. The mutators behind the ADMIN gates may be called from exactly one place each
+# under drivers/ui (file : sink -> function whose body holds the single call), so a new helper, callback or second call
+# in another function cannot reach them without passing a gate. To add a legitimate caller, edit this table.
+$sinkAllow = @(
+    @('ui_page_temperature.c',     'dashboard_set_relay',      'relay_toggle_apply'),
+    @('ui_page_network_manage.c',  'wifi_prov_forget_network', 'forget_worker_task'),
+    @('ui_page_config.c',          'unit_pref_set\w*',         'units_toggle_apply'),
+    @('ui_page_touch_cal.c',       'touch_cal_store_save',     'finish_calibration'),
+    @('ui_page_safety.c',          'dashboard_safety_clear_trip', 'clear_action')
+)
+foreach ($uf in @(Get-ChildItem -Path $UiDir -Filter *.c -File)) {
+    $ucode = Get-CachedCode $uf.Name
+    $ublank = Blank-Strings $ucode
+    foreach ($sinkName in 'dashboard_set_relay', 'wifi_prov_forget_network', 'unit_pref_set\w*', 'touch_cal_store_save', 'dashboard_safety_clear_trip', 'safety_link_send_clear_trip') {
+        $calls = @([regex]::Matches($ublank, '\b' + $sinkName + '\s*\('))
+        if ($calls.Count -eq 0) { continue }
+        $allow = @($sinkAllow | Where-Object { $_[0] -eq $uf.Name -and $_[1] -eq $sinkName })
+        if ($allow.Count -ne 1 -or $calls.Count -ne 1) { Write-Host "FAIL: L-sink: $($uf.Name) calls $sinkName( $($calls.Count) time(s) (allowed: $(if ($allow.Count) { 'exactly 1 in ' + $allow[0][2] } else { 'none' }); a new caller of a gated mutator needs an ADMIN gate and a row in `$sinkAllow in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
+        $sfb = Get-FuncBody $ucode $allow[0][2]
+        if (-not $sfb.ok -or (Blank-Strings $sfb.body) -notmatch ('\b' + $sinkName + '\s*\(')) { Write-Host "FAIL: L-sink: the single $sinkName( call in $($uf.Name) is not inside $($allow[0][2])()"; $fail++ }
+    }
+}
+foreach ($sk in $sinkAllow) {
+    if ($sk[1] -match '\w') { continue }
+    if (-not ((Blank-Strings (Get-CachedCode $sk[0])) -match ('\b' + $sk[1] + '\s*\('))) { Write-Host "FAIL: L-sink: allowlisted $($sk[0]):$($sk[1]) no longer present (update `$sinkAllow)"; $fail++ }
+}
+# Use counts of the private appliers the gates reach (definition excluded): delete_do/crash_ack_do are reached from the
+# ungated-role branch of the click handler and from the PIN-success callback, forget_worker_task only from the task create.
+foreach ($uc in @(@('ui_page_profile_picker.c', 'delete_do', 2), @('ui_page_diagnostics.c', 'crash_ack_do', 2), @('ui_page_network_manage.c', 'forget_worker_task', 1))) {
+    $un = Count-Uses (Get-CachedCode $uc[0]) $uc[1]
+    if ($un -ne $uc[2]) { Write-Host "FAIL: L-sink: $($uc[1]) is referenced $un time(s) in $($uc[0]) outside its definition (expected $($uc[2]); a third call/reference bypasses the gate rows above)"; $fail++ }
+}
 
 # L9: lock init must precede the touch-cal early return.
 $kui = Get-CachedCode "kiln_ui.c"
