@@ -88,7 +88,7 @@ LOW-2 below.
 
 ## Findings
 
-### LOW-1: the ARMED-suffix truncation test no longer reaches truncation -- FIXED (zprecfx6)
+### LOW-1: the ARMED-suffix truncation test no longer reaches truncation -- RESOLVED AS UNREACHABLE (zprecfx6): worst-case reason through the sync seam is 82 chars < head_cap 91; version-mismatch/unknown reasons cannot be produced there (ESP fields always known, shared format_version). Clamp is defensive; test comment corrected, suffix-in-full still pinned.
 
 `firmware/KilnFW/App/test/test_safety_ceiling_sync_divergence.c:596-640`
 (comment at :605-611, value at :616).

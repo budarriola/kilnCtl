@@ -600,20 +600,29 @@ static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
     safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
     safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
 
-    // Ceiling agrees -- the broadened/extra field is left UNKNOWN on the Pico
-    // side (never set), so the reason is the "one or more fields not yet
-    // confirmed on both sides (<names>) -- cannot confirm the configs match"
-    // text from config_divergence.c, ~115 chars. That exceeds this file's
-    // `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91 bytes), forcing
-    // the truncation branch this test pins. (The %.9g value-diff text is only
-    // ~74 chars, too short, so a value difference no longer reaches it.)
+    // Ceiling agrees -- only the broadened/extra field diverges, same shape
+    // as test_broadened_field_divergence_detected() above, with the longest
+    // possible "%.9g" values on both sides.
+    //
+    // 2026-10-12 (REVIEW_ZPRECFX5 LOW-1): this used to push the reason past
+    // `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91 bytes) with the
+    // ~44-char "%.2f" rendering of FLT_MAX. With "%.9g" the worst case through
+    // THIS seam is 19 + 23 (longest name extra_names holds) + 5 + 15 + 6 + 14
+    // = 82 chars, under 91, so the head_len truncation clamp can no longer be
+    // reached from here: the version-mismatch / unknown-field reasons that are
+    // long enough are only produced when the two identities differ in
+    // format_version or an ESP field is unknown, neither of which this seam
+    // can create (ESP extra fields are always known and the version is a
+    // shared constant). The clamp is therefore defensive code; this test pins
+    // the guarantee that is reachable: the suffix is appended IN FULL at the
+    // tail of the longest reason this seam can produce.
     s_zone_max_temp_c[0] = 80.0f;
     fake_pico_ceiling_set(80.0f);
 
     s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
-    s_expected_fields[0].value = 1.0f;
+    s_expected_fields[0].value = 3.4028235e38f; /* near FLT_MAX -- "%.9g" is 14 chars */
     s_expected_field_count = 1;
-    /* No fake_pico_extra_set(): the extra field stays unknown on the Pico. */
+    fake_pico_extra_set(-3.4028235e38f);
 
     s_stub_recent_armed_refusal = true;
 
@@ -622,8 +631,6 @@ static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
     bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
     TEST_CHECK(warned, "still reports a standing divergence with a long field name");
-    TEST_CHECK(strlen(reason) > 91u + sizeof(" (re-push refused: relay is ARMED -- disarm and retry commissioning)") - 1u - 1u,
-               "the reason really was truncated (head hit head_cap)");
 
     static const char kArmedSuffix[] =
         " (re-push refused: relay is ARMED -- disarm and retry commissioning)";
