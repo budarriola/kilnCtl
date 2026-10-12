@@ -142,3 +142,15 @@ Logs:
 
 The hide and restore 409 call sites (`profiles_edit_http.c:936`, `:957`) share an identical find string, so they
 were not mutated separately. They are covered by the same `test_profile_routes_use_profile_409_text` that caught M12.
+
+## Fixed (PROFILESFX11)
+
+Fixed in 4f9f65224 (pre-rebase SHA; see the landed SHA in the landing commit):
+
+- MED-1: `profile_post_handler` refuses a rev-unknown target before the RAM copy (same 409 profile text); its free-slot search skips rev-unknown slots.
+- INFO-2: every first-free allocation (`profiles_http_slot_used_cb`, backup pass-1 simulation, POST handler) skips rev-unknown slots.
+- LOW-1: backup import pass 1 refuses a rev-unknown target slot up front (nothing written); stale "Should not happen" comment corrected.
+- LOW-2: the seqlock test again drives a failed persist (`failing_write_fn` on an overwrite, which still changes RAM) and asserts the old capture is refused. M10 is now CAUGHT (test_profiles_http.c:2939). The rollback guard at `profiles_http.c:2077` (INFO-1/M11) is kept as defence in depth: a rev-unknown slot can no longer reach it.
+- INFO-5: duplicate `zones_config_is_undecided` declaration removed from `zones_http_internal.h`.
+
+Negtests (kilnfw-host, all compiled mutants with failing assertions): M1 post refusal off CAUGHT (test_profiles_http.c:6308-6311); M2 post free-slot skip off CAUGHT (:6330); M3 first-free callback skip off CAUGHT (:6331-6332); M4 backup precheck off CAUGHT (test_backup_import.c:3373-3376); M5 backup simulation skip off CAUGHT (:3393-3394); M10 generation rewind CAUGHT (test_profiles_http.c:2939). Full KilnFW target build passed; `check_httpd_task_stack_budget` on the resulting ELF: OK, honest headroom 1864 B (22.8%, classified LOW).
