@@ -167,3 +167,11 @@ Each run: 10 collected, 1 failed (`test_page_optional_key_regex_pinned_to_preser
 | C2 | N3 (alias splice after the call) | CAUGHT | same as C1 |
 | C3 | rename `savedZonesEditSeq` to `savedSeq` (start marker gone) | CAUGHT | `FAIL: found the Save handler fetch tail`, then SyntaxError (INFO-4) |
 | C4 | move `params = omitBlankOptionalParams(params);` above `msg.textContent = 'Saving…'` | CAUGHT | `POST body drops blank optional, keeps set value` for zones 0-2, plus two lexical asserts; `test_web_review_fixes.js` also fails |
+
+## Fix status
+
+- LOW-1 fixed: `test_host_refusal_pages.js` runs the real `blankGuardKeys`/`blankGuardLabels` on a frozen array in strict mode and asserts it is unchanged; B1 (and a `blankGuardKeys` variant) fail it.
+- LOW-2 fixed: the node test pins the `thermo_mask`/`ct_mask` pushes as bare, unconditional statements (single occurrence, preceded by a complete statement); B5 and a newline `if` variant fail it.
+- INFO-3 fixed: comment corrected; every `ZONE_OPTIONAL_KEY_RE` key must be in `FW_DROPPABLE` or `MUST_KEEP` (loud drift).
+- INFO-4 fixed: tail `new Function` is wrapped, so a failed extraction reports and the rest of the file still runs (C3 now shows the later assertions).
+- INFO-1, INFO-2, INFO-5: not fixed (deliberate-bypass class / existing split).
