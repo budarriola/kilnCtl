@@ -3021,10 +3021,11 @@ _LCD19_LOCKOUT_MARGIN_S = 1.5
 _LCD19_LOCKOUT_MAX_S = 300
 #: Progress is logged at least this often during a long lockout wait.
 _LCD19_WAIT_LOG_EVERY_S = 60.0
-# LONG RUNGS: the 60 s and 300 s rungs outlast the MCP client's 300 s idle
-# watchdog, so LCD-19 on a board whose ladder is past rung 3 must be run
-# through ``bench_test_start`` (background job + ``bench_test_job_status``),
-# never ``bench_test_run``.
+# LONG RUNGS: the 300 s rung alone outlasts the MCP client's 300 s idle
+# watchdog (the 60 s rung does not, but the wait plus the rest of the case
+# can); log.info progress lines do not keep the client alive. So LCD-19 on a
+# board whose ladder is at rung 4 should be run through ``bench_test_start``
+# (background job + ``bench_test_job_status``), not ``bench_test_run``.
 
 
 def _lcd19_sleep(ctx: dict, total_s: float, what: str) -> None:
@@ -3058,7 +3059,10 @@ def _lcd19_wake_if_blanked(ctx: dict) -> Optional[bool]:
         st = touch.get_state()
         on = _power_state_is_on(st)
         if on is None:
-            on = bool(st.screen_on)
+            so = getattr(st, "screen_on", None)
+            if so is None:
+                return None  # unreadable: never tap
+            on = bool(so)
     except Exception:
         return None
     if on:
@@ -3767,7 +3771,15 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                                     elif "OK" in names and "Wrong PIN" in names:
                                         # Dots cleared + "Wrong PIN": genuine DENIED.
                                         right_pin_started = False
+                                    elif names and "OK" not in names and "Cancel" not in names:
+                                        # MED-1: keypad closed and no Start/Cancel confirm
+                                        # followed: the right PIN did not start the firing
+                                        # (e.g. granted role below min_role). Firmware defect.
+                                        right_pin_started = False
+                                        state["right_pin_outcome"] = "closed_no_confirm"
                                     else:
+                                        # Keypad still open, dots cleared, no label (or other
+                                        # unrecognized shape): firmware always labels DENIED.
                                         state["right_pin_outcome"] = "indeterminate"
                             # LOW-A: the ladder is kept per boot and may be past rung 0; a right
                             # PIN that lands in a still-running lock is waited out once and retyped
@@ -4023,11 +4035,26 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                     result.reason = (
                         f"the keypad lockout label read {state['pin_lockout_n_out_of_range']} s, above the "
                         f"firmware ceiling of {_LCD19_LOCKOUT_MAX_S} s (misread label); not waited out")
+                elif state.get("pin_lockout") and state.get("right_pin_lockout_retry"):
+                    result.reason = (
+                        f"the right PIN was still locked out after waiting its own countdown "
+                        f"({state['right_pin_lockout_retry']} s) plus 1 s on the retry; "
+                        "wait it out and rerun")
                 elif state.get("pin_lockout"):
                     result.reason = ("the right PIN landed in a login lockout whose duration could not "
                                      "be read; wait it out and rerun")
                 elif state.get("right_pin_outcome") == "submit_not_applied":
                     result.reason = "the right PIN's OK click was reported but not applied (dots still full); rerun"
+                elif state.get("right_pin_outcome") == "indeterminate":
+                    result.reason = (
+                        "after the right PIN the keypad stayed open with cleared dots and no status "
+                        "label (firmware labels a denial), so the outcome is unknown; names seen: "
+                        + ", ".join(map(str, state.get("after_right_pin_names") or [])) + "; rerun")
+            elif result.verdict == Verdict.FAIL and state.get("right_pin_outcome") == "closed_no_confirm":
+                result.reason = (
+                    "the right PIN closed the keypad but no Start/Cancel confirm appeared, so the "
+                    "firing was not started; names seen: "
+                    + ", ".join(map(str, state.get("after_right_pin_names") or [])))
             if state.get("pin_unlock_verified"):
                 result.observed["pin_unverified"] = False
             if state.get("unverified_right_first_refused"):
