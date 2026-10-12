@@ -198,3 +198,11 @@ mutation testing does not apply to them. They are shown by repros G1 to G5:
 G1 deletes a live lock, G2 leaks silently, G3 deletes a new holder's lock
 across the retry sleep, G4 evicts a live sidecar, and G5 resurrects an
 orphan sidecar.
+
+## Fix status
+
+Fixed in buildfx7 (tools/PcTools/src/mcpkit/buildlock.py, tests in `BuildLockBuildFx7`):
+
+- LOW-1 fixed: `_try_reclaim` now deletes via `_remove_judged` (rename-aside, compare with the judged content, restore on mismatch); a retry can no longer delete a new holder's lock. Test from repro G1.
+- LOW-2 fixed: `_release` logs `LEAKED LOCK?` to stderr naming the path when the aside stays unreadable. Test from repro G2.
+- INFO-1, INFO-2, INFO-3 documented as accepted residual windows in the module docstring; INFO-5 docstring updated; INFO-4 message now says to check `build_job_status` first. INFO-6 needs nothing.
