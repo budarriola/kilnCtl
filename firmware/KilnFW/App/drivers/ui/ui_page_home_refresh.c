@@ -409,8 +409,11 @@ void ui_home_refresh_cb(lv_timer_t *timer)
         /* No recapture poll here -- see this file's header comment. It runs
          * on safety_poll_task now. */
         if (standing_diverged) {
-            char notice_buf[160];
-            snprintf(notice_buf, sizeof(notice_buf), "Config mismatch (Pico): %.130s", diverge_reason);
+            /* Whole reason (<= CONFIG_DIVERGENCE_REASON_MAX-1 = 159) after the 24-char prefix, so the
+             * ARMED hint at the tail is never cut here (the label is fixed-height, LV_LABEL_LONG_DOT:
+             * it ellipsizes inside the strip, never scrolls). */
+            char notice_buf[CONFIG_DIVERGENCE_REASON_MAX + 32];
+            snprintf(notice_buf, sizeof(notice_buf), "Config mismatch (Pico): %s", diverge_reason);
             lv_label_set_text(s_ui_home_lag_notice, notice_buf);
             lv_obj_remove_flag(s_ui_home_lag_notice, LV_OBJ_FLAG_HIDDEN);
             s_ui_home_lag_notice_ticks = ui_page_home_lag_notice_tick(st->ramp_lock_held, s_ui_home_lag_notice_ticks);

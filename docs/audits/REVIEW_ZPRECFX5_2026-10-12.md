@@ -88,7 +88,7 @@ LOW-2 below.
 
 ## Findings
 
-### LOW-1: the ARMED-suffix truncation test no longer reaches truncation
+### LOW-1: the ARMED-suffix truncation test no longer reaches truncation -- FIXED (zprecfx6)
 
 `firmware/KilnFW/App/test/test_safety_ceiling_sync_divergence.c:596-640`
 (comment at :605-611, value at :616).
@@ -106,7 +106,7 @@ needed. Only its pin is gone. The vacuity probe below, which removes
 **Fix:** drive the test with a reason that still exceeds 91 chars, such as the
 format-version-mismatch reason, and update the `%.2f` comment.
 
-### LOW-2: the Pico-side `%.9g` is not pinned
+### LOW-2: the Pico-side `%.9g` is not pinned -- FIXED (zprecfx6)
 
 `firmware/KilnFW/App/test/test_config_divergence.c:84`.
 
@@ -118,7 +118,7 @@ passes. The negtest `pico_fmt_2f` was MISSED. Only the ESP side is pinned
 **Fix:** make the Pico value need more than 2 decimals (for example Pico=1260.305,
 ESP=1260.3), or assert that the following character is a space.
 
-### LOW-3: the wizard tests do not tell `kgR6` apart from the old 0.01 slack
+### LOW-3: the wizard tests do not tell `kgR6` apart from the old 0.01 slack -- FIXED (zprecfx6)
 
 `firmware/KilnFW/App/test/test_setup_wizard.js:537-542,974-982`.
 
@@ -138,7 +138,7 @@ Two inputs do tell the old and new code apart:
 
 Not a safety issue: the firmware heals either way. But the fix's wizard half is unpinned.
 
-### INFO-1: the new header comment overstates reconcile
+### INFO-1: the new header comment overstates reconcile -- FIXED (zprecfx6)
 
 `firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.h:115-123` says
 "reconcile heals a divergence only through guard_raise()/apply_lower()".
@@ -148,7 +148,7 @@ above the zone max is healed by the next zone save, backup import or swap
 (`apply_lower`), not by reconcile. The comment should say reconcile raises and
 saves lower.
 
-### INFO-2: stale comment naming the deleted macro
+### INFO-2: stale comment naming the deleted macro -- FIXED (zprecfx6)
 
 `firmware/KilnFW/App/drivers/safety/safety_ceiling_policy.c:5-8` still says
 "SAFETY_CEILING_EPSILON_C is declared in safety_ceiling_policy.h". The macro is gone.
@@ -162,7 +162,7 @@ Step 7 also accepts an `abs_max` above the zone max. Under the always-equal rule
 that becomes a standing divergence halt, which reconcile never lowers. Only the
 next zone save heals it. This predates the commit and is noted for the owner rule.
 
-### INFO-4: LCD `%.130s` can cut the ARMED hint, and refusal text prints `%.1f`
+### INFO-4: LCD `%.130s` can cut the ARMED hint, and refusal text prints `%.1f` -- LCD part FIXED (zprecfx6); %.1f left as is
 
 `firmware/KilnFW/App/drivers/ui/ui_page_home_refresh.c:414` prints
 `"Config mismatch (Pico): %.130s"`. A realistic `%.9g` reason plus the 68-char

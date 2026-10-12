@@ -540,6 +540,9 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   assert(fracOver.valid === false, 'step6: a genuinely over fractional max (1260.5 vs 1260.3) is refused');
   const fracJustOver = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.35, max_ramp_c_per_hr: 200 }], 1260.3);
   assert(fracJustOver.valid === false, 'step6: 1260.35 vs 1260.3 (0.05 over, past kgR6) is refused -- no 0.1 slack');
+  // kgR6 vs the pre-fix 0.01 slack (REVIEW_ZPRECFX5 LOW-3): old code accepted 1260.305 <= 1260.3 + 0.01.
+  const fracSlack = ctx.validateStep6([{ zone_type: 0, max_temp_c: 1260.305, max_ramp_c_per_hr: 200 }], 1260.3);
+  assert(fracSlack.valid === false, 'step6: 1260.305 vs 1260.3 is refused (kgR6 1260.31 > 1260.3) -- no 0.01 slack');
 })();
 
 // ---- getAbsMaxTempC(): reads the Pico's abs_max_temp_c off GET
@@ -980,6 +983,10 @@ const noopFetch = makeFetch(() => ({ ok: true, status: 200, body: { items: [] } 
   const fracJustUnder = Object.assign({}, base, { absMaxTempC: 1260.25 });
   assert(ctx.validateStep7(fracJustUnder, [1260.3]).valid === false,
     'step7: 1260.25 vs zone max 1260.3 (0.05 tighter, past kgR6) is refused -- no 0.1 slack');
+
+  const fracSlack = Object.assign({}, base, { absMaxTempC: 1260.294 });
+  assert(ctx.validateStep7(fracSlack, [1260.3]).valid === false,
+    'step7: 1260.294 vs zone max 1260.3 is refused (kgR6 1260.29 < 1260.3) -- no 0.01 slack');
 
   const belowCeiling = Object.assign({}, base, { absMaxTempC: 1000 });
   const v = ctx.validateStep7(belowCeiling, [1200]);

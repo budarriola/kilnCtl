@@ -80,9 +80,14 @@ static void test_close_values_print_distinguishably(void)
     config_identity_field_t pico_f[1] = { { .name = "abs_max_temp_c", .known = true, .value = 1260.3f } };
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
     TEST_CHECK(config_divergence_check(esp_f, pico_f, 1, reason, sizeof(reason)), "a 0.005 difference diverges");
-    TEST_CHECK(strstr(reason, "ESP=1260.305") != NULL, "ESP value printed with enough decimals");
-    TEST_CHECK(strstr(reason, "Pico=1260.3") != NULL && strstr(reason, "Pico=1260.305") == NULL,
-               "Pico value printed distinctly");
+    char want[64];
+    snprintf(want, sizeof(want), "ESP=%.9g Pico=%.9g", (double)1260.305f, (double)1260.3f);
+    TEST_CHECK(strstr(reason, want) != NULL, "ESP value printed with %.9g (whole token)");
+    TEST_CHECK(config_divergence_check(pico_f, esp_f, 1, reason, sizeof(reason)), "swapped sides also diverge");
+    /* Pico text is the tail of the reason: the whole token ends at the NUL. */
+    snprintf(want, sizeof(want), "ESP=%.9g Pico=%.9g", (double)1260.3f, (double)1260.305f);
+    const char *tail = strstr(reason, "ESP=");
+    TEST_CHECK(tail != NULL && strcmp(tail, want) == 0, "Pico value printed with %.9g (whole token, not %.2f)");
 }
 
 static void test_unknown_on_one_side_diverges(void)

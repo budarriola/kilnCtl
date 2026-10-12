@@ -600,22 +600,20 @@ static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
     safety_ceiling_sync_set_disable_heat_hooks(fake_all_relays_off, fake_halt_run);
     safety_ceiling_sync_set_expected_pico_fields_source(fake_expected_pico_fields_source);
 
-    // Ceiling agrees -- only the broadened/extra field diverges, same shape
-    // as test_broadened_field_divergence_detected() above, but with the
-    // ESP/Pico values chosen so format_first_field_difference()'s "%.2f"
-    // rendering of each side (config_divergence.c) is tens of characters
-    // long on its own (a huge float prints its full integer part), which is
-    // enough by itself -- with the fixed field name -- to push the
-    // formatted "config divergence: <name> ESP=<v> Pico=<v>" reason past
-    // this file's `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91
-    // bytes), forcing the truncation branch this test exists to pin.
+    // Ceiling agrees -- the broadened/extra field is left UNKNOWN on the Pico
+    // side (never set), so the reason is the "one or more fields not yet
+    // confirmed on both sides (<names>) -- cannot confirm the configs match"
+    // text from config_divergence.c, ~115 chars. That exceeds this file's
+    // `head_cap` (cap - suffix_len - 1 = 160 - 68 - 1 = 91 bytes), forcing
+    // the truncation branch this test pins. (The %.9g value-diff text is only
+    // ~74 chars, too short, so a value difference no longer reaches it.)
     s_zone_max_temp_c[0] = 80.0f;
     fake_pico_ceiling_set(80.0f);
 
     s_expected_fields[0].param_id = FAKE_EXTRA_PARAM_ID;
-    s_expected_fields[0].value = 3.4028235e38f; /* near FLT_MAX -- "%.2f" is ~44 chars */
+    s_expected_fields[0].value = 1.0f;
     s_expected_field_count = 1;
-    fake_pico_extra_set(-3.4028235e38f);
+    /* No fake_pico_extra_set(): the extra field stays unknown on the Pico. */
 
     s_stub_recent_armed_refusal = true;
 
@@ -624,6 +622,8 @@ static void test_armed_refusal_appends_suffix_and_truncates_long_reason(void)
     char reason[CONFIG_DIVERGENCE_REASON_MAX];
     bool warned = safety_ceiling_sync_is_standing_diverged(reason, sizeof(reason));
     TEST_CHECK(warned, "still reports a standing divergence with a long field name");
+    TEST_CHECK(strlen(reason) > 91u + sizeof(" (re-push refused: relay is ARMED -- disarm and retry commissioning)") - 1u - 1u,
+               "the reason really was truncated (head hit head_cap)");
 
     static const char kArmedSuffix[] =
         " (re-push refused: relay is ARMED -- disarm and retry commissioning)";

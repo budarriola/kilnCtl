@@ -2,11 +2,6 @@
 
 #include <stdio.h>
 
-/* SAFETY_CEILING_EPSILON_C is declared in safety_ceiling_policy.h (moved
- * there 2026-09-14 so safety_ceiling_sync.c's divergence check can reuse
- * the exact same tolerance rather than defining its own -- "matches" must
- * mean the same thing in both places). */
-
 float safety_ceiling_policy_target_c(const float *max_temp_c, size_t n)
 {
     float best = 0.0f;
