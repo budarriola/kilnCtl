@@ -231,3 +231,17 @@ and fail on a mismatch. Fix the 3072 registration to 4096 (or use a shared
 - INFO-5: the GATE_NEGATIVE_TEST_EVIDENCE row for check_reset_fence_hooks.ps1
   lists the DEVBREAK3 mutations as CAUGHT, which is accurate. It should not be
   read as covering the preprocessor and job-window classes above.
+
+## Fix status
+
+Fixed on the commit that adds this table. Every verdict below is a `tools\negtest.ps1` run (baseline PASS, copies removed, real tree unchanged); the host suite (98/98) and `check_00_kilnfw_target_build.ps1` pass.
+
+| Finding | Fix | Negative test |
+|---|---|---|
+| MED-1 | `stubs/freertos/task.h` gains a settable `stub_set_current_task()`; `test_link_watchdog.c` asserts task 2 is refused after `_job_enter()` for the kiln_nvs and the general predicate | R4, R5, R9, R10 CAUGHT by `test_link_watchdog` |
+| LOW-1 | `check_build_gate_usage.ps1` enumerates with `git ls-files -co --exclude-standard`, fails loud if git fails or lists nothing | `tools/build/`, `tools/buildx/`, `docs/build/`, `tools/checkbuild_abc123/` all CAUGHT |
+| LOW-2, LOW-3 | `check_reset_fence_hooks.ps1`: continuation splice, comment and `#if 0` stripping, exactly-once setter statement, macro ban, both predicate bodies pinned exactly once | R0 control, R1, R1b, R2, R3, R6, R7, R8, R11 and R4, R5, R9, R10 all CAUGHT (13/13) |
+| LOW-4 | `check_system_uart_bridge_stack_budget.py` derives the stack from `uart_bridge_system.c` and requires creation and registration literals to agree; the registration is now 4096 | BC1 to BC5 CAUGHT; BC6 (4028, headroom exactly 512 B) MISSED as designed, the floor is a strict less-than |
+| Doc nits | 60c6b410 wording, stale parenthetical in the 09-16g audit, literal newline in the DEVBREAK3 bullet | n/a |
+
+Not feasible for a regex check: none; every R case is caught by the check or by the host test.
