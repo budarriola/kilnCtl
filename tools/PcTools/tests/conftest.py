@@ -32,9 +32,16 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 # Review testnet MED-A: mcp_server.py connects to the link hub at import time
 # (bridged to the real bench board by the running kilnctrl MCP server). Disable
-# the hub for the whole run unless a bench host is deliberately selected.
+# the hub for the whole run, bench host or not (LOW-2: no live_bench test uses
+# mcp_server's hub link; bench_fixture_session opens its own serial link).
+os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+
+# Review testnet2 LOW-3: subprocess children must not inherit the real board
+# address or web credentials unless a bench host is deliberately selected.
 if not os.environ.get("KILNCTRL_BENCH_HOST"):
-    os.environ["KILNCTL_TEST_NO_HUB"] = "1"
+    for _v in ("KILNCTL_HOST", "KILNCTL_WEB_USERNAME", "KILNCTL_WEB_PASSWORD",
+               "KILNCTL_WEB_PASSWORD_NEW"):
+        os.environ.pop(_v, None)
 
 from bench_fixture_session import (  # noqa: E402
     BENCH_HOST_ENV,

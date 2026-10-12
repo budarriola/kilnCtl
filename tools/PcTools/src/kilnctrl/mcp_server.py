@@ -123,6 +123,7 @@ from .mcp_server_core import _tool, mcp  # noqa: E402,F401
 try:
     _link = get_shared_link()
 except LinkHubDisabled:  # test suite: never connect to the real hub (review testnet MED-A)
+    log.warning("KILNCTL_TEST_NO_HUB is set: link hub disabled, using NullLink")
     _link = NullLink()
 
 #: File-based session logging, same rollover policy as the GUI (new file on

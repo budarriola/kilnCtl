@@ -440,7 +440,12 @@ class BackupImportSnapshotTest(_Base):
         path = os.path.join(self._tmpdir, "backup.json")
         with open(path, "w") as f:
             f.write(json.dumps(doc))
-        with self._resolve_host_patch(),              unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK),              unittest.mock.patch.object(backup_export_http_client, "get_export", side_effect=export) as ge,              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
+        with self._resolve_host_patch(), \
+                unittest.mock.patch.object(
+                    readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
+                unittest.mock.patch.object(
+                    backup_export_http_client, "get_export", side_effect=export) as ge, \
+                unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
             out = msi.backup_import(path, confirm=True, dry_run=dry_run)
         return out, ge
 
@@ -451,6 +456,13 @@ class BackupImportSnapshotTest(_Base):
         self.assertTrue(out.startswith("UNVERIFIED"), out)
         self.assertIn("snapshot unavailable", out)
         self.assertNotIn("ok - restored", out)
+
+    def test_snapshot_profiles_not_a_list_is_unverified(self):  # LOW-1
+        after = ("", dict(_GOOD_DOC, profiles=[dict(self.P, id=1)]))
+        for bad in ({"profiles": None}, {}, {"profiles": "x"}):
+            out, _ = self._run([dict(self.P)], [("", bad), after])
+            self.assertTrue(out.startswith("UNVERIFIED"), (bad, out))
+            self.assertNotIn("ok - restored", out)
 
     def test_preexisting_identical_profile_is_unverified_via_tool(self):  # MED-C
         same = dict(self.P, id=1)
