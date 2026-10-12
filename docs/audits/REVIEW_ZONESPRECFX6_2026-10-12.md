@@ -34,6 +34,8 @@ preset copied from a GET of current firmware is still refused, as MED-1 describe
 
 ## MED-1: the GET-capture fixture is stale, so MED-1's fix is proven only for an old firmware shape
 
+**FIXED in zonesprecfx7 in beca47b9d.**
+
 `test_get_capture_zones_load_as_preset` runs `tests/fixtures/zones_get_capture.json`
 through `_validate`. That fixture was captured 2026-09-02 and has none of the keys
 `zones_get_handler()` (`firmware/KilnFW/App/drivers/http/zones_http_get.c`) emits per
@@ -76,6 +78,8 @@ honest.
 
 ## LOW-1: validated range is wider than the firmware's, so an in-range-looking value still causes a partial write
 
+**FIXED in zonesprecfx7 in beca47b9d.**
+
 Firmware bounds (refuse, never clamp):
 
 - `pc_link_abort_silence_ms`: `zones_http_post.c:549` parses against
@@ -104,6 +108,8 @@ mirror test against the firmware `#define`s would stop drift.
 
 ## LOW-2: an unexpected exception in the post-loop PID read-back reports "no stage had confirmed landing" after every zone's PID was ACKed
 
+**FIXED in zonesprecfx7 in beca47b9d.**
+
 `_apply_preset_stages` calls `_verify_pid_readback` after the per-zone loop, outside
 its `try`, and before the `done.append("PID/model written over UART: ...")`.
 `_verify_pid_readback` catches only `ControlQueryError` and `AttributeError`. Any other
@@ -126,6 +132,8 @@ read-back inside the stage's `try` so its `except` path reports `results`.
 
 ## LOW-3: zone `name` is written but never type-checked
 
+**FIXED in zonesprecfx7 in beca47b9d.**
+
 `name` is in `_ZONE_NON_FLOAT_KEYS`, so `_validate` skips it, and nothing else checks
 it. It is in `_PRESET_ZONE_OVERRIDE_FIELDS`, so `build_post_body` writes it. The
 following all pass `_validate` and fail only in `_format_scalar` or at the firmware,
@@ -137,12 +145,16 @@ sets `name` on a zone. A GET-copied preset always carries it, but as a valid str
 
 ## INFO-1: nothing pins the ignored and override sets disjoint
 
+**FIXED in zonesprecfx7 in beca47b9d.**
+
 `_validate` skips `_PRESET_ZONE_KNOWN_IGNORED_FIELDS`. `build_post_body` writes any
 key in `_PRESET_ZONE_OVERRIDE_FIELDS` and checks that set first. If a future change
 adds a key to both sets, that key would be written without validation. The sets are
 disjoint today. A one-line test assertion would keep them that way.
 
 ## INFO-2: the paths that do not raise
+
+**FIXED in zonesprecfx7 in beca47b9d.**
 
 - A zones read-back mismatch (`ZonesApplyResult.ok == False`) does not raise.
   `apply_preset` continues to the ramp-assist and safety stages, and the tool
@@ -158,6 +170,8 @@ disjoint today. A one-line test assertion would keep them that way.
   read-back marked a zone FAILED.
 
 ## INFO-3: mid-stage wording
+
+**FIXED in zonesprecfx7 in beca47b9d.**
 
 A raise on zone N after zones 0..N-1 were written produces
 `PID written over UART before the failure: zone 0 pid=ok, ...` under the header
