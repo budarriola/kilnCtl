@@ -188,7 +188,7 @@ def load_preset_data(name: str) -> dict:
 
 
 #: Zone keys that are legitimately not scalar numbers (checked separately or free text).
-_ZONE_NON_FLOAT_KEYS = frozenset({"name", "coupling_coeff", "failsafe_state", "settings_source_groups"})
+_ZONE_NON_FLOAT_KEYS = frozenset({"index", "name", "coupling_coeff", "failsafe_state", "settings_source_groups"})
 
 
 def _is_finite_number(v: object) -> bool:
