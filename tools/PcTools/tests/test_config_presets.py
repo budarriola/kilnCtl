@@ -90,6 +90,17 @@ class IntFieldFloatValueTest(unittest.TestCase):
         self.assertTrue(any("control_mode" in m for m in mism))
 
 
+class TopLevelIntFloatVerifyTest(unittest.TestCase):
+    def test_top_level_float_on_int_field_is_mismatch_not_keyerror(self):
+        key = "thermo_count"
+        self.assertIn(key, zones_http_client._TOP_FIELD_FORM_KEY)
+        try:
+            mism = zones_http_client._verify_against_preset({key: 3, "zones": []}, {key: 3.0, "zones": []})
+        except KeyError as exc:  # pragma: no cover
+            raise AssertionError(f"KeyError escaped top-level verify: {exc}")
+        self.assertTrue(any(key in m for m in mism))
+
+
 class LoadPresetDataTest(unittest.TestCase):
     def test_bench_fixture_loads_and_validates(self):
         preset = config_presets.load_preset_data("bench_fixture")
