@@ -239,7 +239,7 @@ edit that the check would fail to flag.
 
 ## Fix status (2026-10-11)
 
-LOW-1..LOW-5 and INFO-1..INFO-3 are FIXED in 50bfa5948 (`tools/check_lcd_admin_gates.ps1` only; firmware unchanged):
+LOW-1..LOW-5 and INFO-1..INFO-3 are FIXED in 697f8f338 (pre-rebase sha 50bfa5948, not on dev; `tools/check_lcd_admin_gates.ps1` only; firmware unchanged):
 repo-wide `#define`/`#undef` scan of the trusted tokens (LOW-1); opener inventory and pinned `*_open_apply` bodies
 plus use counts and registrar ban in `ui_page_config.c` (LOW-2, INFO-2); C4 conditional, duplicate, reference-count
 and `kiln_ui_show("safety")` refusals (LOW-3); drivers/ui allowlist of `kiln_ui_show`, `ui_page_safety_open` and
