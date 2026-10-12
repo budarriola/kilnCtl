@@ -59,7 +59,7 @@ The MED is a test break. `7592416a0` turned the KilnFW host-test suite red on de
   - Add one negative case: an autotune start with a stale DIAG is refused.
   - Run the full `kilnfw-host` suite, not `-Only`, before landing.
 
-### LOW-1: a stale-but-not-tripped DIAG still lets non-K4 outputs switch ON mid-run, and manual writes never consult DIAG
+### LOW-1 (FIXED in 818a6be11, see tail of this section): a stale-but-not-tripped DIAG still lets non-K4 outputs switch ON mid-run, and manual writes never consult DIAG
 
 - **Where:**
   - `profile_executor_relay_io.c:691` (`aux_apply_relay_pico`)
@@ -106,7 +106,7 @@ The MED is a test break. `7592416a0` turned the KilnFW host-test suite red on de
 - **Executor task:** gains one more block-scoped `safety_link_status_t` (`post_st`, `profile_executor.c:748-756`). GCC probably shares its slot with `pre_st` and `retry_st`, but that is not guaranteed.
 - **Fix:** run `firmware/KilnFW/App/test/check_executor_task_stack_budget.ps1` and the httpd/LVGL/UART-bridge stack budget checks against the next target ELF before the next flash. Raise any stack that is too small; stack bumps are pre-authorized.
 
-### LOW-5: the watchdog's any-age TRIPPED wiring is not behaviourally pinned (mutant M05 survives)
+### LOW-5 (FIXED in 818a6be11): the watchdog's any-age TRIPPED wiring is not behaviourally pinned (mutant M05 survives)
 
 - **Where:**
   - `profile_executor.c:2360` (`bool safety_processor_tripped = safety_diag_tripped_any_age;`)
@@ -167,3 +167,10 @@ About the results:
 - **Clean baseline:** the subset baseline passed. negtest reported `real_tree_unchanged: true` and `copies_removed: true`.
 - **Full-preset recheck:** a recheck of M05 and M11 with the full `-Preset kilnfw-host` could not attribute results, because its baseline failed (MED-1). Only `test_profile_executor_prestart` compiles `profile_executor.c`, so the subset verdicts for M05 and M11 stand.
 - **Text pins:** M06, M10 and M12 are caught only by source-text pins, not by behaviour.
+
+## Fix status
+
+- **LOW-1 fixed (818a6be11, rebased SHA may differ):** `pico_diag_stale_for_on()` in `profile_executor_relay_io.c` gates only the new-ON paths (`aux_apply_relay_pico`, `io_seg_start_since_pico`, `io_segs_retry_on`); OFF, fault-drop and already-on aux are untouched. The manual-write path in `kiln_io_owner` is not changed (still open, pre-existing).
+- **LOW-5 fixed:** behavioural `watchdog_task_entry` test in `test_profile_executor_prestart.c`; mutant M05 is now CAUGHT.
+- **INFO I-1, I-2 fixed:** stale "fresh TRIPPED" comments; `trip_is_test` bound is now `<=`. I-3 not done.
+- **Not in this change:** LOW-2 (`safety_link_commands.c`, another agent), LOW-3, LOW-4, MED-1 (other agent).
