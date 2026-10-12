@@ -238,3 +238,20 @@ All runs were in worktree `C:\wt\rvtfx11_hczcu7` at `295e50a9d`.
 | scratch demo of `Launch` with a 300 ms gap before first access | `ExitCode=[]`, `(ExitCode -ne 0) = True` (MED-1) |
 
 negtest reported `real_tree_unchanged: true` and `copies_removed: true` for both runs.
+
+## Fix status
+
+Fixed in the commit that follows `bc83e7bab` on origin/dev (see git log for `push_verify/land: hold native process handle`).
+
+| ID | Status | Fix |
+|----|--------|-----|
+| MED-1 | Fixed | `Launch` returns the native process handle; wait, exit code (`GetExitCodeProcess`), start time and kill (`TerminateProcess`) all use it; no PID reopen. Test: `PUSH_VERIFY_TEST_POST_LAUNCH_SLEEP_MS` lets git exit before the first read, expects LANDED. Negtest: closing `hp` in `Launch` CAUGHT. |
+| LOW-1 | Fixed | Race = git's anchored `error: cannot lock ref '<ref>': is at X but expected Y` line only; `[remote rejected]` otherwise refuses with its message; final error carries the last git output. check_land fakes the race, a refusal containing "cannot lock ref", a "File exists" lock, and a persistent race; hook removed in finally. The old `failed to update ref ... expected` alternative was dropped (dead, INFO-4). |
+| LOW-2 | Fixed | `ResumeThread` and all three `CreateFileW` results checked, Win32 error thrown. Not forceable at runtime; covered by static assertion (CAUGHT). |
+| LOW-3 | Fixed | L1 uses the PowerShell AST (commands, member calls) and a separate C# scan (`GetProcessById`, `Process.GetProcess*`, `.Kill(`, `TerminateProcess` only on held handles); `saps` removed. Both review MISSED mutations now CAUGHT. |
+| LOW-4 | Fixed | Delay hook needs `PUSH_VERIFY_TEST_MODE=1`, max 5 digits, capped 5000 ms; prints a TEST HOOK line. |
+| LOW-5 | Fixed | Placeholder assert and newline artifacts removed. |
+| INFO-2 | Not done | `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` needs STARTUPINFOEX marshalling; not cheap. Job kill covers the normal path. Documented in the C# comment. |
+| INFO-3 | Fixed | `Get-Command git -CommandType Application` path passed as `lpApplicationName`. |
+
+Equivalent mutants (MISSED, not behavior): `KillProc` made a no-op (the job kill or the snapshot walk already kills the root first), and removal of the post-launch-sleep test seam.
