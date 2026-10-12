@@ -37,7 +37,7 @@ change is needed now. Process note: a commit that adds an `Invoke-HostTestExe` m
 `$totalExpected` in the same change, and the agent should run the unfiltered host-test build once
 before landing.
 
-### LOW-2: the kiln_nvs predicate's `erases_kiln_nvs` gating is not pinned by the new test
+### LOW-2: the kiln_nvs predicate's `erases_kiln_nvs` gating is not pinned by the new test -- FIXED (LCD19FX5)
 
 `test_main_reset_fence.c:96-110` (`test_installed_hooks_behave`) checks the hal_kv hook only with
 `relay_authority_reset_set_erases_kiln_nvs(true)`. A `main.c` predicate that calls
@@ -48,7 +48,7 @@ run_state, ...) are lost during, for example, a wifi-scope reset. It cannot caus
 one assertion with `relay_authority_reset_set_erases_kiln_nvs(false)` + `in_flight_begin()`, requiring
 `!s_hook_kv("kiln_nvs")`.
 
-### LOW-3: stack-size sub-check silently drops an unevaluable site when another pair under the same name compares
+### LOW-3: stack-size sub-check silently drops an unevaluable site when another pair under the same name compares -- FIXED (LCD19FX5)
 
 `tools/check_stack_margin_registration.ps1:703-716`. A name is marked skipped only when
 `$pairs -eq 0`. If one create/register pair evaluates, every unevaluable pair under the same name is
@@ -58,7 +58,7 @@ sizeof(StackType_t) * 999, ...)` beside the real `5120` site. The check passes, 
 not mentioned anywhere. No task name has two create sites today, so this is latent. Fix: report every
 unevaluated pair (for example, a `partial` list printed, and ratcheted, like `$skipped`).
 
-### LOW-4: the ratchet freezes 23 unchecked create/register pairs, and its reasons are boilerplate (some wrong)
+### LOW-4: the ratchet freezes 23 unchecked create/register pairs, and its reasons are boilerplate (some wrong) -- FIXED (LCD19FX5)
 
 `tools/check_stack_margin_registration.ps1:615-640`. 14 "create site only" and 9 "register site only"
 entries share two copy-pasted reasons. Some of those reasons are wrong:
@@ -77,7 +77,7 @@ by hand (SX1509 4096/4096, NS2009 3072/3072, recovery_exit 2048/2048), and all a
 an alias map (`recovery_exit_reboot` -> `recovery_exit`, ...) so these pairs are compared, and give
 each ratchet entry its real reason.
 
-### INFO-1: `$minStackCompared = 5` is not a ratchet
+### INFO-1: `$minStackCompared = 5` is not a ratchet -- FIXED (LCD19FX5)
 
 `check_stack_margin_registration.ps1:641`. 31 pairs compare today, but the floor is 5. The
 skip-set ratchet already makes a blind regex fail (every name becomes a new skip), so this is
@@ -95,7 +95,7 @@ here. No stack size uses division today.
 runs at import. The process exits non-zero with a traceback instead of a `FAIL --` line. The effect
 is still fail-loud, and C would read `0123` as octal anyway.
 
-### INFO-4: wrong comment in test_main_reset_fence.c
+### INFO-4: wrong comment in test_main_reset_fence.c -- FIXED (LCD19FX5)
 
 `test_main_reset_fence.c:18-19` says the phase prototypes "must match main_internal.h or the real
 main.c fails to compile against them". The test defines `MAIN_INTERNAL_H` first, so `main_internal.h`
@@ -158,3 +158,5 @@ baselines could not be used: at `648e97e6d` the unmutated run fails LOW-1's coun
 `d78551461` it fails in `test_autotune_engine_prestart.c` (lines 1426, 1584, 1596, 2371-2377, 2422),
 which neither reviewed commit touches. That autotune failure is outside this review's scope, but
 someone should check whether dev's full host-test run is red at `d78551461`.
+
+LCD19FX5 negtests: K2, C1, C2 and sanity mutant S1 (zone_sweep register 5120 -> 4096) all CAUGHT. K2 by `test_main_reset_fence.c:110` (compiled mutant); C1/C2/S1 by the check's own throw. C1 now fails on the partial-site report, C2 on the recovery_exit alias comparison.
