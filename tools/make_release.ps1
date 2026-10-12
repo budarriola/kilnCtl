@@ -80,7 +80,7 @@ if ($Publish -and $env:KILNCTL_TEST_NO_HUB -eq "1") {
 }
 # KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past a guard so a regressed guard cannot
 # publish, fetch or build (testnet4 L2).
-if ($Publish -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Host 'GUARD-PROBE-PAST-GUARD'; exit 0 }
+if ($Publish -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
 
 # ---------------------------------------------------------------- publish helpers
 # Invoke-ReleasePublish calls Invoke-RestMethod and Get-AssetToFile by plain name so a
@@ -235,7 +235,7 @@ $commit = (& git -C $repoRoot rev-parse HEAD).Trim()
 if ($env:KILNCTL_TEST_NO_HUB -eq "1") {
     Fail "network git access refused under the test suite (KILNCTL_TEST_NO_HUB=1): fetch/ls-remote would use the git credential manager."
 }
-if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Host 'GUARD-PROBE-PAST-GUARD'; exit 0 }
+if ($env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
 & git -C $repoRoot fetch --quiet origin release --tags
 if ($LASTEXITCODE -ne 0) { Fail "git fetch origin release --tags failed." }
 $tagCommit = (& git -C $repoRoot rev-parse --verify --quiet "refs/tags/$Tag^{commit}")

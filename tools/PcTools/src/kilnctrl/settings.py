@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -30,6 +31,8 @@ SETTINGS_PATH = Path(__file__).resolve().with_name("settings.json")
 _TEST_OVERRIDE = os.environ.get("KILNCTL_TEST_SETTINGS_PATH")
 if _TEST_OVERRIDE:
     SETTINGS_PATH = Path(_TEST_OVERRIDE)
+    # Testnet5 L4: never silent -- a leaked variable would otherwise hide saved settings.
+    sys.stderr.write("kilnctrl.settings: KILNCTL_TEST_SETTINGS_PATH is set, using %s instead of settings.json\n" % _TEST_OVERRIDE)
 
 
 def load(path: Path = SETTINGS_PATH) -> dict:

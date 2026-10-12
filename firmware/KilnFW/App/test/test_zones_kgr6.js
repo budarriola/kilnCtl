@@ -5,14 +5,10 @@
 'use strict';
 const fs = require('fs');
 const vm = require('vm');
-const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const { resolveDriversDir, resolveDriverFile, pickLine } = require('./_drivers_layout.js');
 const SRC = fs.readFileSync(resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html'), 'utf8');
 const lines = SRC.split('\n').map((l) => l.replace(/\r$/, ''));
-const pick = (prefix) => {
-  const l = lines.find((x) => x.indexOf(prefix) === 0);
-  if (!l) throw new Error('not found: ' + prefix);
-  return l;
-};
+const pick = (prefix) => pickLine(lines, prefix);
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext([pick('function kgR6('), pick('function kgRawAttrs('), pick('function kgPost(')].join('\n'), ctx);

@@ -26,7 +26,7 @@
 const fs = require('fs');
 const vm = require('vm');
 
-const { resolveDriversDir, resolveDriverFile } = require('./_drivers_layout.js');
+const { resolveDriversDir, resolveDriverFile, pickLine } = require('./_drivers_layout.js');
 const PAGE_PATH = resolveDriverFile(resolveDriversDir(__dirname), 'zones_page.html');
 const SRC = fs.readFileSync(PAGE_PATH, 'utf8');
 const LINES = SRC.split('\n');
@@ -244,7 +244,7 @@ function renderZoneFragment(zoneType, overrides) {
 }
 
 // Real kgR6 helper from the page (fragment calls it for cal/ramp/sanity/max/min).
-const KGR6_SRC = ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].map((p) => LINES.find((l) => l.startsWith(p)).replace(/\r$/, '')).join('\n');
+const KGR6_SRC = ['function kgR6(', 'function kgRawAttrs(', 'function kgPost('].map((p) => pickLine(LINES, p)).join('\n');
 
 function buildZoneDiv(zoneType, overrides) {
   const html = renderZoneFragment(zoneType, overrides);

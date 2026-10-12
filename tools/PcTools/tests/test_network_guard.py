@@ -289,21 +289,65 @@ def test_user_scope_credential_scripts_refuse_under_test_env(script_parts, args)
                        capture_output=True, text=True, env=env, timeout=120)
     out = r.stdout + r.stderr
     assert _PROBE not in out, "guard regressed (stopped only by the probe): " + out
-    assert r.returncode != 0, out
+    assert r.returncode not in (0, _PROBE_RC), out
     assert "refused" in out.lower() and "KILNCTL_TEST_NO_HUB" in out, out
 
 
+_PROBE_RC = 86
+
+# (script parts, args, text of the first line that must come AFTER the probe line). The
+# control runs each with the guard condition off, so a missing probe must not reach real
+# code: bench_hotspot uses read-only `status`; the static check below pins probe-before-action.
+_PROBED = [
+    (("tools", "PcTools", "scripts", "bench_hotspot.ps1"), ["-Action", "status"], "switch ($Action)"),
+    (("tools", "PcTools", "scripts", "web_commission_row.ps1"),
+     ["-Row", "W28", "-BoardHost", "192.0.2.1", "-ScreenshotDir", "unused"], "$repoRoot = Resolve-Path"),
+    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-Publish"], "# ---------------------------------------------------------------- publish helpers"),
+    (("tools", "make_release.ps1"), ["-Tag", "v0.0.0-test.1", "-DevDryRun"], "& git -C $repoRoot fetch --quiet origin release --tags"),
+]
+
+
 @pytest.mark.skipif(_ps_exe() is None, reason="needs powershell")
-def test_guard_probe_reaches_past_guard_without_no_hub():
-    """Control for the test above: with the guard condition off, the probe marker appears, so
-    the refusal test cannot pass merely because the probe path is dead."""
+@pytest.mark.parametrize("script_parts,args,after", _PROBED)
+def test_guard_probe_reaches_past_guard_without_no_hub(script_parts, args, after):
+    """Control for the refusal test: with the guard condition off, every probed invocation
+    reaches its probe (marker on stderr, distinct nonzero exit 86, never 0), so the refusal
+    test cannot pass merely because a probe path is dead. Testnet5 L1/L2/L3."""
     import subprocess, os
     env = {k: v for k, v in os.environ.items() if k != "KILNCTL_TEST_NO_HUB"}
     env["KILNCTL_TEST_GUARD_PROBE"] = "1"
     r = subprocess.run([_ps_exe(), "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
-                        _repo_file("tools", "PcTools", "scripts", "bench_hotspot.ps1"),
-                        "-Action", "stop"], capture_output=True, text=True, env=env, timeout=120)
-    assert r.returncode == 0 and _PROBE in r.stdout, r.stdout + r.stderr
+                        _repo_file(*script_parts), *args], capture_output=True, text=True,
+                       env=env, timeout=120)
+    assert r.returncode == _PROBE_RC and _PROBE in r.stderr, r.stdout + r.stderr
+
+
+@pytest.mark.parametrize("script_parts,args,after", _PROBED)
+def test_guard_probe_precedes_real_action(script_parts, args, after):
+    """Testnet5 L2/L3 static pin: a probe line exists and sits before the first real action,
+    exits with the distinct code and writes the marker to stderr (not stdout)."""
+    with open(_repo_file(*script_parts), encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    probes = [n for n, l in enumerate(lines) if "KILNCTL_TEST_GUARD_PROBE" in l and _PROBE in l]
+    assert probes, "no probe line"
+    first_after = next(n for n, l in enumerate(lines) if l.strip().startswith(after))
+    assert any(0 < first_after - n <= 3 for n in probes), (probes, first_after)
+    for n in probes:
+        assert "[Console]::Error.WriteLine('" + _PROBE + "')" in lines[n] and "exit %d" % _PROBE_RC in lines[n], lines[n]
+
+
+def test_settings_override_prints_notice():
+    """Testnet5 L4: when the override is active, importing settings says so on stderr."""
+    import subprocess, sys, os
+    here = os.path.dirname(__file__)
+    env = {**os.environ, "KILNCTL_TEST_SETTINGS_PATH": os.path.join(str(here), "notice_probe.json"),
+           "PYTHONPATH": os.path.join(here, "..", "src")}
+    r = subprocess.run([sys.executable, "-c", "import kilnctrl.settings"], capture_output=True, text=True, env=env)
+    assert r.returncode == 0, r.stderr
+    assert "KILNCTL_TEST_SETTINGS_PATH" in r.stderr and "notice_probe.json" in r.stderr, r.stderr
+    env.pop("KILNCTL_TEST_SETTINGS_PATH")
+    r = subprocess.run([sys.executable, "-c", "import kilnctrl.settings"], capture_output=True, text=True, env=env)
+    assert "KILNCTL_TEST_SETTINGS_PATH" not in r.stderr, r.stderr
 
 
 def test_settings_override_hides_real_host_in_process(tmp_path):

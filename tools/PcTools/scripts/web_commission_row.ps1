@@ -32,7 +32,7 @@ if (-not $DryRun -and $env:KILNCTL_TEST_NO_HUB -eq '1') {
 }
 # KILNCTL_TEST_GUARD_PROBE=1 (tests only): exit just past the guard so a regressed guard cannot
 # load credentials or contact a board (testnet4 L2).
-if (-not $DryRun -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { Write-Output 'GUARD-PROBE-PAST-GUARD'; exit 0 }
+if (-not $DryRun -and $env:KILNCTL_TEST_GUARD_PROBE -eq '1') { [Console]::Error.WriteLine('GUARD-PROBE-PAST-GUARD'); exit 86 }
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot '..\..\..')
 $venvPython = Join-Path $repoRoot 'tools\PcTools\.venv\Scripts\python.exe'
