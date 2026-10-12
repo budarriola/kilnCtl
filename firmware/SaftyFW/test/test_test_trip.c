@@ -154,7 +154,7 @@ static bool has(const char *body, size_t len, const char *needle)
     return p != NULL && (size_t)(p - body) < len;
 }
 
-/* saftyfx2 LOW-1: copy of a function body with /* */ and // comments removed and all
+/* saftyfx2 LOW-1: copy of a function body with block and line comments removed and all
  * whitespace runs collapsed to one space, so a commented-out call cannot match and the
  * forwarding lines can be compared exactly. Caller frees. */
 static char *normalized_body(const char *body, size_t len)
