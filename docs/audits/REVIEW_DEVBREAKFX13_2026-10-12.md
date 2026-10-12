@@ -226,3 +226,16 @@ Every CAUGHT below has a named `FAIL:` line.
 The runtime effect of B03, B11, B14 and the dot-sourced `exit` (not a bypass)
 was confirmed with small standalone scripts. Each scored mutant leaves at least
 one host-test failure path ending in exit 0.
+
+## Fix status
+
+Fixed in devbreakfx15 (`tools/check_host_test_verdict.ps1` only; INFO-3 is devbreakfx14's):
+
+- MED-1: behavioural test of `Invoke-HostTestProcess` (exit 3 -> 3, exit 0 -> 0, 1 s timeout -> 124) and an AST pin on the bare `if ($exeExit -ne 0)` guarding the `failedExes` append and on the single `$exeExit` source. B09, B10 CAUGHT.
+- LOW-1: exact dot-source list and order; the four libraries are parsed and scanned (no `exit`, `[Environment]::Exit` only with 124, no dot-sources, no duplicate function names across files). B11, B12, B13 CAUGHT.
+- LOW-2: deny `Invoke-Expression`, `[scriptblock]::Create`, `$ExecutionContext`, `Get-Variable` and friends, `variable:`/`function:`/`alias:` provider paths and `${variable:..}`. B01, B02, B04-B08 CAUGHT.
+- LOW-3: break/continue need a loop or switch before any function boundary. B03 CAUGHT.
+- LOW-4: no catch clause anywhere in build_host_tests.ps1. B14, B15 CAUGHT.
+- INFO-1, INFO-2, INFO-6: outer try selected by `Parent -eq $ast.EndBlock`, "under -Only" labels renamed, no BOM and trailing newline restored. INFO-5 not done.
+
+Negtest: 19 mutations (B01-B15, C1-C4) all CAUGHT with a named FAIL, baseline PASS, real tree unchanged.
