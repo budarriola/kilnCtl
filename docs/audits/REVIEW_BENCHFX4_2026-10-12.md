@@ -177,11 +177,24 @@ Fix: point the BENCHFX3 row at this review.
 
 | Finding | Severity | Status |
 |---|---|---|
-| MED-1 wrong-field omit copy slips both layers | MED | open |
-| LOW-1 loose omit regex; HEATER `hyst_c` conditional slips | LOW | open |
-| LOW-2 `_float_close` full-step, unpinned | LOW | fixed: per-field half-step tolerance (`%.9g`: relative 1e-6), format table pinned to `zones_http_get.c` by `test_zones_http_float_tolerance_pin.py`; negtest widen-to-2e-3 and format-mapping mutations CAUGHT |
+| MED-1 wrong-field omit copy slips both layers | MED | FIXED: `test_zones_post_blank_guard_fields_and_pc_link` seeds each guard field with a distinct value (9.0 + 0.25k) and asserts each separately; the drift test now requires the omit `else` to be exactly `z-><f> = current_z-><f>;` (same field and index both sides). M4 CAUGHT on both layers. |
+| LOW-1 loose omit regex; HEATER `hyst_c` conditional slips | LOW | FIXED: comments stripped before matching, exact-assignment match, later same-field assignments flagged (`settings_source` and `tc_type` exempt, both named in the test), direct `settings_source` gkey-else test, new host test omitting `hyst_c` on a HEATER zone. M2 CAUGHT on both layers. |
+| LOW-2 `_float_close` full-step, unpinned | LOW | fixed in f230b49a4: per-field half-step tolerance (`%.9g`: relative 1e-6), format table pinned to `zones_http_get.c` by `test_zones_http_float_tolerance_pin.py`; negtest widen-to-2e-3 and format-mapping mutations CAUGHT |
 | INFO-1 `name` third idiom uncovered on PC | INFO | no action needed |
 | INFO-2 BENCHFX3 evidence pointer | INFO | open (doc) |
+
+Re-run (negtest, base = the fix commit): pytest side (drift + relay_type + zone_coupling tests) M1-M5, N1, N2, N9 all CAUGHT; host side (`kilnctl_host_tests_zones.exe`) M1-M5, N1, N2 all CAUGHT; baselines passed, real tree unchanged.
+
+| Mutation | Drift/pytest | Host tests |
+|---|---|---|
+| M1 | CAUGHT | CAUGHT |
+| M2 | CAUGHT | CAUGHT |
+| M3 | CAUGHT | CAUGHT |
+| M4 | CAUGHT | CAUGHT |
+| M5 | CAUGHT (`test_firmware_has_no_later_overrides`) | CAUGHT |
+| N1 | CAUGHT | CAUGHT |
+| N2 | CAUGHT | CAUGHT |
+| N9 | CAUGHT (4 tests) | n/a |
 
 ## Appendix: mutation JSON
 

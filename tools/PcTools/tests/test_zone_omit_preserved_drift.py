@@ -13,27 +13,57 @@ _KEY_RE = re.compile(r'snprintf\(\s*g?key,\s*sizeof\(g?key\),\s*"z%u_([a-z_0-9]+
 _PRESERVE_RE = re.compile(r"zones_config_json_field_present\(body, key\)|zones_http_field_nonblank\(body, key\)")
 
 
-_OMIT_PRESERVE_RE = re.compile(r"\belse[^{]*\{[^{}]*?current_z->")
+# The omit branch must be EXACTLY `else { z-><f> = current_z-><f>; }` (same field and same
+# optional [index] on both sides; a trailing `continue;` is allowed). Comments are stripped
+# first, so a constant with the field named in a comment no longer counts (review BENCHFX4).
+_EXACT_ELSE_RE = re.compile(
+    r"\belse\s*\{\s*z->(\w+)((?:\[\w+\])?)\s*=\s*current_z->(\w+)((?:\[\w+\])?)\s*;\s*(?:continue;\s*)?\}")
+# Keys whose field is legitimately assigned again after the omit branch (the parse path of a
+# per-group loop; tc_type is restored after the `*z = *current_z` bulk copy of the
+# i >= thermo_count early return). settings_source is pinned directly by
+# test_legacy_settings_source_*.
+_LATER_ASSIGN_EXEMPT = {"settings_source", "tc_type"}
 
 
-def _classify(text: str) -> "tuple[set[str], set[str]]":
-    """(preserved, defaulted). A key is a candidate when a field_present /
-    field_nonblank call follows its snprintf within 4 lines. It is
-    omit-PRESERVED only if its block (up to the next key snprintf) has an
-    else branch assigning from current_z->; otherwise omit-DEFAULTED.
-    coupling_c%u is normalised to coupling_c; gkey sub-keys are ignored."""
-    lines = text.splitlines()
+def strip_c_comments(text: str) -> str:
+    """Remove /* */ and // comments, keeping newlines so line numbers survive."""
+    return re.sub(r"/\*.*?\*/|//[^\n]*", lambda m: re.sub(r"[^\n]", " ", m.group(0)), text, flags=re.S)
+
+
+def _classify_full(text: str) -> "tuple[set[str], set[str], list[str]]":
+    """(preserved, defaulted, violations). A key is a candidate when a field_present /
+    field_nonblank call follows its snprintf within 4 lines. It is omit-PRESERVED only if
+    its block (up to the next key snprintf) has an exact same-field `else` copy from
+    current_z; otherwise omit-DEFAULTED. violations lists any later plain assignment to the
+    same field after that else. coupling_c%u is normalised to coupling_c; gkey sub-keys are
+    ignored."""
+    lines = strip_c_comments(text).splitlines()
     starts = [n for n, line in enumerate(lines) if _KEY_RE.search(line)]
-    preserved, defaulted = set(), set()
+    preserved, defaulted, violations = set(), set(), []
     for idx, n in enumerate(starts):
         end = starts[idx + 1] if idx + 1 < len(starts) else len(lines)
-        if not _PRESERVE_RE.search("\n".join(lines[n + 1:n + 5])):
+        if not _PRESERVE_RE.search(chr(10).join(lines[n + 1:n + 5])):
             continue
         name = _KEY_RE.search(lines[n]).group(1)
         name = "coupling_c" if name.startswith("coupling_c") else name
-        block = "\n".join(lines[n + 1:end])
-        (preserved if _OMIT_PRESERVE_RE.search(block) else defaulted).add(name)
-    return preserved, defaulted
+        block = chr(10).join(lines[n + 1:end])
+        exact = [m for m in _EXACT_ELSE_RE.finditer(block)
+                 if m.group(1) == m.group(3) and m.group(2) == m.group(4)]
+        if not exact:
+            defaulted.add(name)
+            continue
+        preserved.add(name)
+        field = exact[-1].group(1)
+        if field in _LATER_ASSIGN_EXEMPT:
+            continue
+        tail = block[exact[-1].end():]
+        if re.search(r"\bz->" + re.escape(field) + r"(?:\[\w+\])?\s*=(?!=)", tail):
+            violations.append(f"{name}: later assignment to z->{field} after the omit branch")
+    return preserved, defaulted, violations
+
+
+def _classify(text: str) -> "tuple[set[str], set[str]]":
+    return _classify_full(text)[:2]
 
 
 def firmware_omit_preserved_keys(text: str) -> "set[str]":
@@ -78,6 +108,48 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         src = chr(10).join(blk("foo", "z->foo = 0.0f;") + blk("bar", "z->bar = current_z->bar;"))
         self.assertEqual(firmware_omit_preserved_keys(src), {"bar"})
         self.assertEqual(firmware_omit_defaulted_keys(src), {"foo"})
+
+    def test_omit_branch_exact_same_field_only(self):
+        def blk(name, body):
+            return chr(10).join([f'snprintf(key, sizeof(key), "z%u_{name}", i);',
+                                 "if (zones_config_json_field_present(body, key)) { x = 1; }", body])
+        def cls(body):
+            return _classify_full(blk("foo", body))
+        ok = "else { z->foo = current_z->foo; }"
+        self.assertEqual(cls(ok), ({"foo"}, set(), []))
+        # wrong field copied (review BENCHFX4 MED-1)
+        self.assertEqual(cls("else { z->foo = current_z->other; }")[:2], (set(), {"foo"}))
+        # name only in a comment
+        self.assertEqual(cls("else { z->foo = 0.0f; /* current_z->foo */ }")[:2], (set(), {"foo"}))
+        self.assertEqual(cls("else { z->foo = 0.0f; // z->foo = current_z->foo;" + chr(10) + "}")[:2], (set(), {"foo"}))
+        # conditional preserve and current_z-dependent default
+        self.assertEqual(cls("else { if (current_z->t == 1u) { z->foo = current_z->foo; } else { z->foo = 0.0f; } }")[:2],
+                         (set(), {"foo"}))
+        self.assertEqual(cls("else { z->foo = (current_z->t == 1u) ? 2.0f : 0.0f; }")[:2], (set(), {"foo"}))
+        # post-branch override of the same field
+        self.assertEqual(len(cls(ok + chr(10) + "z->foo = 0.0f;")[2]), 1)
+        self.assertEqual(cls(ok + chr(10) + "if (z->foo == 1.0f) { y = 1; }")[2], [])
+        # indexed form must match on both sides
+        self.assertEqual(cls("else { z->foo[j] = current_z->foo[j]; }")[0], {"foo"})
+        self.assertEqual(cls("else { z->foo[j] = current_z->foo[k]; }")[1], {"foo"})
+
+    def test_firmware_has_no_later_overrides(self):
+        self.assertEqual(_classify_full(_SRC.read_text(encoding="utf-8"))[2], [])
+
+    def test_legacy_settings_source_key_classified_by_its_own_gkey_else(self):
+        text = strip_c_comments(_SRC.read_text(encoding="utf-8"))
+        self.assertIn("settings_source", firmware_omit_preserved_keys(_SRC.read_text(encoding="utf-8")))
+        i = text.index('"z%u_settings_source", i);')
+        j = text.index('"z%u_settings_source_%s"', i)
+        k = text.index("}", text.index("else {", text.index("have_legacy)", j)))
+        m = _EXACT_ELSE_RE.search(text[j:k + 1 + 80])
+        self.assertIsNotNone(m, "the gkey loop's final else must copy current_z->settings_source[g]")
+        self.assertEqual(m.group(1), "settings_source")
+        self.assertEqual((m.group(1), m.group(2)), (m.group(3), m.group(4)))
+        # refactor of that else changes the classification
+        mutated = text.replace("z->settings_source[g] = current_z->settings_source[g];",
+                               "z->settings_source[g] = ZONE_SETTINGS_SOURCE_CUSTOM;")
+        self.assertNotIn("settings_source", _classify(mutated)[0])
 
     def test_regex_matches_exactly_the_float_keys(self):
         for k in zhc.ZONE_OMIT_PRESERVED_FLOAT_KEYS:

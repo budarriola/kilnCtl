@@ -1980,15 +1980,18 @@ static void test_zones_post_blank_guard_fields_and_pc_link(void)
         float *fields[9] = {&z->guard_wrong_dir_window_s, &z->guard_wrong_dir_rate_c_per_min, &z->guard_off_settle_s,
                             &z->guard_runaway_rate_c_per_min, &z->guard_runaway_margin_c, &z->guard_drift_period_s,
                             &z->guard_sensor_fault_debounce_ticks, &z->guard_frozen_window_s, &z->cross_zone_max_delta_c};
-        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f;
+        /* Distinct seed per field (review BENCHFX4 MED-1): a cross-wired omit copy must be visible. */
+        for (size_t f = 0; f < 9; f++) *fields[f] = 9.0f + 0.25f * (float)f;
         run_zones_post(body);
         if (s_test_err_called) printf("  err: %s\n", s_test_err_msg);
         TEST_CHECK(!s_test_err_called && s_test_ok_called, keys[k]);
         for (size_t f = 0; f < 9; f++) {
+            const float want = 9.0f + 0.25f * (float)f;
+            if (*fields[f] != want) printf("  field %s (index %u) = %g, want %g\n", keys[f], (unsigned)f, (double)*fields[f], (double)want);
             if (f == k) {
-                TEST_CHECK(*fields[f] == 9.0f, "blank guard/xzone preserves the stored value (never default/disable)");
+                TEST_CHECK(*fields[f] == want, "blank guard/xzone preserves its OWN stored value (never default/disable)");
             } else {
-                TEST_CHECK(*fields[f] == 9.0f, "omitted guard/xzone keeps the stored value (review 11 MED-3: never disables a guard)");
+                TEST_CHECK(*fields[f] == want, "omitted guard/xzone keeps its OWN stored value (review 11 MED-3: never disables a guard)");
             }
         }
         snprintf(body, sizeof(body), ONE_ZONE_BLANK_BODY "&z0_%s=abc", keys[k]);
@@ -6723,6 +6726,17 @@ static void test_post_on_off_fields_optional_range_and_preserve(void)
     TEST_CHECK(out.zone_type == 1 && out.failsafe_state == 1 && out.hyst_c == 3.0f &&
               out.min_on_s == 60 && out.min_off_s == 120,
               "omitting the on/off fields preserves every stored value, not a silent reset to HEATER/OFF/0");
+
+    /* Omitted hyst_c on a HEATER zone (zone_type 0) with a non-zero stored value still preserves it
+     * (review BENCHFX4 LOW-1): it must not depend on the current zone being on/off. */
+    zone_cfg_t current_heater = make_stored_zone();
+    current_heater.zone_type = 0;
+    current_heater.hyst_c = 3.5f;
+    memset(&out, 0, sizeof(out));
+    err_reason = "unset";
+    ok = zones_http_parse_zone_fields(body_omit, 0, 1, 4, 1, &current_heater, &out, &err_reason);
+    TEST_CHECK(ok, "a HEATER-zone body omitting hyst_c must be accepted");
+    TEST_CHECK(out.hyst_c == 3.5f, "omitted hyst_c on a HEATER zone preserves the stored value");
 }
 
 /* One clean body with only the field-under-test varied, mirroring
