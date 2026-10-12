@@ -1104,6 +1104,8 @@ function fakeStep6El(htmlByZone) {
   const ctx = loadPageScript(noopFetch);
   const zones = [{ name: 'Z', zone_type: 0, max_temp_c: 123.400002, max_ramp_c_per_hr: 123.400002, min_temp_c: -20.1000004, cal_offset_c: 0.100000024 }];
   const el = fakeStep6El([ctx.step6ZoneRowHtml(0, zones[0])]);
+  assert(String(el.cards[0].s6maxtemp.value) === '123.4' && String(el.cards[0].s6ramp.value) === '123.4' && String(el.cards[0].s6mintemp.value) === '-20.1',
+    'step6: inputs display the 6-digit rounded value');
   const live = ctx.step6ReadLiveZones(el, zones, 1);
   assert(ctx.step6LimitConfirmLines(zones, live, 1).length === 0,
     'step6: unedited fractional max_temp/max_ramp gives zero confirm lines');
@@ -1129,6 +1131,7 @@ function fakeStep6El(htmlByZone) {
   const z = { tc_type: 3, cal_offset_c: 0.100000024 };
   const inputs = parseInputsFromHtml(ctx.step3ZoneRowHtml(0, z));
   assert(inputs.s3cal.getAttribute('data-raw') === '0.100000024', 'step3: cal input carries data-raw');
+  assert(String(inputs.s3cal.value) === '0.1', 'step3: cal input displays the rounded value');
   assert(ctx.kgPost(inputs.s3cal) === '0.100000024', 'step3: unedited cal posts raw');
 })();
 
