@@ -94,7 +94,7 @@ function Get-KillLintViolations([string]$src, [string]$kind) {
     foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) {
         $nm = $c.GetCommandName()
         if ($c.InvocationOperator -eq [System.Management.Automation.Language.TokenKind]::Dot) {
-            if ($c.Extent.Text -notmatch '^\.\s*\(Join-Path \$PSScriptRoot "lib_push_verify_walk\.ps1"\)$') { [void]$v.Add("dot-source of something else: $($c.Extent.Text)") }
+            if ($c.Extent.Text -notmatch '^\.\s*\(Join-Path \$PSScriptRoot "lib_push_verify_walk[.]ps1"\)$') { [void]$v.Add("dot-source of something else: $($c.Extent.Text)") }
             continue
         }
         if (-not $nm) { [void]$v.Add("dynamic command name: $($c.Extent.Text)"); continue }

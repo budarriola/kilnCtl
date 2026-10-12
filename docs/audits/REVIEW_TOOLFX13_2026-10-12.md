@@ -266,7 +266,7 @@ Three land.ps1 mutants survive `check_land.ps1`:
 |---|---|---|
 | `lint_drop_cmd_from_bad` | MISSED | self-tests vacuous (MED-1) |
 | `pv_no_job_ungated` (LOW-4 gate reverted) | CAUGHT | "stray PUSH_VERIFY_TEST_NO_JOB without PUSH_VERIFY_TEST_MODE: ignored (job path used)" |
-| `pv_timeout_cap` (`2000000` -> `2000001`) | CAUGHT | "oversized -FetchTimeoutSec -> usage error (INFO-4)" |
+| `pv_timeout_cap` (2,000,000 -> 2,000,001) | CAUGHT | "oversized -FetchTimeoutSec -> usage error (INFO-4)" |
 | `control_plain_stop_process` | CAUGHT | `lint: forbidden command: Stop-Process`, then "S2/L1: kill-surface allowlist holds ..." |
 | `bypass_module_qualified` | MISSED | lint bypass (LOW-1) |
 | `bypass_single_quoted_addtype` | MISSED | lint bypass (LOW-1) |

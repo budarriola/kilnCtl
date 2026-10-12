@@ -44,7 +44,7 @@ New-Item -ItemType Directory -Force -Path $tmpWork | Out-Null
 # Mode "probe_after" sleeps first, then probes.
 $child = Join-Path $tmpWork "child.ps1"
 Set-Content -Path $child -Encoding ascii -Value @'
-param([string]$Mode, [string]$Name, [int]$Seconds = 0)
+param([string]$Mode, [string]$Name, [int]$Seconds = 0, [string]$ReadyFile = "")
 $m = New-Object System.Threading.Mutex($false, $Name)
 if ($Mode -eq "probe_after") { Start-Sleep -Seconds $Seconds; $Mode = "probe" }
 $got = $false
@@ -54,14 +54,15 @@ if ($Mode -eq "probe") {
     $m.Dispose(); exit 1
 }
 if (-not $got) { exit 2 }
+if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path $ReadyFile -Value "ready" -Encoding ascii }
 Start-Sleep -Seconds $Seconds
 $m.ReleaseMutex(); $m.Dispose(); exit 0
 '@
 
 function Start-Child {
-    param([string]$Mode, [string]$Name, [int]$Seconds = 0)
+    param([string]$Mode, [string]$Name, [int]$Seconds = 0, [string]$ReadyFile = "")
     $p = Start-Process -FilePath powershell -PassThru -NoNewWindow -ArgumentList @(
-        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $child, $Mode, $Name, $Seconds)
+        "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $child, $Mode, $Name, $Seconds, $(if ($ReadyFile) { $ReadyFile } else { "none" }))
     $null = $p.Handle
     return $p
 }
@@ -121,8 +122,11 @@ try {
 
     Write-Host "case 5: timeouts"
     $env:KILNCTL_BUILD_GATE_TIMEOUT_SEC = "2"
-    $holder = Start-Child -Mode hold -Name $slotName -Seconds 8
-    Start-Sleep -Seconds 2
+    $ready = Join-Path $tmpWork "holder_ready"
+    $holder = Start-Child -Mode hold -Name $slotName -Seconds 8 -ReadyFile $ready
+    $dl = [DateTime]::UtcNow.AddSeconds(60)
+    while (-not (Test-Path $ready) -and [DateTime]::UtcNow -lt $dl -and -not $holder.HasExited) { Start-Sleep -Milliseconds 100 }
+    Assert-True (Test-Path $ready) "holder child acquired the slot (ready-file handshake)"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $msg = ""
     try { $g = Enter-KilnBuildGate -Label "t_timeout" -Lane light -PollIntervalSeconds 1; Exit-KilnBuildGate -Gate $g } catch { $msg = "$_" }
