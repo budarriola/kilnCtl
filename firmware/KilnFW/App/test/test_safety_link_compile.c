@@ -3099,6 +3099,53 @@ static void test_v3_diag_caches_boot_id_and_clear_is_bound(void)
                "Pico reboot clears the cached boot id");
 }
 
+static void v3_apply_diag_uptime(SafetyLinkClass *link, uint32_t uptime_ms, uint8_t boot_id)
+{
+    uart_proto_message_t diag;
+    memset(&diag, 0, sizeof(diag));
+    set_diag_frame(diag.payload, 0u, 0u);
+    safety_put_u32_le(&diag.payload[6], uptime_ms);
+    diag.payload[31] = boot_id;
+    diag.length = SAFETY_LINK_DIAG_FRAME_LEN_V3;
+    TEST_CHECK(safety_apply_diag(link, &diag) == true, "32-byte DIAG applied");
+}
+
+static void test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag(void)
+{
+    TEST_SECTION("WP3 review LOW-1 -- a Pico reboot counted by a 30-byte DIAG's uptime regression is "
+                 "not counted again by the first 32-byte DIAG's changed boot id; the cached id follows");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX; // isolate from the bounded re-announce
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 1500u); // new boot: uptime regressed, 30-byte DIAG (peer version still unknown)
+    TEST_CHECK(link.pico_reboot_by_uptime_count == 1u && link.cached.pico_reboot_seq == seq0 + 1u,
+               "30-byte DIAG counts the reboot once, by uptime");
+    TEST_CHECK(link.pico_boot_id == 42u, "30-byte DIAG leaves the cached boot id on the OLD value");
+    v3_apply_diag_uptime(&link, 2500u, 43u); // first 32-byte DIAG of the same boot: new boot id
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u, "32-byte DIAG does NOT count the same reboot again");
+    TEST_CHECK(link.pico_boot_id == 43u && link.cached.diag_boot_id_known && link.cached.diag_boot_id == 43u,
+               "the new boot id is adopted (cached ids consistent)");
+    // A genuine later reboot (outside the 3 s note window) with another id still counts once.
+    s_fake_tick_count += 10000u;
+    v3_apply_diag_uptime(&link, 12500u, 44u);
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 2u, "a later boot id change is still a reboot");
+    s_fake_tick_count = 0;
+}
+
+static void test_wp3_info5_test_trip_result_counted_in_stats(void)
+{
+    TEST_SECTION("WP3 review INFO-5 -- the stats switch counts TEST_TRIP_RESULT (0x2F) and records its length");
+    SafetyLinkClass link = boot_clear_test_setup();
+    uint32_t before = link.stats.cmd_test_trip_result_count;
+    safety_count_cmd_byte(&link, KILNLINK_TEST_TRIP_RESULT_CMD, KILNLINK_TEST_TRIP_RESULT_LEN);
+    TEST_CHECK(link.stats.cmd_test_trip_result_count == before + 1u, "0x2F counted");
+    TEST_CHECK(link.stats.last_test_trip_result_len == KILNLINK_TEST_TRIP_RESULT_LEN, "0x2F length recorded");
+}
+
 static void tt_set_reply(uint8_t outcome, uint8_t trip_seq)
 {
     memset(&s_stub_broadcast_reply_msg, 0, sizeof(s_stub_broadcast_reply_msg));
@@ -3679,6 +3726,8 @@ int main(void)
     test_low2_boot_clear_waits_for_trip_seq_diag_on_v17_peer();
     test_diag_reannounce_is_bounded();
     test_v3_diag_caches_boot_id_and_clear_is_bound();
+    test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag();
+    test_wp3_info5_test_trip_result_counted_in_stats();
     test_send_test_trip();
     test_low4_link_down_invalidates_uptime_baseline();
     test_reboot_counted_once_diag_before_fw_version();

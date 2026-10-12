@@ -56,10 +56,18 @@ class ToolTests(unittest.TestCase):
         self.assertIn("trip_seq=7", out)
         pt.assert_called_once()
 
-    def test_readback_mismatch_fails(self):
+    def test_readback_wrong_reason_fails(self):
         with unittest.mock.patch("time.monotonic", side_effect=[0.0, 99.0, 99.0, 99.0]):
             out, _, _ = _run((200, {"ok": True, "trip_seq": 7}), [_diag(), _diag(6, 0x20)])
         self.assertTrue(out.startswith("FAILED VERIFY"))
+
+    def test_readback_right_reason_wrong_mask_fails(self):
+        # WP3 review LOW-5: reason 4 but a real guard latched alongside (mask 0x28 != 0x08) must fail on the
+        # mask alone; with the mask half of the check dropped this would report ok.
+        with unittest.mock.patch("time.monotonic", side_effect=[0.0, 99.0, 99.0, 99.0]):
+            out, _, _ = _run((200, {"ok": True, "trip_seq": 7}), [_diag(), _diag(4, 0x0028)])
+        self.assertTrue(out.startswith("FAILED VERIFY"), out)
+        self.assertIn("mask 0x0008", out)
 
     def test_outcomes(self):
         out, _, _ = _run((503, {"ok": False, "outcome": "no_reply"}), [_diag()])

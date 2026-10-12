@@ -73,6 +73,16 @@ esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_tri
     *out_trip_seq = f_tt_seq;
     return f_tt_err;
 }
+static safety_link_status_t f_tt_status;
+static esp_err_t f_tt_status_err;
+esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
+{
+    (void)link;
+    if (f_tt_status_err == ESP_OK) {
+        *out = f_tt_status;
+    }
+    return f_tt_status_err;
+}
 bool boot_guard_is_recovery_mode(void) { return f_tt_recovery; }
 esp_err_t safety_link_get_peer_version_status(SafetyLinkClass *link, bool *known, bool *a, uint16_t *proto, uint16_t *b)
 {
@@ -293,9 +303,36 @@ static void test_safety_test_trip(void)
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 409 && f_tt_calls == 0 &&
                    strstr(s_reply, "recovery_mode") != NULL, "recovery mode -> 409, link never asked");
     f_tt_recovery = false;
+    /* WP3 review LOW-2: the 200 reply reports the live DIAG read-back, never constants posing as observed. */
+    memset(&f_tt_status, 0, sizeof(f_tt_status));
+    f_tt_status_err = ESP_OK;
+    f_tt_status.link_up = true;
+    f_tt_status.diag_ever_received = true;
+    f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    f_tt_status.diag_trip_reason = 4u;
+    f_tt_status.diag_trip_mask = 8u;
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 && f_tt_calls == 1 &&
-                   strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"trip_reason\":4") != NULL &&
-                   strstr(s_reply, "\"trip_mask\":8") != NULL, "accepted -> 200 with seq, reason 4, mask 8");
+                   strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"readback\":true") != NULL &&
+                   strstr(s_reply, "\"trip_reason\":4") != NULL && strstr(s_reply, "\"trip_mask\":8") != NULL &&
+                   strstr(s_reply, "\"is_test\":true") != NULL, "accepted + DIAG read-back -> reason 4, mask 8, is_test");
+    f_tt_status.diag_trip_reason = 2u; /* a real guard won the same tick */
+    f_tt_status.diag_trip_mask = 2u;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"trip_reason\":2") != NULL && strstr(s_reply, "\"trip_mask\":2") != NULL &&
+                   strstr(s_reply, "\"is_test\":false") != NULL && strstr(s_reply, "\"trip_reason\":4") == NULL,
+               "real guard won -> reply reports ITS reason/mask and is_test false, never 4/8");
+    f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED; /* TRIPPED DIAG not seen yet */
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL &&
+                   strstr(s_reply, "\"requested_trip_reason\":4") != NULL &&
+                   strstr(s_reply, "\"trip_reason\"") == NULL, "no TRIPPED DIAG yet -> requested_* only, no observed claim");
+    f_tt_status_err = ESP_FAIL;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "status read fails -> readback false");
+    f_tt_status_err = ESP_OK;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_DUPLICATE, 0) == 409 &&
+                   strstr(s_reply, "\"duplicate\"") != NULL && strstr(s_reply, "\"ok\":false") != NULL,
+               "duplicate -> 409 ok:false (LOW-4)");
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT, 0) == 409 &&
                    strstr(s_reply, "rate_limited") != NULL, "rate limit -> 409");
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_REFUSED_ALREADY_TRIPPED, 0) == 409 &&

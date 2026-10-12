@@ -314,13 +314,30 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     memset(&req, 0, sizeof(req));
     reset_fake_status_with_known_build_identity();
     stub_headers_reset();
-    s_fake_status.trip_event_ever_received = true;
-    s_fake_status.trip_reason = 4u;
+    /* WP3 review LOW-3: trip_is_test follows the LIVE DIAG (TRIPPED + reason 4 + fresh), not the
+     * TRIP_EVENT cache (trip_reason), so it clears with the trip. */
+    s_fake_status.diag_ever_received = true;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_age_ms = 100u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 4)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "reason 4 -> trip_is_test true");
-    s_fake_status.trip_reason = 2u;
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live DIAG TRIPPED reason 4 -> true");
+    s_fake_status.diag_trip_reason = 2u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 2)");
-    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "reason 2 -> trip_is_test false");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "live reason 2 -> false");
+    s_fake_status.diag_trip_reason = 4u;
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED;
+    s_fake_status.trip_event_ever_received = true;
+    s_fake_status.trip_reason = 4u; /* stale TRIP_EVENT cache must not keep it true after the clear */
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (cleared)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "trip cleared -> false even with cached reason 4");
+    s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+    s_fake_status.trip_reason = 2u; /* TRIP_EVENT lost/other: DIAG alone decides */
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (live only)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live reason 4 without TRIP_EVENT -> true");
+    s_fake_status.diag_age_ms = 60000u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (stale)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "stale DIAG -> false");
 }
 
 static void test_status_emits_aux_block(void)

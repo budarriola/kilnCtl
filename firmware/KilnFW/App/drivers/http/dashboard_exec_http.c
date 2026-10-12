@@ -968,7 +968,7 @@ esp_err_t safety_test_trip_post_handler(httpd_req_t *req)
     uint8_t trip_seq = 0u;
     esp_err_t err = safety_link_send_test_trip(s_dash.safety, &outcome, &trip_seq);
 
-    char json[160];
+    char json[256];
     if (err == ESP_ERR_NOT_SUPPORTED || outcome == SAFETY_LINK_TEST_TRIP_LOCAL_PEER_TOO_OLD ||
         (err == ESP_OK && outcome == SAFETY_LINK_TEST_TRIP_REFUSED_PEER_VERSION)) {
         bool known = false;
@@ -993,11 +993,29 @@ esp_err_t safety_test_trip_post_handler(httpd_req_t *req)
         return test_trip_reply(req, "500 Internal Server Error", "{\"ok\":false,\"error\":\"send failed\"}");
     }
     switch (outcome) {
-    case SAFETY_LINK_TEST_TRIP_ACCEPTED:
-        snprintf(json, sizeof(json),
-                 "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"trip_reason\":%u,\"trip_mask\":%u}",
-                 (unsigned)trip_seq, TEST_TRIP_REASON, (unsigned)(1u << (TEST_TRIP_REASON - 1u)));
+    case SAFETY_LINK_TEST_TRIP_ACCEPTED: {
+        /* WP3 review LOW-2: report what the live DIAG shows, never the requested constants as if observed.
+         * The Pico's TRIPPED DIAG may not have arrived yet (readback:false -> only the requested values are
+         * given, under requested_*), and a real guard that won the same tick shows its own reason here
+         * with is_test:false. Callers must still verify against DIAG, as safety_test_trip does. */
+        safety_link_status_t st;
+        memset(&st, 0, sizeof(st));
+        bool readback = safety_link_get_status(s_dash.safety, &st) == ESP_OK && st.link_up &&
+                        st.diag_ever_received && st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+        if (readback) {
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"readback\":true,"
+                     "\"trip_reason\":%u,\"trip_mask\":%u,\"is_test\":%s}",
+                     (unsigned)trip_seq, (unsigned)st.diag_trip_reason, (unsigned)st.diag_trip_mask,
+                     st.diag_trip_reason == TEST_TRIP_REASON ? "true" : "false");
+        } else {
+            snprintf(json, sizeof(json),
+                     "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"readback\":false,"
+                     "\"requested_trip_reason\":%u,\"requested_trip_mask\":%u}",
+                     (unsigned)trip_seq, TEST_TRIP_REASON, (unsigned)(1u << (TEST_TRIP_REASON - 1u)));
+        }
         return test_trip_reply(req, "200 OK", json);
+    }
     case SAFETY_LINK_TEST_TRIP_REFUSED_RATE_LIMIT:
         return test_trip_reply(req, "409 Conflict", "{\"ok\":false,\"outcome\":\"rate_limited\"}");
     case SAFETY_LINK_TEST_TRIP_REFUSED_UPDATING:

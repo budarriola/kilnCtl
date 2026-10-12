@@ -1123,6 +1123,8 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     /* kilnlink audit 2026-10-09 M1: second reboot signal, independent of
      * the 8-bit FW_VERSION boot_id (which repeats 1 boot in 256). */
     bool pico_reboot_by_uptime = false;
+    bool pico_reboot_by_boot_id = false;
+    uint8_t pico_boot_id_prev = 0u;
     uint32_t pico_uptime_prev_ms = link->pico_uptime_baseline_ms;
     uint32_t esp_now_ms = (uint32_t)(xTaskGetTickCount() * (TickType_t)portTICK_PERIOD_MS);
     if (link->pico_uptime_baseline_known &&
@@ -1140,8 +1142,19 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
      * verdict inputs and erase the T3 lost-trip latch), and keep the cached id current from every DIAG so
      * the FW_VERSION that follows the same boot sees no change. */
     if (msg->length == SAFETY_LINK_DIAG_FRAME_LEN_V3) {
-        if (link->pico_boot_id_ever_seen && p[31] != link->pico_boot_id && !pico_reboot_by_uptime) {
+        /* TEST_TRIP WP3 review LOW-1: "already counted" must outlive this one DIAG. A 30-byte DIAG that
+         * counted the reboot by uptime never updated pico_boot_id, so the first V3 DIAG of the same boot
+         * differs from the stale id and would count it again. Honour the uptime path's note for
+         * SAFETY_REBOOT_NOTE_WINDOW_MS, exactly as the FW_VERSION boot-id branch does. The cached id is
+         * adopted below either way. */
+        bool counted_by_uptime =
+            pico_reboot_by_uptime ||
+            (link->reboot_noted_by_uptime &&
+             (uint32_t)(esp_now_ms - link->reboot_noted_by_uptime_esp_ms) <= SAFETY_REBOOT_NOTE_WINDOW_MS);
+        if (link->pico_boot_id_ever_seen && p[31] != link->pico_boot_id && !counted_by_uptime) {
             safety_note_pico_reboot_locked(link);
+            pico_reboot_by_boot_id = true;
+            pico_boot_id_prev = link->pico_boot_id;
         }
         link->pico_boot_id = p[31];
         link->pico_boot_id_known = true;
@@ -1250,6 +1263,11 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
         ESP_LOGW(TAG, "safety processor rebooted (DIAG uptime %" PRIu32 " ms -> %" PRIu32
                  " ms, boot_id unchanged): reset trip dedup and relay baseline, re-announcing",
                  pico_uptime_prev_ms, pico_uptime_now_ms);
+    }
+    if (pico_reboot_by_boot_id) {
+        /* TEST_TRIP WP3 review INFO-2: the DIAG boot-id path used to count silently. */
+        ESP_LOGW(TAG, "safety processor rebooted (DIAG boot_id %u -> new, uptime did not regress): reset trip "
+                 "dedup and relay baseline, re-announcing", (unsigned)pico_boot_id_prev);
     }
     return true;
 }

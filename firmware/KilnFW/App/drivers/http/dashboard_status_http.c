@@ -751,6 +751,12 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"diag_warn_mask\":%u", (unsigned)ds->diag_warn_mask);
         APPEND(",\"diag_trip_mask\":%u", (unsigned)ds->diag_trip_mask);
         APPEND(",\"diag_state\":%u", (unsigned)ds->diag_state);
+        /* WP3 review LOW-3: derived from the LIVE, fresh DIAG (TRIPPED with reason 4), not the TRIP_EVENT
+         * cache -- so it drops when the trip clears and cannot stay true under a later real trip whose
+         * TRIP_EVENT was lost. Mirrored in test_dashboard_json.c's render_worst_case_status_json(). */
+        APPEND(",\"trip_is_test\":%s",
+               (ds->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED && ds->diag_trip_reason == 4u &&
+                ds->diag_age_ms < SAFETY_LINK_STALE_MS) ? "true" : "false");
         /* 2026-09-09: raw boot_reason byte plus three decoded booleans for
          * the fatal-fault bits specifically (SAFETY_LINK_DIAG_BOOT_STACK_
          * OVERFLOW/_MALLOC_FAILED/_ASSERT_FAILED, safety_link.h) -- this is
@@ -777,7 +783,6 @@ esp_err_t dashboard_status_get_handler(httpd_req_t *req)
         APPEND(",\"trip_reason_words\":\"%s\"", safety_trip_words_short(ds->trip_reason));
         /* TEST_TRIP_PLAN 5.5: derived from reason == 4 (SAFETY_TRIP_TEST), no state of its own.
          * Mirrored in test_dashboard_json.c's render_worst_case_status_json(). */
-        APPEND(",\"trip_is_test\":%s", ds->trip_reason == 4u ? "true" : "false");
         {
             /* 2026-08-28 scope change: the cause line now carries the actual
              * detected numbers where this firmware has them -- see

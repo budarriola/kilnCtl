@@ -28,6 +28,7 @@
 #include "driver/uart.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "hal_sysinfo.h"
 #include "hal_time.h"
 #include "stack_margin.h"
 #include "freertos/idf_additions.h"
@@ -1009,6 +1010,9 @@ esp_err_t safety_link_get_stack_margin(SafetyLinkClass *link, kilnlink_stack_mar
 
 /* TEST_TRIP (0x2E) / TEST_TRIP_RESULT (0x2F) -- contract in safety_link.h. */
 static uint8_t s_test_trip_request_id; /* guarded by xact_lock; wraps, dedup key only */
+/* TEST_TRIP WP3 review INFO-1: the Pico's dedup state outlives an ESP reboot, so a counter restarting at 1 could
+ * collide with the Pico's last id (409 duplicate). Seed it once per ESP boot from boot entropy. */
+static bool s_test_trip_request_id_seeded;
 
 esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_trip_outcome_t *out_outcome,
                                       uint8_t *out_trip_seq)
@@ -1059,6 +1063,10 @@ esp_err_t safety_link_send_test_trip(SafetyLinkClass *link, safety_link_test_tri
     if (xSemaphoreTake(link->xact_lock, pdMS_TO_TICKS(SAFETY_XACT_LOCK_TIMEOUT_MS)) != pdTRUE) {
         ESP_LOGE(TAG, "test_trip: timed out waiting for the safety link transaction lock");
         return ESP_ERR_TIMEOUT;
+    }
+    if (!s_test_trip_request_id_seeded) {
+        s_test_trip_request_id = (uint8_t)hal_sysinfo_random_u32();
+        s_test_trip_request_id_seeded = true;
     }
     uint8_t request_id = ++s_test_trip_request_id;
 
