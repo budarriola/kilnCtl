@@ -2984,11 +2984,13 @@ def _lcd19_relock(ctx: dict, client, orig: dict, ui, state: dict) -> bool:
     (the edge makes firmware call ui_lcd_lock_force_lock(), same as the
     allow_heat relock), then wait for the home page to settle past the 1 Hz
     lock tick. Returns True only when both POSTs confirmed and home settled."""
-    off_status, _ = client.set_policy(
+    off_status, off_resp = client.set_policy(
         orig["web_enabled"], False, orig["web_timeout_min"], orig["lcd_timeout_min"])
     on_status, on_resp = client.set_policy(
         orig["web_enabled"], True, orig["web_timeout_min"], orig["lcd_timeout_min"])
-    ok = (off_status == 200 and on_status == 200 and bool(on_resp) and on_resp.get("ok") is True)
+    ok = (off_status == 200 and on_status == 200
+          and bool(off_resp) and off_resp.get("ok") is True
+          and bool(on_resp) and on_resp.get("ok") is True)
     state["unverified_relock_ok"] = ok
     if not ok:
         return False
@@ -3000,15 +3002,31 @@ def _lcd19_relock(ctx: dict, client, orig: dict, ui, state: dict) -> bool:
 _LOCKOUT_RE = re.compile(r"try again in (\d+)\s*s", re.IGNORECASE)
 
 
+#: First rung of the firmware's login_backoff ladder, in seconds: the
+#: ``5000u`` in ``LOGIN_BACKOFF_LADDER_MS`` (firmware/KilnFW/App/drivers/net/
+#: login_backoff.c:3). ``login_backoff_record_failure()`` starts this lock on
+#: EVERY wrong PIN, but the keypad shows only plain "Wrong PIN" for it
+#: (ui_lcd_keypad.c:194-198); the "try again in %us" text appears only for a
+#: submit made DURING the lock (LCD_KEYPAD_SUBMIT_LOCKED_OUT). A test pins
+#: this constant to the C source so the two cannot drift silently.
+_LCD19_LOCKOUT_FIRST_STEP_S = 5.0
+_LCD19_LOCKOUT_MARGIN_S = 1.5
+
+
 def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> Dict[str, Any]:
-    """If `names` (the stable read after a refused PIN) shows the keypad's
-    "Wrong PIN -- try again in %us" text, sleep that long (plus a margin) and
-    re-read until it is gone or `max_wait_s` is spent."""
+    """Wait out the lock a wrong PIN just started. ALWAYS sleeps at least the
+    firmware's first ladder step plus a margin (the lock is invisible on
+    screen after a wrong PIN). If `names` additionally shows the "try again
+    in %us" text (a submit that landed inside the lock), keep sleeping that
+    long and re-reading. Total elapsed time, reads included, is bounded by
+    `max_wait_s` (the one unconditional wait is always taken)."""
     sleep = ctx.get("_sleep", time.sleep)
+    now = ctx.get("_now", time.monotonic)
+    start = now()
     info: Dict[str, Any] = {"lockout_seen": False, "waited_s": 0.0}
-    waited = 0.0
+    sleep(_LCD19_LOCKOUT_FIRST_STEP_S + _LCD19_LOCKOUT_MARGIN_S)
     cur = names
-    while waited < max_wait_s:
+    while now() - start < max_wait_s:
         secs = None
         for n in (cur or []):
             m = _LOCKOUT_RE.search(str(n))
@@ -3018,11 +3036,9 @@ def _lcd19_wait_out_lockout(ctx: dict, ui, names, max_wait_s: float = 20.0) -> D
         if secs is None:
             break
         info["lockout_seen"] = True
-        step = min(secs + 1.0, max_wait_s - waited)
-        sleep(step)
-        waited += step
+        sleep(min(secs + 1.0, max(0.0, max_wait_s - (now() - start))))
         cur, _, _, _, _ = _wait_stable_names(ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
-    info["waited_s"] = waited
+    info["waited_s"] = now() - start
     return info
 
 

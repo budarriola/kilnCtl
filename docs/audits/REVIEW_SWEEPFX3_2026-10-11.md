@@ -109,3 +109,12 @@ The `-not $looseExists` term in the unborn test can be removed and `check_worktr
 - **The relock fake fires on the wrong edge:** the fake (`_wire_relock`) relocks on the `lcd_enabled=False` POST, while the firmware relocks on the off->on edge. The end result is the same for the tests.
 - **Classifying a right-PIN rejection:** with the lockout expired, a real rejection of the right PIN shows `"Wrong PIN"` with OK present. That gives `right_pin_started=False`, which is a FAIL, as it should be. Only a submit inside the lockout (LOCKED_OUT text) becomes INCONCLUSIVE, and there the firmware never checked the PIN. In the unverified path, a closed keypad with no Confirm dialog is INCONCLUSIVE and the PIN is not marked bad. That cannot hide a PASS, because nothing reaches `right_pin_started=True` from there.
 - **Normal mint paths:** default origin/dev, `-Base origin/main`, `-NoSubmodules`, minting without it, and `-Remove` of a new-branch worktree all behave as before.
+
+## Fix status
+
+| Finding | Status | Fix |
+|---|---|---|
+| MED-A | Fixed | `_lcd19_wait_out_lockout` always sleeps `_LCD19_LOCKOUT_FIRST_STEP_S` (5 s, pinned by a test to `LOGIN_BACKOFF_LADDER_MS[0]` in `login_backoff.c`) plus a 1.5 s margin; the text-driven wait is now only an extra. `BackoffUi` fake shows plain "Wrong PIN" on DENIED and the countdown only for a submit inside the lock. |
+| LOW-A | Fixed | `_lcd19_relock` also requires the off-POST body `ok:true`; four failed-relock tests (on-POST not ok, off-POST status, off-POST body, home not settled) catch P1, P3, P4. |
+| LOW-B | Fixed | Bound uses elapsed clock time (reads included); `test_lockout_wait_bound_counts_read_time` catches P11. |
+| LOW-C | Fixed | `check_worktree_mint.ps1` case: zero-byte loose ref + empty reflog is refused, not unborn (M2). |

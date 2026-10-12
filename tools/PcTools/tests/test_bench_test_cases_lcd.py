@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import os
+from pathlib import Path
 import sys
 import time
 import unittest
@@ -2802,36 +2803,154 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         self.assertTrue(result.observed.get("pin_lockout"))
         self.assertIsNone(result.observed.get("right_pin_started"))
 
-    def test_wrong_pin_lockout_is_waited_out_before_right_pin(self):
+    def _backoff_ui_cls(self):
         class BackoffUi(PinKeypadUiTest):
-            """Wrong PIN opens a 5 s lockout; a submit inside it is refused."""
+            """Models ui_lcd_keypad.c + login_backoff.c: a wrong PIN shows plain
+            "Wrong PIN" (no countdown) yet starts a 5 s lock; only a submit made
+            INSIDE the lock shows "Wrong PIN -- try again in Ns" (one-shot)."""
             now = 0.0
+            shown = False
             def list_tap_targets(self):
                 r = super().list_tap_targets()
-                if self._state == "keypad" and BackoffUi.now < self._until:
-                    r["targets"].append({"name": "Wrong PIN -- try again in %ds" % max(1, int(self._until - BackoffUi.now)),
-                                         "hidden": False})
+                if self._state == "keypad":
+                    if BackoffUi.shown:
+                        r["targets"].append({"name": "Wrong PIN -- try again in %ds" % max(1, int(self._until - BackoffUi.now)),
+                                             "hidden": False})
+                    else:
+                        r["targets"].append({"name": "Wrong PIN", "hidden": False})
                 return r
             def click_by_name(self, name):
-                if self._state == "keypad" and name == "OK":
-                    if BackoffUi.now < self._until:
-                        self._entry = ""
-                        return {"result": "ok"}
-                    if self._entry != self._right_pin:
-                        self._until = BackoffUi.now + 5.0
+                if self._state == "keypad":
+                    if name != "OK":
+                        BackoffUi.shown = False
+                    else:
+                        if BackoffUi.now < self._until:
+                            BackoffUi.shown = True
+                            self._entry = ""
+                            return {"result": "ok"}
+                        if self._entry != self._right_pin:
+                            self._until = BackoffUi.now + 5.0
                 return super().click_by_name(name)
         BackoffUi.now = 0.0
+        BackoffUi.shown = False
+        return BackoffUi
+
+    def _backoff_run(self, wait):
+        BackoffUi = self._backoff_ui_cls()
         ui = BackoffUi(right_pin="1234", wrong_pin="1235")
         ui._until = 0.0
         os.environ[CW._LCD_PIN_ENV] = "1234"
         sec = FakeSec04Client(admin_pin_set=False)
         def sleep(s):
-            BackoffUi.now += s
+            BackoffUi.now += s if wait else 0.0
         ctx = {"srv": FakeSrvFull(ui), "sec_client": sec, "_sleep": sleep}
-        result = C._case_lcd19(ctx)
+        return C._case_lcd19(ctx)
+
+    def test_wrong_pin_lockout_is_waited_out_before_right_pin(self):
+        result = self._backoff_run(wait=True)
         self.assertEqual(result.observed.get("wrong_pin_refused"), True)
         self.assertEqual(result.observed.get("right_pin_started"), True)
-        self.assertTrue(result.observed["wrong_pin_lockout_wait"]["lockout_seen"])
+        # The wait is unconditional: no countdown text was ever on screen.
+        self.assertFalse(result.observed["wrong_pin_lockout_wait"]["lockout_seen"])
+
+    def test_right_pin_without_any_wait_hits_lockout_inconclusive(self):
+        # Guards the fake: with sleeps that do not advance the lock clock the
+        # right PIN lands inside the 5 s lock.
+        result = self._backoff_run(wait=False)
+        self.assertNotEqual(result.verdict, Verdict.FAIL)
+        self.assertIsNone(result.observed.get("right_pin_started"))
+
+    def test_lockout_wait_sleeps_at_least_firmware_first_step(self):
+        import re as _re
+        src = (Path(__file__).resolve().parents[3] / "firmware" / "KilnFW" / "App"
+               / "drivers" / "net" / "login_backoff.c").read_text(encoding="utf-8")
+        m = _re.search(r"LOGIN_BACKOFF_LADDER_MS\[\d+\]\s*=\s*\{\s*(\d+)u", src)
+        self.assertIsNotNone(m)
+        self.assertEqual(C._LCD19_LOCKOUT_FIRST_STEP_S * 1000, float(m.group(1)))
+        slept = []
+        ctx = {"_sleep": slept.append, "_now": lambda: 0.0}
+        C._lcd19_wait_out_lockout(ctx, None, {"OK", "Cancel"})
+        self.assertGreaterEqual(sum(slept), C._LCD19_LOCKOUT_FIRST_STEP_S)
+
+    def test_lockout_wait_bound_counts_read_time(self):
+        clock = {"t": 0.0}
+        def sleep(s):
+            clock["t"] += s
+        def fake_read(ui, timeout_s=None, **kw):
+            clock["t"] += 6.0
+            return {"Wrong PIN -- try again in 1s"}, 6.0, 0, False, True
+        ctx = {"_sleep": sleep, "_now": lambda: clock["t"]}
+        with mock.patch.object(C, "_wait_stable_names", fake_read):
+            info = C._lcd19_wait_out_lockout(ctx, None, {"Wrong PIN -- try again in 1s"})
+        self.assertTrue(info["lockout_seen"])
+        # Documented bound 20 s, plus at most one in-flight read.
+        self.assertLessEqual(clock["t"], 20.0 + 6.0)
+
+    def _relock_fail_run(self, set_policy_fn=None, settle=None):
+        ui = PinKeypadUiTest(right_pin="1234", wrong_pin="1235", session=True)
+        ctx = self._unverified_ctx(ui)  # fake still relocks on the off POST
+        sec = ctx["sec_client"]
+        if set_policy_fn:
+            real = sec.set_policy
+            calls = []
+
+            def wrapped(*a, **kw):
+                calls.append(1)
+                # call 1 = case's own enable, 2/3 = the relock off/on, 4+ = restore
+                if len(calls) in (2, 3):
+                    return set_policy_fn(real, *a, **kw)
+                return real(*a, **kw)
+            sec.set_policy = wrapped
+        if settle is not None:
+            real_settle = C._wait_for_home_settled
+            n_pol = []
+            real_sp = sec.set_policy
+            sec.set_policy = lambda *a, **kw: (n_pol.append(1), real_sp(*a, **kw))[1]
+
+            def settle_fn(*a, **kw):
+                # only the settle that follows the relock's off+on POSTs (calls 2, 3)
+                if len(n_pol) == 3:
+                    return settle
+                return real_settle(*a, **kw)
+            with mock.patch.object(C, "_wait_for_home_settled", settle_fn):
+                result = C._case_lcd19(ctx)
+        else:
+            result = C._case_lcd19(ctx)
+        return result
+
+    def _assert_relock_failed(self, result):
+        self.assertTrue(result.observed.get("unverified_reraise_failed"))
+        self.assertEqual(result.verdict, Verdict.INCONCLUSIVE)
+
+    def test_failed_relock_on_post_not_ok_skips_start_tap(self):
+        def fn(real, web, lcd, *a, **kw):
+            r = real(web, lcd, *a, **kw)
+            return (200, {"ok": False}) if lcd else r
+        result = self._relock_fail_run(fn)
+        self.assertFalse(result.observed.get("unverified_relock_ok"))
+        self._assert_relock_failed(result)
+
+    def test_failed_relock_off_post_status_skips_start_tap(self):
+        def fn(real, web, lcd, *a, **kw):
+            r = real(web, lcd, *a, **kw)
+            return (500, r[1]) if not lcd else r
+        result = self._relock_fail_run(fn)
+        self.assertFalse(result.observed.get("unverified_relock_ok"))
+        self._assert_relock_failed(result)
+
+    def test_failed_relock_off_post_body_not_ok_skips_start_tap(self):
+        def fn(real, web, lcd, *a, **kw):
+            r = real(web, lcd, *a, **kw)
+            return (200, {"ok": False}) if not lcd else r
+        result = self._relock_fail_run(fn)
+        self.assertFalse(result.observed.get("unverified_relock_ok"))
+        self._assert_relock_failed(result)
+
+    def test_failed_relock_home_not_settled_skips_start_tap(self):
+        result = self._relock_fail_run(settle=False)
+        self.assertTrue(result.observed.get("unverified_relock_ok"))
+        self.assertFalse(result.observed.get("unverified_relock_settled"))
+        self._assert_relock_failed(result)
 
     def test_unverified_keypad_never_raised_still_fails(self):
         # MED-1: no keypad at all (PIN gate bypassed) must not become INCONCLUSIVE.
