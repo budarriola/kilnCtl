@@ -195,6 +195,8 @@ class IntFieldFloatValueTest(unittest.TestCase):
         self.assertIn("TypeError", out)
         self.assertIn("ALREADY landed", out)
         self.assertIn("board is partially written", out)
+        self.assertIn("PID/model written over UART", out)
+        self.assertIn("zone 0 pid=ok", out)
 
     def test_value_error_after_pid_stage_reports_partial(self):
         from kilnctrl import mcp_server_config_presets as mcp_
@@ -205,6 +207,49 @@ class IntFieldFloatValueTest(unittest.TestCase):
             out = mcp_.load_config_preset("bench_fixture", host="h", confirm=True)
         self.assertIn("ValueError", out)
         self.assertIn("ALREADY landed", out)
+        self.assertIn("PID/model written over UART", out)
+        self.assertIn("zone 0 pid=ok", out)
+
+    def test_zone0_pid_raise_does_not_claim_partial_write(self):
+        from kilnctrl import mcp_server_config_presets as mcp_
+        fake = FakeControl()
+        fake.set_zone_pid = unittest.mock.Mock(side_effect=TypeError("boom"))
+        with unittest.mock.patch("kilnctrl.mcp_server_control._profile_or_autotune_running_reason",
+                                 return_value=None), \
+             unittest.mock.patch("kilnctrl.mcp_server_ota._ota_resolve_host", return_value="h"), \
+             unittest.mock.patch.object(mcp_, "_srv", types.SimpleNamespace(_control=fake)):
+            out = mcp_.load_config_preset("bench_fixture", host="h", confirm=True)
+        self.assertIn("TypeError", out)
+        self.assertNotIn("partially written", out)
+        self.assertNotIn("nothing had landed", out)
+        self.assertIn("may still have applied", out)
+
+    def test_get_capture_zones_load_as_preset(self):
+        import copy
+        cap = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures",
+                                          "zones_get_capture.json"), encoding="utf-8"))
+        d = copy.deepcopy(config_presets.load_preset_data("bench_fixture"))
+        d["zones"] = cap["zones"]
+        config_presets._validate("cap", d)
+        d["zones"][0]["max_temp_c"] = True  # bool still refused on a real numeric field
+        with self.assertRaises(config_presets.ConfigPresetError):
+            config_presets._validate("cap", d)
+        d["zones"][0]["max_temp_c"] = 80
+        d["zones"][0]["k_dc"] = True
+        with self.assertRaises(config_presets.ConfigPresetError):
+            config_presets._validate("cap", d)
+
+    def test_top_level_float_fields_validated(self):
+        import copy
+        for key in ("ease_off_window_mult", "pc_link_abort_silence_ms"):
+            for bad in ("abc", float("nan"), float("inf"), True):
+                d = copy.deepcopy(config_presets.load_preset_data("bench_fixture"))
+                d[key] = bad
+                with self.assertRaises(config_presets.ConfigPresetError, msg=(key, bad)):
+                    config_presets._validate("t", d)
+            d = copy.deepcopy(config_presets.load_preset_data("bench_fixture"))
+            d[key] = 2.0
+            config_presets._validate("t", d)
 
     def test_format_scalar_refuses_non_bool_failsafe(self):
         for bad in ("false", 1.0):

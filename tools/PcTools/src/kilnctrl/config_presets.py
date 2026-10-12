@@ -191,6 +191,9 @@ def load_preset_data(name: str) -> dict:
 _ZONE_NON_FLOAT_KEYS = frozenset({"index", "name", "coupling_coeff", "failsafe_state", "settings_source_groups"})
 
 
+_ZONE_NUMERIC_IGNORED_EXCEPTIONS = frozenset({"k_dc", "tau_s", "dead_time_s"})
+
+
 def _is_finite_number(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -228,6 +231,11 @@ def _validate(name: str, data: object) -> None:
             if (key in _ZONE_NON_FLOAT_KEYS or key in zones_http_client._ZONE_INT_FIELDS
                     or key.startswith("_")):
                 continue
+            # Read-only GET/backup telemetry (incl. five JSON bools) is ignored, never
+            # written; k_dc/tau_s/dead_time_s ARE written over UART and stay numeric.
+            if (key in zones_http_client._PRESET_ZONE_KNOWN_IGNORED_FIELDS
+                    and key not in _ZONE_NUMERIC_IGNORED_EXCEPTIONS):
+                continue
             if not _is_finite_number(val):
                 raise ConfigPresetError(
                     f"preset {name!r}: zones[{i}].{key} must be a finite number (int or float, "
@@ -247,6 +255,13 @@ def _validate(name: str, data: object) -> None:
             raise ConfigPresetError(
                 f"preset {name!r}: {key!r} is an integer field but the preset gives "
                 f"{data[key]!r} ({type(data[key]).__name__}); write it as a plain integer")
+    for key in (*(k for k in zones_http_client._TOP_FIELD_FORM_KEY
+                  if k not in zones_http_client._TOP_INT_FIELDS and k != "continue_on_zone_trip"),
+                zones_http_client.LEGACY_TOP_LEVEL_EASE_OFF_MULT_KEY):
+        if key in data and (not _is_finite_number(data[key]) or data[key] < 0):
+            raise ConfigPresetError(
+                f"preset {name!r}: {key!r} must be a finite non-negative number "
+                f"(not bool/str/NaN/inf), got {data[key]!r}")
     if "continue_on_zone_trip" in data and not isinstance(data["continue_on_zone_trip"], bool):
         raise ConfigPresetError(
             f"preset {name!r}: 'continue_on_zone_trip' must be a bool (true/false), "
@@ -507,7 +522,7 @@ def apply_preset(control: "ControlClient", preset: dict,
     except (Exception,) as exc:
         if getattr(exc, "preset_partial", None) is None:
             try:
-                exc.preset_partial = "\n".join(done) if done else "(nothing had landed yet)"
+                exc.preset_partial = "\n".join(done) if done else ""
             except Exception:  # noqa: BLE001 -- exotic exception without __dict__
                 pass
         raise

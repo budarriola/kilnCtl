@@ -187,7 +187,7 @@ class ApplyPresetRealPartialTests(unittest.TestCase):
         control.set_zone_pid.side_effect = ControlQueryError("x")
         with self.assertRaises(ControlQueryError) as cm:
             config_presets.apply_preset(control, self._preset())
-        self.assertIn("nothing had landed", cm.exception.preset_partial)
+        self.assertEqual(cm.exception.preset_partial, "")
 
 
 

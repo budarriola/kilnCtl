@@ -171,7 +171,14 @@ def _partial_note(exc: BaseException) -> str:
     landed) to a stage failure; surface it so a failure is never read as 'no
     write happened'."""
     partial = getattr(exc, "preset_partial", None)
-    return f"\nstages that had ALREADY landed before the failure (board is partially written):\n{partial}" if partial else ""
+    if partial is None:
+        return ""
+    if not partial:
+        return ("\nno stage had confirmed landing before the failure; a write in flight "
+                "may still have applied")
+    return ("\nstages that had ALREADY landed before the failure (board is partially written; "
+            f"the failing stage's own write may also have applied):\n{partial}")
+
 
 # Bound last, on purpose: tool bodies read `_srv` only at call time, and importing the
 # aggregate any earlier would let it star-import this module half-initialised

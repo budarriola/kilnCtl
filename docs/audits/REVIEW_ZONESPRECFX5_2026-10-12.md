@@ -27,7 +27,7 @@ Result: **0 HIGH, 1 MED, 3 LOW, 2 INFO.** `tests/test_config_presets.py`: 53 pas
    partial-note test cannot tell a real PID-stage record from "nothing landed".
    See LOW-3.
 
-## MED-1: generic float rule refuses a preset captured from a board GET or backup
+## MED-1 (FIXED, zonesprecfx6): generic float rule refuses a preset captured from a board GET or backup
 
 `config_presets.py:191` (`_ZONE_NON_FLOAT_KEYS`) and `config_presets.py:227-233`
 (the `for key, val in zone.items()` loop) now require every zone key that is not
@@ -58,7 +58,7 @@ these keys, so this is MED, not HIGH.
 Alternatively, allow bool for the five tuning/current flags. Add a test that runs
 the GET-capture fixture's zones through `_validate`.
 
-## LOW-1: top-level float fields still unchecked
+## LOW-1 (FIXED, zonesprecfx6): top-level float fields still unchecked
 
 `config_presets.py:245-257` checks only `_TOP_INT_FIELDS`, `continue_on_zone_trip`
 and `ramp_assist_enabled`. These values for the two top-level float fields
@@ -79,7 +79,7 @@ LOW-2 of REVIEW_ZONESPRECFX4 meant to rule out for float fields.
 `zones_http_client._TOP_FIELD_FORM_KEY` and to the legacy ease-off key, except the
 int and bool keys.
 
-## LOW-2: the partial note claims a partial write when nothing landed
+## LOW-2 (FIXED, zonesprecfx6): the partial note claims a partial write when nothing landed
 
 `apply_preset` sets `preset_partial = "(nothing had landed yet)"` when `done` is
 empty (`config_presets.py:510`). `_partial_note` only checks for a truthy value, so
@@ -104,7 +104,7 @@ header. Add a test that drives a zone-0 `set_zone_pid` raise through
 `load_config_preset`. This behaviour predates the fix (2026-10-09); this change
 widens its reach.
 
-## LOW-3: the partial-note test does not check what landed
+## LOW-3 (FIXED, zonesprecfx6): the partial-note test does not check what landed
 
 `tests/test_config_presets.py:185-197`
 (`test_unexpected_exception_after_pid_stage_reports_partial`) asserts `TypeError`,
