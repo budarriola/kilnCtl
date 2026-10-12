@@ -53,7 +53,7 @@ if ($Mode -eq "probe") {
     if ($got) { $m.ReleaseMutex(); $m.Dispose(); exit 0 }
     $m.Dispose(); exit 1
 }
-if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path $ReadyFile -Value "got=$got" -Encoding ascii }
+if ($ReadyFile -and $ReadyFile -ne "none") { Set-Content -Path "$ReadyFile.tmp" -Value "got=$got" -Encoding ascii; Move-Item -Path "$ReadyFile.tmp" -Destination $ReadyFile -Force }
 if (-not $got) { exit 2 }
 Start-Sleep -Seconds $Seconds
 $m.ReleaseMutex(); $m.Dispose(); exit 0
@@ -130,7 +130,7 @@ try {
     Assert-True (Test-Path $ready) "holder child wrote the ready file"
     # The child records its own WaitOne result, so "about to try" (file written
     # before the acquire) is told apart from "holds the mutex".
-    $readyTxt = if (Test-Path $ready) { (Get-Content $ready -Raw).Trim() } else { "" }
+    $readyTxt = if (Test-Path $ready) { "$(Get-Content $ready -Raw)".Trim() } else { "" }
     Assert-True ($readyTxt -eq "got=True") "holder child reports it holds the mutex (ready file says '$readyTxt')"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     $msg = ""
@@ -158,3 +158,4 @@ if ($failures.Count -gt 0) {
 }
 Write-Host "check_build_gate_reentrant: PASS"
 exit 0
+
