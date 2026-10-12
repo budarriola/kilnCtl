@@ -10,6 +10,7 @@ Run with: python -m pytest tools/PcTools/tests/test_bench_test_cases_lcd.py -q
 from __future__ import annotations
 
 import itertools
+import math
 import os
 from pathlib import Path
 import sys
@@ -2803,7 +2804,7 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         self.assertTrue(result.observed.get("pin_lockout"))
         self.assertIsNone(result.observed.get("right_pin_started"))
 
-    def _backoff_ui_cls(self):
+    def _backoff_ui_cls(self, locks=None):
         class BackoffUi(PinKeypadUiTest):
             """Models ui_lcd_keypad.c + login_backoff.c: a wrong PIN shows plain
             "Wrong PIN" (no countdown) yet starts a 5 s lock; only a submit made
@@ -2814,7 +2815,7 @@ class Lcd19SelfSeedTest(unittest.TestCase):
                 r = super().list_tap_targets()
                 if self._state == "keypad":
                     if BackoffUi.shown:
-                        r["targets"].append({"name": "Wrong PIN -- try again in %ds" % max(1, int(self._until - BackoffUi.now)),
+                        r["targets"].append({"name": "Wrong PIN -- try again in %ds" % max(1, math.ceil(self._until - BackoffUi.now)),
                                              "hidden": False})
                     else:
                         r["targets"].append({"name": "Wrong PIN", "hidden": False})
@@ -2829,16 +2830,17 @@ class Lcd19SelfSeedTest(unittest.TestCase):
                             self._entry = ""
                             return {"result": "ok"}
                         if self._entry != self._right_pin:
-                            self._until = BackoffUi.now + 5.0
+                            self._until = BackoffUi.now + BackoffUi.locks.pop(0)
                 return super().click_by_name(name)
         BackoffUi.now = 0.0
         BackoffUi.shown = False
+        BackoffUi.locks = list(locks or []) + [5.0] * 4
         return BackoffUi
 
-    def _backoff_run(self, wait):
-        BackoffUi = self._backoff_ui_cls()
+    def _backoff_run(self, wait, locks=None, until=0.0):
+        BackoffUi = self._backoff_ui_cls(locks)
         ui = BackoffUi(right_pin="1234", wrong_pin="1235")
-        ui._until = 0.0
+        ui._until = until
         os.environ[CW._LCD_PIN_ENV] = "1234"
         sec = FakeSec04Client(admin_pin_set=False)
         def sleep(s):
@@ -2872,12 +2874,30 @@ class Lcd19SelfSeedTest(unittest.TestCase):
         C._lcd19_wait_out_lockout(ctx, None, {"OK", "Cancel"})
         self.assertGreaterEqual(sum(slept), C._LCD19_LOCKOUT_FIRST_STEP_S)
 
+    def test_first_lock_ten_seconds_waits_and_retries_right_pin(self):
+        # LOW-A: ladder already past rung 0 (first lock 10 s).
+        result = self._backoff_run(wait=True, locks=[10.0])
+        self.assertEqual(result.observed.get("wrong_pin_refused"), True)
+        self.assertEqual(result.observed.get("right_pin_started"), True)
+        self.assertFalse(result.observed.get("pin_lockout"))
+        self.assertTrue(result.observed.get("right_pin_lockout_retry"))
+
+    def test_wrong_pin_during_running_lock_is_not_refused(self):
+        # LOW-B: lock already running when the wrong PIN is typed.
+        result = self._backoff_run(wait=True, until=4.0)
+        self.assertIsNone(result.observed.get("wrong_pin_refused"))
+        self.assertNotEqual(result.verdict, Verdict.PASS)
+
     def test_lockout_wait_bound_counts_read_time(self):
         clock = {"t": 0.0}
+        reads = {"n": 0}
         def sleep(s):
             clock["t"] += s
         def fake_read(ui, timeout_s=None, **kw):
             clock["t"] += 6.0
+            reads["n"] += 1
+            if reads["n"] > 20:
+                raise AssertionError("wait loop not bounded by elapsed time")
             return {"Wrong PIN -- try again in 1s"}, 6.0, 0, False, True
         ctx = {"_sleep": sleep, "_now": lambda: clock["t"]}
         with mock.patch.object(C, "_wait_stable_names", fake_read):

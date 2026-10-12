@@ -3588,7 +3588,11 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                             # (2026-09-30 fix) still missed the
                             # still-changing case; gating on `stabilized`
                             # (2026-09-30 review fix) covers both.
-                            if stabilized:
+                            if stabilized and any("try again in" in str(n).lower() for n in names):
+                                # LOW-B: a lock was already running, so firmware
+                                # never evaluated this PIN; no conclusion.
+                                state["wrong_pin_during_lock"] = True
+                            elif stabilized:
                                 if "OK" in names and "Cancel" in names:
                                     # "OK"+"Cancel" present alone doesn't
                                     # prove the wrong PIN was refused and
@@ -3620,51 +3624,63 @@ def _case_lcd19(ctx: dict) -> CaseResult:
                         # `_wait_stable_names` above) showing "OK"+"Cancel"
                         # -- the same keypad, still open, not re-raised --
                         # immediately before this entry starts.
-                        entry = ui.enter_pin_verified(right_pin)
-                        state["right_pin_entry"] = _entry_result_summary(entry)
-                        if entry is not None and entry.get("entry_incomplete"):
-                            # Same "never re-tap, never guess" rule as the
-                            # wrong-PIN entry above: right_pin_started stays
-                            # at its initial None (INCONCLUSIVE).
-                            pass
-                        elif entry is not None and _entry_all_digits_not_found(entry):
-                            state["entry_all_not_found"] = True
-                        if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
-                            # A correct PIN closes the keypad in favour of
-                            # the Confirm Start dialog -- "OK" disappears.
-                            # 2026-09-30 bench evidence (two runs): the
-                            # screen is still mid-transition after submit --
-                            # ~14 non-repeating reads then an empty one at
-                            # the default 2.0s timeout -- so this poll gets
-                            # its own longer, named timeout rather than
-                            # racing the transition.
-                            names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
-                                ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
-                            state["after_right_pin_names"] = sorted(names) if names is not None else None
-                            if empty_polls:
-                                state["after_right_pin_empty_polls"] = empty_polls
-                            if truncated_seen:
-                                state["after_right_pin_truncated"] = truncated_seen
-                            if not stabilized:
-                                state["after_right_pin_stabilized"] = False
-                            # A non-stabilized last read -- `None` (every
-                            # read empty/timeout) OR a real, still-changing
-                            # read that never repeated -- must leave
-                            # `right_pin_started` at its initial `None`,
-                            # never a fabricated "did not start" False. See
-                            # the `wrong_pin_refused` comment above: gating
-                            # on `names is not None` alone (2026-09-30 fix)
-                            # still let a still-transitioning, never-
-                            # repeating non-empty read at timeout produce a
-                            # false FAIL ("the correct PIN did not start the
-                            # firing"); gating on `stabilized` (2026-09-30
-                            # review fix) covers that case too.
-                            if stabilized:
-                                if any("try again in" in str(n).lower() for n in names):
-                                    # Locked out, not rejected on merit: cannot judge.
-                                    state["pin_lockout"] = True
-                                else:
-                                    right_pin_started = "OK" not in names and "Cancel" in names
+                        for _attempt in range(2):
+                            state.pop('pin_lockout', None)
+                            entry = ui.enter_pin_verified(right_pin)
+                            state["right_pin_entry"] = _entry_result_summary(entry)
+                            if entry is not None and entry.get("entry_incomplete"):
+                                # Same "never re-tap, never guess" rule as the
+                                # wrong-PIN entry above: right_pin_started stays
+                                # at its initial None (INCONCLUSIVE).
+                                pass
+                            elif entry is not None and _entry_all_digits_not_found(entry):
+                                state["entry_all_not_found"] = True
+                            if entry is not None and not entry.get("entry_incomplete") and _entry_all_clicked_ok(entry):
+                                # A correct PIN closes the keypad in favour of
+                                # the Confirm Start dialog -- "OK" disappears.
+                                # 2026-09-30 bench evidence (two runs): the
+                                # screen is still mid-transition after submit --
+                                # ~14 non-repeating reads then an empty one at
+                                # the default 2.0s timeout -- so this poll gets
+                                # its own longer, named timeout rather than
+                                # racing the transition.
+                                names, _, empty_polls, truncated_seen, stabilized = _wait_stable_names(
+                                    ui, timeout_s=_PIN_SUBMIT_POLL_TIMEOUT_S)
+                                state["after_right_pin_names"] = sorted(names) if names is not None else None
+                                if empty_polls:
+                                    state["after_right_pin_empty_polls"] = empty_polls
+                                if truncated_seen:
+                                    state["after_right_pin_truncated"] = truncated_seen
+                                if not stabilized:
+                                    state["after_right_pin_stabilized"] = False
+                                # A non-stabilized last read -- `None` (every
+                                # read empty/timeout) OR a real, still-changing
+                                # read that never repeated -- must leave
+                                # `right_pin_started` at its initial `None`,
+                                # never a fabricated "did not start" False. See
+                                # the `wrong_pin_refused` comment above: gating
+                                # on `names is not None` alone (2026-09-30 fix)
+                                # still let a still-transitioning, never-
+                                # repeating non-empty read at timeout produce a
+                                # false FAIL ("the correct PIN did not start the
+                                # firing"); gating on `stabilized` (2026-09-30
+                                # review fix) covers that case too.
+                                if stabilized:
+                                    if any("try again in" in str(n).lower() for n in names):
+                                        # Locked out, not rejected on merit: cannot judge.
+                                        state["pin_lockout"] = True
+                                    else:
+                                        right_pin_started = "OK" not in names and "Cancel" in names
+                            # LOW-A: the ladder is kept per boot and may be past rung 0; a right
+                            # PIN that lands in a still-running lock is waited out once and retyped
+                            # (a LOCKED_OUT submit does not count as a failure).
+                            if _attempt == 0 and state.get('pin_lockout'):
+                                _secs = [int(_m.group(1)) for _n in (names or []) for _m in [_LOCKOUT_RE.search(str(_n))] if _m]
+                                if _secs:
+                                    ctx.get('_sleep', time.sleep)(max(_secs) + 1.0)
+                                    state['right_pin_lockout_retry'] = max(_secs)
+                                    continue
+                            break
 
                 # Owner decision 2026-09-30: stop_gated has never been
                 # reachable in practice -- `firing_active_with_lock` is not
