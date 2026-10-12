@@ -261,6 +261,96 @@ class BuildLockReclaimStress(unittest.TestCase):
         self.assertEqual(entered.value, workers * rounds)
 
 
+class BuildLockReviewFixes(unittest.TestCase):
+    def _key(self):
+        return f"fx5-{os.getpid()}-{time.time_ns()}"
+
+    def test_alive_holder_old_lock_is_never_age_reclaimed(self):
+        key = self._key()
+        path = _lock_path(key)
+        import mcpkit.buildlock as bl
+        _a, start = bl._pid_info(os.getpid())
+        with open(path, "w") as f:
+            f.write(f"{os.getpid()} {int(start)} tok123\n")
+        old = time.time() - 5000
+        os.utime(path, (old, old))
+        try:
+            with self.assertRaises(BuildLockTimeout):
+                with build_lock(key, wait_timeout=0.5, poll_interval=0.05, stale_after=10):
+                    pass
+            self.assertTrue(os.path.exists(path))
+        finally:
+            os.remove(path)
+
+    def test_old_legacy_lock_still_age_reclaimed(self):
+        key = self._key()
+        path = _lock_path(key)
+        with open(path, "w") as f:
+            f.write(f"{os.getpid()} 1.0\n")
+        old = time.time() - 5000
+        os.utime(path, (old, old))
+        with build_lock(key, wait_timeout=3, poll_interval=0.05, stale_after=10):
+            pass
+
+    def test_declined_reclaim_does_not_spin_and_honours_timeout(self):
+        from unittest import mock
+        import mcpkit.buildlock as bl
+        key = self._key()
+        path = _lock_path(key)
+        _a, start = bl._pid_info(os.getpid())
+        with open(path, "w") as f:
+            f.write(f"{os.getpid()} {int(start)} tok\n")
+        old = time.time() - 5000
+        os.utime(path, (old, old))
+        calls = []
+        real = bl._try_reclaim
+        def counting(*a, **k):
+            calls.append(1)
+            return real(*a, **k)
+        try:
+            with mock.patch.object(bl, "_try_reclaim", counting):
+                t0 = time.monotonic()
+                with self.assertRaises(BuildLockTimeout):
+                    with build_lock(key, wait_timeout=0.5, poll_interval=0.1, stale_after=10):
+                        pass
+            self.assertLess(time.monotonic() - t0, 3)
+            self.assertLess(len(calls), 20)
+        finally:
+            os.remove(path)
+
+    def test_stale_sidecar_is_broken_and_live_one_is_kept(self):
+        import mcpkit.buildlock as bl
+        key = self._key()
+        path = _lock_path(key)
+        side = path + ".reclaim"
+        with open(path, "w") as f:
+            f.write("999999999 1.0\n")
+        with open(side, "w") as f:
+            f.write("x")
+        # live sidecar: must survive a break attempt
+        bl._break_stale_sidecar(side)
+        self.assertTrue(os.path.exists(side))
+        old = time.time() - 600
+        os.utime(side, (old, old))
+        with build_lock(key, wait_timeout=5, poll_interval=0.05):
+            pass
+        self.assertFalse(os.path.exists(side))
+
+    def test_release_puts_back_a_lock_it_does_not_own(self):
+        import mcpkit.buildlock as bl
+        key = self._key()
+        path = _lock_path(key)
+        with open(path, "w") as f:
+            f.write("1 2 othertoken\n")
+        try:
+            bl._release(path, "1 2 mine")
+            self.assertEqual(open(path).read().strip(), "1 2 othertoken")
+            self.assertEqual([n for n in os.listdir(os.path.dirname(path))
+                              if n.startswith(os.path.basename(path) + ".rel.")], [])
+        finally:
+            os.remove(path)
+
+
 class BuildLockReleaseAndReclaimGuards(unittest.TestCase):
     def test_release_does_not_remove_a_lock_it_no_longer_owns(self):
         key = f"test-token-{os.getpid()}-{time.time_ns()}"

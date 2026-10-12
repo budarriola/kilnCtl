@@ -36,13 +36,12 @@ PID reclaims at once. Every reclaim goes through an O_EXCL ``.reclaim``
 sidecar that re-reads the lock, and release removes the lock only if the
 token is still the holder's own.
 
-Stale-lock timeout: a lock older than ``stale_after`` seconds is assumed to
-belong to a dead holder (crashed process, killed MCP server, rebooted box)
-and is removed so a waiter is never stuck forever. Default is 2100s (35
-minutes) -- comfortably longer than ``build_kilnfw``'s own 1800s subprocess
-timeout, so a *live*, merely-slow build is never treated as dead and raced
-by a second holder; short enough that a genuinely abandoned lock does not
-wedge the tool for the rest of the day.
+Stale-lock timeout: a lock older than ``stale_after`` seconds whose holder
+is NOT confirmed alive (unparseable/legacy content, unknown start time, or a
+dead/reused PID) is removed so a waiter is never stuck forever. A holder
+confirmed alive (PID alive AND recorded start time matches) is never
+age-reclaimed, however old the lock: ``build_kilnfw`` may legitimately run up
+to 7140 s, well past the default 2100 s ``stale_after``.
 
 A waiter blocks, polling every ``poll_interval`` seconds, until it acquires
 the lock or ``wait_timeout`` elapses, at which point it raises
@@ -182,6 +181,42 @@ def _remove_retry(path: str, attempts: int = 400) -> bool:
     return False
 
 
+def _holder_confirmed_alive(text: "str | None") -> bool:
+    """True only for a token-bearing lock whose PID is alive and whose start
+    time matches the recorded one. Such a lock is never age-reclaimed."""
+    parsed = _parse_holder(text)
+    if parsed is None:
+        return False
+    pid, second, token = parsed
+    alive, started = _pid_info(pid)
+    if not alive or token is None or second <= 0 or started is None:
+        return False
+    return abs(started - second) <= _START_SLACK_S
+
+
+def _break_stale_sidecar(sidecar: str) -> None:
+    """Remove an abandoned sidecar without deleting a live one: rename it to a
+    unique name (atomic), verify the grabbed file is still old, else put it
+    back (rename refuses to overwrite on Windows, so a newer sidecar wins)."""
+    try:
+        if time.time() - os.path.getmtime(sidecar) <= _RECLAIM_SIDECAR_STALE_S:
+            return
+        grabbed = f"{sidecar}.dead.{uuid.uuid4().hex}"
+        os.rename(sidecar, grabbed)
+    except OSError:
+        return
+    try:
+        if time.time() - os.path.getmtime(grabbed) > _RECLAIM_SIDECAR_STALE_S:
+            _remove_retry(grabbed)
+            return
+        try:
+            os.rename(grabbed, sidecar)  # grabbed a live one: restore it
+        except OSError:
+            _remove_retry(grabbed)  # a newer sidecar exists; ours is moot
+    except OSError:
+        pass
+
+
 def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
     """Remove ``lock_path`` only if it still holds the content that was judged
     dead/stale. Serialized through an O_EXCL sidecar so no two waiters can
@@ -191,11 +226,7 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
     try:
         fd = os.open(sidecar, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        try:
-            if time.time() - os.path.getmtime(sidecar) > _RECLAIM_SIDECAR_STALE_S:
-                os.remove(sidecar)  # a reclaimer died holding it
-        except OSError:
-            pass
+        _break_stale_sidecar(sidecar)
         return
     except OSError:
         return
@@ -204,6 +235,8 @@ def _try_reclaim(lock_path: str, judged: "str | None", force: bool) -> None:
         current = _read_holder(lock_path)
         if current != judged:
             return  # replaced by someone else's lock since we judged
+        if _holder_confirmed_alive(current):
+            return  # alive holder: never reclaim, even by age
         if not force and not _text_is_dead_holder(current):
             return
         _remove_retry(lock_path)
@@ -271,7 +304,8 @@ def build_lock(
             judged = _read_holder(lock_path)
             if age > stale_after or _text_is_dead_holder(judged):
                 _try_reclaim(lock_path, judged, force=age > stale_after)
-                continue
+                # No `continue`: fall through so the timeout is honoured and
+                # we never busy-spin when the reclaim declines.
             waited = time.monotonic() - started
             if waited >= wait_timeout:
                 raise BuildLockTimeout(resource_key, waited, _read_holder(lock_path))
@@ -280,7 +314,31 @@ def build_lock(
         yield
     finally:
         if acquired:
-            # Only remove the lock if it is still ours: a stale reclaim may
-            # have replaced it with another holder's file.
-            if _read_holder(lock_path) == my_text:
-                _remove_retry(lock_path)
+            _release(lock_path, my_text)
+
+
+def _release(lock_path: str, my_text: str) -> None:
+    """Delete the lock only if it is still ours. Rename-aside first, then
+    verify the token in the renamed file, so a lock a reclaimer replaced
+    between a read and the delete is put back rather than deleted. Residual
+    window: if a third process creates a new lock in the instant between our
+    rename-aside and restore, the restore fails and the grabbed lock is lost;
+    only reachable after another process already reclaimed ours."""
+    aside = f"{lock_path}.rel.{uuid.uuid4().hex}"
+    for _ in range(400):
+        try:
+            os.rename(lock_path, aside)
+            break
+        except FileNotFoundError:
+            return
+        except OSError:
+            time.sleep(0.005)
+    else:
+        return
+    if _read_holder(aside) == my_text:
+        _remove_retry(aside)
+        return
+    try:
+        os.rename(aside, lock_path)
+    except OSError:
+        _remove_retry(aside)
