@@ -69,7 +69,7 @@ fix, which only changed the size column. Neighbouring rows may be similarly stal
 
 ### INFO-3: the INFO-4 rewording is accurate, and verified
 
-The original text of REVIEW_LCDFX13 (`6021e41b8`, line 108) read "A survey of `30301fbe48` found 110 alias groups".
+The original text of REVIEW_LCDFX13 (`6021e41b8`, line 108) read "A survey of the checkbuild directory (not a commit) found 110 alias groups".
 So the survey used `C:\wt\checkbuild_30301fbe48`, which is the first row of the table. The new wording ("the
 checkbuild directory in the first row of the table above") names exactly that.
 
