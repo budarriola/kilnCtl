@@ -6,12 +6,15 @@
 # the LCD lock BEFORE the touch-calibration early return (L9).
 # Mechanical, string-level: each rule names a file and a regex that must match.
 # Usage: powershell -ExecutionPolicy Bypass -File tools\check_lcd_admin_gates.ps1 [-UiDir <path>]
-param([string]$UiDir)
+param([string]$UiDir, [switch]$DumpSinks)
 $ErrorActionPreference = "Stop"
 if (-not $UiDir) { $UiDir = Join-Path $PSScriptRoot "..\firmware\KilnFW\App\drivers\ui" }
 $UiDir = (Resolve-Path $UiDir).Path
 
 $admin = 'LCD_PIN_ROLE_ADMIN'
+# LCDFX9: every identifier that names an admin-tier mutator the LCD could reach. ANY mention (call, address-of, #define
+# alias, log argument, header wrapper) under drivers/ui must be in $sinkRows below; unlisted mentions fail (deny by default).
+$denyIdent = '(?:dashboard_set_\w+|dashboard_safety_clear_trip|safety_link_send_\w+|wifi_prov_(?:add|forget|set|post|clear|save(?!d)|delete|reset|start|stop|connect|disconnect|factory|remove)\w*|unit_pref_set\w*|unit_pref_(?:reset|clear|save)\w*|touch_cal_store_(?:save|clear|erase|reset|write)\w*|profiles_http_(?:save|delete|set|create|import|restore|retarget|rename|copy|write|erase)\w*|profiles_favorites_set|profiles_live_(?:decide_apply|fork|edit)\w*|crash_report_(?:ack|clear)\w*|kiln_io_set_\w+|edit_firing_apply|zones_config_(?:set|save|write|reset)\w*|aux_outputs_(?:set|save)\w*)'
 # REVIEW_LCDFX5 LOW-5: every rule is matched against ONE named function's body (brace-matched), never the
 # whole file, so a gate moved into a dead function no longer satisfies it. Fields: file, function, regex
 # that must match the body, label, and optionally an apply identifier whose non-definition occurrences in
@@ -21,6 +24,8 @@ $admin = 'LCD_PIN_ROLE_ADMIN'
 $uncond = '(?:(?!\bif\b|\bwhile\b|\bfor\b|\bswitch\b|\bgoto\b|\breturn\b|\?)[^{}])*?\breturn\s*;'
 # Bare-gate callbacks allowed to have code after the gate statement (none today; add with a reason).
 # Keyed by row label. apply_cb carries two gates (apply, then decide), so each row sees the other gate.
+# LCDFX9 HIGH-5: leading statements allowed before a start-anchored guard: `(void)x;` and plain declarations with an initializer.
+$pfx = '(?:\s*(?:\(void\)\s*\w+|(?!\s*(?:return|goto|else)\b)[\w\s\*]+=[^;{}]*)\s*;)*\s*'
 $afterGateOk = @('L11 live-edit decide')
 $preCallOk = @{ 'L11 touch cal nav' = 'kiln_ui_show'; 'L11 live-edit apply' = 'ui_lcd_lock_run_gated' }   # call names allowed before this row's gate
 function GateRx([string]$prompt, [string]$role, [string]$apply) { 'ui_lcd_lock_run_gated\(\s*"' + $prompt + '",\s*' + $role + ',\s*' + $apply + ',' }
@@ -39,13 +44,13 @@ $rules = @(
     @('ui_page_config.c', 'units_toggle_cb', (GateRx 'Admin PIN to change units' $admin 'units_toggle_apply'), 'L11 units', 'units_toggle_apply', 1),
     @('ui_page_config.c', 'units_toggle_apply', ('^\s*\(void\)\s*\w+\s*;\s*if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*return;\s*\}'), 'L11 units apply re-check', $null, 0),
     @('ui_page_config.c', 'touch_cal_nav_cb', (GateRx 'Admin PIN to recalibrate touch' $admin 'touch_cal_open_apply'), 'L11 touch cal nav', 'touch_cal_open_apply', 1),
-    @('ui_page_touch_cal.c', 'finish_calibration', ('if\s*\(touch_cal_store_is_calibrated\(\)\s*&&\s*!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{[^{}]*\breturn\s*;\s*\}[\s\S]*touch_cal_store_save\('), 'L11 touch cal save', $null, 0),
-    @('ui_page_profile_picker.c', 'delete_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to delete profile' $admin 'delete_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*delete_do\(ud\)\s*;\s*$'), 'L11 profile delete', $null, 0),
+    @('ui_page_touch_cal.c', 'finish_calibration', ('[;}]\s*if\s*\(touch_cal_store_is_calibrated\(\)\s*&&\s*!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{' + $uncond + '\s*\}\s*err\s*=\s*touch_cal_store_save\('), 'L11 touch cal save', $null, 0),
+    @('ui_page_profile_picker.c', 'delete_btn_clicked_cb', ('^' + $pfx + 'if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to delete profile' $admin 'delete_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*delete_do\(ud\)\s*;\s*$'), 'L11 profile delete', $null, 0),
     @('ui_page_profile_picker.c', 'delete_unlocked_cb', ('^\s*if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*delete_do\('), 'L11 profile delete unlocked', $null, 0),
     @('ui_page_edit_firing.c', 'apply_cb', (GateRx 'Enter admin PIN to apply edit' $admin 'apply_live_gated'), 'L11 live-edit apply', 'apply_live_gated', 1),
     @('ui_page_edit_firing.c', 'apply_cb', (GateRx 'Enter admin PIN to keep/discard edit' $admin 'open_decide_gated_cb'), 'L11 live-edit decide', 'open_decide_gated_cb', 1),
-    @('ui_page_edit_firing.c', 'apply_live_gated', ('!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*return\s*;'), 'L11 live-edit apply re-check', $null, 0),
-    @('ui_page_diagnostics.c', 'crash_ack_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to acknowledge crash' $admin 'crash_ack_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*crash_ack_do\(\)\s*;\s*$'), 'L11 crash ack', $null, 0),
+    @('ui_page_edit_firing.c', 'apply_live_gated', ('^\s*\(void\)\s*user_data\s*;\s*if\s*\(!s_pg\s*\|\|\s*!s_pg->active\s*\|\|\s*!s_pg->working\s*\|\|\s*!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*return\s*;'), 'L11 live-edit apply re-check', $null, 0),
+    @('ui_page_diagnostics.c', 'crash_ack_btn_clicked_cb', ('^' + $pfx + 'if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to acknowledge crash' $admin 'crash_ack_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*crash_ack_do\(\)\s*;\s*$'), 'L11 crash ack', $null, 0),
     @('ui_page_diagnostics.c', 'crash_ack_unlocked_cb', ('if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*crash_ack_do\(\)'), 'L11 crash ack unlocked', $null, 0),
     # REVIEW_LCDFX6 HIGH-1 (owner decision D2): clearing a trip from the LCD needs an ADMIN PIN, and the action re-checks the
     # role itself. btn_clicked_cb is EXACTLY the ADMIN gate on clear_action (whose only reference is that gate);
@@ -87,19 +92,22 @@ function Remove-CComments([string]$s) {
 # String literal contents replaced by '_' (same length), so an identifier or ';' inside a string never counts.
 function Blank-Strings([string]$s) { [regex]::Replace($s, $script:litRe, $script:blankEval) }
 # Tokens an ESP_LOG* statement must never contain (a call hidden in log arguments still executes: X15).
-$logTok = '\b(kiln_ui_show|ui_page_safety_open|ui_lcd_lock_run_gated|ui_lcd_lock_has_role|dashboard_safety_clear_trip|clear_action|\w+_open_apply|\w+_gated_\w+|\w+_unlocked_cb)\b'
+# LCDFX9 HIGH-3: built from the sink deny list and every row's apply name, so a new row cannot forget to be listed here.
+$logApplies = @(($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) }) + 'delete_do', 'crash_ack_do', 'forget_worker_task', 'delete_unlocked_cb', 'crash_ack_unlocked_cb' | Select-Object -Unique) -join '|'
+$logTok = '\b(kiln_ui_show|ui_page_safety_open|ui_lcd_lock_run_gated|ui_lcd_lock_has_role|clear_action|\w+_open_apply|\w+_gated_\w+|\w+_unlocked_cb|' + $denyIdent + '|' + $logApplies + ')\b'
 $script:logFails = New-Object System.Collections.ArrayList
 # REVIEW_LCDFX5 INFO-3: #warning/#error/#pragma/#line text may hold an unbalanced apostrophe that
 # would desynchronise the stripper, so those directive lines are blanked first.
 # REVIEW_LCDFX7 P1/P7: ESP_LOG* statements are removed from the code (they cannot gate or open anything), unless
 # their arguments contain a trusted call/gate token, which fails the check (X15).
-function Get-CodeFromText([string]$raw, [string]$name) {
+function Get-CodeFromText([string]$raw, [string]$name, [switch]$KeepLogs) {
     $t = $raw -replace "`r", ''
     $t = $t.Replace("\`n", '')
     $t = [regex]::Replace($t, '(?m)^[ \t]*(#|%:)[ \t]*(warning|error|pragma|line)\b[^\n]*', '')
     $t = Remove-CComments $t
     # LCDFX8 HIGH-1: attributes are removed here, so Count-Uses needs no `))` lookbehind (which hid every use after `if (f(x))`).
     $t = [regex]::Replace($t, '__attribute__\s*\(\((?:[^()]|\((?:[^()]|\([^()]*\))*\))*\)\)', ' ')
+    if ($KeepLogs) { return $t }
     $bl = Blank-Strings $t
     $ms = @([regex]::Matches($bl, '\bESP_LOG[IWEDVN]\s*\([^;]*\)\s*;'))
     for ($k = $ms.Count - 1; $k -ge 0; $k--) {
@@ -155,7 +163,7 @@ function Get-CachedCode([string]$file) {
 # is host-test code (stubs are normal there, it is never linked into the firmware) and is excluded; X1-X4 the scan
 # runs on line-spliced text and tolerates comments between '#', 'define' and the name and the '%:' digraph; X8 a
 # macro whose replacement list mentions an opener/gate function (an alias) is refused too.
-$trusted = 'ui_lcd_lock_run_gated|ui_lcd_lock_has_role|LCD_PIN_ROLE_NONE|LCD_PIN_ROLE_USER|LCD_PIN_ROLE_ADMIN|kiln_ui_show|ui_page_safety_open|ui_page_safety_build|lcd_safety_strip_needs_pin|touch_cal_store_is_calibrated|lcd_touch_cal_\w*exit_target|\w+_open_apply|trip_strip_gated_open_cb|trip_strip_clicked_cb|' + (($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) } | Select-Object -Unique) -join '|')
+$trusted = 'ui_lcd_lock_\w+|ui_lcd_lock_run_gated|ui_lcd_lock_has_role|LCD_PIN_ROLE_NONE|LCD_PIN_ROLE_USER|LCD_PIN_ROLE_ADMIN|kiln_ui_show|ui_page_safety_open|ui_page_safety_build|lcd_safety_strip_needs_pin|touch_cal_store_is_calibrated|lcd_touch_cal_\w*exit_target|\w+_open_apply|trip_strip_gated_open_cb|trip_strip_clicked_cb|' + (($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) } | Select-Object -Unique) -join '|')
 $openerTok = 'kiln_ui_show|ui_page_safety_open|ui_lcd_lock_run_gated'
 $appRoot = Split-Path (Split-Path $UiDir)
 if (-not (Test-Path (Join-Path $appRoot 'drivers'))) { $appRoot = $UiDir }
@@ -195,6 +203,7 @@ foreach ($r in $rules) {
     $txt = Get-CachedCode $r[0]
     $fb = Get-FuncBody $txt $r[1]
     if (-not $fb.ok) { Write-Host "FAIL: $($r[3]): $($r[0]) has $($fb.n) static definitions of $($r[1])() (expected exactly 1, and it must be `static` so no other file can call it; if you renamed it, edit its row in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
+    if ($fb.body -match '(?m)^[ \t]*(?:#|%:)') { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) contains a preprocessor directive (#if 0 / #define can disable or rename the gate; none is allowed inside a gated function)"; $fail++ }
     if ($fb.body -notmatch $r[2]) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) lacks the gate matching /$($r[2])/ (if you only reformatted the code, update this row's regex in tools/check_lcd_admin_gates.ps1)"; $fail++ }
     elseif ($r[2].StartsWith('ui_lcd_lock_run_gated')) {
         # MED-1 (X13): a bare gate row is anchored to the function body: nothing before the gate may return/jump
@@ -341,31 +350,103 @@ foreach ($k in $showAllow.Keys) { if (-not $seen.ContainsKey($k)) { Write-Host "
 
 foreach ($lf in ($script:logFails | Select-Object -Unique)) { Write-Host "FAIL: L-log: $lf"; $fail++ }
 
-# REVIEW_LCDFX7 MED-1: sink inventory. The mutators behind the ADMIN gates may be called from exactly one place each
-# under drivers/ui (file : sink -> function whose body holds the single call), so a new helper, callback or second call
-# in another function cannot reach them without passing a gate. To add a legitimate caller, edit this table.
-$sinkAllow = @(
-    @('ui_page_temperature.c',     'dashboard_set_relay',      'relay_toggle_apply'),
-    @('ui_page_network_manage.c',  'wifi_prov_forget_network', 'forget_worker_task'),
-    @('ui_page_config.c',          'unit_pref_set\w*',         'units_toggle_apply'),
-    @('ui_page_touch_cal.c',       'touch_cal_store_save',     'finish_calibration'),
-    @('ui_page_safety.c',          'dashboard_safety_clear_trip', 'clear_action')
+# REVIEW_LCDFX8 (LCDFX9 fixes) HIGH-1/2/3, MED-1/2, LOW-1: sink inventory by IDENTIFIER MENTION, deny by default.
+# Every mention (call, function pointer, #define alias, ESP_LOG argument, header wrapper) of an admin-mutator name ($denyIdent)
+# in any drivers/ui .c or .h file is counted per (file, identifier, enclosing function). The count must equal the row below
+# exactly, so an unlisted mutator, a second mention, an address-of or a wrapper fails; a row whose mention vanished fails too
+# (no stale rows). Each listed function is a gated apply/worker (see the per-function gate rows above); add a caller here ONLY
+# with an ADMIN gate. '<global>' = a mention outside any function (definition/prototype/#define).
+$sinkRows = @(
+    @('ui_edit_firing_apply.c', 'edit_firing_apply', '<global>', 1),
+    @('ui_edit_firing_apply.h', 'edit_firing_apply', '<global>', 1),
+    @('ui_page_config.c', 'unit_pref_set_ex', 'units_toggle_apply', 1),
+    @('ui_page_diagnostics.c', 'crash_report_acknowledge_timeout', 'crash_ack_do', 1),
+    @('ui_page_edit_firing.c', 'edit_firing_apply', 'apply_live_gated', 1),
+    @('ui_page_live_decide.c', 'profiles_live_decide_apply', 'run_decision_apply', 1),
+    @('ui_page_network.c', 'wifi_prov_set_ap_password', 'ap_identity_worker_task', 1),
+    @('ui_page_network.c', 'wifi_prov_set_ap_ssid', 'ap_identity_worker_task', 1),
+    @('ui_page_network.c', 'wifi_prov_set_mode', 'mode_worker_task', 1),
+    @('ui_page_network_manage.c', 'wifi_prov_add_network', 'connect_worker_task', 1),
+    @('ui_page_network_manage.c', 'wifi_prov_forget_network', 'forget_worker_task', 1),
+    @('ui_page_profile_builder_review.c', 'profiles_http_save_expect_rev', 'do_save_apply', 1),
+    @('ui_page_profile_picker.c', 'profiles_favorites_set', 'delete_do', 1),
+    @('ui_page_profile_picker.c', 'profiles_http_delete', 'delete_do', 1),
+    @('ui_page_safety.c', 'dashboard_safety_clear_trip', 'clear_action', 1),
+    @('ui_page_temperature.c', 'dashboard_set_relay', 'relay_toggle_apply', 1),
+    @('ui_page_touch_cal.c', 'touch_cal_store_save', 'finish_calibration', 1)
 )
-foreach ($uf in @(Get-ChildItem -Path $UiDir -Filter *.c -File)) {
-    $ucode = Get-CachedCode $uf.Name
-    $ublank = Blank-Strings $ucode
-    foreach ($sinkName in 'dashboard_set_relay', 'wifi_prov_forget_network', 'unit_pref_set\w*', 'touch_cal_store_save', 'dashboard_safety_clear_trip', 'safety_link_send_clear_trip') {
-        $calls = @([regex]::Matches($ublank, '\b' + $sinkName + '\s*\('))
-        if ($calls.Count -eq 0) { continue }
-        $allow = @($sinkAllow | Where-Object { $_[0] -eq $uf.Name -and $_[1] -eq $sinkName })
-        if ($allow.Count -ne 1 -or $calls.Count -ne 1) { Write-Host "FAIL: L-sink: $($uf.Name) calls $sinkName( $($calls.Count) time(s) (allowed: $(if ($allow.Count) { 'exactly 1 in ' + $allow[0][2] } else { 'none' }); a new caller of a gated mutator needs an ADMIN gate and a row in `$sinkAllow in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
-        $sfb = Get-FuncBody $ucode $allow[0][2]
-        if (-not $sfb.ok -or (Blank-Strings $sfb.body) -notmatch ('\b' + $sinkName + '\s*\(')) { Write-Host "FAIL: L-sink: the single $sinkName( call in $($uf.Name) is not inside $($allow[0][2])()"; $fail++ }
+function Get-TopFuncRanges([string]$code) {
+    $out = New-Object System.Collections.ArrayList
+    foreach ($m in [regex]::Matches($code, '(?m)^[A-Za-z_][^;{}()#\n]*?\b(\w+)\s*\([^;{}]*\)\s*\{')) {
+        $open = $m.Index + $m.Length - 1
+        $b = Get-BraceBody $code $open
+        if ($null -eq $b) { continue }
+        [void]$out.Add(@{ name = $m.Groups[1].Value; start = $m.Index; end = $open + 1 + $b.Length + 1; open = $open })
+    }
+    $out
+}
+$keepCache = @{}
+function Get-KeepLogsCode([string]$path) {
+    if (-not $keepCache.ContainsKey($path)) { $keepCache[$path] = Get-CodeFromText (Get-Content -Raw -Path $path) (Split-Path $path -Leaf) -KeepLogs }
+    $keepCache[$path]
+}
+$uiAll = @(Get-ChildItem -Path $UiDir -File | Where-Object { $_.Extension -in '.c', '.h' })
+$sinkSeen = @{}
+foreach ($uf in $uiAll) {
+    $kc = Blank-Strings (Get-KeepLogsCode $uf.FullName)
+    $mm = @([regex]::Matches($kc, '\b' + $denyIdent + '\b'))
+    if ($mm.Count -eq 0) { continue }
+    $ranges = @(Get-TopFuncRanges $kc)
+    foreach ($x in $mm) {
+        $fnName = '<global>'
+        foreach ($rg in $ranges) { if ($x.Index -gt $rg.open -and $x.Index -lt $rg.end) { $fnName = $rg.name; $dirBody = $kc.Substring($rg.open, $rg.end - $rg.open); break } }
+        if ($fnName -ne '<global>' -and $dirBody -match '(?m)^[ \t]*(?:#|%:)') { Write-Host "FAIL: L-sink: $($uf.Name) function $fnName() reaches $($x.Value) but contains a preprocessor directive (#if 0 / #define can disable its gate)"; $fail++ }
+        $k = "$($uf.Name)|$($x.Value)|$fnName"
+        $sinkSeen[$k] = 1 + [int]$sinkSeen[$k]
     }
 }
-foreach ($sk in $sinkAllow) {
-    if ($sk[1] -match '\w') { continue }
-    if (-not ((Blank-Strings (Get-CachedCode $sk[0])) -match ('\b' + $sk[1] + '\s*\('))) { Write-Host "FAIL: L-sink: allowlisted $($sk[0]):$($sk[1]) no longer present (update `$sinkAllow)"; $fail++ }
+$sinkWant = @{}
+foreach ($sr in $sinkRows) { $sinkWant["$($sr[0])|$($sr[1])|$($sr[2])"] = [int]$sr[3] }
+if ($DumpSinks) { foreach ($k in ($sinkSeen.Keys | Sort-Object)) { Write-Host "SINK $k $($sinkSeen[$k])" } }
+foreach ($k in $sinkSeen.Keys) {
+    if (-not $sinkWant.ContainsKey($k)) { Write-Host "FAIL: L-sink: '$k' ($($sinkSeen[$k]) mention(s)) is an admin mutator mentioned in drivers/ui outside the inventory (any mention counts: call, function pointer, #define alias, log argument, header wrapper). A new use needs an ADMIN gate and a row in `$sinkRows in tools/check_lcd_admin_gates.ps1"; $fail++ }
+    elseif ($sinkWant[$k] -ne $sinkSeen[$k]) { Write-Host "FAIL: L-sink: '$k' is mentioned $($sinkSeen[$k]) time(s), inventory says $($sinkWant[$k]) (a second mention is a second path to the mutator)"; $fail++ }
+}
+foreach ($k in $sinkWant.Keys) { if (-not $sinkSeen.ContainsKey($k)) { Write-Host "FAIL: L-sink: inventory row '$k' no longer present (sink moved or removed; update `$sinkRows)"; $fail++ } }
+
+# HIGH-4: gate impostors. Only ui_lcd_lock.c/.h may define or declare a ui_lcd_lock_* function; every other drivers/ui file
+# must include "ui_lcd_lock.h" if it uses the gate, and may mention the gate functions only as plain calls.
+$kwEx = '(?!(?:return|else|case|goto|do)\b)'
+foreach ($uf in $uiAll) {
+    if ($uf.Name -in 'ui_lcd_lock.c', 'ui_lcd_lock.h') { continue }
+    $gc = Blank-Strings (Get-KeepLogsCode $uf.FullName)
+    if ($gc -match ('(?m)^[ \t]*' + $kwEx + '(?:static\s+|extern\s+|inline\s+)*[A-Za-z_][\w \t\*]*?\bui_lcd_lock_\w+\s*\(')) { Write-Host "FAIL: L-gate-impostor: $($uf.Name) defines/declares a ui_lcd_lock_* function (only ui_lcd_lock.c may; a local copy of the gate would not gate)"; $fail++ }
+    foreach ($gm in [regex]::Matches($gc, '\b(?:ui_lcd_lock_run_gated|ui_lcd_lock_has_role)\b(?!\s*\()')) { Write-Host "FAIL: L-gate-impostor: $($uf.Name) mentions $($gm.Value) other than as a direct call (alias/function pointer/shadow)"; $fail++ }
+    $hasInc = [regex]::IsMatch((Get-KeepLogsCode $uf.FullName), '(?m)^[ \t]*#[ \t]*include[ \t]+"ui_lcd_lock\.h"')
+    if ($gc -match '\b(?:ui_lcd_lock_run_gated|ui_lcd_lock_has_role)\s*\(' -and -not $hasInc) { Write-Host "FAIL: L-gate-impostor: $($uf.Name) uses the LCD gate but does not include `"ui_lcd_lock.h`" (the gate symbols must come from the real header)"; $fail++ }
+}
+
+# MED-2: a wrapper OUTSIDE drivers/ui (drivers/http, persist, ...) that reaches an admin mutator must not be called from the
+# UI. Every function the UI calls that is defined elsewhere in App is parsed; if its body mentions $denyIdent (and it is not
+# itself a listed mutator), it is refused. (Direct, one-level; a deeper chain ends in a $denyIdent name at some level.)
+$uiCalled = @{}
+foreach ($uf in $uiAll) {
+    foreach ($cm in [regex]::Matches((Blank-Strings (Get-KeepLogsCode $uf.FullName)), '\b([A-Za-z_]\w*)\s*\(')) { $uiCalled[$cm.Groups[1].Value] = $uf.Name }
+}
+$wrapAllow = @('wifi_prov_scan')   # read-only scan request: posts a scan command through wifi_prov_post_and_wait, changes no setting
+foreach ($of in $appFiles) {
+    if ($of.FullName.StartsWith($UiDir)) { continue }
+    $rawo = Get-Content -Raw -Path $of.FullName
+    if ($rawo -notmatch $denyIdent) { continue }
+    $co = Get-CodeFromText $rawo $of.Name -KeepLogs
+    $cb = Blank-Strings $co
+    foreach ($fr in (Get-TopFuncRanges $cb)) {
+        if (-not $uiCalled.ContainsKey($fr.name)) { continue }
+        if ($fr.name -match ('^' + $denyIdent + '$') -or $fr.name -in $wrapAllow) { continue }
+        $bodyo = $cb.Substring($fr.open, $fr.end - $fr.open)
+        $hit = [regex]::Match($bodyo, '\b' + $denyIdent + '\b')
+        if ($hit.Success) { Write-Host "FAIL: L-wrapper: $($uiCalled[$fr.name]) calls $($fr.name)() (defined in $($of.Name)), whose body reaches admin mutator $($hit.Value); call the gated path directly or add the wrapper to a reviewed allowlist"; $fail++ }
+    }
 }
 # Use counts of the private appliers the gates reach (definition excluded): delete_do/crash_ack_do are reached from the
 # ungated-role branch of the click handler and from the PIN-success callback, forget_worker_task only from the task create.
