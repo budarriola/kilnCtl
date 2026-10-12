@@ -320,6 +320,7 @@ static link_test_trip_state_t s_test_trip_state = {false, 0u, 0u, 0u, 0u};
 static bool s_tt_waiting_seq = false;      // ACCEPTED, waiting for the latch to show a new trip_seq
 static uint8_t s_tt_seq_base = 0;
 static uint32_t s_tt_wait_deadline_ms = 0;
+static uint8_t s_tt_wait_request_id = 0;   // saftyfx2 INFO-3: id of the request waiting for its seq, never shared with an armed refusal
 static uint8_t s_tt_reply_request_id = 0;
 static uint8_t s_tt_reply_outcome = 0;
 static uint8_t s_tt_reply_trip_seq = 0;
@@ -1654,9 +1655,9 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         // when the original was answered (REVIEW_TRIPWP2 LOW-2: never the current trip_seq,
         // which may belong to a later, real trip). While the original is still waiting for
         // its seq, its own reply covers it.
-        uint8_t dup_outcome = 0u, dup_seq = 0u;
-        if (link_frame_test_trip_duplicate_replay(&s_test_trip_state, s_tt_waiting_seq, &dup_outcome, &dup_seq)) {
-            link_task_arm_test_trip_reply(msg.request_id, dup_outcome, dup_seq);
+        link_test_trip_reply_t dup;
+        if (link_frame_test_trip_reply_on_duplicate(&s_test_trip_state, s_tt_waiting_seq, msg.request_id, &dup)) {
+            link_task_arm_test_trip_reply(dup.request_id, dup.outcome, dup.trip_seq);
         }
         return;
     }
@@ -1676,7 +1677,7 @@ static void link_task_handle_test_trip(const kilnlink_frame_t *frame)
         log_task_log(LOG_LEVEL_WARN, "test_trip", "ACCEPTED, test trip requested");
         s_tt_waiting_seq = true;
         s_tt_seq_base = base;
-        s_tt_reply_request_id = msg.request_id;
+        s_tt_wait_request_id = msg.request_id;
         s_tt_wait_deadline_ms = link_task_now_ms() + LINK_TEST_TRIP_SEQ_WAIT_MS;
         return;
     }
@@ -1697,13 +1698,15 @@ static void link_task_poll_test_trip_reply(void)
             s_tt_waiting_seq = false;
             // REVIEW_TRIPWP2 LOW-1: only a TEST latch is "your test trip"; a real guard that
             // won the race is reported as already tripped (with its seq), never as ACCEPTED.
-            uint8_t o = link_frame_test_trip_latched_outcome(reason == SAFETY_TRIP_TEST);
-            link_frame_test_trip_record_answer(&s_test_trip_state, o, seq);
-            link_task_arm_test_trip_reply(s_tt_reply_request_id, o, seq);
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_latch(&s_test_trip_state, s_tt_wait_request_id,
+                                                      reason == SAFETY_TRIP_TEST, seq, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
         } else if ((int32_t)(now_ms - s_tt_wait_deadline_ms) >= 0) {
             s_tt_waiting_seq = false;
-            link_frame_test_trip_record_answer(&s_test_trip_state, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
-            link_task_arm_test_trip_reply(s_tt_reply_request_id, KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 0u);
+            link_test_trip_reply_t rep;
+            (void)link_frame_test_trip_reply_on_timeout(&s_test_trip_state, s_tt_wait_request_id, &rep);
+            link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq);
         }
     }
     if (s_tt_reply_pending > 0u && (now_ms - s_tt_reply_last_ms) >= LINK_TEST_TRIP_REPLY_PERIOD_MS) {

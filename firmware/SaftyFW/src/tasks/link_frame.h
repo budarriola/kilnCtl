@@ -707,6 +707,23 @@ void link_frame_test_trip_record_answer(link_test_trip_state_t *state, uint8_t o
 bool link_frame_test_trip_duplicate_replay(const link_test_trip_state_t *state, bool original_waiting,
                                            uint8_t *out_outcome, uint8_t *out_seq);
 
+// saftyfx2 LOW-1: the reply-decision glue, pure so link_task only forwards `reply` to its
+// arm call. Each call also records the answer in `state`.
+typedef struct {
+    uint8_t request_id;
+    uint8_t outcome;
+    uint8_t trip_seq;
+} link_test_trip_reply_t;
+// Latch observed for a waiting request (always true).
+bool link_frame_test_trip_reply_on_latch(link_test_trip_state_t *state, uint8_t request_id, bool latch_is_test,
+                                         uint8_t trip_seq, link_test_trip_reply_t *reply);
+// Seq wait timed out: ACCEPTED with seq 0 (always true).
+bool link_frame_test_trip_reply_on_timeout(link_test_trip_state_t *state, uint8_t request_id,
+                                           link_test_trip_reply_t *reply);
+// DUPLICATE request: true when a reply should be armed.
+bool link_frame_test_trip_reply_on_duplicate(const link_test_trip_state_t *state, bool original_waiting,
+                                             uint8_t request_id, link_test_trip_reply_t *reply);
+
 // Returns a KILNLINK_TEST_TRIP_OUTCOME_* value. Check order: bad magic, peer
 // version, boot_id, duplicate request_id (within the interval), update busy,
 // already tripped, rate limit, else ACCEPTED (recorded in `state`).

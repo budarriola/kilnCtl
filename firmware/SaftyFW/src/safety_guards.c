@@ -168,11 +168,24 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
         }
         return false;
     }
-    if (state->s8_window_active && state->s8_window_elapsed_s > 0.0f) {
-        /* saftyfx LOW-3: the window is frozen at latch time and may be tiny; floor the
-         * divisor at S8_POST_MIN_S so a moments-old window does not refuse every rise by
-         * dividing by ~0. Fail-safe: a real fast rise still exceeds the limit. */
-        float elapsed_s = state->s8_window_elapsed_s;
+    /* saftyfx2 LOW-3: a window that completed over the rate (streak >= 1) is the
+     * mid-debounce state (frozen window elapsed may be exactly 0 right after a slide).
+     * In doubt, refuse: any rise at all since that window opened refuses, so the clear
+     * is granted only for a reading that is flat or falling (the streak itself cannot
+     * decay while the TEST latch freezes S8, so refusing on it alone would deadlock). */
+    if (state->s8_over_rate_streak >= 1u && state->s8_window_active &&
+        in->tc_c > state->s8_window_start_c) {
+        return true;
+    }
+    if (state->s8_window_active) {
+        /* saftyfx LOW-3 / saftyfx2 INFO-1: the window is frozen at latch time and may be
+         * tiny. The TEST latch has been held for s9_verify_elapsed_s since (it only grows
+         * while K4 is de-energised), so frozen elapsed + that is the true time since the
+         * window opened; floor it at S8_POST_MIN_S so a moments-old window does not divide
+         * by ~0. With trip_verify_s >= 5 s the divisor never exceeds the true elapsed
+         * time; below that the floor can, which only lowers the rate over a span S8
+         * itself would not trip on (it needs two full windows). */
+        float elapsed_s = state->s8_window_elapsed_s + state->s9_verify_elapsed_s;
         if (elapsed_s < S8_POST_MIN_S) {
             elapsed_s = S8_POST_MIN_S;
         }

@@ -4904,6 +4904,38 @@ static void test_test_clear_s8_tiny_window(void)
     }
 }
 
+/* saftyfx2 LOW-3: the TEST latch lands right after S8 completed an over-rate window and
+ * slid (frozen elapsed exactly 0, streak 1): a rise since the slide must refuse, a flat
+ * reading clears. */
+static void test_test_clear_s8_streak_zero_elapsed(void)
+{
+    TEST_SECTION("TEST clear S8 check, streak 1 with a 0 s frozen window (saftyfx2 LOW-3)");
+    for (int k = 0; k < 2; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t pre = base_input();
+        pre.dt_s = 60.0f;
+        pre.tc_c = 20.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre);
+        pre.tc_c = 40.0f;
+        (void)safety_guards_tick(&s, &cfg, &pre); /* window over rate, slides: streak 1, elapsed 0 */
+        TEST_CHECK(!s.is_tripped && s.s8_over_rate_streak == 1u, "sanity: streak 1, not tripped");
+        latch_test_trip_and_hold(&s, &cfg);
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 40.0f : 40.3f;
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "flat since the slide: clear granted");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "any rise since the slide with streak 1 refuses");
+        }
+    }
+}
+
 /* review s8clrfx2 LOW-1/2/3 */
 static void test_s8_clear_followups(void)
 {
@@ -4994,6 +5026,7 @@ void run_test_safety_guards(void)
 {
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
+    test_test_clear_s8_streak_zero_elapsed();
     test_test_trip_loses_to_every_real_guard();
     test_test_clear_s8_tiny_window();
     test_s8_clear_followups();

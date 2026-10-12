@@ -154,6 +154,72 @@ static bool has(const char *body, size_t len, const char *needle)
     return p != NULL && (size_t)(p - body) < len;
 }
 
+/* saftyfx2 LOW-1: copy of a function body with /* */ and // comments removed and all
+ * whitespace runs collapsed to one space, so a commented-out call cannot match and the
+ * forwarding lines can be compared exactly. Caller frees. */
+static char *normalized_body(const char *body, size_t len)
+{
+    char *out = (char *)malloc(len + 1u);
+    size_t n = 0;
+    bool space = false;
+    if (!out) {
+        return NULL;
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (body[i] == '/' && i + 1 < len && body[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < len && !(body[i] == '*' && body[i + 1] == '/')) {
+                i++;
+            }
+            i++;
+            space = true;
+            continue;
+        }
+        if (body[i] == '/' && i + 1 < len && body[i + 1] == '/') {
+            while (i < len && body[i] != '\n') {
+                i++;
+            }
+            space = true;
+            continue;
+        }
+        if (body[i] == ' ' || body[i] == '\n' || body[i] == '\t' || body[i] == '\r') {
+            space = true;
+            continue;
+        }
+        if (space && n > 0) {
+            out[n++] = ' ';
+        }
+        space = false;
+        out[n++] = body[i];
+    }
+    out[n] = 0;
+    return out;
+}
+
+/* saftyfx2 LOW-1: the reply glue behaviourally (what link_task forwards). */
+static void test_reply_glue(void)
+{
+    TEST_SECTION("TEST_TRIP reply glue (saftyfx2 LOW-1)");
+    link_test_trip_state_t st = {false, 0u, 0u, 0u, 0u};
+    link_test_trip_reply_t r = {0u, 0u, 0u};
+    TEST_CHECK(link_frame_test_trip_reply_on_latch(&st, 9u, false, 33u, &r) && r.request_id == 9u &&
+                   r.outcome == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED && r.trip_seq == 33u,
+               "real guard won the race: reply is REFUSED_ALREADY_TRIPPED with the real seq");
+    TEST_CHECK(st.answer_outcome == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED && st.answer_seq == 33u,
+               "latch reply records the answer");
+    link_test_trip_reply_t d = {0u, 0u, 0u};
+    TEST_CHECK(link_frame_test_trip_reply_on_duplicate(&st, false, 9u, &d) && d.request_id == 9u &&
+                   d.outcome == KILNLINK_TEST_TRIP_OUTCOME_REFUSED_ALREADY_TRIPPED && d.trip_seq == 33u,
+               "DUPLICATE replays the recorded refusal, not ACCEPTED");
+    TEST_CHECK(!link_frame_test_trip_reply_on_duplicate(&st, true, 9u, &d), "no DUPLICATE reply while waiting");
+    TEST_CHECK(link_frame_test_trip_reply_on_latch(&st, 10u, true, 34u, &r) && r.outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED &&
+                   r.trip_seq == 34u && st.answer_seq == 34u,
+               "TEST latch: ACCEPTED with the seq, recorded");
+    TEST_CHECK(link_frame_test_trip_reply_on_timeout(&st, 11u, &r) && r.request_id == 11u &&
+                   r.outcome == KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED && r.trip_seq == 0u,
+               "timeout: ACCEPTED seq 0");
+}
+
 static void scan_wiring(void)
 {
     TEST_SECTION("TEST_TRIP wiring (source scan)");
@@ -218,14 +284,31 @@ static void scan_wiring(void)
                            has(h, len, "outcome = KILNLINK_TEST_TRIP_OUTCOME_REFUSED_RATE_LIMIT;"),
                        "LOW-3: queue-busy restores dedup/rate state and does not claim ALREADY_TRIPPED");
         }
-        /* saftyfx LOW-2: behaviour is tested via the pure helpers (test_answer_replay); here
-         * only that link_task actually calls them. */
+        /* saftyfx2 LOW-1: link_task holds no reply logic of its own; pin the exact forwarding
+         * (comments stripped, whitespace normalised) of the three reply sites. */
         const char *pl = function_body(lt, "static void link_task_poll_test_trip_reply(", &len);
-        TEST_CHECK(pl != NULL && has(pl, len, "link_frame_test_trip_latched_outcome(reason == SAFETY_TRIP_TEST)") &&
-                       has(pl, len, "link_frame_test_trip_record_answer(&s_test_trip_state, o, seq)"),
-                   "poll path uses the pure outcome helper and records the answer");
-        TEST_CHECK(h != NULL && strstr(h, "link_frame_test_trip_duplicate_replay(&s_test_trip_state") != NULL,
-                   "DUPLICATE replays through the pure helper");
+        char *pn = pl ? normalized_body(pl, len) : NULL;
+        TEST_CHECK(pn != NULL &&
+                       strstr(pn, "{ uint8_t seq = 0; ") != NULL &&
+                       strstr(pn, "link_test_trip_reply_t rep; (void)link_frame_test_trip_reply_on_latch("
+                                  "&s_test_trip_state, s_tt_wait_request_id, reason == SAFETY_TRIP_TEST, seq, &rep); "
+                                  "link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq); }") != NULL,
+                   "poll latch path forwards the pure helper's reply, unconditionally");
+        TEST_CHECK(pn != NULL &&
+                       strstr(pn, "{ s_tt_waiting_seq = false; link_test_trip_reply_t rep; "
+                                  "(void)link_frame_test_trip_reply_on_timeout(&s_test_trip_state, s_tt_wait_request_id, &rep); "
+                                  "link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq); }") != NULL,
+                   "poll timeout path forwards the pure helper's reply");
+        free(pn);
+        size_t hlen = 0;
+        const char *hb = function_body(lt, "static void link_task_handle_test_trip(", &hlen);
+        char *hn = hb ? normalized_body(hb, hlen) : NULL;
+        TEST_CHECK(hn != NULL &&
+                       strstr(hn, "link_test_trip_reply_t dup; if (link_frame_test_trip_reply_on_duplicate("
+                                  "&s_test_trip_state, s_tt_waiting_seq, msg.request_id, &dup)) { "
+                                  "link_task_arm_test_trip_reply(dup.request_id, dup.outcome, dup.trip_seq); } return; }") != NULL,
+                   "DUPLICATE path forwards the pure helper's reply");
+        free(hn);
     }
     TEST_CHECK(strstr(lt, "case LINK_FRAME_TEST_TRIP_CMD:") != NULL, "0x2E dispatched");
     const char *cl = function_body(lt, "static void link_task_handle_clear_trip(", &len);
@@ -256,5 +339,6 @@ void run_test_test_trip(void)
     test_decide_test_trip();
     test_decide_clear_v3();
     test_answer_replay();
+    test_reply_glue();
     scan_wiring();
 }
