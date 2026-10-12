@@ -5126,6 +5126,51 @@ static void test_test_clear_s8_post_window_checks(void)
     }
 }
 
+/* saftyfx5 LOW-5: pin the 5 s partial-window floor exactly and that the partial rate
+ * divides by ELAPSED time (not the window length). Limit 10 C/min, window 60 s: a 1.5 C
+ * rise is 15 C/min over 6 s (refuse) but only 1.5 C/min over the 60 s window length. */
+static void test_test_clear_s8_partial_floor_and_divisor(void)
+{
+    TEST_SECTION("TEST clear S8 partial window: 5 s floor and elapsed divisor (saftyfx5 LOW-5)");
+    for (int k = 0; k < 3; k++) {
+        int nticks = (k == 0) ? 9 : (k == 1 ? 11 : 20); /* 4.5 s, 5.5 s, 10 s after rollover */
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 0.5f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 400 && s.s8_post_windows_done < 1u; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "LOW-5 sanity: TEST latched");
+        TEST_CHECK(s.s8_post_windows_done == 1u && s.s8_post_last_rate_c_per_min < 1.0f,
+                   "LOW-5 sanity: one flat completed window");
+        for (int i = 0; i < nticks; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        float e = s.s8_post_elapsed_s;
+        TEST_CHECK(k == 0 ? (e > 4.4f && e < 4.6f) : (k == 1 ? (e > 5.4f && e < 5.6f) : (e > 9.9f && e < 10.1f)),
+                   "LOW-5 sanity: elapsed after rollover");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 2) ? 22.0f : 21.5f;
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "LOW-5: 4.5 s after rollover the partial check is skipped");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c),
+                       k == 1 ? "LOW-5: 5.5 s after rollover, 15 C/min over elapsed refuses (floor 5 s)"
+                              : "LOW-5: 10 s after rollover, 12 C/min over elapsed refuses (divisor is elapsed)");
+        }
+    }
+}
+
 /* review s8clrfx2 LOW-1/2/3 */
 static void test_s8_clear_followups(void)
 {
@@ -5219,6 +5264,7 @@ void run_test_safety_guards(void)
     test_test_clear_s8_streak_zero_elapsed();
     test_test_clear_s8_late_rise();
     test_test_clear_s8_post_window_checks();
+    test_test_clear_s8_partial_floor_and_divisor();
     test_test_clear_s8_divisor();
     test_test_trip_loses_to_every_real_guard();
     test_test_clear_s8_tiny_window();

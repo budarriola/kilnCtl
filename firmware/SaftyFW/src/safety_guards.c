@@ -184,11 +184,21 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
      * it is S8_POST_MIN_S long, is over the rate. The windows are TUMBLING (fixed, back to
      * back from the first tripped tick), not sliding. Rates are signed, so a kiln that
      * warmed slowly and then cools (K4 open) still clears. Additive: only more refusals.
-     * Known gaps, at the same resolution as S8's own trip (which needs two consecutive
-     * windows), so the TEST clear is no weaker than the guard it stands in for:
-     * (1) a burst of up to 2x max_rate that straddles a window boundary evenly reads at or
-     * under the limit in both windows; (2) a rise in the first S8_POST_MIN_S seconds after
-     * a rollover is seen only by the whole-hold average. The window algorithm is a safety
+     * Known gaps (REVIEW_SAFTYFX5; OWNER Q whether to close any), none of which changes the
+     * window algorithm:
+     * (1) a burst that straddles a window boundary is forgotten once it has passed: the
+     * check sees only the last completed window and the partial window, so the net rise is
+     * at most max_rate x W per window at ANY burst rate (not "2x"), and the clear is granted
+     * only after the burst has ended (the partial window still refuses while it sees it);
+     * (2) a rise in progress, at any rate, passes in the first S8_POST_MIN_S seconds after
+     * each rollover (the partial check is skipped); only the whole-hold average sees it;
+     * (3) the partial average runs from the window start over ELAPSED time and so includes
+     * the flat time before a rise that starts mid-window: a rise still in progress passes
+     * while the net rise so far is no more than max_rate x elapsed;
+     * (4) the post window is clamped to 60..600 s while rate_window_s is unbounded: below a
+     * 60 s rate_window_s this check is COARSER than S8 itself (no "same resolution as S8"
+     * claim holds there). The clear itself restarts S8 from zero and S1 abs_max is
+     * independent. The window algorithm is a safety
      * design and is unchanged; see REVIEW_SAFTYFX4 INFO-2 for the owner question. */
     if (state->s8_post_active) {
         if (state->s8_post_windows_done >= 1u &&
