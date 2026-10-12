@@ -83,28 +83,58 @@ public class WtWalkResult {
 public static class WtStatusWalk {
     // Runs git with stdin closed (a pooled runspace has no usable console stdin,
     // and a native call from one hung on it) and stderr discarded.
+    // Full path for git: CreateProcess would search the current directory first.
+    static string GitExe() {
+        string cwd = Path.GetFullPath(Directory.GetCurrentDirectory()).TrimEnd((char)92);
+        foreach (string d in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(';')) {
+            if (d.Length == 0) continue;
+            try {
+                string full = Path.GetFullPath(d).TrimEnd((char)92);
+                if (string.Equals(full, cwd, StringComparison.OrdinalIgnoreCase)) continue;
+                string c = Path.Combine(full, "git.exe");
+                if (File.Exists(c)) return c;
+            } catch (Exception) { }
+        }
+        return "git";
+    }
+    static void KillTree(System.Diagnostics.Process p) {
+        try {
+            System.Diagnostics.ProcessStartInfo tk = new System.Diagnostics.ProcessStartInfo(
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "taskkill.exe"), "/T /F /PID " + p.Id);
+            tk.UseShellExecute = false; tk.CreateNoWindow = true;
+            tk.RedirectStandardOutput = true; tk.RedirectStandardError = true;
+            using (System.Diagnostics.Process k = System.Diagnostics.Process.Start(tk)) {
+                k.StandardOutput.ReadToEndAsync(); k.StandardError.ReadToEndAsync();
+                k.WaitForExit(15000);
+            }
+        } catch (Exception) { }
+    }
     public static WtGitResult Git(string dir, string args) {
         WtGitResult r = new WtGitResult();
-        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo("git", "-C \"" + dir + "\" " + args);
+        System.Diagnostics.ProcessStartInfo psi = new System.Diagnostics.ProcessStartInfo(GitExe(), "-C \"" + dir + "\" " + args);
         psi.UseShellExecute = false; psi.CreateNoWindow = true;
         psi.RedirectStandardInput = true; psi.RedirectStandardOutput = true; psi.RedirectStandardError = true;
         try {
             using (System.Diagnostics.Process p = System.Diagnostics.Process.Start(psi)) {
+                try {
                 p.StandardInput.Close();
                 System.Threading.Tasks.Task<string> err = p.StandardError.ReadToEndAsync();
                 System.Threading.Tasks.Task<string> outT = p.StandardOutput.ReadToEndAsync();
                 if (!outT.Wait(120000) || !p.WaitForExit(120000)) {
-                    try {
-                        System.Diagnostics.ProcessStartInfo tk = new System.Diagnostics.ProcessStartInfo("taskkill", "/T /F /PID " + p.Id);
-                        tk.UseShellExecute = false; tk.CreateNoWindow = true;
-                        using (System.Diagnostics.Process k = System.Diagnostics.Process.Start(tk)) { k.WaitForExit(15000); }
-                    } catch (Exception) { }
+                    KillTree(p);
                     r.ExitCode = -1;
                     return r;
                 }
                 using (System.IO.StringReader sr = new System.IO.StringReader(outT.Result)) { string line; while ((line = sr.ReadLine()) != null) r.Lines.Add(line); }
-                err.Wait();
+                if (!err.Wait(15000)) {
+                    // A grandchild kept stderr open: treat as a failed git call.
+                    KillTree(p);
+                    r.ExitCode = -1;
+                    r.Lines.Clear();
+                    return r;
+                }
                 r.ExitCode = p.ExitCode;
+                } catch (Exception) { KillTree(p); throw; }
             }
         } catch (Exception) { r.ExitCode = -1; }
         return r;
