@@ -68,7 +68,7 @@ function Start-Child {
 }
 function Test-SlotHeld {
     $p = Start-Child -Mode probe -Name $slotName
-    $p.WaitForExit()
+    if (-not $p.WaitForExit(120000)) { try { $p.Kill() } catch { }; throw "check_build_gate_reentrant: probe child did not exit within 120 s" }
     return ($p.ExitCode -ne 0)
 }
 
@@ -137,7 +137,7 @@ try {
     try { $g = Enter-KilnBuildGate -Label "t_timeout" -Lane light -PollIntervalSeconds 1; Exit-KilnBuildGate -Gate $g } catch { $msg = "$_" }
     Assert-True ($sw.Elapsed.TotalSeconds -lt 6) "env timeout bounded the slot wait ($([int]$sw.Elapsed.TotalSeconds)s)"
     Assert-True ($msg -match $busyPattern) "slot timeout message matches the BUSY pattern"
-    $holder.WaitForExit()
+    if (-not $holder.WaitForExit(120000)) { try { $holder.Kill() } catch { }; throw "check_build_gate_reentrant: holder child did not exit within 120 s" }
     Remove-Item Env:KILNCTL_BUILD_GATE_TIMEOUT_SEC -ErrorAction SilentlyContinue
 }
 catch {

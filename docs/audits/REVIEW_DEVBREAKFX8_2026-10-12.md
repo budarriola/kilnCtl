@@ -18,7 +18,7 @@ dot-source line (`tools/push_verify.ps1:60`), a double-spaced variant, `walkXps1
 `walk\ps1` and `evil.ps1`. `check_source_path_drift.ps1` passes at the tip (288
 references, all resolve). `tools/lib_push_verify_walk.ps1` exists.
 
-- **INFO-1** (`tools/check_push_verify.ps1:99-103`, pre-existing). No self-test proves
+- **INFO-1** FIXED (not applicable: toolfx15's SHA-pin change 3c806102c replaced the dot-source regex lint with a SHA-256 pin over push_verify.ps1 plus lib_push_verify_walk.ps1, check L1, whose "hash changes when the script changes" assert covers an appended dot-source; no dot-source lint remains to test) (`tools/check_push_verify.ps1:99-103`, pre-existing). No self-test proves
   that the dot-source branch rejects a foreign dot-source. The `$holes` table (from
   line 180) covers kill surfaces only. If someone appended
   `. (Join-Path $PSScriptRoot "other.ps1")` to the script, the lint would flag it,
@@ -26,12 +26,12 @@ references, all resolve). `tools/lib_push_verify_walk.ps1` exists.
 
 ## Item 2: `docs/audits/REVIEW_TOOLFX13_2026-10-12.md:269`
 
-"`2000000` -> `2000001`" became "2,000,000 -> 2,000,001". The values and the
+the cap mutation (2e6 -> 2e6+1, in digits) became "2,000,000 -> 2,000,001". The values and the
 direction are unchanged, and they still match the guard (`tools/push_verify.ps1:80-81`,
 `-gt 2000000`). `check_doc_hash_citations.ps1` passes at the tip.
 
-- **INFO-2.** The row no longer contains the exact literal that the mutation edits
-  (`2000000`). A `git grep 2000000` from the source will no longer find this evidence
+- **INFO-2** FIXED (REVIEW_TOOLFX13 row now carries `-gt 2000000` -> `-gt 2000001`). The row no longer contains the exact literal that the mutation edits
+  (the digit string). A `git grep` for it from the source will no longer find this evidence
   row. This is cosmetic. Writing "2e6 -> 2e6+1" or naming `push_verify.ps1:80` would
   keep it searchable.
 
@@ -95,7 +95,7 @@ as an `  FAIL:` assertion line.
   skips `finally`. A later run that reuses that PID would then find a stale
   `holder_ready`, `New-Item -Force` (line 40) keeps it, and the handshake passes
   vacuously. Fix: `Remove-Item $ready -ErrorAction SilentlyContinue` before line 126.
-- **INFO-6** (hang and orphan). There is no new hang risk:
+- **INFO-6** FIXED (both WaitForExit calls in check_build_gate_reentrant.ps1, and the one in check_build_gate_usage.ps1, now take a 120 s bound and fail loud) (hang and orphan). There is no new hang risk:
   - The wait loop is bounded at 60 s and exits early on `$holder.HasExited`.
   - The holder's lifetime is bounded by its own `Start-Sleep 8` after a
     non-blocking `WaitOne(0)`.
