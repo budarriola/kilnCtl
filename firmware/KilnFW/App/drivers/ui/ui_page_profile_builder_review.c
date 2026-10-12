@@ -90,7 +90,7 @@ static void do_save_apply(void *user_data)
 {
     uint8_t slot = (uint8_t)(uintptr_t)user_data;
     profile_t *d = draft();
-    char err_msg[64] = "";
+    char err_msg[PROFILES_SAVE_ERR_MSG_LEN] = "";
     uint8_t out_id = 0;
     uint8_t warn_count = 0;
 

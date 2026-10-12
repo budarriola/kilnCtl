@@ -2723,7 +2723,8 @@ static void test_save_expect_rev_under_lock(void)
     TEST_CHECK(strstr(err, "changed") != NULL, "refusal names the change");
     TEST_CHECK(strstr(err, "Reopen") != NULL && strstr(err, "Pick the slot again") == NULL,
                "REVIEW_PROFILESFX LOW-3: refusal says reopen / other slot, not 'pick again' (which is refused every time)");
-    TEST_CHECK(strlen(err) < 192 - 9, "refusal fits the LCD 192-byte message buffer after 'Refused: '");
+    TEST_CHECK(strlen(err) < PROFILES_SAVE_ERR_MSG_LEN,
+               "REVIEW_PROFILESFX3 LOW-1: refusal fits the LCD save dialog's err_msg buffer untruncated");
     TEST_CHECK(profiles_http_slot_rev(4) == before, "refused save wrote nothing");
     TEST_CHECK(profiles_http_save_expect_rev(4, &p, before, &out_id, &warn, err, sizeof(err)),
                "current expected rev saves");
@@ -3064,6 +3065,9 @@ static void test_delete_clears_favorite_before_erase_wiring(void)
                    "LCD slot pick captures the slot revision");
         TEST_CHECK(strstr(lcd_text, "profiles_http_save_expect_rev(slot, d, s_pick_rev") != NULL,
                    "LCD save compares the captured revision inside the save (under the save lock)");
+        TEST_CHECK(strstr(lcd_text, "char err_msg[PROFILES_SAVE_ERR_MSG_LEN]") != NULL,
+                   "LCD save dialog sizes err_msg with PROFILES_SAVE_ERR_MSG_LEN (not a small literal)");
+        TEST_CHECK(strstr(lcd_text, "err_msg, sizeof(err_msg))") != NULL, "LCD save passes sizeof(err_msg)");
         TEST_CHECK(strstr(lcd_text, "ui_page_profile_builder_source_rev()") != NULL,
                    "LCD overwrite of the edited slot uses the rev captured at edit load");
         free(lcd_text);

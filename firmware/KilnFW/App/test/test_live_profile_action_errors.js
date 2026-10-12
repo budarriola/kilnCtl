@@ -108,6 +108,15 @@ const txt = (el) => (el.innerHTML || '') + (el.textContent || '');
   scenario.live = null;
   ok(r.sandbox.lastGen === 1 && !/Changed elsewhere/.test(txt(r.els.saveMsg) + txt(r.els.statusText)), 'failed decide keeps lastGen (got ' + r.sandbox.lastGen + ')');
 
+  // REVIEW_PROFILESFX3 INFO-1: after a failed decide, a generation that really moved while the form is dirty
+  // must still show the "Changed elsewhere" banner (the board copy changed under the unsaved edits).
+  scenario.live = { active: true, working_id: 3, generation: 2, pending_decision: true, editable_from_segment: 0 };
+  r = await scenario('overwriteBtn', { status: 403, json: { ok: false, error: 'origin is a built-in schedule' } },
+    (e) => { e.overwriteConfirm.checked = true; sandbox_dirty = true; });
+  scenario.live = null;
+  ok(/Changed elsewhere/.test(txt(r.els.saveMsg) + txt(r.els.statusText)),
+    'failed decide + moved generation + dirty form shows the Changed elsewhere banner');
+
   // D6: no mojibake in the page source, progress text is plain.
   ok(HTML.indexOf(String.fromCharCode(0xe2, 0x20ac)) < 0, 'page source has no double-encoded UTF-8 (mojibake)');
   ok(/Loading\.\.\./.test(HTML) && /Saving\.\.\./.test(HTML) && /Forking\.\.\./.test(HTML) && /Working\.\.\./.test(HTML), 'progress texts use plain ASCII ellipses');

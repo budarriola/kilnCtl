@@ -119,11 +119,22 @@ def _url(host: str, path: str) -> str:
     return f"http://{host}{path}"
 
 
-def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
-    """Normalize a request exception into (status, detail-text). For an
-    HTTPError, tries to pull `.error` out of a JSON body first (the house
-    shape every refusal on this surface uses); falls back to the raw text if
-    the body isn't JSON."""
+def _parse_saved(raw: str) -> tuple[bool, Optional[int]]:
+    """(saved, id) from an error body's "saved"/"id" fields. "saved" must be literally true."""
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return False, None
+    if isinstance(obj, dict) and obj.get("saved") is True:
+        i = obj.get("id")
+        return True, (i if isinstance(i, int) and not isinstance(i, bool) else None)
+    return False, None
+
+
+def _error_info(exc: Exception) -> tuple[Optional[int], str, bool, Optional[int]]:
+    """Normalize a request exception into (status, detail, saved, saved_id). The HTTPError body is a
+    one-shot stream (a real http.client.HTTPResponse cannot seek), so it is read exactly once and
+    both the detail text and the saved/id fields are parsed from those bytes."""
     if isinstance(exc, urllib.error.HTTPError):
         try:
             raw = exc.read().decode("utf-8", errors="replace").strip()
@@ -136,24 +147,16 @@ def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
                 detail = obj["error"]
         except Exception:
             pass
-        return exc.code, detail
+        saved, saved_id = _parse_saved(raw)
+        return exc.code, detail, saved, saved_id
     if isinstance(exc, urllib.error.URLError):
-        return None, f"unreachable: {exc.reason}"
-    return None, str(exc)
+        return None, f"unreachable: {exc.reason}", False, None
+    return None, str(exc), False, None
 
 
-def _error_saved(exc: Exception) -> tuple[bool, Optional[int]]:
-    """(saved, id) from an HTTPError JSON body's "saved"/"id" fields; (False, None) when absent."""
-    if isinstance(exc, urllib.error.HTTPError):
-        try:
-            exc.fp.seek(0)
-            obj = json.loads(exc.fp.read().decode("utf-8", errors="replace"))
-        except Exception:
-            return False, None
-        if isinstance(obj, dict) and obj.get("saved") is True:
-            i = obj.get("id")
-            return True, (i if isinstance(i, int) and not isinstance(i, bool) else None)
-    return False, None
+def _error_detail(exc: Exception) -> tuple[Optional[int], str]:
+    status, detail, _, _ = _error_info(exc)
+    return status, detail
 
 
 def _get_json(host: str, path: str, timeout: float) -> dict:
@@ -182,8 +185,7 @@ def _post_form(host: str, path: str, fields: dict, timeout: float) -> dict:
         with http_auth.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except Exception as exc:  # noqa: BLE001 - normalized below
-        status, detail = _error_detail(exc)
-        saved, saved_id = _error_saved(exc)
+        status, detail, saved, saved_id = _error_info(exc)
         raise ProfileLiveHttpError(f"POST {path} failed: {detail}", status, detail, saved, saved_id) from exc
     try:
         return json.loads(body)

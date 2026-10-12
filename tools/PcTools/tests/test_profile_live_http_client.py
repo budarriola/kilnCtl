@@ -18,6 +18,8 @@ import json
 import os
 import sys
 import unittest
+import http.server
+import threading
 import unittest.mock
 import urllib.error
 
@@ -40,8 +42,18 @@ def _fake_response(body: bytes, status: int = 200):
     return _Ctx()
 
 
+class _OneShotBody(io.BytesIO):
+    """Like a real http.client.HTTPResponse body: readable once, cannot seek (REVIEW_PROFILESFX3 MED-1)."""
+
+    def seekable(self):
+        return False
+
+    def seek(self, *a, **k):
+        raise io.UnsupportedOperation("seek")
+
+
 def _fake_http_error(status: int, body: bytes):
-    return urllib.error.HTTPError("http://x/api/profile/live", status, "err", hdrs=None, fp=io.BytesIO(body))
+    return urllib.error.HTTPError("http://x/api/profile/live", status, "err", hdrs=None, fp=_OneShotBody(body))
 
 
 class GetLiveStatusTest(unittest.TestCase):
@@ -187,6 +199,78 @@ class DecideSavedFieldsTest(unittest.TestCase):
                 plive.decide_live_discard("h")
         self.assertFalse(ctx.exception.saved)
         self.assertIsNone(ctx.exception.saved_id)
+
+
+class _LoopbackBoard:
+    """Real loopback http.server answering every POST with a fixed status/body."""
+
+    def __init__(self, status: int, body: bytes):
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                n = int(self.headers.get("Content-Length") or 0)
+                if n:
+                    self.rfile.read(n)
+                self.send_response(outer.status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(outer.body)))
+                self.end_headers()
+                self.wfile.write(outer.body)
+
+            def log_message(self, *a):
+                pass
+
+        self.status, self.body = status, body
+        self.srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        self.host = f"127.0.0.1:{self.srv.server_address[1]}"
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+class DecideSavedLoopbackTest(unittest.TestCase):
+    """REVIEW_PROFILESFX3 MED-1: the real urllib HTTPError body cannot seek; saved/id must still arrive."""
+
+    def _decide(self, status, body):
+        board = _LoopbackBoard(status, body)
+        self.addCleanup(board.close)
+        with self.assertRaises(plive.ProfileLiveHttpError) as ctx:
+            plive.decide_live_save_as(board.host, "n")
+        return ctx.exception
+
+    def test_real_409_saved_true_reaches_exception(self):
+        e = self._decide(409, b'{"ok":false,"saved":true,"id":7,"error":"saved to slot 7; edited during save"}')
+        self.assertEqual(e.status, 409)
+        self.assertIn("slot 7", e.detail)
+        self.assertTrue(e.saved)
+        self.assertEqual(e.saved_id, 7)
+
+    def test_real_malformed_body_is_not_saved(self):
+        e = self._decide(409, b'{"ok":false,"saved":true,"id":7')
+        self.assertFalse(e.saved)
+        self.assertIsNone(e.saved_id)
+
+    def test_real_saved_not_literally_true_is_not_saved(self):
+        for val in (b'"true"', b'1', b'null', b'false'):
+            e = self._decide(409, b'{"ok":false,"saved":' + val + b',"id":7,"error":"x"}')
+            self.assertFalse(e.saved, val)
+            self.assertIsNone(e.saved_id, val)
+
+    def test_real_saved_true_without_int_id(self):
+        e = self._decide(500, b'{"ok":false,"saved":true,"id":"7","error":"x"}')
+        self.assertTrue(e.saved)
+        self.assertIsNone(e.saved_id)
+
+    def test_mcp_decide_prints_saved_do_not_retry(self):
+        from kilnctrl import mcp_server_profile_live as mpl
+        board = _LoopbackBoard(409, b'{"ok":false,"saved":true,"id":7,"error":"saved to slot 7; edited during save"}')
+        self.addCleanup(board.close)
+        result = mpl.profile_live_decide("save_as", name="n", confirm=True, host=board.host)
+        self.assertTrue(result.startswith("SAVED to slot 7"), result)
+        self.assertIn("do not retry save_as", result)
 
 
 class EditLiveTest(unittest.TestCase):
