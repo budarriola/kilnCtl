@@ -317,3 +317,25 @@ Results: baseline PASS (25.9 s).
  {"name":"M9 MSYS strip case-sensitive","file":"tools/PcTools/src/mcpkit/workbench.py","find":"if k.upper() not in _MSYS_ENV_VARS}","replace":"if k not in _MSYS_ENV_VARS}"}
 ]}
 ```
+
+
+## Fix status
+
+| Finding | Status | Where |
+|---|---|---|
+| HIGH-1 incremental build reported FAILED | fixed | `_enforce_fresh_artifacts`: only `KilnCtrl.bin` is judged fresh (esp_app_desc build time, mtime fallback, 2 s tolerance); bootloader/partition-table need exist + size > 0 |
+| MED-1 non-build targets OK when nothing ran | fixed | `_idf_command` (ErrorActionPreference Stop, `Get-Command` check, null `$LASTEXITCODE` = failure), `output_check` on every kilnfw step, `_enforce_target_effect` (reconfigure CMakeCache fresh, fullclean empty/absent) |
+| LOW-1 baseline before lock | fixed | `lock_info["start_wall"]` taken after `build_lock` acquired |
+| LOW-2 env strips untested alone | fixed | tests for `_run`, ungated `_run_locked`, gated strip, saftyfw-configure env |
+| LOW-3 per-artifact + tolerance tests | fixed | parametrized missing/zero-byte tests, ~10 s stale case |
+| LOW-4 MSys check placement, log line | fixed | `output_check=_msys_output_problems`; `_downgrade` keeps "full log:" |
+| LOW-5 0-byte bins, magic | fixed | size > 0 and esp_app_desc magic checks |
+| LOW-6 fakes bypass gate | fixed | `tests/_kilnfw_fakes.py` writes real bins; downgraded report skips sdkconfig refresh test |
+
+Real-build note (2026-10-12): the first fix judged `KilnCtrl.bin` by its embedded
+esp_app_desc time. A real incremental build (`build_kilnfw`, worktree code)
+FAILED as stale: the link rewrites the .bin (mtime fresh) but the desc time stays
+at the last recompile of its TU. Freshness is now the .bin mtime; desc is used for
+the magic check only. Proof: clean build OK (851 s), incremental build with the
+fixed gate `kilnfw-build: OK in 55.1s`, with `KilnCtrl.bin` relinked 01:43:11 while
+`bootloader.bin` (01:35:00) and `partition-table.bin` (01:26:08) stayed old.

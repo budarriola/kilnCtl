@@ -13,14 +13,26 @@ from mcpkit import workbench
 
 import pytest as _pytest
 
+from _kilnfw_fakes import write_fresh_bins
+
 
 @_pytest.fixture(autouse=True)
-def _no_artifact_gate(monkeypatch):
-    """These tests stub the toolchain; artifact freshness has its own tests
-    (test_build_kilnfw_artifact_gate.py)."""
-    from mcpkit import workbench as _wb
-    monkeypatch.setattr(_wb, "_enforce_fresh_artifacts", lambda report, *a, **k: report)
+def _tmp_repo(monkeypatch, tmp_path):
+    """Point repo_root() at a scratch tree so the REAL artifact gate runs against
+    bins the fakes write there (no bypass)."""
+    os.makedirs(tmp_path / "firmware" / "KilnFW" / "build")
+    os.makedirs(tmp_path / "tools" / "PcTools")
+    monkeypatch.setattr(workbench, "repo_root", lambda: str(tmp_path))
 
+
+def _ok(tag, resource_key):
+    """A successful kilnfw step: report OK and leave the build's artifacts."""
+    if tag == "kilnfw-fullclean":
+        for name in os.listdir(resource_key):
+            os.remove(os.path.join(resource_key, name))
+    elif tag == "kilnfw-build":
+        write_fresh_bins(resource_key)
+    return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
 
 
 def test_saftyfw_runs_before_kilnfw_and_both_reported(monkeypatch, tmp_path):
@@ -32,7 +44,7 @@ def test_saftyfw_runs_before_kilnfw_and_both_reported(monkeypatch, tmp_path):
 
     def fake_run_locked(tag, resource_key, argv, **kwargs):
         calls.append("kilnfw")
-        return f"{tag}: OK in 1.0s (1 log lines)\nfull log: y\n--\nbuilt"
+        return _ok(tag, resource_key)
 
     monkeypatch.setattr(workbench, "build_saftyfw", fake_build_saftyfw)
     monkeypatch.setattr(workbench, "_run_locked", fake_run_locked)
@@ -54,7 +66,7 @@ def test_saftyfw_failure_aborts_before_kilnfw_starts(monkeypatch):
 
     def fake_run_locked(tag, resource_key, argv, **kwargs):
         calls.append("kilnfw")
-        return f"{tag}: OK"
+        return _ok(tag, resource_key)
 
     monkeypatch.setattr(workbench, "build_saftyfw", fake_build_saftyfw)
     monkeypatch.setattr(workbench, "_run_locked", fake_run_locked)
@@ -75,7 +87,7 @@ def test_skip_saftyfw_opts_out(monkeypatch):
 
     def fake_run_locked(tag, resource_key, argv, **kwargs):
         calls.append("kilnfw")
-        return f"{tag}: OK"
+        return _ok(tag, resource_key)
 
     monkeypatch.setattr(workbench, "build_saftyfw", fake_build_saftyfw)
     monkeypatch.setattr(workbench, "_run_locked", fake_run_locked)
@@ -96,7 +108,7 @@ def test_fullclean_target_does_not_build_saftyfw(monkeypatch):
 
     def fake_run_locked(tag, resource_key, argv, **kwargs):
         calls.append("kilnfw")
-        return f"{tag}: OK"
+        return _ok(tag, resource_key)
 
     monkeypatch.setattr(workbench, "build_saftyfw", fake_build_saftyfw)
     monkeypatch.setattr(workbench, "_run_locked", fake_run_locked)
