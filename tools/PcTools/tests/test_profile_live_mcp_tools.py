@@ -164,7 +164,8 @@ class ProfileLiveDecideConfirmGateTests(unittest.TestCase):
     def test_generation_is_passed_through(self):
         with unittest.mock.patch.object(mpl.profile_live_http, "decide_live_discard",
                                          return_value={"ok": True}) as m:
-            mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5", generation=12)
+            with _rb("decide"):
+                mpl.profile_live_decide("discard", confirm=True, host="10.0.0.5", generation=12)
         m.assert_called_once_with("10.0.0.5", generation=12)
 
     def test_overwrite_sends_request(self):

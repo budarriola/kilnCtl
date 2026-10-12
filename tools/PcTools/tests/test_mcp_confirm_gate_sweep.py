@@ -63,12 +63,12 @@ ARG_OVERRIDES = {
     # bench_test_run/start gate confirm only when an ota_*/update_* argument is given (a valid suite
     # is checked first), so pass one to reach the gate.
     "bench_test_run": {"suite": "smoke", "ota_image_path": "x.bin"},
+    # bench_test_start refuses an unconfirmed OTA/update run synchronously (before any job exists).
+    "bench_test_start": {"suite": "smoke", "ota_image_path": "x.bin"},
 }
 # flash_firmware validates build outputs before its gate and is covered by
 # test_flash_firmware_confirm_gate.py with a real fake build tree.
-# bench_test_start is the background twin of bench_test_run: it hands `confirm` to the job thread, and the
-# refusal arrives in the job's FAILED report (test_bench_test_start_jobs.test_ota_images_without_confirm_refuse_before_runner).
-RUNTIME_EXEMPT = {"flash_firmware", "bench_test_start"}
+RUNTIME_EXEMPT = {"flash_firmware"}
 
 
 def _dummy_args(fn, gate, bad):

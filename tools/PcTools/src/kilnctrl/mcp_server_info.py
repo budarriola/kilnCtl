@@ -1064,6 +1064,17 @@ def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
     if isinstance(want, dict):
         if not isinstance(got, dict):
             return f"{path}: expected an object, board has {type(got).__name__}"
+        # Legacy (format <=3) pair: backup_import.c maps it onto ONE cell coupling_c<neighbor> unless the entry
+        # carries explicit coupling_c<n> keys. Verify that derived cell instead of skipping the pair.
+        if "coupling_coeff" in want and "coupling_neighbor_zone" in want:
+            nz = want["coupling_neighbor_zone"]
+            cell = f"coupling_c{nz}"
+            if isinstance(nz, int) and not isinstance(nz, bool) and cell not in want:
+                if cell not in got:
+                    return f"{path}.{cell}: legacy coupling_coeff has no matching cell in the re-export"
+                d = _first_content_diff(want["coupling_coeff"], got[cell], f"{path}.{cell} (from legacy coupling_coeff)")
+                if d:
+                    return d
         for k, v in want.items():
             if k in _IMPORT_ONLY_KEYS:
                 continue
@@ -1091,7 +1102,8 @@ def _first_content_diff(want: object, got: object, path: str) -> Optional[str]:
     return None
 
 
-def _backup_import_readback_problem(host: str, body_text: str, after_readiness: str) -> Optional[str]:
+def _backup_import_readback_problem(host: str, body_text: str, after_readiness: str,
+                                    before_profiles: Optional[list] = None) -> Optional[str]:
     """None when the post-import read-back agrees with the backup, else why not.
     Checks: readiness readable, and a fresh GET /api/backup/export holds at least
     the backup's profiles and exactly its zones count (count, then per-profile-id / per-zone-index content)."""
@@ -1121,6 +1133,16 @@ def _backup_import_readback_problem(host: str, body_text: str, after_readiness: 
             return f"{key}: backup has {len(w)} entries, board now has {len(g)}"
         ident = "index" if key == "zones" else "id"
         by_id = {e.get(ident): e for e in g if isinstance(e, dict)}
+        # Board entries already claimed: by an id-carrying backup entry, or by an earlier id-less match.
+        consumed = {id(by_id[e[ident]]) for e in w
+                    if isinstance(e, dict) and ident in e and e[ident] in by_id}
+        if key == "profiles" and before_profiles:
+            # An id-less entry whose identical twin was already on the board before the import proves nothing.
+            for e in g:
+                if isinstance(e, dict) and any(_first_content_diff(b, e, "") is None
+                                               for b in before_profiles if isinstance(b, dict)
+                                               and b.get("id") == e.get("id")):
+                    consumed.add(id(e))
         for i, entry in enumerate(w):
             if not isinstance(entry, dict):
                 continue
@@ -1129,11 +1151,14 @@ def _backup_import_readback_problem(host: str, body_text: str, after_readiness: 
                 other = by_id.get(eid)
             else:
                 # No id: the firmware puts it in the first free slot, so position is not meaningful.
-                # Accept any re-exported entry that matches it completely; else diff against position.
-                other = next((e for e in g if isinstance(e, dict)
-                              and _first_content_diff({k: v for k, v in entry.items()}, e, "") is None), None)
-                if other is None:
-                    other = g[i] if i < len(g) else None
+                # Accept an UNCLAIMED re-exported entry that matches it completely, and claim it; else diff
+                # against position (fails safe).
+                other = next((e for e in g if isinstance(e, dict) and id(e) not in consumed
+                              and _first_content_diff(dict(entry), e, "") is None), None)
+                if other is not None:
+                    consumed.add(id(other))
+                else:
+                    other = g[i] if i < len(g) and id(g[i]) not in consumed else None
             if other is None:
                 return f"{key}[{ident}={eid}]: in the backup but missing from the board's re-export"
             diff = _first_content_diff(entry, other, f"{key}[{ident}={eid}]")
@@ -1278,6 +1303,18 @@ def backup_import(
     if stale_note:
         stale_note = "\n" + stale_note
 
+    before_profiles = None
+    if confirm is True and not dry_run:
+        # Only an id-less profile needs a pre-import snapshot (see _backup_import_readback_problem).
+        try:
+            _wp = json.loads(body_text).get("profiles")
+            if isinstance(_wp, list) and any(isinstance(e, dict) and "id" not in e for e in _wp):
+                from . import backup_export_http_client as _bex
+                _bp = _bex.get_export(resolved)[1].get("profiles")
+                before_profiles = _bp if isinstance(_bp, list) else None
+        except Exception:  # noqa: BLE001 - best effort; without it case 3 stays undetected
+            before_profiles = None
+
     t0 = time.monotonic()
     try:
         status, resp_text = backup_import_http_client.post_import(
@@ -1309,7 +1346,7 @@ def backup_import(
             kept_note = (f"\nNOTE: relay_cycles counters {kept} were NOT lowered: the backup value was below the "
                          "live wear count, so the live (higher) count was kept (raise-only).")
         # Read back before claiming ok: a 2xx alone is the board's word, not proof.
-        problem = _backup_import_readback_problem(resolved, body_text, after_readiness)
+        problem = _backup_import_readback_problem(resolved, body_text, after_readiness, before_profiles)
         if problem:
             return (
                 f"UNVERIFIED - POST returned HTTP {status} but the read-back could not confirm the "

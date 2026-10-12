@@ -21,7 +21,9 @@ re-deriving what the board was configured with.
 """
 from __future__ import annotations
 
+import ipaddress
 import os
+import socket
 import sys
 
 import pytest
@@ -235,8 +237,9 @@ def _idle_shared_link_stub(monkeypatch):
     try:
         from kilnctrl import mcp_server as srv
         from kilnctrl.devices_profiles import ProfileExecStatus
+        from kilnctrl.devices_autotune import (
+            AutotuneGains, AutotuneModel, AutotuneRelayResult, AutotuneStatus)
         from kilnctrl.wifi_uart import WifiUartQueryError
-        from types import SimpleNamespace
     except Exception:
         return
 
@@ -250,7 +253,13 @@ def _idle_shared_link_stub(monkeypatch):
         state=0, profile_id=0, name="", zone_mask=0, segment_index=0, segment_count=0,
         dwelling=False, target_c=0.0, segment_elapsed_s=0, dwell_remaining_s=0,
         ramp_lock_held=False, ramp_lock_lagging_mask=0, fault_guard=0, zones=[])
-    idle_at = SimpleNamespace(state=0, state_name="IDLE")
+    idle_at = AutotuneStatus(
+        state=0, method=0, zone=0, elapsed_s=0, sample_count=0, actual_c=0.0,
+        actual_valid=False, duty=0.0, model_valid=False, model_settled=False,
+        model_extrapolation_converged=False, model_tau_consistent=False,
+        model=AutotuneModel(0.0, 0.0, 0.0), proposed_gains=AutotuneGains(0.0, 0.0, 0.0, 0),
+        predicted_max_ramp_c_per_hr=0.0, relay_valid=False,
+        relay=AutotuneRelayResult(0.0, 0.0, 0.0), abort_reason="")
     for obj, name, fn in (
         (getattr(srv, "_profiles", None), "get_exec_status", lambda *a, **k: idle_exec),
         (getattr(srv, "_autotune", None), "get_status", lambda *a, **k: idle_at),
@@ -259,3 +268,74 @@ def _idle_shared_link_stub(monkeypatch):
     ):
         if obj is not None:
             monkeypatch.setattr(obj, name, fn, raising=False)
+
+
+class NetworkGuardError(RuntimeError):
+    """Raised (and recorded) when a test tries to reach a non-loopback address."""
+
+
+def _is_loopback_addr(address) -> bool:
+    """True for AF_UNIX paths, loopback IPs and 'localhost'; False otherwise."""
+    if not isinstance(address, tuple) or not address:
+        return True  # AF_UNIX / unknown family: not a LAN connection
+    host = address[0]
+    if isinstance(host, bytes):
+        host = host.decode("ascii", "replace")
+    if host in ("localhost", ""):
+        return True
+    try:
+        return ipaddress.ip_address(str(host).split("%", 1)[0]).is_loopback
+    except ValueError:
+        return False  # an unresolved hostname is not loopback
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_network(request, monkeypatch):
+    """Refuse any non-loopback connect (review confx HIGH-1).
+
+    A host-side pytest run once sent a real POST /api/ota/esp/boot_guard_reset
+    to the bench board's LAN address. Every non-loopback ``connect`` /
+    ``create_connection`` now raises NetworkGuardError AND records the attempt;
+    teardown fails the test if any was recorded, so code that swallows the
+    exception (``except Exception``) cannot hide it. Loopback stays open for
+    local test servers; ``live_bench`` tests opt out.
+    """
+    if request.node.get_closest_marker("live_bench"):
+        yield
+        return
+    attempts = []
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_create = socket.create_connection
+
+    def _refuse(address):
+        import traceback
+        frames = [f"{os.path.basename(fr.filename)}:{fr.lineno} {fr.name}"
+                  for fr in traceback.extract_stack()[:-2] if "kilnctrl" in fr.filename]
+        attempts.append((address, frames[-3:]))
+        raise NetworkGuardError(
+            f"test tried a real outbound connection to {address!r}; mock the "
+            "client (conftest _no_outbound_network)")
+
+    def guarded_connect(self, address):
+        if not _is_loopback_addr(address):
+            _refuse(address)
+        return real_connect(self, address)
+
+    def guarded_connect_ex(self, address):
+        if not _is_loopback_addr(address):
+            _refuse(address)
+        return real_connect_ex(self, address)
+
+    def guarded_create(address, *a, **k):
+        if not _is_loopback_addr(address):
+            _refuse(address)
+        return real_create(address, *a, **k)
+
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
+    monkeypatch.setattr(socket, "create_connection", guarded_create)
+    yield attempts
+    if attempts:
+        pytest.fail(f"test attempted real outbound network connection(s): {attempts}",
+                    pytrace=False)

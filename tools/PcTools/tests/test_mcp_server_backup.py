@@ -42,6 +42,11 @@ class _Base(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp(prefix="backup_mcp_test_")
         self.addCleanup(shutil.rmtree, self._tmpdir, ignore_errors=True)
+        # Review confx HIGH-1: no test here may reach the board; individual tests patch over this.
+        _p = unittest.mock.patch.object(backup_export_http_client, "get_export",
+                                        side_effect=backup_export_http_client.BackupExportHttpError("no board in tests"))
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _resolve_host_patch(self):
         return unittest.mock.patch.object(mcp_server_ota, "_ota_resolve_host", return_value="10.0.0.5")
@@ -147,7 +152,7 @@ class BackupImportSuccessTest(_Base):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", side_effect=fake_readiness), \
              unittest.mock.patch.object(backup_export_http_client, "get_export",
-                                        return_value=("", dict(_GOOD_DOC))), \
+                                        side_effect=[("", {"profiles": []}), ("", dict(_GOOD_DOC))]), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')) as post_mock:
             result = msi.backup_import(path, confirm=True)
         post_mock.assert_called_once()
@@ -215,7 +220,7 @@ class BackupImportSuccessTest(_Base):
         with self._resolve_host_patch(), \
              unittest.mock.patch.object(readiness_http_client, "get_readiness", return_value=_READINESS_OK), \
              unittest.mock.patch.object(backup_export_http_client, "get_export",
-                                        return_value=("", dict(_GOOD_DOC))), \
+                                        side_effect=[("", {"profiles": []}), ("", dict(_GOOD_DOC))]), \
              unittest.mock.patch.object(bi, "post_import", return_value=(200, '{"ok":true}')):
             result = msi.backup_import(path, confirm=True)
         self.assertIn("synchronous", result)
@@ -367,6 +372,7 @@ class ReadbackContentTest(unittest.TestCase):
         want = json.loads(json.dumps(self.WANT))
         want["zones"][0].update(coupling_coeff=0.1, coupling_neighbor_zone=1)
         got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["coupling_c1"] = 0.1  # the derived cell (LOW-3 verifies it)
         with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
             self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
 
@@ -379,6 +385,44 @@ class ReadbackContentTest(unittest.TestCase):
         got["profiles"][1]["name"] = "zzz"
         with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
             self.assertIsNotNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+
+    def _idless(self, want_profiles, got_profiles, before=None):
+        want = {"profiles": want_profiles}
+        got = {"profiles": got_profiles}
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            return msi._backup_import_readback_problem("h", json.dumps(want), "ready", before)
+
+    P = {"name": "n", "zone_mask": 1, "segments": []}
+
+    def test_two_identical_idless_profiles_one_landed_detected(self):
+        # MED-1 case 1: both backup entries must not pair with the one board slot.
+        got = [dict(self.P, id=1), dict(self.P, id=2, name="other")]
+        self.assertIsNotNone(self._idless([dict(self.P), dict(self.P)], got))
+        got[1] = dict(self.P, id=2)
+        self.assertIsNone(self._idless([dict(self.P), dict(self.P)], got))
+
+    def test_idless_does_not_reuse_slot_claimed_by_id_entry(self):
+        # MED-1 case 2.
+        self.assertIsNotNone(self._idless([dict(self.P, id=1), dict(self.P)], [dict(self.P, id=1)]))
+
+    def test_idless_matching_preexisting_board_profile_detected(self):
+        # MED-1 case 3: the identical profile was already on the board and the import wrote nothing.
+        got = [dict(self.P, id=1)]
+        self.assertIsNotNone(self._idless([dict(self.P)], got, before=[dict(self.P, id=1)]))
+        # Landed in a new slot alongside the old one: fine.
+        got2 = [dict(self.P, id=1), dict(self.P, id=2)]
+        self.assertIsNone(self._idless([dict(self.P)], got2, before=[dict(self.P, id=1)]))
+
+    def test_legacy_coupling_pair_derived_cell_verified(self):
+        want = json.loads(json.dumps(self.WANT))
+        want["zones"][0].update(coupling_coeff=0.1, coupling_neighbor_zone=1)
+        got = json.loads(json.dumps(self.WANT))
+        got["zones"][0]["coupling_c1"] = 0.1
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIsNone(msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
+        got["zones"][0]["coupling_c1"] = 0.7
+        with unittest.mock.patch.object(backup_export_http_client, "get_export", return_value=("{}", got)):
+            self.assertIn("coupling_c1", msi._backup_import_readback_problem("h", json.dumps(want), "ready"))
 
     def test_profile_missing_by_id_detected(self):
         got = json.loads(json.dumps(self.WANT))

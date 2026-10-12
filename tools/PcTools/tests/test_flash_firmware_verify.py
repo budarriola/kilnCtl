@@ -273,6 +273,23 @@ class FlashFirmwareVerifyWiringTest(unittest.TestCase):
         self._archive_patch.start()
         self.addCleanup(self._archive_patch.stop)
 
+        # Review confx HIGH-1: nothing in this class may reach the network.
+        # The partition-offset guard and the post-flash boot_guard calls
+        # (including a real POST) used to hit the bench address; tests that
+        # care override these per test with their own patches.
+        for target, kw in (
+            (mf, {"_check_app_flash_offset_matches_chip": {"return_value": None},
+                  # host USB enumeration: depends on whether a board is plugged in
+                  "_refuse_if_adapter_absent": {"return_value": None}}),
+            (mf.ota_http, {
+                "get_boot_guard_status": {"side_effect": mf.ota_http.OtaHttpError("blocked in tests")},
+                "boot_guard_reset_esp": {"side_effect": mf.ota_http.OtaHttpError("blocked in tests")}}),
+        ):
+            for name, opts in kw.items():
+                patcher = unittest.mock.patch.object(target, name, **opts)
+                patcher.start()
+                self.addCleanup(patcher.stop)
+
         # 2026-09-29: the post-flash boot_guard reset no longer reads any
         # credential from the environment (the AP-password HMAC it used to
         # also require was retired) -- it goes through the same admin

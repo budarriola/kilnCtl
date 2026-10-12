@@ -283,9 +283,13 @@ class UnacknowledgedCrashReportTest(unittest.TestCase):
         self.assertFalse(report.board.crash_unacknowledged)
         self.assertNotIn("UNACKNOWLEDGED CRASH REPORT", report.describe())
 
-        with self.assertRaises(cp.PreflightFailed):
-            cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
-                                   preset_name="test-preset")
+        # An unreachable board (mocked; the guard forbids a real connect) must raise.
+        with unittest.mock.patch.object(
+                cp.urllib.request, "urlopen",
+                side_effect=urllib.error.URLError("connection refused")):
+            with self.assertRaises(cp.PreflightFailed):
+                cp.preflight_or_raise(preset, "192.168.1.50", zones_host="192.168.1.50",
+                                       preset_name="test-preset")
 
     def test_unreachable_board_not_ok_even_with_zero_required_capabilities(self):
         # Isolates PreflightReport.ok's own "board must have answered"

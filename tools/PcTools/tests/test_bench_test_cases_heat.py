@@ -21,6 +21,27 @@ from kilnctrl.bench_test import cases_smoke as CS  # noqa: E402
 from kilnctrl.bench_test.registry import Verdict  # noqa: E402
 
 
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _no_board_http(monkeypatch):
+    """Review confx HIGH-1: these cases are handed ctx host 10.0.0.5, so any
+    unmocked board HTTP read would be a real outbound connection. Default every
+    board HTTP seam to "board unreachable" (OSError, what a refused connect
+    raised before); a test that needs an answer passes its own seam or patches
+    over this."""
+    from kilnctrl import dashboard_http_client, zones_http_client
+
+    def _down(*_a, **_k):
+        raise OSError("board unreachable (no network in tests)")
+
+    monkeypatch.setattr(C, "_http_get_json", _down)
+    monkeypatch.setattr(CS, "_http_get_json", _down)
+    monkeypatch.setattr(dashboard_http_client, "get_status", _down)
+    monkeypatch.setattr(zones_http_client, "get_zones", _down)
+
+
 class _Reading:
     def __init__(self, channel, temperature_c, valid=True):
         self.channel = channel
