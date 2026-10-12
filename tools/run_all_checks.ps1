@@ -344,6 +344,18 @@ if (Test-Path $dupSymbolsTest) {
     Write-Host "WARNING: expected test $dupSymbolsTest not found -- proceeding" -ForegroundColor Yellow
 }
 
+# test_check_lcd_sink_callgraph.ps1: synthetic-dump test of check_lcd_sink_callgraph.ps1
+# (REVIEW_LCDFX9 HIGH-2); named test_*, wired explicitly.
+$lcdCgTest = Join-Path $repoRoot "tools	est_check_lcd_sink_callgraph.ps1"
+if (Test-Path $lcdCgTest) {
+    $checks += Get-Item $lcdCgTest
+    $checks = $checks | Sort-Object FullName
+} elseif (-not $AllowFewerChecks) {
+    Write-Host "FAILED: expected test $lcdCgTest not found" -ForegroundColor Red
+    Clear-ChecksFastEnv
+    exit 2
+}
+
 # test_check_submodule_pins_pushed.ps1 tests the network-dependent
 # check_submodule_pins_pushed.ps1 against local scratch repos (offline). The
 # check itself is excluded from the glob above; wired explicitly here.

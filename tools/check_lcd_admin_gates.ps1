@@ -14,7 +14,7 @@ $UiDir = (Resolve-Path $UiDir).Path
 $admin = 'LCD_PIN_ROLE_ADMIN'
 # LCDFX9: every identifier that names an admin-tier mutator the LCD could reach. ANY mention (call, address-of, #define
 # alias, log argument, header wrapper) under drivers/ui must be in $sinkRows below; unlisted mentions fail (deny by default).
-$denyIdent = '(?:dashboard_set_\w+|dashboard_safety_clear_trip|safety_link_send_\w+|wifi_prov_(?:add|forget|set|post|clear|save(?!d)|delete|reset|start|stop|connect|disconnect|factory|remove)\w*|unit_pref_set\w*|unit_pref_(?:reset|clear|save)\w*|touch_cal_store_(?:save|clear|erase|reset|write)\w*|profiles_http_(?:save|delete|set|create|import|restore|retarget|rename|copy|write|erase)\w*|profiles_favorites_set|profiles_live_(?:decide_apply|fork|edit)\w*|crash_report_(?:ack|clear)\w*|kiln_io_set_\w+|edit_firing_apply|zones_config_(?:set|save|write|reset)\w*|aux_outputs_(?:set|save)\w*)'
+$denyIdent = '(?:dashboard_set_\w+|dashboard_safety_clear_trip|safety_link_send_\w+|wifi_prov_(?:add|forget|set|post|clear|save(?!d)|delete|reset|start|stop|connect|disconnect|factory|remove)\w*|unit_pref_set\w*|unit_pref_(?:reset|clear|save)\w*|touch_cal_store_(?:save|clear|erase|reset|write)\w*|profiles_http_(?:save|delete|set|create|import|restore|retarget|rename|copy|write|erase)\w*|profiles_favorites_set|profiles_live_(?:decide_apply|fork|edit)\w*|crash_report_(?:ack|clear)\w*|kiln_io_set_\w+|edit_firing_apply|zones_config_(?:set|save|write|reset)\w*|aux_outputs_(?:set|save)\w*|wifi_prov_get_\w*(?:password|psk|secret)\w*|esp_restart|time_sync_set\w*|kiln_io_owner_command_(?:set|all_relays_off|sx_write)\w*|relay_cycles_(?:reset|set_type|restore)\w*|ramp_assist_cfg_(?:set|save|reset|apply)\w*|display_power_cfg_(?:set|save|reset)\w*|danger_mode_(?:request|set|stop|touch|clear)\w*|relay_names_(?:save|set|reset|clear)\w*|safety_cfg_write_\w+|autotune_engine_(?:start|abort|stop)\w*|factory_reset_(?:execute|reboot)\w*)'
 # REVIEW_LCDFX5 LOW-5: every rule is matched against ONE named function's body (brace-matched), never the
 # whole file, so a gate moved into a dead function no longer satisfies it. Fields: file, function, regex
 # that must match the body, label, and optionally an apply identifier whose non-definition occurrences in
@@ -57,7 +57,7 @@ $rules = @(
     # clear_action's verdict is fed the live ADMIN role, NEEDS_ADMIN/NOT_TRIPPED return before the send, and the send
     # (dashboard_safety_clear_trip) appears once, after the switch. Other files in drivers/ui may not call it (below).
     @('ui_page_safety.c', 'btn_clicked_cb', ('^\s*\(void\)\s*e\s*;\s*' + (GateRx 'Enter admin PIN to clear trip' $admin 'clear_action') + '\s*NULL\)\s*;\s*$'), 'D2 trip clear gate', 'clear_action', 1),
-    @('ui_page_safety.c', 'clear_action', ('^\s*\(void\)\s*user\s*;\s*switch\s*\(ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\)\s*\{\s*case\s+UI_SAFETY_CLEAR_NOT_TRIPPED\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_NEEDS_ADMIN\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_SEND\s*:\s*default\s*:\s*break\s*;\s*\}[\s\S]*dashboard_safety_clear_trip\('), 'D2 trip clear re-check', 'dashboard_safety_clear_trip', 1)
+    @('ui_page_safety.c', 'clear_action', ('^\s*\(void\)\s*user\s*;\s*(?:switch\s*\(ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\)|(?:const\s+)?\w+\s+(\w+)\s*=\s*ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\s*;\s*switch\s*\(\1\))\s*\{\s*case\s+UI_SAFETY_CLEAR_NOT_TRIPPED\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_NEEDS_ADMIN\s*:' + $uncond + '\s*case\s+UI_SAFETY_CLEAR_SEND\s*:\s*default\s*:\s*break\s*;\s*\}[\s\S]*dashboard_safety_clear_trip\('), 'D2 trip clear re-check', 'dashboard_safety_clear_trip', 1)
 )
 
 # Review LCDFX2/DEVBREAK INFO: rules match code only. A gate call left inside a comment must not
@@ -363,6 +363,8 @@ $sinkRows = @(
     @('ui_page_diagnostics.c', 'crash_report_acknowledge_timeout', 'crash_ack_do', 1),
     @('ui_page_edit_firing.c', 'edit_firing_apply', 'apply_live_gated', 1),
     @('ui_page_live_decide.c', 'profiles_live_decide_apply', 'run_decision_apply', 1),
+    @('ui_page_network.c', 'wifi_prov_get_ap_password', 'ap_edit_open_apply', 1),   # LCDFX9 MED-2: ADMIN-gated editor prefill
+    @('ui_page_network.c', 'wifi_prov_get_ap_password', 'refresh_cb', 1),            # pinned below: revealed only in the unmasked ADMIN branch
     @('ui_page_network.c', 'wifi_prov_set_ap_password', 'ap_identity_worker_task', 1),
     @('ui_page_network.c', 'wifi_prov_set_ap_ssid', 'ap_identity_worker_task', 1),
     @('ui_page_network.c', 'wifi_prov_set_mode', 'mode_worker_task', 1),
@@ -377,7 +379,7 @@ $sinkRows = @(
 )
 function Get-TopFuncRanges([string]$code) {
     $out = New-Object System.Collections.ArrayList
-    foreach ($m in [regex]::Matches($code, '(?m)^[A-Za-z_][^;{}()#\n]*?\b(\w+)\s*\([^;{}]*\)\s*\{')) {
+    foreach ($m in [regex]::Matches($code, '(?m)^[A-Za-z_][^;{}()#]*?\b(\w+)\s*\([^;{}]*\)\s*\{')) {
         $open = $m.Index + $m.Length - 1
         $b = Get-BraceBody $code $open
         if ($null -eq $b) { continue }
@@ -433,7 +435,7 @@ $uiCalled = @{}
 foreach ($uf in $uiAll) {
     foreach ($cm in [regex]::Matches((Blank-Strings (Get-KeepLogsCode $uf.FullName)), '\b([A-Za-z_]\w*)\s*\(')) { $uiCalled[$cm.Groups[1].Value] = $uf.Name }
 }
-$wrapAllow = @('wifi_prov_scan')   # read-only scan request: posts a scan command through wifi_prov_post_and_wait, changes no setting
+$wrapAllow = @('wifi_prov_scan', 'profile_executor_run')   # read-only scan request: posts a scan command through wifi_prov_post_and_wait, changes no setting; profile_executor_run is the LCD profile-detail Start button (a USER action by design, the executor applies its own refusals)
 foreach ($of in $appFiles) {
     if ($of.FullName.StartsWith($UiDir)) { continue }
     $rawo = Get-Content -Raw -Path $of.FullName
@@ -453,6 +455,70 @@ foreach ($of in $appFiles) {
 foreach ($uc in @(@('ui_page_profile_picker.c', 'delete_do', 2), @('ui_page_diagnostics.c', 'crash_ack_do', 2), @('ui_page_network_manage.c', 'forget_worker_task', 1))) {
     $un = Count-Uses (Get-CachedCode $uc[0]) $uc[1]
     if ($un -ne $uc[2]) { Write-Host "FAIL: L-sink: $($uc[1]) is referenced $un time(s) in $($uc[0]) outside its definition (expected $($uc[2]); a third call/reference bypasses the gate rows above)"; $fail++ }
+}
+
+
+# ---- REVIEW_LCDFX9 structural additions -------------------------------------------------------------------------------
+# HIGH-3: a lone CR is a line terminator for GCC but is deleted by this script's normalisation, so `// note<CR>call();`
+# hides a live call inside what the check reads as one comment. No legitimate source has one.
+foreach ($f in $appFiles) {
+    if ([regex]::IsMatch((Get-Content -Raw -Path $f.FullName), "`r(?!`n)")) { Write-Host "FAIL: L-cr: $($f.Name) contains a lone CR (GCC ends a // comment at it, this check does not; convert to LF or CRLF)"; $fail++ }
+}
+# HIGH-1: no declaration or definition of a gate token inside drivers/ui outside its home file (a block-scope
+# `const lcd_pin_role_t LCD_PIN_ROLE_ADMIN = LCD_PIN_ROLE_USER;` or a local function pointer named like a predicate compiles
+# silently and turns an ADMIN gate into a USER gate). Backstop for what regex cannot see: -Werror=shadow, asserted below.
+$gateTok = 'LCD_PIN_ROLE_\w+|ui_lcd_lock_\w+|kiln_ui_show|ui_page_safety_open|touch_cal_store_is_calibrated|ui_safety_clear_verdict|UI_SAFETY_CLEAR_\w+|lcd_safety_strip_needs_pin|lcd_touch_cal_\w*exit_target'
+$gateHome = @(
+    @('^LCD_PIN_ROLE_', @('lcd_auth_state.h')), @('^ui_lcd_lock_', @('ui_lcd_lock.c', 'ui_lcd_lock.h')),
+    @('^kiln_ui_show$', @('kiln_ui.c', 'kiln_ui.h')), @('^ui_page_safety_open$', @('ui_page_safety.c', 'ui_page_safety.h')),
+    @('^(ui_safety_clear_verdict|UI_SAFETY_CLEAR_)', @('ui_page_safety_logic.c', 'ui_page_safety_logic.h')),
+    @('^lcd_safety_strip_needs_pin$', @('ui_page_safety_logic.c', 'ui_page_safety_logic.h', 'lcd_auth_state.c', 'lcd_auth_state.h')),
+    @('^lcd_touch_cal_\w*exit_target$', @('ui_page_touch_cal.c', 'ui_page_touch_cal.h', 'ui_page_touch_cal_logic.c', 'ui_page_touch_cal_logic.h', 'lcd_auth_state.c', 'lcd_auth_state.h'))
+)
+$declRx = @(
+    '\b(?!return\b|case\b|else\b|goto\b|do\b|sizeof\b|typeof\b|defined\b)[A-Za-z_]\w*[\s\*]+(' + $gateTok + ')\b\s*(?:=(?!=)|;|\[|,|\)|\()',   # `type T = / ; / , / ) / (`
+    '\(\s*\*\s*(' + $gateTok + ')\s*\)',                                                                                                 # function-pointer declarator
+    '[{,]\s*(' + $gateTok + ')\s*=(?!=)',                                                                                                # enumerator
+    '\btypedef\b[^;]*\b(' + $gateTok + ')\s*;'
+)
+foreach ($uf in $uiAll) {
+    $dc = Blank-Strings (Get-KeepLogsCode $uf.FullName)
+    foreach ($rx in $declRx) {
+        foreach ($dm in [regex]::Matches($dc, $rx)) {
+            $tok = $dm.Groups[1].Value
+            $home = $false
+            foreach ($h in $gateHome) { if ($tok -match $h[0] -and $uf.Name -in $h[1]) { $home = $true } }
+            if (-not $home) { Write-Host "FAIL: L-declarator: $($uf.Name) declares/defines gate token '$tok' (`"$($dm.Value.Trim() -replace '\s+', ' ')`"); a local, parameter, enumerator, typedef or function pointer with a gate name shadows the real one and defeats the gate rows"; $fail++ }
+        }
+    }
+}
+# HIGH-1 backstop: drivers/ui must compile with -Werror=shadow (the compiler sees what the text rules cannot).
+$drvCmake = Join-Path $appRoot 'drivers\CMakeLists.txt'
+if (Test-Path $drvCmake) {
+    $dct = Get-Content -Raw -Path $drvCmake
+    if ($dct -notmatch '(?m)^\s*file\(GLOB\s+(\w+)\s+"\$\{CMAKE_CURRENT_LIST_DIR\}/ui/\*\.c"\)\s*\r?\n\s*set_source_files_properties\(\s*\$\{\1\}\s+PROPERTIES\s+COMPILE_OPTIONS\s+"-Werror=shadow"\s*\)') {
+        Write-Host "FAIL: L-shadow: App/drivers/CMakeLists.txt no longer applies -Werror=shadow to every drivers/ui/*.c (file(GLOB ... ui/*.c) + set_source_files_properties(... COMPILE_OPTIONS `"-Werror=shadow`")); the shadow flag is the compiler backstop for gate-token shadowing"; $fail++
+    }
+    if ($dct -match '(?i)-Wno-shadow|-Wno-error=shadow') { Write-Host "FAIL: L-shadow: App/drivers/CMakeLists.txt turns shadow warnings off"; $fail++ }
+}
+# LOW-1: the gate implementation must not be weak (a strong definition elsewhere would silently replace it at link time).
+foreach ($wf in 'ui_lcd_lock.c', 'ui_lcd_lock.h') {
+    $wp = Join-Path $UiDir $wf
+    if ((Test-Path $wp) -and ((Get-Content -Raw -Path $wp) -match '\bweak\b|__weak__|__attribute__\s*\(\(\s*(?:__)?weak')) { Write-Host "FAIL: L-weak: $wf mentions weak (a weak gate function can be overridden by a strong definition in another file at link time)"; $fail++ }
+}
+# MED-2: the AP password is revealed only in refresh_cb's unmasked ADMIN branch (and the ADMIN-gated editor prefill; both
+# are sink rows above, so Home or any other page reading it fails the inventory). The masked branch (all a USER sees)
+# must show string literals only.
+$nw = Get-CachedCode 'ui_page_network.c'
+$rcb = Get-FuncBody $nw 'refresh_cb'
+if (-not $rcb.ok) { Write-Host "FAIL: L-secret: ui_page_network.c refresh_cb not found exactly once"; $fail++ }
+else {
+    $mm = [regex]::Match($rcb.body, 'if\s*\(!show_secret\)\s*\{([^{}]*)\}')
+    if (-not $mm.Success) { Write-Host "FAIL: L-secret: refresh_cb has no recognisable masked '!show_secret' block"; $fail++ }
+    else {
+        $mb = ($mm.Groups[1].Value -replace 'ap_password\[0\]', '')
+        if ($mb -match '\bap_password\b|\bap_ssid\b|\bs_ap_qr_uri\b|wifi_prov_get_\w*|build_wifi_qr_uri') { Write-Host "FAIL: L-secret: refresh_cb's masked (non-ADMIN) branch references '$($Matches[0])'; it may show string literals only (the AP password and QR are ADMIN-only)"; $fail++ }
+    }
 }
 
 # L9: lock init must precede the touch-cal early return.
