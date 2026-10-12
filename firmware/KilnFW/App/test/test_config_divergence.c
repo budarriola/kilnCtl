@@ -205,7 +205,7 @@ static void test_append_suffix_truncating_head(void)
     memset(head, 'h', sizeof(head) - 1);
     head[sizeof(head) - 1] = '\0';
     /* Guard tail past the nominal cap so an overflow is an assertion, not a crash. */
-    char guarded[CONFIG_DIVERGENCE_REASON_MAX + 64];
+    char guarded[CONFIG_DIVERGENCE_REASON_MAX + 256];
     char *dst = guarded;
     memset(guarded, 'X', sizeof(guarded));
     size_t n = config_divergence_append_suffix_truncating_head(dst, CONFIG_DIVERGENCE_REASON_MAX, head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
