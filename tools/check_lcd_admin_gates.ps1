@@ -521,14 +521,14 @@ foreach ($hf in (Get-ChildItem -Path $appRoot -Recurse -File -Filter *.h -ErrorA
 $pragmaScan = @{}
 foreach ($pf in $uiAll) { $pragmaScan[$pf.FullName] = $pf.Name }
 foreach ($pf in $uiAll) {
-    $inc = (Get-Content -Raw -Path $pf.FullName) -replace '\\r?\n', ''
+    $inc = (Get-Content -Raw -Path $pf.FullName) -replace '\\\r?\n', ''
     foreach ($im in [regex]::Matches($inc, '(?m)^\s*#\s*include\s*"([^"]+)"')) {
         $hn = [IO.Path]::GetFileName($im.Groups[1].Value)
         if ($hdrIndex.ContainsKey($hn) -and -not $pragmaScan.ContainsKey($hdrIndex[$hn])) { $pragmaScan[$hdrIndex[$hn]] = "$hn (included by $($pf.Name))" }
     }
 }
 foreach ($pk in $pragmaScan.Keys) {
-    $praw = (Get-Content -Raw -Path $pk) -replace '\\r?\n', ''
+    $praw = (Get-Content -Raw -Path $pk) -replace '\\\r?\n', ''
     if ($praw -match '(?is)#\s*pragma\s+(GCC|clang)\s+diagnostic[^\r\n]*shadow|_Pragma\s*\(|__pragma|#\s*pragma\s+GCC\s+(?:system_header|poison|optimize)') { Write-Host "FAIL: L-shadow: $($pragmaScan[$pk]) has a diagnostic pragma naming shadow, a _Pragma, or a GCC system_header/poison/optimize pragma; it can switch -Werror=shadow off"; $fail++ }
 }
 # MED-2: the AP password is revealed only in refresh_cb's unmasked ADMIN branch (and the ADMIN-gated editor prefill; both
