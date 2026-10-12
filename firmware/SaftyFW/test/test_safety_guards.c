@@ -4805,9 +4805,10 @@ static void test_test_trip_loses_to_every_real_guard(void)
 
 /* Latch a TEST trip, then let K4 read open past trip_verify_s so only the "real
  * condition" test can still refuse the clear. */
-static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard_cfg_t *cfg)
+static void latch_test_trip_and_hold_at(safety_guard_state_t *s, const safety_guard_cfg_t *cfg, float tc_c)
 {
     safety_guard_input_t in = base_input();
+    in.tc_c = tc_c; /* a continuous reading: the post-latch windows (saftyfx3 LOW-1) see no phantom jump */
     in.test_trip_requested = true;
     (void)safety_guards_tick(s, cfg, &in);
     in.test_trip_requested = false;
@@ -4815,6 +4816,11 @@ static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard
     for (int i = 0; i < 120; i++) {
         (void)safety_guards_tick(s, cfg, &in);
     }
+}
+
+static void latch_test_trip_and_hold(safety_guard_state_t *s, const safety_guard_cfg_t *cfg)
+{
+    latch_test_trip_and_hold_at(s, cfg, base_input().tc_c);
 }
 
 /* REVIEW_TRIPWP2 MED-1: a TEST latch freezes every other guard's debounce, so its clear
@@ -4841,7 +4847,7 @@ static void test_test_trip_clear_refuses_real_conditions(void)
             pre.tc_c = 40.0f; (void)safety_guards_tick(&s, &cfg, &pre);
             TEST_CHECK(!s.is_tripped, "S8 sanity: mid-debounce, not yet tripped");
         }
-        latch_test_trip_and_hold(&s, &cfg);
+        latch_test_trip_and_hold_at(&s, &cfg, (k == 4) ? 40.0f : base_input().tc_c);
         TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
         safety_guard_input_t c = base_input();
         c.relay_deenergized = true;
@@ -4950,7 +4956,7 @@ static void test_test_clear_s8_divisor(void)
  * reading clears. */
 static void test_test_clear_s8_streak_zero_elapsed(void)
 {
-    TEST_SECTION("TEST clear S8 check, streak 1 with a 0 s frozen window (saftyfx2 LOW-3)");
+    TEST_SECTION("TEST clear S8 check, streak 1 with a near-zero frozen window (saftyfx2 LOW-3)");
     for (int k = 0; k < 2; k++) {
         safety_guard_state_t s;
         safety_guards_reset(&s);
@@ -4964,7 +4970,7 @@ static void test_test_clear_s8_streak_zero_elapsed(void)
         pre.tc_c = 40.0f;
         (void)safety_guards_tick(&s, &cfg, &pre); /* window over rate, slides: streak 1, elapsed 0 */
         TEST_CHECK(!s.is_tripped && s.s8_over_rate_streak == 1u, "sanity: streak 1, not tripped");
-        latch_test_trip_and_hold(&s, &cfg);
+        latch_test_trip_and_hold_at(&s, &cfg, 40.0f);
         TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
         safety_guard_input_t c = base_input();
         c.relay_deenergized = true;
@@ -4973,6 +4979,62 @@ static void test_test_clear_s8_streak_zero_elapsed(void)
             TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "flat since the slide: clear granted");
         } else {
             TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "any rise since the slide with streak 1 refuses");
+        }
+    }
+}
+
+/* saftyfx3 LOW-1: a rise late in a long TEST hold must not be averaged away by the
+ * whole-hold divisor. k=0 flat hold clears; k=1 flat 9 min then +20 C in the last minute
+ * refuses; k=2 same rise but then cooling back below the window start clears (slow-warm
+ * kiln with K4 open never deadlocks). */
+static void test_test_clear_s8_late_rise(void)
+{
+    TEST_SECTION("TEST clear S8 late rise is not diluted by the hold (saftyfx3 LOW-1)");
+    for (int k = 0; k < 4; k++) {
+        safety_guard_state_t s;
+        safety_guards_reset(&s);
+        safety_guard_cfg_t cfg = base_cfg();
+        cfg.max_rate_c_per_min = 10.0f;
+        cfg.rate_window_s = 60.0f;
+        safety_guard_input_t in = base_input();
+        in.dt_s = 1.0f;
+        in.tc_c = 20.0f;
+        in.test_trip_requested = true;
+        (void)safety_guards_tick(&s, &cfg, &in);
+        in.test_trip_requested = false;
+        in.relay_deenergized = true;
+        for (int i = 0; i < 540; i++) {
+            (void)safety_guards_tick(&s, &cfg, &in);
+        }
+        if (k >= 1) {
+            for (int i = 1; i <= 60; i++) {
+                in.tc_c = 20.0f + (20.0f * (float)i / 60.0f);
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+        }
+        if (k == 3) { /* partial window: rise inside the current (unfinished) window */
+            for (int i = 1; i <= 10; i++) {
+                in.tc_c = 40.0f + 4.0f * (float)i;
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+        }
+        TEST_CHECK(s.is_tripped && s.reason == SAFETY_TRIP_TEST, "TEST latched");
+        safety_guard_input_t c = base_input();
+        c.relay_deenergized = true;
+        c.tc_c = (k == 0) ? 20.0f : (k == 3 ? 80.0f : 40.0f);
+        if (k == 0) {
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "flat hold: clear granted");
+        } else {
+            TEST_CHECK(!safety_guards_try_clear(&s, &cfg, &c), "late 20 C/min rise refuses");
+        }
+        if (k == 1) {
+            /* the rise stops and the kiln cools: two quiet windows later it clears */
+            in.tc_c = 30.0f;
+            for (int i = 0; i < 130; i++) {
+                (void)safety_guards_tick(&s, &cfg, &in);
+            }
+            c.tc_c = 30.0f;
+            TEST_CHECK(safety_guards_try_clear(&s, &cfg, &c), "after the post windows slide past the rise, clear granted");
         }
     }
 }
@@ -5068,6 +5130,7 @@ void run_test_safety_guards(void)
     test_admin_test_trip();
     test_test_trip_clear_refuses_real_conditions();
     test_test_clear_s8_streak_zero_elapsed();
+    test_test_clear_s8_late_rise();
     test_test_clear_s8_divisor();
     test_test_trip_loses_to_every_real_guard();
     test_test_clear_s8_tiny_window();

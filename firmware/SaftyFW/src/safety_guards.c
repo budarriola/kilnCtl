@@ -177,6 +177,23 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
         in->tc_c > state->s8_window_start_c) {
         return true;
     }
+    /* saftyfx3 LOW-1: the whole-hold average below dilutes a late rise, so also test the
+     * sliding post-latch windows (tracked for TEST latches too, see safety_guards_tick()).
+     * Refuse while the latest completed post window, or the current partial window once
+     * it is S8_POST_MIN_S long, is over the rate. Windows slide, so a kiln that warmed
+     * slowly and then cools (K4 open) still clears. Additive: only more refusals. */
+    if (state->s8_post_active) {
+        if (state->s8_post_windows_done >= 1u &&
+            state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {
+            return true;
+        }
+        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {
+            float pm = state->s8_post_elapsed_s / 60.0f;
+            if (((in->tc_c - state->s8_post_start_c) / pm) > cfg->max_rate_c_per_min) {
+                return true;
+            }
+        }
+    }
     if (state->s8_window_active) {
         /* saftyfx LOW-3 / saftyfx2 INFO-1: the window is frozen at latch time and may be
          * tiny. The TEST latch has been held for s9_verify_elapsed_s since (it only grows
@@ -492,7 +509,8 @@ bool safety_guards_tick(safety_guard_state_t *state, const safety_guard_cfg_t *c
         /* Review saftyfx6 F2: after an S8 trip keep measuring a fresh rate so the
          * clear refusal in guard_condition_still_immediate() is bounded in time.
          * Only used by the clear check; never touches the trip path. */
-        if (state->reason == SAFETY_TRIP_RATE && in->tc_valid && !isnan(in->tc_c)) {
+        if ((state->reason == SAFETY_TRIP_RATE || state->reason == SAFETY_TRIP_TEST) &&
+            in->tc_valid && !isnan(in->tc_c)) {
             if (!state->s8_post_active) {
                 state->s8_post_active = true;
                 state->s8_post_start_c = in->tc_c;

@@ -62,6 +62,7 @@
 
 #include "test_common.h"
 #include "fake_gpio.h" /* fault-hold tests read the physical fault pin level */
+#include "fake_sysinfo.h" /* scripted hal_sysinfo_random_u32() for the test-trip request_id seed */
 #include "fake_time.h" /* hal_time.h's host fake -- safety_link_inbox.c's safety_exchange() now
                         * calls hal_time_now_us() for link_reply_us (HW_ABSTRACTION.md "Still
                         * open") -- see fake_time.c already linked into this executable's build
@@ -3186,7 +3187,14 @@ static void test_send_test_trip(void)
 
     v3_apply_diag(&link, SAFETY_LINK_DIAG_STATE_ARMED, 1u, 0x5Au);
     tt_set_reply(KILNLINK_TEST_TRIP_OUTCOME_ACCEPTED, 9u);
+    {
+        /* saftyfx3 LOW-3: first request id is seeded from the RNG (not 1 after a reboot). */
+        static const uint32_t seed[1] = { 0x40u };
+        fake_sysinfo_script_random_sequence(seed, 1u);
+    }
     TEST_CHECK(safety_link_send_test_trip(&link, &oc, &seq) == ESP_OK, "accepted call returns ESP_OK");
+    TEST_CHECK(s_stub_broadcast_last_payload[2] == 0x41u,
+               "first request_id is the RNG seed + 1, not a counter restarting at 1");
     TEST_CHECK(oc == SAFETY_LINK_TEST_TRIP_ACCEPTED && seq == 9u, "outcome ACCEPTED, trip_seq 9");
     TEST_CHECK(s_stub_broadcast_count == base + 1u && s_stub_broadcast_last_len == KILNLINK_TEST_TRIP_LEN &&
                    s_stub_broadcast_last_payload[0] == KILNLINK_TEST_TRIP_CMD &&

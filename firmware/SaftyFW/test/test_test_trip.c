@@ -299,6 +299,9 @@ static void scan_wiring(void)
                                   "(void)link_frame_test_trip_reply_on_timeout(&s_test_trip_state, s_tt_wait_request_id, &rep); "
                                   "link_task_arm_test_trip_reply(rep.request_id, rep.outcome, rep.trip_seq); }") != NULL,
                    "poll timeout path forwards the pure helper's reply");
+        /* saftyfx3 INFO-3: the latch-happened test must stay "a NEW trip_seq showed up". */
+        TEST_CHECK(pn != NULL && strstr(pn, "if (have && seq != s_tt_seq_base) {") != NULL,
+                   "poll latches the reply only when trip_seq differs from the base taken at ACCEPT");
         free(pn);
         size_t hlen = 0;
         const char *hb = function_body(lt, "static void link_task_handle_test_trip(", &hlen);
@@ -308,6 +311,11 @@ static void scan_wiring(void)
                                   "&s_test_trip_state, s_tt_waiting_seq, msg.request_id, &dup)) { "
                                   "link_task_arm_test_trip_reply(dup.request_id, dup.outcome, dup.trip_seq); } return; }") != NULL,
                    "DUPLICATE path forwards the pure helper's reply");
+        /* saftyfx3 LOW-2: ACCEPTED must record the request id the final reply is sent under. */
+        TEST_CHECK(hn != NULL &&
+                       strstr(hn, "s_tt_waiting_seq = true; s_tt_seq_base = base; "
+                                  "s_tt_wait_request_id = msg.request_id;") != NULL,
+                   "ACCEPTED stores the request id for the final reply");
         free(hn);
     }
     TEST_CHECK(strstr(lt, "case LINK_FRAME_TEST_TRIP_CMD:") != NULL, "0x2E dispatched");

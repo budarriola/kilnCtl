@@ -594,6 +594,16 @@ int main(void)
     (void)hal_scratch_write_u32(SAFTYFW_STARTUP_DIAG_MAGIC_SCRATCH,
                                  SAFTYFW_STARTUP_DIAG_MAGIC);
 
+    {
+        // REVIEW_TRIPWP2 LOW-6: stack bumps (link_task now 11264 B) come out of the fixed
+        // configTOTAL_HEAP_SIZE; report what is left after every task exists so the next bump
+        // is not blind. heap_4 accessors; boot-time console only, never a gate.
+        char heap_msg[96];
+        snprintf(heap_msg, sizeof(heap_msg), "SaftyFW: heap after task start: free %u B of %u B, min-ever free %u B\r\n",
+                 (unsigned)xPortGetFreeHeapSize(), (unsigned)configTOTAL_HEAP_SIZE,
+                 (unsigned)xPortGetMinimumEverFreeHeapSize());
+        console_uart_puts(heap_msg);
+    }
     console_uart_puts("SaftyFW: tasks started, entering scheduler\r\n");
 
     // --- Step 8/9: GRACE -> ARMED. ---------------------------------------------

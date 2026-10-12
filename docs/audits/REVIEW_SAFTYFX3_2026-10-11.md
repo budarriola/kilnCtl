@@ -181,11 +181,11 @@ Pico not tripped, so the error is visible. Fix options are unchanged.
   ACCEPTED with seq 0, even when a real guard won the race. This is
   pre-existing wiring, and the result is a misreport only.
 - **INFO-4: `test_test_clear_s8_streak_zero_elapsed` does not reach a frozen
-  elapsed of exactly 0.** `latch_test_trip_and_hold()` latches on a separate
+  elapsed of 0.** `latch_test_trip_and_hold()` latches on a separate
   tick, after the slide, which adds one dt. The streak rule does not depend on
   elapsed, and L3a shows the test discriminates, so this affects only the
   test's title.
-- **INFO-5: the Fix status says "frozen elapsed is exact".** It is a lower
+- **INFO-5: the Fix status says "frozen elapsed is a lower bound".** It is a lower
   bound: bad-read ticks pause the window, and verify time only counts while K4
   is reported open. That is the conservative direction, so the conclusion
   stands.
@@ -213,3 +213,43 @@ egtest_logs61012_000014_9d0m`.
 Not re-run: the fixer's N1-N4, N1b, N4b, L3a-c, N5 and N6, which are cited in
 the REVIEW_SAFTYFX2 Fix status. P5 independently confirms that the
 forwarding scan catches a wrong id argument.
+
+## Fix status
+
+| Item | Status |
+|---|---|
+| LOW-1 | FIXED. TEST latches now run the `s8_post_*` window tracking in `safety_guards_tick`; the non-strict `s8_clear_refuse` also refuses when the latest completed post window, or a partial one of at least `S8_POST_MIN_S`, is over the rate limit. Only adds refusals; a slowly warming kiln still clears (`test_test_clear_s8_late_rise`, k=0..3). Existing hold tests now hold at the clear reading to avoid a phantom jump. |
+| LOW-2 | FIXED. `test_test_trip.c` scan pins `s_tt_waiting_seq = true; s_tt_seq_base = base; s_tt_wait_request_id = msg.request_id;`. Mutation: store removed, CAUGHT `test_test_trip.c:318`. |
+| INFO-3 (P2) | FIXED. Scan pins `if (have && seq != s_tt_seq_base) {`. Mutation: inverted, CAUGHT `test_test_trip.c:304`. |
+| LOW-3 | FIXED on the ESP side only: `safety_link_send_test_trip` lazily seeds `s_test_trip_request_id` from `hal_sysinfo_random_u32()` once per boot (under xact_lock). Pico-side reorder not done: it changes decision semantics. Residual 1/256 chance of a post-reboot collision with the Pico dedup memory. Test: `test_send_test_trip` scripts the RNG to 0x40 and asserts the first id is 0x41. |
+| INFO-4, INFO-5 | FIXED (wording): streak test title says near-zero frozen window; "exact" changed to "a lower bound". |
+| TRIPWP2 LOW-6 | FIXED: boot heap log in `main.c`. |
+| Pooled: bound on 0x0205 `rate_window_s` | NOT DONE. No precedent for a U16 time-field bound in `config_params.c` (only the F32 rate has a range), and adding one to `config_params_validate_ranges` could invalidate stored records at load. Needs an owner decision. |
+
+Negative tests (SaftyFW `-Preset saftyfw-host`, KilnFW `-Preset kilnfw-host`), all CAUGHT:
+- L1-a post-window refusal disabled; L1-b TEST latch not tracking post windows; L1-c partial window ignored; L1-d wrong comparison sense; LOW-2 request id store removed; P2 latch trigger inverted.
+- LOW-3: seed removed (`s_test_trip_request_id = 0u;`); LOW-3b: seeded flag preset true (CAUGHT `test_safety_link_compile.c:3150`).
+
+Mutation definitions (negtest `-Mutations` JSON):
+
+SaftyFW:
+
+```json
+[
+{"name":"L1-a: post-window refusal disabled","file":"firmware/SaftyFW/src/safety_guards.c","find":"    if (state->s8_post_active) {\n        if (state->s8_post_windows_done >= 1u &&","replace":"    if (0 && state->s8_post_active) {\n        if (state->s8_post_windows_done >= 1u &&"},
+{"name":"L1-b: TEST latch no longer tracks post windows","file":"firmware/SaftyFW/src/safety_guards.c","find":"state->reason == SAFETY_TRIP_RATE || state->reason == SAFETY_TRIP_TEST","replace":"state->reason == SAFETY_TRIP_RATE"},
+{"name":"L1-c: partial post window ignored","file":"firmware/SaftyFW/src/safety_guards.c","find":"        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {\n            float pm","replace":"        if (state->s8_post_elapsed_s >= 1.0e9f) {\n            float pm"},
+{"name":"L1-d: completed window compares against wrong sense","file":"firmware/SaftyFW/src/safety_guards.c","find":"state->s8_post_last_rate_c_per_min > cfg->max_rate_c_per_min) {\n            return true;\n        }\n        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {\n            float pm","replace":"state->s8_post_last_rate_c_per_min < cfg->max_rate_c_per_min) {\n            return true;\n        }\n        if (state->s8_post_elapsed_s >= S8_POST_MIN_S) {\n            float pm"},
+{"name":"LOW-2 P1: ACCEPTED no longer stores request id","file":"firmware/SaftyFW/src/tasks/link_task.c","find":"        s_tt_wait_request_id = msg.request_id;\n","replace":""},
+{"name":"INFO P2: latch trigger inverted","file":"firmware/SaftyFW/src/tasks/link_task.c","find":"if (have && seq != s_tt_seq_base) {","replace":"if (have && seq == s_tt_seq_base) {"}
+]
+```
+
+KilnFW:
+
+```json
+[
+{"name":"LOW-3: request id seed removed","file":"firmware/KilnFW/App/drivers/safety/safety_link_commands.c","find":"        s_test_trip_request_id = (uint8_t)hal_sysinfo_random_u32();\n","replace":"        s_test_trip_request_id = 0u;\n"},
+{"name":"LOW-3b: seed never applied (flag preset)","file":"firmware/KilnFW/App/drivers/safety/safety_link_commands.c","find":"static bool s_test_trip_request_id_seeded; /* guarded by xact_lock */","replace":"static bool s_test_trip_request_id_seeded = true; /* guarded by xact_lock */"}
+]
+```
