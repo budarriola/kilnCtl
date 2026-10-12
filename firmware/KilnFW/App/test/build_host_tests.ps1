@@ -1456,7 +1456,7 @@ try {
     $exe9t = Join-Path $outDir "kilnctl_host_tests_uart_protocol_tick10.exe"
     $linkObjDirT = Join-Path $outDir "link_tick10"
     New-Item -ItemType Directory -Force -Path $linkObjDirT | Out-Null
-    $cmd9t = $cmd9.Replace("/Fo:`"$linkObjDir\`"", "/Fo:`"$linkObjDirT\`"").Replace("/Fe:`"$exe9`"", "/Fe:`"$exe9t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
+    $cmd9t = $cmd9.Replace("/Fo:`"$linkObjDir\\`"", "/Fo:`"$linkObjDirT\\`"").Replace("/Fe:`"$exe9`"", "/Fe:`"$exe9t`"").Replace("/std:c11 ", "/std:c11 /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY ")
     Invoke-HostTestExe -Name "uart_protocol_tick10" -ExePath $exe9t -BuildCmd $cmd9t
 
     # ---- test_board_temps.c: its own TENTH, separate executable --------------
