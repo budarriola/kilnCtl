@@ -13,13 +13,14 @@
 # reset job's own task stays exempt).
 #
 # This check fails when main.c stops making any of those four calls as an unconditional statement of its own
-# (backslash continuations are joined, comments and `#if 0` regions are stripped first, so a commented-out,
-# preprocessor-dead or `if (0)`-wrapped install does not count; each setter may appear exactly ONCE, so a later
+# (backslash continuations are joined and comments are stripped string-literal-aware; each setter must sit at brace
+# depth 1 of the app_main() body with no enclosing #if/#ifdef/#ifndef/#elif of ANY condition and a previous code line
+# ending in `;`, `{` or `}`, so a commented-out, preprocessor-dead, `if (0)`-wrapped or uncalled-function install does not count; each setter may appear exactly ONCE, so a later
 # NULL re-install fails too), or when the kiln_nvs predicate's return is not exactly the three-term expression
 # ending in the relay_authority predicate, or when the body of EITHER relay_authority predicate (kiln_nvs and the
 # general writer) is edited -- each must be defined exactly once, with an exactly pinned prologue, expression and
 # epilogue. Task-identity semantics (another task IS refused while the reset job runs) are pinned by
-# test_link_watchdog.c via stub_set_current_task(). Self-tested by tools\negtest.ps1 (REVIEW_DEVBREAK4 R1-R10).
+# test_link_watchdog.c via stub_set_current_task(). Self-tested by tools\negtest.ps1 (REVIEW_DEVBREAK4 R1-R10, REVIEW_DEVBREAK5 F1-F7).
 #
 # Usage: powershell -File tools\check_reset_fence_hooks.ps1 [-MainFile <path to main.c>]
 param(
@@ -46,13 +47,27 @@ if (-not (Test-Path -LiteralPath $RelayAuthorityFile)) {
 $text = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $MainFile).Path)
 $raText = [System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $RelayAuthorityFile).Path)
 
-# C pre-pass: splice backslash-newline continuations, strip block and line comments, then drop preprocessor-dead
-# regions (`#if 0`, `#if (0)`, the else of `#if 1`). Unknown conditions (#ifdef X, #if CONFIG_Y) stay live in
-# every branch, so a duplicate inside one trips the exactly-once counts below instead of being silently trusted.
-function Get-LiveC([string]$raw) {
+# String- and char-literal-aware comment strip: one left-to-right alternation, so a "/*" inside a string is a string,
+# not a comment opener (REVIEW_DEVBREAK5 F6). Literals are kept verbatim.
+function Remove-CComments([string]$raw) {
     $t = [regex]::Replace($raw, '\\\r?\n', '')
-    $t = [regex]::Replace($t, '/\*.*?\*/', ' ', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-    $t = [regex]::Replace($t, '//[^\r\n]*', '')
+    $pat = '"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*''|/\*.*?\*/|//[^\r\n]*'
+    return [regex]::Replace($t, $pat, {
+        param($m)
+        if ($m.Value.StartsWith('/')) { return ' ' }
+        return $m.Value
+    }, [System.Text.RegularExpressions.RegexOptions]::Singleline)
+}
+
+function Test-ZeroCond([string]$c) { return ($c -match '^\(?\s*0[uUlL]*\s*\)?$') }
+function Test-OneCond([string]$c) { return ($c -match '^\(?\s*1[uUlL]*\s*\)?$') }
+
+# C pre-pass: strip comments (literal-aware), then drop preprocessor-dead regions (`#if 0`, `#if (0)`, the else of
+# `#if 1`). Unknown conditions (#ifdef X, #if CONFIG_Y) stay live in every branch, so a duplicate inside one trips the
+# exactly-once counts below instead of being silently trusted. (The install statements themselves are NOT trusted to
+# this pass: Get-AnchoredInstallCount requires them outside every conditional.)
+function Get-LiveC([string]$raw) {
+    $t = Remove-CComments $raw
     $out = New-Object System.Collections.Generic.List[string]
     $stack = New-Object System.Collections.Generic.List[object]   # each: @{ Parent; Cond ('false'|'true'|'unknown') }
     $live = $true
@@ -60,8 +75,8 @@ function Get-LiveC([string]$raw) {
         if ($ln -match '^\s*#\s*(?<d>ifdef|ifndef|if)\b(?<c>.*)$') {
             $c = $Matches['c'].Trim()
             $kind = 'unknown'
-            if ($Matches['d'] -eq 'if' -and $c -match '^\(?\s*0\s*\)?$') { $kind = 'false' }
-            elseif ($Matches['d'] -eq 'if' -and $c -match '^\(?\s*1\s*\)?$') { $kind = 'true' }
+            if ($Matches['d'] -eq 'if' -and (Test-ZeroCond $c)) { $kind = 'false' }
+            elseif ($Matches['d'] -eq 'if' -and (Test-OneCond $c)) { $kind = 'true' }
             $stack.Add(@{ Parent = $live; Cond = $kind })
             $live = $live -and ($kind -ne 'false')
             continue
@@ -69,7 +84,7 @@ function Get-LiveC([string]$raw) {
         if ($ln -match '^\s*#\s*elif\b(?<c>.*)$' -and $stack.Count -gt 0) {
             $top = $stack[$stack.Count - 1]
             $kind = 'unknown'
-            if ($Matches['c'].Trim() -match '^\(?\s*0\s*\)?$') { $kind = 'false' }
+            if (Test-ZeroCond $Matches['c'].Trim()) { $kind = 'false' }
             $top.Cond = $kind
             $live = $top.Parent -and ($kind -ne 'false')
             continue
@@ -89,6 +104,42 @@ function Get-LiveC([string]$raw) {
     return ($out -join "`n")
 }
 
+# Structural anchor (REVIEW_DEVBREAK5 MED-1): counts the setter statements `Name(Arg);` that sit (a) inside the
+# app_main() body at brace depth 1, (b) with NO enclosing conditional directive of any kind (#if, #ifdef, #ifndef;
+# #elif/#else only occur inside one) -- conditions are never evaluated, any conditional fails -- and (c) with the
+# previous code line ending in `;`, `{` or `}` (so a braceless if/while/for/else guard cannot own it).
+function Get-AnchoredInstallCount([string]$raw, [string]$name, [string]$arg) {
+    $t = Remove-CComments $raw
+    $lit = '"(?:\\.|[^"\\\r\n])*"|''(?:\\.|[^''\\\r\n])*'''
+    $stmtPat = '^' + [regex]::Escape($name) + '\s*\(\s*' + [regex]::Escape($arg) + '\s*\)\s*;'
+    $condDepth = 0
+    $brace = 0
+    $inMain = $false
+    $prevCode = ''
+    $count = 0
+    foreach ($ln in ($t -split '\r?\n')) {
+        $trim = $ln.Trim()
+        if ($trim -eq '') { continue }
+        if ($trim -match '^#\s*(if|ifdef|ifndef)\b') { $condDepth++; continue }
+        if ($trim -match '^#\s*endif\b') { $condDepth--; continue }
+        if ($trim.StartsWith('#')) { continue }
+        $blank = [regex]::Replace($trim, $lit, '""')
+        if (-not $inMain -and $brace -eq 0 -and $condDepth -eq 0 -and $blank -match '(?<![A-Za-z0-9_])void\s+app_main\s*\(\s*void\s*\)') {
+            $inMain = $true
+        }
+        if ($inMain -and $brace -eq 0 -and $blank -match ';$') { $inMain = $false }   # a prototype, not the definition
+        if ($inMain -and $brace -eq 1 -and $condDepth -eq 0 -and $trim -match $stmtPat -and $prevCode -match '[;{}]$') {
+            $count++
+        }
+        foreach ($ch in $blank.ToCharArray()) {
+            if ($ch -eq '{') { $brace++ } elseif ($ch -eq '}') { $brace-- }
+        }
+        if ($inMain -and $brace -eq 0 -and $blank -match '\}') { $inMain = $false }
+        $prevCode = $blank
+    }
+    return $count
+}
+
 $stripped = Get-LiveC $text
 
 $required = @(
@@ -105,8 +156,9 @@ foreach ($r in $required) {
     $all = [regex]::Matches($stripped, '(?<![A-Za-z0-9_])' + $esc + '(?![A-Za-z0-9_])').Count
     # ... and it must be an unconditional statement of its own: first token on its line, exact argument, `;`.
     $stmt = [regex]::Matches($stripped, '(?m)^[ \t]*' + $esc + '\s*\(\s*' + [regex]::Escape($r.Arg) + '\s*\)\s*;').Count
-    if ($stmt -ne 1 -or $all -ne 1) {
-        Write-Host "FAIL: main.c must call $($r.Name)($($r.Arg)); exactly once as its own statement (found $stmt such statement(s), $all mention(s)) -- the factory-reset writer fence it carries is off or overridden"
+    $anch = Get-AnchoredInstallCount $text $r.Name $r.Arg
+    if ($stmt -ne 1 -or $all -ne 1 -or $anch -ne 1) {
+        Write-Host "FAIL: main.c must call $($r.Name)($($r.Arg)); exactly once as its own statement directly in the app_main() body (brace depth 1, outside every #if/#ifdef/#ifndef/#elif, previous code line ending in ; { or }) (found $stmt such statement(s), $all mention(s), $anch anchored) -- the factory-reset writer fence it carries is off or overridden"
         $fail++
     }
 }

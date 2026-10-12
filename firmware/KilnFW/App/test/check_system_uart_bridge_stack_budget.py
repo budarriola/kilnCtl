@@ -61,6 +61,47 @@ ROOT = "system_bridge_task"
 BRIDGE_SOURCE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "drivers", "bridge", "uart_bridge_system.c")
 
 
+_LITERAL_OR_COMMENT = re.compile(r'"(?:\\.|[^"\\\n])*"|\'(?:\\.|[^\'\\\n])*\'|/\*.*?\*/|//[^\n]*', re.S)
+_ZERO = re.compile(r"^\(?\s*(0[uUlL]*|!\s*1[uUlL]*)\s*\)?$")
+_ONE = re.compile(r"^\(?\s*1[uUlL]*\s*\)?$")
+
+
+def strip_dead_c(src):
+    """Comments (string/char-literal aware, so a "/*" in a string is not a comment opener) and preprocessor-dead
+    regions (`#if 0`, `#if 0L`, `#if !1`, `#elif 0`, the else of `#if 1`) removed (REVIEW_DEVBREAK5 LOW-5).
+    Unknown conditions stay live in every branch, so a decoy inside one trips the exactly-one counts."""
+    src = re.sub(r"\\\r?\n", "", src)
+    src = _LITERAL_OR_COMMENT.sub(lambda m: " " if m.group(0).startswith("/") else m.group(0), src)
+    out, stack, live = [], [], True
+    for ln in src.split("\n"):
+        m = re.match(r"\s*#\s*(ifdef|ifndef|if)\b(.*)$", ln)
+        if m:
+            c = m.group(2).strip()
+            kind = "unknown"
+            if m.group(1) == "if" and _ZERO.match(c):
+                kind = "false"
+            elif m.group(1) == "if" and _ONE.match(c):
+                kind = "true"
+            stack.append([live, kind])
+            live = live and kind != "false"
+            continue
+        m = re.match(r"\s*#\s*elif\b(.*)$", ln)
+        if m and stack:
+            kind = "false" if _ZERO.match(m.group(1).strip()) else "unknown"
+            stack[-1][1] = kind
+            live = stack[-1][0] and kind != "false"
+            continue
+        if re.match(r"\s*#\s*else\b", ln) and stack:
+            live = stack[-1][0] and stack[-1][1] != "true"
+            continue
+        if re.match(r"\s*#\s*endif\b", ln) and stack:
+            live = stack.pop()[0]
+            continue
+        if live:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def read_configured_stack(path=BRIDGE_SOURCE):
     """Derive the task stack from the C source (REVIEW_DEVBREAK4 LOW-4): the literal passed to
     xTaskCreatePinnedToCore(system_bridge_task, "system_uart_bridge", N, ...) and the one passed to
@@ -71,10 +112,9 @@ def read_configured_stack(path=BRIDGE_SOURCE):
             src = fh.read()
     except OSError as exc:
         return None, f"cannot read {path}: {exc}"
-    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
-    src = re.sub(r"//[^\n]*", "", src)
-    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(\d+)\s*,', src)
-    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(\d+)\s*\)\s*;', src)
+    src = strip_dead_c(src)
+    created = re.findall(r'xTaskCreatePinnedToCore\s*\(\s*system_bridge_task\s*,\s*"system_uart_bridge"\s*,\s*(\d+)[uUlL]*\s*,', src)
+    regd = re.findall(r'stack_margin_register\s*\(\s*"system_uart_bridge"\s*,[^;]*?,\s*(\d+)[uUlL]*\s*\)\s*;', src)
     if len(created) != 1 or len(regd) != 1:
         return None, (f"expected exactly one xTaskCreatePinnedToCore(system_bridge_task, ...) literal and one "
                       f"stack_margin_register(\"system_uart_bridge\", ...) literal in {path}; found {len(created)} and {len(regd)}")

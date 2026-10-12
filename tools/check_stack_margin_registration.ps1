@@ -598,6 +598,55 @@ if ($unrecognized.Count -gt 0) {
 
 Write-Host "Stack margin create-vs-register check passed: $($createdTasks.Count) xTaskCreate*() call site(s) all accounted for (registered or exempted)." -ForegroundColor Green
 
+# --- Create-vs-register stack LITERAL comparison (REVIEW_DEVBREAK5 LOW-4) ---
+#
+# The name check above proves a created task is registered; it never compared the stack SIZE. stack_margin grades
+# free space against the size handed to stack_margin_register(), so a registration that disagrees with the
+# xTaskCreate*() stack (zone_sweep: created 5120, registered 4096) reports a denominator that is wrong by the
+# difference. For every task whose FreeRTOS name equals a registered name, when BOTH the creating call and the
+# registering call carry a plain integer literal (optional [uUlL]* suffix), they must be equal. A non-literal
+# (macro/sizeof/expression) on either side is skipped, listed in the output, and may be exempted below.
+$stackLiteralExempt = @{}   # name -> reason (names created through a macro or in another file)
+$createStackRe = 'xTaskCreate\w*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*,\s*"([^"]+)"\s*,\s*(\d+)[uUlL]*\s*,'
+$regStackRe = 'stack_margin_register\s*\(\s*"([^"]+)"\s*,[^;]*?,\s*(\d+)[uUlL]*\s*\)\s*;'
+$createdStacks = @{}
+$registeredStacks = @{}
+foreach ($f in $sourceFiles) {
+    $joined = [string]::Join("`n", (Get-CodeOnlyLines -Path $f.FullName))
+    foreach ($m in [regex]::Matches($joined, $createStackRe)) {
+        $n = $m.Groups[1].Value
+        if (-not $createdStacks.ContainsKey($n)) { $createdStacks[$n] = @() }
+        $createdStacks[$n] += [pscustomobject]@{ Bytes = [int]$m.Groups[2].Value; File = $f.Name }
+    }
+    foreach ($m in [regex]::Matches($joined, $regStackRe)) {
+        $n = $m.Groups[1].Value
+        if (-not $registeredStacks.ContainsKey($n)) { $registeredStacks[$n] = @() }
+        $registeredStacks[$n] += [pscustomobject]@{ Bytes = [int]$m.Groups[2].Value; File = $f.Name }
+    }
+}
+$stackMismatch = @()
+$stackCompared = 0
+foreach ($n in $createdStacks.Keys) {
+    if (-not $registeredStacks.ContainsKey($n) -or $stackLiteralExempt.ContainsKey($n)) { continue }
+    foreach ($c in $createdStacks[$n]) {
+        foreach ($r in $registeredStacks[$n]) {
+            $stackCompared++
+            if ($c.Bytes -ne $r.Bytes) {
+                $stackMismatch += "$n : created with $($c.Bytes) B in $($c.File) but stack_margin_register() reports against $($r.Bytes) B in $($r.File)"
+            }
+        }
+    }
+}
+if ($stackCompared -lt 5) {
+    throw "check_stack_margin_registration.ps1: only $stackCompared create/register stack literal pair(s) compared -- the patterns have probably gone blind."
+}
+if ($stackMismatch.Count -gt 0) {
+    Write-Host "STACK MARGIN STACK-LITERAL CHECK FAILED:" -ForegroundColor Red
+    foreach ($v in $stackMismatch) { Write-Host "    $v" -ForegroundColor Red }
+    throw "A task's xTaskCreate*() stack size and its stack_margin_register() size disagree -- get_stack_margin grades free space against the wrong denominator. Make both the same literal (or add the name to `$stackLiteralExempt with a reason)."
+}
+Write-Host "Stack margin stack-literal check passed: $stackCompared create/register pair(s) agree." -ForegroundColor Green
+
 # --- Recovery image (firmware/KilnFW_recovery) -----------------------------
 #
 # Recovery audit finding 5: the standalone recovery image has no stack_margin

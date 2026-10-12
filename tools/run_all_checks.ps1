@@ -197,23 +197,8 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 
 # Every check_*.ps1 anywhere in the tree, excluding build output and any
 # vendored/third-party directory that might ship its own.
-$checks = Get-ChildItem -Path $repoRoot -Filter "check_*.ps1" -Recurse -File |
-    Where-Object {
-        $_.FullName -notmatch '\\build\\' -and
-        $_.FullName -notmatch '\\node_modules\\' -and
-        # Untracked run archives (logs\wt_archive_*) hold stale copies of check_*.ps1.
-        $_.FullName.Substring($repoRoot.Length) -notmatch '^\\logs\\' -and
-        # Any dotted directory: .venv, .git, and -- the one that actually bit
-        # here -- .claude\worktrees\, which holds leftover per-agent copies of
-        # the whole tree. Without this the first run of this script found 24
-        # scripts where the repository has 11, and would have been reporting
-        # the pass/fail state of an abandoned worktree alongside the real one.
-        $_.FullName -notmatch '\\\.[^\\]+\\' -and
-        # Needs the network (git ls-remote); not a standing check. land.ps1 and
-        # dev_promote.ps1 run it before pushing. Its offline test is wired below.
-        $_.Name -ne 'check_submodule_pins_pushed.ps1'
-    } |
-    Sort-Object FullName
+. (Join-Path $PSScriptRoot "lib_check_discovery.ps1")   # shared with check_build_gate_usage.ps1 (REVIEW_DEVBREAK5 LOW-3)
+$checks = Get-KilnCheckScripts -RepoRoot $repoRoot
 
 # test_check_hal_include_boundary.ps1 is a negative test, not a guard --
 # it proves check_hal_include_boundary.ps1's scan can actually detect a

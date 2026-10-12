@@ -2511,7 +2511,7 @@ zone_sweep_refusal_t zones_current_sweep_start(void)
      * reports "not alive" rather than a stale handle -- CLAUDE.md "Register
      * every new task for stack-margin reporting". Idempotent by (name,
      * slot): a repeat sweep start re-registers the same pair as a no-op. */
-    stack_margin_register("zone_sweep", &s_sweep.task, 4096);
+    stack_margin_register("zone_sweep", &s_sweep.task, 5120);
     if (created != pdPASS) {
         relay_authority_heat_sweep_claim_end(); /* task never started -- give the claim back */
         (void)safety_cfg_writer_release(SAFETY_CFG_WRITER_SWEEP); /* ... and the writer guard */

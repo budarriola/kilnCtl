@@ -214,9 +214,10 @@ esp_err_t uart_bridge_start_system_task(uart_protocol_t *proto, uart_owner_t *ow
         uart_protocol_unregister_task(proto, UART_TASK_ID_SYSTEM);
         return ESP_ERR_NO_MEM;
     }
-    /* TODO.md section 13: internal-only (plain xTaskCreatePinnedToCore(), no
-     * MALLOC_CAP_SPIRAM) -- one of the six candidate stacks left unresized
-     * pending a real uxTaskGetStackHighWaterMark() reading. */
+    /* Internal-only (plain xTaskCreatePinnedToCore(), no MALLOC_CAP_SPIRAM).
+     * 4096 B, sized from a measured deepest path (3216 B, see
+     * check_system_uart_bridge_stack_budget.py); the create literal and this
+     * one are cross-checked by check_stack_margin_registration.ps1. */
     stack_margin_register("system_uart_bridge", &s_system_bridge_task_handle, 4096);
     return ESP_OK;
 }

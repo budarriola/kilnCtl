@@ -210,8 +210,8 @@ static void log_net80211_key_count(const char *when)
  * than the caller's -- see uart_bridge_ext_run_on_flash_worker()'s doc
  * comment (flash_worker.h). This path is reachable both from an HTTP POST
  * (httpd_worker, 8192 B stack, comfortable) and from the UART SYSTEM task's
- * SYSTEM_CMD_FACTORY_RESET (system_uart_bridge, 3072 B, reporting only 884 B
- * / 28.8% free at idle -- get_stack_margin()). nvs_flash_erase_partition()'s
+ * SYSTEM_CMD_FACTORY_RESET (system_uart_bridge, 4096 B since 2026-10-09; its
+ * deepest measured path is 3216 B -- check_system_uart_bridge_stack_budget.py). nvs_flash_erase_partition()'s
  * own depth has never been exercised on that task by the idle-board soak
  * (this route is destructive and not something a soak test triggers), so its
  * true peak on that stack is unmeasured; dispatching it onto the worker's
