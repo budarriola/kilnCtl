@@ -158,11 +158,13 @@ class IntFieldFloatValueTest(unittest.TestCase):
             self.assertIn("coupling_coeff", str(cm.exception))
 
     def test_validator_rejects_bool_index(self):
-        d = self._preset()
-        d["zones"][0]["index"] = True
-        with self.assertRaises(config_presets.ConfigPresetError) as cm:
-            config_presets._validate("t", d)
-        self.assertIn("index", str(cm.exception))
+        for bad in (True, False):
+            d = self._preset()
+            d["zones"] = d["zones"][:1]  # one zone: no duplicate-index error can mask the type check
+            d["zones"][0]["index"] = bad
+            with self.assertRaises(config_presets.ConfigPresetError) as cm:
+                config_presets._validate("t", d)
+            self.assertIn("non-negative int", str(cm.exception))
 
     def test_bad_float_preset_through_loader_never_writes(self):
         from kilnctrl import mcp_server_config_presets as mcp_
