@@ -143,6 +143,9 @@ static int do_req(const char *uri, int method, const char *query)
 static DWORD g_t0;
 #define WAIT_FOR(cond) for (g_t0 = GetTickCount(); !(cond) && GetTickCount() - g_t0 < 5000;) Sleep(2)
 
+// bounded condition wait with a caller-chosen ceiling; exits as soon as cond holds
+#define WAIT_FOR_MS(cond, ms) for (g_t0 = GetTickCount(); !(cond) && GetTickCount() - g_t0 < (DWORD)(ms);) Sleep(2)
+
 static bool resp_has(const char *s) { return strstr(g_rq.resp, s) != NULL; }
 
 static void wait_idle(void)
@@ -459,9 +462,9 @@ static void test_writer_wedge(void)
     g_fr_time_div = 1000; // the writer wait becomes milliseconds
     g_fr_flash_write_block = true;
     CHECK(POST("/api/update/download", NULL) == 202, "download accepted");
-    WAIT_FOR(update_fetch_writer_wedged());
+    WAIT_FOR_MS(update_fetch_writer_wedged(), 30000); // writer start-up is starvation-sensitive
     CHECK(update_fetch_writer_wedged(), "a timed-out writer op marks the writer wedged");
-    WAIT_FOR((job_result(), strcmp(g_state, "failed") == 0));
+    WAIT_FOR_MS((job_result(), strcmp(g_state, "failed") == 0), 30000);
     CHECK(strcmp(g_state, "failed") == 0, "wedged job reported failed");
     CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0, "wedged job names writer_wedged_reboot_required");
     CHECK(strstr(g_rq.resp, "\"bytes_total\":20000") != NULL && IMG_LEN == 20000u,
@@ -512,7 +515,11 @@ static void test_writer_wedge(void)
     CHECK(stage_phase() == UPDATE_STAGE_IDLE, "abandoned op aborted its own upload (stage back to idle)");
     CHECK(!stage_staged(), "abandoned op left no valid stage");
     CHECK(update_fetch_writer_wedged(), "wedge itself is permanent until reboot");
-    Sleep(50); // a writer spinning on deleted semaphores would show up here
+    // the released writer must have exited before the semaphore check (no fixed sleep)
+    // handshake: the released writer finished its abandoned op (final give included) and is back parked in its
+    // idle command wait (unbounded take), so nothing it does later can race the check below
+    WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
+    CHECK(g_fr_sem_idle_waiters >= 1, "released writer is back at its idle wait");
     CHECK(g_fr_sem_bad_n == 0, "no semaphore take/give on a NULL or deleted handle (wr_stop kept the parked writer's semaphores)");
 }
 

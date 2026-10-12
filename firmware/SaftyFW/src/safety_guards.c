@@ -189,7 +189,8 @@ static bool s8_clear_refuse(const safety_guard_cfg_t *cfg, const safety_guard_in
      * (1) a burst that straddles a window boundary is forgotten once it has passed: the
      * check sees only the last completed window and the partial window, so the net rise is
      * at most max_rate x W per window at ANY burst rate (not "2x"), and the clear is granted
-     * only after the burst has ended (the partial window still refuses while it sees it);
+     * once the burst has left the partial window, or earlier under (2) and (3) (the partial
+     * window refuses only a burst it still sees, after the first S8_POST_MIN_S);
      * (2) a rise in progress, at any rate, passes in the first S8_POST_MIN_S seconds after
      * each rollover (the partial check is skipped); only the whole-hold average sees it;
      * (3) the partial average runs from the window start over ELAPSED time and so includes

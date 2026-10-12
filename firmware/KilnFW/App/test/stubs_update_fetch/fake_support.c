@@ -250,6 +250,7 @@ bool fr_wait_tasks_idle(int ms)
 
 #define FR_DEL_MAX 64
 static volatile HANDLE s_deleted[FR_DEL_MAX];
+volatile long g_fr_sem_idle_waiters;
 volatile long g_fr_sem_bad_n;
 
 static void sem_note_live(HANDLE h)
@@ -320,7 +321,14 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
         }
     }
     DWORD ms = ticks == portMAX_DELAY ? INFINITE : (DWORD)(ticks / (TickType_t)g_fr_time_div);
-    return WaitForSingleObject((HANDLE)s, ms) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
+    if (ticks == portMAX_DELAY) {
+        InterlockedIncrement(&g_fr_sem_idle_waiters);
+    }
+    BaseType_t got = WaitForSingleObject((HANDLE)s, ms) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
+    if (ticks == portMAX_DELAY) {
+        InterlockedDecrement(&g_fr_sem_idle_waiters);
+    }
+    return got;
 }
 BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
 {

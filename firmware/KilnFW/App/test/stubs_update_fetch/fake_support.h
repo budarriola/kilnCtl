@@ -36,6 +36,7 @@ extern uint8_t g_fr_flash[FR_STAGE_SIZE];
 extern bool g_fr_flash_write_fail;
 extern bool g_fr_flash_write_block;        // writes block until fr_flash_release()
 extern volatile long g_fr_flash_blocked_n; // writers currently parked
+extern volatile long g_fr_sem_idle_waiters; // tasks currently blocked in an unbounded (portMAX_DELAY) take
 extern volatile long g_fr_sem_bad_n; // take/give on a NULL or deleted semaphore
 extern volatile long g_fr_wr_wait_after_wedge; // writer-op waits begun after the wedge latched
 extern int g_fr_flash_erase_n, g_fr_flash_write_n;
