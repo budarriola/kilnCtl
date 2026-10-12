@@ -1037,7 +1037,7 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6352,  # 2026-10-10: re-measured 6336 B (was 6320 B, 6272 B before); declared stack 10240 B, honest free 3604 B (35.2%), so only the regression ceiling moves
+    "bx_flash_worker": 6352,  # 2026-10-12: re-measured 6352 B (was 6336 B) after 44289aa41 uart_proto_message_t.rx_ms; honest free 3588 B (35.0%), so only the regression ceiling moves
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
     "safety_uart_bridge": 3328,
@@ -1148,7 +1148,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7728,  # 2026-10-10: re-measured on dev tip (was 7632): backup_import_job chain 5632 -> 5712 B after the pass-1 parse/K10 edits in backup_import.c; honest free 2228 B (21.8%)
+    "http_async_job": 7728,  # 2026-10-12: re-measured 7728 B (was 7632 B): backup_import_job chain 5728 B after 44289aa41 uart_proto_message_t.rx_ms; honest free 2212 B (21.6%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +

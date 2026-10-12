@@ -105,7 +105,7 @@ I ran the check read-only against two builds:
 | `C:\wt\checkbuild_30301fbe48` | passed | 22771 |
 | `C:\wt\checkbuild_280d180149` | passed | 22779 |
 
-A survey of the checkbuild worktree above found 110 alias groups. Almost all of them are ESP-IDF, plus four in `drivers/`, none of which is UI.
+A survey of the checkbuild directory in the first row of the table above found 110 alias groups. Almost all of them are ESP-IDF, plus four in `drivers/`, none of which is UI.
 
 **False negatives (LOW-3).** The walk begins at the sinks' callers. It never treats the sink definitions themselves as nodes. Synthetic probes, run directly against the check:
 
