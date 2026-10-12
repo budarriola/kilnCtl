@@ -741,11 +741,19 @@ void executor_task_entry(void *arg)
         if (s_exec.safety) {
             safety_link_status_t pre_st;
             if (safety_link_get_status(s_exec.safety, &pre_st) == ESP_OK) {
-                pre_lock_pico_tripped = relay_authority_pico_tripped_fresh(&pre_st);
+                pre_lock_pico_tripped = relay_authority_pico_tripped(&pre_st);
             }
         }
 
         xSemaphoreTake(s_exec.lock, portMAX_DELAY);
+        /* F5HOLDERFX4 LOW-2: re-sample after the (unbounded) lock wait and OR it in, so a trip that landed while
+         * waiting is seen by aux_fault_drop, io_seg_start_pico and aux_tick_pico this tick. */
+        if (s_exec.safety) {
+            safety_link_status_t post_st;
+            if (safety_link_get_status(s_exec.safety, &post_st) == ESP_OK) {
+                pre_lock_pico_tripped = pre_lock_pico_tripped || relay_authority_pico_tripped(&post_st);
+            }
+        }
         TickType_t now = xTaskGetTickCount();
         s_exec.last_tick_tick = now; /* guard 9 -- updated every iteration regardless of run state */
 
@@ -2082,7 +2090,7 @@ void executor_task_entry(void *arg)
             if (s_exec.safety) {
                 safety_link_status_t retry_st;
                 if (safety_link_get_status(s_exec.safety, &retry_st) == ESP_OK) {
-                    retry_pico_tripped = retry_pico_tripped || relay_authority_pico_tripped_fresh(&retry_st);
+                    retry_pico_tripped = retry_pico_tripped || relay_authority_pico_tripped(&retry_st);
                 }
             }
             io_segs_retry_on(retry_pico_tripped);
@@ -2312,6 +2320,7 @@ void watchdog_task_entry(void *arg)
          * larger threshold. */
         uint16_t safety_age_ms = SAFETY_LINK_AGE_NEVER;
         bool safety_diag_valid = false;
+        bool safety_diag_tripped_any_age = false;
         uint8_t safety_diag_state = SAFETY_LINK_DIAG_STATE_INIT;
         uint8_t safety_diag_trip_reason = 0;
         bool safety_k4_closed = false;
@@ -2324,17 +2333,12 @@ void watchdog_task_entry(void *arg)
             if (safety_link_get_status(s_exec.safety, &safety_status) == ESP_OK) {
                 safety_status_ok = true;
                 safety_age_ms = safety_status.age_ms;
-                /* A trip report is only actionable while the DIAG frame it
-                 * came from is fresh -- diag_age_ms shares the same
-                 * cached_tick as age_ms (safety_link.c), so age_ms doubles as
-                 * the diag frame's own age here. Anything stale beyond
-                 * SAFETY_LINK_STALE_MS is exactly the "link went silent"
-                 * case the 30s check below already owns; this branch must
-                 * never act on a trip read off data that old, or a silent
-                 * link's LAST-KNOWN diag_state would get relabeled as a
-                 * fresh trip. */
+                /* F5HOLDERFX4 MED-1: the DIAG's own age is diag_frame_age_ms (age_ms is the STATUS
+                 * frame's). safety_diag_valid = "fresh enough to act on as OK"; a cached TRIPPED is
+                 * acted on at any age (safety_diag_tripped_any_age), never relabeled as OK. */
                 safety_diag_valid = safety_status.diag_ever_received &&
-                                     !safety_link_is_stale(safety_age_ms, SAFETY_LINK_STALE_MS);
+                                     safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
+                safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status);
                 safety_diag_state = safety_status.diag_state;
                 safety_reboot_seq = safety_status.pico_reboot_seq;
                 safety_diag_since_reboot = safety_status.diag_since_reboot;
@@ -2352,8 +2356,8 @@ void watchdog_task_entry(void *arg)
          * blocked new relay-on, but the run itself kept advancing its
          * schedule and both GUIs kept showing a firing in progress while the
          * kiln cooled. */
-        bool safety_processor_tripped = safety_diag_valid &&
-                                         safety_diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+        /* F5HOLDERFX4 MED-1: a cached TRIPPED counts at any age (fail closed). */
+        bool safety_processor_tripped = safety_diag_tripped_any_age;
 
         /* PC link loss (profile_executor.h's PROFILE_EXECUTOR_PC_LINK_ABORT_
          * SILENCE_MS): uart_bridge.c's link_watchdog_task asserts

@@ -690,6 +690,8 @@ static int g_stub_link_mode = 0; /* 0 = up, 1 = never up, 2 = uninitialised (INV
 
 static bool g_stub_diag_tripped = false;      /* F5HOLDERFX3: the Pico DIAG reads TRIPPED ... */
 static uint16_t g_stub_diag_age_ms = 0;        /* ... with this age (fresh unless >= SAFETY_LINK_STALE_MS) */
+static bool g_stub_diag_received = true;        /* F5HOLDERFX4: a DIAG was received since the Pico's reboot ... */
+static uint32_t g_stub_diag_frame_age_ms = 0;   /* ... this old (diag_frame_age_ms; age_ms is the STATUS age) */
 static bool s_test_bump_epoch_in_link = false; /* LOW-3: an all-off lands during every start-gate link read */
 esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *out)
 {
@@ -705,10 +707,12 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
         if (out) memset(out, 0, sizeof(*out));
         /* mode 5 = up on the first call (the entry gate), down on every later one (commit recheck). */
         if (g_stub_link_mode == 5) g_stub_link_calls++;
-        if (out && g_stub_diag_tripped) {
-            out->diag_ever_received = true;
+        if (out) {
+            out->diag_ever_received = g_stub_diag_received;
+            out->diag_since_reboot = g_stub_diag_received;
+            out->diag_frame_age_ms = g_stub_diag_frame_age_ms;
             out->age_ms = g_stub_diag_age_ms;
-            out->diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
+            if (g_stub_diag_tripped) out->diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
         }
         if (out) out->link_up = (g_stub_link_mode == 0) || (g_stub_link_mode == 5 && g_stub_link_calls <= 1);
         return ESP_OK;
@@ -3101,6 +3105,10 @@ static void test_f5holderfx2_retry_placement_and_pico_gate(void)
             memcpy(code, fn, blen);
             code[blen] = '\0';
         }
+        TEST_CHECK(code_all && strstr(code_all, "safety_status.diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS") != NULL,
+                   "F5HOLDERFX4 MED-1: watchdog DIAG validity uses diag_frame_age_ms");
+        TEST_CHECK(code_all && strstr(code_all, "safety_diag_tripped_any_age = relay_authority_pico_tripped(&safety_status)") != NULL,
+                   "F5HOLDERFX4 MED-1: watchdog treats a cached TRIPPED as tripped at any age");
         free(code_all);
         TEST_CHECK(code && pe_count_in_range(code, code + strlen(code), "io_segs_retry_on(") == 1,
                    "LOW-4: exactly one io_segs_retry_on( call in the tick body (a second, ungated retry goes red)");
@@ -3108,7 +3116,17 @@ static void test_f5holderfx2_retry_placement_and_pico_gate(void)
         TEST_CHECK(retry != NULL, "MUST GO RED if the executor loop stops calling io_segs_retry_on()");
         TEST_CHECK(retry && strncmp(retry, "io_segs_retry_on(retry_pico_tripped);", 37) == 0,
                    "LOW-2: the retry uses the under-lock re-sampled Pico state");
-        TEST_CHECK(code && strstr(code, "relay_authority_pico_tripped_fresh(&retry_st)") != NULL,
+        {
+            const char *ps = code ? strstr(code, "relay_authority_pico_tripped(&post_st)") : NULL;
+            const char *lk = NULL;
+            for (const char *q = code ? strstr(code, "xSemaphoreTake(s_exec.lock, portMAX_DELAY);") : NULL; q && ps && q < ps;
+                 q = strstr(q + 1, "xSemaphoreTake(s_exec.lock, portMAX_DELAY);")) lk = q;
+            TEST_CHECK(lk && ps && ps - lk < 400, "F5HOLDERFX4 LOW-2: the re-sample directly follows the lock take");
+            const char *fd = code ? strstr(code, "profile_executor_aux_fault_drop(pre_lock_pico_tripped)") : NULL;
+            TEST_CHECK(lk && ps && fd && ps > lk && ps < fd,
+                       "F5HOLDERFX4 LOW-2: Pico state re-sampled right after the lock take, before aux_fault_drop/io_seg_start/aux_tick");
+        }
+        TEST_CHECK(code && strstr(code, "relay_authority_pico_tripped(&retry_st)") != NULL,
                    "LOW-2: the Pico state is re-sampled under the lock before the retry");
         if (retry) {
             const char *tg = pe_last_occurrence(code, "thermal_guard_tick(");
@@ -12156,12 +12174,14 @@ static void test_aux_off_pending_retried_by_task_loop(void)
 
 /* Host-test gap audit 2026-10-09 gap 2: drive the real task tick so the call
  * site and the Pico-tripped derivation in executor_task_entry() are covered. */
-static bool aux_tick_case(bool received, uint16_t age_ms, uint8_t diag)
+static bool aux_tick_case(bool received, uint32_t diag_frame_age_ms, uint8_t diag)
 {
     aux_fd_setup(PROFILE_EXEC_IDLE, true, false);
     memset(&g_stub_safety_st, 0, sizeof(g_stub_safety_st));
     g_stub_safety_st.diag_ever_received = received;
-    g_stub_safety_st.age_ms = age_ms;
+    g_stub_safety_st.age_ms = 100; /* STATUS fresh: must not matter (F5HOLDERFX4 MED-1) */
+    g_stub_safety_st.diag_frame_age_ms = diag_frame_age_ms;
+    g_stub_safety_st.diag_since_reboot = received;
     g_stub_safety_st.diag_state = diag;
     g_stub_safety_rc = ESP_OK;
     g_stub_force_link_up = false;
@@ -12177,8 +12197,9 @@ static void test_aux_fault_drop_via_task_tick(void)
 {
     TEST_SECTION("aux fault-drop through executor_task_entry(): fresh TRIPPED drops; stale/never-received/not-tripped do not");
     TEST_CHECK(aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_TRIPPED), "(a) fresh TRIPPED drops aux OFF");
-    TEST_CHECK(!aux_tick_case(true, SAFETY_LINK_STALE_MS + 1, SAFETY_LINK_DIAG_STATE_TRIPPED),
-               "(b) stale TRIPPED is not tripped: aux stays ON");
+    TEST_CHECK(aux_tick_case(true, SAFETY_LINK_DIAG_FRESH_MS + 1, SAFETY_LINK_DIAG_STATE_TRIPPED),
+               "(b) F5HOLDERFX4 MED-1: a cached TRIPPED counts at any age: aux drops OFF");
+    TEST_CHECK(aux_tick_case(true, 60000u, SAFETY_LINK_DIAG_STATE_TRIPPED), "(b2) very old cached TRIPPED still drops");
     TEST_CHECK(!aux_tick_case(false, 100, SAFETY_LINK_DIAG_STATE_TRIPPED),
                "(c) never-received status is not tripped: aux stays ON");
     TEST_CHECK(!aux_tick_case(true, 100, SAFETY_LINK_DIAG_STATE_ARMED),
@@ -13712,7 +13733,7 @@ static int pe_count_in_range(const char *begin, const char *end, const char *nee
 }
 
 /* F5HOLDERFX3 LOW-1: the shared start gate refuses a fresh Pico TRIPPED; a stale/never-received DIAG does not
- * (policy documented at relay_authority_pico_tripped_fresh()). Warm replay never drives ON while TRIPPED. */
+ * (policy documented at relay_authority_pico_tripped()). Warm replay never drives ON while TRIPPED. */
 static void test_f5holderfx3_start_gate_pico_tripped(void)
 {
     TEST_SECTION("F5HOLDERFX3 LOW-1 -- start gate refuses a fresh Pico TRIPPED; warm replay never drives ON");
@@ -13727,10 +13748,25 @@ static void test_f5holderfx3_start_gate_pico_tripped(void)
     g_stub_diag_age_ms = 0;
     TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "Pico fresh TRIPPED -> start refused");
     TEST_CHECK(strstr(err, "tripped") != NULL, "refusal names the trip");
-    g_stub_diag_age_ms = (uint16_t)(SAFETY_LINK_STALE_MS + 1u);
-    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"),
-               "stale TRIPPED DIAG on a live link -> allowed (documented policy; the 2 s watchdog covers it)");
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    g_stub_diag_age_ms = 100;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"),
+               "F5HOLDERFX4 MED-1: stale cached TRIPPED DIAG on a live link -> refused (fail closed, any age)");
+    TEST_CHECK(strstr(err, "tripped") != NULL, "stale TRIPPED still names the trip");
     g_stub_diag_tripped = false;
+    /* Freshness boundary: age == FRESH is allowed, FRESH+1 refused (st->age_ms stays fresh throughout). */
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
+    TEST_CHECK(!relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "diag age == FRESH_MS -> allowed");
+    g_stub_diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS + 1u;
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "diag age == FRESH_MS+1 -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "stale-DIAG refusal says to wait and retry");
+    g_stub_diag_frame_age_ms = 0;
+    g_stub_diag_received = false;
+    err[0] = 0;
+    TEST_CHECK(relay_authority_start_blocked(NULL, err, sizeof(err), "x"), "no DIAG since reboot -> refused");
+    TEST_CHECK(strstr(err, "waiting for the safety processor") != NULL, "missing-DIAG refusal says to wait");
+    g_stub_diag_received = true;
 
     profile_t p;
     memset(&p, 0, sizeof(p));

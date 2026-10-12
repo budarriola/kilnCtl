@@ -850,6 +850,11 @@ esp_err_t profile_exec_resume_post_handler(httpd_req_t *req)
 {
     bool ok = profile_executor_resume();
     if (!ok) {
+        char why[128];
+        if (profile_executor_resume_refusal(why, sizeof(why))) {
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, why);
+            return ESP_OK;
+        }
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "nothing paused to resume");
         return ESP_OK;
     }

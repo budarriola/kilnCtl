@@ -340,18 +340,23 @@ bool relay_authority_reset_refuses_kiln_nvs_writer(void);
  * link reads fault_sources == 0 and a run would start and enable the safety link. This refuses
  * unless no fault source is asserted AND the link is positively up and fresh
  * (safety_link_get_status() == ESP_OK && link_up; an uninitialised or NULL link reads as down) and the
- * Pico's fresh DIAG does not report TRIPPED (F5HOLDERFX3 LOW-1: closes warm replay and every start).
+ * Pico's DIAG is fresh and does not report TRIPPED (F5HOLDERFX3 LOW-1, F5HOLDERFX4 MED-1).
  * Fail closed. Never consults fault_on_link_loss, so the bench override opens no start path.
  * Writes a decoded refusal (<128 chars) to err when non-NULL; `what` completes the sentence
  * ("autotune cannot drive the element"). Returns true when the start must be refused. */
-/* F5HOLDERFX3 LOW-1: true when the Pico's DIAG is FRESH and reports TRIPPED. Same rule as the executor
- * tick's pre_lock_pico_tripped. Policy: a DIAG that was never received or is stale (age >=
- * SAFETY_LINK_STALE_MS) reads as NOT tripped here -- the link_up requirement above is what fails closed
- * for a dead link, and a stale DIAG on a live link is covered by the 2 s watchdog Pico-TRIPPED fault. */
-static inline bool relay_authority_pico_tripped_fresh(const safety_link_status_t *st)
+/* F5HOLDERFX4 MED-1: fail closed on the Pico's DIAG. "Tripped" = a DIAG was ever received and its cached state is
+ * TRIPPED, at ANY age (a stale TRIPPED never reads as OK; the Pico reboot path keeps the cache on purpose). Note
+ * st->age_ms is the STATUS frame's age, not the DIAG's, so it must not be used here. */
+static inline bool relay_authority_pico_tripped(const safety_link_status_t *st)
 {
-    return st->diag_ever_received && !safety_link_is_stale(st->age_ms, SAFETY_LINK_STALE_MS) &&
-           st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+    return st->diag_ever_received && st->diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+}
+
+/* A DIAG report we may act on to PERMIT heat/switch-on: received since the Pico's last reboot and no older than
+ * SAFETY_LINK_DIAG_FRESH_MS (inclusive: age == FRESH is fresh, FRESH+1 is not). */
+static inline bool relay_authority_pico_diag_fresh(const safety_link_status_t *st)
+{
+    return st->diag_ever_received && st->diag_since_reboot && st->diag_frame_age_ms <= SAFETY_LINK_DIAG_FRESH_MS;
 }
 
 static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *err, size_t cap, const char *what)
@@ -376,9 +381,15 @@ static inline bool relay_authority_start_blocked(SafetyLinkClass *safety, char *
         }
         return true;
     }
-    if (relay_authority_pico_tripped_fresh(&st)) {
+    if (relay_authority_pico_tripped(&st)) {
         if (err && cap) {
             snprintf(err, cap, "the safety processor is tripped (clear the trip first) -- %s", what);
+        }
+        return true;
+    }
+    if (!relay_authority_pico_diag_fresh(&st)) {
+        if (err && cap) {
+            snprintf(err, cap, "waiting for the safety processor's status report -- retry in a few seconds -- %s", what);
         }
         return true;
     }

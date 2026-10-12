@@ -54,6 +54,12 @@ bool profile_executor_run(uint8_t id, char *err, size_t cap)
 void profile_executor_halt(void) { f_halt_calls++; }
 bool profile_executor_pause(void) { f_pause_calls++; return f_pause_result; }
 bool profile_executor_resume(void) { f_resume_calls++; return f_resume_result; }
+static char f_resume_why[128];
+bool profile_executor_resume_refusal(char *out, size_t cap)
+{
+    snprintf(out, cap, "%s", f_resume_why);
+    return out[0] != 0;
+}
 bool run_state_acknowledge(void) { f_ack_calls++; return f_ack_result; }
 
 /* ---- TEST_TRIP link fakes ---- */
@@ -168,6 +174,7 @@ static void reset(void)
     f_run_calls = f_halt_calls = f_pause_calls = f_resume_calls = f_ack_calls = 0;
     f_run_result = f_pause_result = f_resume_result = f_ack_result = true;
     f_run_err = "";
+    f_resume_why[0] = 0;
     f_danger = false;
     f_run_id = 0xEE;
 }
@@ -265,6 +272,11 @@ static void test_stop_pause_resume(void)
     TEST_CHECK(post_ok(profile_exec_pause_post_handler, "") == 400 && f_pause_calls == 1, "pause with nothing running -> 400");
     f_resume_result = false;
     TEST_CHECK(post_ok(profile_exec_resume_post_handler, "") == 400 && f_resume_calls == 1, "resume with nothing paused -> 400");
+    TEST_CHECK(strstr(s_reply, "nothing paused") != NULL, "no gate refusal -> generic text");
+    snprintf(f_resume_why, sizeof(f_resume_why), "the safety processor is tripped (clear the trip first) -- resume");
+    TEST_CHECK(post_ok(profile_exec_resume_post_handler, "") == 400 && strstr(s_reply, "tripped") != NULL,
+               "F5HOLDERFX4 LOW-1: gate refusal carries its reason, not 'nothing paused'");
+    f_resume_why[0] = 0;
     f_pause_result = true;
     TEST_CHECK(post_ok(profile_exec_pause_post_handler, "") == 200 && f_pause_calls == 2, "pause ok -> 200");
     TEST_CHECK(post_ok(profile_exec_stop_post_handler, "") == 200 && f_halt_calls == 1, "stop halts exactly once");

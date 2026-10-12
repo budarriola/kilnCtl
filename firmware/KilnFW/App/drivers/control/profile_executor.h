@@ -563,6 +563,9 @@ bool profile_executor_pause_with_reason(const char *reason);
  * control task cannot block guard 9 / the 30 s link abort. */
 bool profile_executor_pause_with_reason_bounded(const char *reason);
 bool profile_executor_resume(void);
+/* F5HOLDERFX4 LOW-1: copies the reason the last profile_executor_resume() was refused by the start gate
+ * (e.g. "the safety processor is tripped ..."). Returns false and leaves an empty string when there is none. */
+bool profile_executor_resume_refusal(char *out, size_t cap);
 
 
 /* PID_EXPANSION_PLAN.md Phase 7a-2/7a-3: copies up to
