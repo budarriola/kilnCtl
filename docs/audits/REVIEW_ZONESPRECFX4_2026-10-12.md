@@ -55,7 +55,7 @@ validator covers never causes a write. A failure after the UART PID stage carrie
 wherever a handler prints it. LOW-1 covers the exceptions that bypass those
 handlers.
 
-## LOW-1: `load_config_preset` drops the partial-apply note for any exception it does not list
+## LOW-1: `load_config_preset` drops the partial-apply note for any exception it does not list -- FIXED (zonesprecfx5)
 
 `mcp_server_config_presets.py:155-165` catches only ControlQueryError,
 ZonesHttpError, SafetyCfgHttpError, RampAssistHttpError and (new) ValueError. A
@@ -72,7 +72,7 @@ The new `except ValueError` branch has no test, and presets cannot currently
 reach it: every int-field `int("x")` case is now rejected earlier. Negtest M8
 removes the branch and the suite does not notice (MISSED).
 
-## LOW-2: float fields are still not type-checked
+## LOW-2: float fields are still not type-checked -- FIXED (zonesprecfx5)
 
 `_validate()` checks the int and bool fields but none of the float fields. A
 probe against `bench_fixture` showed that all of these validate cleanly:
@@ -92,7 +92,7 @@ for every `_REQUIRED_ZONE_FIELDS` float and every other float key the preset
 names, apply the same rule to each `coupling_coeff` cell, and require
 `type(index) is int`.
 
-## LOW-3: two tests prove less than their names claim
+## LOW-3: two tests prove less than their names claim -- FIXED (zonesprecfx5)
 
 - `test_bad_bool_field_never_writes` patches `post_zones` but calls only
   `_validate()`, which can never reach `post_zones`. It repeats
@@ -156,3 +156,7 @@ collection or import errors.
 | M7 | `load_preset_data` NON_PRESET refusal -> pass | MISSED | (masked by validation error, LOW-3) |
 | M8 | remove `except ValueError` in load_config_preset | MISSED | (untested and unreachable, LOW-1) |
 | M9 | int check `isinstance(v, int)` (accepts bool) | CAUGHT | test_validator_rejects_bool_and_str_int_fields |
+
+## Fix status (zonesprecfx5, 2026-10-12)
+
+LOW-1, LOW-2, LOW-3 fixed. `load_config_preset` now ends with `except Exception` (the unreachable `except ValueError` branch is folded into it) and appends `_partial_note`; `_validate` requires finite int-or-float (not bool) for every non-int zone field and each `coupling_coeff` cell, and `type(index) is int`; the no-write and data-file tests now exercise the real paths. Negtests (`-Preset pytest`, tests/test_config_presets.py): no `except Exception` CAUGHT, no float check CAUGHT, bool index CAUGHT, no NON_PRESET refusal CAUGHT. INFO-1, 2, 4, 5 deferred (harmless / by recommendation); INFO-3 (eight-name list test) left in place.
