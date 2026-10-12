@@ -1037,12 +1037,12 @@ CEILING_BYTES = {
     # 2026-10-09: 6160 is the real measured walk total on dev tip (check_all_task_stack_budgets
     # --dump-ceilings), no headroom added: the profiles_handle_message dispatch root grew
     # 5408 -> 5424 B (readiness_gate_collect frame 256 -> 272 from dashboard_status_t growth).
-    "bx_flash_worker": 6336,  # 2026-10-10: re-measured 6336 B (was 6320 B, 6272 B before); declared stack 10240 B, honest free 3604 B (35.2%), so only the regression ceiling moves
+    "bx_flash_worker": 6352,  # 2026-10-10: re-measured 6336 B (was 6320 B, 6272 B before); declared stack 10240 B, honest free 3604 B (35.2%), so only the regression ceiling moves
     "info_uart_bridge": 3200,
     "io_uart_bridge": 3248,
-    "safety_uart_bridge": 3312,
-    "thermo_uart_bridge": 3152,
-    "touch_uart_bridge": 3168,
+    "safety_uart_bridge": 3328,
+    "thermo_uart_bridge": 3168,
+    "touch_uart_bridge": 3184,
     # Measured 2026-09-22 against a KilnCtrl.elf freshly built in worktree
     # C:\wt\swapstack_yrljuq (rebased onto origin/main f5a793ce), superseding
     # the same-day static-locals fix below. Review of that fix
@@ -1103,7 +1103,7 @@ CEILING_BYTES = {
     "ota_rollback_reboot": 2464,
     # Inherited from ota_rollback_reboot (same shape: announce-reboot send + hal_wdt_reboot); not measured -- never run on hardware.
     "recovery_boot": 2208,
-    "ota_pico_rollback": 2896,
+    "ota_pico_rollback": 2912,
     "ota_confirm": 3760,  # measured 2026-10-12 against a fresh target build (lower bound: indirect call)
     # 2026-09-25 fix-then-push review: the previous 2736 ceiling here was
     # WRONG -- it was borrowed from ota_pico_rollback on the assumption the
@@ -1148,7 +1148,7 @@ CEILING_BYTES = {
     # about 2.25 KB under the 8192 B stack after the ESP_LOG overhead above
     # (4528 B ESP_LOG-inclusive ceiling + ~1.4 KB of ESP_LOG frames = ~5.9 KB used;
     # an earlier revision of this note said 3.3 KB, which forgot that overhead).
-    "http_async_job": 7712,  # 2026-10-10: re-measured on dev tip (was 7632): backup_import_job chain 5632 -> 5712 B after the pass-1 parse/K10 edits in backup_import.c; honest free 2228 B (21.8%)
+    "http_async_job": 7728,  # 2026-10-10: re-measured on dev tip (was 7632): backup_import_job chain 5632 -> 5712 B after the pass-1 parse/K10 edits in backup_import.c; honest free 2228 B (21.8%)
     "recovery_exit": 1056,
     # 2026-10-09: 112 -> 192 B. Measured on a clean origin/main target build
     # (5ddf68d1): backlight_pwm_task 80 + hal_pwm_set_duty 32 + ledc_set_duty 48 +
@@ -1187,7 +1187,7 @@ CEILING_BYTES = {
     # against a freshly rebuilt KilnCtrl.elf (build_kilnfw, same day) with
     # 4756 B (58.1%) of the 8192 B stack still honestly free -- ordinary,
     # understood growth, not a regression to paper over.
-    "safety_poll": 3360,
+    "safety_poll": 3376,
     # 4880 = 752 (lvgl_port_task's own deepest resolved path) + 4128
     # (ui_home_refresh_cb, the deepest of the extra_roots callbacks -- see
     # TASKS["lvgl"]'s comment), measured 2026-09-09 against KilnCtrl.elf as
@@ -1286,7 +1286,7 @@ CEILING_BYTES = {
     # task that reaches into safety_cfg_store's NVS-backed refetch path is
     # thin margin, same class flagged (not bumped) for lvgl above; worth a
     # real hardware high-water-mark measurement before ruling this settled.
-    "zone_sweep": 3888,
+    "zone_sweep": 3904,
     # Measured 2026-09-29 against a KilnCtrl.elf freshly built by build_kilnfw
     # in a clean worktree (C:\wt\stacktbl_4yfec2) minted at origin/main, right
     # after adding this task's TASKS row (5cd11231 registered

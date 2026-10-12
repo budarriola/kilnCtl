@@ -168,7 +168,7 @@ $libNames = 'build_lock', 'host_test_exec', 'build_gate', 'host_test_verdict'
 $units = @(@{ Label = 'build_host_tests.ps1'; Ast = $ast; IsLib = $false })
 foreach ($ln in $libNames) {
     $lt = $null; $le = $null
-    $la = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot "$ln.ps1"), [ref]$lt, [ref]$le)
+    $la = [System.Management.Automation.Language.Parser]::ParseFile(([IO.Path]::Combine($PSScriptRoot, "$ln.ps1")), [ref]$lt, [ref]$le)
     Assert-True ($le.Count -eq 0) "$ln.ps1 parses"
     $units += @{ Label = "$ln.ps1"; Ast = $la; IsLib = $true; Tokens = $lt }
 }
