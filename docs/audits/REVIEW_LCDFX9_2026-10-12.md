@@ -293,6 +293,26 @@ The fix proposed in REVIEW_LCDFX8 still applies.
 | LOW-3 | open | LCDFX9 LOW-2 |
 | INFO-1..3 | informational | no action |
 
+## REVIEW_LCDFX9 fix status
+
+Threat model: accidental regressions by honest developers. Round 10 of regex hardening; no further regex rounds.
+
+| Finding | Status | Where |
+|---|---|---|
+| HIGH-1 gate-token redeclaration | Fixed | L-declarator rule in check_lcd_admin_gates.ps1 plus -Werror=shadow on drivers/ui (drivers/CMakeLists.txt; real shadow in ui_page_home.c fixed, `bar` renamed `zbar`) |
+| HIGH-2 wrapper / macro / fn-pointer reaching the sink | Fixed structurally | tools/check_lcd_sink_callgraph.py (+ .ps1, test_check_lcd_sink_callgraph.ps1, wired in run_all_checks.ps1); SKIP-FAST without a build |
+| HIGH-3 lone CR | Fixed | L-cr rule |
+| MED-1 non-ADMIN page deny-list | Fixed | $denyIdent extended |
+| MED-2 AP password reveal | Fixed | L-secret rows |
+| MED-3 macro defeating verdict recheck (N11) | Fixed | caught by the macro/declarator rules (N11 CAUGHT) |
+| LOW-1 weak gate | Fixed | L-weak rule; N14 (gate returns true) caught by host test ui_lcd_lock (RUN FAILURES with the mutation) |
+| LOW-2 R12 false fail | Fixed | alternate verdict-local form accepted |
+
+Mutation results (negtest -Preset check): set A before 2 CAUGHT / 23 MISSED of 25 probes; after 20 CAUGHT / 5 MISSED, controls 7 of 7. Set B 29 of 29 CAUGHT before and after.
+The 5 residual MISSED are not text-rule territory and are caught elsewhere: N04, N06, N07, N12 (wrapper, macro alias, fn-pointer struct, `##` paste outside ui) are each CAUGHT by check_lcd_sink_callgraph.py on rebuilt objects (exit 1 naming ui_page_home_build); N14 is CAUGHT by the ui_lcd_lock host test.
+
+Accepted limits: text rules cannot see `##` paste or macros outside drivers/ui, nor a gate function that is made always-true; those are covered by the call-graph check, -Werror=shadow and the host test respectively. The call-graph check merges same-named statics (over-reports only) and cannot see calls through runtime-built function pointers.
+
 ## Appendix A -- set A mutation JSON (32 mutations)
 
 Anchors use LF. negtest converts them to the CRLF target files.

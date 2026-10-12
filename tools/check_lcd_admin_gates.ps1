@@ -6,6 +6,13 @@
 # the LCD lock BEFORE the touch-calibration early return (L9).
 # Mechanical, string-level: each rule names a file and a regex that must match.
 # Usage: powershell -ExecutionPolicy Bypass -File tools\check_lcd_admin_gates.ps1 [-UiDir <path>]
+# REVIEW_LCDFX9 ACCEPTED LIMITS (threat model: accidental regressions by honest developers; regex is NOT a C parser):
+#  - A gate token spelled via `##` paste or defined as a macro OUTSIDE drivers/ui is invisible here; the object-level
+#    check_lcd_sink_callgraph.py proves no un-gated LCD page reaches safety_trip_clear's sinks instead.
+#  - Preprocessor tricks that redefine a gate token in a header outside drivers/ui are backstopped by -Werror=shadow
+#    (drivers/CMakeLists.txt) and the call-graph check, not by text rules.
+#  - A gate function that is made always-true is caught by the host test test_ui_lcd_lock.c, not here.
+#  - Anything needing real C parsing (macro expansion, constexpr folding) is out of scope; no further regex rounds.
 param([string]$UiDir, [switch]$DumpSinks)
 $ErrorActionPreference = "Stop"
 if (-not $UiDir) { $UiDir = Join-Path $PSScriptRoot "..\firmware\KilnFW\App\drivers\ui" }
