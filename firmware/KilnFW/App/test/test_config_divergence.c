@@ -225,8 +225,8 @@ static void test_lcd_notice_leads_with_armed_hint(void)
 {
     TEST_SECTION("REVIEW_ZPRECFX6 LOW-B: the LCD strip text carries the ARMED action within the visible ~55 chars");
     char head[200];
-    memset(head, 'h', 100);
-    head[100] = '\0';
+    memset(head, 'h', 60);
+    head[60] = '\0';
     char full[CONFIG_DIVERGENCE_REASON_MAX];
     config_divergence_append_suffix_truncating_head(full, sizeof(full), head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
     char out[CONFIG_DIVERGENCE_REASON_MAX + 32];
