@@ -6322,6 +6322,13 @@ static void test_post_handler_rev_unknown_refuses_before_ram_copy(void)
         const char *nb = "name=NewSkip&zone_mask=1&seg_count=1&seg0_target=100&seg0_ramp=50&seg0_dwell=5";
         (void)fuzz_post(profile_post_handler, nb, (long long)strlen(nb), (size_t)-1, 0);
         TEST_CHECK(!profiles_slot_used((uint8_t)ff), "new profile never lands on the rev-unknown free slot");
+        {
+            int landed = -1;
+            for (uint8_t i = 0; i < PROFILES_MAX_COUNT; i++) {
+                if (profiles_slot_used(i) && strcmp(s_profiles.profiles[i].name, "NewSkip") == 0) { landed = i; break; }
+            }
+            TEST_CHECK(landed >= 0 && landed != ff, "new-slot POST succeeded in the next truly free slot");
+        }
         TEST_CHECK(s_profiles.profiles[ff].name[0] == '\0', "no phantom content in the rev-unknown slot");
         profile_t cand = make_stored_profile();
         strncpy(cand.name, "NewSkip2", sizeof(cand.name) - 1);
