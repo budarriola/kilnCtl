@@ -83,6 +83,8 @@ was issued after the wedge (`update_wr_arb` issue count, or a fake count of `wr_
 gives). Another option is to drop the guard's claim from the comment if the queued abort
 is the intended recovery. This is not a regression from these commits.
 
+**Fix status:** fixed in `72faacb41`. The fake `xSemaphoreTake` counts writer-op waits begun after the wedge (`g_fr_wr_wait_after_wedge`) and `test_writer_wedge()` asserts 0. Re-negtested in REVIEW_FLAKEFX2_2026-10-12 M1: CAUGHT at test:501 in both executables. Related gaps that remain are REVIEW_FLAKEFX2 LOW-1..3.
+
 ### LOW-2: the fix status in `71fa518` overstates the negtest
 
 It says "forcing `wedged = false` in `update_fetch.c` is CAUGHT". That holds only when
@@ -92,6 +94,8 @@ as abandoned and does not undo itself. The wedge-detection branch is not what ca
 With the arbiter call kept (U1), the mutation is MISSED. See INFO-1 for why that is
 acceptable. The record should name the exact mutation that was run.
 
+**Fix status:** fixed in `72faacb41`. The FIRELOWFX3 line now names U1b and U1. Its `test:504` citation is now test:508 (REVIEW_FLAKEFX2 INFO-1).
+
 ### LOW-3: the fake's gate is tied to the literal 30000
 
 `ticks >= 30000` stands in for "this is the FETCH_WR_TIMEOUT_MS wait". If
@@ -99,6 +103,8 @@ acceptable. The record should name the exact mutation that was run.
 the call, and LOW-4's original race returns as a flake. The test would not become
 vacuous. A shared constant, or a fake hook keyed on the `wr_done` handle, would remove
 the coupling.
+
+**Fix status:** fixed in `72faacb41`. `FETCH_WR_TIMEOUT_MS` moved to `update_fetch.h`, and the fake gate tests `ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)`. REVIEW_FLAKEFX2 M5 (20000u) still passes.
 
 ### INFO-1: U1 is an almost-equivalent mutant
 
