@@ -842,7 +842,8 @@ if ($recFiles.Count -lt 1) {
     throw "check_stack_margin_registration.ps1: no .c files under $recoveryDirResolved -- has the recovery image moved?"
 }
 $recCreateRe = $createPattern2   # any first argument (cast, &fn): same form as the main section (LCD19FX6 LOW-1)
-$minRecCreated = 5               # 5 sites today (4 reported + rec_restart exempt); a blind regex must not hide behind a low floor
+# The floor guards the REAL recovery dir only; a caller-supplied -RecoveryDir (tests, fixtures) has none (REVIEW_LCD19FX7 MED-1).
+$minRecCreated = if ($RecoveryDir) { 0 } else { 5 }  # 5 sites today (4 reported + rec_restart exempt); a blind regex must not hide behind a low floor
 $recViolations = @()
 $recCreated = 0
 foreach ($f in $recFiles) {
