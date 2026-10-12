@@ -104,6 +104,22 @@ typedef struct {
  * from just hashing the raw bytes of `value`. */
 float config_identity_normalize_f32(float value);
 
+/* Appended to a standing reason when a commissioning re-push was refused
+ * because the relay is ARMED. CONFIG_DIVERGENCE_ARMED_MARK is the stable part
+ * the LCD keys on. */
+#define CONFIG_DIVERGENCE_ARMED_MARK "relay is ARMED"
+#define CONFIG_DIVERGENCE_ARMED_SUFFIX " (re-push refused: " CONFIG_DIVERGENCE_ARMED_MARK " -- disarm and retry commissioning)"
+
+/* dst = head truncated to leave room, then `suffix` in full. Never
+ * overflows; returns strlen(dst). If cap <= strlen(suffix), dst = suffix cut
+ * to fit. */
+size_t config_divergence_append_suffix_truncating_head(char *dst, size_t cap, const char *head, const char *suffix);
+
+/* LCD strip text (one fixed-height line, ~55-65 chars, must not scroll).
+ * When the reason carries the ARMED marker, a short action-first message;
+ * otherwise "Config mismatch (Pico): <reason>". The web keeps the full text. */
+void config_divergence_lcd_notice(const char *reason, char *out, size_t cap);
+
 /* Computes one side's identity over `fields` (n entries), in the order
  * given -- ORDER IS PART OF THE FORMAT and must be identical on both sides
  * a caller compares (document the fixed order at the call site, the way

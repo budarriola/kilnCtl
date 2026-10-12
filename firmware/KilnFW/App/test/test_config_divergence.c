@@ -183,6 +183,59 @@ static void test_normalize_collapses_different_bit_patterns(void)
     TEST_CHECK(na == nb, "both normalise to the same value");
 }
 
+static void test_signed_zero_is_canonical(void)
+{
+    TEST_SECTION("REVIEW_ZPRECFX6 LOW-A: +0.0 and -0.0 are the same config value (hash and diff agree)");
+    float nz = config_identity_normalize_f32(-0.0f);
+    float pz = config_identity_normalize_f32(0.0f);
+    TEST_CHECK(memcmp(&nz, &pz, sizeof(nz)) == 0, "-0.0 normalises to the same BYTES as +0.0");
+    config_identity_field_t a[1] = { { .name = "off", .known = true, .value = 0.0f } };
+    config_identity_field_t b[1] = { { .name = "off", .known = true, .value = -0.0f } };
+    config_identity_t ia = config_identity_compute(CONFIG_IDENTITY_FORMAT_VERSION, a, 1);
+    config_identity_t ib = config_identity_compute(CONFIG_IDENTITY_FORMAT_VERSION, b, 1);
+    TEST_CHECK(config_identity_matches(&ia, &ib), "+0.0 vs -0.0 hashes match");
+    char reason[CONFIG_DIVERGENCE_REASON_MAX];
+    TEST_CHECK(!config_divergence_check(a, b, 1, reason, sizeof(reason)), "+0.0 vs -0.0 is not a divergence");
+}
+
+static void test_append_suffix_truncating_head(void)
+{
+    TEST_SECTION("REVIEW_ZPRECFX6 LOW-1: head truncated, suffix always intact, never overflows");
+    char head[200];
+    memset(head, 'h', sizeof(head) - 1);
+    head[sizeof(head) - 1] = '\0';
+    char dst[CONFIG_DIVERGENCE_REASON_MAX];
+    memset(dst, 'X', sizeof(dst));
+    size_t n = config_divergence_append_suffix_truncating_head(dst, sizeof(dst), head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    size_t sl = strlen(CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    TEST_CHECK(n == sizeof(dst) - 1u && strlen(dst) == n, "result exactly fills the buffer (159 chars), NUL-terminated");
+    TEST_CHECK(strcmp(dst + n - sl, CONFIG_DIVERGENCE_ARMED_SUFFIX) == 0, "suffix intact at the tail");
+    TEST_CHECK(dst[n - sl - 1u] == 'h' && dst[0] == 'h', "head kept up to cap - suffix - 1 chars");
+    n = config_divergence_append_suffix_truncating_head(dst, sizeof(dst), "short", CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    TEST_CHECK(n == 5u + sl && strncmp(dst, "short", 5) == 0, "short head is kept whole");
+    char tiny[10];
+    n = config_divergence_append_suffix_truncating_head(tiny, sizeof(tiny), "abc", CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    TEST_CHECK(n == 9u && tiny[9] == '\0', "cap <= suffix: hint only, no overflow");
+}
+
+static void test_lcd_notice_leads_with_armed_hint(void)
+{
+    TEST_SECTION("REVIEW_ZPRECFX6 LOW-B: the LCD strip text carries the ARMED action within the visible ~55 chars");
+    char head[200];
+    memset(head, 'h', 100);
+    head[100] = '\0';
+    char full[CONFIG_DIVERGENCE_REASON_MAX];
+    config_divergence_append_suffix_truncating_head(full, sizeof(full), head, CONFIG_DIVERGENCE_ARMED_SUFFIX);
+    char out[CONFIG_DIVERGENCE_REASON_MAX + 32];
+    config_divergence_lcd_notice(full, out, sizeof(out));
+    const char *at = strstr(out, "disarm");
+    TEST_CHECK(at != NULL && (size_t)(at - out) + 6u <= 55u, "ARMED text names 'disarm' within the first 55 chars");
+    TEST_CHECK(strlen(out) <= 60u, "short enough for one strip line");
+    config_divergence_lcd_notice("config divergence: x ESP=1 Pico=2", out, sizeof(out));
+    TEST_CHECK(strcmp(out, "Config mismatch (Pico): config divergence: x ESP=1 Pico=2") == 0,
+               "non-ARMED reasons keep the prefix + reason format");
+}
+
 static void test_reason_buffer_is_never_truncated(void)
 {
     /* Owner's own caution: "ki_refusal_reason is char[96] and a message
@@ -253,6 +306,9 @@ int main(void)
     test_unknown_identity_never_matches();
     test_wire_round_trip_normalises_identically();
     test_normalize_collapses_different_bit_patterns();
+    test_signed_zero_is_canonical();
+    test_append_suffix_truncating_head();
+    test_lcd_notice_leads_with_armed_hint();
     test_reason_buffer_is_never_truncated();
     test_all_unknown_message_is_honest();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

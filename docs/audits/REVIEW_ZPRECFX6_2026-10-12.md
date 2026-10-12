@@ -269,3 +269,12 @@ Each CAUGHT below is a compiled or loaded mutant with a failing assertion line. 
 | `step7_le`: step 7 `<` changed to `<=` | node | CAUGHT | `FAIL: step7: abs_max_temp_c exactly equal to the highest zone max_temp_c is accepted` |
 
 The two MISSED results are the expected evidence for LOW-1. The clamp branch is reachable (see LOW-1 and LOW-A), but no test reaches it, so removing it or shrinking it goes unnoticed.
+
+## Resolution (zprecfx7)
+
+- **LOW-A FIXED:** `config_identity_normalize_f32()` maps -0.0f to +0.0f. SaftyFW does not compute this identity hash (no normalize/FNV there), so no Pico change. Test: `test_signed_zero_is_canonical` in `test_config_divergence.c`.
+- **LOW-1 FIXED:** the suffix and clamp are now `config_divergence_append_suffix_truncating_head()` (used by `safety_ceiling_sync.c`), unit-tested directly in `test_append_suffix_truncating_head` (159-char fill, suffix intact, tiny-cap case). The seam test is renamed `..._appends_suffix_to_longest_first_diff_reason` and its messages corrected.
+- **LOW-B FIXED:** `config_divergence_lcd_notice()` returns "Pico config mismatch: disarm, retry commissioning" (48 chars) when the reason carries the ARMED marker, else the old prefix + reason. Web/readiness text unchanged. Test: `test_lcd_notice_leads_with_armed_hint`.
+- **INFO-A FIXED:** 82 -> 83 in the test comment.
+- **INFO-B:** the zprecfx5 LOW-1 line was wrong for the version-mismatch/unknown-field producers; the clamp's real route was +-0, now closed by LOW-A. Recorded here as the correction.
+- **INFO-C:** deferred (owner question, not trivial).
