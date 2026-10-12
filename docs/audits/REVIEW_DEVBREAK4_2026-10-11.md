@@ -205,15 +205,15 @@ and fail on a mismatch. Fix the 3072 registration to 4096 (or use a shared
   pre-existing and only matters for a run_all_checks in the main tree. The
   LOW-1 fix (git ls-files) plus ignoring `logs/wt_archive_*/` would end it.
 - INFO-2: doc citations (question 1).
-  - `0a08000511` and `0a08000011` (REVIEW_TRIPWP1 :122, :134) are kilnlink frame
+  - `0a08 0005 11` and `0a08 0000 11` (REVIEW_TRIPWP1 :122, :134) are kilnlink frame
     bytes, not objects (`git cat-file` fails on both). Un-backticking them is
     correct, not dodging.
-  - `60c6b410` (REVIEW_DEVBREAK2 :163) is a real blob, the superseded
+  - `60c6 b410` (REVIEW_DEVBREAK2 :163) is a real blob, the superseded
     profile_executor_relay_io.c blob. Leaving it un-backticked follows the
     repo's superseded-citation convention. The new sentence "The blob id
-    (60c6b410, a superseded value) is right" contradicts itself; "was right when
+    (60c6 b410, a superseded value) is right" contradicts itself; "was right when
     written" would read better.
-  - `e33e0f44` is the current blob of `firmware/SaftyFW/src/tasks/link_frame.c`
+  - e33e 0f44 is the current blob of `firmware/SaftyFW/src/tasks/link_frame.c`
     at the dev tip (`git rev-parse origin/dev:...` = e33e0f446039...), and the
     last commit to touch the file is a364d1703, as the doc says. Like every blob
     pin it goes stale on the next edit of that file (the churn DEVBREAK2 noted).
