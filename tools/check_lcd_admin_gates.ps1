@@ -1,4 +1,4 @@
-﻿# checkcache: ok
+# checkcache: ok
 # check_lcd_admin_gates.ps1 -- LCD UI audit 2026-10-09 (L1-L3, L6, L9, L11, L22).
 # Every LCD action whose web equivalent is ROUTE_TIER_ADMIN must run through the
 # admin gate (ui_lcd_lock_run_gated(..., LCD_PIN_ROLE_ADMIN, ...) or a
@@ -31,7 +31,7 @@ $rules = @(
     @('ui_page_live_decide.c', 'run_decision', (GateRx 'Admin PIN to keep/discard edit' $admin 'run_decision_apply'), 'L2 decide', 'run_decision_apply', 1),
     @('ui_page_temperature.c', 'relay_toggle_cb', (GateRx 'Admin PIN to switch relay' $admin 'relay_toggle_apply'), 'L3 relay', 'relay_toggle_apply', 1),
     @('ui_page_config.c', 'units_toggle_cb', (GateRx 'Admin PIN to change units' $admin 'units_toggle_apply'), 'L11 units', 'units_toggle_apply', 1),
-    @('ui_page_config.c', 'units_toggle_apply', ('^\s*\(void\)\s*user_data\s*;\s*if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*return;\s*\}'), 'L11 units apply re-check', $null, 0),
+    @('ui_page_config.c', 'units_toggle_apply', ('^\s*\(void\)\s*\w+\s*;\s*if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*return;\s*\}'), 'L11 units apply re-check', $null, 0),
     @('ui_page_config.c', 'touch_cal_nav_cb', (GateRx 'Admin PIN to recalibrate touch' $admin 'touch_cal_open_apply'), 'L11 touch cal nav', 'touch_cal_open_apply', 1),
     @('ui_page_touch_cal.c', 'finish_calibration', ('if\s*\(touch_cal_store_is_calibrated\(\)\s*&&\s*!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{[^{}]*\breturn\s*;\s*\}[\s\S]*touch_cal_store_save\('), 'L11 touch cal save', $null, 0),
     @('ui_page_profile_picker.c', 'delete_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to delete profile' $admin 'delete_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*delete_do\(ud\)\s*;\s*$'), 'L11 profile delete', $null, 0),
@@ -40,45 +40,68 @@ $rules = @(
     @('ui_page_edit_firing.c', 'apply_cb', (GateRx 'Enter admin PIN to keep/discard edit' $admin 'open_decide_gated_cb'), 'L11 live-edit decide', 'open_decide_gated_cb', 1),
     @('ui_page_edit_firing.c', 'apply_live_gated', ('!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*return\s*;'), 'L11 live-edit apply re-check', $null, 0),
     @('ui_page_diagnostics.c', 'crash_ack_btn_clicked_cb', ('if\s*\(!ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*' + (GateRx 'Admin PIN to acknowledge crash' $admin 'crash_ack_unlocked_cb') + '[^;]*;\s*return\s*;\s*\}\s*crash_ack_do\(\)\s*;\s*$'), 'L11 crash ack', $null, 0),
-    @('ui_page_diagnostics.c', 'crash_ack_unlocked_cb', ('if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*crash_ack_do\(\)'), 'L11 crash ack unlocked', $null, 0)
+    @('ui_page_diagnostics.c', 'crash_ack_unlocked_cb', ('if\s*\(ui_lcd_lock_has_role\(' + $admin + '\)\)\s*\{\s*crash_ack_do\(\)'), 'L11 crash ack unlocked', $null, 0),
+    # REVIEW_LCDFX6 HIGH-1 (owner decision D2): clearing a trip from the LCD needs an ADMIN PIN, and the action re-checks the
+    # role itself. btn_clicked_cb is EXACTLY the ADMIN gate on clear_action (whose only reference is that gate);
+    # clear_action's verdict is fed the live ADMIN role, NEEDS_ADMIN/NOT_TRIPPED return before the send, and the send
+    # (dashboard_safety_clear_trip) appears once, after the switch. Other files in drivers/ui may not call it (below).
+    @('ui_page_safety.c', 'btn_clicked_cb', ('^\s*\(void\)\s*e\s*;\s*' + (GateRx 'Enter admin PIN to clear trip' $admin 'clear_action') + '\s*NULL\)\s*;\s*$'), 'D2 trip clear gate', 'clear_action', 1),
+    @('ui_page_safety.c', 'clear_action', ('^\s*\(void\)\s*user\s*;\s*switch\s*\(ui_safety_clear_verdict\(&s_view,\s*ui_lcd_lock_has_role\(' + $admin + '\)\)\)\s*\{\s*case\s+UI_SAFETY_CLEAR_NOT_TRIPPED\s*:[^}]*?\breturn\s*;\s*case\s+UI_SAFETY_CLEAR_NEEDS_ADMIN\s*:[^}]*?\breturn\s*;\s*case\s+UI_SAFETY_CLEAR_SEND\s*:\s*default\s*:\s*break\s*;\s*\}[\s\S]*dashboard_safety_clear_trip\('), 'D2 trip clear re-check', 'dashboard_safety_clear_trip', 1)
 )
 
 # Review LCDFX2/DEVBREAK INFO: rules match code only. A gate call left inside a comment must not
 # satisfy a rule, so // and /* */ comments are blanked (newlines kept) before matching. String and
 # char literals are skipped so a "//" inside a string is not taken for a comment.
-function Remove-CComments([string]$s) {
-    $sb = New-Object System.Text.StringBuilder
-    $i = 0; $n = $s.Length
-    while ($i -lt $n) {
-        $c = $s[$i]
-        $d = if ($i + 1 -lt $n) { $s[$i + 1] } else { [char]0 }
-        if ($c -eq '/' -and $d -eq '/') {
-            while ($i -lt $n -and $s[$i] -ne "`n") { $i++ }
-        } elseif ($c -eq '/' -and $d -eq '*') {
-            $i += 2
-            while ($i -lt $n -and -not ($s[$i] -eq '*' -and $i + 1 -lt $n -and $s[$i + 1] -eq '/')) {
-                if ($s[$i] -eq "`n") { [void]$sb.Append("`n") }
-                $i++
-            }
-            $i += 2; [void]$sb.Append(' ')
-        } elseif ($c -eq '"' -or $c -eq "'") {
-            [void]$sb.Append($c); $i++
-            while ($i -lt $n -and $s[$i] -ne $c) {
-                if ($s[$i] -eq '\' -and $i + 1 -lt $n) { [void]$sb.Append($s[$i]); $i++ }
-                [void]$sb.Append($s[$i]); $i++
-            }
-            if ($i -lt $n) { [void]$sb.Append($c); $i++ }
-        } else { [void]$sb.Append($c); $i++ }
-    }
-    return $sb.ToString()
+# REVIEW_LCDFX7: translation phases are mimicked in compiler order: (1) backslash-newline is spliced out FIRST
+# (X1/X11/X12), (2) comments become one space, (3) adjacent string literals are concatenated (X6/X7/X15) so a
+# page name split as "saf" "ety" is seen as "safety". One regex pass each, fast enough for all of App.
+$script:litRe = '"(?:[^"\\\n]|\\.)*"'
+$script:chrRe = "'(?:[^'\\\n]|\\.)*'"
+$script:cmtEval = [System.Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    $v = $m.Value
+    if ($v[0] -eq '"' -or $v[0] -eq "'") { return $v }
+    $nl = $v.Split("`n").Count - 1
+    return ' ' + ("`n" * $nl)
 }
+$script:catEval = [System.Text.RegularExpressions.MatchEvaluator]{
+    param($m)
+    $v = $m.Value
+    if ($v[0] -eq "'") { return $v }
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($x in [regex]::Matches($v, $script:litRe)) { [void]$sb.Append($x.Value.Substring(1, $x.Value.Length - 2)) }
+    return '"' + $sb.ToString() + '"'
+}
+$script:blankEval = [System.Text.RegularExpressions.MatchEvaluator]{ param($m) '"' + ('_' * ($m.Value.Length - 2)) + '"' }
+function Remove-CComments([string]$s) {
+    $s = $s.Replace("\`n", '')
+    $s = [regex]::Replace($s, '//[^\n]*|/\*[\s\S]*?\*/|' + $script:litRe + '|' + $script:chrRe, $script:cmtEval)
+    [regex]::Replace($s, $script:chrRe + '|' + $script:litRe + '(?:\s*' + $script:litRe + ')*', $script:catEval)
+}
+# String literal contents replaced by '_' (same length), so an identifier or ';' inside a string never counts.
+function Blank-Strings([string]$s) { [regex]::Replace($s, $script:litRe, $script:blankEval) }
+# Tokens an ESP_LOG* statement must never contain (a call hidden in log arguments still executes: X15).
+$logTok = '\b(kiln_ui_show|ui_page_safety_open|ui_lcd_lock_run_gated|ui_lcd_lock_has_role|dashboard_safety_clear_trip|clear_action|\w+_open_apply|\w+_gated_\w+|\w+_unlocked_cb)\b'
+$script:logFails = New-Object System.Collections.ArrayList
 # REVIEW_LCDFX5 INFO-3: #warning/#error/#pragma/#line text may hold an unbalanced apostrophe that
 # would desynchronise the stripper, so those directive lines are blanked first.
-function Get-Code([string]$path) {
-    $t = (Get-Content -Raw -Path $path) -replace "`r", ''
-    $t = [regex]::Replace($t, '(?m)^[ \t]*#[ \t]*(warning|error|pragma|line)\b[^\n]*', '')
-    Remove-CComments $t
+# REVIEW_LCDFX7 P1/P7: ESP_LOG* statements are removed from the code (they cannot gate or open anything), unless
+# their arguments contain a trusted call/gate token, which fails the check (X15).
+function Get-CodeFromText([string]$raw, [string]$name) {
+    $t = $raw -replace "`r", ''
+    $t = $t.Replace("\`n", '')
+    $t = [regex]::Replace($t, '(?m)^[ \t]*(#|%:)[ \t]*(warning|error|pragma|line)\b[^\n]*', '')
+    $t = Remove-CComments $t
+    $bl = Blank-Strings $t
+    $ms = @([regex]::Matches($bl, '\bESP_LOG[IWEDVN]\s*\([^;]*\)\s*;'))
+    for ($k = $ms.Count - 1; $k -ge 0; $k--) {
+        $x = $ms[$k]
+        if ($x.Value -match $logTok) { [void]$script:logFails.Add("$name has '$($Matches[1])' inside an ESP_LOG* statement (a call hidden in log arguments still executes; make it a real statement so the rules see it)") }
+        $t = $t.Remove($x.Index, $x.Length)
+    }
+    return $t
 }
+function Get-Code([string]$path) { Get-CodeFromText (Get-Content -Raw -Path $path) (Split-Path $path -Leaf) }
 # Body of the function whose definition ends at the '{' at $open: brace-matched, string/char aware.
 function Get-BraceBody([string]$code, [int]$open) {
     $depth = 1; $i = $open + 1; $n = $code.Length
@@ -95,7 +118,8 @@ function Get-BraceBody([string]$code, [int]$open) {
 }
 # Definitions only (a type token at line start, then NAME(...) {), so prototypes and calls never count.
 function Get-FuncDefs([string]$code, [string]$name) {
-    @([regex]::Matches($code, '(?m)^(?:static\s+)?(?:inline\s+)?\w+[\s\*]+' + [regex]::Escape($name) + '\s*\([^;{}]*\)\s*\{'))
+    $at = '(?:__attribute__\s*\(\([^;{}]*?\)\)\s*)*'   # P6: attributes before/after the return type
+    @([regex]::Matches($code, '(?m)^(?:static\s+)?(?:inline\s+)?' + $at + '\w+[\s\*]+' + $at + [regex]::Escape($name) + '\s*\([^;{}]*\)\s*\{'))
 }
 function Get-FuncBody([string]$code, [string]$name) {
     $defs = Get-FuncDefs $code $name
@@ -105,7 +129,11 @@ function Get-FuncBody([string]$code, [string]$name) {
     return @{ ok = $true; body = $b; n = 1 }
 }
 # Occurrences of an identifier that are not a definition/prototype (not preceded by the word void).
-function Count-Uses([string]$code, [string]$name) { @([regex]::Matches($code, '(?<!void\s+)\b' + [regex]::Escape($name) + '\b')).Count }
+# P2: string literal contents are blanked first, so a name inside a log/format string is not a use.
+$script:blankCache = @{}
+function Count-Uses([string]$code, [string]$name) {
+    if (-not $script:blankCache.ContainsKey($code)) { $script:blankCache[$code] = Blank-Strings $code }
+    @([regex]::Matches($script:blankCache[$code], '(?<!void\s+)(?<!\)\)\s+)\b' + [regex]::Escape($name) + '\b')).Count }
 
 $fail = 0
 $codeCache = @{}
@@ -115,16 +143,44 @@ function Get-CachedCode([string]$file) {
 }
 
 # LOW-1: no macro (#define/#undef) anywhere under the App tree may rename a token the regexes trust.
-$trusted = 'ui_lcd_lock_run_gated|ui_lcd_lock_has_role|LCD_PIN_ROLE_\w+|kiln_ui_show|ui_page_safety_open|lcd_safety_strip_needs_pin|touch_cal_store_is_calibrated|lcd_touch_cal_\w*exit_target|\w+_open_apply|trip_strip_gated_open_cb|trip_strip_clicked_cb|' + (($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) } | Select-Object -Unique) -join '|')
+# REVIEW_LCDFX7: P4 only the three real role enumerators are trusted (LCD_PIN_ROLE_COUNT etc. are fine); P3 App/test
+# is host-test code (stubs are normal there, it is never linked into the firmware) and is excluded; X1-X4 the scan
+# runs on line-spliced text and tolerates comments between '#', 'define' and the name and the '%:' digraph; X8 a
+# macro whose replacement list mentions an opener/gate function (an alias) is refused too.
+$trusted = 'ui_lcd_lock_run_gated|ui_lcd_lock_has_role|LCD_PIN_ROLE_NONE|LCD_PIN_ROLE_USER|LCD_PIN_ROLE_ADMIN|kiln_ui_show|ui_page_safety_open|ui_page_safety_build|lcd_safety_strip_needs_pin|touch_cal_store_is_calibrated|lcd_touch_cal_\w*exit_target|\w+_open_apply|trip_strip_gated_open_cb|trip_strip_clicked_cb|' + (($rules | Where-Object { $_[4] } | ForEach-Object { [regex]::Escape($_[4]) } | Select-Object -Unique) -join '|')
+$openerTok = 'kiln_ui_show|ui_page_safety_open|ui_lcd_lock_run_gated'
 $appRoot = Split-Path (Split-Path $UiDir)
 if (-not (Test-Path (Join-Path $appRoot 'drivers'))) { $appRoot = $UiDir }
-foreach ($f in Get-ChildItem -Path $appRoot -Recurse -Include *.c, *.h -File) {
-    $raw = (Get-Content -Raw -Path $f.FullName) -replace "`r", ''
-    foreach ($mm in [regex]::Matches($raw, '(?m)^[ \t]*#[ \t]*(define|undef)[ \t]+(' + $trusted + ')\b')) {
+$appFiles = @(Get-ChildItem -Path $appRoot -Recurse -Include *.c, *.h -File | Where-Object { $_.FullName -notmatch '[\\/]test[\\/]' })
+$ws = '(?:[ \t]|/\*[^\n]*?\*/)*'
+$hash = '[ \t]*(?:#|%:)'
+foreach ($f in $appFiles) {
+    $raw = ((Get-Content -Raw -Path $f.FullName) -replace "`r", '').Replace("\`n", '')
+    foreach ($mm in [regex]::Matches($raw, '(?m)^' + $hash + $ws + '(define|undef)' + $ws + '(' + $trusted + ')\b')) {
         Write-Host "FAIL: L1-macro: $($f.Name) $($mm.Groups[1].Value)s '$($mm.Groups[2].Value)' (a macro can rename the gate tokens this check trusts; rename your macro)"; $fail++
     }
+    foreach ($mm in [regex]::Matches($raw, '(?m)^' + $hash + $ws + 'define' + $ws + '\w+(?:\([^)\n]*\))?[^\n]*\b(' + $openerTok + ')\b')) {
+        Write-Host "FAIL: L1-macro: $($f.Name) defines a macro mentioning '$($mm.Groups[1].Value)' (an alias hides the opener/gate call from this check)"; $fail++
+    }
 }
+# X5: a build-system compile definition can rename a gate token just like a #define. No CMake file may mention one.
+$cmakeFiles = @(Get-ChildItem -Path $appRoot -Recurse -Include CMakeLists.txt, *.cmake -File)
+$kilnRoot = Split-Path $appRoot
+if ($kilnRoot -and (Test-Path $kilnRoot)) { $cmakeFiles += @(Get-ChildItem -Path $kilnRoot -File -Include CMakeLists.txt, *.cmake -ErrorAction SilentlyContinue) }
+foreach ($f in $cmakeFiles) {
+    $ct = Get-Content -Raw -Path $f.FullName
+    foreach ($mm in [regex]::Matches($ct, '\b(' + $openerTok + '|ui_lcd_lock_has_role|LCD_PIN_ROLE_\w+|\w+_open_apply)\b')) {
+        Write-Host "FAIL: L1-cmake: $($f.FullName.Substring($kilnRoot.Length)) mentions '$($mm.Groups[1].Value)' (a compile definition can rename a gate token; this check only reads C sources)"; $fail++
+    }
+}
+# X19: the role enum is pinned: NONE must stay 0 and USER/ADMIN must follow, in order, with no explicit values.
+$authH = Join-Path $UiDir 'lcd_auth_state.h'
+if (Test-Path $authH) {
+    $ah = Get-Code $authH
+    if ($ah -notmatch 'typedef\s+enum\s*\{\s*LCD_PIN_ROLE_NONE\s*=\s*0\s*,\s*LCD_PIN_ROLE_USER\s*,\s*LCD_PIN_ROLE_ADMIN\s*,?\s*\}\s*lcd_pin_role_t\s*;') { Write-Host "FAIL: L1-enum: lcd_auth_state.h lcd_pin_role_t is not exactly { NONE = 0, USER, ADMIN } (an explicit value can make USER equal NONE)"; $fail++ }
+} else { Write-Host "FAIL: L1-enum: lcd_auth_state.h missing"; $fail++ }
 
+$regChecked = @{}
 foreach ($r in $rules) {
     $path = Join-Path $UiDir $r[0]
     if (-not (Test-Path $path)) { Write-Host "FAIL: $($r[3]): missing $($r[0])"; $fail++; continue }
@@ -132,6 +188,22 @@ foreach ($r in $rules) {
     $fb = Get-FuncBody $txt $r[1]
     if (-not $fb.ok) { Write-Host "FAIL: $($r[3]): $($r[0]) has $($fb.n) definitions of $($r[1])() (expected exactly 1; if you renamed it, edit its row in tools/check_lcd_admin_gates.ps1)"; $fail++; continue }
     if ($fb.body -notmatch $r[2]) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) lacks the gate matching /$($r[2])/"; $fail++ }
+    elseif ($r[2].StartsWith('ui_lcd_lock_run_gated')) {
+        # MED-1 (X13): a bare gate row is anchored to the function body: nothing before the gate may return/jump
+        # (a call plus `return;` ahead of an intact gate leaves the gate as dead code) or call anything.
+        $pre = $fb.body.Substring(0, [regex]::Match($fb.body, $r[2]).Index)
+        $pre = [regex]::Replace($pre, '\bif\s*\([^;{}]*\)\s*return\s*;', ' ')   # single-statement refusal guards are fine
+        while ($pre -match '\{[^{}]*\}') { $pre = [regex]::Replace($pre, '\{[^{}]*\}', ' ') }   # nested blocks (early-out branches) are fine
+        if ($pre -match '\b(return|goto)\b' -or $pre -match '\b(?!if\b|while\b|for\b|switch\b|sizeof\b|snprintf\b|lv_event_get_\w+|touch_cal_store_is_calibrated\b)\w+\s*\(') { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) runs code before the gate at top level that returns or calls something ('$($pre.Trim())'); the gate must be the first call (edit the row if this is intended)"; $fail++ }
+    }
+    # MED-1 (X14): a gated event callback must be registered, and ONLY through lv_obj_add_event_cb (no ungated twin
+    # registered instead, no `(void)cb;` dummy reference keeping the dead gated copy alive).
+    if ($r[1] -match '_cb$' -and $r[1] -notmatch '_unlocked_cb$|^refresh_cb$|^open_decide_gated_cb$|^touch_cal_nav_cb$' -and -not $regChecked.ContainsKey($r[0] + ':' + $r[1])) {
+        $regChecked[$r[0] + ':' + $r[1]] = 1
+        $nu = Count-Uses $txt $r[1]
+        $nr = @([regex]::Matches($txt, '(?:\blv_obj_add_event_cb\s*\(\s*[^,;()]+,|\.on_confirm\s*=)\s*' + [regex]::Escape($r[1]) + '\s*,')).Count
+        if ($nr -lt 1 -or $nr -ne $nu) { Write-Host "FAIL: $($r[3]): $($r[1])() in $($r[0]) has $nu use(s) outside its definition but $nr lv_obj_add_event_cb registration(s); the gated callback must be what the widget registers, and nothing else may reference it"; $fail++ }
+    }
     if ($r[4]) {
         $u = Count-Uses $txt $r[4]
         if ($u -ne $r[5]) { Write-Host "FAIL: $($r[3]): $($r[4]) is referenced $u time(s) in $($r[0]) outside its definition (expected $($r[5]): only the gated call; an ungated call or registration bypasses the gate)"; $fail++ }
@@ -148,7 +220,7 @@ foreach ($r in $rules) {
 # opener (kiln_ui_show / ui_page_safety_open) appears only in its own *_open_apply, and each *_open_apply
 # identifier appears exactly twice (definition + its one gated call).
 $cfg = Get-CachedCode "ui_page_config.c"
-if ($cfg -match '(?m)^\s*#\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C3: ui_page_config.c contains a preprocessor conditional (dead code can hide an ungated twin; if one is needed, extend this check)"; $fail++ }
+if ($cfg -match '(?m)^\s*(?:#|%:)\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C3: ui_page_config.c contains a preprocessor conditional (dead code can hide an ungated twin; if one is needed, extend this check)"; $fail++ }
 $navCalls = @([regex]::Matches($cfg, '\bbuild_nav_item\s*\(')).Count - @([regex]::Matches($cfg, '\bbuild_nav_item\s*\(\s*(const\s+)?lv_obj_t')).Count   # minus definition and prototypes
 $navRe = @([regex]::Matches($cfg, '\bbuild_nav_item\(\s*\w+\s*,\s*"[^"]*"\s*,\s*(\w+)\s*\)'))
 if ($navRe.Count -ne $navCalls) { Write-Host "FAIL: C3: $navCalls build_nav_item call(s) but only $($navRe.Count) in a recognised form (cast, non-literal label or array entry?)"; $fail++ }
@@ -200,7 +272,7 @@ if (@([regex]::Matches($cfg, '\bkiln_ui_show\s*\(')).Count -ne 6) { Write-Host "
 # LCDFX4 LOW-4 / LCDFX5 LOW-3: the Home trip strip is the other way into Safety; pin its whole handler and the
 # opener's references.
 $homeSrc = Get-CachedCode "ui_page_home.c"
-if ($homeSrc -match '(?m)^\s*#\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C4: ui_page_home.c contains a preprocessor conditional (dead code can hide an ungated twin of trip_strip_clicked_cb)"; $fail++ }
+if ($homeSrc -match '(?m)^\s*(?:#|%:)\s*(if|ifdef|ifndef|elif|else)\b') { Write-Host "FAIL: C4: ui_page_home.c contains a preprocessor conditional (dead code can hide an ungated twin of trip_strip_clicked_cb)"; $fail++ }
 $hf = Get-FuncBody $homeSrc 'trip_strip_clicked_cb'
 $hpin = '^\s*\(void\)\s*\w+\s*;\s*if\s*\(s_ui_home_trip_strip_is_safety\)\s*\{\s*if\s*\(lcd_safety_strip_needs_pin\(ui_lcd_lock_has_role\(LCD_PIN_ROLE_USER\)\)\)\s*\{\s*ui_lcd_lock_run_gated\("[^"]*",\s*LCD_PIN_ROLE_USER,\s*trip_strip_gated_open_cb,\s*NULL\)\s*;\s*\}\s*else\s*\{\s*trip_strip_gated_open_cb\(NULL\)\s*;\s*\}\s*\}\s*$'
 # Log statements cannot open a page, so they may be added without editing this check (LCDFX5 INFO-1).
@@ -222,8 +294,20 @@ $showNonLiteralFiles = 'ui_topbar.c', 'ui_page_touch_cal.c', 'kiln_ui.c'        
 $backAllow = @('ui_page_network_manage.c:network', 'ui_page_profile_builder_zones.c:profiles')   # in-flow Back from ADMIN-gated pages
 $backNonLiteralFiles = 'ui_page_profile_detail.c', 'ui_page_profile_picker.c', 'ui_page_safety.c'   # in-flow back targets
 $seen = @{}
-foreach ($f in Get-ChildItem -Path $UiDir -Include *.c, *.h -Recurse -File) {
+# REVIEW_LCDFX7 X9: the whole App tree (minus host-test code) is inventoried, not only drivers/ui. A file that
+# mentions none of the opener tokens is skipped before the (slower) comment/concatenation pass.
+$openerPre = 'kiln_ui_show|ui_page_safety_open|back_page|ui_page_safety_build|clear_trip|##'
+$safetyBuildRefs = 0
+foreach ($f in $appFiles) {
+    if ((Get-Content -Raw -Path $f.FullName) -notmatch $openerPre) { continue }
     $code = Get-Code $f.FullName; $nm = $f.Name
+    if ($nm -notin 'ui_page_safety.c', 'ui_page_safety.h') {
+        $sb = @([regex]::Matches($code, '\bui_page_safety_build\b')).Count
+        if ($sb -gt 0 -and $nm -ne 'kiln_ui.c') { Write-Host "FAIL: L4: $nm references ui_page_safety_build (only kiln_ui.c's single kiln_ui_register_page(`"safety`", ...) may; a second registration is a second name for the Safety page)"; $fail++ }
+        if ($nm -eq 'kiln_ui.c') { $safetyBuildRefs = $sb; if ($sb -ne 1 -or $code -notmatch 'kiln_ui_register_page\(\s*"safety"\s*,\s*ui_page_safety_build\s*\)') { Write-Host "FAIL: L4: kiln_ui.c must reference ui_page_safety_build exactly once, as kiln_ui_register_page(`"safety`", ui_page_safety_build) (found $sb)"; $fail++ } }
+        if ($nm -ne 'ui_page_safety.c' -and $f.FullName.StartsWith($UiDir) -and $code -match '\b\w*clear_trip\w*\s*\(') { Write-Host "FAIL: L4: $nm calls a clear_trip function '$($Matches[0])' (the LCD trip clear is only ui_page_safety.c's gated clear_action; non-UI callers belong in http/ or bridge code, not under App/drivers/ui)"; $fail++ }
+    }
+    if ($f.FullName.StartsWith($UiDir) -and $code -match '##') { Write-Host "FAIL: L4: $nm uses the ## token-paste operator (it can build an opener name this check cannot see)"; $fail++ }
     foreach ($mm in [regex]::Matches($code, 'kiln_ui_show\s*\(\s*"(' + $userPages + ')"')) { $k = $nm + ':' + $mm.Groups[1].Value; $seen[$k] = 1 + [int]$seen[$k] }
     if ($nm -ne 'ui_page_safety.c') {
         foreach ($mm in [regex]::Matches($code, '\bkiln_ui_show\s*\(\s*(?!")(?!const\b)([^\s)])')) { if ($nm -notin $showNonLiteralFiles) { Write-Host "FAIL: L4: $nm calls kiln_ui_show with a non-literal page (only $($showNonLiteralFiles -join ', ') may)"; $fail++ } }
@@ -238,6 +322,8 @@ foreach ($f in Get-ChildItem -Path $UiDir -Include *.c, *.h -Recurse -File) {
 }
 foreach ($k in $seen.Keys) { if ($seen[$k] -ne [int]$showAllow[$k]) { Write-Host "FAIL: L4: $k opens a USER page $($seen[$k]) time(s), allowlist says $([int]$showAllow[$k]) (add the gate, then an allowlist entry in this check)"; $fail++ } }
 foreach ($k in $showAllow.Keys) { if (-not $seen.ContainsKey($k)) { Write-Host "FAIL: L4: allowlisted opener $k no longer present (update the allowlist)"; $fail++ } }
+
+foreach ($lf in ($script:logFails | Select-Object -Unique)) { Write-Host "FAIL: L-log: $lf"; $fail++ }
 
 # L9: lock init must precede the touch-cal early return.
 $kui = Get-CachedCode "kiln_ui.c"
