@@ -53,10 +53,54 @@ assert(out.join(',') === 'z0_kp=,z0_driftperiod=30,z0_name=,thermo_count=',
   'blank optional fields dropped, required blanks and set values kept: ' + out.join(','));
 assert(omit(['z0_coilpower=','z1_hystc= ','z0_minons=','z0_minoffs=','z0_coilpower=5']).join(',') === 'z0_coilpower=5',
   'blank coilpower/hystc/minons/minoffs dropped (keep stored), set value kept');
-// BENCHFX9 LOW-1: ct_mask/thermo_mask are omit-DEFAULTED by the firmware, so a blank must be KEPT in the
-// POST (dropping it would silently default the mask instead of refusing).
-assert(omit(['z0_ct_mask=', 'z0_thermo_mask=']).join(',') === 'z0_ct_mask=,z0_thermo_mask=',
-  'blank ct_mask/thermo_mask entries are kept, not dropped');
+// BENCHFX9 LOW-1 / BENCHFX10 LOW-2: exhaustive, independent of ZONE_OPTIONAL_KEY_RE. The firmware
+// omit-PRESERVES exactly these keys (zones_http_client.ZONE_OMIT_PRESERVED_*), so a blank for one may be
+// dropped; every other blank (ct_mask/thermo_mask are omit-DEFAULTED, the rest required) must be KEPT.
+const FW_DROPPABLE = ['wrongdirwindow', 'wrongdirrate', 'offsettle', 'runawayrate', 'runawaymargin', 'driftperiod',
+  'debounce', 'frozenwindow', 'fuzzy_strength', 'coupling_diag_k_dc', 'easeoffmult', 'approachratecap', 'errorband',
+  'rateband', 'progressband', 'coilpower', 'hystc', 'minons', 'minoffs', 'k', 'tau', 'deadtime',
+  'coupling_c0', 'coupling_c1', 'coupling_c2'];
+const MUST_KEEP = ['ct_mask', 'thermo_mask', 'kp', 'ki', 'kd', 'name', 'relay_mask', 'xzone', 'maxtemp', 'mintemp',
+  'cal', 'ramp', 'sanity', 'mode', 'window', 'minon', 'minoff', 'timingprofile', 'zonetype', 'tctype', 'failsafe',
+  'settings_source', 'driftperiodx', 'kk', 'coupling_c', 'coupling_cx'];
+const gen = [];
+for (let z = 0; z < 3; z++) {
+  FW_DROPPABLE.concat(MUST_KEEP).forEach(function (k) {
+    ['', '  ', '5', '0'].forEach(function (v) { gen.push('z' + z + '_' + k + '=' + v); });
+  });
+}
+['thermo_count=', 'relay_count=', 'relay1_name=', 'expected_generation=', 'tp0_name='].forEach(function (e) { gen.push(e); });
+function indepDrops(p) {
+  const mm = /^z\d+_(.*?)=(.*)$/.exec(p);
+  return !!mm && FW_DROPPABLE.indexOf(mm[1]) >= 0 && mm[2].trim() === '';
+}
+assert(omit(gen).join('\n') === gen.filter(function (p) { return !indepDrops(p); }).join('\n'),
+  'omit() drops exactly the blank omit-preserved keys, over every zone 0..2 and every key');
+for (let z = 0; z < 3; z++) {
+  assert(omit(['z' + z + '_ct_mask=', 'z' + z + '_thermo_mask=']).length === 2, 'blank ct_mask/thermo_mask kept for zone ' + z);
+}
+// BENCHFX10 LOW-1: run the REAL tail of the Save handler (from the in-flight marker through the fetch call)
+// against a mocked fetch and check the POST body itself. Edits BEFORE this point are pinned in
+// test_zone_omit_preserved_drift.py (every use of `params` must be an allowed form).
+const sIdx = ZONES.indexOf('  var savedZonesEditSeq');
+const eIdx = ZONES.indexOf('}).then(function (r) {', sIdx);
+assert(sIdx > 0 && eIdx > sIdx, 'found the Save handler fetch tail');
+let posted = null;
+const mockFetch = function (url, opts) { posted = { url: url, opts: opts }; return {}; };
+const tail = new Function('params', 'current', 'saveBtnEl', 'zonesEditSeq', 'msg', 'fetch', 'omitBlankOptionalParams',
+  ZONES.slice(sIdx, eIdx) + '});');
+const saveParams = [];
+for (let z = 0; z < 3; z++) saveParams.push('z' + z + '_thermo_mask=', 'z' + z + '_ct_mask=', 'z' + z + '_kp=1', 'z' + z + '_driftperiod=');
+tail(saveParams.slice(), { generation: 7 }, { disabled: false }, 0, {}, mockFetch, omit);
+const bodyParts = posted ? posted.opts.body.split('&') : [];
+assert(!!posted && posted.url === '/api/zones' && posted.opts.method === 'POST', 'Save posts to /api/zones');
+for (let z = 0; z < 3; z++) {
+  assert(bodyParts.indexOf('z' + z + '_ct_mask=') >= 0 && bodyParts.indexOf('z' + z + '_thermo_mask=') >= 0,
+    'POST body keeps blank ct_mask/thermo_mask for zone ' + z);
+  assert(bodyParts.indexOf('z' + z + '_driftperiod=') < 0 && bodyParts.indexOf('z' + z + '_kp=1') >= 0,
+    'POST body drops blank optional, keeps set value for zone ' + z);
+}
+assert(bodyParts[bodyParts.length - 1] === 'expected_generation=7', 'POST body carries expected_generation');
 assert(/saveBtnEl\.disabled = true;[\s\S]*?omitBlankOptionalParams\(params\)[\s\S]*?fetch\('\/api\/zones'/.test(ZONES),
   'Save disables the button and filters params before the POST');
 assert(/\.then\(function \(r\) \{\s*if \(saveTimer\) clearTimeout\(saveTimer\);\s*saveBtnEl\.disabled = false;/.test(ZONES), 'button re-enabled on response');

@@ -329,13 +329,35 @@ class ZoneOmitPreservedDriftTest(unittest.TestCase):
         self.assertEqual(len(re.findall(r"\.\s*filter\s*\(", body)), 1, "exactly one .filter in the function")
         self.assertEqual(len(re.findall(r"\bZONE_OPTIONAL_KEY_RE\s*\.\s*(?:compile|lastIndex)", page)), 0,
                          "ZONE_OPTIONAL_KEY_RE must not be rewritten in place")
-        # Call site: one call, and no second filter on params between it and the POST.
+        # Call site (BENCHFX10 LOW-1): every use of `params` in the Save handler, from its declaration to
+        # the POST, must be an allowed form; anything else (a filter, an alias, pop/splice/length, a second
+        # assignment, a filtered body:) could drop a blank mask entry from the real POST body. The node test
+        # (test_host_refusal_pages.js) also runs the real fetch tail against a mocked fetch.
         self.assertEqual(len(re.findall(r"=\s*omitBlankOptionalParams\s*\(\s*params\s*\)", page)), 1,
                          "exactly one `params = omitBlankOptionalParams(params)` call")
-        call = re.search(r"omitBlankOptionalParams\(params\);(.*?)fetch\('/api/zones'", page, flags=re.S)
-        self.assertIsNotNone(call, "Save handler call site not found")
-        self.assertIsNone(re.search(r"\bparams\s*=\s*params\s*\.|\bparams\s*\.\s*(?:filter|splice|length\s*=)",
-                                    call.group(1)), "no second filter on params at the call site")
+        self.assertEqual(len(re.findall(r"fetch\(\s*['\"]/api/zones['\"]\s*,\s*\{\s*method:\s*'POST'", page)), 1,
+                         "exactly one POST to /api/zones in the page")
+        h0 = page.index("document.getElementById('saveBtn').addEventListener('click'")
+        h1 = page.index("}).then(", page.index("fetch('/api/zones'", h0))
+        rest = page[h0:h1]
+        for allowed, expect in ((r"var params = \[", 1), (r"\bparams\.push\(", None),
+                                (r"blankGuardLabels\(params, guardFieldHidden\)", 1),
+                                (r"\bparams = omitBlankOptionalParams\(params\);", 1),
+                                (r"body: params\.join\('&'\),", 1)):
+            if expect is not None:
+                self.assertEqual(len(re.findall(allowed, rest)), expect, f"Save handler: expected {expect} x {allowed}")
+            rest = re.sub(allowed, "", rest)
+        self.assertIsNone(re.search(r"\bparams\b", rest),
+                          "Save handler uses `params` other than push / declaration / blankGuardLabels / the one "
+                          "omitBlankOptionalParams call / body: params.join('&')")
+        self.assertIsNone(re.search(r"\b(?:blankGuardLabels|omitBlankOptionalParams)\s*=(?!=)", page),
+                          "helpers must not be reassigned")
+        # BENCHFX10 INFO-1: no other mention of the regex (window[...] swaps) outside its declaration and
+        # omitBlankOptionalParams; comments excluded.
+        code = re.sub(r"/\*.*?\*/", "", page, flags=re.S)
+        code = code.replace(_js_function_body(page, "omitBlankOptionalParams") or "\0", "")
+        self.assertEqual(len(re.findall(r"ZONE_OPTIONAL_KEY_RE", code)), 1,
+                         "ZONE_OPTIONAL_KEY_RE must appear only in its declaration and omitBlankOptionalParams")
 
     def test_guard_keys_stripped_from_body(self):
         body = "z0_runawaymargin=12.2&z0_xzone=5.0&z0_debounce=3&z0_kp=1&z0_zonetype=1"
