@@ -154,3 +154,15 @@ point is a parse failure.
 B1, B1b and R8 also fail `test_web_review_fixes.js`. C3 and R13 also fail
 `test_unsaved_guard_pages.js`. In every case the `test_host_refusal_pages.js` assertion above
 fired as well.
+
+## Fixed (benchfx13, ef9e52628)
+
+- LOW-1 fixed: `test_zones_save_masks.js` boots `zones_page.html` through `_page_vm.js`, clicks Save with one
+  all-unchecked zone and asserts the POST carries `z0_thermo_mask=0`, `z0_ct_mask=0`, `z0_relay_mask=0`. The lexical
+  pin stays. Re-run of R1, R2, R3, R4, R7 against `check_page_js_tests.ps1`: all CAUGHT by a node assertion
+  (R1-R4 by `POST body carries z0_ct_mask=0`; R7 also by `helpers run on a frozen no-blank array`).
+- INFO-1 fixed: the helpers also run on a frozen, realistic no-blank array in `test_host_refusal_pages.js`.
+- INFO-2 fixed: `tools/check_zone_omit_preserved_drift.ps1` runs the pytest drift test in the standing suite
+  (R9 is now also caught by the behavioural test only if it drops a mask; the drift test's `params` whitelist covers the rest).
+- INFO-3 fixed: comment names the parsing helper's real location and lists `name`.
+- INFO-4: no change needed.
