@@ -894,3 +894,79 @@ class AuxC03ReviewFx3Test(unittest.TestCase):
                 um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h"):
             self.assertIsNotNone(C._default_zone_mask_fns({"srv": FakeSrv()}))
         self.assertEqual(len(n), 1)
+
+
+class AuxC03RestoreGenerationTest(unittest.TestCase):
+    """MED-1/LOW-1/LOW-2/INFO-1 of REVIEW_AUXC03FX3: REAL build_post_body against a board that enforces
+    expected_generation like zones_http_post.c:362-379."""
+
+    def _board(self, fail_post_after_commit=False):
+        import copy
+        import json
+        import pathlib
+        import urllib.parse
+        import unittest.mock as um
+        from kilnctrl import zones_http_client as zhc
+        cap = json.loads((pathlib.Path(__file__).parent / "fixtures" / "zones_get_capture.json").read_text())
+        cap["generation"] = 5
+        state = {"cap": cap, "posts": []}
+
+        def get_zones(host):
+            return copy.deepcopy(state["cap"])
+
+        def post_zones(host, body):
+            q = dict(urllib.parse.parse_qsl(body, keep_blank_values=True))
+            state["posts"].append(q)
+            eg = q.get("expected_generation")
+            if eg is not None and int(eg) != state["cap"]["generation"]:
+                raise zhc.ZonesHttpError("409 zones_config_stale")
+            if "z0_relay_mask" in q:
+                state["cap"]["zones"][0]["relay_mask"] = int(q["z0_relay_mask"])
+            state["cap"]["generation"] += 1
+            if fail_post_after_commit:
+                raise zhc.ZonesHttpError("500 could not be saved to flash")
+            return "ok"
+
+        patches = [um.patch.object(zhc, "get_zones", side_effect=get_zones),
+                   um.patch.object(zhc, "post_zones", side_effect=post_zones),
+                   um.patch("kilnctrl.mcp_server_aux._resolve_host", return_value="h")]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        pair = C._default_zone_mask_fns({"srv": FakeSrv()})
+        return state, pair
+
+    def test_restore_after_committed_write_uses_current_generation(self):
+        state, (_post, restore) = self._board()
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        # a committed bad write bumps the generation and changes the mask
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        state["cap"]["generation"] += 1
+        self.assertTrue(restore())
+        self.assertEqual(state["cap"]["zones"][0]["relay_mask"], orig)
+        self.assertEqual(state["posts"][-1]["expected_generation"], "6")
+
+    def test_stale_generation_is_refused_by_fake_board(self):
+        from kilnctrl import zones_http_client as zhc
+        state, _ = self._board()
+        body = zhc.build_post_body(dict(state["cap"], generation=4), {})
+        with self.assertRaises(zhc.ZonesHttpError):
+            zhc.post_zones("h", body)
+
+    def test_post_error_with_matching_readback_counts_as_restored(self):
+        state, (_post, restore) = self._board(fail_post_after_commit=True)
+        orig = state["cap"]["zones"][0]["relay_mask"]
+        state["cap"]["zones"][0]["relay_mask"] = orig | 8
+        self.assertTrue(restore())
+        self.assertIn("restore POST error", restore.detail)
+
+    def test_save_failure_with_failed_restore_registers_teardown_once(self):
+        ctx = AuxC03ReviewFx3Test._ctx(self, lambda: (None, 'error: POST /api/zones failed (HTTP 503): '
+                                       'settings storage (cfg) not mounted - x'), lambda: False)
+        r = C._case_ax_c03(ctx)
+        self.assertEqual(r.verdict, Verdict.FAIL)
+        self.assertNotIn("then the save failed", r.reason)
+        self.assertIn("before any save", r.reason)
+        self.assertTrue(ctx["_tainted"])
+        self.assertIn("_c03_restore_fn", ctx)
+        self.assertEqual(ctx["teardown_hooks"].count(C.c03_teardown_hook), 1)

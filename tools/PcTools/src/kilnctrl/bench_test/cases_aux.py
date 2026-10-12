@@ -466,14 +466,30 @@ def _default_zone_mask_fns(ctx: dict):
 
     def restore():
         """Re-POST the pre-write GET snapshot (relay_mask and any collateral field the first write
-        changed), then confirm by re-fetch that nothing differs from that snapshot."""
+        changed) under the CURRENT generation, then judge by a read-back that nothing differs from
+        that snapshot. A POST error does not skip the read-back: error + matching read-back counts as
+        restored (the error is noted in restore.detail)."""
+        restore.detail = ""
+        err = None
         try:
+            # Every commit bumps the generation, so the snapshot's expected_generation is stale by now
+            # (409 zones_config_stale, nothing written): take the live one just before the POST.
+            live = zhc.get_zones(host)
+            body = zhc.build_post_body(dict(snapshot, generation=live.get("generation")), {})
             # omit-preserved fields stay out of the body so the firmware keeps them bit-exact (MED-1)
-            zhc.post_zones(host, zhc.strip_omit_preserved(zhc.build_post_body(snapshot, {})))
+            zhc.post_zones(host, zhc.strip_omit_preserved(body))
+        except Exception as e:  # noqa: BLE001
+            err = e
+        try:
             after = zhc.get_zones(host)
-            return not _zone_collateral_diff(snapshot, after, zone, set())
+            ok = not _zone_collateral_diff(snapshot, after, zone, set())
         except Exception:  # noqa: BLE001
             return False
+        if err is not None:
+            restore.detail = f"restore POST error ({str(err)[:80]}), read-back " + ("matches" if ok else "differs")
+        return ok
+
+    restore.detail = ""
 
     return post, restore
 
@@ -545,9 +561,10 @@ def _case_ax_c03(ctx: dict) -> CaseResult:
             ctx.setdefault("teardown_hooks", [])
             if c03_teardown_hook not in ctx["teardown_hooks"]:
                 ctx["teardown_hooks"].append(c03_teardown_hook)
-        return CaseResult(Verdict.FAIL, reason="firmware accepted the mask past the aux check, then the save failed: "
+        return CaseResult(Verdict.FAIL, reason="firmware let the mask past the aux check and answered a save/storage refusal "
+                          "(post-commit save failure, or the cfg-unmounted 503 sent before any save): "
                           f"{_fw_detail(text)[:100]}; original mask restore {'ok' if restored else 'NOT confirmed'} "
-                          "-- run tainted", observed={"status": status, "restored": restored})
+                          f"{getattr(rfn, 'detail', '') or ''} -- run tainted", observed={"status": status, "restored": restored})
     if status == 409:
         detail = _fw_detail(text)
         # PASS only on the owner text itself (zones_http_post.c:663), matched against the response
