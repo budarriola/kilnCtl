@@ -159,8 +159,8 @@ blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c
 489bc22c (not backtick-quoted here, per this repo's superseded-citation
 convention), since superseded by a later unrelated edit; the file still holds the same
 `heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE);` call this negative test
-targeted, so the citation is refreshed to
-blob:firmware/KilnFW/App/drivers/control/profile_executor_relay_io.c`60c6b410`
+targeted, so the byte-identity pin is dropped (2026-10-11): the claim is only that
+profile_executor_relay_io.c still holds that call, not that its blob is unchanged
 (citation refreshed again 2026-09-24 after 540b2d72 added the per-zone claim release, 2026-10-05 after spare-relay WP-3 added the aux functions, and 2026-10-07 after the on/off min_off_s seed helper, and 2026-10-09 after later unrelated edits, and again 2026-10-09 after 45c2b4de and 8c287553; the heat_enable_release() call this test targets is unchanged))
 and, at the time of this audit, 552f8a05 for `profile_executor_status.c`
 -- that file has since changed, so its blob id is no longer cited as

@@ -70,8 +70,8 @@ change the finding, which was that the restored file's hash matched its
 own pre-sabotage hash, not any particular fixed value. That refreshed
 citation is itself now superseded by a further unrelated edit, so it is
 refreshed again:
-blob:firmware/SaftyFW/src/tasks/link_frame.c`b6257d5b` (citation refreshed
-2026-09-24).
+blob:firmware/SaftyFW/src/tasks/link_frame.c`e33e0f44` (citation refreshed
+2026-10-11 after a364d1703).
 
 **Forced full rebuild:** deleted `firmware/SaftyFW/build` entirely (not a
 reconfigure-in-place) and re-ran the check from scratch. **PASS**, exit 0,

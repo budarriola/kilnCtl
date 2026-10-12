@@ -119,7 +119,7 @@ build". MIN_COMPATIBLE = 7 itself is still right.
 `tools/PcTools/tests/test_kilnlink_commonfw_vectors.py` re-encodes them with
 `kilnlink_codec.py`, so they are the one C<->Python cross-check. The V3 forms
 have none:
-- CLEAR_TRIP V3 is pinned in Python by a literal (`0a08000511`) that matches
+- CLEAR_TRIP V3 is pinned in Python by a literal (0a08000511) that matches
   the C vector, so it is covered in practice, but by hand-copy.
 - DIAG V3: the C test `test_vector_boot_id` checks only bytes 0, 30 and 31 of
   32; the Python test checks length and bytes 30/31. Bytes 1..29 are shared
@@ -131,7 +131,7 @@ have none:
 
 Fix: add one V3 vector to each JSON (e.g. the existing C vectors) so the
 PcTools vector test covers them, and pin the absent-trip_seq case (encode
-`{"trip_mask":8,"pico_boot_id":0x11}` -> `0a08000011`).
+`{"trip_mask":8,"pico_boot_id":0x11}` -> 0a08000011).
 
 ### LOW-3: stale `safety_guards.h` comments for reason 4
 

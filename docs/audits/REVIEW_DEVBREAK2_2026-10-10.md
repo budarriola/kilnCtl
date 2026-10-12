@@ -160,7 +160,7 @@ whole return expression). Fix the stale comment at main.c line 214.
 The doc text refreshed in 10ddf02f4/f65950541 says "line 505 still holds
 heat_enable_release(HEAT_ENABLE_CLAIMANT_PROFILE)" for
 profile_executor_relay_io.c. At the tip that call is at line 1106. The blob
-id (`60c6b410`) is right; the line number is not.
+id (60c6b410, a superseded value) is right; the line number is not.
 
 Scenario: a reader checks line 505, finds something else, and either distrusts
 the citation or "fixes" the wrong code.
