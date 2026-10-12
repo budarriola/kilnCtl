@@ -248,6 +248,13 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void) { return CreateSemaphore(NULL, 0,
 SemaphoreHandle_t xSemaphoreCreateMutex(void) { return CreateSemaphore(NULL, 1, 1, NULL); }
 BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
 {
+    if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= 30000 && g_fr_flash_write_block) {
+        // Scaled writer-timeout wait: start the (shrunk) clock only once the writer thread is
+        // actually parked in flash, so a descheduled writer under load is not declared wedged early.
+        for (int i = 0; i < 10000 && g_fr_flash_blocked_n < 1; i++) {
+            Sleep(1);
+        }
+    }
     DWORD ms = ticks == portMAX_DELAY ? INFINITE : (DWORD)(ticks / (TickType_t)g_fr_time_div);
     return WaitForSingleObject((HANDLE)s, ms) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
 }
