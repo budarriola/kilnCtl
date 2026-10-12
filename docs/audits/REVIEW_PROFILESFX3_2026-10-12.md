@@ -17,6 +17,15 @@ Reviewed at `3bee3a583` in worktree `C:\wt\rvpfx3_8d5p4j`. No code was changed.
 | INFO-1 | INFO | web LOW-1 | No test covers the case where the banner should show (generation moved and dirty after a failed decide). The logic is right. |
 | INFO-2 | INFO | web | The page still ignores `saved:true` on a failed decide. A user can press Save as again and make a duplicate. This was there before. |
 
+## Fix status
+
+| ID | Status | Fix |
+|----|--------|-----|
+| MED-1 | fixed in f5939a4c3 | `profile_live_http_client._error_info` reads the body once; `saved` must be literally true with an int id. Non-seekable fakes plus loopback `http.server` tests. Negtested (seek parse, dropped check, truthy check: all CAUGHT). |
+| LOW-1 | fixed in f5939a4c3 | `PROFILES_SAVE_ERR_MSG_LEN` (128) in `profiles_store.h`; the LCD save dialog uses it; host test checks the real caller. Negtested (CAUGHT by assertions). Stack: +64 B in the LVGL task, not measured on hardware. |
+| INFO-1 | fixed in f5939a4c3 | New scenario in `test_live_profile_action_errors.js`. Negtested (CAUGHT). |
+| INFO-2 | open | Web page still ignores `saved:true` on a failed decide. |
+
 None of the changes is HIGH. LOW-1 (web), H3b, H5b and H7 are correct and pin real behavior. Negtest results are below.
 
 ## 1. LOW-1 (web): keeping lastGen after a failed decide
