@@ -472,6 +472,8 @@ extern "C" {
  * must not silently loosen along with it. safety_link_is_stale() below is
  * the pure, host-testable comparison against this constant. */
 #define SAFETY_LINK_STALE_MS 1500u
+/* Freshness bound for a cached DIAG itself (two 2000 ms DIAG periods plus jitter); trip_is_test uses it. */
+#define SAFETY_LINK_DIAG_FRESH_MS 4500u
 
 /* LINK_PROTOCOL.md sec 8 / ROADMAP.md M6: 30 s of continued silence aborts a
  * running firing (distinct from, and much larger than, SAFETY_LINK_STALE_MS
@@ -1125,6 +1127,9 @@ typedef struct {
      * why the two are not conflated). 0 if trip_event_ever_received is
      * false. */
     uint32_t trip_event_age_ms;
+    /* TRIPFX3 LOW-B: age of the last DIAG frame itself (age_ms is the STATUS frame's). 0 until
+     * diag_ever_received. */
+    uint32_t diag_frame_age_ms;
 } safety_link_status_t;
 
 /* Counters for the PC's GET_LINK_STATS. All monotonic since start. */
@@ -1428,6 +1433,10 @@ typedef struct {
      * cached_tick becomes age_ms. Meaningless until
      * cached.trip_event_ever_received is true. */
     TickType_t            trip_event_tick;
+
+    /* When the last DIAG (Frame B) was applied; cached_tick only moves on STATUS (Frame A).
+     * Becomes safety_link_status_t::diag_frame_age_ms. Meaningless until diag_ever_received. */
+    TickType_t            diag_tick;
 
     /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
      * one, kept so safety_link_get_config_page() can still find it.

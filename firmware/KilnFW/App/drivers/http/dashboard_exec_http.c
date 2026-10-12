@@ -1001,7 +1001,10 @@ esp_err_t safety_test_trip_post_handler(httpd_req_t *req)
         safety_link_status_t st;
         memset(&st, 0, sizeof(st));
         bool readback = safety_link_get_status(s_dash.safety, &st) == ESP_OK && st.link_up &&
-                        st.diag_ever_received && st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED;
+                        st.diag_ever_received && st.diag_since_reboot &&
+                        st.diag_state == SAFETY_LINK_DIAG_STATE_TRIPPED &&
+                        /* TRIPFX3 INFO-A: only the DIAG that names THIS trip occurrence */
+                        st.diag_trip_seq_known && st.diag_trip_seq == trip_seq;
         if (readback) {
             snprintf(json, sizeof(json),
                      "{\"ok\":true,\"outcome\":\"accepted\",\"trip_seq\":%u,\"readback\":true,"

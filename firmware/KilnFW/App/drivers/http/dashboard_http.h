@@ -342,6 +342,9 @@ typedef struct {
      * SAFETY_LINK_STALE_MS (safety_link.h), same threshold
      * safety_link_send_clear_trip() already uses to judge the same data. */
     uint16_t diag_age_ms;
+    /* TRIPFX3 LOW-B/C: age of the DIAG frame itself, and whether it is from the current Pico boot. */
+    uint32_t diag_frame_age_ms;
+    bool     diag_since_reboot;
     uint8_t  diag_context_age_100ms;
     uint32_t diag_context_frames_ok;
     uint32_t diag_context_frames_bad;

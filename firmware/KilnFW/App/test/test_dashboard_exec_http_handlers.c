@@ -311,6 +311,9 @@ static void test_safety_test_trip(void)
     f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
     f_tt_status.diag_trip_reason = 4u;
     f_tt_status.diag_trip_mask = 8u;
+    f_tt_status.diag_since_reboot = true;
+    f_tt_status.diag_trip_seq_known = true;
+    f_tt_status.diag_trip_seq = 3u;
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 && f_tt_calls == 1 &&
                    strstr(s_reply, "\"trip_seq\":3") != NULL && strstr(s_reply, "\"readback\":true") != NULL &&
                    strstr(s_reply, "\"trip_reason\":4") != NULL && strstr(s_reply, "\"trip_mask\":8") != NULL &&
@@ -321,6 +324,19 @@ static void test_safety_test_trip(void)
                    strstr(s_reply, "\"trip_reason\":2") != NULL && strstr(s_reply, "\"trip_mask\":2") != NULL &&
                    strstr(s_reply, "\"is_test\":false") != NULL && strstr(s_reply, "\"trip_reason\":4") == NULL,
                "real guard won -> reply reports ITS reason/mask and is_test false, never 4/8");
+    f_tt_status.diag_trip_reason = 5u; /* an older trip's DIAG (different trip_seq) is not this trip's readback */
+    f_tt_status.diag_trip_seq = 2u;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "INFO-A: DIAG with another trip_seq -> readback false");
+    f_tt_status.diag_trip_seq = 3u;
+    f_tt_status.diag_since_reboot = false;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "LOW-C: previous-boot DIAG -> readback false");
+    f_tt_status.diag_since_reboot = true;
+    f_tt_status.link_up = false;
+    TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
+                   strstr(s_reply, "\"readback\":false") != NULL, "M4: link down -> readback false");
+    f_tt_status.link_up = true;
     f_tt_status.diag_state = SAFETY_LINK_DIAG_STATE_ARMED; /* TRIPPED DIAG not seen yet */
     TEST_CHECK(tt_post("confirm=1", ESP_OK, SAFETY_LINK_TEST_TRIP_ACCEPTED, 3) == 200 &&
                    strstr(s_reply, "\"readback\":false") != NULL &&

@@ -699,6 +699,7 @@ esp_err_t safety_link_get_status(SafetyLinkClass *link, safety_link_status_t *ou
      * out to) until trip_event_ever_received is true. */
     out->trip_event_age_ms =
         out->trip_event_ever_received ? safety_elapsed_ms(link->trip_event_tick) : 0u;
+    out->diag_frame_age_ms = out->diag_ever_received ? safety_elapsed_ms(link->diag_tick) : 0u;
     safety_unlock(link);
     return ESP_OK;
 }

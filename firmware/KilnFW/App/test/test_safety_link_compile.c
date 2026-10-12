@@ -3137,6 +3137,28 @@ static void test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag(void)
     s_fake_tick_count = 0;
 }
 
+static void test_tripfx3_lowa_second_quick_reboot_within_note_window_counted(void)
+{
+    TEST_SECTION("TRIPFX3 LOW-A -- a V3 boot-id adoption consumes the uptime note, so a second quick reboot "
+                 "inside the 3 s note window (seen only by a new boot id) is counted");
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    low_fw_version(&link, 42u, 18u);
+    link.diag_reannounce_count = SAFETY_DIAG_REANNOUNCE_MAX;
+    apply_diag_uptime(&link, 600000u);
+    apply_diag_uptime(&link, 601000u);
+    uint32_t seq0 = link.cached.pico_reboot_seq;
+    apply_diag_uptime(&link, 1500u);              /* boot A: counted by uptime, note set */
+    v3_apply_diag_uptime(&link, 1600u, 43u);      /* boot A's first V3 DIAG adopts id 43 */
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 1u && !link.reboot_noted_by_uptime,
+               "boot A counted once and the note is consumed by the id adoption");
+    s_fake_tick_count += 2000u;
+    v3_apply_diag_uptime(&link, 1800u, 44u);      /* boot B: young, inside tolerance, new id */
+    TEST_CHECK(link.cached.pico_reboot_seq == seq0 + 2u, "boot B (new id 44) is counted");
+    TEST_CHECK(link.diag_tick == 2000u, "LOW-B: the DIAG apply stamps diag_tick (age of the DIAG itself, not cached_tick)");
+    s_fake_tick_count = 0;
+}
+
 static void test_wp3_info5_test_trip_result_counted_in_stats(void)
 {
     TEST_SECTION("WP3 review INFO-5 -- the stats switch counts TEST_TRIP_RESULT (0x2F) and records its length");
@@ -3737,6 +3759,7 @@ int main(void)
     test_diag_reannounce_is_bounded();
     test_v3_diag_caches_boot_id_and_clear_is_bound();
     test_wp3_low1_reboot_counted_once_across_30_then_32_byte_diag();
+    test_tripfx3_lowa_second_quick_reboot_within_note_window_counted();
     test_wp3_info5_test_trip_result_counted_in_stats();
     test_send_test_trip();
     test_low4_link_down_invalidates_uptime_baseline();

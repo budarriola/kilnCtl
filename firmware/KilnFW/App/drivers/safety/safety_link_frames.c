@@ -1159,6 +1159,9 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
         link->pico_boot_id = p[31];
         link->pico_boot_id_known = true;
         link->pico_boot_id_ever_seen = true;
+        /* TRIPFX3 LOW-A: the cached id is current now; consume the uptime note like the FW_VERSION branch
+         * so a second quick reboot inside the note window is still counted. */
+        link->reboot_noted_by_uptime = false;
     }
     link->pico_uptime_baseline_ms = link->cached.diag_uptime_ms;
     link->pico_uptime_baseline_esp_ms = esp_now_ms;
@@ -1170,6 +1173,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_tx_frames_dropped = safety_read_u32_le(&p[20]);
     link->cached.diag_state = p[24];
     link->cached.diag_since_reboot = true;
+    link->diag_tick = xTaskGetTickCount(); /* TRIPFX3 LOW-B: age of the DIAG itself */
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);
     /* kilnlink audit 2026-10-09 M4: only the 31-byte form names the trip

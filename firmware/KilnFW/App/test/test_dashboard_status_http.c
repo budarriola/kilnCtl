@@ -320,6 +320,8 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     s_fake_status.diag_state = SAFETY_LINK_DIAG_STATE_TRIPPED;
     s_fake_status.diag_trip_reason = 4u;
     s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = true;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (reason 4)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live DIAG TRIPPED reason 4 -> true");
     s_fake_status.diag_trip_reason = 2u;
@@ -335,9 +337,23 @@ static void test_status_trip_is_test_only_for_reason_4(void)
     s_fake_status.trip_reason = 2u; /* TRIP_EVENT lost/other: DIAG alone decides */
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (live only)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "live reason 4 without TRIP_EVENT -> true");
-    s_fake_status.diag_age_ms = 60000u;
+    s_fake_status.diag_frame_age_ms = 60000u;
     TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (stale)");
     TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "stale DIAG -> false");
+    /* TRIPFX3 LOW-B/M3: the bound is the DIAG's own age, pinned at SAFETY_LINK_DIAG_FRESH_MS; a fresh
+     * STATUS frame (diag_age_ms) must not keep an old DIAG alive. */
+    s_fake_status.diag_age_ms = 100u;
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS - 1u;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge-1)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":true") != NULL, "DIAG age bound-1 -> true");
+    s_fake_status.diag_frame_age_ms = SAFETY_LINK_DIAG_FRESH_MS;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (edge)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "DIAG age == bound -> false");
+    /* LOW-C: a DIAG from the previous Pico boot never reads as a test trip. */
+    s_fake_status.diag_frame_age_ms = 100u;
+    s_fake_status.diag_since_reboot = false;
+    TEST_CHECK(dashboard_status_get_handler(&req) == ESP_OK, "handler returns ESP_OK (old boot)");
+    TEST_CHECK(strstr(s_last_resp_body, "\"trip_is_test\":false") != NULL, "old-boot DIAG -> false");
 }
 
 static void test_status_emits_aux_block(void)
