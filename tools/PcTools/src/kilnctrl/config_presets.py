@@ -196,15 +196,23 @@ def _validate(name: str, data: object) -> None:
             raise ConfigPresetError(f"preset {name!r}: duplicate zone index {idx}")
         seen_index.add(idx)
         for key in zones_http_client._ZONE_INT_FIELDS:
-            if isinstance(zone.get(key), float):
+            if key in zone and type(zone[key]) is not int:
                 raise ConfigPresetError(
                     f"preset {name!r}: zones[{i}].{key} is an integer field but the preset gives "
-                    f"a float ({zone[key]!r}); write it as a plain integer")
-    for key in zones_http_client._TOP_INT_FIELDS:
-        if isinstance(data.get(key), float):
+                    f"{zone[key]!r} ({type(zone[key]).__name__}); write it as a plain integer")
+        if "failsafe_state" in zone and not isinstance(zone["failsafe_state"], bool):
             raise ConfigPresetError(
-                f"preset {name!r}: {key!r} is an integer field but the preset gives a float "
-                f"({data[key]!r}); write it as a plain integer")
+                f"preset {name!r}: zones[{i}].failsafe_state must be a bool (true/false), "
+                f"got {zone['failsafe_state']!r}")
+    for key in zones_http_client._TOP_INT_FIELDS:
+        if key in data and type(data[key]) is not int:
+            raise ConfigPresetError(
+                f"preset {name!r}: {key!r} is an integer field but the preset gives "
+                f"{data[key]!r} ({type(data[key]).__name__}); write it as a plain integer")
+    if "continue_on_zone_trip" in data and not isinstance(data["continue_on_zone_trip"], bool):
+        raise ConfigPresetError(
+            f"preset {name!r}: 'continue_on_zone_trip' must be a bool (true/false), "
+            f"got {data['continue_on_zone_trip']!r}")
     if not isinstance(data["ramp_assist_enabled"], bool):
         raise ConfigPresetError(f"preset {name!r}: 'ramp_assist_enabled' must be a bool (true/false), "
                                 "not inherited or inferred -- see this field's own comment above "

@@ -161,6 +161,8 @@ def load_config_preset(name: str, host: Optional[str] = None,
         return f"error writing safety config over HTTP (host={resolved_safety}): {exc}{_partial_note(exc)}"
     except ramp_assist_http_client.RampAssistHttpError as exc:
         return f"error pinning ramp_assist over HTTP (host={resolved}): {exc}{_partial_note(exc)}"
+    except ValueError as exc:
+        return f"error: preset value could not be encoded: {exc}{_partial_note(exc)}"
     return result.describe() if result.all_ok else "FAILED (partial apply):\n" + result.describe()
 
 

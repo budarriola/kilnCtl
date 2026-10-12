@@ -751,6 +751,8 @@ def _format_scalar(key: str, value: Any, int_fields: "set[str]") -> str:
         # firmware's POST parser (zones_http_post_parse.c) expects
         # z%u_failsafe as "0"/"1" via zones_config_json_parse_u8_field(),
         # not "true"/"false".
+        if not isinstance(value, bool):
+            raise ZonesHttpError(f"field {key!r} must be a bool, got {value!r}")
         return "1" if value else "0"
     if key in int_fields:
         return str(int(value))

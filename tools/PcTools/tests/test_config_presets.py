@@ -75,6 +75,48 @@ class IntFieldFloatValueTest(unittest.TestCase):
         with self.assertRaises(config_presets.ConfigPresetError):
             config_presets._validate("t", d)
 
+    def test_validator_rejects_bool_and_str_int_fields(self):
+        for bad in (True, False, "2", float("nan"), float("inf")):
+            d = self._preset()
+            d["zones"][0]["control_mode"] = bad
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets._validate("t", d)
+            d = self._preset()
+            d["thermo_count"] = bad
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets._validate("t", d)
+
+    def test_validator_rejects_non_bool_bool_fields(self):
+        for bad in ("false", 1.0, 1, 0, "0"):
+            d = self._preset()
+            d["zones"][0]["failsafe_state"] = bad
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets._validate("t", d)
+            d = self._preset()
+            d["continue_on_zone_trip"] = bad
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets._validate("t", d)
+
+    def test_bad_bool_field_never_writes(self):
+        d = self._preset()
+        d["zones"][0]["failsafe_state"] = "false"
+        with unittest.mock.patch.object(zones_http_client, "post_zones") as post:
+            with self.assertRaises(config_presets.ConfigPresetError):
+                config_presets._validate("t", d)
+        post.assert_not_called()
+
+    def test_format_scalar_refuses_non_bool_failsafe(self):
+        for bad in ("false", 1.0):
+            with self.assertRaises(zones_http_client.ZonesHttpError):
+                zones_http_client._format_scalar("failsafe_state", bad, set())
+        self.assertEqual(zones_http_client._format_scalar("failsafe_state", False, set()), "0")
+
+    def test_all_shipped_presets_load(self):
+        names = [p["name"] for p in config_presets.list_presets()]
+        self.assertGreaterEqual(len(names), 8)
+        for n in names:
+            config_presets.load_preset_data(n)
+
     def test_validator_accepts_int_values(self):
         d = self._preset()
         d["zones"][0]["control_mode"] = 2
