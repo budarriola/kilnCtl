@@ -192,3 +192,20 @@ so every CAUGHT is a compiled mutant failing an assertion. `real_tree_unchanged:
 | U10 | hop uses the start rule | CAUGHT | `:440` check hop at 25000 B admitted |
 | U11 | hop download need + 1 | CAUGHT | `test_update_fetch_heap.c:66` |
 | U12 | start need back to 29556 | CAUGHT | `test_update_fetch_heap.c:10` |
+
+## Fix status
+
+Fixed on dev by 5bda58956 (round 1 fixes), 12d69356a (DMA floor 2048 B, admission margin documented) and 07e895fa3
+(abort/admission consistency). Negative tests: round 1 N1..N11 CAUGHT, N12 MISSED as an equivalent mutant (that check was
+removed); round 2 (12 mutations incl. N13 floor 2452) 12/12 CAUGHT, each by a FAIL assertion line; round 3 (3 mutations)
+3/3 CAUGHT (a by the new static assert at build time, b and c by assertion failures).
+
+| Finding | Status | Commit | Negtest |
+|---|---|---|---|
+| MED-1 (re-scoped: abort/admission consistency) | Fixed: `FETCH_HEAP_ABORT_BELOW` 10240 -> 8704 B (floor + 512); a fetch admitted at 29647 B bottoms out near 8711 B and used to abort every time. Static assert `PRECHECK_MIN >= ABORT_BELOW + MEASURED_DRAW` (29647 >= 29640); new test: admitted at the threshold, dip to 8711 B, completes. | 07e895fa3 | round 3 a (assert, build) / b (test) CAUGHT |
+| MED-2 (DMA floor a fixed constant) | Fixed: explicit `FETCH_DMA_FREE_MIN` 2048 B, from the 2291 B healthy bench low-water, windowed sampling after data reads only | 5bda58956, 12d69356a, 07e895fa3 | rounds 1-2 CAUGHT; round 3 c (4096) CAUGHT |
+| LOW-1 (missed starvation shapes) | Fixed: window rule (low,low,ok repeating aborts) | 5bda58956 | round 1/2 CAUGHT |
+| LOW-2 (settle ignores deadline/heat) | Fixed: settle wait rechecks deadline, cancel and heat | 5bda58956, 12d69356a | round 1/2 CAUGHT |
+| LOW-3 (stale comments and docs) | Fixed: header and plan doc updated to 8704 B / 2048 B | 5bda58956, 07e895fa3 | n/a |
+| LOW-4 (settle on LOW_BLOCK untested) | Fixed: test added | 5bda58956 | round 1/2 CAUGHT (N8) |
+| LOW-5 (per-response DMA run reset untested) | Fixed: test added | 5bda58956 | round 1/2 CAUGHT (N9) |
