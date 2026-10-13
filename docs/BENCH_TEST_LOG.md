@@ -3272,3 +3272,13 @@ Built and flashed origin/dev 721b3fc7e (flash_firmware verified). Post-flash: li
 - Not run (blocked by staging): stage_clear/restart, fetch_cancel mid-download, full stage of pre.3, recovery_enter, recovery_apply_staged, post-apply verify.
 
 After failures: update_fetch_status failed/version_mismatch, busy False, writer not wedged; stage partition still staged=True semver 1.0.0-pre.1 (old); update_check still works; link up, armed, no trip; heap free 30299 B, min_free 11419 B.
+
+## 2026-10-12 -- GitHub auto-update chain against v1.0.0-pre.3 (benchupd2)
+
+Built origin/dev c549a144c in a minted worktree (build_kilnfw_start, kiln_fw_root) and flashed with flash_firmware (verified on retry; only the ESP reset, no S6a trip). Post-flash: link up, armed, no trip, no crash report, running version v1.0.0-pre.1-1645-gc549a144c.
+
+- Idle heap (uptime ~49 s): internal free 30299 B, largest 7680 B, min_free 15519 B; DMA free 22511 B, largest 7680 B, min_free 7731 B; spiram free 7875400 B.
+- update_check without allow_prerelease: FAIL http_status=404 ("no release published"). Expected: pre.3 is a GitHub pre-release and /releases/latest never returns one. update_check(allow_prerelease): PASS, tag v1.0.0-pre.3, app_size 2956144, verdict refuse_needs_force (dev build, running version unknown), sha256 6afbe3b5...ee0c5.
+- update_stage_release(allow_prerelease, force, confirm_downgrade=tag): PASS. Stage read-back verified, source github, sha256 6afbe3b5c56a4f77abcd23b5ba3e6a17faec3168cd16eef7d9e93f04269ee0c5, 2956144 B. Heap after: internal free 30299, largest 7680; low-water during job: internal min_free 15519 -> 8339 B (only 147 B above the 8192 B floor), DMA min_free 7731 -> 551 B. Per-hop values not exposed.
+- Cancel test: stage_clear OK (blank). Cancel in stage=manifest and again in stage=asset: both end state=failed error=cancelled, busy False, stage blank, heap back to idle (30299 free, min_free unchanged at 8339). Full re-stage PASS, verified as above.
+- recovery_enter: accepted (was running v1.0.0-pre.1-1645-gc549a144c); board rebooted into the recovery image. recovery_status times out on the LAN IP and port 80 is closed: the recovery image is AP-only (no STA, docs/RECOVERY_IMAGE_PLAN.md), reachable only by joining its SoftAP with the passphrase shown on the LCD. No PcTools tool joins the AP and the join was not attempted from the agent session (blocked). recovery_apply_staged, recovery_exit, post-apply verification and the dev re-flash NOT run. Board left in recovery mode with pre.3 staged.
