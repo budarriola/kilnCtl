@@ -14,6 +14,7 @@
 
 #include "kilnlink/kilnlink_version.h"
 #include "uart_task_ids.h"
+#include "update_fetch_heap.h"
 #include "update_http.h"
 #include "update_http_internal.h"
 #include "update_policy.h"
@@ -288,6 +289,7 @@ static void test_claim_released_on_failures(void)
     job_result();
     CHECK(strcmp(g_state, "failed") == 0, "asset connect failure fails the job");
     CHECK(stage_phase() == UPDATE_STAGE_IDLE, "stage idle after connect failure");
+    CHECK(g_fr_live_clients == 0, "no http client leaked by a failed open (REVIEW_UPDFX3 LOW-4)");
     expect_claim_balanced("connect_failed");
 
     fixture(g_sha_hex, IMG_LEN);
@@ -404,11 +406,19 @@ static void set_dma_ok(void) { g_fake_heap_dma_free_internal = 100000; }
 static void set_heap_28000(void) { g_fake_heap_free_internal = 28000; }
 static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
 static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
+// Arms the scripted per-read DMA sequence (fake_support) when the asset body starts.
+static void arm_dma_seq(void) { g_fr_dma_seq_armed = true; }
+static void cancel_on_third_delay(int n)
+{
+    if (n == 3) {
+        POST("/api/update/fetch/cancel", NULL);
+    }
+}
 #define HOP_URL "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin"
 
 static void test_heap_admission_updfx3(void)
 {
-    // MED-1: a download hop needs floor + draw + slack (28532 B); 28000 B (above the old 26740 B hop rule,
+    // MED-1: a download hop needs floor + draw + slack (28623 B); 28000 B (above the old 26740 B hop rule,
     // below the start rule) is refused after the settle wait.
     fixture(g_sha_hex, IMG_LEN);
     g_app_route->status = 302;
@@ -419,7 +429,7 @@ static void test_heap_admission_updfx3(void)
     CHECK(strcmp(g_error, "low_heap_free") == 0, "download hop at 28000 B refused (slack restored)");
     expect_claim_balanced("hop 28000");
 
-    // hop rule differs from start rule for a check: start needs 28532 B, a check hop needs 24100 B
+    // hop rule differs from start rule for a check: start needs 28623 B, a check hop needs 24100 B
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 30311;
     g_fr_routes[0].status = 302;
@@ -460,13 +470,60 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "low DMA at a redirect hop refused");
 
-    // LOW-3: DMA drop mid-body aborts
+    // LOW-3 / REVIEW_UPDFX3 LOW-2: a sustained DMA shortage mid-body aborts, and the job state says so.
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 30311;
     g_app_route->on_read = set_dma_low;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "DMA drop mid-body aborts low_heap_dma");
+    CHECK(strcmp(g_state, "failed") == 0, "mid-body DMA abort leaves the job failed");
+    CHECK(stage_phase() == UPDATE_STAGE_IDLE && !stage_staged(), "mid-body DMA abort stages nothing, stage idle");
+    CHECK(g_fr_live_clients == 0, "mid-body DMA abort cleans the client up");
     expect_claim_balanced("mid-body dma");
+
+    // UPDFX4 MED-3: a transient dip (the benchupd2 551 B low-water, two reads) that recovers does not abort.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_dma_seq[0] = 551;
+    g_fr_dma_seq[1] = 551;
+    g_fr_dma_seq_n = 2;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "two low DMA reads then recovery: download completes");
+    CHECK(g_fr_dma_seq_i > 2, "the scripted dip was consumed by body reads");
+    expect_claim_balanced("transient dma dip");
+
+    // UPDFX4 MED-3: real exhaustion (under the hard minimum) aborts on the very first sample.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_dma_seq[0] = 100;
+    g_fr_dma_seq_n = 1;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0 && strcmp(g_state, "failed") == 0, "DMA under the hard minimum aborts");
+    CHECK(g_fr_dma_seq_i <= 2, "aborted on the first low sample, not after a run of three");
+    CHECK(!stage_staged(), "hard-min abort stages nothing");
+    expect_claim_balanced("hard-min dma");
+
+    // REVIEW_UPDFX3 LOW-3: the settle wait is FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS for a heap that stays low.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 20000;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "persistently low heap refuses low_heap_free");
+    CHECK(g_fr_delay_calls == (int)FETCH_HEAP_SETTLE_TRIES, "settle wait re-samples exactly FETCH_HEAP_SETTLE_TRIES times");
+    CHECK(g_fr_delay_total_ticks == (unsigned long)FETCH_HEAP_SETTLE_TRIES * (unsigned long)pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS),
+          "each settle delay is FETCH_HEAP_SETTLE_MS");
+    expect_claim_balanced("settle persistent low");
+
+    // REVIEW_UPDFX3 LOW-1/LOW-3: a cancel during the settle wait reports cancelled, breaks the loop at once.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 20000;
+    g_fr_on_delay = cancel_on_third_delay;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "cancelled") == 0, "cancel during the settle wait reports cancelled, not low_heap_free");
+    CHECK(strcmp(g_state, "failed") == 0, "cancelled settle wait fails the job");
+    CHECK(g_fr_delay_calls == 3, "the settle loop stops at the cancel (no further delays)");
+    expect_claim_balanced("settle cancel");
 
     // pre-release-only repo: /releases/latest 404 is a clear no_stable_release, not a generic http_status
     fixture(g_sha_hex, IMG_LEN);

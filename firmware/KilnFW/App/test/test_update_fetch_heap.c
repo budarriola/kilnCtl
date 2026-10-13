@@ -6,7 +6,15 @@
 static void test_admit(void)
 {
     TEST_SECTION("update_fetch_heap -- admission");
-    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 29556u && FETCH_HEAP_WORST_DRAW_BYTES == 17524u && FETCH_HEAP_SLACK_BYTES == 3840u, "precheck is 8192+17524+3840");
+    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN == 29647u && FETCH_HEAP_WORST_DRAW_BYTES == 17524u && FETCH_HEAP_SLACK_BYTES == 3840u,
+               "precheck is the idle minimum 29647 B (UPDFX4), worst draw 17524, slack 3840");
+    TEST_CHECK(FETCH_IDLE_MIN_FREE_BYTES == 29647u && FETCH_HEAP_MEASURED_DRAW_BYTES == 20936u,
+               "idle minimum and measured benchupd2 draw pinned");
+    TEST_CHECK(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH == 28623u, "download need with the scratch held is 28623 B");
+    TEST_CHECK(update_fetch_heap_admit(28623u, 9728u, true) == FETCH_HEAP_OK, "28623 B admitted (idle minimum less scratch)");
+    TEST_CHECK(update_fetch_heap_admit(28622u, 9728u, true) == FETCH_HEAP_LOW_FREE, "28622 B refused");
+    // UPDFX4 residual, stated not hidden: the measured draw from the lowest admitted level ends under the floor.
+    TEST_CHECK(28623u - FETCH_HEAP_MEASURED_DRAW_BYTES == 7687u, "residual at the admission edge is 7687 B (505 B under the floor)");
     TEST_CHECK(FETCH_HEAP_SCRATCH_BYTES <= 4096u, "stager scratch is at most 4 KiB (MED-1)");
     TEST_CHECK(FETCH_HEAP_WORST_DRAW_BYTES == 16500u + FETCH_HEAP_SCRATCH_BYTES, "scratch is counted in the worst draw");
     // The derivation: floor + worst draw leaves the owner floor intact.
@@ -47,7 +55,7 @@ static void test_admit(void)
     TEST_CHECK(update_fetch_heap_admit(31123u, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
                "largest block one byte short refused");
     TEST_CHECK(update_fetch_heap_admit(28000u, 9728u, true) == FETCH_HEAP_LOW_FREE,
-               "28000 B (below the 28532 B download need) refused");
+               "28000 B (below the 28623 B download need) refused");
     TEST_CHECK(update_fetch_heap_admit(8295u, 4096u, true) == FETCH_HEAP_LOW_FREE, "post-stage dip refused");
     TEST_CHECK(update_fetch_heap_admit(0u, 0u, true) == FETCH_HEAP_LOW_FREE, "zero refused");
 }
@@ -55,7 +63,7 @@ static void test_admit(void)
 static void test_hop(void)
 {
     TEST_SECTION("update_fetch_heap -- redirect hop admission (UPDFX2)");
-    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 28532u, "download hop need is floor + 16500 + slack 3840");
+    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 28623u, "download hop need equals the start need (UPDFX4)");
     TEST_CHECK(FETCH_HOP_CHECK_HEAP_MIN == 24100u, "check hop need is floor + check draw + slack 3840");
     // Bench: 27855 B free, 7680 B block at the 302 hop of a healthy download.
     TEST_CHECK(update_fetch_heap_admit_hop(27855u, 7680u, true) == FETCH_HEAP_LOW_FREE, "bench 27855 B hop reading refused until the residual drains");
@@ -81,6 +89,25 @@ static void test_dma(void)
     TEST_CHECK(update_fetch_heap_dma_ok(6351u), "bench idle min_free 6351 passes");
     TEST_CHECK(update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN), "exact floor passes");
     TEST_CHECK(!update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN - 1u), "one under refused");
+
+    // MED-3 mid-body: consecutive-sample abort plus a hard minimum.
+    TEST_CHECK(FETCH_DMA_LOW_READS == 3u && FETCH_DMA_HARD_MIN == 256u, "DMA abort constants pinned");
+    unsigned run = 0;
+    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 1u, "first low sample (551 B) does not abort");
+    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 2u, "second low sample does not abort");
+    TEST_CHECK(update_fetch_heap_dma_abort(551u, &run), "third consecutive low sample aborts");
+    run = 0;
+    update_fetch_heap_dma_abort(551u, &run);
+    update_fetch_heap_dma_abort(551u, &run);
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN, &run) && run == 0u, "a recovered sample resets the run");
+    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 1u, "run restarts from 1 after recovery");
+    run = 0;
+    TEST_CHECK(update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN - 1u, &run), "under the hard minimum aborts at once");
+    run = 0;
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN, &run) && run == 1u, "exactly the hard minimum is only a low sample");
+    run = 0;
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN - 1u, &run) && run == 1u, "4095 B counts as low");
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN, &run) && run == 0u, "4096 B is not low");
 }
 
 static void test_abort(void)

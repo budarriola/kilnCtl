@@ -71,8 +71,8 @@ static const char *TAG = "update_fetch";
 // Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
 // internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 10240 B)
 // live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
-// admission rule, redirect hops after the first the hop rule (post-draw level >= the abort level),
-// and the read loop only the abort floor.
+// admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
+// read loop only the abort floor plus the consecutive-sample DMA check.
 // The tx buffer stays 2048 B (a JWT-signed release-assets GET line can exceed 1 KB, so 1 KB would
 // risk a truncated request); that costs 1 KB over the spike and is inside the worst-case draw.
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
@@ -223,7 +223,8 @@ static const char *heap_admit(const work_t *w, bool hop)
     uint32_t f = 0;
     uint32_t l = 0;
     fetch_heap_verdict_t hv = FETCH_HEAP_LOW_FREE;
-    for (unsigned tries = 0;; tries++) {
+    unsigned tries = 0;
+    for (;; tries++) {
         f = free_internal();
         l = largest_internal_block();
         hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
@@ -231,6 +232,14 @@ static const char *heap_admit(const work_t *w, bool hop)
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS));
+    }
+    if (hv == FETCH_HEAP_LOW_FREE && s_c->cancel) {
+        return "cancelled";  // REVIEW_UPDFX3 LOW-1: cancelled during the settle wait, not a heap shortfall
+    }
+    if (tries > 0) {
+        // REVIEW_UPDFX3 MED-2: bench evidence of the settle wait (re-samples used, where free ended up).
+        ESP_LOGI(TAG, "heap settle: %u re-sample(s) x %u ms, free %u, %s%s", tries, (unsigned)FETCH_HEAP_SETTLE_MS,
+                 (unsigned)f, hv == FETCH_HEAP_OK ? "admitted" : "still short", hop ? " (redirect hop)" : "");
     }
     if (hv == FETCH_HEAP_OK) {
         const uint32_t dma = dma_free_internal();
@@ -699,6 +708,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             fail = sink->begin(w, known ? clen : -1);
             uint32_t chunks = 0;
             unsigned eagain = 0;
+            unsigned dma_low_run = 0;  // consecutive low DMA samples (UPDFX4 MED-3)
             int64_t total = 0;
             while (fail == NULL) {
                 if (s_c->cancel) {
@@ -713,7 +723,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     fail = "low_heap_midrun";
                     break;
                 }
-                if (!update_fetch_heap_dma_ok(dma_free_internal())) {
+                if (update_fetch_heap_dma_abort(dma_free_internal(), &dma_low_run)) {
                     fail = "low_heap_dma";
                     break;
                 }

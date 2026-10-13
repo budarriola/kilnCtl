@@ -64,6 +64,17 @@ extern char g_fr_repo[96];
 extern size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
 extern size_t g_fake_heap_dma_free_internal;
 extern int g_fake_heap_recover_reads;
+// vTaskDelay observers (REVIEW_UPDFX3 LOW-3): calls and total ticks since fr_reset(); g_fr_on_delay, when set,
+// runs inside every delay with the 1-based call number (a test cancels the job from it).
+extern int g_fr_delay_calls;
+extern unsigned long g_fr_delay_total_ticks;
+extern void (*g_fr_on_delay)(int call_no);
+// Scripted DMA-free per body read (UPDFX4 MED-3): once armed (a route's on_read sets g_fr_dma_seq_armed), the
+// Nth read sets the DMA-capable internal free to g_fr_dma_seq[N]; after the script it returns to 100000.
+#define FR_DMA_SEQ_MAX 16
+extern size_t g_fr_dma_seq[FR_DMA_SEQ_MAX];
+extern int g_fr_dma_seq_n, g_fr_dma_seq_i;
+extern bool g_fr_dma_seq_armed;
 extern size_t g_fake_heap_recover_to;
 extern volatile long g_fr_internal_mallocs;
 extern bool g_fr_internal_alloc_fail;

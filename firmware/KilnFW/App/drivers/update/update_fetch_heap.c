@@ -31,6 +31,19 @@ bool update_fetch_heap_dma_ok(uint32_t dma_free)
     return dma_free >= FETCH_DMA_FREE_MIN;
 }
 
+bool update_fetch_heap_dma_abort(uint32_t dma_free, unsigned *low_run)
+{
+    if (dma_free < FETCH_DMA_HARD_MIN) {
+        return true;
+    }
+    if (dma_free < FETCH_DMA_FREE_MIN) {
+        (*low_run)++;
+        return *low_run >= FETCH_DMA_LOW_READS;
+    }
+    *low_run = 0;
+    return false;
+}
+
 bool update_fetch_heap_abort(uint32_t free_internal)
 {
     return free_internal < FETCH_HEAP_ABORT_BELOW;

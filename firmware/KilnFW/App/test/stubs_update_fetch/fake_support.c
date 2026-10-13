@@ -64,6 +64,12 @@ long long g_fr_now_epoch;
 volatile long g_fr_eagain_n;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
+int g_fr_delay_calls;
+unsigned long g_fr_delay_total_ticks;
+void (*g_fr_on_delay)(int call_no);
+size_t g_fr_dma_seq[FR_DMA_SEQ_MAX];
+int g_fr_dma_seq_n, g_fr_dma_seq_i;
+bool g_fr_dma_seq_armed;
 int g_fake_heap_recover_reads;      // >0: after this many internal-free reads, free becomes g_fake_heap_recover_to
 size_t g_fake_heap_recover_to;
 volatile long g_fr_internal_mallocs; // MALLOC_CAP_INTERNAL heap_caps_malloc/calloc calls that succeeded
@@ -124,6 +130,11 @@ void fr_reset(void)
     g_fake_heap_largest_internal = 100000;
     g_fake_heap_dma_free_internal = 100000;
     g_fake_heap_recover_reads = 0;
+    g_fr_delay_calls = 0;
+    g_fr_delay_total_ticks = 0;
+    g_fr_on_delay = NULL;
+    g_fr_dma_seq_n = g_fr_dma_seq_i = 0;
+    g_fr_dma_seq_armed = false;
     g_fr_internal_mallocs = 0;
     g_fr_internal_alloc_fail = false;
     g_fr_fail_task = NULL;
@@ -260,7 +271,15 @@ void vTaskDelete(TaskHandle_t t)
 void vTaskDeleteWithCaps(TaskHandle_t t) { vTaskDelete(t); }
 long long g_fr_tick_skew_ms;
 TickType_t xTaskGetTickCount(void) { return (TickType_t)(GetTickCount() + g_fr_tick_skew_ms); }
-void vTaskDelay(TickType_t ticks) { Sleep(ticks); }
+void vTaskDelay(TickType_t ticks)
+{
+    int n = ++g_fr_delay_calls;
+    g_fr_delay_total_ticks += (unsigned long)ticks;
+    if (g_fr_on_delay != NULL) {
+        g_fr_on_delay(n);
+    }
+    Sleep(ticks);
+}
 TaskHandle_t xTaskGetCurrentTaskHandle(void) { return (TaskHandle_t)1; }
 UBaseType_t uxTaskGetStackHighWaterMark(TaskHandle_t t)
 {
@@ -619,6 +638,10 @@ int esp_http_client_read(esp_http_client_handle_t c, char *buf, int len)
         Sleep((DWORD)(c->route->read_stall_ms < 0 ? c->cfg.timeout_ms : c->route->read_stall_ms)); // <0: block for the client's slice
         g_fr_eagain_n++;
         return -ESP_ERR_HTTP_EAGAIN;
+    }
+    if (g_fr_dma_seq_armed) {
+        g_fake_heap_dma_free_internal = g_fr_dma_seq_i < g_fr_dma_seq_n ? g_fr_dma_seq[g_fr_dma_seq_i] : 100000;
+        g_fr_dma_seq_i++;
     }
     size_t avail = deliverable(c->route) - c->pos;
     size_t n = avail < (size_t)len ? avail : (size_t)len;
