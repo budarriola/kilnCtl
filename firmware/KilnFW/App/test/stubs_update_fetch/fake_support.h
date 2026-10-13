@@ -30,6 +30,9 @@ extern size_t g_fr_route_n;
 extern fr_route_t g_fr_routes[FR_MAX_ROUTES];
 extern int g_fr_open_count;                // successful or failed opens, any URL
 extern char g_fr_last_url[512];
+extern int g_fr_live_clients;             // esp_http_client_init() handles not yet cleaned up
+extern int g_fr_max_live_clients;         // high-water mark of g_fr_live_clients since fr_reset()
+extern int g_fr_open_while_live;          // opens issued while another client handle was still live
 
 // ---- stage flash (partition "stage") ----
 #define FR_STAGE_SIZE (4096u + 262144u)

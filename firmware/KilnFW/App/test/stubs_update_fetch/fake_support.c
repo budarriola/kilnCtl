@@ -41,6 +41,9 @@
 size_t g_fr_route_n;
 fr_route_t g_fr_routes[FR_MAX_ROUTES];
 int g_fr_open_count;
+int g_fr_live_clients;
+int g_fr_max_live_clients;
+int g_fr_open_while_live;
 char g_fr_last_url[512];
 
 uint8_t g_fr_flash[FR_STAGE_SIZE];
@@ -89,6 +92,9 @@ void fr_reset(void)
     g_fr_route_n = 0;
     memset(g_fr_routes, 0, sizeof(g_fr_routes));
     g_fr_open_count = 0;
+    g_fr_live_clients = 0;
+    g_fr_max_live_clients = 0;
+    g_fr_open_while_live = 0;
     g_fr_last_url[0] = 0;
     fr_flash_erase_all();
     g_fr_flash_write_fail = false;
@@ -500,6 +506,9 @@ esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *co
 {
     struct esp_http_client *c = calloc(1, sizeof(*c));
     c->cfg = *config;
+    if (++g_fr_live_clients > g_fr_max_live_clients) {
+        g_fr_max_live_clients = g_fr_live_clients;
+    }
     return c;
 }
 esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, const char *k, const char *v)
@@ -511,6 +520,9 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len)
 {
     (void)write_len;
     g_fr_open_count++;
+    if (g_fr_live_clients > 1) {
+        g_fr_open_while_live++;
+    }
     if (route_for(c->cfg.url) != NULL && route_for(c->cfg.url)->on_open != NULL) {
         route_for(c->cfg.url)->on_open();
     }
@@ -571,6 +583,7 @@ esp_err_t esp_http_client_close(esp_http_client_handle_t c)
 }
 esp_err_t esp_http_client_cleanup(esp_http_client_handle_t c)
 {
+    g_fr_live_clients--;
     free(c);
     return ESP_OK;
 }

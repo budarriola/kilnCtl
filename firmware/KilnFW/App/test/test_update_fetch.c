@@ -399,6 +399,24 @@ static void test_heap_admission_updfx2(void)
     CHECK(strstr(g_error, "low_heap") == NULL, "27855 B hop admitted");
 }
 
+// UPDAUDIT Q1: a redirect hop closes and frees the first client (its TLS session) before the second
+// client is created and opened, so the two TLS sessions never coexist in internal heap.
+static void test_redirect_hop_frees_first_client(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin";
+    add_route("https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin", g_img, IMG_LEN);
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "redirected download staged");
+    CHECK(strcmp(g_fr_last_url, "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin") == 0,
+          "second hop opened the Location URL");
+    CHECK(g_fr_max_live_clients == 1, "never two http clients live at once across the redirect hop");
+    CHECK(g_fr_open_while_live == 0, "no open while a previous client was still live");
+    CHECK(g_fr_live_clients == 0, "every client cleaned up after the job");
+    expect_claim_balanced("redirect hop");
+}
+
 static HANDLE g_hold_ev;
 static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
 
@@ -626,6 +644,7 @@ int main(void)
     test_sha_mismatch();
     test_claim_released_on_failures();
     test_heap_admission_updfx2();
+    test_redirect_hop_frees_first_client();
     test_handler_refusals();
     test_stage_upload_and_clear();
 #ifdef UF_EXTRA_TESTS
