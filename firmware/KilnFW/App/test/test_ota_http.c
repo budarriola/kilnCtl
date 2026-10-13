@@ -781,7 +781,7 @@ static char s_last_resp_status[32] = "";
 esp_err_t httpd_resp_send(httpd_req_t *r, const char *buf, long long buf_len)
 {
     (void)r;
-    size_t n = (buf_len < 0) ? 0 : (size_t)buf_len;
+    size_t n = (buf_len < 0) ? (buf ? strlen(buf) : 0) : (size_t)buf_len;
     if (n >= sizeof(s_last_resp_body)) {
         n = sizeof(s_last_resp_body) - 1;
     }

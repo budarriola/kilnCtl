@@ -321,6 +321,7 @@ static void test_recovery_boot_hooks(void)
     g_stub_profile_state = PROFILE_EXEC_RUNNING;
     (void)ota_recovery_boot_run(&req, &hooks);
     TEST_CHECK(strncmp(s_last_resp_status, "409", 3) == 0, "hooks firing: mode gate 409");
+    TEST_CHECK(strstr(s_last_resp_body, "before entering recovery") != NULL, "hooks firing: refusal body is the mode-gate text, not the interlock text");
     TEST_CHECK(s_hk_prepare_calls == 0, "hooks firing: prepare never called (no record written)");
     TEST_CHECK(s_fake_select_calls == 0, "hooks firing: boot target untouched");
 
