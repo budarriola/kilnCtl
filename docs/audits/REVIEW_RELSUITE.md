@@ -227,3 +227,26 @@ every CAUGHT failed on an `AssertionError`, with no collection or import error.
 | 9 | crash check replaced with `False` | MISSED | none (MED-1) |
 | 10 | `bench_test_start` `or ota_install is True` removed | CAUGHT | test_release_ota_install_is_ota_gated |
 | 11 | release_gates `--suites` default drops `release` | MISSED | none (INFO-1) |
+
+## Fix status
+
+All findings fixed in 8652ecaef (SHA updated below if changed by rebase).
+
+| Finding | Status | Note |
+|---|---|---|
+| MED-1 | fixed | unreadable crash report -> `crash_unacked=None` -> INCONCLUSIVE |
+| MED-2 | fixed | stage clear not starting with "ok" -> RL-D01 FAIL + `_tainted` |
+| MED-3 | fixed | install tools checked before staging; failed install clears the stage |
+| MED-4 | fixed | `bench_test_run` / `bench_test_start` refuse suite=release unless `confirm is True` (start refuses synchronously) |
+| MED-5 | fixed | zone-ceiling precheck on kiln path with explicit target; board identity checked against target by zone ceilings (heuristic: 200 C split, fail-closed; a bench board with ceilings above 200 C is refused) |
+| MED-6 | fixed | INCONCLUSIVE RL-A01 aborts |
+| LOW-1 | fixed | trip_fn raise aborts; only reason 4 / mask 0x0008 is cleared |
+| LOW-2 | fixed | before/after build compared; missing fw_build refused |
+| LOW-3 | fixed (judgement) | missing LCD camera is by design on kiln, no longer an INCONCLUSIVE reason there |
+| LOW-4 | fixed | unknown target raises ValueError |
+| LOW-5 | fixed (judgement) | RL-F01 regresses only on CRC error growth (`link_crc_errors`); timeouts grow legitimately across trip/OTA phases and no bench evidence says otherwise; `link_errors` still recorded |
+| LOW-6 | fixed | `actual_valid` default False |
+| LOW-7 | fixed | stage must be provably empty (`update_status` staged=False) before the run; pre-staged image is never cleared |
+| INFO-1 | fixed | target and install flag in RL-D01 evidence; `DEFAULT_EVIDENCE_SUITES` constant tested |
+
+Negtest (pytest preset, 3 files): M7 stage-clear taint, M8 target always bench, M9 crash check False, M11 suites default, M4 run confirm, M4b start confirm, M6 A01 no abort: all CAUGHT on assertions.
