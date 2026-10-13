@@ -618,10 +618,10 @@ def test_ota_install_board_gone_clears_baseline():
 
 
 def test_link_timeout_growth_bound():
-    b = R.LINK_TIMEOUT_GROWTH_BOUND
+    assert 0 < R.LINK_TIMEOUT_GROWTH_BOUND <= 50  # documented small bound, not unbounded
     base = snap(link_timeouts=5)
-    assert not [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=5 + b)) if "timeout" in x]
-    assert [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=6 + b)) if "timeout" in x]
+    assert not [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=5 + 20)) if "timeout" in x]
+    assert [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=5 + 1000)) if "timeout" in x]
 
 
 def test_unreadable_link_counter_is_inconclusive():

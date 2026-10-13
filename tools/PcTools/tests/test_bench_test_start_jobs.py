@@ -204,6 +204,14 @@ class BenchTestStartTest(_Base):
         self.assertEqual(_FakeRunner.instances, [])
         self.finish(BT.bench_test_start(suite="release", dry_run=True))
 
+    def test_release_allow_heat_defaults_off_and_confirm_reaches_runner(self):
+        self.finish(BT.bench_test_start(suite="release", confirm=True))
+        kw = _FakeRunner.instances[-1].run_kwargs
+        self.assertIs(kw["allow_heat"], False)
+        self.assertIs(kw["confirm"], True)
+        self.finish(BT.bench_test_start(suite="release", confirm=True, allow_heat=True))
+        self.assertIs(_FakeRunner.instances[-1].run_kwargs["allow_heat"], True)
+
     def test_release_ota_install_is_ota_gated(self):
         with mock.patch.object(build_jobs, "start_job") as sj:
             out = BT.bench_test_start(suite="release", ota_install=True)
