@@ -25,6 +25,7 @@
 #include "recovery_health.h"
 #include "recovery_health_policy.h"
 #include "recovery_http.h"
+#include "recovery_install.h"
 #include "recovery_io.h"
 #include "recovery_lcd.h"
 #include "recovery_wifi.h"
@@ -122,6 +123,9 @@ void app_main(void)
         recovery_lcd_clear_error();
         recovery_health_clear_http();
     }
+
+    // Unattended install: a request left by the application install route.
+    recovery_install_boot();
 
     // wifi/lcd are snapshots (the LCD retry task may be mid re-init).
     if (rhealth_all_up(recovery_wifi_is_up(), recovery_lcd_is_ok(), http_ok)) {

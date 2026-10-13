@@ -30,6 +30,10 @@ extern "C" {
 // an error is returned so the caller can retry.
 esp_err_t recovery_http_start(void);
 
+// boot_guard counter clear (0 = cleared or not applicable). Used by the
+// unattended-install pre-boot hook, same order as /api/recovery/exit.
+int recovery_http_boot_guard_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

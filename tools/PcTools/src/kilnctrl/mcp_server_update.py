@@ -20,10 +20,11 @@ update_get_settings/update_set_settings read and set the repo. Release
 signing was removed (owner decision 2026-10-07); the board accepts an image only
 when it is for this project (esp_app_desc project_name).
 
-There is deliberately NO ``update_apply``: installing a staged image is the
-recovery image's ``POST /api/recovery/apply_staged`` (WP5, wrapped by the
-``recovery_apply_staged`` tool). Nothing here reboots the board or touches the
-``app`` partition.
+There is deliberately NO ``update_apply``: the recovery image's
+``POST /api/recovery/apply_staged`` (WP5, ``recovery_apply_staged``) is the manual
+path. The unattended path is ``update_install_staged`` (POST /api/update/install):
+the board reboots into recovery, applies the VERIFIED stage by itself and boots the
+new app. Every other tool here only stages; none touches the ``app`` partition.
 Credentials never appear here; every request goes through http_auth.urlopen().
 """
 from __future__ import annotations
@@ -549,3 +550,60 @@ def update_fetch_cancel(confirm: bool = False, host: Optional[str] = None) -> st
         return f"UNKNOWN: cancel accepted but the confirming status read failed: {exc} (host={resolved})"
     note = " (job still winding down; read update_fetch_status)" if after.get("busy") else ""
     return f"ok - cancel requested: {_fmt_fetch(after)}{note} (host={resolved})"
+
+
+def _install_line(st: dict) -> str:
+    li = st.get("last_install") or {}
+    return (f"running={st.get('running_version')!r}, staged={st.get('staged')} "
+            f"({st.get('staged_version')!r}), last_install={li.get('state')}/{li.get('code')}"
+            f"/{li.get('reason')}/{li.get('version')!r}")
+
+
+@_core._tool()
+def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Optional[str] = None) -> str:
+    """Install the VERIFIED staged image unattended (POST /api/update/install,
+    ROUTE_TIER_ADMIN, form confirm=1). The board writes a one-shot request,
+    reboots into the recovery image, which applies the stage (bounded to 3
+    attempts), boots the new app and records the result. No Wi-Fi joining.
+    Without ``confirm=True`` (exactly) it only reads GET /api/update/status
+    (including the last install result) and sends nothing. Refuses unless the
+    stage reads staged. A firing or autotune makes the board answer 409.
+    After the POST it waits up to ``wait_s`` (clamped to 280) for the board
+    to answer again in the application with running_version equal to the staged
+    version, then reports ok only if that matches and last_install is ok. A
+    failed install (recovery stays up) or a board not back in time is reported
+    as FAILED or UNKNOWN with the recorded reason; re-run this tool with
+    confirm=False later to read it."""
+    resolved = _resolve_host(host)
+    try:
+        before = uhc.get_install_status(resolved)
+    except uhc.UpdateHttpError as exc:
+        return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
+    if confirm is not True:
+        return _refuse_unconfirmed(f"would install the staged image: {_install_line(before)} (host={resolved})")
+    if not before.get("staged") or before.get("stage_busy"):
+        return f"REFUSED: no verified stage ready (staged={before.get('staged')}, stage_busy={before.get('stage_busy')}) (host={resolved})"
+    want = before.get("staged_version")
+    try:
+        uhc.start_install(resolved)
+    except uhc.UpdateHttpError as exc:
+        return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
+    deadline = time.monotonic() + max(10.0, min(float(wait_s), 280.0))
+    time.sleep(15.0)  # let the board go down before polling
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            st = uhc.get_install_status(resolved, timeout=5.0)
+        except uhc.UpdateHttpError:
+            time.sleep(5.0)
+            continue
+        last = st
+        li = st.get("last_install") or {}
+        if st.get("running_version") == want and li.get("state") == "recorded" and li.get("code") == "ok":
+            return f"ok - installed {want!r} and running in the application: {_install_line(st)} (host={resolved})"
+        if li.get("state") == "recorded" and li.get("code") not in ("ok", None):
+            return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
+        time.sleep(5.0)
+    tail = _install_line(last) if last else "board never answered the application API"
+    return (f"UNKNOWN: board not confirmed on {want!r} within the wait ({tail}); the recovery image may still be "
+            f"applying or may have failed; re-run with confirm=False to read the result (host={resolved})")

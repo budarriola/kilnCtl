@@ -23,6 +23,7 @@
 // recovery_upload.c; an upload route calls recovery_upload_stream() with its
 // own validator and sink.
 #include "recovery_http.h"
+#include "recovery_install.h"
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -596,11 +597,22 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
                       (unsigned)ls.draw_failures, (unsigned)ls.task_stack_free_bytes);
     }
     if (e == ESP_OK) {
+        update_install_res_t ir;
+        bool have_ir = recovery_install_last_result(&ir);
+        char ir_ver[UPD_INST_SEMVER_LEN];
+        for (size_t i = 0; i < sizeof(ir_ver); i++) {
+            unsigned char c = have_ir ? (unsigned char)ir.semver[i] : 0;
+            ir_ver[i] = (c == 0) ? 0 : ((c < 0x20 || c > 0x7e || c == '"' || c == '\\') ? '?' : (char)c);
+        }
+        ir_ver[sizeof(ir_ver) - 1] = '\0';
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
-                           "\"heap_internal_min_free\":%u,\"free_heap\":%u}",
+                           "\"heap_internal_min_free\":%u,\"free_heap\":%u,"
+                           "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\"}}",
                       nvs_failed ? "true" : "false", nvs_failed,
                       (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                      (unsigned)esp_get_free_heap_size());
+                      (unsigned)esp_get_free_heap_size(),
+                      have_ir ? update_install_code_name(ir.code) : "none",
+                      have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver);
     }
     if (e != ESP_OK) {
         return ESP_FAIL; // truncated stream: close the connection
@@ -1027,6 +1039,12 @@ static int apply_pre_boot(void)
 {
     char msg[96];
     return boot_guard_clear_or_na(msg, sizeof(msg)) ? 0 : -1;
+}
+
+// Same clear for the unattended-install pre-boot hook (recovery_install.c).
+int recovery_http_boot_guard_clear(void)
+{
+    return apply_pre_boot();
 }
 
 // Erases the stage header sector (what a finished apply does) so the stage is

@@ -48,6 +48,8 @@ CHECK_PATH = "/api/update/check"
 DOWNLOAD_PATH = "/api/update/download"
 SETTINGS_PATH = "/api/update/settings"
 FETCH_CANCEL_PATH = "/api/update/fetch/cancel"
+INSTALL_PATH = "/api/update/install"
+INSTALL_STATUS_PATH = "/api/update/status"
 
 ESP_IMAGE_MAGIC = 0xE9
 #: stage_header.h STAGE_SEMVER_FIELD_LEN / STAGE_COMMIT_HEX_LEN.
@@ -287,3 +289,21 @@ def set_settings(host: str, repo: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) 
 
 def sha256_hex(image: bytes) -> str:
     return hashlib.sha256(image).hexdigest()
+
+
+def get_install_status(host: str, timeout: float = UPDATE_STATUS_TIMEOUT_S) -> dict:
+    """GET /api/update/status. Keys: running_version, stage_busy, staged,
+    staged_version, last_install{state (recorded/none/unreadable), code, reason, version}."""
+    req = urllib.request.Request(_url(host, INSTALL_STATUS_PATH), method="GET")
+    data = _request(req, INSTALL_STATUS_PATH, timeout)
+    if "running_version" not in data or not isinstance(data.get("last_install"), dict):
+        raise UpdateHttpError(f"GET {INSTALL_STATUS_PATH} response lacks running_version/last_install: {data!r}")
+    return data
+
+
+def start_install(host: str, timeout: float = UPDATE_CLEAR_TIMEOUT_S) -> dict:
+    """POST /api/update/install (form body confirm=1). The board writes a one-shot
+    request and reboots into the recovery image, which applies the stage unattended."""
+    req = urllib.request.Request(_url(host, INSTALL_PATH), data=b"confirm=1", method="POST")
+    req.add_header("Content-Type", "application/x-www-form-urlencoded")
+    return _request(req, INSTALL_PATH, timeout)

@@ -99,7 +99,7 @@ assert(api.ghRefusalText(500, '') === 'HTTP 500', 'empty 500');
 
 // Wiring: every route and element the card needs is in the page, nothing else is invented.
 ['/api/update/check', '/api/update/download', '/api/update/fetch', '/api/update/fetch/cancel',
- '/api/ota/esp/recovery_boot'].forEach(r => assert(SRC.indexOf("'" + r) >= 0, 'page calls ' + r));
+ '/api/update/install'].forEach(r => assert(SRC.indexOf("'" + r) >= 0, 'page calls ' + r));
 ['ghCheckBtn', 'ghDownloadBtn', 'ghCancelBtn', 'ghBusyBox', 'ghInfo', 'ghTyped', 'stageInstallBtn']
   .forEach(id => assert(SRC.indexOf('id="' + id + '"') >= 0, 'element ' + id));
 assert(!/id="stageInstallBtn"[^>]*disabled[^>]*title="Waiting/.test(SRC), 'the placeholder install title is gone');

@@ -175,11 +175,10 @@ done by the recovery image: <b>Install</b> below reboots the board into it.</p>
     <button id="stageUploadBtn" type="button" class="primary">Upload to stage</button>
     <button id="stageClearBtn" type="button" class="danger">Clear stage</button>
     <button id="stageInstallBtn" type="button" disabled
-            title="Needs a verified staged image">Install (reboots into recovery)</button>
+            title="Needs a verified staged image">Install staged update</button>
   </div>
-  <p class="note">Install restarts the board into the recovery image, where you
-  join its Wi-Fi (the passphrase is shown on the LCD) and press
-  <i>Apply staged update</i>. Uploading may erase a previously staged image once the new image passes the checks.</p>
+  <p class="note">Install restarts the board into the recovery image, which applies the
+  staged update unattended and boots the new firmware. Uploading may erase a previously staged image once the new image passes the checks.</p>
 </div>
 <div id="stageProgressWrap" style="display:none">
   <div class="progress-outer"><div id="stageProgressBar" class="progress-inner">0%</div></div>
@@ -1093,23 +1092,23 @@ document.getElementById('ghCancelBtn').addEventListener('click', function () {
   document.getElementById(id).addEventListener('change', function () { if (ghLast) renderGh(ghLast); });
 });
 
-/* Install: POST /api/ota/esp/recovery_boot (ADMIN, mode gate, interlock) points the
- * bootloader at the recovery image and reboots. Applying is then done on the
- * recovery image's own page; this page cannot reach it. */
+/* Install: POST /api/update/install (ADMIN, confirm=1, mode gate). The board writes a
+ * one-shot request, reboots into recovery, applies the verified stage unattended and
+ * boots the new app. No Wi-Fi joining. The outcome shows in GET /api/update/status. */
 document.getElementById('stageInstallBtn').addEventListener('click', function () {
   var msg = document.getElementById('stageMsg');
-  window.kcConfirm('Restart the board into the recovery image to install the staged update? ' +
-    'This page will stop responding. Join the recovery Wi-Fi (passphrase on the LCD), open ' +
-    'its page and press "Apply staged update". The kiln cannot fire while in recovery.').then(function (ok) {
+  window.kcConfirm('Install the staged update now? The board restarts into the recovery image, ' +
+    'applies the update by itself and then boots the new firmware. This page will stop ' +
+    'responding for a few minutes. The kiln cannot fire meanwhile.').then(function (ok) {
     if (!ok) throw { __kcHandled: true };
-    msg.textContent = 'Requesting recovery boot…';
-    return window.kcOtaAuthedFetch('/api/ota/esp/recovery_boot', {
-      method: 'POST', headers: { 'Content-Type': 'application/octet-stream' }, body: new Uint8Array(0)
+    msg.textContent = 'Requesting install\u2026';
+    return window.kcOtaAuthedFetch('/api/update/install', {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'confirm=1'
     });
   }).then(function (r) {
     return r.text().then(function (text) {
       if (!r.ok) throw new Error(ghRefusalText(r.status, text));
-      msg.textContent = 'Rebooting into the recovery image. Join its Wi-Fi (passphrase on the LCD), open its page and press "Apply staged update". Afterwards rejoin your normal Wi-Fi.';
+      msg.textContent = 'Install requested. The board is restarting into recovery to apply the update; reload this page in a few minutes and check the update status.';
     });
   }).catch(function (e) {
     if (e && e.__kcHandled) return;

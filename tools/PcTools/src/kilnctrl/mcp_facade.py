@@ -114,6 +114,7 @@ GROUP_OVERRIDES = {
     "update_set_settings": "system",
     "update_fetch_status": "system",
     "update_fetch_cancel": "system",
+    "update_install_staged": "system",
     # OpenOCD, shared by both processors.
     "flash_firmware": "debug",
     "flash_recovery": "debug",
@@ -285,6 +286,7 @@ KEYWORDS = {
     "update_get_settings": ("update", "repo", "repository", "github", "settings", "api/update/settings", "owner", "default repo"),
     "update_set_settings": ("update", "repo", "repository", "github", "settings", "api/update/settings", "set repo", "change repo", "owner"),
     "update_fetch_status": ("update", "fetch", "status", "github", "download progress", "api/update/fetch", "release", "job"),
+    "update_install_staged": ("update", "install", "staged", "apply", "unattended", "recovery", "github", "api/update/install"),
     "update_fetch_cancel": ("update", "fetch", "cancel", "stop download", "github", "api/update/fetch/cancel", "abort"),
     "flash_recovery": ("recovery", "recovery image", "recovery.bin", "recovery partition",
                        "factory", "esp32", "jtag", "openocd", "program", "write", "burn",
