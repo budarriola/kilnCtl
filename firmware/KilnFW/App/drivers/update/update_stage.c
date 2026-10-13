@@ -93,6 +93,21 @@ static const char *strip_v(const char *s)
     return (s[0] == 'v' || s[0] == 'V') ? s + 1 : s;
 }
 
+// Normalise an app-descriptor version for comparison with a declared one: drop one leading v/V and one
+// trailing "-dirty" (git describe --dirty). out must hold STAGE_SEMVER_FIELD_LEN + 1 bytes.
+static void desc_version_normalise(const char *v, char *out)
+{
+    const char *s = strip_v(v);
+    size_t n = strlen(s);
+    static const char suffix[] = "-dirty";
+    const size_t sl = sizeof(suffix) - 1u;
+    if (n > sl && strcmp(s + n - sl, suffix) == 0) {
+        n -= sl;
+    }
+    memcpy(out, s, n);
+    out[n] = '\0';
+}
+
 static update_stage_err_t map_hdr(stage_hdr_status_t s)
 {
     switch (s) {
@@ -254,10 +269,15 @@ static update_stage_err_t flush_head(update_stage_t *st)
     v[STAGE_SEMVER_FIELD_LEN] = '\0';
     if (st->semver_given) {
         // A declared version may not override a valid one in the descriptor (else 99.0.0 on an old image
-        // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one. Only gated (hand-upload) stagers
-        // check: the release fetch's tag is not necessarily the build's descriptor string.
+        // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one.
+        // Gated stagers (hand upload AND the GitHub release fetch, which installs update_stage_manifest_gate)
+        // compare the NORMALISED forms: leading v and a trailing "-dirty" (ESP-IDF's git-describe
+        // PROJECT_VER, e.g. the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty") are dropped from the
+        // descriptor; any other difference is a real mismatch.
         update_semver_t dv;
-        if (st->gate != NULL && update_semver_parse(strip_v(v), &dv) && strcmp(strip_v(v), st->semver) != 0) {
+        char dn[STAGE_SEMVER_FIELD_LEN + 1];
+        desc_version_normalise(v, dn);
+        if (st->gate != NULL && update_semver_parse(dn, &dv) && strcmp(dn, st->semver) != 0) {
             return UPDATE_STAGE_ERR_VERSION_MISMATCH;
         }
     } else {

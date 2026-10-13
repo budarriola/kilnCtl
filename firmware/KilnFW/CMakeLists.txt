@@ -19,6 +19,13 @@ set(EXTRA_COMPONENT_DIRS
     "${CMAKE_CURRENT_LIST_DIR}/../hwAbstraction/idf/hwabstraction_esp"
 )
 
+# A release build (tools/make_release.ps1 exports KILNCTL_RELEASE_VERSION) stamps the tag into
+# esp_app_desc_t.version, so the descriptor equals the release.json tag. Without this ESP-IDF uses
+# git describe --dirty and the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty".
+if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" STREQUAL "")
+    set(PROJECT_VER "$ENV{KILNCTL_RELEASE_VERSION}")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 # --- Hard-error the missing-declaration class, TREE-WIDE -------------------

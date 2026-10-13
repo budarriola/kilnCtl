@@ -1132,6 +1132,32 @@ static void test_manifest_gate(void)
     TEST_CHECK(upload_gated(30000, 4096, "v1.2.4", update_stage_manifest_gate, &want) == UPDATE_STAGE_ERR_VERSION_MISMATCH,
                "descriptor version differs from the manifest version: refused");
 
+    // Published v1.0.0-pre.3: release.json tag "v1.0.0-pre.3" (manifest identity version) vs the image's
+    // esp_app_desc_t.version "v1.0.0-pre.3-dirty" (ESP-IDF git-describe PROJECT_VER). Real artifact strings.
+    reset_board();
+    make_image(30000, "v1.0.0-pre.3-dirty");
+    put_record_c(24, 16, 13, "abc1234");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+               "pre.3: descriptor v1.0.0-pre.3-dirty vs manifest v1.0.0-pre.3: accepted");
+    reset_board();
+    make_image(30000, "v1.0.0-pre.3");
+    put_record_c(24, 16, 13, "abc1234");
+    TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) == UPDATE_STAGE_OK,
+               "pre.3: clean descriptor still accepted");
+    {
+        static const char *const bad[] = {"v1.0.0-pre.4-dirty", "v1.0.0-pre.4", "v1.0.0-dirty",
+                                          "v1.0.0-pre.3-dirtyx", "v1.0.0-pre.3-dirt", "v1.0.1-pre.3-dirty"};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            reset_board();
+            make_image(30000, bad[i]);
+            put_record_c(24, 16, 13, "abc1234");
+            TEST_CHECK(upload_gated(30000, 4096, "v1.0.0-pre.3", update_stage_manifest_gate, &want) ==
+                               UPDATE_STAGE_ERR_VERSION_MISMATCH &&
+                           !is_staged(),
+                       "pre.3 manifest vs a genuinely different descriptor version: refused");
+        }
+    }
+
     // Review 5 M1: the IMAGE embedded commit is compared with the manifest commit. The stager declared
     // commit is what production passes (the manifest own), so it is always the matching one here.
     {
