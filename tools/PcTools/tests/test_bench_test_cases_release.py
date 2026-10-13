@@ -47,6 +47,7 @@ GOOD_SNAP = {
     "boot_persisted": 0,
     "link_errors": 0,
     "link_crc_errors": 0,
+    "link_timeouts": 0,
     "thermo": [(0, 24.0, True)],
     "wifi": {"connected": True, "ip": "10.0.0.5"},
 }
@@ -59,7 +60,8 @@ def snap(**over):
 
 
 def ctx_with(snapshot, **extra):
-    c = {"_rl_snapshot_fn": lambda _c: snapshot, "host": "10.0.0.5"}
+    c = {"_rl_snapshot_fn": lambda _c: snapshot, "host": "10.0.0.5",
+         "_board_identity_fn": lambda h: (None, "10.0.0.5")}
     c.update(extra)
     return c
 
@@ -183,10 +185,12 @@ class _Srv:
     def __init__(self, trip_text="ok - test trip latched: trip_reason=4 trip_mask=0x0008 trip_seq=1"):
         self.trip_text = trip_text
         self.trip_calls = []
+        self.hosts = []
         self.clears = 0
 
-    def safety_test_trip(self, confirm=False):
+    def safety_test_trip(self, confirm=False, host=None):
         self.trip_calls.append(confirm)
+        self.hosts.append(host)
         return self.trip_text
 
     def safety_clear_trip(self):
@@ -372,11 +376,11 @@ def test_kiln_heat_runs_ceiling_precheck_with_explicit_target(monkeypatch):
 def _ota_srv(**over):
     cleared = []
     d = dict(
-        update_check=lambda allow_prerelease=False: "ok - release v1.0.0-pre.9 available",
-        update_fetch_status=lambda: "ok idle",
+        update_check=lambda allow_prerelease=False, host=None: "ok - release v1.0.0-pre.9 available",
+        update_fetch_status=lambda host=None: "ok idle",
         update_status=lambda host=None: "ok - phase=idle, busy=False, staged=False, header=none",
-        update_stage_release=lambda confirm=False, allow_prerelease=False: "ok staged, verified by read-back sha256 abc",
-        update_stage_clear=lambda confirm=False: cleared.append(confirm) or "ok cleared",
+        update_stage_release=lambda confirm=False, allow_prerelease=False, host=None: "ok staged, verified by read-back sha256 abc",
+        update_stage_clear=lambda confirm=False, host=None: cleared.append(confirm) or "ok cleared",
     )
     d.update(over)
     s = types.SimpleNamespace(**d)
@@ -398,7 +402,7 @@ def test_ota_pass_clears_stage_by_default():
 
 
 def test_ota_stage_without_readback_claim_fails_and_still_clears():
-    s = _ota_srv(update_stage_release=lambda confirm=False, allow_prerelease=False: "ok staged")
+    s = _ota_srv(update_stage_release=lambda confirm=False, allow_prerelease=False, host=None: "ok staged")
     r = get_case("RL-D01").judge(ctx_with(snap(), srv=s))
     assert r.verdict == Verdict.FAIL and s.cleared == [True]
 
@@ -411,7 +415,7 @@ def test_ota_install_requested_but_tool_absent_skips_and_keeps_stage():
 
 def test_ota_failed_stage_clear_fails_and_taints():
     for bad in ("FAILED: boom", "REFUSED: busy", "UNKNOWN", "error: x"):
-        s = _ota_srv(update_stage_clear=lambda confirm=False, b=bad: b)
+        s = _ota_srv(update_stage_clear=lambda confirm=False, host=None, b=bad: b)
         c = ctx_with(snap(), srv=s)
         r = get_case("RL-D01").judge(c)
         assert r.verdict == Verdict.FAIL, bad
@@ -419,7 +423,7 @@ def test_ota_failed_stage_clear_fails_and_taints():
 
 
 def test_ota_raising_stage_clear_fails_and_taints():
-    def boom(confirm=False):
+    def boom(confirm=False, host=None):
         raise OSError("down")
     c = ctx_with(snap(), srv=_ota_srv(update_stage_clear=boom))
     assert get_case("RL-D01").judge(c).verdict == Verdict.FAIL
@@ -439,7 +443,7 @@ def test_ota_unreadable_stage_state_refuses():
 
 
 def test_ota_install_failed_clears_stage():
-    s = _ota_srv(update_install_staged=lambda confirm=False: "FAILED: nope")
+    s = _ota_srv(update_install_staged=lambda confirm=False, host=None: "FAILED: nope")
     r = get_case("RL-D01").judge(ctx_with(snap(), srv=s, ota_install=True))
     assert r.verdict == Verdict.FAIL and s.cleared == [True]
 
@@ -458,7 +462,7 @@ def test_unknown_target_raises_and_kiln_honoured():
 
 def test_trip_fn_raise_aborts():
     class S(_Srv):
-        def safety_test_trip(self, confirm=False):
+        def safety_test_trip(self, confirm=False, host=None):
             raise OSError("link")
     c = ctx_with(snap(), srv=S())
     r = get_case("RL-B01").judge(c)
@@ -518,7 +522,7 @@ class _Cancel:
     def __init__(self):
         self.calls = []
 
-    def __call__(self, confirm=False):
+    def __call__(self, confirm=False, host=None):
         self.calls.append(confirm)
         return "ok cancelled"
 
@@ -533,21 +537,23 @@ def _dirty_after_stage(**over):
 
     def status(host=None):
         state["n"] += 1
-        return "ok - phase=idle, busy=False, staged=False, header=none" if state["n"] == 1 else DIRTY
+        return DIRTY if state["n"] == 2 else "ok - phase=idle, busy=False, staged=False, header=none"
 
-    s = _ota_srv(update_status=status, update_fetch_cancel=cancel, **over)
+    kw = dict(update_status=status, update_fetch_cancel=cancel)
+    kw.update(over)
+    s = _ota_srv(**kw)
     s.cancel = cancel
     return s
 
 
-def _raise_stage(confirm=False, allow_prerelease=False):
+def _raise_stage(confirm=False, allow_prerelease=False, host=None):
     raise OSError("link dropped mid download")
 
 
 @pytest.mark.parametrize("stage", [
     _raise_stage,
-    lambda confirm=False, allow_prerelease=False: "FAILED: sha mismatch",
-    lambda confirm=False, allow_prerelease=False: "UNKNOWN",
+    lambda confirm=False, allow_prerelease=False, host=None: "FAILED: sha mismatch",
+    lambda confirm=False, allow_prerelease=False, host=None: "UNKNOWN",
 ])
 def test_ota_stage_any_bad_outcome_cancels_then_clears(stage):
     s = _dirty_after_stage(update_stage_release=stage)
@@ -560,7 +566,7 @@ def test_ota_stage_any_bad_outcome_cancels_then_clears(stage):
 
 def test_ota_stage_raise_clear_failure_taints():
     s = _dirty_after_stage(update_stage_release=_raise_stage,
-                           update_stage_clear=lambda confirm=False: "FAILED: busy")
+                           update_stage_clear=lambda confirm=False, host=None: "FAILED: busy")
     c = ctx_with(snap(), srv=s)
     r = get_case("RL-D01").judge(c)
     assert r.verdict == Verdict.FAIL and c.get("_tainted") is True
@@ -584,7 +590,8 @@ def test_ota_precheck_requires_not_busy_and_no_header(status):
 
 def _install_ctx(snapfn, t):
     return {"_rl_snapshot_fn": snapfn, "host": "h", "ota_install": True, "_rl_baseline": snap(heap_min_free=30000),
-            "srv": _ota_srv(update_install_staged=lambda confirm=False: "ok installed"),
+            "_board_identity_fn": lambda h: (None, "10.0.0.5"),
+            "srv": _ota_srv(update_install_staged=lambda confirm=False, host=None: "ok installed"),
             "_now": lambda: t["v"], "_sleep": lambda s: t.__setitem__("v", t["v"] + s)}
 
 
@@ -679,14 +686,237 @@ def test_b01_partial_match_trip_is_not_cleared(diag):
     assert r.verdict == Verdict.FAIL and srv.clears == 0 and c.get("_release_abort")
 
 
-def test_b01_no_trip_latched_still_clears_and_passes():
+def test_b01_no_trip_in_diag_fails_even_if_tool_text_says_ok():
     srv = _Srv()
     srv.diag = "trip_reason: 0 | trip_mask: 0x0000"
     c = ctx_with(snap(), srv=srv)
     _readiness(c)
     r = get_case("RL-B01").judge(c)
-    assert r.verdict == Verdict.PASS, r.reason
-    assert r.observed["trip_before_clear"]["reason"] == 0 and srv.clears >= 1
+    assert r.verdict == Verdict.FAIL and srv.clears == 0 and c.get("_release_abort")
+
+
+def test_b01_unparseable_diag_does_not_pass():
+    srv = _Srv()
+    srv.diag = "garbage"
+    c = ctx_with(snap(), srv=srv)
+    _readiness(c)
+    assert get_case("RL-B01").judge(c).verdict != Verdict.PASS
+
+
+# -- MED-1 / LOW-1: host threading and identity pin --------------------------
+
+
+def test_b01_passes_host_and_pins_resolved_ip():
+    srv = _Srv()
+    c = ctx_with(snap(), srv=srv, host="kiln.local", _board_identity_fn=lambda h: (None, "10.9.9.9"))
+    _readiness(c)
+    assert get_case("RL-B01").judge(c).verdict == Verdict.PASS
+    assert srv.hosts == ["10.9.9.9"] and c["host"] == "10.9.9.9"
+
+
+@pytest.mark.parametrize("idfn", [
+    lambda h: ("different board", "1.2.3.4"),
+    lambda h: (_ for _ in ()).throw(OSError("uart down")),
+])
+def test_b01_identity_mismatch_or_unreadable_is_inconclusive_and_trips_nothing(idfn):
+    srv = _Srv()
+    c = ctx_with(snap(), srv=srv, _board_identity_fn=idfn)
+    r = get_case("RL-B01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE and srv.trip_calls == []
+
+
+def test_b01_no_host_is_inconclusive():
+    srv = _Srv()
+    c = ctx_with(snap(), srv=srv)
+    c["host"] = None
+    assert get_case("RL-B01").judge(c).verdict == Verdict.INCONCLUSIVE and srv.trip_calls == []
+
+
+def _host_ota_srv(seen, **over):
+    def rec(name, ret):
+        def f(*a, host=None, **k):
+            seen.append((name, host))
+            return ret
+        return f
+
+    d = dict(
+        update_check=rec("check", "ok - release available"),
+        update_fetch_status=rec("fetch_status", "ok idle"),
+        update_status=rec("status", "ok - phase=idle, busy=False, staged=False, header=none"),
+        update_stage_release=rec("stage", "ok staged, verified by read-back sha256 abc"),
+        update_stage_clear=rec("clear", "ok cleared"),
+        update_fetch_cancel=rec("cancel", "ok cancelled"),
+        update_install_staged=rec("install", "FAILED: nope"),
+    )
+    d.update(over)
+    return types.SimpleNamespace(**d)
+
+
+def test_d01_every_update_call_carries_the_pinned_host():
+    seen = []
+    c = ctx_with(snap(), srv=_host_ota_srv(seen), host="kiln.local", ota_install=True,
+                 _board_identity_fn=lambda h: (None, "10.9.9.9"))
+    get_case("RL-D01").judge(c)
+    names = {n for n, _h in seen}
+    assert {"status", "check", "fetch_status", "stage", "install", "cancel", "clear"} <= names
+    assert all(h == "10.9.9.9" for _n, h in seen), seen
+
+
+def test_d01_identity_mismatch_touches_nothing():
+    seen = []
+    c = ctx_with(snap(), srv=_host_ota_srv(seen), _board_identity_fn=lambda h: ("other", "1.1.1.1"))
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE and seen == []
+
+
+def test_d01_identity_rechecked_before_install():
+    seen = []
+    calls = {"n": 0}
+
+    def idfn(h):
+        calls["n"] += 1
+        return (None, "10.0.0.5") if calls["n"] == 1 else ("swapped board", "10.0.0.5")
+
+    c = ctx_with(snap(), srv=_host_ota_srv(seen), ota_install=True, _board_identity_fn=idfn)
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE and "install" not in {n for n, _h in seen}
+    assert "clear" in {n for n, _h in seen}  # stage still cleaned up
+
+
+# -- LOW-3: cleanup taints --------------------------------------------------
+
+
+@pytest.mark.parametrize("cancel", [None, "FAILED: x", "raise"])
+def test_d01_bad_cancel_taints(cancel):
+    def raiser(confirm=False, host=None):
+        raise OSError("down")
+
+    over = {}
+    if cancel == "raise":
+        over["update_fetch_cancel"] = raiser
+    elif cancel:
+        over["update_fetch_cancel"] = lambda confirm=False, host=None, t=cancel: t
+    s = _dirty_after_stage(**over)
+    if cancel is None:
+        del s.update_fetch_cancel
+    c = ctx_with(snap(), srv=s)
+    get_case("RL-D01").judge(c)
+    assert c.get("_tainted") is True
+
+
+def test_d01_stage_still_dirty_after_clear_taints_and_fails():
+    state = {"n": 0}
+
+    def status(host=None):
+        state["n"] += 1
+        return "ok - phase=idle, busy=False, staged=False, header=none" if state["n"] == 1 else DIRTY
+
+    s = _ota_srv(update_status=status, update_fetch_cancel=_Cancel())
+    c = ctx_with(snap(), srv=s)
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and c.get("_tainted") is True
+    assert "after clear" in r.reason
+
+
+def test_d01_unreadable_status_after_clear_taints():
+    state = {"n": 0}
+
+    def status(host=None):
+        state["n"] += 1
+        if state["n"] == 1:
+            return "ok - phase=idle, busy=False, staged=False, header=none"
+        if state["n"] == 2:
+            return DIRTY
+        raise OSError("down")
+
+    s = _ota_srv(update_status=status, update_fetch_cancel=_Cancel())
+    c = ctx_with(snap(), srv=s)
+    assert get_case("RL-D01").judge(c).verdict == Verdict.FAIL and c.get("_tainted") is True
+
+
+# -- LOW-4 / LOW-5: install -------------------------------------------------
+
+
+def _inst_ctx(snaps, install, t=None):
+    """snaps: list of snapshots / exceptions consumed one per call; last repeats."""
+    t = t or {"v": 0.0}
+    st = {"i": 0}
+
+    def snapfn(_c):
+        v = snaps[min(st["i"], len(snaps) - 1)]
+        st["i"] += 1
+        if isinstance(v, Exception):
+            raise v
+        return v
+
+    seen = []
+    s = _host_ota_srv(seen, update_install_staged=install)
+    c = _install_ctx(snapfn, t)
+    c["srv"] = s
+    c["_seen"] = seen
+    return c
+
+
+def _ident(build, up=None):
+    d = {"fw_build": build, "fw_version": "1"}
+    if up is not None:
+        d["uptime_s"] = up
+    return d
+
+
+def test_install_raise_has_own_label_and_never_cancels_or_clears():
+    def boom(confirm=False, host=None):
+        raise OSError("link dropped")
+
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), OSError("down"),
+                   snap(identity=_ident("b2", 5))], boom)
+    r = get_case("RL-D01").judge(c)
+    names = [n for n, _h in c["_seen"]]
+    assert r.verdict == Verdict.FAIL and "raised" in r.reason
+    assert "cancel" not in names and "clear" not in names
+    assert c["_rl_baseline"] is not None
+
+
+def test_install_poll_ignores_pre_reboot_snapshot_without_confirmed_reboot():
+    # same build, uptime rising: board never rebooted within the window.
+    c = _inst_ctx([snap(identity=_ident("b1", 100))] + [snap(identity=_ident("b1", 100 + 10 * i)) for i in range(1, 40)],
+                  lambda confirm=False, host=None: "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and "no confirmed reboot" in r.reason
+    assert c["_rl_baseline"] is None
+
+
+def test_install_uptime_drop_confirms_reboot_even_with_same_build():
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), snap(identity=_ident("b1", 12))],
+                  lambda confirm=False, host=None: "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and "unchanged" in r.reason  # reboot seen, build same
+    assert c["_rl_baseline"]["identity"]["uptime_s"] == 12
+
+
+def test_install_down_then_up_confirms_reboot():
+    c = _inst_ctx([snap(identity=_ident("b1")), OSError("down"), snap(identity=_ident("b2"))],
+                  lambda confirm=False, host=None: "ok installed")
+    assert get_case("RL-D01").judge(c).verdict == Verdict.PASS
+
+
+@pytest.mark.parametrize("field,val", [
+    ("link_crc_errors", None), ("link_timeouts", None), ("heap_min_free", None),
+    ("link_crc_errors", True), ("link_timeouts", "3"),
+])
+def test_install_unreadable_baseline_field_is_inconclusive(field, val):
+    bad = snap(identity=_ident("b2", 5))
+    bad[field] = val
+    bad.setdefault("link_timeouts", 0)
+    c = _inst_ctx([snap(identity=_ident("b1", 500), link_timeouts=0), bad],
+                  lambda confirm=False, host=None: "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE, r.reason
+
+
+def test_bool_link_counter_is_not_a_valid_baseline():
+    assert R._valid_baseline(snap(link_crc_errors=True, link_timeouts=0)) == "link_crc_errors"
+    assert R._valid_baseline(snap(link_crc_errors=0, link_timeouts=0)) is None
 
 
 def test_rl_ids_only_in_release_suite():

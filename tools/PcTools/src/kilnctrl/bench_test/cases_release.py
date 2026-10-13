@@ -236,7 +236,11 @@ def _read_snapshot(ctx: dict) -> dict:
         st, body = _get_json(ctx, "/api/status")
         if st != 200 or not isinstance(body, dict):
             raise RuntimeError(f"/api/status http {st}")
-        return {"fw_build": body.get("fw_build"), "fw_version": body.get("fw_version") or body.get("version")}
+        up = body.get("uptime_s")
+        if isinstance(up, bool) or not isinstance(up, (int, float)):
+            up = None
+        return {"fw_build": body.get("fw_build"), "fw_version": body.get("fw_version") or body.get("version"),
+                "uptime_s": up}
 
     _try(snap, "identity", identity)
 
@@ -480,8 +484,11 @@ def _case_rl_b01(ctx: dict) -> CaseResult:
     trip_fn = getattr(srv, "safety_test_trip", None)
     if trip_fn is None:
         return CaseResult(Verdict.SKIP, reason="safety_test_trip tool not present on this server")
+    prob = _pin_identity(ctx)
+    if prob:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"before the test trip: {prob}")
     try:
-        text = trip_fn(confirm=True)
+        text = trip_fn(confirm=True, host=ctx["host"])
     except Exception as exc:  # noqa: BLE001
         _abort(ctx, "safety_test_trip raised")
         return CaseResult(Verdict.FAIL, reason=f"safety_test_trip raised {type(exc).__name__}: {exc}")
@@ -496,9 +503,9 @@ def _case_rl_b01(ctx: dict) -> CaseResult:
         _abort(ctx, "phase B could not read the trip before clearing")
         return CaseResult(Verdict.FAIL, reason=f"diag before clear raised {type(exc).__name__}: {exc}", observed=obs)
     obs["trip_before_clear"] = {"reason": pre_reason, "mask": pre_mask}
-    if pre_reason not in (0, None) and (pre_reason != 4 or pre_mask != 0x0008):
-        _abort(ctx, "a trip other than the test trip is latched; not cleared")
-        return CaseResult(Verdict.FAIL, reason=f"latched trip reason={pre_reason} mask={pre_mask} is not the test trip; left latched", observed=obs)
+    if pre_reason != 4 or pre_mask != 0x0008:
+        _abort(ctx, "the UART diag does not show the test trip; nothing cleared")
+        return CaseResult(Verdict.FAIL, reason=f"UART diag shows trip reason={pre_reason} mask={pre_mask}, expected the test trip (4, 0x0008); left as is", observed=obs)
     # The latched trip must always be cleared, even when the judge FAILed,
     # so the board is not left tripped for the heat phase.
     try:
@@ -636,26 +643,39 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
 BENCH_CEILING_MAX_C = 200.0
 
 
-def _board_identity_problem(ctx: dict, kiln: bool, mask: int) -> Optional[str]:
-    """Cross-check the named target against the board's own zone ceilings.
-    Fail closed: no host, unreadable config, or a mismatch returns a reason."""
+def _pin_identity(ctx: dict) -> Optional[str]:
+    """UART-vs-HTTP identity check; on success pins the resolved IP into
+    ctx["host"] so later calls never re-resolve the hostname. Returns a
+    reason on a mismatch, an unreadable value or no host (fail closed)."""
     host = ctx.get("host")
     if not host:
         return "no host to verify the board identity against the target"
-    from .. import zones_http_client
-
-    # Heat runs over UART, ceilings are read over HTTP: both must be the same board.
     idfn = ctx.get("_board_identity_fn")
     if idfn is None:
         from .. import mcp_server_aux
 
         idfn = mcp_server_aux._board_identity_check
     try:
-        mism = idfn(host)[0]
+        mism, ip = idfn(host)
     except Exception as exc:  # noqa: BLE001
         return f"could not tie the UART link to the HTTP host: {exc}"
     if mism:
         return f"UART/HTTP board mismatch: {mism}"
+    if isinstance(ip, str) and ip:
+        ctx["host"] = ip
+    return None
+
+
+def _board_identity_problem(ctx: dict, kiln: bool, mask: int) -> Optional[str]:
+    """Cross-check the named target against the board's own zone ceilings.
+    Fail closed: no host, unreadable config, or a mismatch returns a reason."""
+    from .. import zones_http_client
+
+    # Heat runs over UART, ceilings are read over HTTP: both must be the same board.
+    prob = _pin_identity(ctx)
+    if prob:
+        return prob
+    host = ctx["host"]
 
     get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
     try:
@@ -712,6 +732,13 @@ def _release_teardown(ctx: dict) -> None:
 # -- phase D: OTA ----------------------------------------------------------
 
 
+_STAGE_EMPTY_MARKS = ("staged=False", "busy=False", "header=none")
+
+
+def _stage_empty(text: str) -> bool:
+    return text.startswith("ok") and all(m in text for m in _STAGE_EMPTY_MARKS)
+
+
 def _case_rl_d01(ctx: dict) -> CaseResult:
     ab = _aborted(ctx)
     if ab:
@@ -725,26 +752,31 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
         if getattr(srv, name, None) is None:
             return CaseResult(Verdict.SKIP, reason=f"{name} tool not present on this server")
     obs: Dict[str, Any] = {"target": _target(ctx), "install_requested": want_install}
+    # UART-vs-HTTP identity, then the resolved IP is pinned for every call below.
+    prob = _pin_identity(ctx)
+    if prob:
+        return CaseResult(Verdict.INCONCLUSIVE, reason=f"before the update steps: {prob}", observed=obs)
+    host = ctx["host"]
+    obs["host"] = host
     # A stage the operator filled before the run is theirs: never overwrite or erase it.
-    pre = str(srv.update_status())
+    pre = str(srv.update_status(host=host))
     obs["stage_before"] = pre[:300]
-    if (not pre.startswith("ok") or "staged=False" not in pre or "busy=False" not in pre
-            or "header=none" not in pre):
+    if not _stage_empty(pre):
         return CaseResult(Verdict.INCONCLUSIVE,
                           reason=f"stage not provably empty before the run (clear or install it first): {pre[:160]}",
                           observed=obs)
-    chk = srv.update_check(allow_prerelease=True)
+    chk = srv.update_check(allow_prerelease=True, host=host)
     obs["check"] = str(chk)[:300]
     if not str(chk).startswith("ok"):
         return CaseResult(Verdict.INCONCLUSIVE if str(chk).startswith(("REFUSED", "UNKNOWN")) else Verdict.FAIL,
                           reason=f"update_check: {str(chk)[:200]}", observed=obs)
-    obs["fetch_status"] = str(srv.update_fetch_status())[:300]
+    obs["fetch_status"] = str(srv.update_fetch_status(host=host))[:300]
     staged = False
-    install_ok = False
+    install_ran = False
     stage_ok = False
     try:
         staged = True  # once invoked, a download may be in flight whatever it returns
-        stg = srv.update_stage_release(confirm=True, allow_prerelease=True)
+        stg = srv.update_stage_release(confirm=True, allow_prerelease=True, host=host)
         obs["stage"] = str(stg)[:400]
         if not str(stg).startswith("ok"):
             res = CaseResult(Verdict.FAIL, reason=f"update_stage_release: {str(stg)[:200]}", observed=obs)
@@ -753,82 +785,144 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
             if "verified by read-back" not in str(stg):
                 res = CaseResult(Verdict.FAIL, reason="stage result does not claim read-back verification", observed=obs)
             elif want_install:
-                res, install_ok = _install_and_verify(ctx, srv.update_install_staged, obs)
+                # Identity re-checked right before the install; a mismatch leaves
+                # the stage to the cleanup below (nothing was installed).
+                prob = _pin_identity(ctx)
+                if prob:
+                    res = CaseResult(Verdict.INCONCLUSIVE, reason=f"before the install: {prob}", observed=obs)
+                else:
+                    host = ctx["host"]
+                    res, install_ran = _install_and_verify(
+                        ctx, lambda **kw: srv.update_install_staged(host=host, **kw), obs)
             else:
                 res = CaseResult(Verdict.PASS, observed=obs)
     except Exception as exc:  # noqa: BLE001
         res = CaseResult(Verdict.FAIL, reason=f"stage raised {type(exc).__name__}: {exc}", observed=obs)
-    if staged and not install_ok:
+    if install_ran:
+        # The install tool consumed (or may have consumed) the stage and the board
+        # rebooted: never cancel or clear while an install/reboot may be running.
+        return res
+    if staged:
         # Re-read the stage: after a non-ok or raising stage call the download may
-        # still be running or half written. Cancel, then clear.
+        # still be running or half written. Cancel, then clear, then read back.
         try:
-            post = str(srv.update_status())
+            post = str(srv.update_status(host=host))
         except Exception as exc:  # noqa: BLE001
             post = f"error: {type(exc).__name__}: {exc}"
         obs["stage_after"] = post[:300]
-        dirty = (stage_ok or not post.startswith("ok") or "staged=False" not in post or "busy=False" not in post
-                 or "header=none" not in post)
-        if dirty:
+        if stage_ok or not _stage_empty(post):
             cancel = getattr(srv, "update_fetch_cancel", None)
-            if cancel is not None:
+            if cancel is None:
+                obs["fetch_cancel"] = "tool missing"
+                ctx["_tainted"] = True
+            else:
                 try:
-                    obs["fetch_cancel"] = str(cancel(confirm=True))[:200]
+                    cres = str(cancel(confirm=True, host=host))
+                    obs["fetch_cancel"] = cres[:200]
+                    if not cres.startswith("ok"):
+                        ctx["_tainted"] = True
                 except Exception as exc:  # noqa: BLE001
                     obs["fetch_cancel"] = f"raised {type(exc).__name__}: {exc}"
+                    ctx["_tainted"] = True
             try:
-                clr = str(srv.update_stage_clear(confirm=True))
+                clr = str(srv.update_stage_clear(confirm=True, host=host))
             except Exception as exc:  # noqa: BLE001
                 clr = f"FAILED: raised {type(exc).__name__}: {exc}"
             obs["stage_clear"] = clr[:300]
             if not clr.startswith("ok"):
                 ctx["_tainted"] = True
                 return CaseResult(Verdict.FAIL, reason=f"stage clear failed, image left in stage: {clr[:160]}", observed=obs)
+            try:
+                back = str(srv.update_status(host=host))
+            except Exception as exc:  # noqa: BLE001
+                back = f"error: {type(exc).__name__}: {exc}"
+            obs["stage_after_clear"] = back[:300]
+            if not _stage_empty(back):
+                ctx["_tainted"] = True
+                return CaseResult(Verdict.FAIL, reason=f"stage still staged or busy after clear: {back[:160]}", observed=obs)
     return res
 
 
+def _valid_baseline(snap: dict) -> Optional[str]:
+    """None when every field the new baseline needs is present and typed."""
+    ident = snap.get("identity")
+    if not isinstance(ident, dict) or not ident.get("fw_build"):
+        return "identity/fw_build"
+    for k in ("link_crc_errors", "link_timeouts", "heap_min_free"):
+        v = snap.get(k)
+        if isinstance(v, bool) or not isinstance(v, int):
+            return k
+    return None
+
+
 def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool]:
-    """Returns (result, install_ran_ok). The stage is only left alone when the
-    install tool reported ok (it consumes the stage)."""
+    """Returns (result, install_may_have_run). The stage is only left alone when
+    the install tool reported ok or raised (it may be installing/rebooting)."""
     before = _snapshot(ctx)
-    before_build = (before.get("identity") or {}).get("fw_build")
+    bident = before.get("identity") or {}
+    before_build = bident.get("fw_build")
+    before_up = bident.get("uptime_s")
     if not before_build:
         return CaseResult(Verdict.INCONCLUSIVE, reason="no fw_build before install; cannot prove a change", observed=obs), False
-    res = install(confirm=True)
-    obs["install"] = str(res)[:400]
-    if not str(res).startswith("ok"):
+    raised = None
+    try:
+        res = install(confirm=True)
+    except Exception as exc:  # noqa: BLE001
+        raised = f"{type(exc).__name__}: {exc}"
+        res = ""
+    obs["install"] = (f"RAISED {raised}" if raised else str(res))[:400]
+    if not raised and not str(res).startswith("ok"):
         return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs), False
     sleep = ctx.get("_sleep", _time.sleep)
     now = ctx.get("_now", _time.monotonic)
     deadline = now() + 300.0
     after = None
+    saw_down = False
+    bad_field = None
     while now() < deadline:
         sleep(10.0)
         try:
             cand = _snapshot(ctx)
         except Exception:  # noqa: BLE001
+            saw_down = True
             continue
-        if (cand.get("identity") or {}).get("fw_build"):
-            after = cand
-            break
+        ident = cand.get("identity") or {}
+        if not ident.get("fw_build"):
+            saw_down = True
+            continue
+        up = ident.get("uptime_s")
+        rebooted = (saw_down or ident["fw_build"] != before_build
+                    or (isinstance(up, (int, float)) and isinstance(before_up, (int, float)) and up < before_up))
+        if not rebooted:
+            continue  # the pre-install board still answering: not a confirmed reboot
+        bad_field = _valid_baseline(cand)
+        if bad_field:
+            continue
+        after = cand
+        break
+    if raised:
+        obs["install_raised"] = raised
     if after is None:
         ctx["_rl_baseline"] = None  # since-boot watermarks are gone; F01 cannot compare
-        return CaseResult(Verdict.FAIL, reason="board did not come back with a fw_build after install", observed=obs), True
+        if bad_field:
+            return CaseResult(Verdict.INCONCLUSIVE, reason=f"after the reboot the baseline field {bad_field} stayed unreadable", observed=obs), True
+        why = "update_install_staged raised and " if raised else ""
+        return CaseResult(Verdict.FAIL, reason=f"{why}no confirmed reboot with a readable baseline after install within 300 s", observed=obs), True
     # The reboot reset every since-boot watermark (heap min_free, stack hwm, link
     # counters): re-baseline so RL-F01 does not compare across the reboot.
     ctx["_rl_baseline"] = after
-    obs["version_before"] = (before.get("identity") or {}).get("fw_version")
+    obs["version_before"] = bident.get("fw_version")
     obs["version_after"] = (after.get("identity") or {}).get("fw_version")
     obs["build_before"] = before_build
     obs["build_after"] = after["identity"]["fw_build"]
+    if raised:
+        return CaseResult(Verdict.FAIL, reason=f"update_install_staged raised ({raised}) but the board rebooted; install state unproven", observed=obs), True
     if obs["build_after"] == before_build:
         return CaseResult(Verdict.FAIL, reason=f"fw_build unchanged after install ({before_build})", observed=obs), True
     v, fails, _inc = judge_snapshot(after)
     if v == Verdict.FAIL:
         return CaseResult(Verdict.FAIL, reason="after install: " + "; ".join(fails), observed=obs), True
     return CaseResult(Verdict.PASS, observed=obs), True
-
-
-# -- phase E: web / LCD smoke ----------------------------------------------
 
 
 def _case_rl_e01(ctx: dict) -> CaseResult:
