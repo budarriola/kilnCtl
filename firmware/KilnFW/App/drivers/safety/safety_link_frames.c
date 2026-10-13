@@ -1175,6 +1175,7 @@ bool safety_apply_diag(SafetyLinkClass *link, const uart_proto_message_t *msg)
     link->cached.diag_state = p[24];
     link->cached.diag_since_reboot = true;
     link->cached.trip_event_after_diag = false; /* SAFETYFX10 MED-1: a DIAG arrived after any TRIP_EVENT */
+    link->diag_stale_latched = false; /* REBOOTFX7 LOW-1 */
     link->diag_tick = msg->rx_ms; /* TRIPFX3 LOW-B / REBOOTFX4 LOW-2: receive stamp (ms) of the DIAG itself */
     link->cached.diag_flags = p[25];
     link->cached.diag_log_frames_dropped = safety_read_u32_le(&p[26]);

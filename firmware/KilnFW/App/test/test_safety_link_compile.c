@@ -3969,6 +3969,31 @@ static void test_diag_frame_age_tick_period_10(void)
     s_fake_tick_count = saved_tick;
 }
 
+// REBOOTFX7 LOW-1: link up, no DIAG for 2^32 ms: the raw ms difference wraps back to a small value and must not
+// read fresh. Modelled with period 1: read stale at 6000, then the clock wraps to 1000 (2^32 + 1000 ms).
+static void test_diag_age_does_not_alias_fresh_after_2p32_ms(void)
+{
+    TEST_SECTION("diag_frame_age_ms saturates stale across the 2^32 ms alias (REBOOTFX7 LOW-1)");
+    TickType_t saved_tick = s_fake_tick_count;
+    s_fake_tick_count = 0;
+    SafetyLinkClass link = make_link();
+    link.initialized = true;
+    apply_diag_uptime_rx(&link, 1000u, 0u);
+    safety_link_status_t st;
+    s_fake_tick_count = 1000;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 1000u, "fresh at 1000 ms");
+    s_fake_tick_count = 6000;
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS,
+               "stale at 6000 ms");
+    s_fake_tick_count = 1000; /* clock advanced by 2^32 ms: wraps to the same value as the fresh read */
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK, "status read after wrap");
+    TEST_CHECK(st.diag_frame_age_ms > SAFETY_LINK_DIAG_FRESH_MS, "wrapped age still reads stale");
+    apply_diag_uptime_rx(&link, 2000u, 1000u);
+    TEST_CHECK(safety_link_get_status(&link, &st) == ESP_OK && st.diag_frame_age_ms == 0u,
+               "a new DIAG clears the latch and reads fresh");
+    s_fake_tick_count = saved_tick;
+}
+
 int main(void)
 {
 #ifdef KILN_TICK10_ONLY
@@ -3994,6 +4019,7 @@ int main(void)
     test_safetyfx10_trip_event_after_diag_is_arrival_order();
     test_stalled_inbox_fw_version_does_not_double_count_reboot();
     test_diag_frame_age_uses_receive_time();
+    test_diag_age_does_not_alias_fresh_after_2p32_ms();
     test_rx_ms_units_pinned_at_uptime_consumer();
     test_fw_version_unknown_before_any_frame_arrives();
     test_fw_version_known_and_dirty_roundtrips();

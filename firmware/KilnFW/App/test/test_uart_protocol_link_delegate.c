@@ -305,8 +305,27 @@ static void test_message_init(void)
     CHECK(m.payload[0] == 0u && m.payload[UART_PROTO_MAX_PAYLOAD - 1] == 0u, "message_init zero-initialises payload");
 }
 
+/* REBOOTFX7 LOW-2: absolute rx_ms units. Only meaningful at a tick period != 1 (built a second time with
+ * /DportTICK_PERIOD_MS=10u /DKILN_TICK10_ONLY): a raw-tick stamp would give 300, not 3000. */
+static void test_message_init_units_period_10(void)
+{
+    uart_proto_message_t m;
+    uart_proto_message_init(&m, UART_PROTO_DEVICE_SAFETY, 1u, 2u, 3u, 300u);
+    CHECK(portTICK_PERIOD_MS == 10u, "this executable is built with a 10 ms tick period");
+    CHECK(m.rx_ms == 3000u, "uart_proto_message_init(.., 300 ticks) stamps 3000 ms, not raw ticks");
+}
+
 int main(void)
 {
+#ifdef KILN_TICK10_ONLY
+    test_message_init_units_period_10();
+    if (g_failures == 0) {
+        printf("ALL PASS: message_init rx_ms units at 10 ms tick\n");
+        return 0;
+    }
+    printf("%d FAILURE(S)\n", g_failures);
+    return 1;
+#endif
     test_rx_stamp();
     test_message_init();
     test_required_cases();

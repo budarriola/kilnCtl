@@ -1443,6 +1443,7 @@ typedef struct {
 
     /* When the last DIAG (Frame B) was applied; cached_tick only moves on STATUS (Frame A).
      * Becomes safety_link_status_t::diag_frame_age_ms. Meaningless until diag_ever_received. */
+    bool                  diag_stale_latched; /* REBOOTFX7 LOW-1: set once the DIAG age was seen past SAFETY_LINK_DIAG_FRESH_MS; cleared only by the next DIAG apply */
     uint32_t              diag_tick; /* ms receive stamp (uart_proto_message_t::rx_ms), not a tick count */
 
     /* Last CONFIG_PAGE (0x1F) frame that arrived while NOBODY was waiting for
