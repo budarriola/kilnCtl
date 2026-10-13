@@ -25,7 +25,7 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 205.
+Gate rows: 206.
 
 | Status | Rows |
 |---|---|
