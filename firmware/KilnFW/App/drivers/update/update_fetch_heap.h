@@ -48,21 +48,36 @@
 //     check    need = 8192 + CHECK_DRAW 12068 + 3840 = 24100 B
 //   CHECK_DRAW = WP7 measured handshake draw 11044 B (2 KB rx, 1 KB tx) + 1024 B (2 KB tx here); no
 //   4096 B writer stack (wr_start only runs for the stage sink). The 8192 B owner floor and the 3840 B
-//   concurrent margin are unchanged; the mid-body abort (12288 B) is unchanged.
+//   concurrent margin are unchanged. (The mid-body abort was 12288 B here; UPDFX2 below moved it to 10240 B.)
 //   UPDFX2 (MED-1, LOW-1): a check is admitted at the SAME 28532 B need as a download (a check that
 //   starts is a precursor to a download; the bench board idles at 29.6-31.1 KB so both pass). The
 //   check keeps its own 3072 B largest-block need (client buffers only). The mid-body abort is now
 //   FLOOR + 2048 = 10240 B, not 12288 B: a download admitted at 28532 B ends at 28532 - 16500 = 12032 B,
 //   which the old 12288 B abort would have tripped immediately (256 B under). 10240 B leaves 1792 B of
 //   margin over that post-draw level and still keeps 2048 B over the 8192 B floor.
-//   Redirect hops (UPDFX2, bench 2026-10-12): after the first hop the heap is ~2.4 KB lower than at
-//   job start (27855 B seen at the 302 hop vs 30299 B idle; the first client is closed and cleaned up
-//   before the next admission, so what remains held is outside this module: lwIP/TLS teardown).
-//   Re-requiring the start need per hop therefore refused a healthy download. Hops after the first are
-//   admitted when the level AFTER the draw still to come stays at or above the abort level:
-//     download hop need = ABORT_BELOW + 16500 = 26740 B   (27855 B passes, post-draw 11355 B)
-//     check    hop need = ABORT_BELOW + 12068 = 22308 B
-//   so the 8192 B floor is never admitted under (hop post-draw >= 10240 B = floor + 2048 B).
+//   Redirect hops (UPDFX2/UPDFX3). After the first hop the heap is ~2.4 KB lower than at job start
+//   (27855 B seen at the 302 hop vs 30299 B idle; the first client is closed before the next admission,
+//   so the remainder is lwIP/TLS teardown still draining). UPDFX2 admitted a hop on ABORT_BELOW + draw
+//   (26740 B), dropping the 3840 B concurrent-request slack: a hop admitted at that minimum could end at
+//   10240 B and a concurrent httpd request (3840 B) takes it to 6400 B, under the 8192 B floor (UPDFX2
+//   review MED-1). UPDFX3 restores the slack, so a hop uses the same arithmetic as a start:
+//     download hop need = FLOOR 8192 + DRAW 16500 + SLACK 3840 = 28532 B  (= the start need)
+//     check    hop need = FLOOR 8192 + CHECK_DRAW 12068 + SLACK 3840 = 24100 B
+//   Worst case at the minimum: 28532 - 16500 = 12032 B after the draw; minus the 3840 B request = 8192 B,
+//   exactly the floor, and 1792 B above the abort level 10240 B, so the abort fires before a concurrent
+//   request could be the one to cross the floor. The abort level itself keeps FLOOR + 2048 B.
+//   The bench 302 hop at 27855 B is then 677 B short of 28532 B. Rather than weaken the rule, a LOW_FREE
+//   verdict is re-sampled for up to FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS (12 x 250 ms = 3 s,
+//   cancel- and deadline-aware, in update_fetch.c): the teardown frees its memory within that time, and the
+//   same wait also covers a residual from the previous http_get (UPDFX2 LOW-1), so the first admission of
+//   a release, manifest or asset request is not intermittently refused by the previous call's leftovers.
+//   A heap that never recovers is still refused with low_heap_free.
+//   DMA vs internal (UPDFX2 LOW-3): on the ESP32-S3 the DMA-capable internal pool is nearly the same RAM
+//   as the general internal pool (MALLOC_CAP_DMA internal = internal minus a few regions), so the two
+//   free figures move together and the 4096 B DMA floor is much lower than the 8192 B internal floor.
+//   The bench run benchupd2 saw DMA min_free 551 B: a transient low-water inside a TLS record read that
+//   the between-read checks cannot see. The read loop now also checks DMA free after each read
+//   (FETCH_DMA_FREE_MIN) and aborts with low_heap_dma; it narrows, not closes, the TOCTOU.
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
 // idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 17524 = 12123 B,
@@ -110,16 +125,19 @@ extern "C" {
 #define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES)
 // Mid-body abort (read loop only, session already built): floor plus 2 KB of transient room.
 #define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 2048u)
-// Redirect hops after the first: post-draw level must stay at or above the abort level.
-#define FETCH_HOP_DOWNLOAD_HEAP_MIN (FETCH_HEAP_ABORT_BELOW + 16500u)
-#define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_ABORT_BELOW + FETCH_CHECK_DRAW_BYTES)
+// Redirect hops after the first: same arithmetic as a start, floor + draw + concurrent slack (UPDFX3).
+#define FETCH_HOP_DOWNLOAD_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + 16500u + FETCH_HEAP_SLACK_BYTES)
+#define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_CHECK_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
+// A LOW_FREE verdict is re-sampled this many times, this far apart, before the request is refused.
+#define FETCH_HEAP_SETTLE_TRIES 12u
+#define FETCH_HEAP_SETTLE_MS 250u
 // DMA-capable internal free (LOW-6): the TLS/WiFi path draws DMA-capable memory; idle min_free is 6351 B
 // on the bench, so a floor of 4096 B refuses only a board already starved of it.
 #define FETCH_DMA_FREE_MIN 4096u
 
 typedef enum {
     FETCH_HEAP_OK = 0,
-    FETCH_HEAP_LOW_FREE,   // current free internal heap below FETCH_HEAP_PRECHECK_MIN
+    FETCH_HEAP_LOW_FREE,   // current free internal heap below the start or hop need for this kind
     FETCH_HEAP_LOW_BLOCK,  // largest free internal block below FETCH_LARGEST_BLOCK_MIN
 } fetch_heap_verdict_t;
 
@@ -128,7 +146,7 @@ typedef enum {
 // download (writer task + stager) or check (TLS + JSON only) draw.
 fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download);
 
-// Same, for a redirect hop after the first (heap not back to the job-start level, see UPDFX2 above).
+// Same, for a redirect hop after the first (heap not back to the job-start level, see UPDFX3 above).
 fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_t largest_internal_block,
                                                  bool is_download);
 

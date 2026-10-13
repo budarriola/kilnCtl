@@ -55,11 +55,13 @@ static void test_admit(void)
 static void test_hop(void)
 {
     TEST_SECTION("update_fetch_heap -- redirect hop admission (UPDFX2)");
-    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 26740u, "download hop need is abort level + 16500");
-    TEST_CHECK(FETCH_HOP_CHECK_HEAP_MIN == 22308u, "check hop need is abort level + 12068");
+    TEST_CHECK(FETCH_HOP_DOWNLOAD_HEAP_MIN == 28532u, "download hop need is floor + 16500 + slack 3840");
+    TEST_CHECK(FETCH_HOP_CHECK_HEAP_MIN == 24100u, "check hop need is floor + check draw + slack 3840");
     // Bench: 27855 B free, 7680 B block at the 302 hop of a healthy download.
-    TEST_CHECK(update_fetch_heap_admit_hop(27855u, 7680u, true) == FETCH_HEAP_OK, "bench 302 hop admitted for download");
-    TEST_CHECK(update_fetch_heap_admit(27855u, 7680u, true) == FETCH_HEAP_LOW_FREE, "same reading refused as a job start");
+    TEST_CHECK(update_fetch_heap_admit_hop(27855u, 7680u, true) == FETCH_HEAP_LOW_FREE, "bench 27855 B hop reading refused until the residual drains");
+    TEST_CHECK(update_fetch_heap_admit_hop(28000u, 9000u, true) == FETCH_HEAP_LOW_FREE, "28000 B download hop refused");
+    TEST_CHECK(update_fetch_heap_admit_hop(25000u, 9000u, false) == FETCH_HEAP_OK, "25000 B check hop admitted");
+    TEST_CHECK(update_fetch_heap_admit(25000u, 9000u, false) == FETCH_HEAP_LOW_FREE, "25000 B check refused as a start");
     TEST_CHECK(update_fetch_heap_admit_hop(FETCH_HOP_DOWNLOAD_HEAP_MIN - 1u, 9000u, true) == FETCH_HEAP_LOW_FREE,
                "download hop one byte short refused");
     TEST_CHECK(update_fetch_heap_admit_hop(FETCH_HOP_CHECK_HEAP_MIN - 1u, 9000u, false) == FETCH_HEAP_LOW_FREE,

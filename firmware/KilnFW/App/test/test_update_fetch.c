@@ -396,7 +396,88 @@ static void test_heap_admission_updfx2(void)
     add_route("https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin", g_img, IMG_LEN);
     g_app_route->on_open = set_heap_hop_ok;
     run_job_and_result("/api/update/download");
-    CHECK(strstr(g_error, "low_heap") == NULL, "27855 B hop admitted");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "27855 B hop refused once the 3840 B slack is restored");
+}
+
+static void set_dma_low(void) { g_fake_heap_dma_free_internal = 551; }
+static void set_heap_28000(void) { g_fake_heap_free_internal = 28000; }
+static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
+static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
+#define HOP_URL "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin"
+
+static void test_heap_admission_updfx3(void)
+{
+    // MED-1: a download hop needs floor + draw + slack (28532 B); 28000 B (above the old 26740 B hop rule,
+    // below the start rule) is refused after the settle wait.
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = HOP_URL;
+    add_route(HOP_URL, g_img, IMG_LEN);
+    g_app_route->on_open = set_heap_28000;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "download hop at 28000 B refused (slack restored)");
+    expect_claim_balanced("hop 28000");
+
+    // hop rule differs from start rule for a check: start needs 28532 B, a check hop needs 24100 B
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_routes[0].status = 302;
+    g_fr_routes[0].location = HOP_URL;
+    add_route(HOP_URL, g_api, strlen(g_api))->on_open = set_heap_30311;
+    g_fr_routes[0].on_open = set_heap_25000;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_free") != 0, "check hop at 25000 B admitted by the hop rule (24100 B)");
+
+    // LOW-1/MED-1: a residual that clears while the settle loop waits admits the start
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 27855;
+    g_fake_heap_recover_to = 30311;
+    g_fake_heap_recover_reads = 4;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_free") != 0, "start admitted once the previous call's residual clears");
+    CHECK(g_fake_heap_recover_reads == 0, "the settle loop re-sampled the heap");
+
+    // LOW-5 M8: a check allocates no internal scratch; a download allocates one.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_internal_mallocs = 0;
+    run_job_and_result("/api/update/check");
+    CHECK(g_fr_internal_mallocs == 0, "a check job allocates no internal scratch");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_internal_mallocs = 0;
+    run_job_and_result("/api/update/download");
+    CHECK(g_fr_internal_mallocs >= 1, "a download job allocates the internal stager scratch");
+
+    // LOW-5 M12: DMA low at the redirect hop refuses
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = HOP_URL;
+    add_route(HOP_URL, g_img, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_app_route->on_open = set_dma_low;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "low DMA at a redirect hop refused");
+
+    // LOW-3: DMA drop mid-body aborts
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_app_route->on_read = set_dma_low;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "DMA drop mid-body aborts low_heap_dma");
+    expect_claim_balanced("mid-body dma");
+
+    // pre-release-only repo: /releases/latest 404 is a clear no_stable_release, not a generic http_status
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 404;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "no_stable_release") == 0, "404 on releases/latest -> no_stable_release");
+    fixture(g_sha_hex, IMG_LEN);
+    add_route("https://api.github.com/repos/" REPO "/releases?per_page=5", "{}", 2)->status = 404;
+    POST("/api/update/check", "allow_prerelease=1");
+    wait_idle();
+    job_result();
+    CHECK(strcmp(g_error, "http_status") == 0, "404 with pre-releases allowed stays http_status");
 }
 
 // UPDAUDIT Q1: a redirect hop closes and frees the first client (its TLS session) before the second
@@ -645,6 +726,7 @@ int main(void)
     test_claim_released_on_failures();
     test_heap_admission_updfx2();
     test_redirect_hop_frees_first_client();
+    test_heap_admission_updfx3();
     test_handler_refusals();
     test_stage_upload_and_clear();
 #ifdef UF_EXTRA_TESTS

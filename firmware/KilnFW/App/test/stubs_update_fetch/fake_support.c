@@ -62,6 +62,9 @@ bool g_fr_heat_profile, g_fr_heat_autotune;
 bool g_fr_clock_synced;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
+int g_fake_heap_recover_reads;      // >0: after this many internal-free reads, free becomes g_fake_heap_recover_to
+size_t g_fake_heap_recover_to;
+volatile long g_fr_internal_mallocs; // MALLOC_CAP_INTERNAL heap_caps_malloc/calloc calls that succeeded
 size_t g_fake_heap_dma_free_internal;
 bool g_fr_internal_alloc_fail;
 
@@ -116,6 +119,8 @@ void fr_reset(void)
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
     g_fake_heap_dma_free_internal = 100000;
+    g_fake_heap_recover_reads = 0;
+    g_fr_internal_mallocs = 0;
     g_fr_internal_alloc_fail = false;
     g_fr_fail_task = NULL;
     g_fr_time_div = 1;
@@ -133,6 +138,9 @@ void *heap_caps_malloc(size_t size, uint32_t caps)
     }
     void *p = malloc(size);
     if (p != NULL) {
+        if (caps & MALLOC_CAP_INTERNAL) {
+            InterlockedIncrement(&g_fr_internal_mallocs);
+        }
         InterlockedIncrement(&g_fr_heap_live);
     }
     return p;
@@ -159,6 +167,9 @@ size_t heap_caps_get_free_size(uint32_t caps)
 {
     if ((caps & MALLOC_CAP_INTERNAL) && (caps & MALLOC_CAP_DMA)) {
         return g_fake_heap_dma_free_internal;
+    }
+    if ((caps & MALLOC_CAP_INTERNAL) && g_fake_heap_recover_reads > 0 && --g_fake_heap_recover_reads == 0) {
+        g_fake_heap_free_internal = g_fake_heap_recover_to;
     }
     return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u;
 }

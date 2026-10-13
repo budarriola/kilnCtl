@@ -52,6 +52,7 @@ assert(api.ghErrorText('') === '', 'no error is blank');
 assert(api.ghCheckQuery({}) === '', 'check: no flag -> no query');
 assert(api.ghCheckQuery({ pre: true }) === '?allow_prerelease=1', 'check: prerelease flag reads the list');
 assert(api.ghErrorText('no_release').indexOf('Include pre-releases') > 0, 'no_release text');
+assert(api.ghErrorText('no_stable_release').indexOf('Include pre-releases') > 0, 'no_stable_release text');
 
 // Download query: nothing ticked sends nothing; downgrade carries the typed tag.
 assert(api.ghDownloadQuery({}) === '', 'no flags -> no query');

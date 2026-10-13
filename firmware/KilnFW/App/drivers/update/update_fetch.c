@@ -193,18 +193,31 @@ static uint32_t largest_internal_block(void)
     return (uint32_t)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 }
 
-// Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
 static uint32_t dma_free_internal(void)
 {
     return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
 }
 
+// Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
+// A LOW_FREE verdict is re-sampled (FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS, cancel-aware): the
+// previous request's TLS/lwIP teardown is still draining after a redirect hop or a previous http_get
+// (UPDFX2 LOW-1, UPDFX3 MED-1), so one early sample must not refuse a healthy fetch. The job deadline is
+// not consulted here (it is not armed yet at the first admission); http_get checks it every hop.
 static const char *heap_admit(const work_t *w, bool hop)
 {
-    uint32_t f = free_internal();
-    uint32_t l = largest_internal_block();
     const bool dl = w->p.kind == KIND_DOWNLOAD;
-    const fetch_heap_verdict_t hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
+    uint32_t f = 0;
+    uint32_t l = 0;
+    fetch_heap_verdict_t hv = FETCH_HEAP_LOW_FREE;
+    for (unsigned tries = 0;; tries++) {
+        f = free_internal();
+        l = largest_internal_block();
+        hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
+        if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES || s_c->cancel) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS));
+    }
     if (hv == FETCH_HEAP_OK) {
         const uint32_t dma = dma_free_internal();
         if (update_fetch_heap_dma_ok(dma)) {
@@ -544,9 +557,9 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         if (heat_run_active()) {
             return "heat_run_active";
         }
-        // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
-        // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
-        // floor. Gate each esp_http_client_init on the full start threshold instead.
+        // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so each
+        // esp_http_client_init is gated. The first request of this call uses the start rule, later hops
+        // the hop rule (same arithmetic, see update_fetch_heap.h); both settle-wait on a LOW_FREE reading.
         const char *adm = heap_admit(w, hops > 0);
         if (adm != NULL) {
             return adm;
@@ -619,6 +632,10 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                 }
                 if (update_fetch_heap_abort(free_internal())) {
                     fail = "low_heap_midrun";
+                    break;
+                }
+                if (!update_fetch_heap_dma_ok(dma_free_internal())) {
+                    fail = "low_heap_dma";
                     break;
                 }
                 int n = esp_http_client_read(c, (char *)w->chunk, FETCH_CHUNK_LEN);
@@ -766,6 +783,15 @@ static const char *run_job(work_t *w)
     w->mem_cap = FETCH_API_BODY_CAP;
     e = http_get(w, w->url, "application/vnd.github+json", &MEM_SINK);
     if (e != NULL) {
+        if (!use_list && strcmp(e, "http_status") == 0) {
+            // /releases/latest answers 404 when the repo has only pre-releases (or no release at all).
+            st_lock();
+            const int hs = s_c->st.http_status;
+            st_unlock();
+            if (hs == 404) {
+                return "no_stable_release";
+            }
+        }
         return e;
     }
     const uint32_t max_app = update_stage_capacity(update_http_stage());
