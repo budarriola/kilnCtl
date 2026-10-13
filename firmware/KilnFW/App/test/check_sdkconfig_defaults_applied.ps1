@@ -126,6 +126,24 @@ if ($missingFromDefaults.Count -gt 0) {
     throw "sdkconfig.defaults no longer sets $($missingFromDefaults.Count) watched key(s) -- see DRAM_PSRAM_STATUS.md section 5"
 }
 
+# Keys whose VALUE (not merely presence) is load-bearing. Deleting the line is caught above; flipping it to
+# "# ... is not set" (or any other value) is a valid pin the generic comparison would happily match against a
+# regenerated sdkconfig, so assert the expected value in sdkconfig.defaults itself (REVIEW_LINKCRC LOW-3).
+$mustBe = @{
+    'CONFIG_UART_ISR_IN_IRAM' = 'y'   # off brings back the 14/8/12/28 link errors during a fetch (LINK_CRC_DURING_FETCH.md)
+}
+$wrongValue = @()
+foreach ($key in $mustBe.Keys) {
+    if ($defaultsValues[$key] -ne $mustBe[$key]) {
+        $wrongValue += "'$key' must be $($mustBe[$key]) in sdkconfig.defaults, found $($defaultsValues[$key])"
+    }
+}
+if ($wrongValue.Count -gt 0) {
+    Write-Host "CHECK FAILED: load-bearing sdkconfig.defaults value changed:" -ForegroundColor Red
+    foreach ($m in $wrongValue) { Write-Host "  $m" -ForegroundColor Red }
+    throw "$($wrongValue.Count) load-bearing sdkconfig.defaults value(s) are wrong -- see docs/audits/REVIEW_LINKCRC.md LOW-3"
+}
+
 if (-not (Test-Path $SdkconfigPath)) {
     Write-Host "WARNING: generated sdkconfig not found at $SdkconfigPath." -ForegroundColor Yellow
     Write-Host "  This is expected on a clean checkout with no build yet -- there is nothing" -ForegroundColor Yellow

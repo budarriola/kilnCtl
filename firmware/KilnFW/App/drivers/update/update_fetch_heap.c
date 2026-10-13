@@ -12,33 +12,65 @@ static fetch_heap_verdict_t verdict(uint32_t free_internal, uint32_t largest, ui
     return FETCH_HEAP_OK;
 }
 
+static uint32_t sub_sat(uint32_t a, uint32_t b)
+{
+    return a > b ? a - b : 0u;
+}
+
+uint32_t update_fetch_heap_need(bool is_download, bool hop)
+{
+    if (!hop) {
+        return FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH;
+    }
+    return is_download ? FETCH_HOP_DOWNLOAD_HEAP_MIN : FETCH_HOP_CHECK_HEAP_MIN;
+}
+
 fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download)
 {
-    return verdict(free_internal, largest_internal_block, FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH,
+    return verdict(free_internal, largest_internal_block, update_fetch_heap_need(is_download, false),
                    is_download ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN);
 }
 
 fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_t largest_internal_block,
                                                  bool is_download)
 {
-    return verdict(free_internal, largest_internal_block,
-                   is_download ? FETCH_HOP_DOWNLOAD_HEAP_MIN : FETCH_HOP_CHECK_HEAP_MIN,
+    return verdict(free_internal, largest_internal_block, update_fetch_heap_need(is_download, true),
                    is_download ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN);
 }
 
-bool update_fetch_heap_dma_admit(uint32_t dma_free, bool is_download, bool hop)
+uint32_t update_fetch_heap_dma_offset(uint32_t free_internal, uint32_t dma_free)
 {
-    const uint32_t need = (hop && !is_download) ? FETCH_DMA_ADMIT_CHECK_HOP_MIN : FETCH_DMA_ADMIT_DOWNLOAD_MIN;
-    return dma_free >= need;
+    return sub_sat(free_internal, dma_free);
 }
 
-bool update_fetch_heap_dma_abort(uint32_t dma_free, unsigned *hist)
+uint32_t update_fetch_heap_dma_need(bool is_download, bool hop, uint32_t rtc_free)
 {
-    if (dma_free < FETCH_DMA_HARD_MIN) {
+    // A check's first admission uses the download need (see the header); a hop uses the kind's hop need.
+    return sub_sat(update_fetch_heap_need(is_download, hop), rtc_free);
+}
+
+uint32_t update_fetch_heap_dma_floor(uint32_t rtc_free)
+{
+    return sub_sat(FETCH_HEAP_ABORT_BELOW, rtc_free);
+}
+
+uint32_t update_fetch_heap_dma_hard_min(uint32_t rtc_free)
+{
+    return sub_sat(FETCH_HEAP_FLOOR_BYTES, rtc_free);
+}
+
+bool update_fetch_heap_dma_admit(uint32_t dma_free, uint32_t rtc_free, bool is_download, bool hop)
+{
+    return dma_free >= update_fetch_heap_dma_need(is_download, hop, rtc_free);
+}
+
+bool update_fetch_heap_dma_abort(uint32_t dma_free, uint32_t rtc_free, unsigned *hist)
+{
+    if (dma_free < update_fetch_heap_dma_hard_min(rtc_free)) {
         return true;
     }
     const unsigned mask = (1u << FETCH_DMA_WINDOW) - 1u;
-    *hist = ((*hist << 1) | (dma_free < FETCH_DMA_FREE_MIN ? 1u : 0u)) & mask;
+    *hist = ((*hist << 1) | (dma_free < update_fetch_heap_dma_floor(rtc_free) ? 1u : 0u)) & mask;
     const unsigned run_mask = (1u << FETCH_DMA_LOW_READS) - 1u;
     if ((*hist & run_mask) == run_mask) {
         return true;  // FETCH_DMA_LOW_READS consecutive low samples

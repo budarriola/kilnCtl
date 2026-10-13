@@ -54,6 +54,7 @@
 #include "freertos/task.h"
 
 #include "hal_esp_common.h"
+#include "kilnlink/kilnlink_frame.h"
 
 static const char *TAG = "hal_uart_esp";
 
@@ -70,9 +71,9 @@ static const char *TAG = "hal_uart_esp";
  * 3+ frames and a 1024 TX ring holds one (plus the 8 B ring item header). */
 #define HAL_UART_ESP_RX_RING_BUF_SIZE 2048
 #define HAL_UART_ESP_TX_RING_BUF_SIZE 1024
-_Static_assert(HAL_UART_ESP_RX_RING_BUF_SIZE >= 3 * 528,
+_Static_assert(HAL_UART_ESP_RX_RING_BUF_SIZE >= 3 * KILNLINK_FRAME_STUFFED_MAX,
                "RX ring must hold several worst-case stuffed kilnlink frames");
-_Static_assert(HAL_UART_ESP_TX_RING_BUF_SIZE >= 528 + 64,
+_Static_assert(HAL_UART_ESP_TX_RING_BUF_SIZE >= KILNLINK_FRAME_STUFFED_MAX + 64,
                "TX ring must hold one worst-case stuffed frame plus ring item overhead");
 #define HAL_UART_ESP_EVENT_QUEUE_LEN  16
 

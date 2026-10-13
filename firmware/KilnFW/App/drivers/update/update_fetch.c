@@ -68,13 +68,11 @@ static const char *TAG = "update_fetch";
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
-// LOW-1 (update_fetch_heap.h): the abort margin is the largest single internal allocation a read-loop pass makes.
-// The flash write bounces one chunk through internal RAM, so neither the chunk nor the client buffers may grow
-// past the bound the abort level is built on.
-_Static_assert(FETCH_CHUNK_LEN <= FETCH_HEAP_MAX_STEP_BYTES, "read chunk exceeds the heap abort margin bound");
-_Static_assert(FETCH_TX_BUF_BYTES <= FETCH_HEAP_MAX_STEP_BYTES, "client tx buffer exceeds the heap abort margin bound");
+// LOW-1 (update_fetch_heap.h): FETCH_HEAP_MAX_STEP_BYTES is an empirical margin for concurrent tasks, not a bound
+// on a fetch allocation (the flash write uses a 32 B stack buffer, the read chunk and TLS records are PSRAM), so
+// no assert ties the chunk or client buffers to it.
 // Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
-// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 12288 B)
+// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 9216 B)
 // live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
 // admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
 // read loop only the abort floor plus the consecutive-sample DMA check.
@@ -113,6 +111,23 @@ typedef struct {
     char confirm[UPDATE_TAG_MAX];
 } job_params_t;
 
+// Heap evidence of the job (REVIEW_UPDFX6 MED-2 / UPDFX7): the first admission, the first redirect hop's
+// settle result, and the low-waters of every sample the job took. Exported in GET /api/update/fetch "heap".
+typedef enum { HOP_NONE = 0, HOP_ADMITTED, HOP_REFUSED } hop_result_t;
+typedef struct {
+    bool sampled;          // min_* are valid (at least one sample taken)
+    bool rtc_set;          // rtc_free was derived at the first admission
+    uint32_t rtc_free;     // internal free - DMA free at the first admission (RTC FAST heap, not DMA-capable)
+    uint32_t start_free;   // internal free at the first admission (scratch held)
+    uint32_t start_dma;    // DMA-capable internal free at the first admission
+    hop_result_t hop_result;
+    uint32_t hop_free;     // internal free at the first redirect hop's final admission sample
+    uint32_t hop_tries;    // settle re-samples used at that hop
+    uint32_t min_free;     // low-waters over admission and read-loop samples
+    uint32_t min_dma;
+    uint32_t min_block;
+} job_heap_t;
+
 typedef struct {
     fetch_state_t state;
     fetch_kind_t kind;
@@ -134,6 +149,7 @@ typedef struct {
     bool needs_typed_confirm;
     bool zones_cfg_lower;
     bool have_decision;
+    job_heap_t heap;
 } job_status_t;
 
 typedef enum { WR_BEGIN = 1, WR_WRITE, WR_FINISH, WR_ABORT, WR_EXIT } wr_cmd_id_t;
@@ -225,6 +241,30 @@ static uint32_t dma_free_internal(void)
 // re-checks cancel, the job deadline (when armed: it is not at the first admission) and heat_run_active().
 static bool heat_run_active(void);
 static bool deadline_passed(const work_t *w);
+static void st_lock(void);
+static void st_unlock(void);
+
+// Fold one set of heap readings into the job's low-waters (UINT32_MAX = "not read this time").
+static void heap_note(uint32_t f, uint32_t dma, uint32_t blk)
+{
+    st_lock();
+    job_heap_t *h = &s_c->st.heap;
+    if (!h->sampled) {
+        h->sampled = true;
+        h->min_free = h->min_dma = h->min_block = UINT32_MAX;
+    }
+    if (f < h->min_free) {
+        h->min_free = f;
+    }
+    if (dma < h->min_dma) {
+        h->min_dma = dma;
+    }
+    if (blk < h->min_block) {
+        h->min_block = blk;
+    }
+    st_unlock();
+}
+
 static const char *heap_admit(const work_t *w, bool hop)
 {
     const bool dl = w->p.kind == KIND_DOWNLOAD;
@@ -235,6 +275,7 @@ static const char *heap_admit(const work_t *w, bool hop)
     for (;; tries++) {
         f = free_internal();
         l = largest_internal_block();
+        heap_note(f, UINT32_MAX, l);
         hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
         if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES) {
             break;
@@ -257,17 +298,37 @@ static const char *heap_admit(const work_t *w, bool hop)
         ESP_LOGI(TAG, "heap settle: %u re-sample(s) x %u ms, free %u, %s%s", tries, (unsigned)FETCH_HEAP_SETTLE_MS,
                  (unsigned)f, hv == FETCH_HEAP_OK ? "admitted" : "still short", hop ? " (redirect hop)" : "");
     }
+    // First hop only: keep the settle result (re-samples used, the final reading, the verdict) for the status JSON.
+    const bool first_hop = hop && s_c->st.heap.hop_result == HOP_NONE;
+    if (first_hop) {
+        st_lock();
+        s_c->st.heap.hop_free = f;
+        s_c->st.heap.hop_tries = tries;
+        s_c->st.heap.hop_result = hv == FETCH_HEAP_OK ? HOP_ADMITTED : HOP_REFUSED;
+        st_unlock();
+    }
     if (hv == FETCH_HEAP_OK) {
         const uint32_t dma = dma_free_internal();
-        if (update_fetch_heap_dma_admit(dma, dl, hop)) {
+        heap_note(UINT32_MAX, dma, UINT32_MAX);
+        // LOW-2: the RTC FAST heap is internal but not DMA-capable; derive its free size from the first admission
+        // (redundant with the internal check there, by construction) and hold it for every later DMA number.
+        if (!s_c->st.heap.rtc_set) {
+            st_lock();
+            s_c->st.heap.rtc_free = update_fetch_heap_dma_offset(f, dma);
+            s_c->st.heap.rtc_set = true;
+            s_c->st.heap.start_free = f;
+            s_c->st.heap.start_dma = dma;
+            st_unlock();
+        }
+        const uint32_t rtc = s_c->st.heap.rtc_free;
+        if (update_fetch_heap_dma_admit(dma, rtc, dl, hop)) {
             return NULL;
         }
-        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u)", (unsigned)dma,
-                 (unsigned)((hop && !dl) ? FETCH_DMA_ADMIT_CHECK_HOP_MIN : FETCH_DMA_ADMIT_DOWNLOAD_MIN));
+        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u, rtc %u)", (unsigned)dma,
+                 (unsigned)update_fetch_heap_dma_need(dl, hop, rtc), (unsigned)rtc);
         return "low_heap_dma";
     }
-    const unsigned need_free = hop ? (dl ? FETCH_HOP_DOWNLOAD_HEAP_MIN : FETCH_HOP_CHECK_HEAP_MIN)
-                                   : FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH;
+    const unsigned need_free = update_fetch_heap_need(dl, hop);
     ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s%s", (unsigned)f, need_free,
              (unsigned)l, (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check",
              hop ? " (redirect hop)" : "");
@@ -752,7 +813,9 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     fail = "timeout";
                     break;
                 }
-                if (update_fetch_heap_abort(free_internal())) {
+                const uint32_t f_now = free_internal();
+                heap_note(f_now, UINT32_MAX, (chunks & 7u) == 0 ? largest_internal_block() : UINT32_MAX);
+                if (update_fetch_heap_abort(f_now)) {
                     fail = "low_heap_midrun";
                     break;
                 }
@@ -760,7 +823,9 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                 if (n > 0) {
                     eagain = 0;
                     // UPDFX5 MED-2: sampled only after a read that returned data, never on a stalled slice.
-                    if (update_fetch_heap_dma_abort(dma_free_internal(), &dma_hist)) {
+                    const uint32_t dma_now = dma_free_internal();
+                    heap_note(UINT32_MAX, dma_now, UINT32_MAX);
+                    if (update_fetch_heap_dma_abort(dma_now, s_c->st.heap.rtc_free, &dma_hist)) {
                         fail = "low_heap_dma";
                         break;
                     }
@@ -1277,6 +1342,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     typedef struct {
         char a[320];
         char b[768];
+        char h[320];
         char rp[UPDATE_REPO_MAX + 48];
         char repo_now[UPDATE_REPO_MAX];
         char running[UPDATE_VERSION_STR_MAX];
@@ -1302,10 +1368,20 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     snprintf(bf->b, sizeof(bf->b),
              "\"tag\":\"%s\",\"prerelease\":%s,\"app_size\":%u,\"running\":\"%s\",\"commit\":\"%s\","
              "\"sha256\":\"%s\",\"verdict\":\"%s\",\"reason\":\"%s\",\"allowed\":%s,"
-             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s}",
+             "\"needs_typed_confirm\":%s,\"zones_cfg_lower\":%s,",
              s->tag, s->prerelease ? "true" : "false", (unsigned)s->app_size, bf->running, s->commit, s->sha256,
              s->verdict ? s->verdict : "", bf->reason, s->allowed ? "true" : "false",
              s->needs_typed_confirm ? "true" : "false", s->zones_cfg_lower ? "true" : "false");
+    // Heap evidence (UPDFX7): all zero until the job has taken a sample. min_* are the low-waters of the job.
+    const job_heap_t *jh = &s->heap;
+    snprintf(bf->h, sizeof(bf->h),
+             "\"heap\":{\"sampled\":%s,\"rtc_free\":%u,\"start_free\":%u,\"start_dma\":%u,"
+             "\"hop\":\"%s\",\"hop_free\":%u,\"hop_settle_tries\":%u,"
+             "\"min_free\":%u,\"min_dma\":%u,\"min_block\":%u}}",
+             jh->sampled ? "true" : "false", (unsigned)jh->rtc_free, (unsigned)jh->start_free, (unsigned)jh->start_dma,
+             jh->hop_result == HOP_ADMITTED ? "admitted" : jh->hop_result == HOP_REFUSED ? "refused" : "none",
+             (unsigned)jh->hop_free, (unsigned)jh->hop_tries, (unsigned)(jh->sampled ? jh->min_free : 0u),
+             (unsigned)(jh->sampled ? jh->min_dma : 0u), (unsigned)(jh->sampled ? jh->min_block : 0u));
     st_unlock();
     // Before any job has run the repo is the configured setting.
     if (bf->repo_now[0] == '\0') {
@@ -1319,7 +1395,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
     esp_err_t rc;
     if (httpd_resp_send_chunk(req, bf->a, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
         httpd_resp_send_chunk(req, bf->rp, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
-        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
+        httpd_resp_send_chunk(req, bf->b, HTTPD_RESP_USE_STRLEN) != ESP_OK ||
+        httpd_resp_send_chunk(req, bf->h, HTTPD_RESP_USE_STRLEN) != ESP_OK) {
         rc = ESP_FAIL;
     } else {
         rc = httpd_resp_send_chunk(req, NULL, 0);

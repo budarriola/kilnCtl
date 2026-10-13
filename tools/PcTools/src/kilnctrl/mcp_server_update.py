@@ -308,7 +308,23 @@ def _fmt_fetch(st: dict) -> str:
             parts.append(f"sha256={st.get('sha256')}")
     if st.get("busy") and st.get("bytes_total"):
         parts.append(f"progress={st.get('bytes_done')}/{st.get('bytes_total')}")
+    heap = _fmt_heap(st.get("heap"))
+    if heap:
+        parts.append(heap)
     return ", ".join(parts)
+
+
+def _fmt_heap(h: Optional[dict]) -> str:
+    """The job's internal-RAM readings (UPDFX7): admission reading, the 302 hop's settle result and the low-waters."""
+    if not isinstance(h, dict) or not h.get("sampled"):
+        return ""
+    text = (f"heap[start free={h.get('start_free')} dma={h.get('start_dma')} rtc={h.get('rtc_free')}; "
+            f"hop={h.get('hop')}")
+    if h.get("hop") in ("admitted", "refused"):
+        text += f" (heap settle: free={h.get('hop_free')} after {h.get('hop_settle_tries')} re-samples)"
+    text += (f"; low-water free={h.get('min_free')} dma={h.get('min_dma')} "
+             f"largest_block={h.get('min_block')}]")
+    return text
 
 
 def _refusal_text(exc: uhc.UpdateHttpError) -> str:
