@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "esp_attr.h" /* EXT_RAM_BSS_ATTR */
 #include "esp_log.h"
 #include "hal_esp_common.h"
 #include "hal_kv.h"
@@ -274,7 +275,7 @@ static bool topology_override_applies_here(void)
     return s_topology_override_active && s_topology_override_owner == (void *)xTaskGetCurrentTaskHandle();
 }
 
-static kiln_cfg_store_blob_t s_store;
+EXT_RAM_BSS_ATTR static kiln_cfg_store_blob_t s_store; /* PSRAM (IRAMGATE 2026-10-13): 17 KB; only touched by tasks under the store lock, buffer handed to NVS (esp_flash copes with external buffers) */
 
 /* Dual-write rev counter for the whole store document -- see
  * kiln_cfg_store_cfg_fs.h's header comment ("SHAPE") for why this is ONE

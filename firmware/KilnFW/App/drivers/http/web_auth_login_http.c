@@ -57,6 +57,7 @@
 // 129-byte password, well under the ~256-byte budget
 // WEB_AUTH_PLAN.md section 4 documents for the KDF's own locals, and no
 // buffer here is enlarged beyond that.
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "web_auth_login_http.h"
 
 #include <stdint.h>
@@ -433,7 +434,7 @@ static esp_err_t login_post_handler(httpd_req_t *req)
     // split it across TCP segments, corrupting username/password field
     // parsing rather than failing loud. Loop until content_len bytes are
     // read, same shape as security_http.c's security_post_handler().
-    char *body = (char *)malloc(LOGIN_BODY_MAX);
+    char *body = (char *)persist_scratch_alloc(LOGIN_BODY_MAX);
     if (body == NULL) {
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
         return ESP_OK;

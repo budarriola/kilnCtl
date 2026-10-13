@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "autotune_engine_internal.h"
 #include "heat_enable.h"
 #include "profile_feasibility.h"
@@ -253,7 +254,7 @@ autotune_sample_t *autotune_unpack_zone_trace(uint8_t zone, size_t count)
     if (count == 0) {
         return NULL;
     }
-    autotune_sample_t *out = malloc(count * sizeof(*out));
+    autotune_sample_t *out = persist_scratch_alloc(count * sizeof(*out));
     if (!out) {
         return NULL;
     }

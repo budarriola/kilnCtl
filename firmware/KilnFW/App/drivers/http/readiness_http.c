@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "../common/json_escape_ctl.h"
 #include "readiness_http.h"
 #include "http_auth_disclosure_gate.h" // http_auth_may_disclose()
@@ -163,7 +164,7 @@ static esp_err_t api_readiness_get_handler(httpd_req_t *req)
      * (recovery_mode 152, safety_context 136, safety_commissioned 130,
      * safety_trip 97), so truncating detail text again reintroduces a
      * -Werror=format-truncation build break. */
-    char *json = malloc(READINESS_JSON_CAP);
+    char *json = persist_scratch_alloc(READINESS_JSON_CAP);
     if (!json) {
         /* Out of heap is a real, reportable condition on this board (see the
          * DRAM-exhaustion history), not something to paper over with a

@@ -1,6 +1,7 @@
 // http_auth_http.c -- see http_auth_http.h for the design. This is the only
 // file in this module that touches esp_http_server.h/ESP_LOGE; everything it
 // decides comes from the pure functions in http_auth_enforce.c.
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "http_auth_http.h"
 
 #include <stdio.h>
@@ -175,7 +176,7 @@ bool http_auth_extract_session_token(httpd_req_t *req, char *out, size_t out_len
         return false;
     }
 
-    char *cookie = malloc(cookie_hdr_len + 1);
+    char *cookie = persist_scratch_alloc(cookie_hdr_len + 1);
     if (!cookie) {
         // Allocation failure fails closed (no token), same as every other
         // unparsable-header case here -- never falls back to a truncated

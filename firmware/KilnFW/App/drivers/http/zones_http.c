@@ -1,3 +1,4 @@
+#include "persist_scratch.h" // persist_scratch_alloc(): PSRAM-first scratch (IRAMGATE)
 #include "zones_http.h"
 #include "http_auth_http.h" // kiln_http_register() -- WEB_AUTH_PLAN.md section 5
 #include "zones_http_internal.h"
@@ -512,7 +513,7 @@ static esp_err_t sweep_status_get_handler(httpd_req_t *req)
     zone_sweep_status_t st;
     zones_current_sweep_get_status(&st);
 
-    sweep_status_scratch_t *s = malloc(sizeof(*s));
+    sweep_status_scratch_t *s = persist_scratch_alloc(sizeof(*s));
     if (!s) {
         ESP_LOGE(ZONES_HTTP_TAG, "sweep_status_get_handler: malloc(%u) failed", (unsigned)sizeof(*s));
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "out of memory");
