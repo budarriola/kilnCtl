@@ -443,7 +443,7 @@ def test_ota_unreadable_stage_state_refuses():
 
 
 def test_ota_install_failed_clears_stage():
-    s = _ota_srv(update_install_staged=lambda confirm=False, host=None: "FAILED: nope")
+    s = _ota_srv(update_install_staged=lambda confirm=False, host=None: "REFUSED: nope")
     r = get_case("RL-D01").judge(ctx_with(snap(), srv=s, ota_install=True))
     assert r.verdict == Verdict.FAIL and s.cleared == [True]
 
@@ -746,7 +746,7 @@ def _host_ota_srv(seen, **over):
         update_stage_release=rec("stage", "ok staged, verified by read-back sha256 abc"),
         update_stage_clear=rec("clear", "ok cleared"),
         update_fetch_cancel=rec("cancel", "ok cancelled"),
-        update_install_staged=rec("install", "FAILED: nope"),
+        update_install_staged=rec("install", "REFUSED: nope"),
     )
     d.update(over)
     return types.SimpleNamespace(**d)
@@ -951,3 +951,112 @@ def test_allow_heat_defaults_off_for_release(monkeypatch):
     seen.clear()
     M.bench_test_run(suite="smoke")
     assert seen["allow_heat"] is True
+
+
+# -- RELSUITEFX3 fixes -------------------------------------------------------
+
+
+def test_pin_identity_real_board_identity_check_ipv4address_keeps_port(monkeypatch):
+    """MED-1/LOW-1: drive the REAL _board_identity_check (returns IPv4Address)."""
+    import ipaddress
+    from kilnctrl import mcp_server_aux as A
+    wifi = types.SimpleNamespace(connected=True, ip="10.0.0.7")
+    monkeypatch.setattr(A, "_srv", types.SimpleNamespace(_info=types.SimpleNamespace(get_wifi_status=lambda: wifi)))
+    mism, ip = A._board_identity_check("10.0.0.7:8080")
+    assert mism is None and isinstance(ip, ipaddress.IPv4Address)
+    c = {"host": "10.0.0.7:8080"}
+    assert R._pin_identity(c) is None
+    assert c["host"] == "10.0.0.7:8080" and isinstance(c["host"], str)
+    c2 = {"host": "10.0.0.7"}
+    assert R._pin_identity(c2) is None and c2["host"] == "10.0.0.7"
+
+
+def test_pin_identity_ipv4address_from_fake_is_pinned_as_str_with_port():
+    import ipaddress
+    c = {"host": "kiln.local:8080", "_board_identity_fn": lambda h: (None, ipaddress.ip_address("10.9.9.9"))}
+    assert R._pin_identity(c) is None
+    assert c["host"] == "10.9.9.9:8080"
+
+
+@pytest.mark.parametrize("res", [
+    "UNKNOWN: board not confirmed, the recovery image may still be applying",
+    "FAILED: install recorded a failure",
+    "FAILED: install refused or lost: reply dropped",
+])
+def test_install_post_sent_non_ok_never_cancels_or_clears(res):
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), OSError("down"), snap(identity=_ident("b2", 5))],
+                  lambda confirm=False, host=None, r=res: r)
+    r = get_case("RL-D01").judge(c)
+    names = [n for n, _h in c["_seen"]]
+    assert r.verdict == Verdict.FAIL
+    assert "cancel" not in names and "clear" not in names
+    assert c["_rl_baseline"] is not None
+
+
+def test_install_post_sent_non_ok_without_reboot_still_skips_cleanup():
+    t = {"v": 0.0}
+    c = _inst_ctx([snap(identity=_ident("b1", 100 + i)) for i in range(60)],
+                  lambda confirm=False, host=None: "UNKNOWN: mid-apply", t)
+    r = get_case("RL-D01").judge(c)
+    names = [n for n, _h in c["_seen"]]
+    assert r.verdict == Verdict.FAIL and "cancel" not in names and "clear" not in names
+
+
+@pytest.mark.parametrize("res", ["error: could not read the stage", "REFUSED: not staged"])
+def test_install_pre_post_refusal_cleans_up(res):
+    c = _inst_ctx([snap(identity=_ident("b1", 500))], lambda confirm=False, host=None, r=res: r)
+    r = get_case("RL-D01").judge(c)
+    names = [n for n, _h in c["_seen"]]
+    assert r.verdict == Verdict.FAIL and "cancel" in names and "clear" in names
+
+
+def test_install_post_reboot_judge_snapshot_fail_is_fail():
+    """LOW-2 (M14)."""
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), snap(identity=_ident("b2", 5), crash_unacked=True)],
+                  lambda confirm=False, host=None: "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and r.reason.startswith("after install:")
+
+
+def test_install_post_reboot_unreadable_fields_are_inconclusive():
+    """INFO-1."""
+    c = _inst_ctx([snap(identity=_ident("b1", 500)), snap(identity=_ident("b2", 5), liveness=None)],
+                  lambda confirm=False, host=None: "ok installed")
+    assert get_case("RL-D01").judge(c).verdict == Verdict.INCONCLUSIVE
+
+
+@pytest.mark.parametrize("text", [
+    "error: staged=False, busy=False, header=none",
+    "UNKNOWN: staged=False busy=False header=none",
+])
+def test_stage_empty_requires_ok_prefix(text):
+    """LOW-3 (M11)."""
+    assert R._stage_empty(text) is False
+    assert R._stage_empty("ok - phase=idle, busy=False, staged=False, header=none") is True
+    s = _ota_srv(update_status=lambda host=None, tx=text: tx)
+    assert get_case("RL-D01").judge(ctx_with(snap(), srv=s)).verdict == Verdict.INCONCLUSIVE
+
+
+def test_install_poll_deadline_is_300_seconds_on_fake_clock():
+    """INFO-2 (M3)."""
+    t = {"v": 0.0}
+    n = {"c": 0}
+
+    def snapfn(_c):
+        n["c"] += 1
+        return snap(identity=_ident("b1", 100 + t["v"]))
+
+    c = _install_ctx(snapfn, t)
+    c["srv"] = _host_ota_srv([], update_install_staged=lambda confirm=False, host=None: "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and "300 s" in r.reason
+    assert 300.0 <= t["v"] <= 310.0 and n["c"] <= 33
+
+
+def test_install_without_pre_install_fw_build_is_inconclusive_and_never_installs():
+    """INFO-3 (M15)."""
+    ran = []
+    c = _inst_ctx([snap(identity={"fw_version": "1"}), snap(identity=_ident("b2", 5))],
+                  lambda confirm=False, host=None: ran.append(1) or "ok installed")
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE and ran == []

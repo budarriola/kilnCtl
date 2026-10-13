@@ -661,8 +661,11 @@ def _pin_identity(ctx: dict) -> Optional[str]:
         return f"could not tie the UART link to the HTTP host: {exc}"
     if mism:
         return f"UART/HTTP board mismatch: {mism}"
-    if isinstance(ip, str) and ip:
-        ctx["host"] = ip
+    if ip:
+        from .. import mcp_server_aux
+
+        # Keeps the port; str(ip) alone would drop it and accept IPv4Address.
+        ctx["host"] = mcp_server_aux._pin_host(host, ip)
     return None
 
 
@@ -872,7 +875,14 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
         res = ""
     obs["install"] = (f"RAISED {raised}" if raised else str(res))[:400]
     if not raised and not str(res).startswith("ok"):
-        return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs), False
+        # Only error:/REFUSED precede the install POST. UNKNOWN, FAILED: install
+        # recorded a failure and FAILED: install refused or lost all come after
+        # it was sent, so the recovery image may be applying: never clean up.
+        if str(res).startswith(("error:", "REFUSED")):
+            return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs), False
+        raised_non_ok = True
+    else:
+        raised_non_ok = False
     sleep = ctx.get("_sleep", _time.sleep)
     now = ctx.get("_now", _time.monotonic)
     deadline = now() + 300.0
@@ -902,11 +912,14 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
         break
     if raised:
         obs["install_raised"] = raised
+    if raised_non_ok:
+        obs["install_non_ok"] = True
     if after is None:
         ctx["_rl_baseline"] = None  # since-boot watermarks are gone; F01 cannot compare
         if bad_field:
             return CaseResult(Verdict.INCONCLUSIVE, reason=f"after the reboot the baseline field {bad_field} stayed unreadable", observed=obs), True
-        why = "update_install_staged raised and " if raised else ""
+        why = "update_install_staged raised and " if raised else (
+            f"update_install_staged returned {str(res)[:80]!r} and " if raised_non_ok else "")
         return CaseResult(Verdict.FAIL, reason=f"{why}no confirmed reboot with a readable baseline after install within 300 s", observed=obs), True
     # The reboot reset every since-boot watermark (heap min_free, stack hwm, link
     # counters): re-baseline so RL-F01 does not compare across the reboot.
@@ -917,11 +930,16 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
     obs["build_after"] = after["identity"]["fw_build"]
     if raised:
         return CaseResult(Verdict.FAIL, reason=f"update_install_staged raised ({raised}) but the board rebooted; install state unproven", observed=obs), True
+    if raised_non_ok:
+        return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]} (board rebooted; install state unproven)", observed=obs), True
     if obs["build_after"] == before_build:
         return CaseResult(Verdict.FAIL, reason=f"fw_build unchanged after install ({before_build})", observed=obs), True
     v, fails, _inc = judge_snapshot(after)
     if v == Verdict.FAIL:
         return CaseResult(Verdict.FAIL, reason="after install: " + "; ".join(fails), observed=obs), True
+    if _inc:
+        obs["after_inconclusive"] = [str(i)[:120] for i in _inc]
+        return CaseResult(Verdict.INCONCLUSIVE, reason="after install, unreadable: " + "; ".join(str(i) for i in _inc), observed=obs), True
     return CaseResult(Verdict.PASS, observed=obs), True
 
 
