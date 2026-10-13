@@ -3310,3 +3310,12 @@ Worktree C:\wt\benchupd4_ci557d at origin/dev 36f3ad031. Board 192.168.1.156 was
 - update_install_staged(confirm=True): tool returned UNKNOWN "board never answered the application API" within its wait. Afterwards (about 4 min later, uptime 231 s) the board answered as the application: stage cleared (blank), get_fw_version commit b9fa1748e (v1.0.0-pre.3), boot_guard persisted 0, recovery_mode False, readiness 20 ok, no trip, no crash, link up. Install and unattended apply therefore SUCCEEDED; only the tool's wait window was too short to confirm it. Exact reboot-to-app time was not timestamped. Heap on pre.3 at uptime 231 s: internal free 30559, min_free 15523, DMA min_free 7735 B.
 - Return to dev: flash_firmware verified OK on retry (known benign Verify-Failed quirk), boot_guard cleared. Final: commit 36f3ad031 clean, readiness 20 ok (only safety_commissioned not_done), no trip, no crash, io=up. control_get_zones identical to before (gains, plant model, coupling); backup_import not needed.
 - Failures: (1) first stage attempt 409 heater commanded on because io=down after flash (see above); (2) install tool returned UNKNOWN though the install succeeded.
+
+## 2026-10-13 linkcrc: kilnlink errors during update staging (UART ISR in IRAM)
+Board on dev d0e9fdc19 builds. Control (ISR not in IRAM): `update_stage_release` v1.0.0-pre.3 gave
+crc/framing 14, timeouts 8, crc mismatch 12, length mismatch 28 (baseline 0/0/0/0). 60 GETs of the
+web UI (5 MB): 0 errors. Fix (`CONFIG_UART_ISR_IN_IRAM=y` + rings 2048/1024): two fetches, 0/0/0/0
+each; heap_internal min_free 14267 B (floor 8192), largest-block low-water 7936 B during TLS
+handshake. With the key but rings still 4096/4096 the fetch refused `low_heap_free` (-22.7 KB
+internal). Stage cleared after each run; board left on the fix build, link up, no trip.
+See docs/audits/LINK_CRC_DURING_FETCH.md.
