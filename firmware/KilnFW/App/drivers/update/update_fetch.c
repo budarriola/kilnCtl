@@ -216,8 +216,10 @@ static uint32_t dma_free_internal(void)
 // Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
 // A LOW_FREE verdict is re-sampled (FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS, cancel-aware): the
 // previous request's TLS/lwIP teardown is still draining after a redirect hop or a previous http_get
-// (UPDFX2 LOW-1, UPDFX3 MED-1), so one early sample must not refuse a healthy fetch. The job deadline is
-// not consulted here (it is not armed yet at the first admission); http_get checks it every hop.
+// (UPDFX2 LOW-1, UPDFX3 MED-1), so one early sample must not refuse a healthy fetch. Each settle tick
+// re-checks cancel, the job deadline (when armed: it is not at the first admission) and heat_run_active().
+static bool heat_run_active(void);
+static bool deadline_passed(const work_t *w);
 static const char *heap_admit(const work_t *w, bool hop)
 {
     const bool dl = w->p.kind == KIND_DOWNLOAD;
@@ -229,13 +231,24 @@ static const char *heap_admit(const work_t *w, bool hop)
         f = free_internal();
         l = largest_internal_block();
         hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
-        if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES || s_c->cancel) {
+        if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES) {
             break;
         }
+        if (s_c->cancel) {
+            return "cancelled";
+        }
         vTaskDelay(pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS));
-    }
-    if (hv == FETCH_HEAP_LOW_FREE && s_c->cancel) {
-        return "cancelled";  // REVIEW_UPDFX3 LOW-1: cancelled during the settle wait, not a heap shortfall
+        // UPDFX5 LOW-2: every tick re-checks cancel, the job deadline (once armed) and a firing start, and
+        // reports them as themselves, not as a heap refusal.
+        if (s_c->cancel) {
+            return "cancelled";
+        }
+        if (w->deadline_tick != 0 && deadline_passed(w)) {
+            return "timeout";
+        }
+        if (heat_run_active()) {
+            return "heat_run_active";
+        }
     }
     if (tries > 0) {
         // REVIEW_UPDFX3 MED-2: bench evidence of the settle wait (re-samples used, where free ended up).
@@ -725,7 +738,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             fail = sink->begin(w, known ? clen : -1);
             uint32_t chunks = 0;
             unsigned eagain = 0;
-            unsigned dma_low_run = 0;  // consecutive low DMA samples (UPDFX4 MED-3)
+            unsigned dma_hist = 0;  // bit history of recent between-read DMA samples (UPDFX5)
             int64_t total = 0;
             while (fail == NULL) {
                 if (s_c->cancel) {
@@ -740,13 +753,14 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     fail = "low_heap_midrun";
                     break;
                 }
-                if (update_fetch_heap_dma_abort(dma_free_internal(), &dma_low_run)) {
-                    fail = "low_heap_dma";
-                    break;
-                }
                 int n = esp_http_client_read(c, (char *)w->chunk, FETCH_CHUNK_LEN);
                 if (n > 0) {
                     eagain = 0;
+                    // UPDFX5 MED-2: sampled only after a read that returned data, never on a stalled slice.
+                    if (update_fetch_heap_dma_abort(dma_free_internal(), &dma_hist)) {
+                        fail = "low_heap_dma";
+                        break;
+                    }
                     total += n;
                     if (known && total > clen) {
                         fail = "overrun";

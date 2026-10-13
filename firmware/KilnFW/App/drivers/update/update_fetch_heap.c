@@ -31,17 +31,22 @@ bool update_fetch_heap_dma_ok(uint32_t dma_free)
     return dma_free >= FETCH_DMA_FREE_MIN;
 }
 
-bool update_fetch_heap_dma_abort(uint32_t dma_free, unsigned *low_run)
+bool update_fetch_heap_dma_abort(uint32_t dma_free, unsigned *hist)
 {
     if (dma_free < FETCH_DMA_HARD_MIN) {
         return true;
     }
-    if (dma_free < FETCH_DMA_FREE_MIN) {
-        (*low_run)++;
-        return *low_run >= FETCH_DMA_LOW_READS;
+    const unsigned mask = (1u << FETCH_DMA_WINDOW) - 1u;
+    *hist = ((*hist << 1) | (dma_free < FETCH_DMA_FREE_MIN ? 1u : 0u)) & mask;
+    const unsigned run_mask = (1u << FETCH_DMA_LOW_READS) - 1u;
+    if ((*hist & run_mask) == run_mask) {
+        return true;  // FETCH_DMA_LOW_READS consecutive low samples
     }
-    *low_run = 0;
-    return false;
+    unsigned lows = 0;
+    for (unsigned h = *hist; h != 0; h >>= 1) {
+        lows += h & 1u;
+    }
+    return lows >= FETCH_DMA_WINDOW_LOW;  // low, low, ok, low, ... patterns never recover for long
 }
 
 bool update_fetch_heap_abort(uint32_t free_internal)

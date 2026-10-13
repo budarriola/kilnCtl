@@ -213,15 +213,15 @@ compiled and exited 0. Real tree unchanged, copies removed.
 
 ## Fix status
 
-Fixed in 350829c36 (rebased) and 969b9e924 (pin settle total as 3000 ticks); landed SHAs follow in the landing note below.
+Fixed in 2cf5ace78 (fix) and bd33f4793 (pin settle total as 3000 ticks) on origin/dev; docs in 8022f7600. Reviewed in REVIEW_UPDFX4, whose findings are fixed in the UPDFX5 commits listed there.
 
 | Finding | Status | Notes |
 |---|---|---|
 | MED-1 | Fixed in code | Start/hop need capped at the idle minimum 29647 B (28623 B with the 1024 B scratch held), measured draw 20936 B. Residual about 505 B under the 8192 B floor at the idle minimum is documented; per-phase `min_free` measurement is bench-pending. |
 | MED-2 | Open, bench | Rerun `update_stage_release` on the board; log the `heap settle:` line and per-phase `min_free` during a hop download. |
-| MED-3 | Fixed | DMA abort on 3 consecutive reads under 4096 B or at once under 256 B (`update_fetch_heap_dma_abort`). |
+| MED-3 | Reduced; reworked in UPDFX5 | DMA abort on 3 consecutive reads under 4096 B or at once under 256 B (`update_fetch_heap_dma_abort`). |
 | LOW-1 | Fixed | Settle wait returns `cancelled` on cancel. |
-| LOW-2 | Fixed | Settle re-samples logged at INFO. |
+| LOW-2 | Fixed | Mid-body DMA abort tests now assert failed state, idle stage, zero live clients and a following download that completes; `g_fr_heap_live` is not asserted. (Settle re-sample INFO logging was MED-2's recommendation.) |
 | LOW-3 | Fixed | Settle length and delay pinned (3000 ticks literal). |
 | LOW-4 | Fixed | Open failure calls `esp_http_client_cleanup`; live client count asserted. |
 

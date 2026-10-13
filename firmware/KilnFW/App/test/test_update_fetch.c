@@ -369,15 +369,15 @@ static void test_heap_admission_updfx2(void)
 
     // DMA low refuses both kinds
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_dma_free_internal = 4095;
+    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN - 1;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "check refused on low DMA free");
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_dma_free_internal = 4095;
+    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN - 1;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "download refused on low DMA free");
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_dma_free_internal = 4096;
+    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") != 0, "DMA free at floor admitted");
 
@@ -408,6 +408,29 @@ static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
 static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
 // Arms the scripted per-read DMA sequence (fake_support) when the asset body starts.
 static void arm_dma_seq(void) { g_fr_dma_seq_armed = true; }
+static void set_dma_low_and_arm(void)
+{
+    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN - 1;
+    g_fr_dma_seq_armed = true;
+}
+static void cancel_on_second_delay(int n)
+{
+    if (n == 2) {
+        POST("/api/update/fetch/cancel", NULL);
+    }
+}
+static void deadline_on_first_delay(int n)
+{
+    if (n == 1) {
+        g_fr_tick_skew_ms += 25LL * 60LL * 1000LL;  /* past the 20 min job deadline */
+    }
+}
+static void heat_on_second_delay(int n)
+{
+    if (n == 2) {
+        g_fr_heat_profile = true;
+    }
+}
 static void cancel_on_third_delay(int n)
 {
     if (n == 3) {
@@ -481,17 +504,79 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_live_clients == 0, "mid-body DMA abort cleans the client up");
     expect_claim_balanced("mid-body dma");
 
-    // UPDFX4 MED-3: a transient dip (the benchupd2 551 B low-water, two reads) that recovers does not abort.
+    // UPDFX5 MED-2: steady between-read samples above the derived floor (2452 B) but under the old fixed 4096 B
+    // one (a healthy body phase) do not abort.
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 30311;
-    g_fr_dma_seq[0] = 551;
-    g_fr_dma_seq[1] = 551;
+    for (int i = 0; i < 8; i++) {
+        g_fr_dma_seq[i] = 2600;
+    }
+    g_fr_dma_seq_n = 8;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA at 2600 B (above the derived floor) completes");
+    expect_claim_balanced("steady dma above floor");
+
+    // A transient dip under the floor (two between-read samples) that recovers does not abort.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_dma_seq[0] = FETCH_DMA_FREE_MIN - 1;
+    g_fr_dma_seq[1] = FETCH_DMA_FREE_MIN - 1;
     g_fr_dma_seq_n = 2;
     g_app_route->on_read = arm_dma_seq;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "two low DMA reads then recovery: download completes");
-    CHECK(g_fr_dma_seq_i > 2, "the scripted dip was consumed by body reads");
+    CHECK(g_fr_dma_seq_i >= 2, "the scripted dip was consumed by body reads");
     expect_claim_balanced("transient dma dip");
+
+    // LOW-1: low,low,ok repeating aborts (the consecutive rule alone never would).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    for (int i = 0; i < 12; i++) {
+        g_fr_dma_seq[i] = (i % 3 == 2) ? 100000 : FETCH_DMA_FREE_MIN - 1;
+    }
+    g_fr_dma_seq_n = 12;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "low,low,ok repeating DMA aborts low_heap_dma");
+    expect_claim_balanced("dma low-low-ok");
+
+    // MED-2: stalled (EAGAIN) slices are not reads. DMA stays low across 5 stalled slices, then the first
+    // data read samples healthy: the download completes (3 stalled slices used to abort).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_dma_seq[0] = 100000;
+    g_fr_dma_seq_n = 1;
+    g_app_route->read_stall_ms = 1;
+    g_app_route->stall_reads = 5;
+    g_app_route->on_read = set_dma_low_and_arm;  /* low from the first read on, healthy only after the 5 stalls */
+    g_fr_eagain_n = 0;
+    run_job_and_result("/api/update/download");
+    CHECK(g_fr_eagain_n >= 5, "the route stalled five slices");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "low DMA across stalled slices does not abort");
+    expect_claim_balanced("dma eagain");
+
+    // LOW-5: the low-sample history is per response. Job A ends on two low samples; job B starts with one
+    // low sample: B must complete (a carried-over history would abort it).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    /* IMG_LEN is 5 body reads of 4096 B: job A ends on its last two samples low. */
+    for (int i = 0; i < 3; i++) {
+        g_fr_dma_seq[i] = 100000;
+    }
+    g_fr_dma_seq[3] = FETCH_DMA_FREE_MIN - 1;
+    g_fr_dma_seq[4] = FETCH_DMA_FREE_MIN - 1;
+    g_fr_dma_seq_n = 5;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "job A (two low samples) completes");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fr_dma_seq[0] = FETCH_DMA_FREE_MIN - 1;
+    g_fr_dma_seq_n = 1;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "job B (one low sample) is not aborted by job A's history");
 
     // UPDFX4 MED-3: real exhaustion (under the hard minimum) aborts on the very first sample.
     fixture(g_sha_hex, IMG_LEN);
@@ -524,6 +609,49 @@ static void test_heap_admission_updfx3(void)
     CHECK(strcmp(g_state, "failed") == 0, "cancelled settle wait fails the job");
     CHECK(g_fr_delay_calls == 3, "the settle loop stops at the cancel (no further delays)");
     expect_claim_balanced("settle cancel");
+
+    // UPDFX5 LOW-2: a cancel during the wait is "cancelled" even when the sample after it reads LOW_BLOCK.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 20000;
+    g_fake_heap_largest_internal = 100;
+    g_fake_heap_recover_to = 30311;
+    g_fake_heap_recover_reads = 3;
+    g_fr_on_delay = cancel_on_second_delay;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "cancelled") == 0, "cancel during the wait reports cancelled, not low_heap_block");
+    CHECK(g_fr_delay_calls == 2, "the wait stops at the cancelling tick");
+    expect_claim_balanced("settle cancel block");
+
+    // UPDFX5 LOW-2: the job deadline is re-checked each tick at a redirect hop (armed by then).
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = HOP_URL;
+    add_route(HOP_URL, g_img, IMG_LEN);
+    g_app_route->on_open = set_heap_28000;
+    g_fr_on_delay = deadline_on_first_delay;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "timeout") == 0, "deadline passing during the hop's settle wait reports timeout");
+    CHECK(g_fr_delay_calls == 1, "the wait stops at the tick that passed the deadline");
+    expect_claim_balanced("settle deadline");
+
+    // UPDFX5 LOW-2: a firing that starts during the wait stops the fetch at once.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 20000;
+    g_fr_on_delay = heat_on_second_delay;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "heat_run_active") == 0, "firing start during the settle wait reports heat_run_active");
+    CHECK(g_fr_delay_calls == 2, "the wait stops at the tick that saw the firing");
+    expect_claim_balanced("settle heat");
+
+    // UPDFX4 LOW-4: a block-starved heap (free fine, largest block short) is refused low_heap_block with no
+    // settle wait at all: only LOW_FREE settles.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fake_heap_largest_internal = 100;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_block") == 0, "block-starved heap refused low_heap_block");
+    CHECK(g_fr_delay_calls == 0, "no settle wait on a LOW_BLOCK verdict");
+    expect_claim_balanced("block starved");
 
     // pre-release-only repo: /releases/latest 404 is a clear no_stable_release, not a generic http_status
     fixture(g_sha_hex, IMG_LEN);

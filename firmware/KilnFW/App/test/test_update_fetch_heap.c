@@ -84,30 +84,57 @@ static void test_hop(void)
 
 static void test_dma(void)
 {
-    TEST_SECTION("update_fetch_heap -- DMA-capable free (LOW-6)");
-    TEST_CHECK(FETCH_DMA_FREE_MIN == 4096u, "DMA floor 4096");
+    TEST_SECTION("update_fetch_heap -- DMA-capable free (UPDFX5 derived floor)");
+    TEST_CHECK(FETCH_DMA_FREE_MIN == 2452u, "DMA floor is abort level 10240 minus the 7788 B idle offset");
+    TEST_CHECK(FETCH_DMA_FREE_MIN + FETCH_DMA_IDLE_OFFSET_BYTES == FETCH_HEAP_ABORT_BELOW,
+               "DMA floor corresponds to the internal abort level");
     TEST_CHECK(update_fetch_heap_dma_ok(6351u), "bench idle min_free 6351 passes");
     TEST_CHECK(update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN), "exact floor passes");
     TEST_CHECK(!update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN - 1u), "one under refused");
 
-    // MED-3 mid-body: consecutive-sample abort plus a hard minimum.
-    TEST_CHECK(FETCH_DMA_LOW_READS == 3u && FETCH_DMA_HARD_MIN == 256u, "DMA abort constants pinned");
-    unsigned run = 0;
-    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 1u, "first low sample (551 B) does not abort");
-    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 2u, "second low sample does not abort");
-    TEST_CHECK(update_fetch_heap_dma_abort(551u, &run), "third consecutive low sample aborts");
-    run = 0;
-    update_fetch_heap_dma_abort(551u, &run);
-    update_fetch_heap_dma_abort(551u, &run);
-    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN, &run) && run == 0u, "a recovered sample resets the run");
-    TEST_CHECK(!update_fetch_heap_dma_abort(551u, &run) && run == 1u, "run restarts from 1 after recovery");
-    run = 0;
-    TEST_CHECK(update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN - 1u, &run), "under the hard minimum aborts at once");
-    run = 0;
-    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN, &run) && run == 1u, "exactly the hard minimum is only a low sample");
-    run = 0;
-    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN - 1u, &run) && run == 1u, "4095 B counts as low");
-    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN, &run) && run == 0u, "4096 B is not low");
+    TEST_CHECK(FETCH_DMA_LOW_READS == 3u && FETCH_DMA_HARD_MIN == 256u && FETCH_DMA_WINDOW == 8u &&
+                   FETCH_DMA_WINDOW_LOW == 4u,
+               "DMA abort constants pinned");
+    const uint32_t low = FETCH_DMA_FREE_MIN - 1u;
+    unsigned h = 0;
+    TEST_CHECK(!update_fetch_heap_dma_abort(low, &h), "first low sample does not abort");
+    TEST_CHECK(!update_fetch_heap_dma_abort(low, &h), "second low sample does not abort");
+    TEST_CHECK(update_fetch_heap_dma_abort(low, &h), "third consecutive low sample aborts");
+    h = 0;
+    update_fetch_heap_dma_abort(low, &h);
+    update_fetch_heap_dma_abort(low, &h);
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_FREE_MIN, &h), "a recovered sample (exact floor) does not abort");
+    TEST_CHECK(!update_fetch_heap_dma_abort(low, &h), "after recovery a single low sample does not abort");
+    h = 0;
+    TEST_CHECK(update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN - 1u, &h), "under the hard minimum aborts at once");
+    h = 0;
+    TEST_CHECK(!update_fetch_heap_dma_abort(FETCH_DMA_HARD_MIN, &h), "exactly the hard minimum is only a low sample");
+
+    /* LOW-1: low, low, ok repeating never gets 3 in a row but must abort within the window (4 lows of 8). */
+    h = 0;
+    int aborted_at = 0;
+    for (int i = 1; i <= 12 && !aborted_at; i++) {
+        const uint32_t v = (i % 3 == 0) ? 100000u : low;
+        if (update_fetch_heap_dma_abort(v, &h)) {
+            aborted_at = i;
+        }
+    }
+    TEST_CHECK(aborted_at == 5, "low,low,ok repeating aborts on the fourth low of the window (sample 5)");
+    h = 0;
+    bool any = false;
+    for (int i = 0; i < 40; i++) {
+        any |= update_fetch_heap_dma_abort((i % 4 == 0) ? low : 100000u, &h);
+    }
+    TEST_CHECK(!any, "one low in four (2 of 8) never aborts");
+    /* Window edge: 3 lows in 8 with no 3 in a row passes, a fourth low within the window aborts. */
+    h = 0;
+    const unsigned seq3[4] = { 1, 1, 0, 1 };
+    any = false;
+    for (int i = 0; i < 4; i++) {
+        any |= update_fetch_heap_dma_abort(seq3[i] ? low : 100000u, &h);
+    }
+    TEST_CHECK(!any, "3 lows within 4 samples (no 3 in a row) does not abort");
+    TEST_CHECK(update_fetch_heap_dma_abort(low, &h), "the fourth low within 8 samples aborts");
 }
 
 static void test_abort(void)
