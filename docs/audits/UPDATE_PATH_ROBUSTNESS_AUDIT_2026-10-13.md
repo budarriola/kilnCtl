@@ -290,7 +290,7 @@ after AUTOAPPLY lands, then compare.
 
 ## 6. Fix status (LOW batch)
 
-Fixed in `4d17ed8eb` (code and tests) and `288c629bd` (cancel tests for the
+Fixed in `980c50c59` (code and tests) and `574616774` (cancel tests for the
 header and body waits). All host-test only; nothing run on hardware.
 
 | Finding | Status | Change |
@@ -302,10 +302,10 @@ header and body waits). All host-test only; nothing run on hardware.
 | LOW-5 | Fixed | A wedged writer's job buffers (body, scratch, writer state) are handed to the writer and freed when its late operation returns. Test asserts they stay held while parked and are released afterwards. |
 | LOW-6 | Skipped | Stays documented. |
 | LOW-7 | Fixed | `per_page` raised to 15 (`update_url_build_list` allows 1..30), staying inside the heap budget; no internal RAM added (buffers in PSRAM). |
-| LOW-8 | Fixed | Reads and the header wait are sliced (1 s, 5 stall slices); the settle-wait polls cancel. Tests cancel a stalled header wait and a stalled body read and assert effect within 1.25 s. |
+| LOW-8 | Fixed | Reads and the header wait are sliced (1 s, 5 stall slices); the settle-wait already polled cancel before this fix. Tests cancel a stalled header wait and a stalled body read and assert effect within 1.25 s. |
 
-Negative tests (`tools\negtest.ps1`, kilnfw-host pattern, base `4d17ed8eb`
-for the first seven, base `288c629bd` for the two cancel mutants; every
+Negative tests (`tools\negtest.ps1`, kilnfw-host pattern, base `980c50c59`
+for the first seven, base `574616774` for the two cancel mutants; every
 CAUGHT mutant compiled and failed on a test assertion):
 
 | Mutation | Result |
