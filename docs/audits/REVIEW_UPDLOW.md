@@ -163,3 +163,30 @@ assertion (`FAIL test_*.c:<line>`); none was a compile failure.
 | M17 Retry-After not clamped at capture | MISSED | LOW-4 (final clamp also unpinned, see M5) |
 
 14 CAUGHT, 5 MISSED.
+
+## Fix status
+
+Fixed in 48010bf4a and d884f482c (rebased onto origin/dev; landed SHAs recorded below once pushed). Targeted host tests (`update_*`, `backup_import`) pass.
+
+| Finding | Status |
+|---|---|
+| MED-1 | fixed: X-RateLimit-Reset used only when Remaining is 0; a non-rate 403 is an access error; a 5xx does not inherit a reset backoff; a repo-setting change clears the backoff |
+| LOW-1 | fixed (`wr_late_exited` on the missed-completion path); no test pins it, open as a test gap |
+| LOW-2 | fixed: about 10 s stall patience restored, header loop bounded by the job deadline |
+| LOW-3 | fixed: unsigned tick elapsed in the backoff expiry |
+| LOW-4 | fixed: M8, M10, M15 CAUGHT; M5 and M17 are equivalent alone (redundant clamps), CAUGHT combined |
+
+Negtest of the fixes (base 48010bf4a, kilnfw-host preset):
+
+| Mutation | Verdict | Failing assertion |
+|---|---|---|
+| M8 header stall extra slice | CAUGHT | test_update_fetch.c:730 |
+| M10 eagain not reset on progress | CAUGHT | test_update_fetch.c:745/746 |
+| M15 parse_u64 digit cap 40 | CAUGHT | test_update_url |
+| 403 any = limited | CAUGHT | test_update_url / test_update_fetch |
+| 5xx inherits reset | CAUGHT | test_update_fetch |
+| settings change does not clear backoff | CAUGHT | test_update_http_refusals |
+| tick wrap signed compare | CAUGHT | test_update_fetch |
+| M5 alone / M17 alone | MISSED (equivalent: the other clamp covers it) | |
+| M5 + M17 combined | CAUGHT | test_update_url.c:216/223 |
+| reset ignores Remaining | CAUGHT after added test | test_update_url.c:213 |

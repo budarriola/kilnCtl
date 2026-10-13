@@ -132,3 +132,15 @@ Every CAUGHT row below compiled (its log has no `BUILD FAILURES`) and failed on 
 | N5 | `update_policy.c` `cand_s.dirty = req->dirty;` -> `req->dirty && !req->force` | CAUGHT | FAIL `test_update_policy.c:315`, `:322`; `test_update_http_refusals.c:322`, `:327` |
 
 There is no N4: it was dropped while the mutation set was drafted.
+
+## Fix status
+
+Fixed in 48010bf4a (rebased onto origin/dev). Targeted host tests pass.
+
+| Finding | Status |
+|---|---|
+| MED-1 | fixed: `firmware/KilnFW/CMakeLists.txt` composes a dev PROJECT_VER at configure time so the "-dirty" form fits in 31 chars, and fails the configure if it cannot |
+| LOW-1 | fixed: tests for the `dl >= 6u` boundary and the truncated-dirty case |
+| INFO (stale comment, labels, form feed, pre-rebase SHA) | fixed in `update_policy.h`, the tests and `REVIEW_STAGEVERFX.md` |
+
+Negtest: shortening `ci_dirty_suffix` to 5 chars is CAUGHT (`test_update_stage.c:1229`). The `dl >= 6u` boundary was not negtested separately (both sites share identical text, so a unique find string was not available); open.
