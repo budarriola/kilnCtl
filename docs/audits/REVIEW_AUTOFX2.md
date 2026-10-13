@@ -188,3 +188,37 @@ powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset kilnfw-host -
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset pytest -Mutations py.json
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset check -PresetArg firmware/KilnFW_recovery/main/check_recovery_wifi_policy.ps1 -Mutations rec.json
 ```
+
+## Fix status
+
+Fixed in `5ee85aaac` (AUTOFX3), on origin/dev:
+
+- **MED-1**: `saw_down` is gone. `update_install_staged` reads `uptime_s` (GET `/api/status`) before the POST and
+  accepts an `ok` after an unanswered POST only when the uptime now plus 2 s of truncation slack is below the
+  earlier uptime plus the elapsed time (a reboot happened), or when the version that was running before the POST
+  differs from the requested one. A same-version `ok` with no proof (uptime unreadable, or still counting) stays
+  UNKNOWN with the stale note. Pytest covers outage, 503 and auth-error poll failures, unreadable uptime before
+  and after, and uptime that keeps counting.
+- **Pooled bench finding** (pre.3 install reported UNKNOWN after the 270 s window): the UNKNOWN text now says the
+  install may still be running (up to about 4 minutes) and to poll again with `update_install_staged(confirm=False)`.
+  The tool keeps the pre-POST evidence per host, so that follow-up read reports `ok` once the new version runs with an
+  `ok` record and the same reboot proof holds, or `FAILED` on a recorded failure. The per-call cap is still 270 s.
+- **LOW-1**: the `last_install` JSON now goes out as its own `send_frag` fragment (worst case 154 B of the 200 B
+  static buffer, no stack cost). `check_recovery_status_fragments.ps1` computes that worst case from the reason-name
+  table and `UPD_INST_SEMVER_LEN`.
+- **LOW-2**: the unmonitored-install notice is now a warning line (`recovery_lcd_set_warning`) on the note row, drawn in
+  addition to the SSID and passphrase. The 1 Hz LCD task removes it when `recovery_apply_busy()` goes false. The
+  passphrase is not logged anywhere new. The persisted FAIL/`outcome_unknown` record is unchanged (INFO-2 stays).
+- **LOW-3**: `ota_esp_post` supersedes before it sets the boot partition and reports a failed supersede in its
+  response body. The same check asserts the order.
+- **LOW-4**: `test_answered_post_is_accepted_without_a_down_poll` pins mutant P3. The recovery supersede calls have no
+  host-test harness; they are covered only by the source-level order/report assertions in
+  `check_recovery_status_fragments.ps1`, not by a behavioural test.
+
+Negative tests (base `5ee85aaac`, all CAUGHT by a failing assertion): pytest 7/7 (drop the uptime comparison, any poll
+error counts as down, follow-up ignores evidence, answered POST needing proof, inverted comparison, UNKNOWN text,
+version-change shortcut forced on); check script 5/5 (shrunk buffer, last_install merged back into the numeric
+fragment, supersede dropped, supersede not reported, supersede after the boot set).
+
+INFO-1..5 are unchanged. Not fixed: INFO-5 (slow P4 mutant) is addressed in passing, because the tests now run on a
+virtual clock.
