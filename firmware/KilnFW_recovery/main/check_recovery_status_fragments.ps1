@@ -23,7 +23,13 @@ $fragSize = [int]$Matches[1]
 
 $nameFn = [regex]::Match($rec, 'update_install_reason_name\(uint8_t reason\)\s*\{(?<b>.*?)return reason', 'Singleline')
 if (-not $nameFn.Success) { throw "update_install_reason_name table not found" }
-$names = [regex]::Matches($nameFn.Groups['b'].Value, '"([a-z_]+)"') | ForEach-Object { $_.Groups[1].Value.Length }
+# Any quoted name counts (digits and capitals too: REVIEW_AUTOFX3 LOW-3), and the number found must equal the enum's.
+$names = [regex]::Matches($nameFn.Groups['b'].Value, '"([^"\\]*)"') | ForEach-Object { $_.Groups[1].Value.Length }
+$recH = Get-Content -Raw -LiteralPath (Join-Path $here "..\..\KilnFW\App\drivers\update\update_install_record.h")
+$enum = [regex]::Match($recH, 'typedef enum \{\s*UPD_INST_REASON_NONE(?<b>.*?)UPD_INST_REASON_COUNT\b', 'Singleline')
+if (-not $enum.Success) { throw "UPD_INST_REASON enum not found" }
+$enumCount = 1 + ([regex]::Matches($enum.Groups['b'].Value, 'UPD_INST_REASON_[A-Z0-9_]+')).Count
+if (@($names).Count -ne $enumCount) { $fails += "reason-name parser found $(@($names).Count) names but the enum has $enumCount" }
 $maxReason = ($names | Measure-Object -Maximum).Maximum
 if ($rec -notmatch '#define UPD_INST_SEMVER_LEN') {
     $hdr = Get-Content -Raw -LiteralPath (Join-Path $here "..\..\KilnFW\App\drivers\update\update_install_record.h")
@@ -56,9 +62,11 @@ foreach ($lit in $lastInstall) {
 $m = [regex]::Match($http, 'static esp_err_t ota_esp_post\(.*?\n\}', 'Singleline')
 if (-not $m.Success) { throw "ota_esp_post not found" }
 $body = $m.Value
-$iSup = $body.IndexOf('recovery_install_supersede()')
+# The call must be a statement at the function's top indentation (not inside if (0) { } or a nested block).
+$mSup = [regex]::Match($body, '(?m)^ {4}(?:int\s+\w+\s*=\s*|\(void\))?recovery_install_supersede\(\)')
+$iSup = if ($mSup.Success) { $mSup.Index } else { -1 }
 $iSet = $body.IndexOf('recovery_boot_partition_set_and_verify(')
-if ($iSup -lt 0) { $fails += "ota_esp_post does not call recovery_install_supersede()" }
+if ($iSup -lt 0) { $fails += "ota_esp_post does not call recovery_install_supersede() as a top-level statement" }
 elseif ($iSet -lt 0) { throw "ota_esp_post: boot partition set not found" }
 elseif ($iSup -gt $iSet) { $fails += "ota_esp_post supersedes AFTER setting the boot partition" }
 if ($body -notmatch 'supersede_rc == 0') { $fails += "ota_esp_post does not report a failed supersede in its response" }

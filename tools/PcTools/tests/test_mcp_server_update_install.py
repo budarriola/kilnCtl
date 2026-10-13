@@ -236,6 +236,39 @@ class RebootEvidenceTests(_Base):
         self.assertTrue(out.startswith("UNKNOWN"), out)
 
 
+class SlowReadTests(_Base):
+    """Request latency on the uptime reads must not look like a reboot."""
+
+    def _run(self, delay, reboot):
+        def status(host, timeout=8.0):
+            self.clock.t += delay
+            up = int(self.clock.t - self.boot_t)
+            self.clock.t += delay
+            return {"uptime_s": up}
+        stale = _ok()
+        seq = [stale, uhc.UpdateHttpError("down")] + [stale] * 200
+
+        def get(host, timeout=8.0):
+            v = seq.pop(0)
+            if isinstance(v, Exception):
+                if reboot:
+                    self.reboot()
+                raise v
+            return v
+        with mock.patch.object(dhc, "get_status", side_effect=status),              mock.patch.object(uhc, "get_install_status", side_effect=get),              mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+            return msu.update_install_staged(confirm=True, wait_s=60)
+
+    def test_slow_reads_without_reboot_are_not_ok(self):
+        for d in (1.0, 1.5, 3.0):
+            with self.subTest(delay=d):
+                msu._PENDING_INSTALL.clear()
+                self.boot_t = self.clock.t - 600.0
+                self.assertTrue(self._run(d, False).startswith("UNKNOWN"))
+
+    def test_slow_reads_with_real_reboot_are_ok(self):
+        self.assertTrue(self._run(1.0, True).startswith("ok"))
+
+
 class FollowUpTests(_Base):
     """Pooled bench finding: the call ran out of time; a follow-up decides with the same evidence."""
 
@@ -265,6 +298,24 @@ class FollowUpTests(_Base):
         with mock.patch.object(uhc, "get_install_status", return_value=_ok()):
             out = msu.update_install_staged(confirm=False)
         self.assertFalse(out.startswith("ok"), out)
+
+    def test_unproven_follow_up_is_pending_not_refused(self):
+        self._timed_out_call()
+        with mock.patch.object(uhc, "get_install_status", return_value=_ok()):
+            out = msu.update_install_staged(confirm=False)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertNotIn("REFUSED", out)
+        self.assertNotIn("confirm=True", out)
+        self.assertIn("poll again with update_install_staged(confirm=False)", out)
+
+    def test_stale_pending_record_does_not_yield_installed(self):
+        self._timed_out_call()
+        self.clock.sleep(86400)
+        self.reboot()
+        with mock.patch.object(uhc, "get_install_status", return_value=_ok()):
+            out = msu.update_install_staged(confirm=False)
+        self.assertFalse(out.startswith("ok"), out)
+        self.assertEqual(msu._PENDING_INSTALL, {})
 
     def test_follow_up_reports_recorded_failure(self):
         self._timed_out_call()

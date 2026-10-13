@@ -567,6 +567,10 @@ def _install_line(st: dict) -> str:
 #: one call may run).
 _PENDING_INSTALL: dict = {}
 
+#: A pending record older than this (seconds past its pre-POST read) is dropped:
+#: well past the 270 s poll cap, so a late reboot cannot count as this install.
+_PENDING_TTL_S = 600.0
+
 #: Slack for the whole-second truncation of two uptime_s readings.
 _UPTIME_SLACK_S = 2.0
 
@@ -588,10 +592,13 @@ def _reboot_proven(host: str, pend: dict) -> bool:
     before_up = pend.get("before_up")
     if before_up is None:
         return False
+    # "now" is taken BEFORE the read is sent, and t_pre AFTER the before-read
+    # returned: request transit time is then never counted as board time, so
+    # elapsed is a lower bound and a slow link cannot fake a reboot.
+    elapsed = time.monotonic() - pend["t_pre"]
     after = _read_uptime(host)
     if after is None:
         return False
-    elapsed = time.monotonic() - pend["t_pre"]
     return after + _UPTIME_SLACK_S < before_up + elapsed
 
 
@@ -637,6 +644,9 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
         return f"error: could not read GET {uhc.INSTALL_STATUS_PATH} (host={resolved}): {exc}"
     if confirm is not True:
         pend = _PENDING_INSTALL.get(resolved)
+        if pend is not None and time.monotonic() - pend["t_pre"] > _PENDING_TTL_S:
+            _PENDING_INSTALL.pop(resolved, None)  # expired: cannot confirm an old install
+            pend = None
         if pend is not None:
             if _ok_is_new(resolved, before, pend):
                 _PENDING_INSTALL.pop(resolved, None)
@@ -646,15 +656,15 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
             if li.get("state") == "recorded" and li.get("code") not in ("ok", None):
                 _PENDING_INSTALL.pop(resolved, None)
                 return f"FAILED: install recorded a failure: {_install_line(before)} (host={resolved})"
-            return _refuse_unconfirmed(
-                f"an earlier install of {pend['want']!r} is still unconfirmed (not yet proven): "
-                f"{_install_line(before)} (host={resolved})")
+            return (f"UNKNOWN: an earlier install of {pend['want']!r} is still pending, not yet proven: "
+                    f"{_install_line(before)}; poll again with update_install_staged(confirm=False) "
+                    f"(host={resolved})")
         return _refuse_unconfirmed(f"would install the staged image: {_install_line(before)} (host={resolved})")
     if not before.get("staged") or before.get("stage_busy"):
         return f"REFUSED: no verified stage ready (staged={before.get('staged')}, stage_busy={before.get('stage_busy')}) (host={resolved})"
     want = before.get("staged_version")
-    t_pre = time.monotonic()
     before_up = _read_uptime(resolved)
+    t_pre = time.monotonic()  # after the read returned: transit time must not count as board time
     post_unknown = False
     try:
         uhc.start_install(resolved)
