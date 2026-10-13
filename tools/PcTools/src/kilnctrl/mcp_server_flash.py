@@ -22,7 +22,7 @@ import time
 from collections import deque
 from typing import Any, Callable, Optional
 
-from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
+from . import actions, capability_preflight, config_presets, coredump_fetch, dashboard_http_client, debug_probe, devices, elf_archive, esp_app_desc, flash_provenance, host_resolve, mcp_facade, openocd_util, otadata_blob, partition_http_client, partition_table, pico_gpio_probe, pico_image_freshness, recovery_flash, safety_cfg_http_client, serial_link, settings, stale_check, ui_test_runner, wifi_credentials, zones_http_client
 from .autotune import AutotuneClient, AutotuneQueryError
 from .control import ControlClient, ControlQueryError
 from .device_log import LogClient
@@ -172,6 +172,22 @@ def _resolve_app_flash_target(kiln_fw_root: str) -> partition_table.PartitionEnt
 
 
 DEFAULT_PARTITION_TABLE_OFFSET = 0x8000
+
+
+def _resolve_otadata_target(kiln_fw_root: str) -> "partition_table.PartitionEntry":
+    """The `otadata` partition (data type 0x01, subtype ota 0x00) from
+    `<kiln_fw_root>/partitions.csv`; ValueError if absent or too small."""
+    csv_path = os.path.join(kiln_fw_root, "partitions.csv")
+    try:
+        entries = partition_table.parse_partitions_csv(csv_path)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"could not parse {csv_path}: {exc}") from exc
+    for entry in entries:
+        if entry.name == "otadata" and entry.type == 0x01 and entry.subtype == 0x00:
+            if entry.size < 2 * otadata_blob.SECTOR_SIZE:
+                raise ValueError(f"otadata partition too small ({entry.size} B) in {csv_path}")
+            return entry
+    raise ValueError(f"{csv_path} has no data/ota partition named 'otadata'")
 
 
 def _resolve_partition_table_offset(kiln_fw_root: str) -> "tuple[int, str]":
@@ -1033,6 +1049,7 @@ def flash_firmware(
     confirm_erase: bool = False,
     confirm: bool = False,
     allow_unreadable_board_state: bool = False,
+    set_otadata_app: bool = False,
 ) -> str:
     """Flashes KilnFW/build/{bootloader,partition_table,KilnCtrl}.bin to the
     board over JTAG via OpenOCD -- the ONLY sanctioned way to flash this
@@ -1242,6 +1259,14 @@ def flash_firmware(
     OTA) is unaffected; a from-scratch/never-OTA'd board may need that
     resolved before this tool's own post-flash verification will pass.
 
+    `set_otadata_app` (default False): also writes both `otadata` sectors
+    (offset/size resolved from `<kiln_fw_root>/partitions.csv`, the `ota`
+    subtype data partition) selecting the `app` ota_0 slot, in the same
+    OpenOCD session, so a board whose otadata points at the factory
+    (`recovery`) image after `recovery_enter` boots the app after this flash.
+    The blob is ESP-IDF's own esp_ota_select_entry_t (ota_seq=1, see
+    otadata_blob.py). Leave False when otadata already selects `app`.
+
     `erase_partitions` / `confirm_erase`: owner decision 2026-09-21 -- erase
     one or more DATA partitions in the SAME OpenOCD session as the app image
     (written after it, before the final reset), by writing a 0xFF-filled
@@ -1357,6 +1382,13 @@ def flash_firmware(
             )
         try:
             erase_targets = _resolve_erase_targets(effective_kiln_fw_root, erase_partitions)
+        except ValueError as exc:
+            return f"error: {exc}"
+
+    otadata_entry = None
+    if set_otadata_app is True:
+        try:
+            otadata_entry = _resolve_otadata_target(effective_kiln_fw_root)
         except ValueError as exc:
             return f"error: {exc}"
 
@@ -1508,6 +1540,13 @@ def flash_firmware(
         blank_path = _write_blank_partition_file(entry, erase_tmp_dir)
         tcl_parts.append(f'program_esp "{blank_path.replace(chr(92), "/")}" 0x{entry.offset:x} verify')
         erase_note_entries.append({"name": entry.name, "offset": entry.offset, "size": entry.size})
+    otadata_tmp_dir = None
+    if otadata_entry is not None:
+        otadata_tmp_dir = tempfile.mkdtemp(prefix="kilnctl_otadata_")
+        otadata_path = os.path.join(otadata_tmp_dir, "otadata_app.bin")
+        with open(otadata_path, "wb") as f:
+            f.write(otadata_blob.build_otadata_image(otadata_entry.size, 1))
+        tcl_parts.append(f'program_esp "{otadata_path.replace(chr(92), "/")}" 0x{otadata_entry.offset:x} verify')
     tcl_parts[-1] += " reset exit"
     tcl = "; ".join(tcl_parts)
 
@@ -1601,6 +1640,8 @@ def flash_firmware(
     finally:
         if erase_tmp_dir:
             shutil.rmtree(erase_tmp_dir, ignore_errors=True)
+        if otadata_tmp_dir:
+            shutil.rmtree(otadata_tmp_dir, ignore_errors=True)
 
 
 def _recovery_board_state_refusals(host: Optional[str], allow_link_down: bool = False
