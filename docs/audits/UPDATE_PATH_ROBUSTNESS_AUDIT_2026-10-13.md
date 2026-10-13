@@ -287,3 +287,35 @@ after AUTOAPPLY lands, then compare.
    dwell): the apply must not depend on the safety link. Clearing the S6b
    that results is covered by the owner decision of 2026-10-02.
 9. **No re-download between stage and install** (LOW-1).
+
+## 6. Fix status (LOW batch)
+
+Fixed in `4d17ed8eb` (code and tests) and `288c629bd` (cancel tests for the
+header and body waits). All host-test only; nothing run on hardware.
+
+| Finding | Status | Change |
+|---|---|---|
+| LOW-1 | Kept, documented | The old verified stage is erased only in `flush_head` (`update_stage.c`), i.e. on the first flash write of the new image. A download that fails earlier (HTTP error, bad size, cancel, timeout) leaves the old stage staged. New test `old verified stage kept when the new download fails before writing`. |
+| LOW-2 | Fixed | `rate_limited` (403/429) and `server_error` (5xx) are separate reasons. `Retry-After` (seconds) and `X-RateLimit-Reset` set a board-side backoff (default 900 s rate, 60 s server, clamped 5..3600 s). check/download POST answer `429 backoff` with `retry_after_s`; status JSON carries `retry_after_s`. RAM only. |
+| LOW-3 | Skipped | Already fixed by UPDFX3 (`566a4861d`). |
+| LOW-4 | Fixed | A header-read or body-read timeout is labelled `timeout`, not `bad_response`. |
+| LOW-5 | Fixed | A wedged writer's job buffers (body, scratch, writer state) are handed to the writer and freed when its late operation returns. Test asserts they stay held while parked and are released afterwards. |
+| LOW-6 | Skipped | Stays documented. |
+| LOW-7 | Fixed | `per_page` raised to 15 (`update_url_build_list` allows 1..30), staying inside the heap budget; no internal RAM added (buffers in PSRAM). |
+| LOW-8 | Fixed | Reads and the header wait are sliced (1 s, 5 stall slices); the settle-wait polls cancel. Tests cancel a stalled header wait and a stalled body read and assert effect within 1.25 s. |
+
+Negative tests (`tools\negtest.ps1`, kilnfw-host pattern, base `4d17ed8eb`
+for the first seven, base `288c629bd` for the two cancel mutants; every
+CAUGHT mutant compiled and failed on a test assertion):
+
+| Mutation | Result |
+|---|---|
+| L2_reason_generic | CAUGHT |
+| L2_no_backoff_note | CAUGHT |
+| L4_header_timeout_bad_response | CAUGHT |
+| L4_body_stall_label | CAUGHT |
+| L8_header_ignores_cancel | CAUGHT (`test_update_fetch.c:720`) |
+| L8_slice_too_long | CAUGHT (`test_update_fetch.c:720`) |
+| L5_no_handoff | CAUGHT |
+| L7_per_page_5 | CAUGHT |
+| L1_early_erase | CAUGHT |
