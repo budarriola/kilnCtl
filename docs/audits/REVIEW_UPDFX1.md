@@ -177,3 +177,52 @@ test assertion (`FAIL ...c:NNN`), none a build failure.
 | M8 | `AFTER_SCRATCH` without the scratch subtraction | CAUGHT | `test_update_fetch_heap.c:23` |
 | M9 | `FETCH_CHECK_BLOCK_MIN` 9728 | MISSED | - |
 | M10 | per-hop `heap_admit` in `http_get` removed | MISSED | - |
+
+## Fix status (UPDFX2, code commit 1f22e5e5c)
+
+| Finding | Status | What changed |
+|---|---|---|
+| MED-1 | fixed | A check is admitted at the download need (28532 B free). `FETCH_CHECK_HEAP_MIN` (24100 B) removed. The check keeps its 3072 B largest-block need. Per-hop admission kept. |
+| LOW-1 | fixed | Mid-body abort lowered 12288 -> 10240 B (floor 8192 + 2048). A job admitted at 28532 ends at 12032 B, 1792 B above the abort. The bench idle reading (30311 B free, 10752 B block, minus the 1024 B scratch) is admitted. The 8192 B floor is untouched. |
+| LOW-2 | fixed | Stale header and call-site comments rewritten. |
+| LOW-3 | fixed | The 1024 B scratch is allocated only for KIND_DOWNLOAD. |
+| LOW-4 | fixed | `low_heap_midrun` page text is neutral (no "during the download"). |
+| LOW-5 | fixed | Host tests added (`test_update_fetch_heap.c`, `test_heap_admission_updfx2` in `test_update_fetch.c`); see Negtest (UPDFX2). |
+| LOW-6 | fixed | DMA-capable free is read (`MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL`) and must be >= 4096 B (`DMA_FREE_MIN`), else `low_heap_dma`, with page text. The bench idle DMA min_free was 6351 B, so idle is admitted. |
+| Bench: redirect hop (coordinator) | fixed in rule, residual unexplained | See below. |
+
+### Redirect hop
+
+Bench evidence: the idle board (30299 B free) showed 27855 B free at the redirect hop, need 28532,
+block 7680, giving `low_heap_free`. About 2.4 KB is held at the hop. The first client is already
+closed and cleaned up before the next admission, so the residual sits outside this module
+(lwIP/TLS teardown) and cannot be proven without the board.
+
+The hop is no longer judged against the start need. `update_fetch_heap_admit_hop` requires the
+post-draw level (free minus the worst-case draw, 17524 B for a download, 12068 B for a check) to be
+at least the abort level 10240 B. Hop minimums are therefore 26740 (download) and 22308 (check).
+At the observed 27855 B the post-draw level is 10331 B (download worst case), so the hop is admitted;
+a job that then drains further self-aborts at 10240 B, 2048 B above the 8192 B floor. Start
+admission is unchanged (28532), so a board that is genuinely low at start is still refused. The hop
+rule never admits a job whose worst case ends below the abort level, so the floor holds with margin.
+
+Remaining: confirm on the bench that the 2.4 KB residual is released and that real hops land above
+26740 B. No board access in this task.
+
+## Negtest (UPDFX2)
+
+`tools\negtest.ps1 -Preset kilnfw-host` at base 1f22e5e5c, `-Only update_fetch`, ExpectPattern as
+above. Baseline passed; real tree unchanged; copies removed. Each CAUGHT row has a compiled test
+assertion failure (`FAIL ...c:NNN`), none a build failure.
+
+| Mutation | Change | Verdict | Caught by |
+|---|---|---|---|
+| M1 | `dl = kind != KIND_DOWNLOAD` | CAUGHT | `test_update_fetch.c:346` |
+| M2 | `dl = true` | CAUGHT | `test_update_fetch.c:346` |
+| M4 | always `"low_heap_free"` | CAUGHT | `test_update_fetch.c:351` |
+| M5 | midrun string back to `"low_heap"` | CAUGHT | `test_update_fetch.c:365` |
+| M6 | block minimum always download | CAUGHT | `test_update_fetch_heap.c:31` |
+| M9 | `FETCH_CHECK_BLOCK_MIN` 9728 | CAUGHT | `test_update_fetch_heap.c:67`, `test_update_fetch.c:346` |
+| M10 | per-hop admission removed | CAUGHT | `test_update_fetch.c:391` |
+| M11 | hop uses start rule (`heap_admit(w,false)`) | CAUGHT | `test_update_fetch.c:399` |
+| M12 | `dma_ok` always true | CAUGHT | `test_update_fetch.c:372`, `:376` |
