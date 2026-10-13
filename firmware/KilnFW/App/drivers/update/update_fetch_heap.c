@@ -26,9 +26,10 @@ fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_
                    is_download ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN);
 }
 
-bool update_fetch_heap_dma_ok(uint32_t dma_free)
+bool update_fetch_heap_dma_admit(uint32_t dma_free, bool is_download, bool hop)
 {
-    return dma_free >= FETCH_DMA_FREE_MIN;
+    const uint32_t need = (hop && !is_download) ? FETCH_DMA_ADMIT_CHECK_HOP_MIN : FETCH_DMA_ADMIT_DOWNLOAD_MIN;
+    return dma_free >= need;
 }
 
 bool update_fetch_heap_dma_abort(uint32_t dma_free, unsigned *hist)

@@ -68,8 +68,13 @@ static const char *TAG = "update_fetch";
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
+// LOW-1 (update_fetch_heap.h): the abort margin is the largest single internal allocation a read-loop pass makes.
+// The flash write bounces one chunk through internal RAM, so neither the chunk nor the client buffers may grow
+// past the bound the abort level is built on.
+_Static_assert(FETCH_CHUNK_LEN <= FETCH_HEAP_MAX_STEP_BYTES, "read chunk exceeds the heap abort margin bound");
+_Static_assert(FETCH_TX_BUF_BYTES <= FETCH_HEAP_MAX_STEP_BYTES, "client tx buffer exceeds the heap abort margin bound");
 // Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
-// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 8704 B)
+// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 12288 B)
 // live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
 // admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
 // read loop only the abort floor plus the consecutive-sample DMA check.
@@ -254,10 +259,11 @@ static const char *heap_admit(const work_t *w, bool hop)
     }
     if (hv == FETCH_HEAP_OK) {
         const uint32_t dma = dma_free_internal();
-        if (update_fetch_heap_dma_ok(dma)) {
+        if (update_fetch_heap_dma_admit(dma, dl, hop)) {
             return NULL;
         }
-        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u)", (unsigned)dma, (unsigned)FETCH_DMA_FREE_MIN);
+        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u)", (unsigned)dma,
+                 (unsigned)((hop && !dl) ? FETCH_DMA_ADMIT_CHECK_HOP_MIN : FETCH_DMA_ADMIT_DOWNLOAD_MIN));
         return "low_heap_dma";
     }
     const unsigned need_free = hop ? (dl ? FETCH_HOP_DOWNLOAD_HEAP_MIN : FETCH_HOP_CHECK_HEAP_MIN)

@@ -1,116 +1,72 @@
 // update_fetch_heap.h -- the internal-heap admission rule for the GitHub fetch (WP8), pure C so
 // the decision is host-tested (App/test/test_update_fetch_heap.c). update_fetch.c supplies the
-// two live numbers (heap_caps_get_free_size / heap_caps_get_largest_free_block, MALLOC_CAP_INTERNAL).
+// live numbers (heap_caps_get_free_size / heap_caps_get_largest_free_block, MALLOC_CAP_INTERNAL, and
+// the DMA-capable internal free).
 //
-// Owner floor: heap_internal min_free >= 8192 B. A start is admitted only when the CURRENT free
-// internal heap covers floor + estimated worst fetch draw + slack, so that the fetch's own draw
-// should not take the low-water mark under the floor (see "Limits" below: not a guarantee), AND
-// the largest free block can hold the biggest single internal allocation (the 4 KB
-// update_fetch_wr stack plus its TCB, the 2 KB client buffers).
+// Owner floor: heap_internal min_free >= 8192 B. This is a model, not a guarantee (see "Limits").
 //
-// Derivation (docs/GITHUB_RELEASE_UPDATE_PLAN.md section 14, WP8 heap budget):
-//   floor                                 8192 B
-//   worst-case fetch draw, option D      16500 B   (about 16.5 KB estimated: WP7 bench handshake
-//                                                   draw 11044 B, pre_init 31683 -> sampled_min
-//                                                   20639, measured with a 2 KB rx and 1 KB tx
-//                                                   client buffer; +1024 B for the 2 KB tx buffer
-//                                                   here; plus the 4096 B writer stack with
-//                                                   TCB/heap overhead, about 4.5 KB; mbedTLS
-//                                                   buffers are PSRAM, so not counted. One hop,
-//                                                   one hop of the API check; the asset download is the final hop and carries the writer stack)
-// REVISED (bench finding, origin/dev 8fcd3237: update_check refused at idle, 29815 B free < 30836 B):
-//   floor                                8192 B  (owner floor, unchanged)
-//   worst draw                          17524 B  (16500 + 1024 B stager scratch; scratch cut 2048 -> 1024,
-//                                                 UPDATE_STAGE_SCRATCH_MIN is 256, see
-//                                                 docs/audits/UPDATE_FETCH_HEAP_DRAW_2026-10-09.md route 4)
-//   concurrent httpd / KDF margin        3840 B  (was 4096). The login KDF (web_auth_store.c) does no heap
-//                                                 allocation of its own (iterated HMAC on the caller's stack),
-//                                                 so the margin only covers a concurrent httpd request; it
-//                                                 is NOT shown mutually exclusive with the fetch, so kept.
-//   -> FETCH_HEAP_PRECHECK_MIN          29556 B  (8192 + 17524 + 3840), below the 29647 B idle minimum;
-//      at the idle minimum the post-draw margin over the floor is 29647 - 17524 - 8192 = 3931 B (superseded by UPDFX4: measured draw).
-//      (old: 8192 + 18548 + 4096 = 30836 B, above idle.) Estimate, not a measurement: the WP8 gate
-//      (b) bench run must confirm min_free >= 8192 B with scratch 1024.
-// UPDFX1 (bench 2026-10-12, main 5098a1316: update_check -> low_heap at 30.3 KB free, 10.7 KB block):
-//   Root cause: admission ran in run_job(), AFTER fetch_task had already allocated the 1024 B internal
-//   stager scratch, so the live reading had that scratch taken out while the threshold counted it again
-//   (30311 - 1024 = 29287 < 29556). Also a CHECK (releases/latest only, memory sink, no writer task, no
-//   stager) was held to the full DOWNLOAD draw. Fix: admission is per kind and compares against the
-//   draw still to come with the scratch already held:
-//     download need = PRECHECK_MIN - SCRATCH = 28532 B   (floor + 16500 + slack; writer stack + TLS)
-//     check    need = 8192 + CHECK_DRAW 12068 + 3840 = 24100 B
-//   CHECK_DRAW = WP7 measured handshake draw 11044 B (2 KB rx, 1 KB tx) + 1024 B (2 KB tx here); no
-//   4096 B writer stack (wr_start only runs for the stage sink). The 8192 B owner floor and the 3840 B
-//   concurrent margin are unchanged. (The mid-body abort was 12288 B here; UPDFX2 moved it to 10240 B and UPDFX5 round 2 to 8704 B, see FETCH_HEAP_ABORT_BELOW.)
-//   UPDFX2 (MED-1, LOW-1): a check is admitted at the SAME 28532 B need as a download (a check that
-//   starts is a precursor to a download; the bench board idles at 29.6-31.1 KB so both pass). The
-//   check keeps its own 3072 B largest-block need (client buffers only). The mid-body abort is now
-//   FLOOR + 2048 = 10240 B, not 12288 B: a download admitted at 28532 B ends at 28532 - 16500 = 12032 B,
-//   which the old 12288 B abort would have tripped immediately (256 B under). 10240 B leaves 1792 B of
-//   margin over that post-draw level and still keeps 2048 B over the 8192 B floor.
-//   Redirect hops (UPDFX2/UPDFX3). After the first hop the heap is ~2.4 KB lower than at job start
-//   (27855 B seen at the 302 hop vs 30299 B idle; the first client is closed before the next admission,
-//   so the remainder is lwIP/TLS teardown still draining). UPDFX2 admitted a hop on ABORT_BELOW + draw
-//   (26740 B), dropping the 3840 B concurrent-request slack: a hop admitted at that minimum could end at
-//   10240 B and a concurrent httpd request (3840 B) takes it to 6400 B, under the 8192 B floor (UPDFX2
-//   review MED-1). UPDFX3 restores the slack, so a hop uses the same arithmetic as a start:
-//     download hop need = FLOOR 8192 + DRAW 16500 + SLACK 3840 = 28532 B  (= the start need)
-//     check    hop need = FLOOR 8192 + CHECK_DRAW 12068 + SLACK 3840 = 24100 B
-//   Worst case at the minimum: 28532 - 16500 = 12032 B after the draw; minus the 3840 B request = 8192 B,
-//   exactly the floor, and 1792 B above the abort level 10240 B, so the abort fires before a concurrent
-//   request could be the one to cross the floor. The abort level itself keeps FLOOR + 2048 B.
-//   The bench 302 hop at 27855 B is then 677 B short of 28532 B. Rather than weaken the rule, a LOW_FREE
-//   verdict is re-sampled for up to FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS (12 x 250 ms = 3 s,
-//   cancel- and deadline-aware, in update_fetch.c): the teardown frees its memory within that time, and the
-//   same wait also covers a residual from the previous http_get (UPDFX2 LOW-1), so the first admission of
-//   a release, manifest or asset request is not intermittently refused by the previous call's leftovers.
-//   A heap that never recovers is still refused with low_heap_free.
-//   DMA vs internal (UPDFX2 LOW-3): on the ESP32-S3 the DMA-capable internal pool is nearly the same RAM
-//   as the general internal pool (MALLOC_CAP_DMA internal = internal minus a few regions), so the two
-//   free figures move together and the DMA floor is much lower than the 8192 B internal floor (see UPDFX5 at FETCH_DMA_FREE_MIN).
-//   The bench run benchupd2 saw DMA min_free 551 B: a transient low-water inside a TLS record read that
-//   the between-read checks cannot see. The read loop now also checks DMA free after each read
-//   (FETCH_DMA_FREE_MIN) and aborts with low_heap_dma; it narrows, not closes, the TOCTOU.
-// UPDFX4 (REVIEW_UPDFX3 MED-1, MED-3): the measured cost model. Supersedes the 16500 B estimate above.
-//   benchupd2 (c549a144c): the job started at about 29275 B free (30299 idle minus the 1024 B scratch) and
-//   the low-water was 8339 B, so the whole download drew about 20936 B (FETCH_HEAP_MEASURED_DRAW_BYTES),
-//   concurrent httpd polling included. The 16500 B + 3840 B slack budget (20340 B) was 596 B short of it, and
-//   floor + measured draw (29128 B) is above the idle minimum after the scratch (29647 - 1024 = 28623 B).
-//   Admission therefore cannot guarantee the floor from a minimum-idle start: any need that covers the
-//   measured draw refuses every idle board and no update could ever start.
-//   Choice: the start/hop need is the highest value an idle board still passes,
-//     FETCH_HEAP_PRECHECK_MIN = FETCH_IDLE_MIN_FREE_BYTES = 29647 B   (28623 B with the scratch held),
-//   so admission refuses every board below the observed idle minimum (busy or fragmented). Admission is the
-//   ONLY guard for the TLS handshake, the hop's esp_http_client_open and anything inside a single
-//   esp_http_client_read: the mid-body abort (FETCH_HEAP_ABORT_BELOW) runs only BETWEEN body reads, so it covers
-//   the body phase only and cannot see a dip in those other phases (UPDFX4 MED-1). The floor is NOT guaranteed
-//   there; the admission value is unchanged (UPDFX5 MED-1).
-//   Abort/admission consistency (UPDFX5 round 2): admission at 29647 B ends the body phase near 8711 B, so the abort
-//   is FLOOR + 512 = 8704 B and a static assert requires PRECHECK_MIN >= ABORT_BELOW + MEASURED_DRAW (29647 >= 29640).
-//   Margin, bench-measured draw (v1.0.0-pre.3 fetch on c549a144c: internal draw from idle 20240 B, an earlier run 20936 B;
-//   the worse figure is used): idle minimum 29647 - 20936 = 8711 B, 519 B ABOVE the 8192 B floor. The 1024 B stager
-//   scratch is part of that draw measurement, not extra. The internal largest-block low-water was 7680 B.
-//   The older 28532 B / 29556 B / 3931 B / 31123 figures in the UPDFX1..3 paragraphs above are superseded by
-//   28623 / 29647 and the measured 20936 B draw.
-//   DMA (MED-3, reworked by UPDFX5): see FETCH_DMA_FREE_MIN below; the 551 B benchupd2 figure is a low-water over
-//   the whole job (inside TLS record reads), not a between-read sample, so it is not used as a test shape.
-// The slack is deliberately NOT larger: the board idles at 29647-31123 B free
-// (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
-// idle board. (Historical: against the 17524 B estimate the idle minimum would end at 12123 B; the measured
-// 20936 B draw above supersedes that, leaving 7687 B at the idle minimum.)
-// Largest block at idle is 9728 B (same log), so the block floor must sit below that. The biggest
-// single internal allocation is the 4096 B update_fetch_wr stack (+ heap overhead); the 2 KB
-// client buffers and TLS pieces are smaller and separate. 6144 B = 1.5x the stack, passes at idle.
+// THE MODEL (UPDFX6; one source for the internal and the DMA numbers). Every level is the live reading
+// taken by heap_admit() in update_fetch.c, which runs AFTER fetch_task() has allocated the 1024 B stager
+// scratch. So "admission level" means the level with the scratch already held, and the measured draw must
+// be on that same base:
 //
-// Limits (review 2026-10-07). This is an admission check, not a guarantee of the floor:
-//  - It would also have admitted the 258b80d4 bench run that dipped to min_free 8295 B if that run
-//    started near idle (31123 would be admitted; the current need is 28623 B). From an idle start that dip is a draw of up to about
-//    22.8 KB, some 6 KB over the 16500 B budget and unexplained; the run did not record current
-//    free before the job, so the start level is unknown. Do not read this rule as the fix for it.
-//  - The numbers are a snapshot (TOCTOU): nothing is reserved between admission and the TLS
-//    handshake, and the mid-body abort only runs between reads. The board's own transients are
-//    larger than the slack (idle low-water 16555 B against idle free 31123 B, about 14.5 KB).
-// WP8 gate (b) must log current free immediately before the job and min_free after it.
+//   FLOOR                8192 B   owner floor
+//   MAX_STEP             4096 B   largest single internal allocation between two heap samples (LOW-1 below)
+//   ABORT_BELOW         12288 B   = FLOOR + MAX_STEP: a sample at or above this cannot be taken under the floor
+//                                 by the next single step, so the mid-body abort fires before the floor is crossed
+//   MEASURED_DRAW       20936 B   whole download draw, scratch already held (benchupd2: idle 30299 B, minus the
+//                                 1024 B scratch = 29275 B at the job start, low-water 8339 B). From idle,
+//                                 scratch included, that run drew 21960 B and the pre.3 run 20240 B.
+//   ADMISSION (held)    33224 B   = ABORT_BELOW + MEASURED_DRAW. An admitted fetch bottoms out at or above
+//                                 ABORT_BELOW, so it neither self-aborts nor reaches the floor.
+//   same before scratch 34248 B   = ADMISSION + SCRATCH (FETCH_HEAP_PRECHECK_MIN: what an idle board must show)
+//   DMA                           internal pool minus a fixed 7788 B (benchupd2 idle 30299 / 22511, low-waters
+//                                 8339 / 551, pre.3 low-waters 10079 / 2291: the offset is 7788 B in every pair),
+//                                 and the draw is the same. FETCH_DMA_FREE_MIN = ABORT_BELOW - 7788 = 4500 B,
+//                                 FETCH_DMA_HARD_MIN = FLOOR - 7788 = 404 B (DMA that low means the internal
+//                                 floor is already crossed), DMA admission = DMA_FREE_MIN + DRAW = 25436 B
+//                                 = ADMISSION - 7788 B: never stricter than the internal rule on a board with
+//                                 the measured offset, and it binds if DMA is scarcer than that.
+//
+// Idle boards against this rule (admitted when idle >= 34248 B before the scratch):
+//   current firmware (bench 2026-10-13, update_stage_release run)   47191 B  ADMITTED (about 13 KB over; that
+//                                                                   fetch drew only 2908 B below its prior
+//                                                                   low-water)
+//   older firmware (sk04 log 2026-10-06; update_check refusal)      29647..31123 B, 29815 B  REFUSED
+//   No rule that is consistent with the measured draw can admit the older figures: from 29647 B the benchupd2
+//   draw bottoms at 7687 B, 505 B under the floor. The previous revision admitted exactly that and its assert
+//   compared the wrong pair (REVIEW_UPDFX5 MED-1). A refused start fails with low_heap_free after the settle
+//   wait; it never runs into the floor. Re-measure on the bench before lowering ADMISSION.
+//
+// LOW-1 (MAX_STEP). The abort samples once per read-loop pass (update_fetch.c), so between two samples the heap
+// can move by the largest allocation that pass makes. Candidates, all internal under
+// CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=8192:
+//   - the flash write of one FETCH_CHUNK_LEN (4096 B) chunk from the PSRAM buffer: esp_partition_write bounces
+//     through an internal buffer of min(len, 8192) = 4096 B (update_http.c:38, UPDATE_FETCH_HEAP_DRAW audit);
+//   - the 2048 B rx/tx client buffers: allocated at open, before the loop, not per pass;
+//   - TLS records and the read chunk: PSRAM (option D), not internal;
+//   - lwIP/WiFi rx pbufs: a fixed pool of ~1.6 KB buffers.
+// So the bound is 4096 B, and update_fetch.c static-asserts FETCH_CHUNK_LEN and FETCH_TX_BUF_BYTES against it.
+// It bounds ONE allocation by this fetch; concurrent tasks (httpd request, KDF) can stack more on top, which is
+// the residual in "Limits".
+//
+// Redirect hops. After the first hop the heap is ~2.4 KB lower than at job start (27855 B at the 302 hop vs
+// 30299 B idle: the first client is closed but lwIP/TLS teardown is still draining). A LOW_FREE verdict is
+// re-sampled FETCH_HEAP_SETTLE_TRIES x FETCH_HEAP_SETTLE_MS (12 x 250 ms = 3 s, cancel/deadline/heat aware, in
+// update_fetch.c); a heap that never recovers is refused low_heap_free. A hop uses the start need for a download
+// and ABORT_BELOW + CHECK_DRAW for a check (a check runs the same abort loop). The first admission of a check
+// uses the download need (a check that starts is a precursor to a download).
+//
+// Largest free block: the biggest single internal allocation at start is the 4096 B update_fetch_wr stack
+// (+ overhead); 6144 B = 1.5x passes the idle largest block (9728 B, sk04 log). A check needs only the 2 KB
+// client buffers (3072 B).
+//
+// Limits (review 2026-10-07, REVIEW_UPDFX4/5). Admission is the ONLY guard for the TLS handshake,
+// esp_http_client_open and anything inside a single esp_http_client_read: the abort runs between reads only.
+// The numbers are a snapshot (TOCTOU), the draw comes from two bench runs, and the board's own transients are
+// larger than any margin here (idle low-water 16555 B against idle free 31123 B). The 258b80d4 bench run that
+// dipped to 8295 B is not explained by this rule. Bench-pending: a fetch on a board flashed with this build,
+// logging free before the job, per-hop and between-read DMA samples, and the settle wait.
 #ifndef KILNCTL_UPDATE_FETCH_HEAP_H
 #define KILNCTL_UPDATE_FETCH_HEAP_H
 
@@ -122,52 +78,70 @@ extern "C" {
 #endif
 
 #define FETCH_HEAP_FLOOR_BYTES 8192u
-// Stager scratch: INTERNAL RAM (MALLOC_CAP_INTERNAL), one per job. Must be internal and small: a PSRAM
-// scratch makes esp_partition_read borrow an internal bounce buffer of up to 16 KiB per read (review
-// GITHUB_UPDATE_CHAIN_REVIEW_2026-10-09 MED-1). Its bytes are part of the worst draw, taken out of the slack.
+// Stager scratch: INTERNAL RAM (MALLOC_CAP_INTERNAL), one per download job, allocated before admission. Must be
+// internal and small: a PSRAM scratch makes esp_partition_read borrow an internal bounce buffer of up to 16 KiB
+// per read (review GITHUB_UPDATE_CHAIN_REVIEW_2026-10-09 MED-1).
 #define FETCH_HEAP_SCRATCH_BYTES 1024u
-#define FETCH_HEAP_WORST_DRAW_BYTES (16500u + FETCH_HEAP_SCRATCH_BYTES)
-// Margin for a concurrent httpd request / login KDF / httpd request while the fetch holds its allocations (review 3 LOW-5:
-// the old 1932 B left almost nothing against the 8192 B floor). Used only by FETCH_HOP_CHECK_HEAP_MIN now;
-// the start and download-hop need is the idle minimum minus the scratch (UPDFX4).
-#define FETCH_HEAP_SLACK_BYTES 3840u
-// Idle bench minimum of free internal heap (logs/sk04_sampling/2026-10-06.tsv). Admission never asks for
-// more than this, or an idle board could never start a fetch (UPDFX4 above).
+// Largest single internal allocation a read-loop pass makes (LOW-1 above).
+#define FETCH_HEAP_MAX_STEP_BYTES 4096u
+// Idle bench minimum of the older firmware (logs/sk04_sampling/2026-10-06.tsv). Historical: admission is now
+// ABOVE it, see the header comment.
 #define FETCH_IDLE_MIN_FREE_BYTES 29647u
-// Measured whole-download draw (benchupd2), httpd traffic included. Informational pin, not an admission input.
+// Measured whole-download draw with the scratch already held (benchupd2); an input to ADMISSION and to the assert.
 #define FETCH_HEAP_MEASURED_DRAW_BYTES 20936u
-#define FETCH_HEAP_PRECHECK_MIN FETCH_IDLE_MIN_FREE_BYTES
+
+// Mid-body abort (read loop only, session already built): floor plus the largest single step.
+#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_MAX_STEP_BYTES)
+// Admission with the scratch held (what heap_admit() reads). Bottoming out at ABORT_BELOW exactly.
+#define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_ABORT_BELOW + FETCH_HEAP_MEASURED_DRAW_BYTES)
+// The same level before the scratch is taken: what an idle board must read.
+#define FETCH_HEAP_PRECHECK_MIN (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH + FETCH_HEAP_SCRATCH_BYTES)
+
+_Static_assert(FETCH_HEAP_ABORT_BELOW >= FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_MAX_STEP_BYTES,
+               "ABORT_BELOW must be at least the floor plus the largest single allocation between samples");
+_Static_assert(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_HEAP_MEASURED_DRAW_BYTES >= FETCH_HEAP_ABORT_BELOW,
+               "post-admission level (scratch held) minus the remaining measured draw must be >= ABORT_BELOW");
+_Static_assert(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES == FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH,
+               "the pre-scratch level is the admission level plus exactly the scratch");
+
 #define FETCH_LARGEST_BLOCK_MIN 6144u
 // Check job: TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
 #define FETCH_CHECK_DRAW_BYTES (11044u + 1024u)
 #define FETCH_CHECK_BLOCK_MIN 3072u
-// Start need (both kinds). Download jobs hold the scratch already (the live reading excludes it); a check
-// allocates none, so its live reading is 1024 B higher and the same number is slightly more lenient.
-#define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES)
-// Mid-body abort (read loop only, session already built): floor plus 512 B (UPDFX5 round 2). A fetch admitted at
-// the idle minimum bottoms out at 29647 - 20936 = 8711 B, so the abort must sit at or under that; the bench healthy
-// low-water of 10079 B is also above it. The old FLOOR + 2048 = 10240 B aborted every admitted fetch.
-#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 512u)
-_Static_assert(FETCH_HEAP_PRECHECK_MIN >= FETCH_HEAP_ABORT_BELOW + FETCH_HEAP_MEASURED_DRAW_BYTES,
-               "a fetch admitted at the admission threshold must not self-abort: PRECHECK_MIN >= ABORT_BELOW + measured draw");
-// Redirect hops after the first: same value as a start, the idle minimum minus the held scratch (UPDFX4).
+// Redirect hops after the first: a download uses the start need; a check needs the abort level plus its own draw.
 #define FETCH_HOP_DOWNLOAD_HEAP_MIN FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH
-#define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_CHECK_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
+#define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_ABORT_BELOW + FETCH_CHECK_DRAW_BYTES)
+_Static_assert(FETCH_HOP_CHECK_HEAP_MIN - FETCH_CHECK_DRAW_BYTES >= FETCH_HEAP_ABORT_BELOW,
+               "an admitted check hop must not self-abort");
 // A LOW_FREE verdict is re-sampled this many times, this far apart, before the request is refused.
 #define FETCH_HEAP_SETTLE_TRIES 12u
 #define FETCH_HEAP_SETTLE_MS 250u
-// DMA-capable internal free. UPDFX5 (REVIEW_UPDFX4 MED-2): the floor is DERIVED from bench data, not a fixed 4096 B.
-// Bench (v1.0.0-pre.3 fetch, verified OK on c549a144c): DMA min_free fell 6767 -> 2291 B on a HEALTHY download, i.e.
-// below the old 4096 B floor. The floor is an explicit 2048 B, 243 B under that healthy low-water; it is NOT derived
-// from FETCH_HEAP_ABORT_BELOW. It only fires on a sustained run/window of low reads (below), never on one dip.
-#define FETCH_DMA_FREE_MIN 2048u
+
+// DMA-capable internal free, derived from the same source as the internal numbers (UPDFX6, REVIEW_UPDFX5 MED-2).
+// Offset of DMA free below internal free, identical in all four bench low-water pairs (header comment).
+#define FETCH_DMA_OFFSET_BYTES 7788u
+// Sustained-low floor: the DMA reading at which the internal level equals ABORT_BELOW.
+#define FETCH_DMA_FREE_MIN (FETCH_HEAP_ABORT_BELOW - FETCH_DMA_OFFSET_BYTES)
+// Hard minimum: the DMA reading at which the internal level has already reached the owner floor. Below this the
+// floor is crossed (on a board with the measured offset), so there is nothing to wait and see for.
+#define FETCH_DMA_HARD_MIN (FETCH_HEAP_FLOOR_BYTES - FETCH_DMA_OFFSET_BYTES)
+// DMA admission: DMA free (scratch held) must cover the sustained-low floor plus the same measured draw.
+#define FETCH_DMA_ADMIT_DOWNLOAD_MIN (FETCH_DMA_FREE_MIN + FETCH_HEAP_MEASURED_DRAW_BYTES)
+#define FETCH_DMA_ADMIT_CHECK_HOP_MIN (FETCH_DMA_FREE_MIN + FETCH_CHECK_DRAW_BYTES)
+_Static_assert(FETCH_DMA_ADMIT_DOWNLOAD_MIN - FETCH_HEAP_MEASURED_DRAW_BYTES >= FETCH_DMA_FREE_MIN,
+               "a DMA-admitted download must not end under the DMA sustained-low floor");
+_Static_assert(FETCH_DMA_FREE_MIN + FETCH_DMA_OFFSET_BYTES >= FETCH_HEAP_ABORT_BELOW,
+               "DMA floor must map to at least the internal abort level");
+_Static_assert(FETCH_DMA_HARD_MIN + FETCH_DMA_OFFSET_BYTES >= FETCH_HEAP_FLOOR_BYTES,
+               "DMA hard minimum must map to at least the internal owner floor");
+_Static_assert(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_DMA_OFFSET_BYTES >= FETCH_DMA_ADMIT_DOWNLOAD_MIN,
+               "DMA admission must not be stricter than the internal admission on a board with the measured offset");
 // Mid-body: the sample is taken only AFTER a read that returned data (a stalled EAGAIN slice is not a read and
 // is never sampled). Abort on FETCH_DMA_LOW_READS consecutive low samples, or FETCH_DMA_WINDOW_LOW low samples
-// among the last FETCH_DMA_WINDOW (UPDFX5 LOW-1: low,low,ok repeating), or one sample under FETCH_DMA_HARD_MIN.
+// among the last FETCH_DMA_WINDOW (low,low,ok repeating), or one sample under FETCH_DMA_HARD_MIN.
 #define FETCH_DMA_LOW_READS 3u
 #define FETCH_DMA_WINDOW 8u
 #define FETCH_DMA_WINDOW_LOW 4u
-#define FETCH_DMA_HARD_MIN 256u
 
 typedef enum {
     FETCH_HEAP_OK = 0,
@@ -180,12 +154,13 @@ typedef enum {
 // download (writer task + stager) or check (TLS + JSON only) draw.
 fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download);
 
-// Same, for a redirect hop after the first (heap not back to the job-start level, see UPDFX3 above).
+// Same, for a redirect hop after the first (heap not back to the job-start level, see "Redirect hops" above).
 fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_t largest_internal_block,
                                                  bool is_download);
 
-// DMA-capable internal free check (true = enough).
-bool update_fetch_heap_dma_ok(uint32_t dma_free);
+// DMA admission (true = enough): DMA free with the scratch held against the measured DMA draw. A check at a
+// redirect hop uses its own, smaller draw; every other case uses the download need.
+bool update_fetch_heap_dma_admit(uint32_t dma_free, bool is_download, bool hop);
 
 // Mid-body DMA check after every read that returned data. *hist is caller-owned (start 0, reset per response):
 // a bit history of the last FETCH_DMA_WINDOW samples (1 = under FETCH_DMA_FREE_MIN). True = abort the download.

@@ -320,7 +320,9 @@ static void test_claim_released_on_failures(void)
     g_fr_flash_write_fail = false;
 }
 
+#define BENCH_IDLE_FREE 47191u  /* idle internal free on the current firmware (bench 2026-10-13); any value >= the admission need works */
 static void drop_heap_low(void) { g_fake_heap_free_internal = 8000; }
+static void drop_heap_one_under_abort(void) { g_fake_heap_free_internal = FETCH_HEAP_ABORT_BELOW - 1; }
 static void set_heap_hop_ok(void) { g_fake_heap_free_internal = 27855; g_fake_heap_largest_internal = 7680; }
 static void set_heap_hop_low(void) { g_fake_heap_free_internal = 22910; }
 
@@ -342,12 +344,12 @@ static void test_heap_admission_updfx2(void)
 
     // check admitted with a 4096 B block; download refused LOW_BLOCK
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fake_heap_largest_internal = 4096;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_state, "failed") != 0 || strcmp(g_error, "low_heap_block") != 0, "check admitted with 4096 B block");
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fake_heap_largest_internal = 4096;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused on 4096 B block");
@@ -355,7 +357,7 @@ static void test_heap_admission_updfx2(void)
 
     // bench idle reading admits a full download
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fake_heap_largest_internal = 10752;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_state, "done") == 0 || strcmp(g_state, "staged") == 0 || stage_staged(), "bench idle reading downloads");
@@ -367,19 +369,38 @@ static void test_heap_admission_updfx2(void)
     CHECK(strcmp(g_error, "low_heap_midrun") == 0, "mid-body drop aborts low_heap_midrun");
     expect_claim_balanced("midrun");
 
-    // DMA low refuses both kinds
+    // One byte under the abort level aborts; the admission bottom (exactly the abort level) does not (see below).
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN - 1;
-    run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "low_heap_dma") == 0, "check refused on low DMA free");
-    fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN - 1;
+    g_app_route->on_read = drop_heap_one_under_abort;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_dma") == 0, "download refused on low DMA free");
+    CHECK(strcmp(g_error, "low_heap_midrun") == 0, "one byte under the abort level aborts low_heap_midrun");
+    expect_claim_balanced("midrun edge");
+
+    // UPDFX6 MED-2: the DMA admission need is floor + measured draw; one byte under refuses both kinds.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = FETCH_DMA_ADMIT_DOWNLOAD_MIN - 1;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "check refused one byte under the DMA admission need");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = FETCH_DMA_ADMIT_DOWNLOAD_MIN - 1;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "download refused one byte under the DMA admission need");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = FETCH_DMA_ADMIT_DOWNLOAD_MIN;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") != 0, "DMA free exactly at the admission need admitted");
+    // The old floor-only value (the previous admission) no longer admits.
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_dma_free_internal = FETCH_DMA_FREE_MIN;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_dma") != 0, "DMA free at floor admitted");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "DMA free at only the abort floor is refused at admission");
+
+    // UPDFX6 MED-1: internal admission edge, judged on the live (scratch-held) reading.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - 1;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "download one byte under the admission need refused");
+    expect_claim_balanced("admission edge refused");
 
     // per-hop admission: asset URL redirects to a second URL; heap low at the hop refuses it,
     // 27855 B (bench reading) admits it.
@@ -398,16 +419,16 @@ static void test_heap_admission_updfx2(void)
     add_route("https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin", g_img, IMG_LEN);
     g_app_route->on_open = set_heap_hop_ok;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_free") == 0, "27855 B hop refused once the 3840 B slack is restored");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "27855 B hop refused (below the UPDFX6 hop need)");
 }
 
 static void set_dma_low(void) { g_fake_heap_dma_free_internal = 551; }
 static void set_dma_ok(void) { g_fake_heap_dma_free_internal = 100000; }
-static void set_heap_28000(void) { g_fake_heap_free_internal = 28000; }
+static void set_heap_hop_edge(void) { g_fake_heap_free_internal = FETCH_HOP_DOWNLOAD_HEAP_MIN - 1; }
 static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
-static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
+static void set_heap_idle(void) { g_fake_heap_free_internal = BENCH_IDLE_FREE; }
 // Arms the scripted per-read DMA sequence (fake_support) when the asset body starts.
-static void dip_heap_8711(void) { g_fake_heap_free_internal = 8711; }
+static void dip_heap_bottom(void) { g_fake_heap_free_internal = FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - FETCH_HEAP_MEASURED_DRAW_BYTES; }
 static void arm_dma_seq(void) { g_fr_dma_seq_armed = true; }
 static void set_dma_low_and_arm(void)
 {
@@ -442,31 +463,31 @@ static void cancel_on_third_delay(int n)
 
 static void test_heap_admission_updfx3(void)
 {
-    // MED-1: a download hop needs floor + draw + slack (28623 B); 28000 B (above the old 26740 B hop rule,
-    // below the start rule) is refused after the settle wait.
+    // UPDFX6: a download hop needs the start need (33224 B); one byte under it
+    // is refused after the settle wait.
     fixture(g_sha_hex, IMG_LEN);
     g_app_route->status = 302;
     g_app_route->location = HOP_URL;
     add_route(HOP_URL, g_img, IMG_LEN);
-    g_app_route->on_open = set_heap_28000;
+    g_app_route->on_open = set_heap_hop_edge;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_error, "low_heap_free") == 0, "download hop at 28000 B refused (slack restored)");
-    expect_claim_balanced("hop 28000");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "download hop one byte under the need refused");
+    expect_claim_balanced("hop edge");
 
-    // hop rule differs from start rule for a check: start needs 28623 B, a check hop needs 24100 B
+    // hop rule differs from start rule for a check: start needs 33224 B, a check hop needs 24356 B
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_routes[0].status = 302;
     g_fr_routes[0].location = HOP_URL;
-    add_route(HOP_URL, g_api, strlen(g_api))->on_open = set_heap_30311;
+    add_route(HOP_URL, g_api, strlen(g_api))->on_open = set_heap_idle;
     g_fr_routes[0].on_open = set_heap_25000;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "low_heap_free") != 0, "check hop at 25000 B admitted by the hop rule (24100 B)");
+    CHECK(strcmp(g_error, "low_heap_free") != 0, "check hop at 25000 B admitted by the hop rule (24356 B)");
 
     // LOW-1/MED-1: a residual that clears while the settle loop waits admits the start
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 27855;
-    g_fake_heap_recover_to = 30311;
+    g_fake_heap_recover_to = BENCH_IDLE_FREE;
     g_fake_heap_recover_reads = 4;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "low_heap_free") != 0, "start admitted once the previous call's residual clears");
@@ -474,12 +495,12 @@ static void test_heap_admission_updfx3(void)
 
     // LOW-5 M8: a check allocates no internal scratch; a download allocates one.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_internal_mallocs = 0;
     run_job_and_result("/api/update/check");
     CHECK(g_fr_internal_mallocs == 0, "a check job allocates no internal scratch");
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_internal_mallocs = 0;
     run_job_and_result("/api/update/download");
     CHECK(g_fr_internal_mallocs >= 1, "a download job allocates the internal stager scratch");
@@ -489,14 +510,14 @@ static void test_heap_admission_updfx3(void)
     g_app_route->status = 302;
     g_app_route->location = HOP_URL;
     add_route(HOP_URL, g_img, IMG_LEN)->on_open = set_dma_ok;  // restored after the hop admission, so only that gate sees it low
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_app_route->on_open = set_dma_low;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "low DMA at a redirect hop refused");
 
     // LOW-3 / REVIEW_UPDFX3 LOW-2: a sustained DMA shortage mid-body aborts, and the job state says so.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_app_route->on_read = set_dma_low;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "low_heap_dma") == 0, "DMA drop mid-body aborts low_heap_dma");
@@ -505,31 +526,44 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_live_clients == 0, "mid-body DMA abort cleans the client up");
     expect_claim_balanced("mid-body dma");
 
-    // UPDFX5 MED-2: steady between-read samples above the derived floor (2048 B) but under the old fixed 4096 B
-    // one (a healthy body phase) do not abort.
+    // UPDFX6: steady between-read samples exactly at the derived floor (4500 B)
+    // do not abort.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
+    for (int i = 0; i < 8; i++) {
+        g_fr_dma_seq[i] = FETCH_DMA_FREE_MIN;
+    }
+    g_fr_dma_seq_n = 8;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA exactly at the derived floor (4500 B) completes");
+    expect_claim_balanced("steady dma above floor");
+
+    // The previous healthy low-water (2291 B) sits under the 4500 B floor: it is only reachable from a start the
+    // new admission refuses, and if it does happen mid-body it aborts (3 consecutive low samples).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     for (int i = 0; i < 8; i++) {
         g_fr_dma_seq[i] = 2291;
     }
     g_fr_dma_seq_n = 8;
     g_app_route->on_read = arm_dma_seq;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA at 2291 B (the bench healthy low-water, above the derived floor) completes");
-    expect_claim_balanced("steady dma above floor");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "sustained DMA at 2291 B (under the 4500 B floor) aborts low_heap_dma");
+    expect_claim_balanced("dma under floor");
 
-    // UPDFX5 round 2: admitted at exactly the admission need (live 28623 B + 1024 B scratch = 29647 B) and the
-    // internal free dips to 8711 B (admission minus the measured 20936 B draw) mid-body: completes, no abort.
+    // UPDFX6: admitted at exactly the admission need (live 33224 B, scratch held) and the
+    // internal free dips to 12288 B (admission minus the measured 20936 B draw) mid-body: completes, no abort.
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH;
-    g_app_route->on_read = dip_heap_8711;
+    g_app_route->on_read = dip_heap_bottom;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "fetch admitted at the threshold dipping to 8711 B completes without an abort");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "fetch admitted at the threshold dipping to 12288 B completes without an abort");
     expect_claim_balanced("admission-edge dip");
 
     // A transient dip under the floor (two between-read samples) that recovers does not abort.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_dma_seq[0] = FETCH_DMA_FREE_MIN - 1;
     g_fr_dma_seq[1] = FETCH_DMA_FREE_MIN - 1;
     g_fr_dma_seq_n = 2;
@@ -541,7 +575,7 @@ static void test_heap_admission_updfx3(void)
 
     // LOW-1: low,low,ok repeating aborts (the consecutive rule alone never would).
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     for (int i = 0; i < 12; i++) {
         g_fr_dma_seq[i] = (i % 3 == 2) ? 100000 : FETCH_DMA_FREE_MIN - 1;
     }
@@ -554,7 +588,7 @@ static void test_heap_admission_updfx3(void)
     // MED-2: stalled (EAGAIN) slices are not reads. DMA stays low across 5 stalled slices, then the first
     // data read samples healthy: the download completes (3 stalled slices used to abort).
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_dma_seq[0] = 100000;
     g_fr_dma_seq_n = 1;
     g_app_route->read_stall_ms = 1;
@@ -569,7 +603,7 @@ static void test_heap_admission_updfx3(void)
     // LOW-5: the low-sample history is per response. Job A ends on two low samples; job B starts with one
     // low sample: B must complete (a carried-over history would abort it).
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     /* IMG_LEN is 5 body reads of 4096 B: job A ends on its last two samples low. */
     for (int i = 0; i < 3; i++) {
         g_fr_dma_seq[i] = 100000;
@@ -581,7 +615,7 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_state, "done") == 0, "job A (two low samples) completes");
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_dma_seq[0] = FETCH_DMA_FREE_MIN - 1;
     g_fr_dma_seq_n = 1;
     g_app_route->on_read = arm_dma_seq;
@@ -590,7 +624,7 @@ static void test_heap_admission_updfx3(void)
 
     // UPDFX4 MED-3: real exhaustion (under the hard minimum) aborts on the very first sample.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fr_dma_seq[0] = 100;
     g_fr_dma_seq_n = 1;
     g_app_route->on_read = arm_dma_seq;
@@ -624,7 +658,7 @@ static void test_heap_admission_updfx3(void)
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 20000;
     g_fake_heap_largest_internal = 100;
-    g_fake_heap_recover_to = 30311;
+    g_fake_heap_recover_to = BENCH_IDLE_FREE;
     g_fake_heap_recover_reads = 3;
     g_fr_on_delay = cancel_on_second_delay;
     run_job_and_result("/api/update/check");
@@ -637,7 +671,7 @@ static void test_heap_admission_updfx3(void)
     g_app_route->status = 302;
     g_app_route->location = HOP_URL;
     add_route(HOP_URL, g_img, IMG_LEN);
-    g_app_route->on_open = set_heap_28000;
+    g_app_route->on_open = set_heap_hop_edge;
     g_fr_on_delay = deadline_on_first_delay;
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_error, "timeout") == 0, "deadline passing during the hop's settle wait reports timeout");
@@ -656,7 +690,7 @@ static void test_heap_admission_updfx3(void)
     // UPDFX4 LOW-4: a block-starved heap (free fine, largest block short) is refused low_heap_block with no
     // settle wait at all: only LOW_FREE settles.
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 30311;
+    g_fake_heap_free_internal = BENCH_IDLE_FREE;
     g_fake_heap_largest_internal = 100;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "low_heap_block") == 0, "block-starved heap refused low_heap_block");

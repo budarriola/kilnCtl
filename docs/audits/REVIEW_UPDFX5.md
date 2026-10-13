@@ -298,4 +298,25 @@ behind the tests is wrong.
 
 ## Fix status
 
-Open. No fixes in this commit.
+Fixed in code, bench pending (UPDFX6).
+
+Design: one model with one base. Admission is judged on the live reading with
+the 1024 B scratch held (that is where `heap_admit()` runs). The abort level is
+`FLOOR + MAX_STEP` = 8192 + 4096 = 12288 B. Admission is `ABORT_BELOW + measured
+draw` = 12288 + 20936 = 33224 B (34248 B before the scratch). Static asserts tie
+them together.
+
+- MED-1: fixed. Admission and abort are consistent; the edge test admits at
+  33224 B, bottoms out at 12288 B and does not abort.
+- MED-2: fixed. DMA admission precheck `FETCH_DMA_ADMIT_DOWNLOAD_MIN` = 25436 B
+  (check hop 16568 B), derived from the internal numbers through the measured
+  7788 B offset; DMA floor 4500 B, hard minimum 404 B (floor less offset). Static
+  asserts and edge tests (host and fetch).
+- LOW-1: fixed. The largest allocation between samples is the 4096 B flash-write
+  bounce; the margin is now 4096 B (was 512 B) and `update_fetch.c` has static
+  asserts for the chunk and TX buffer sizes.
+- LOW-2: fixed. Stale comments in the header, the host test and the plan doc.
+- MED-3: see REVIEW_UPDFX4 (SHAs corrected).
+
+Trade-off: the older idle levels (29.6-31.1 KB, 29815 B) are now refused; the
+current firmware idles at 47191 B and is admitted.
