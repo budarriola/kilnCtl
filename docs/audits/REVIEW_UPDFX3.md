@@ -210,3 +210,19 @@ the mutant compiled and an assertion FAILed.
 
 Baseline PASS (114.6 s). No BUILD FAILURES in any mutant log; every MISSED mutant
 compiled and exited 0. Real tree unchanged, copies removed.
+
+## Fix status
+
+Fixed in 350829c36 (rebased) and 969b9e924 (pin settle total as 3000 ticks); landed SHAs follow in the landing note below.
+
+| Finding | Status | Notes |
+|---|---|---|
+| MED-1 | Fixed in code | Start/hop need capped at the idle minimum 29647 B (28623 B with the 1024 B scratch held), measured draw 20936 B. Residual about 505 B under the 8192 B floor at the idle minimum is documented; per-phase `min_free` measurement is bench-pending. |
+| MED-2 | Open, bench | Rerun `update_stage_release` on the board; log the `heap settle:` line and per-phase `min_free` during a hop download. |
+| MED-3 | Fixed | DMA abort on 3 consecutive reads under 4096 B or at once under 256 B (`update_fetch_heap_dma_abort`). |
+| LOW-1 | Fixed | Settle wait returns `cancelled` on cancel. |
+| LOW-2 | Fixed | Settle re-samples logged at INFO. |
+| LOW-3 | Fixed | Settle length and delay pinned (3000 ticks literal). |
+| LOW-4 | Fixed | Open failure calls `esp_http_client_cleanup`; live client count asserted. |
+
+Negtest (`-Preset kilnfw-host`, base 969b9e924, 11 mutations, all CAUGHT, each compiled and failed an assertion, no BUILD FAILURES, real tree unchanged): R2_settle_tries_2, R3_no_cancel_return, R4_no_cancel_break, settle_ms_100, dma_abort_always, dma_no_reset, dma_no_hard, dma_reads_2, idle_min_28672, dma_use_ok_old, R15_no_cleanup_on_open_fail.

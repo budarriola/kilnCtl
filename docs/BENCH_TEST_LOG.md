@@ -3268,6 +3268,7 @@ Built and flashed origin/dev 721b3fc7e (flash_firmware verified). Post-flash: li
 
 - update_get_settings, update_check (allow_prerelease): PASS, verdict refuse_needs_force (dev build has no semver). Two more back-to-back update_checks: PASS, no fetch_busy, no claim leak.
 - update_stage_release attempt 1: FAIL `low_heap_free`: "internal free 27855 (need 28532), largest block 7680 (need 6144), download" (http_status 302). Idle free is 30299 B; the TLS/redirect step drops free internal heap about 2.4 KB below the download admission threshold (update_fetch.c ~205, update_fetch_heap.h).
+  - Superseded by REVIEW_UPDFX3 fixes: the 28532/28672/29556 B needs are now capped at the idle minimum 29647 B (28623 B with scratch held); the hop reading 27855 B is settled for up to 3 s before refusal. Bench rerun pending.
 - update_stage_release attempt 2 (force, confirm_downgrade): FAIL `version_mismatch` right after the writer was created (http_status 200, verdict allow_reinstall). The manifest gate set at update_fetch.c ~370 compares against the image app_desc version; update_stage.c flush_head ~260 rejects it (comment there says only hand-upload stagers are gated).
 - Not run (blocked by staging): stage_clear/restart, fetch_cancel mid-download, full stage of pre.3, recovery_enter, recovery_apply_staged, post-apply verify.
 
