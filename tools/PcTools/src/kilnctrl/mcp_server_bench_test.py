@@ -26,6 +26,8 @@ from .bench_test.runner import RUNNER_LOG_NAME, BenchTestRunner
 
 _OTA_CONFIRM_REFUSAL = ("error: refused -- ota_*/update_*_repo image arguments can flash, roll back "
                          "or reset the safety link; pass confirm=True (or use ota_matrix_run)")
+_RELEASE_CONFIRM_REFUSAL = ("error: refused -- suite 'release' trips the safety latch, heats and stages/installs "
+                            "firmware; pass confirm=True (exactly True)")
 
 
 @_core._tool()
@@ -155,6 +157,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     ctx["target"] = target
     if ota_install is True:
         ctx["ota_install"] = True
+    if suite == "release" and not dry_run and confirm is not True:
+        return _RELEASE_CONFIRM_REFUSAL
     if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
         if confirm is not True:
             return _OTA_CONFIRM_REFUSAL
@@ -315,6 +319,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     still going (check logs/bench_test/<run>/runner.log)."""
     # An unconfirmed OTA/update run is refused here, synchronously, before any job exists
     # (same as ota_matrix_start); bench_test_run re-checks inside the job.
+    if suite == "release" and not dry_run and confirm is not True:
+        return _RELEASE_CONFIRM_REFUSAL
     if not dry_run and confirm is not True and (any(
             v is not None for v in (ota_image_path, ota_corrupt_image_path, ota_truncated_image_path,
                                     ota_wrong_build_image_path, ota_image_build, ota_pico_image_path,

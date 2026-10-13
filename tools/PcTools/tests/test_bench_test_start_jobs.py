@@ -186,12 +186,23 @@ class BenchTestStartTest(_Base):
         self.assertEqual(_FakeRunner.instances, [])
 
     def test_release_target_reaches_ctx_and_default_is_bench(self):
-        self.finish(BT.bench_test_start(suite="release"))
+        self.finish(BT.bench_test_start(suite="release", confirm=True))
         self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "bench")
         self.assertNotIn("ota_install", _FakeRunner.instances[-1].ctx)
-        self.finish(BT.bench_test_start(suite="release", target="kiln"))
+        self.finish(BT.bench_test_start(suite="release", target="kiln", confirm=True))
         self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "kiln")
         self.assertIn("target must be", BT.bench_test_run(suite="release", target="oven"))
+
+    def test_release_requires_exact_confirm(self):
+        for bad in (False, "yes", 1, None):
+            with mock.patch.object(build_jobs, "start_job") as sj:
+                out = BT.bench_test_start(suite="release", confirm=bad)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("error: refused"), out)
+            sj.assert_not_called()
+            out = BT.bench_test_run(suite="release", confirm=bad)  # type: ignore[arg-type]
+            self.assertTrue(out.startswith("error: refused"), out)
+        self.assertEqual(_FakeRunner.instances, [])
+        self.finish(BT.bench_test_start(suite="release", dry_run=True))
 
     def test_release_ota_install_is_ota_gated(self):
         with mock.patch.object(build_jobs, "start_job") as sj:

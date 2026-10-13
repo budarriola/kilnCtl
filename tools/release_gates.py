@@ -293,6 +293,9 @@ def _evaluate_run(doc, fw_build, max_age_s, now, suite_cases):
     return reasons, counts, age
 
 
+DEFAULT_EVIDENCE_SUITES = "ota,lcd,safety,release"
+
+
 def bench_evidence(logs_dir, fw_build, suites, max_age_days, now=None, suite_cases=None):
     """Return (exit_code, lines). One line per suite; nonzero if any suite has no qualifying run."""
     import glob
@@ -356,7 +359,7 @@ def main(argv=None):
     b.add_argument("--app-bin", help="derive --fw-build from this KilnCtrl.bin's esp_app_desc_t")
     b.add_argument("--logs-dir", default="logs/bench_test")
     b.add_argument("--max-age-days", type=float, default=7)
-    b.add_argument("--suites", default="ota,lcd,safety,release")
+    b.add_argument("--suites", default=DEFAULT_EVIDENCE_SUITES)
     a = ap.parse_args(argv)
     if a.cmd == "bench-evidence":
         if bool(a.fw_build) == bool(a.app_bin):

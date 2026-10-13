@@ -46,6 +46,7 @@ GOOD_SNAP = {
     "heap_min_free": 20000,
     "boot_persisted": 0,
     "link_errors": 0,
+    "link_crc_errors": 0,
     "thermo": [(0, 24.0, True)],
     "wifi": {"connected": True, "ip": "10.0.0.5"},
 }
@@ -117,7 +118,7 @@ def test_test_trip_text():
 def test_compare_regressions():
     assert R.compare_final_to_baseline(snap(), snap()) == []
     assert R.compare_final_to_baseline(snap(), snap(heap_min_free=1000))
-    assert R.compare_final_to_baseline(snap(), snap(link_errors=5))
+    assert R.compare_final_to_baseline(snap(), snap(link_crc_errors=5))
     assert R.compare_final_to_baseline(snap(), snap(stack_hwm={"t": 10}))
 
 
@@ -148,11 +149,31 @@ def test_phase_a_fail_aborts_and_later_cases_not_run(bad):
         assert out[cid].verdict == Verdict.NOT_RUN, cid
 
 
-def test_phase_a_inconclusive_does_not_abort():
+def test_phase_a_inconclusive_aborts():
     c = ctx_with(snap(heap_min_free=None))
     r = get_case("RL-A01").judge(c)
     assert r.verdict == Verdict.INCONCLUSIVE
-    assert "_release_abort" not in c
+    assert c.get("_release_abort")
+    assert get_case("RL-B01").judge(c).verdict == Verdict.NOT_RUN
+
+
+def test_crash_unreadable_is_inconclusive_via_real_snapshot(monkeypatch):
+    from kilnctrl import dashboard_http_client as dhc
+    heap = {"heap_internal": {"min_free": 20000, "free": 30000}, "unacknowledged_crash": False,
+            "unacknowledged_crash_check_error": "http 500"}
+    from kilnctrl import ota_http_client as och
+    monkeypatch.setattr(och, "get_boot_guard_status", lambda *a, **k: (_ for _ in ()).throw(OSError("x")))
+    monkeypatch.setattr(dhc, "get_heap_status", lambda host: heap)
+    s = R._read_snapshot({"host": "h", "srv": types.SimpleNamespace()})
+    assert s["crash_unacked"] is None
+    heap2 = dict(heap, unacknowledged_crash_check_error=None)
+    s2 = R._read_snapshot({"host": "h", "srv": types.SimpleNamespace()})
+    assert s2["crash_unacked"] is None  # still the same heap object error
+    monkeypatch.setattr(dhc, "get_heap_status", lambda host: heap2)
+    s3 = R._read_snapshot({"host": "h", "srv": types.SimpleNamespace()})
+    assert s3["crash_unacked"] is False
+    c = ctx_with(snap(crash_unacked=None))
+    assert get_case("RL-A01").judge(c).verdict != Verdict.PASS
 
 
 # -- phase B -----------------------------------------------------------------
@@ -170,10 +191,13 @@ class _Srv:
 
     def safety_clear_trip(self):
         self.clears += 1
+        self.diag = "trip_reason: 0 | trip_mask: 0x0000"
         return "ok"
 
+    diag = "trip_reason: 4 | trip_mask: 0x0008"
+
     def safety_get_diag(self):
-        return "trip_reason: 0 | trip_mask: 0x0000"
+        return self.diag
 
 
 def _readiness(ctx, items=None):
@@ -254,6 +278,7 @@ def _heat_ctx(profiles, heap=20000, **extra):
     srv = types.SimpleNamespace(
         _profiles=profiles,
         _thermo=types.SimpleNamespace(read=lambda: [types.SimpleNamespace(channel=0, temperature_c=24.0, valid=True)]))
+    extra.setdefault("_get_zones_config", lambda host: {"zones": [{"max_temp_c": 150.0}]})
     return ctx_with(snap(), srv=srv, allow_heat=True, _rl_heap_fn=lambda _c: heap,
                     _now=lambda: t["v"], _sleep=lambda s: t.__setitem__("v", t["v"] + s), **extra)
 
@@ -316,6 +341,30 @@ def test_heat_teardown_cannot_stop_taints_and_aborts(started):
     assert c.get("_tainted") is True and c.get("_release_abort")
 
 
+def test_heat_identity_mismatch_refuses_before_any_write(monkeypatch):
+    calls = []
+    monkeypatch.setattr(H, "_start_bench_profile", lambda *a, **k: calls.append(1) or (True, "", 24.0))
+    for target, ceil in (("kiln", 150.0), ("bench", 1300.0)):
+        p = _Profiles([_Status("idle")])
+        c = _heat_ctx(p, target=target, _get_zones_config=lambda h, v=ceil: {"zones": [{"max_temp_c": v}]})
+        r = get_case("RL-C01").judge(c)
+        assert r.verdict == Verdict.INCONCLUSIVE, target
+    c = _heat_ctx(_Profiles([_Status("idle")]), _get_zones_config=lambda h: (_ for _ in ()).throw(OSError("x")))
+    assert get_case("RL-C01").judge(c).verdict == Verdict.INCONCLUSIVE
+    assert calls == []
+
+
+def test_kiln_heat_runs_ceiling_precheck_with_explicit_target(monkeypatch):
+    seen = []
+    monkeypatch.setattr(H, "_check_zone_ceilings", lambda ctx, mask, t: seen.append(t) or (False, "ceiling low"))
+    started = []
+    monkeypatch.setattr(H, "_start_bench_profile", lambda *a, **k: started.append(1) or (True, "", 24.0))
+    c = _heat_ctx(_Profiles([_Status("idle")]), target="kiln",
+                  _get_zones_config=lambda h: {"zones": [{"max_temp_c": 1300.0}]})
+    r = get_case("RL-C01").judge(c)
+    assert r.verdict == Verdict.INCONCLUSIVE and seen and started == []
+
+
 # -- phase D -----------------------------------------------------------------
 
 
@@ -324,6 +373,7 @@ def _ota_srv(**over):
     d = dict(
         update_check=lambda allow_prerelease=False: "ok - release v1.0.0-pre.9 available",
         update_fetch_status=lambda: "ok idle",
+        update_status=lambda host=None: "ok - phase=idle, busy=False, staged=False, header=none",
         update_stage_release=lambda confirm=False, allow_prerelease=False: "ok staged, verified by read-back sha256 abc",
         update_stage_clear=lambda confirm=False: cleared.append(confirm) or "ok cleared",
     )
@@ -355,7 +405,79 @@ def test_ota_stage_without_readback_claim_fails_and_still_clears():
 def test_ota_install_requested_but_tool_absent_skips_and_keeps_stage():
     s = _ota_srv()
     r = get_case("RL-D01").judge(ctx_with(snap(), srv=s, ota_install=True))
-    assert r.verdict == Verdict.SKIP and s.cleared == []
+    assert r.verdict == Verdict.SKIP and s.cleared == []  # skipped before anything was staged
+
+
+def test_ota_failed_stage_clear_fails_and_taints():
+    for bad in ("FAILED: boom", "REFUSED: busy", "UNKNOWN", "error: x"):
+        s = _ota_srv(update_stage_clear=lambda confirm=False, b=bad: b)
+        c = ctx_with(snap(), srv=s)
+        r = get_case("RL-D01").judge(c)
+        assert r.verdict == Verdict.FAIL, bad
+        assert c.get("_tainted") is True, bad
+
+
+def test_ota_raising_stage_clear_fails_and_taints():
+    def boom(confirm=False):
+        raise OSError("down")
+    c = ctx_with(snap(), srv=_ota_srv(update_stage_clear=boom))
+    assert get_case("RL-D01").judge(c).verdict == Verdict.FAIL
+    assert c.get("_tainted") is True
+
+
+def test_ota_prestaged_image_refuses_without_touching_it():
+    s = _ota_srv(update_status=lambda host=None: "ok - phase=idle, busy=False, staged=True, header=x")
+    r = get_case("RL-D01").judge(ctx_with(snap(), srv=s))
+    assert r.verdict == Verdict.INCONCLUSIVE and s.cleared == []
+
+
+def test_ota_unreadable_stage_state_refuses():
+    s = _ota_srv(update_status=lambda host=None: "error: down")
+    r = get_case("RL-D01").judge(ctx_with(snap(), srv=s))
+    assert r.verdict == Verdict.INCONCLUSIVE and s.cleared == []
+
+
+def test_ota_install_failed_clears_stage():
+    s = _ota_srv(update_install_staged=lambda confirm=False: "FAILED: nope")
+    r = get_case("RL-D01").judge(ctx_with(snap(), srv=s, ota_install=True))
+    assert r.verdict == Verdict.FAIL and s.cleared == [True]
+
+
+def test_ota_records_target_and_install_flag():
+    r = get_case("RL-D01").judge(ctx_with(snap(), srv=_ota_srv(), target="kiln"))
+    assert r.observed["target"] == "kiln" and r.observed["install_requested"] is False
+
+
+def test_unknown_target_raises_and_kiln_honoured():
+    with pytest.raises(ValueError):
+        R._target({"target": "kilm"})
+    assert R._target({"target": "kiln"}) == "kiln"
+    assert R._target({}) == "bench"
+
+
+def test_trip_fn_raise_aborts():
+    class S(_Srv):
+        def safety_test_trip(self, confirm=False):
+            raise OSError("link")
+    c = ctx_with(snap(), srv=S())
+    r = get_case("RL-B01").judge(c)
+    assert r.verdict == Verdict.FAIL and c.get("_release_abort")
+
+
+def test_non_test_trip_is_not_cleared():
+    srv = _Srv()
+    srv.diag = "trip_reason: 6 | trip_mask: 0x0020"
+    c = ctx_with(snap(), srv=srv)
+    _readiness(c)
+    r = get_case("RL-B01").judge(c)
+    assert r.verdict == Verdict.FAIL and srv.clears == 0 and c.get("_release_abort")
+
+
+def test_link_timeouts_alone_are_not_regression():
+    base, fin = snap(link_crc_errors=0, link_errors=0), snap(link_crc_errors=0, link_errors=7)
+    assert not [x for x in R.compare_final_to_baseline(base, fin) if "link" in x]
+    fin2 = snap(link_crc_errors=3, link_errors=3)
+    assert [x for x in R.compare_final_to_baseline(base, fin2) if "CRC" in x]
 
 
 # -- phase F / verdict -------------------------------------------------------

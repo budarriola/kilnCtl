@@ -91,7 +91,9 @@ _registry._enforce_always_last()
 
 def _target(ctx: dict) -> str:
     t = ctx.get("target", "bench")
-    return t if t in TARGETS else "bench"
+    if t not in TARGETS:
+        raise ValueError(f"unknown release target {t!r}; expected one of {sorted(TARGETS)}")
+    return t
 
 
 def _aborted(ctx: dict) -> Optional[CaseResult]:
@@ -195,9 +197,11 @@ def compare_final_to_baseline(base: dict, final: dict) -> List[str]:
         f = fs.get(name)
         if isinstance(b, int) and isinstance(f, int) and f < b - STACK_REGRESSION_TOLERANCE_B:
             out.append(f"stack {name} hwm fell {b} -> {f} B")
-    be, fe = base.get("link_errors"), final.get("link_errors")
+    # Only CRC errors (corrupted frames) count; timeouts grow legitimately
+    # across the deliberate trip/OTA/reset phases of the run (REVIEW LOW-5).
+    be, fe = base.get("link_crc_errors"), final.get("link_crc_errors")
     if isinstance(be, int) and isinstance(fe, int) and fe > be:
-        out.append(f"safety link error counters grew {be} -> {fe}")
+        out.append(f"safety link CRC errors grew {be} -> {fe}")
     return out
 
 
@@ -250,7 +254,10 @@ def _read_snapshot(ctx: dict) -> dict:
     snap["heap_free"] = hi.get("free")
     snap["heap_largest"] = hi.get("largest_free_block")
     snap["psram_free"] = (h.get("heap_spiram") or {}).get("free")
-    snap["crash_unacked"] = None if snap.get("heap") is None else bool(h.get("unacknowledged_crash"))
+    if snap.get("heap") is None or h.get("unacknowledged_crash_check_error") or h.get("unacknowledged_crash") is None:
+        snap["crash_unacked"] = None  # unreadable crash report is never "no crash"
+    else:
+        snap["crash_unacked"] = bool(h.get("unacknowledged_crash"))
 
     def readiness():
         st, body = _get_json(ctx, "/api/readiness")
@@ -272,6 +279,7 @@ def _read_snapshot(ctx: dict) -> dict:
         return (getattr(s, "crc_errors", 0) or 0) + (getattr(s, "timeouts", 0) or 0)
 
     _try(snap, "link_errors", link)
+    _try(snap, "link_crc_errors", lambda: getattr(srv._safety.get_link_stats(), "crc_errors", 0) or 0)
     _try(snap, "liveness", lambda: srv.check_task_liveness())
 
     def stacks():
@@ -393,6 +401,7 @@ def _snapshot_observed(snap: dict) -> dict:
         "heap_largest_block": snap.get("heap_largest"),
         "psram_free": snap.get("psram_free"),
         "link_errors": snap.get("link_errors"),
+        "link_crc_errors": snap.get("link_crc_errors"),
         "wifi": snap.get("wifi"),
         "unreadable": snap.get("_unreadable"),
     }
@@ -418,8 +427,8 @@ def _case_rl_a01(ctx: dict) -> CaseResult:
     snap = _snapshot(ctx)
     ctx["_rl_baseline"] = snap
     res = _result_from_snapshot(snap)
-    if res.verdict == Verdict.FAIL:
-        _abort(ctx, f"phase A health FAIL: {res.reason}")
+    if res.verdict in (Verdict.FAIL, Verdict.INCONCLUSIVE):
+        _abort(ctx, f"phase A health {res.verdict}: {res.reason}")
     return res
 
 
@@ -453,9 +462,25 @@ def _case_rl_b01(ctx: dict) -> CaseResult:
     trip_fn = getattr(srv, "safety_test_trip", None)
     if trip_fn is None:
         return CaseResult(Verdict.SKIP, reason="safety_test_trip tool not present on this server")
-    text = trip_fn(confirm=True)
+    try:
+        text = trip_fn(confirm=True)
+    except Exception as exc:  # noqa: BLE001
+        _abort(ctx, "safety_test_trip raised")
+        return CaseResult(Verdict.FAIL, reason=f"safety_test_trip raised {type(exc).__name__}: {exc}")
     res = judge_test_trip_text(text)
     obs = dict(res.observed or {})
+    # Only the trip this case injected (reason 4, mask 0x0008) may be cleared;
+    # any other latched trip is a real fault and must stay latched.
+    try:
+        pre = srv.safety_get_diag()
+        pre_reason, pre_mask = J.parse_trip_reason(pre), J.parse_trip_mask(pre)
+    except Exception as exc:  # noqa: BLE001
+        _abort(ctx, "phase B could not read the trip before clearing")
+        return CaseResult(Verdict.FAIL, reason=f"diag before clear raised {type(exc).__name__}: {exc}", observed=obs)
+    obs["trip_before_clear"] = {"reason": pre_reason, "mask": pre_mask}
+    if pre_reason not in (0, None) and (pre_reason != 4 or pre_mask != 0x0008):
+        _abort(ctx, "a trip other than the test trip is latched; not cleared")
+        return CaseResult(Verdict.FAIL, reason=f"latched trip reason={pre_reason} mask={pre_mask} is not the test trip; left latched", observed=obs)
     # The latched trip must always be cleared, even when the judge FAILed,
     # so the board is not left tripped for the heat phase.
     try:
@@ -518,7 +543,13 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
         mask = 0
         for z in temps:
             mask |= 1 << z
+        idp = _board_identity_problem(ctx, kiln)
+        if idp:
+            return CaseResult(Verdict.INCONCLUSIVE, reason=f"heat refused: {idp}")
         if kiln:
+            cok, creason = H._check_zone_ceilings(ctx, mask, KILN_HEAT_TARGET_C)
+            if not cok:
+                return CaseResult(Verdict.INCONCLUSIVE, reason=f"heat refused: {creason}")
             ok, reason, ambient = H._start_bench_profile(
                 ctx, mask, ramp_c_per_hr=KILN_HEAT_RAMP_C_PER_HR, dwell_min=KILN_HEAT_DWELL_MIN,
                 target_c=KILN_HEAT_TARGET_C)
@@ -544,7 +575,7 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
             for zs in st.zones:
                 max_duty = max(max_duty, float(getattr(zs, "duty", 0.0) or 0.0))
                 relay_seen_on = relay_seen_on or bool(getattr(zs, "relay_commanded_on", False))
-                if getattr(st, "dwelling", False) and getattr(zs, "actual_valid", True) and (st.zone_mask >> zs.zone) & 1:
+                if getattr(st, "dwelling", False) and getattr(zs, "actual_valid", False) and (st.zone_mask >> zs.zone) & 1:
                     hold_err.append(abs(float(zs.actual_c) - float(st.target_c)))
             pr = getattr(st, "pause_reason", None)
             if pr:
@@ -583,6 +614,35 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
         _release_teardown(ctx)
 
 
+#: Zone ceilings above this mean a real kiln; at or below it a bench fixture.
+BENCH_CEILING_MAX_C = 200.0
+
+
+def _board_identity_problem(ctx: dict, kiln: bool) -> Optional[str]:
+    """Cross-check the named target against the board's own zone ceilings.
+    Fail closed: no host, unreadable config, or a mismatch returns a reason."""
+    host = ctx.get("host")
+    if not host:
+        return "no host to verify the board identity against the target"
+    from .. import zones_http_client
+
+    get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
+    try:
+        snap = get_zones(host)
+    except Exception as exc:  # noqa: BLE001
+        return f"zones config unreadable, cannot verify target {_target(ctx)!r}: {exc}"
+    ceilings = [z.get("max_temp_c") for z in (snap.get("zones") or []) if isinstance(z, dict)]
+    ceilings = [c for c in ceilings if isinstance(c, (int, float)) and c > 0]
+    if not ceilings:
+        return "no zone ceilings reported, cannot verify the target"
+    top = max(ceilings)
+    if kiln and top <= BENCH_CEILING_MAX_C:
+        return f"target=kiln but highest zone ceiling is {top:.0f}C (looks like the bench fixture)"
+    if not kiln and top > BENCH_CEILING_MAX_C:
+        return f"target=bench but highest zone ceiling is {top:.0f}C (looks like a real kiln)"
+    return None
+
+
 def _heap_min(ctx: dict) -> Optional[int]:
     fn = ctx.get("_rl_heap_fn")
     if fn:
@@ -618,10 +678,21 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
     if ab:
         return ab
     srv = _srv(ctx)
-    for name in ("update_check", "update_fetch_status", "update_stage_release", "update_stage_clear"):
+    want_install = ctx.get("ota_install") is True
+    needed = ["update_check", "update_fetch_status", "update_status", "update_stage_release", "update_stage_clear"]
+    if want_install:
+        needed.append("update_install_staged")
+    for name in needed:
         if getattr(srv, name, None) is None:
             return CaseResult(Verdict.SKIP, reason=f"{name} tool not present on this server")
-    obs: Dict[str, Any] = {}
+    obs: Dict[str, Any] = {"target": _target(ctx), "install_requested": want_install}
+    # A stage the operator filled before the run is theirs: never overwrite or erase it.
+    pre = str(srv.update_status())
+    obs["stage_before"] = pre[:300]
+    if not pre.startswith("ok") or "staged=True" in pre or "staged=False" not in pre:
+        return CaseResult(Verdict.INCONCLUSIVE,
+                          reason=f"stage not provably empty before the run (clear or install it first): {pre[:160]}",
+                          observed=obs)
     chk = srv.update_check(allow_prerelease=True)
     obs["check"] = str(chk)[:300]
     if not str(chk).startswith("ok"):
@@ -629,35 +700,46 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
                           reason=f"update_check: {str(chk)[:200]}", observed=obs)
     obs["fetch_status"] = str(srv.update_fetch_status())[:300]
     staged = False
+    install_ok = False
     try:
         stg = srv.update_stage_release(confirm=True, allow_prerelease=True)
         obs["stage"] = str(stg)[:400]
         if not str(stg).startswith("ok"):
-            return CaseResult(Verdict.FAIL, reason=f"update_stage_release: {str(stg)[:200]}", observed=obs)
-        staged = True
-        if "verified by read-back" not in str(stg):
-            return CaseResult(Verdict.FAIL, reason="stage result does not claim read-back verification", observed=obs)
-        install = getattr(srv, "update_install_staged", None)
-        if ctx.get("ota_install") is True:
-            if install is None:
-                obs["install"] = "update_install_staged tool absent"
-                return CaseResult(Verdict.SKIP, reason="update_install_staged tool absent; staged image checked, install not run", observed=obs)
-            return _install_and_verify(ctx, install, obs)
-    finally:
-        if staged and ctx.get("ota_install") is not True:
-            clr = srv.update_stage_clear(confirm=True)
-            obs["stage_clear"] = str(clr)[:300]
-            if "FAIL" in str(clr).upper().split(" ")[0:2] or str(clr).startswith(("REFUSED", "error")):
-                ctx["_tainted"] = True
-    return CaseResult(Verdict.PASS, observed=obs)
+            res = CaseResult(Verdict.FAIL, reason=f"update_stage_release: {str(stg)[:200]}", observed=obs)
+        else:
+            staged = True
+            if "verified by read-back" not in str(stg):
+                res = CaseResult(Verdict.FAIL, reason="stage result does not claim read-back verification", observed=obs)
+            elif want_install:
+                res, install_ok = _install_and_verify(ctx, srv.update_install_staged, obs)
+            else:
+                res = CaseResult(Verdict.PASS, observed=obs)
+    except Exception as exc:  # noqa: BLE001
+        res = CaseResult(Verdict.FAIL, reason=f"stage raised {type(exc).__name__}: {exc}", observed=obs)
+        staged = True  # may be half-staged: clear below
+    if staged and not install_ok:
+        try:
+            clr = str(srv.update_stage_clear(confirm=True))
+        except Exception as exc:  # noqa: BLE001
+            clr = f"FAILED: raised {type(exc).__name__}: {exc}"
+        obs["stage_clear"] = clr[:300]
+        if not clr.startswith("ok"):
+            ctx["_tainted"] = True
+            return CaseResult(Verdict.FAIL, reason=f"stage clear failed, image left in stage: {clr[:160]}", observed=obs)
+    return res
 
 
-def _install_and_verify(ctx: dict, install, obs: dict) -> CaseResult:
+def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool]:
+    """Returns (result, install_ran_ok). The stage is only left alone when the
+    install tool reported ok (it consumes the stage)."""
     before = _snapshot(ctx)
+    before_build = (before.get("identity") or {}).get("fw_build")
+    if not before_build:
+        return CaseResult(Verdict.INCONCLUSIVE, reason="no fw_build before install; cannot prove a change", observed=obs), False
     res = install(confirm=True)
     obs["install"] = str(res)[:400]
     if not str(res).startswith("ok"):
-        return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs)
+        return CaseResult(Verdict.FAIL, reason=f"update_install_staged: {str(res)[:200]}", observed=obs), False
     sleep = ctx.get("_sleep", _time.sleep)
     now = ctx.get("_now", _time.monotonic)
     deadline = now() + 300.0
@@ -665,19 +747,24 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> CaseResult:
     while now() < deadline:
         sleep(10.0)
         try:
-            after = _snapshot(ctx)
+            cand = _snapshot(ctx)
         except Exception:  # noqa: BLE001
             continue
-        if (after.get("identity") or {}).get("fw_build"):
+        if (cand.get("identity") or {}).get("fw_build"):
+            after = cand
             break
     if after is None:
-        return CaseResult(Verdict.FAIL, reason="board did not come back after install", observed=obs)
+        return CaseResult(Verdict.FAIL, reason="board did not come back with a fw_build after install", observed=obs), True
     obs["version_before"] = (before.get("identity") or {}).get("fw_version")
     obs["version_after"] = (after.get("identity") or {}).get("fw_version")
+    obs["build_before"] = before_build
+    obs["build_after"] = after["identity"]["fw_build"]
+    if obs["build_after"] == before_build:
+        return CaseResult(Verdict.FAIL, reason=f"fw_build unchanged after install ({before_build})", observed=obs), True
     v, fails, _inc = judge_snapshot(after)
     if v == Verdict.FAIL:
-        return CaseResult(Verdict.FAIL, reason="after install: " + "; ".join(fails), observed=obs)
-    return CaseResult(Verdict.PASS, observed=obs)
+        return CaseResult(Verdict.FAIL, reason="after install: " + "; ".join(fails), observed=obs), True
+    return CaseResult(Verdict.PASS, observed=obs), True
 
 
 # -- phase E: web / LCD smoke ----------------------------------------------
@@ -707,9 +794,10 @@ def _case_rl_e01(ctx: dict) -> CaseResult:
             fails.append(f"{cid}: {r.reason}")
         elif r.verdict != Verdict.PASS:
             inc.append(f"{cid} {r.verdict}: {r.reason}")
-    if _target(ctx) != "bench" or not ctx.get("lcd_camera", True):
-        inc.append("LCD capture skipped (no camera on this target)")
-    obs = {"cases": parts}
+    if _target(ctx) == "bench" and not ctx.get("lcd_camera", True):
+        inc.append("LCD capture skipped (no camera)")
+    # A kiln has no LCD camera by design, so that is not a missing check.
+    obs = {"cases": parts, "target": _target(ctx), "lcd_checked": _target(ctx) == "bench" and bool(ctx.get("lcd_camera", True))}
     if fails:
         return CaseResult(Verdict.FAIL, reason="; ".join(fails), observed=obs)
     if inc:
