@@ -200,3 +200,18 @@ copies removed. Result: 11 CAUGHT, 3 MISSED.
 | M12 | non-test-trip guard `or` -> `and` | MISSED | single-field test missing (LOW-5) |
 | M13 | no-read-back-claim stage accepted | CAUGHT | no-readback-claim fails and clears |
 | M14 | install failure skips the clear | CAUGHT | install failed clears stage |
+
+## Fix status
+
+All findings fixed in the PcTools release suite (`bench_test/cases_release.py`, `bench_test/runner.py`, `mcp_server_bench_test.py`). The board was not touched.
+
+- MED-A: RL-D01 re-reads `update_status` after any `update_stage_release` outcome (ok, FAILED, UNKNOWN, raise). A dirty stage (staged, busy or a header) gets `update_fetch_cancel`, then `update_stage_clear`; a failed clear taints the run. A verified stage is always cleared unless an install consumed it. Tests cover raise, FAILED, UNKNOWN, clear failure and a clean re-read.
+- MED-B: heat refuses INCONCLUSIVE when `mcp_server_aux._board_identity_check` reports a UART/HTTP mismatch, raises or is unreadable. The 200 C kiln heuristic uses only the zones in the heat mask; a heated zone without a readable ceiling refuses. Tests: 200 vs 200.1 for bench and kiln, multi-zone mask, mismatch writes nothing.
+- LOW-1: `BenchTestRunner.run` and `run_suite` refuse suite release unless `confirm is True` (dry run excepted).
+- LOW-2: registry test that RL-* ids exist only in suite release.
+- LOW-3: an unreadable link counter is INCONCLUSIVE; RL-D01 re-baselines after a successful install (baseline None if the board never returns); link timeouts regress only past `LINK_TIMEOUT_GROWTH_BOUND` (20, chosen not measured), any CRC growth still regresses.
+- LOW-4: RL-D01 pre-check requires `staged=False`, `busy=False` and `header=none`.
+- LOW-5: RL-B01 tests for reason-only-wrong, mask-only-wrong and no trip latched.
+- INFO-2: `allow_heat` defaults to False for suite release in `bench_test_run` and `bench_test_start`; docstrings updated.
+
+Negative tests (`negtest.ps1 -Preset pytest`, each CAUGHT checked as an assertion failure in the log): stage cleanup disabled, pre-check busy/header ignored, timeout bound unbounded, no re-baseline, link-counter check off, runner confirm gate off, ceiling boundary flipped, mask ignored, allow_heat default True in run and in start: all CAUGHT after two added tests (timeout bound, start default) closed initial misses.
