@@ -205,6 +205,16 @@ static void test_rate_capture(void)
     update_rate_capture_feed(&c, "X-RateLimit-Remaining", "0");
     TEST_CHECK(update_rate_backoff_s(&c, 403, 1000) == 500 && update_status_is_rate_limited(&c, 403), "rate: Remaining 0 uses reset");
     TEST_CHECK(update_rate_backoff_s(&c, 503, 1000) == UPDATE_BACKOFF_DEFAULT_SERVER_S, "rate: 5xx never uses reset");
+    {
+        update_rate_capture_t c2;
+        update_rate_capture_init(&c2);
+        update_rate_capture_feed(&c2, "X-RateLimit-Reset", "1500");
+        update_rate_capture_feed(&c2, "X-RateLimit-Remaining", "3");
+        TEST_CHECK(update_rate_backoff_s(&c2, 429, 1000) == UPDATE_BACKOFF_DEFAULT_RATE_S, "rate: 429 with Remaining 3 ignores reset");
+        update_rate_capture_init(&c2);
+        update_rate_capture_feed(&c2, "X-RateLimit-Reset", "900000");
+        TEST_CHECK(update_rate_backoff_s(&c2, 429, 1000) == UPDATE_BACKOFF_MAX_S, "rate: reset window clamped to max");
+    }
     update_rate_capture_init(&c);
     update_rate_capture_feed(&c, "Retry-After", "3600");
     TEST_CHECK(update_rate_backoff_s(&c, 429, 1) == UPDATE_BACKOFF_MAX_S, "rate: max exactly");
