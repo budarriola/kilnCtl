@@ -33,6 +33,7 @@ import os
 import time
 from typing import Optional
 
+from . import http_auth
 from . import mcp_server_core as _core
 from . import update_http_client as uhc
 
@@ -594,26 +595,37 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
     except uhc.UpdateHttpError as exc:
         if exc.status is not None:
             return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
+        if isinstance(exc.__cause__, http_auth.HttpAuthError):
+            # Relogin refused, lockout or no credential: the handler never ran. Definite, not "possibly applied".
+            return f"FAILED: install not sent, authentication refused: {exc} (host={resolved})"
         # Transport failure/timeout: the board may have accepted the request and
         # rebooted. Do not call it failed; let the follow-up reads decide.
         post_unknown = True
     time.sleep(min(15.0, max(0.0, deadline - time.monotonic())))  # let the board go down before polling
     last = None
+    saw_down = False
     while time.monotonic() < deadline:
         try:
             st = uhc.get_install_status(resolved, timeout=5.0)
         except uhc.UpdateHttpError:
+            saw_down = True
             time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
             continue
         last = st
         li = st.get("last_install") or {}
-        if st.get("running_version") == want and li.get("state") == "recorded" and li.get("code") == "ok":
+        if (st.get("running_version") == want and li.get("state") == "recorded" and li.get("code") == "ok"
+                and (not post_unknown or saw_down)):
+            # After a POST with no HTTP answer, an `ok` may predate this call (same-version reinstall):
+            # accept it only once the board was seen going unreachable, i.e. a new install ran.
             return f"ok - installed {want!r} and running in the application: {_install_line(st)} (host={resolved})"
         if li.get("state") == "recorded" and li.get("code") not in ("ok", None):
             return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
         time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
     tail = _install_line(last) if last else "board never answered the application API"
     note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""
+    if post_unknown and not saw_down and last and (last.get("last_install") or {}).get("code") == "ok":
+        note += (" The board shows an `ok` install for this version but never became unreachable after the POST,"
+                 " so it may be a stale result from an earlier install, not this one.")
     return (f"UNKNOWN: still in progress or unconfirmed: board not confirmed on {want!r} within the wait ({tail});{note} "
             f"the recovery image may still be applying or may have failed; poll with "
             f"update_install_staged(confirm=False) (host={resolved})")

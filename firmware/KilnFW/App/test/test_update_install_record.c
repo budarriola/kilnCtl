@@ -196,6 +196,20 @@ static void test_codec(void)
     TEST_CHECK(!update_install_res_decode(rb, sizeof(rb), &d), "tampered result refused (CRC)");
     TEST_CHECK(strcmp(update_install_reason_name(UPD_INST_REASON_SHA_MISMATCH), "sha_mismatch") == 0,
                "reason name");
+    TEST_CHECK(strcmp(update_install_reason_name(UPD_INST_REASON_OUTCOME_UNKNOWN),
+                      "outcome_unknown_do_not_power_cycle") == 0,
+               "outcome-unknown reason name");
+    {
+        update_install_res_t u;
+        uint8_t ub[UPD_INST_RES_SIZE];
+        memset(&u, 0, sizeof(u));
+        u.code = UPD_INST_RES_FAIL;
+        u.reason = UPD_INST_REASON_OUTCOME_UNKNOWN;
+        strcpy(u.semver, "1.0.0");
+        TEST_CHECK(update_install_res_encode(&u, ub) == UPD_INST_RES_SIZE &&
+                       update_install_res_decode(ub, sizeof(ub), &d) && d.reason == UPD_INST_REASON_OUTCOME_UNKNOWN,
+                   "outcome-unknown result round-trips (inside the range check)");
+    }
     TEST_CHECK(strcmp(update_install_reason_name(200), "unknown") == 0, "unknown reason name");
 }
 

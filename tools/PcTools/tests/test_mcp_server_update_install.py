@@ -91,7 +91,7 @@ class InstallBudgetTests(unittest.TestCase):
 
     def test_post_timeout_is_unknown_then_follow_up_decides(self):
         err = uhc.UpdateHttpError("timed out")  # status None: transport failure
-        seq = [_st(), _st(running="1.0.1", state="recorded", code="ok")]
+        seq = [_st(), uhc.UpdateHttpError("down"), _st(running="1.0.1", state="recorded", code="ok")]
         with mock.patch.object(uhc, "get_install_status", side_effect=seq),              mock.patch.object(uhc, "start_install", side_effect=err):
             self.assertTrue(msu.update_install_staged(confirm=True).startswith("ok"))
 
@@ -115,3 +115,37 @@ class InstallBudgetTests(unittest.TestCase):
     def test_refusal_with_status_still_failed(self):
         with mock.patch.object(uhc, "get_install_status", return_value=_st()),              mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("x", 409, "busy")):
             self.assertTrue(msu.update_install_staged(confirm=True).startswith("FAILED"))
+
+    def test_stale_ok_after_post_transport_failure_is_not_success(self):
+        # Same-version reinstall: board already runs 1.0.1 with a recorded ok. POST gets no answer and the
+        # board never goes unreachable -> the ok is stale evidence, must not be reported as installed.
+        stale = _st(running="1.0.1", sv="1.0.1", state="recorded", code="ok")
+        err = uhc.UpdateHttpError("connection refused")
+        clock = iter([0.0, 1.0, 2.0, 3.0, 400.0, 400.0, 400.0, 400.0])
+        with mock.patch.object(uhc, "get_install_status", return_value=stale),              mock.patch.object(uhc, "start_install", side_effect=err),              mock.patch.object(msu.time, "monotonic", side_effect=lambda: next(clock)):
+            out = msu.update_install_staged(confirm=True, wait_s=9999)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("stale", out)
+
+    def test_ok_after_post_failure_accepted_once_board_went_down(self):
+        stale = _st(running="1.0.1", sv="1.0.1", state="recorded", code="ok")
+        err = uhc.UpdateHttpError("connection refused")
+        seq = [stale, uhc.UpdateHttpError("down"), stale]
+        with mock.patch.object(uhc, "get_install_status", side_effect=seq),              mock.patch.object(uhc, "start_install", side_effect=err):
+            out = msu.update_install_staged(confirm=True, wait_s=60)
+        self.assertTrue(out.startswith("ok"), out)
+
+    def test_auth_refusal_without_status_is_failed_and_does_not_poll(self):
+        try:
+            try:
+                raise msu.http_auth.HttpAuthError("relogin refused")
+            except msu.http_auth.HttpAuthError as inner:
+                raise uhc.UpdateHttpError("POST failed: relogin refused") from inner
+        except uhc.UpdateHttpError as err:
+            auth_err = err
+        with mock.patch.object(uhc, "get_install_status", return_value=_st()) as g,              mock.patch.object(uhc, "start_install", side_effect=auth_err):
+            out = msu.update_install_staged(confirm=True)
+        self.assertTrue(out.startswith("FAILED"), out)
+        self.assertNotIn("possibly applied", out)
+        self.assertEqual(g.call_count, 1)  # initial GET only, no polling
+

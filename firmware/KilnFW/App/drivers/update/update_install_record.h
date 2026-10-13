@@ -64,6 +64,7 @@ typedef enum {
     UPD_INST_REASON_RESULT_WRITE_FAILED,
     UPD_INST_REASON_ATTEMPTS_EXCEEDED,
     UPD_INST_REASON_COUNTER_FAILED,
+    UPD_INST_REASON_OUTCOME_UNKNOWN, // poll task could not start; the copy may still run: do not power-cycle
     UPD_INST_REASON_COUNT
 } update_install_reason_t;
 

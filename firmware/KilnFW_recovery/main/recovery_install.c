@@ -17,7 +17,7 @@
 static const char *TAG = "rec_install";
 
 #define KILN_NVS_PART "kiln_nvs"
-#define POLL_TASK_STACK 3072 // internal RAM: this task writes NVS; mirrored as APPLY_POLL_STACK in recovery_apply_esp.c
+#define POLL_TASK_STACK RECOVERY_INSTALL_POLL_STACK // shared with recovery_apply_esp.c (recovery_apply_esp.h)
 #define POLL_TASK_PRIO 3
 
 static update_install_res_t s_last;
@@ -243,15 +243,17 @@ void recovery_install_boot(void)
         if (xTaskCreate(poll_task, "rec_inst_poll", POLL_TASK_STACK, NULL, POLL_TASK_PRIO, NULL) != pdPASS) {
             // Nobody would record an apply failure: surface it now (status + LCD), not only in the log.
             ESP_LOGE(TAG, "poll task create failed");
-            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, s_semver);
+            // The apply task is already running and usually succeeds, so this is NOT "apply failed":
+            // record that the outcome is unknown and tell the operator not to power-cycle.
+            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_OUTCOME_UNKNOWN, s_semver);
             load_last();
             if (!s_have_last) {
                 memset(&s_last, 0, sizeof(s_last));
                 s_last.code = UPD_INST_RES_FAIL;
-                s_last.reason = UPD_INST_REASON_APPLY_FAILED;
+                s_last.reason = UPD_INST_REASON_OUTCOME_UNKNOWN;
                 s_have_last = true;
             }
-            show_failure(UPD_INST_REASON_APPLY_FAILED);
+            recovery_lcd_set_error("INSTALL UNMONITORED", "DO NOT POWER-CYCLE");
         }
     }
 }

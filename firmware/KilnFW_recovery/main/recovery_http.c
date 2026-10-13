@@ -242,6 +242,7 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     // L3: a staged image of a different version must not stay installable
     // behind the image just pushed. Best effort: reported, never fatal.
     esp_err_t stage_err = stage_clear_after_upload();

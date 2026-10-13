@@ -110,7 +110,7 @@ const char *update_install_reason_name(uint8_t reason)
     static const char *const names[UPD_INST_REASON_COUNT] = {
         "none",         "record_bad",   "clear_failed",    "stage_not_ready",   "size_mismatch",
         "sha_mismatch", "apply_failed", "nvs_unavailable", "result_write_failed",
-        "attempts_exceeded", "counter_failed",
+        "attempts_exceeded", "counter_failed", "outcome_unknown_do_not_power_cycle",
     };
     return reason < UPD_INST_REASON_COUNT ? names[reason] : "unknown";
 }

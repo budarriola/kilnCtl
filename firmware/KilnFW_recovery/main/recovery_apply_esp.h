@@ -17,6 +17,9 @@
 #include "recovery_apply.h"
 #include "stage_header.h"
 
+// Stack of the unattended-install poll task (recovery_install.c); recovery_apply_esp.c counts it in its heap floor.
+#define RECOVERY_INSTALL_POLL_STACK 3072
+
 #ifdef __cplusplus
 extern "C" {
 #endif

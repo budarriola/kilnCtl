@@ -19,7 +19,7 @@ static const char *TAG = "recovery_apply";
 
 #define APPLY_TASK_STACK 8192
 #define APPLY_TASK_PRIO 4
-#define APPLY_POLL_STACK 3072 // recovery_install.c poll task stack (internal RAM)
+#define APPLY_POLL_STACK RECOVERY_INSTALL_POLL_STACK // recovery_install.c poll task stack (internal RAM)
 #define STAGE_LABEL "stage"
 // Same floor as the Pico relay (recovery_pico.c): free internal RAM that must
 // remain after the task stack is allocated.
