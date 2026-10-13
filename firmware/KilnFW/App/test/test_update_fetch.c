@@ -511,7 +511,7 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "low_heap_free") == 0, "persistently low heap refuses low_heap_free");
     CHECK(g_fr_delay_calls == (int)FETCH_HEAP_SETTLE_TRIES, "settle wait re-samples exactly FETCH_HEAP_SETTLE_TRIES times");
-    CHECK(g_fr_delay_total_ticks == (unsigned long)FETCH_HEAP_SETTLE_TRIES * (unsigned long)pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS),
+    CHECK(g_fr_delay_total_ticks == 3000ul /* 12 x 250 ms, pinned literally (UPDFX3 LOW-3) */,
           "each settle delay is FETCH_HEAP_SETTLE_MS");
     expect_claim_balanced("settle persistent low");
 
