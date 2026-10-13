@@ -1146,7 +1146,7 @@ static void test_manifest_gate(void)
                "pre.3: clean descriptor still accepted");
     {
         static const char *const bad[] = {"v1.0.0-pre.4-dirty", "v1.0.0-pre.4", "v1.0.0-dirty",
-                                          "v1.0.0-pre.3-dirtyx", "v1.0.0-pre.3-dirt", "v1.0.1-pre.3-dirty"};
+                                          "v1.0.0-pre.3-dirtyx", "v1.0.0-pre.3-dirt", "v1.0.0-pre.3-dirtz", "v1.0.0-pre.3-xdirty", "v1.0.1-pre.3-dirty"};
         for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
             reset_board();
             make_image(30000, bad[i]);
