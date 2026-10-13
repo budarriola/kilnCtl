@@ -276,3 +276,17 @@ caught. The 3 misses are the untested recovery glue.
 5. LOW-3: do not record FAIL while the apply runs unmonitored.
 6. LOW-5: add one shared poll-stack constant, plus a source guard or host
    harness for the supersede call sites.
+
+## Fix status
+
+Code fixes landed in `e8a6ad365`. The fix doc commit follows it on dev.
+
+| Finding | Status | Notes |
+|---|---|---|
+| MED-1 | fixed `e8a6ad365` | After a POST with no HTTP answer, `ok` is accepted only once a poll failed (board seen unreachable). Otherwise the tool reports UNKNOWN and says the `ok` may be stale. Pytest: stale ok, and ok accepted after the board went down. The board's status has no uptime field, so unreachability is the only evidence used. |
+| LOW-1 | fixed `e8a6ad365` | A `HttpAuthError` cause with no HTTP status returns FAILED at once, with no polling. Pytest. |
+| LOW-2 | fixed `e8a6ad365` | `ota_esp_post` calls `recovery_install_supersede()` after the boot partition is set. Recovery target build passes. |
+| LOW-3 | fixed `e8a6ad365` | New reason `UPD_INST_REASON_OUTCOME_UNKNOWN` ("outcome_unknown_do_not_power_cycle"), recorded with code FAIL, and the LCD shows "INSTALL UNMONITORED / DO NOT POWER-CYCLE". `test_update_install_record.c` pins the name and the range check. |
+| LOW-4 | not fixed | Unreachable in practice (a client must join within milliseconds of SoftAP start); the fix is a boot-order change in `recovery_main.c`, out of scope here. |
+| LOW-5 | partly fixed `e8a6ad365` | One shared `RECOVERY_INSTALL_POLL_STACK` define in `recovery_apply_esp.h`, used by both files. Not done: the source-level supersede guard. `recovery_http.c` has no host coverage and no harness was added, so the LOW-2 call is covered by the recovery target build only. |
+| INFO-1..5 | not fixed | Informational. |
