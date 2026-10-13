@@ -108,6 +108,22 @@ static void desc_version_normalise(const char *v, char *out)
     out[n] = '\0';
 }
 
+// Case-insensitive match of the 6-char "-dirty" suffix (avoids a strncasecmp portability dependency).
+static bool ci_dirty_suffix(const char *p)
+{
+    static const char suffix[] = "-dirty";
+    for (size_t i = 0; i < 6u; i++) {
+        char c = p[i];
+        if (c >= 'A' && c <= 'Z') {
+            c = (char)(c - 'A' + 'a');
+        }
+        if (c != suffix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static update_stage_err_t map_hdr(stage_hdr_status_t s)
 {
     switch (s) {
@@ -267,6 +283,7 @@ static update_stage_err_t flush_head(update_stage_t *st)
     char v[STAGE_SEMVER_FIELD_LEN + 1];
     memcpy(v, st->head + UPDATE_STAGE_APP_DESC_VERSION_OFFSET, STAGE_SEMVER_FIELD_LEN);
     v[STAGE_SEMVER_FIELD_LEN] = '\0';
+    bool dirty = false;
     if (st->semver_given) {
         // A declared version may not override a valid one in the descriptor (else 99.0.0 on an old image
         // would walk past the downgrade gate). An invalid/blank descriptor version leaves the declared one.
@@ -281,12 +298,23 @@ static update_stage_err_t flush_head(update_stage_t *st)
             return UPDATE_STAGE_ERR_VERSION_MISMATCH;
         }
     } else {
-        const char *s = strip_v(v);
-        if (strlen(s) >= sizeof(st->semver) || s[0] == '\0') {
+        // Strip v/V and one trailing "-dirty" exactly as the declared branch does; the dirty fact goes to the
+        // gate so update_policy's dirty rule decides (a raw "...-pre.3-dirty" would outrank "...-pre.4").
+        char dn[STAGE_SEMVER_FIELD_LEN + 1];
+        desc_version_normalise(v, dn);
+        dirty = strlen(dn) < strlen(strip_v(v));
+        if (strlen(dn) >= sizeof(st->semver) || dn[0] == '\0') {
             return UPDATE_STAGE_ERR_BAD_VERSION;
         }
+        {
+            // A differently-cased "-DIRTY" is not stripped; refuse it rather than rank it as a prerelease.
+            const size_t dl = strlen(dn);
+            if (dl >= 6u && ci_dirty_suffix(dn + dl - 6u)) {
+                return UPDATE_STAGE_ERR_BAD_VERSION;
+            }
+        }
         memset(st->semver, 0, sizeof(st->semver));
-        strcpy(st->semver, s);
+        strcpy(st->semver, dn);
         if (dry_run_header(st) != UPDATE_STAGE_OK) {
             return UPDATE_STAGE_ERR_BAD_VERSION;
         }
@@ -294,7 +322,7 @@ static update_stage_err_t flush_head(update_stage_t *st)
     if (st->gate != NULL) {
         update_image_id_t id;
         const bool have_id = update_image_id_find(st->head, UPDATE_STAGE_HEAD_LEN, UPDATE_STAGE_IMAGE_ID_FROM, &id);
-        update_stage_err_t g = st->gate(st->gate_ctx, st->semver, st->commit, have_id ? &id : NULL);
+        update_stage_err_t g = st->gate(st->gate_ctx, st->semver, st->commit, have_id ? &id : NULL, dirty);
         if (g != UPDATE_STAGE_OK) {
             return UPDATE_STAGE_ERR_POLICY;
         }
@@ -393,8 +421,9 @@ static update_stage_err_t hash_from_flash(update_stage_t *st, uint32_t length, u
 }
 
 update_stage_err_t update_stage_manifest_gate(void *ctx, const char *semver, const char *commit,
-                                              const update_image_id_t *id)
+                                              const update_image_id_t *id, bool dirty)
 {
+    (void)dirty; // declared path: the manifest sha256 and commit bind the bytes
     (void)semver;
     (void)commit; // the stager's declared commit IS the manifest's: comparing it proves nothing (review 5 M1)
     const update_identity_t *want = ctx;

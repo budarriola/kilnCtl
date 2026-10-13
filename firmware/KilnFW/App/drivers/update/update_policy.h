@@ -106,7 +106,7 @@ update_decision_t update_policy_decide_typed(const update_identity_t *running, c
 // manifest, so the caller supplies what the uploader declared: X-Stage-Version / X-Stage-Commit and
 // optional schema versions (0 = not declared, taken as equal to the board's, i.e. unchecked), plus the
 // override flags. The partition-table hash cannot be checked for an upload (not in the image) and
-// prerelease versions are allowed (no channel), and the dirty/floor rules do not apply. The typed
+// prerelease versions are allowed (no channel), and the floor rule does not apply (the dirty rule does, for an image whose own descriptor says -dirty). The typed
 // confirm is `confirm` equal to `version` exactly; allow_downgrade only counts with it. A missing
 // version is treated as unknown and needs force plus confirm == "unversioned". Signing plays no part.
 // Identity record the firmware embeds in its own image (a const in .rodata_custom_desc, the section the
@@ -152,6 +152,7 @@ typedef struct {
     bool force;
     bool allow_downgrade;
     const char *confirm;   // typed confirm text, NULL/"" = none
+    bool dirty;            // the image descriptor said "-dirty" (undeclared upload): the dirty rule refuses it
 } update_upload_request_t;
 
 // An image without the record has an unknown schema: it needs force AND the typed confirm, on top of

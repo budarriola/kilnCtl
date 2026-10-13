@@ -23,8 +23,26 @@ set(EXTRA_COMPONENT_DIRS
 # esp_app_desc_t.version, so the descriptor equals the release.json tag. Without this ESP-IDF uses
 # git describe --dirty and the published v1.0.0-pre.3 image reads "v1.0.0-pre.3-dirty".
 if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" STREQUAL "")
+    # esp_app_desc_t.version holds 32 bytes (31 chars + NUL): a longer tag would be truncated and
+    # then no longer equal the release.json tag. Fail configure rather than stamp a cut-off version.
+    string(LENGTH "$ENV{KILNCTL_RELEASE_VERSION}" _kiln_rv_len)
+    if(_kiln_rv_len GREATER 31)
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is ${_kiln_rv_len} "
+                            "characters; esp_app_desc_t.version holds at most 31.")
+    endif()
+    if(NOT "$ENV{KILNCTL_RELEASE_VERSION}" MATCHES "^[vV]?[0-9]+\\.[0-9]+\\.[0-9]+(-[0-9A-Za-z.-]+)?$")
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='$ENV{KILNCTL_RELEASE_VERSION}' is not a semver "
+                            "([v]MAJOR.MINOR.PATCH[-prerelease]).")
+    endif()
     set(PROJECT_VER "$ENV{KILNCTL_RELEASE_VERSION}")
+    set(KILN_CONFIGURED_RELEASE_VERSION "$ENV{KILNCTL_RELEASE_VERSION}")
+else()
+    set(KILN_CONFIGURED_RELEASE_VERSION "")
 endif()
+# Remembered in the cache so a reused build dir shows what it was configured with. The env var does
+# not trigger a reconfigure by itself, so gen_build_info.cmake (run every build) compares the env
+# against this value and fails the build on a mismatch in either direction.
+set(KILN_CONFIGURED_RELEASE_VERSION "${KILN_CONFIGURED_RELEASE_VERSION}" CACHE INTERNAL "KILNCTL_RELEASE_VERSION at configure time" FORCE)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 

@@ -83,6 +83,15 @@ if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" 
                             "(vMAJOR.MINOR.PREREL as update_tag_valid() accepts, at most 32 characters).")
     endif()
 endif()
+# The env var does not trigger a reconfigure: a reused build dir can still carry the version it was
+# configured with (esp_app_desc_t.version), in either direction. Only checked when the caller passed
+# CONFIGURED_RELEASE_VERSION (the normal build); unset env and empty configured value always agree.
+if(DEFINED CONFIGURED_RELEASE_VERSION OR NOT "${release_version}" STREQUAL "")
+    if(NOT "${release_version}" STREQUAL "${CONFIGURED_RELEASE_VERSION}")
+        message(FATAL_ERROR "KILNCTL_RELEASE_VERSION='${release_version}' but this build dir was configured "
+                            "with '${CONFIGURED_RELEASE_VERSION}'; re-run cmake/idf.py reconfigure.")
+    endif()
+endif()
 set(partitions_sha "")
 if(EXISTS "${THIS_PROJECT_DIR}/partitions.csv")
     file(READ "${THIS_PROJECT_DIR}/partitions.csv" _praw)

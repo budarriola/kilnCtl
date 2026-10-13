@@ -744,6 +744,7 @@ add_custom_target(drivers_build_info ALL
         -DOUT=${BUILD_INFO_HEADER}
         -DPROJECT_ROOT=${FW_GIT_TOPLEVEL}
         -DTHIS_PROJECT_DIR=${CMAKE_SOURCE_DIR}
+        -DCONFIGURED_RELEASE_VERSION=${KILN_CONFIGURED_RELEASE_VERSION}
         -P ${CMAKE_CURRENT_SOURCE_DIR}/gen_build_info.cmake
     BYPRODUCTS ${BUILD_INFO_HEADER}
     COMMENT "Regenerating build_info.h (git commit/dirty/build time)"
