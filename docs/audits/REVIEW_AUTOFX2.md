@@ -191,7 +191,7 @@ powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset check -Preset
 
 ## Fix status
 
-Fixed in `5ee85aaac` (AUTOFX3), on origin/dev:
+Fixed in `9073ff25a` (AUTOFX3), on origin/dev:
 
 - **MED-1**: `saw_down` is gone. `update_install_staged` reads `uptime_s` (GET `/api/status`) before the POST and
   accepts an `ok` after an unanswered POST only when the uptime now plus 2 s of truncation slack is below the
@@ -215,7 +215,7 @@ Fixed in `5ee85aaac` (AUTOFX3), on origin/dev:
   host-test harness; they are covered only by the source-level order/report assertions in
   `check_recovery_status_fragments.ps1`, not by a behavioural test.
 
-Negative tests (base `5ee85aaac`, all CAUGHT by a failing assertion): pytest 7/7 (drop the uptime comparison, any poll
+Negative tests (base `9073ff25a`, all CAUGHT by a failing assertion): pytest 7/7 (drop the uptime comparison, any poll
 error counts as down, follow-up ignores evidence, answered POST needing proof, inverted comparison, UNKNOWN text,
 version-change shortcut forced on); check script 5/5 (shrunk buffer, last_install merged back into the numeric
 fragment, supersede dropped, supersede not reported, supersede after the boot set).
