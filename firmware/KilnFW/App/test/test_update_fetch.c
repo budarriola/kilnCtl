@@ -318,6 +318,87 @@ static void test_claim_released_on_failures(void)
     g_fr_flash_write_fail = false;
 }
 
+static void drop_heap_low(void) { g_fake_heap_free_internal = 9000; }
+static void set_heap_hop_ok(void) { g_fake_heap_free_internal = 27855; g_fake_heap_largest_internal = 7680; }
+static void set_heap_hop_low(void) { g_fake_heap_free_internal = 26000; }
+
+static void run_job_and_result(const char *uri)
+{
+    POST(uri, NULL);
+    wait_idle();
+    job_result();
+}
+
+static void test_heap_admission_updfx2(void)
+{
+    // MED-1: 26000 B free admits neither kind (check needs the download need).
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 26000;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "26000 B refuses a check");
+    expect_claim_balanced("check low free");
+
+    // check admitted with a 4096 B block; download refused LOW_BLOCK
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fake_heap_largest_internal = 4096;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_state, "failed") != 0 || strcmp(g_error, "low_heap_block") != 0, "check admitted with 4096 B block");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fake_heap_largest_internal = 4096;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_block") == 0, "download refused on 4096 B block");
+    expect_claim_balanced("download low block");
+
+    // bench idle reading admits a full download
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = 30311;
+    g_fake_heap_largest_internal = 10752;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 || strcmp(g_state, "staged") == 0 || stage_staged(), "bench idle reading downloads");
+
+    // LOW-1/mid-body: drop during the first read aborts with low_heap_midrun
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->on_read = drop_heap_low;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_midrun") == 0, "mid-body drop aborts low_heap_midrun");
+    expect_claim_balanced("midrun");
+
+    // DMA low refuses both kinds
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = 4095;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "check refused on low DMA free");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = 4095;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") == 0, "download refused on low DMA free");
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_dma_free_internal = 4096;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "low_heap_dma") != 0, "DMA free at floor admitted");
+
+    // per-hop admission: asset URL redirects to a second URL; heap low at the hop refuses it,
+    // 27855 B (bench reading) admits it.
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin";
+    fr_route_t *tgt = add_route("https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin", g_img, IMG_LEN);
+    (void)tgt;
+    g_app_route->on_open = set_heap_hop_low;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "failed") == 0 && strstr(g_error, "low_heap") != NULL, "low heap at redirect hop refused");
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->status = 302;
+    g_app_route->location = "https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin";
+    add_route("https://objects.githubusercontent.com/KilnCtrl-v1.2.3.bin", g_img, IMG_LEN);
+    g_app_route->on_open = set_heap_hop_ok;
+    run_job_and_result("/api/update/download");
+    CHECK(strstr(g_error, "low_heap") == NULL, "27855 B hop admitted");
+}
+
 static HANDLE g_hold_ev;
 static void hold_job(void) { WaitForSingleObject(g_hold_ev, 20000); }
 
@@ -544,6 +625,7 @@ int main(void)
     test_short_body_chunked();
     test_sha_mismatch();
     test_claim_released_on_failures();
+    test_heap_admission_updfx2();
     test_handler_refusals();
     test_stage_upload_and_clear();
 #ifdef UF_EXTRA_TESTS

@@ -22,6 +22,7 @@ typedef struct {
     const char *location;     // Location header (redirects)
     bool open_fail;           // esp_http_client_open() fails
     void (*on_read)(void);    // called once, at the first read of this response
+    void (*on_open)(void);    // called at every esp_http_client_open() of this URL
 } fr_route_t;
 
 #define FR_MAX_ROUTES 16
@@ -51,6 +52,7 @@ extern bool g_fr_heat_profile, g_fr_heat_autotune;
 extern bool g_fr_clock_synced;
 extern char g_fr_repo[96];
 extern size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
+extern size_t g_fake_heap_dma_free_internal;
 extern bool g_fr_internal_alloc_fail;
 extern bool g_fr_alloc_fail_all;           // every heap_caps_malloc fails (reset by fr_reset only if the test clears it)
 extern volatile long g_fr_heap_live;        // heap_caps_* blocks currently allocated (leak checks)

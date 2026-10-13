@@ -59,6 +59,7 @@ bool g_fr_heat_profile, g_fr_heat_autotune;
 bool g_fr_clock_synced;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
+size_t g_fake_heap_dma_free_internal;
 bool g_fr_internal_alloc_fail;
 
 const char *g_fr_fail_task;
@@ -108,6 +109,7 @@ void fr_reset(void)
     strcpy(g_fr_repo, "budarriola/kilnCtl");
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
+    g_fake_heap_dma_free_internal = 100000;
     g_fr_internal_alloc_fail = false;
     g_fr_fail_task = NULL;
     g_fr_time_div = 1;
@@ -147,7 +149,13 @@ void heap_caps_free(void *p)
     }
     free(p);
 }
-size_t heap_caps_get_free_size(uint32_t caps) { return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u; }
+size_t heap_caps_get_free_size(uint32_t caps)
+{
+    if ((caps & MALLOC_CAP_INTERNAL) && (caps & MALLOC_CAP_DMA)) {
+        return g_fake_heap_dma_free_internal;
+    }
+    return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_free_internal : 4000000u;
+}
 size_t heap_caps_get_largest_free_block(uint32_t caps)
 {
     return (caps & MALLOC_CAP_INTERNAL) ? g_fake_heap_largest_internal : 2000000u;
@@ -503,6 +511,9 @@ esp_err_t esp_http_client_open(esp_http_client_handle_t c, int write_len)
 {
     (void)write_len;
     g_fr_open_count++;
+    if (route_for(c->cfg.url) != NULL && route_for(c->cfg.url)->on_open != NULL) {
+        route_for(c->cfg.url)->on_open();
+    }
     snprintf(g_fr_last_url, sizeof(g_fr_last_url), "%s", c->cfg.url);
     c->route = route_for(c->cfg.url);
     if (c->route == NULL || c->route->open_fail) {

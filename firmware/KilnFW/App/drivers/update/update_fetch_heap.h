@@ -17,7 +17,7 @@
 //                                                   here; plus the 4096 B writer stack with
 //                                                   TCB/heap overhead, about 4.5 KB; mbedTLS
 //                                                   buffers are PSRAM, so not counted. One hop,
-//                                                   releases/latest only, never the asset hop)
+//                                                   one hop of the API check; the asset download is the final hop and carries the writer stack)
 //   (the 16500 B above now also includes the 2048 B internal stager scratch, FETCH_HEAP_SCRATCH_BYTES,
 //    so worst draw = 18548 B and slack = 1932 B; the PRECHECK sum is unchanged)
 //   slack, concurrent httpd / login KDF   3980 B (1932 B after the scratch)
@@ -49,8 +49,20 @@
 //   CHECK_DRAW = WP7 measured handshake draw 11044 B (2 KB rx, 1 KB tx) + 1024 B (2 KB tx here); no
 //   4096 B writer stack (wr_start only runs for the stage sink). The 8192 B owner floor and the 3840 B
 //   concurrent margin are unchanged; the mid-body abort (12288 B) is unchanged.
-//   Margin: 29556 B sits only 91 B below the 29647 B measured idle minimum (logs/sk04_sampling); a bench
-//   re-measure of the idle minimum is PENDING, so treat the value as provisional.
+//   UPDFX2 (MED-1, LOW-1): a check is admitted at the SAME 28532 B need as a download (a check that
+//   starts is a precursor to a download; the bench board idles at 29.6-31.1 KB so both pass). The
+//   check keeps its own 3072 B largest-block need (client buffers only). The mid-body abort is now
+//   FLOOR + 2048 = 10240 B, not 12288 B: a download admitted at 28532 B ends at 28532 - 16500 = 12032 B,
+//   which the old 12288 B abort would have tripped immediately (256 B under). 10240 B leaves 1792 B of
+//   margin over that post-draw level and still keeps 2048 B over the 8192 B floor.
+//   Redirect hops (UPDFX2, bench 2026-10-12): after the first hop the heap is ~2.4 KB lower than at
+//   job start (27855 B seen at the 302 hop vs 30299 B idle; the first client is closed and cleaned up
+//   before the next admission, so what remains held is outside this module: lwIP/TLS teardown).
+//   Re-requiring the start need per hop therefore refused a healthy download. Hops after the first are
+//   admitted when the level AFTER the draw still to come stays at or above the abort level:
+//     download hop need = ABORT_BELOW + 16500 = 26740 B   (27855 B passes, post-draw 11355 B)
+//     check    hop need = ABORT_BELOW + 12068 = 22308 B
+//   so the 8192 B floor is never admitted under (hop post-draw >= 10240 B = floor + 2048 B).
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
 // (logs/sk04_sampling/2026-10-06.tsv, 29 samples), so anything above ~29.6 KB would refuse on an
 // idle board. At the idle minimum the fetch's own estimated draw ends at 29647 - 17524 = 12123 B,
@@ -90,14 +102,20 @@ extern "C" {
 #define FETCH_HEAP_SLACK_BYTES 3840u
 #define FETCH_HEAP_PRECHECK_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_WORST_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_LARGEST_BLOCK_MIN 6144u
-// Check job (UPDFX1): TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
+// Check job: TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
 #define FETCH_CHECK_DRAW_BYTES (11044u + 1024u)
-#define FETCH_CHECK_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_CHECK_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_CHECK_BLOCK_MIN 3072u
-// Download need once the job's own scratch is already allocated (the live reading excludes it).
+// Start need (both kinds). Download jobs hold the scratch already (the live reading excludes it); a check
+// allocates none, so its live reading is 1024 B higher and the same number is slightly more lenient.
 #define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES)
-// Mid-body abort (read loop only, session already built): floor plus 4 KB of transient room.
-#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 4096u)
+// Mid-body abort (read loop only, session already built): floor plus 2 KB of transient room.
+#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 2048u)
+// Redirect hops after the first: post-draw level must stay at or above the abort level.
+#define FETCH_HOP_DOWNLOAD_HEAP_MIN (FETCH_HEAP_ABORT_BELOW + 16500u)
+#define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_ABORT_BELOW + FETCH_CHECK_DRAW_BYTES)
+// DMA-capable internal free (LOW-6): the TLS/WiFi path draws DMA-capable memory; idle min_free is 6351 B
+// on the bench, so a floor of 4096 B refuses only a board already starved of it.
+#define FETCH_DMA_FREE_MIN 4096u
 
 typedef enum {
     FETCH_HEAP_OK = 0,
@@ -109,6 +127,13 @@ typedef enum {
 // the job's stager scratch is allocated, so the scratch is not charged again. is_download selects the
 // download (writer task + stager) or check (TLS + JSON only) draw.
 fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download);
+
+// Same, for a redirect hop after the first (heap not back to the job-start level, see UPDFX2 above).
+fetch_heap_verdict_t update_fetch_heap_admit_hop(uint32_t free_internal, uint32_t largest_internal_block,
+                                                 bool is_download);
+
+// DMA-capable internal free check (true = enough).
+bool update_fetch_heap_dma_ok(uint32_t dma_free);
 
 // Mid-body: true when the job must give up.
 bool update_fetch_heap_abort(uint32_t free_internal);

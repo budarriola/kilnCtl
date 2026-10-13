@@ -65,10 +65,11 @@ static const char *TAG = "update_fetch";
 // well over 1 KB. esp_http_client mallocs it, and a malloc under CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
-// Admission and mid-body abort thresholds (FETCH_HEAP_PRECHECK_MIN 28 KB on current free internal
-// heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 12288 B) live
-// in update_fetch_heap.h with their derivation and are host-tested. Every hop start uses the full
-// admission rule; the read loop uses only the abort floor.
+// Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
+// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 10240 B)
+// live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
+// admission rule, redirect hops after the first the hop rule (post-draw level >= the abort level),
+// and the read loop only the abort floor.
 // The tx buffer stays 2048 B (a JWT-signed release-assets GET line can exceed 1 KB, so 1 KB would
 // risk a truncated request); that costs 1 KB over the spike and is inside the worst-case draw.
 #define FETCH_JOB_DEADLINE_MS (20u * 60u * 1000u)
@@ -193,18 +194,30 @@ static uint32_t largest_internal_block(void)
 }
 
 // Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
-static const char *heap_admit(const work_t *w)
+static uint32_t dma_free_internal(void)
+{
+    return (uint32_t)heap_caps_get_free_size(MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+}
+
+static const char *heap_admit(const work_t *w, bool hop)
 {
     uint32_t f = free_internal();
     uint32_t l = largest_internal_block();
-    const fetch_heap_verdict_t hv = update_fetch_heap_admit(f, l, w->p.kind == KIND_DOWNLOAD);
-    if (hv == FETCH_HEAP_OK) {
-        return NULL;
-    }
     const bool dl = w->p.kind == KIND_DOWNLOAD;
-    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s", (unsigned)f,
-             (unsigned)(dl ? FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH : FETCH_CHECK_HEAP_MIN), (unsigned)l,
-             (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check");
+    const fetch_heap_verdict_t hv = hop ? update_fetch_heap_admit_hop(f, l, dl) : update_fetch_heap_admit(f, l, dl);
+    if (hv == FETCH_HEAP_OK) {
+        const uint32_t dma = dma_free_internal();
+        if (update_fetch_heap_dma_ok(dma)) {
+            return NULL;
+        }
+        ESP_LOGW(TAG, "refused: DMA-capable internal free %u (need %u)", (unsigned)dma, (unsigned)FETCH_DMA_FREE_MIN);
+        return "low_heap_dma";
+    }
+    const unsigned need_free = hop ? (dl ? FETCH_HOP_DOWNLOAD_HEAP_MIN : FETCH_HOP_CHECK_HEAP_MIN)
+                                   : FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH;
+    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s%s", (unsigned)f, need_free,
+             (unsigned)l, (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check",
+             hop ? " (redirect hop)" : "");
     // Distinct strings per cause (UPDFX1): free-heap shortfall, fragmentation, and mid-body abort differ.
     return hv == FETCH_HEAP_LOW_BLOCK ? "low_heap_block" : "low_heap_free";
 }
@@ -534,7 +547,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
         // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
         // floor. Gate each esp_http_client_init on the full start threshold instead.
-        const char *adm = heap_admit(w);
+        const char *adm = heap_admit(w, hops > 0);
         if (adm != NULL) {
             return adm;
         }
@@ -727,7 +740,7 @@ static const char *run_job(work_t *w)
     if (!clock_synced()) {
         return "clock_not_synced";
     }
-    const char *adm = heap_admit(w);
+    const char *adm = heap_admit(w, false);
     if (adm != NULL) {
         return adm;
     }
@@ -857,10 +870,13 @@ static void fetch_task(void *arg)
     const bool wedged_at_start = s_c->wr_wedged;
     work_t *w = heap_caps_calloc(1, sizeof(*w), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     uint8_t *body = heap_caps_malloc(FETCH_API_BODY_CAP, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    // The stager scratch is internal on purpose (MED-1); one 2 KiB block per job, in the admission budget.
-    uint8_t *scratch = heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // The stager scratch is internal on purpose (MED-1); one block per DOWNLOAD job, in the admission budget.
+    // A check has no stager (memory sink), so it allocates none (UPDFX1 LOW-3).
+    uint8_t *scratch = p.kind == KIND_DOWNLOAD
+                           ? heap_caps_malloc(FETCH_SCRATCH_LEN, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+                           : NULL;
     const char *err = NULL;
-    if (w == NULL || body == NULL || scratch == NULL) {
+    if (w == NULL || body == NULL || (p.kind == KIND_DOWNLOAD && scratch == NULL)) {
         err = "no_memory";
     } else {
         w->p = p;
