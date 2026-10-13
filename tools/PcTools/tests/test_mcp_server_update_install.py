@@ -271,10 +271,10 @@ class SlowReadTests(_Base):
                  "slow both, 1 s each": [(1.0, 1.0), (1.0, 1.0)],
                  "slow both, 3 s each": [(3.0, 3.0), (3.0, 3.0)]}
         for name, d in cases.items():
-            with self.subTest(case=name):
-                msu._PENDING_INSTALL.clear()
-                self.boot_t = self.clock.t - 600.0
-                self.assertTrue(self._run(d, False).startswith("UNKNOWN"))
+            msu._PENDING_INSTALL.clear()
+            self.boot_t = self.clock.t - 600.0
+            out = self._run(d, False)
+            self.assertTrue(out.startswith("UNKNOWN"), f"{name}: {out}")
 
     def test_slow_reads_with_real_reboot_are_ok(self):
         self.assertTrue(self._run([(1.0, 1.0)], True).startswith("ok"))
