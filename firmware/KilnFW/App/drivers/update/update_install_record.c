@@ -141,6 +141,28 @@ int update_install_record_result(const update_install_ops_t *ops, uint8_t code, 
     return ops->res_write(ops->ctx, blob, n);
 }
 
+int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void),
+                            const char *semver, bool *result_ok)
+{
+    if (result_ok) {
+        *result_ok = false;
+    }
+    if (!ops || !ops->req_clear || !boot_guard_clear) {
+        return -1;
+    }
+    if (boot_guard_clear() != 0) {
+        return -1;
+    }
+    if (ops->req_clear(ops->ctx) != 0) {
+        return -1;
+    }
+    bool ok = update_install_record_result(ops, UPD_INST_RES_OK, UPD_INST_REASON_NONE, semver) == 0;
+    if (result_ok) {
+        *result_ok = ok;
+    }
+    return 0;
+}
+
 static update_install_boot_outcome_t refuse(const update_install_ops_t *ops, uint8_t reason,
                                             const char *semver, update_install_res_t *res_out)
 {

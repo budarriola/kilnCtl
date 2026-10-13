@@ -286,8 +286,142 @@ static void test_boot_logic(void)
                "written ok result decodes");
 }
 
+static int g_guard_rc;
+static fake_t *g_guard_f;
+static int guard_fn(void)
+{
+    ev(g_guard_f, 99);
+    return g_guard_rc;
+}
+
+static void test_pre_boot(void)
+{
+    TEST_SECTION("update_install_record -- recovery pre-boot hook (success path)");
+    fake_t f;
+    update_install_ops_t o;
+    bool ok = false;
+
+    fake_init(&f);
+    o = ops_for(&f);
+    g_guard_f = &f;
+    g_guard_rc = 0;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "1.0.0-pre.3", &ok) == 0 && ok, "success path returns 0");
+    TEST_CHECK(f.have_req == 0 && f.clear_calls == 1, "request cleared on success");
+    TEST_CHECK(f.res_writes == 1 && update_install_res_decode(f.res_blob, sizeof(f.res_blob), &(update_install_res_t){0}),
+               "OK result written");
+    update_install_res_t d;
+    TEST_CHECK(update_install_res_decode(f.res_blob, sizeof(f.res_blob), &d) && d.code == UPD_INST_RES_OK &&
+                   d.reason == UPD_INST_REASON_NONE && strcmp(d.semver, "1.0.0-pre.3") == 0,
+               "OK result content");
+    TEST_CHECK(index_of(&f, 99) < index_of(&f, EV_CLEAR) && index_of(&f, EV_CLEAR) < index_of(&f, EV_RES),
+               "order: boot guard, request clear, then result");
+
+    fake_init(&f);
+    f.clear_rc = -1;
+    o = ops_for(&f);
+    g_guard_f = &f;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == -1 && !ok, "uncleared request aborts boot switch");
+    TEST_CHECK(f.have_req == 1 && f.res_writes == 0, "request kept, no OK result when clear failed");
+
+    fake_init(&f);
+    o = ops_for(&f);
+    g_guard_f = &f;
+    g_guard_rc = -1;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == -1 && f.clear_calls == 0 && f.res_writes == 0,
+               "boot guard failure aborts before any clear");
+    g_guard_rc = 0;
+
+    fake_init(&f);
+    f.res_rc = -1;
+    o = ops_for(&f);
+    g_guard_f = &f;
+    TEST_CHECK(update_install_pre_boot(&o, guard_fn, "x", &ok) == 0 && !ok && f.have_req == 0,
+               "result write failure does not block the switch, reported via result_ok");
+}
+
+typedef struct {
+    int events[8];
+    int n;
+    bool safe, busy, verified;
+    int erase_rc, write_rc;
+    int writes;
+    uint8_t blob[UPD_INST_REQ_SIZE];
+} app_t;
+
+static void aev(app_t *a, int e) { a->events[a->n++] = e; }
+static bool a_safe(void *c) { return ((app_t *)c)->safe; }
+static bool a_stage(void *c, bool *busy, uint32_t *len, uint8_t sha[UPD_INST_SHA_LEN], char sv[UPD_INST_SEMVER_LEN])
+{
+    app_t *a = c;
+    *busy = a->busy;
+    *len = 1234;
+    memset(sha, 0x5A, UPD_INST_SHA_LEN);
+    strcpy(sv, "1.0.0-pre.3");
+    return a->verified;
+}
+static int a_erase(void *c) { app_t *a = c; aev(a, 1); return a->erase_rc; }
+static int a_write(void *c, const uint8_t *b, size_t n)
+{
+    app_t *a = c;
+    aev(a, 2);
+    a->writes++;
+    memcpy(a->blob, b, n < sizeof(a->blob) ? n : sizeof(a->blob));
+    return a->write_rc;
+}
+
+static void test_prepare(void)
+{
+    TEST_SECTION("update_install_record -- app prepare hook");
+    app_t a;
+    char msg[96];
+    int st = 0;
+    update_install_app_ops_t o = { &a, a_safe, a_stage, a_erase, a_write };
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    TEST_CHECK(update_install_prepare(&o, msg, sizeof(msg), &st) && a.writes == 1, "verified stage stores a request");
+    TEST_CHECK(a.n == 2 && a.events[0] == 1 && a.events[1] == 2, "old result erased BEFORE the request is written");
+    update_install_req_t r;
+    TEST_CHECK(update_install_req_decode(a.blob, sizeof(a.blob), &r) && r.attempts == 0 && r.image_length == 1234,
+               "fresh request, attempts 0, stage length and sha");
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = false;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0 && a.n == 0,
+               "unverified stage refused 409, nothing erased or written");
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    a.busy = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0,
+               "busy stage refused 409");
+
+    memset(&a, 0, sizeof(a));
+    a.verified = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 500 && a.writes == 0,
+               "NVS not writable refused 500");
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    a.erase_rc = -1;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 500 && a.writes == 0,
+               "result erase failure: request never written");
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    a.write_rc = -1;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 500, "request write failure refused 500");
+}
+
 void run_test_update_install_record(void)
 {
     test_codec();
     test_boot_logic();
+    test_pre_boot();
+    test_prepare();
 }

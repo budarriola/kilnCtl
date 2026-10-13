@@ -294,6 +294,56 @@ static void test_recovery_exit_and_boot_guard(void)
     TEST_CHECK(strstr(s_last_resp_body, "\"ok\":true") != NULL, "verified clear reports ok:true");
 }
 
+static int s_hk_prepare_calls, s_hk_undo_calls;
+static bool s_hk_prepare_ok;
+static int s_hk_prepare_status;
+static bool hk_prepare(char *msg, size_t cap, int *http_status)
+{
+    s_hk_prepare_calls++;
+    if (!s_hk_prepare_ok) {
+        snprintf(msg, cap, "hook refused");
+        *http_status = s_hk_prepare_status;
+    }
+    return s_hk_prepare_ok;
+}
+static void hk_undo(void) { s_hk_undo_calls++; }
+
+static void test_recovery_boot_hooks(void)
+{
+    TEST_SECTION("ota_recovery_boot_run with hooks -- gate before prepare, prepare refusal, undo on select failure");
+    httpd_req_t req;
+    memset(&req, 0, sizeof(req));
+    const ota_recovery_boot_hooks_t hooks = { hk_prepare, hk_undo };
+
+    refusal_reset();
+    s_hk_prepare_calls = s_hk_undo_calls = 0;
+    s_hk_prepare_ok = true;
+    g_stub_profile_state = PROFILE_EXEC_RUNNING;
+    (void)ota_recovery_boot_run(&req, &hooks);
+    TEST_CHECK(strncmp(s_last_resp_status, "409", 3) == 0, "hooks firing: mode gate 409");
+    TEST_CHECK(s_hk_prepare_calls == 0, "hooks firing: prepare never called (no record written)");
+    TEST_CHECK(s_fake_select_calls == 0, "hooks firing: boot target untouched");
+
+    refusal_reset();
+    s_hk_prepare_calls = s_hk_undo_calls = 0;
+    s_hk_prepare_ok = false;
+    s_hk_prepare_status = 409;
+    (void)ota_recovery_boot_run(&req, &hooks);
+    TEST_CHECK(strncmp(s_last_resp_status, "409", 3) == 0, "prepare refuses: 409");
+    TEST_CHECK(s_hk_prepare_calls == 1, "prepare refuses: prepare called once");
+    TEST_CHECK(s_fake_select_calls == 0, "prepare refuses: boot target untouched");
+    TEST_CHECK(claim_free(), "prepare refuses: claim released");
+
+    refusal_reset();
+    s_hk_prepare_calls = s_hk_undo_calls = 0;
+    s_hk_prepare_ok = true;
+    s_fake_select_result = RECOVERY_SWITCH_SET_FAILED;
+    (void)ota_recovery_boot_run(&req, &hooks);
+    TEST_CHECK(s_hk_prepare_calls == 1, "select fails: prepare ran first");
+    TEST_CHECK(s_hk_undo_calls == 1, "select fails: undo removes the record");
+    TEST_CHECK(claim_free(), "select fails: claim released");
+}
+
 static void test_recovery_boot_refusals(void)
 {
     TEST_SECTION("ota_recovery_boot_post_handler -- mode gate, interlock, claim, relay, select/restore ordering");
@@ -474,6 +524,7 @@ int main(void)
     test_esp_rollback_refusals();
     test_recovery_exit_and_boot_guard();
     test_recovery_boot_refusals();
+    test_recovery_boot_hooks();
     test_pico_push_refusals();
     test_route_registration();
     printf("\n%d/%d checks passed\n", g_test_count - g_test_failures, g_test_count);

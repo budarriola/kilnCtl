@@ -118,6 +118,13 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
                                  const char *semver);
 
+// Recovery pre-boot hook body (after the copy verified, before the boot target
+// switch). Order: boot_guard_clear (nonzero aborts), req_clear (nonzero aborts,
+// request kept for the bounded retry), then the OK result write (failure only
+// logged by the caller: the install is good). Returns 0 to let the switch run,
+// -1 to abort. *result_ok is set to whether the OK result verified.
+int update_install_pre_boot(const update_install_ops_t *ops, int (*boot_guard_clear)(void),
+                            const char *semver, bool *result_ok);
 
 // ---- Application side: write the request before the reboot into recovery ----
 // Injected IO for update_install_prepare (the install route's prepare hook).

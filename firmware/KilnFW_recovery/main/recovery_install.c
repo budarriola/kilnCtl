@@ -137,25 +137,22 @@ static bool op_stage_verified(void *ctx, uint32_t *len, uint8_t sha[UPD_INST_SHA
 // boot_guard clear, then the request is removed (read back) and the OK result is
 // written. A failure before the request is gone aborts the apply (boot target
 // not changed, request kept for the bounded retry).
+static const update_install_ops_t s_ops;
+
+static int guard_clear(void)
+{
+    return recovery_http_boot_guard_clear();
+}
+
 static int pre_boot(void)
 {
-    if (recovery_http_boot_guard_clear() != 0) {
+    bool ok = false;
+    if (update_install_pre_boot(&s_ops, guard_clear, s_semver, &ok) != 0) {
+        ESP_LOGE(TAG, "pre-boot clear failed; not selecting app");
         return -1;
     }
-    if (kv_clear(UPD_INST_KEY_REQ) != 0) {
-        ESP_LOGE(TAG, "could not clear the install request; not selecting app");
-        return -1;
-    }
-    update_install_res_t r;
-    memset(&r, 0, sizeof(r));
-    r.code = UPD_INST_RES_OK;
-    r.reason = UPD_INST_REASON_NONE;
-    strncpy(r.semver, s_semver, sizeof(r.semver) - 1);
-    uint8_t blob[UPD_INST_RES_SIZE];
-    size_t n = update_install_res_encode(&r, blob);
-    if (n == 0 || kv_write(UPD_INST_KEY_RES, blob, n) != 0) {
-        // The request is already gone, so the install itself is good; the app
-        // just cannot report it. Do not block the boot target switch.
+    if (!ok) {
+        // Request already gone, so the install is good; the app just cannot report it.
         ESP_LOGW(TAG, "OK result write failed");
     }
     return 0;
