@@ -24,6 +24,8 @@ idf_component_register(
         "recovery_io.c"
         "recovery_text.c"
         "recovery_passphrase.c"
+        "recovery_wifi_qr.c"
+        "third_party/qrcodegen/qrcodegen.c"
         "recovery_hold.c"
         "recovery_health.c"
     INCLUDE_DIRS "."

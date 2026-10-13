@@ -24,6 +24,7 @@
 #include "recovery_lcd_policy.h"
 #include "recovery_passphrase.h"
 #include "recovery_text.h"
+#include "recovery_wifi_qr.h"
 
 static const char *TAG = "recovery_lcd";
 
@@ -121,6 +122,11 @@ static bool s_net_set = false;
 static char s_net_name[33];
 static char s_net_pass[RPASS_LEN + 1];
 static char s_net_ip[16];
+// Wi-Fi join QR (recovery_wifi_qr.h): encoded once in recovery_lcd_set_ap into static
+// buffers (no heap), drawn top-right every status redraw, hidden while the AP is down/errored.
+static uint8_t s_qr[RQR_BUF_LEN];
+static uint8_t s_qr_tmp[RQR_BUF_LEN];
+static int s_qr_size = 0; // modules per side, 0 = none (encode failed / no AP)
 static bool s_net_none = false;      // every Wi-Fi bring-up path failed
 static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
 static int s_ap_down = 0;       // SoftAP stopped: do not show its credentials
@@ -341,6 +347,27 @@ static esp_err_t draw_line(int y, int scale, uint16_t fg, uint16_t bg, const cha
     return err;
 }
 
+// Paints the RQR_AREA_PX square at the top-right: the QR when `show` and one
+// was encoded, else solid background (so a stale code never outlives its AP).
+// Drawn after the text lines, which never reach x >= PANEL_W - RQR_AREA_PX in
+// rows 0..RQR_AREA_PX-1 except as full-width fault bands this paints over.
+static esp_err_t draw_qr_area(bool show)
+{
+    int x0 = PANEL_W - RQR_AREA_PX;
+    esp_err_t err = set_window(x0, 0, PANEL_W - 1, RQR_AREA_PX - 1);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (int y = 0; y < RQR_AREA_PX; y++) {
+        rqr_scanline(s_qr, show ? s_qr_size : 0, y, COL_BG, RGB565(255, 255, 255), COL_BG, s_line);
+        err = send_data(s_line, RQR_AREA_PX * 2);
+        if (err != ESP_OK) {
+            return err;
+        }
+    }
+    return ESP_OK;
+}
+
 static esp_err_t clear_screen(void)
 {
     esp_err_t err = set_window(0, 0, PANEL_W - 1, PANEL_H - 1);
@@ -362,6 +389,9 @@ static void draw_status(void)
     char buf[64];
 
     s_line_errs = 0;
+    // The QR is shown only where the passphrase text is: AP up, no error banner.
+    bool show_qr = !(s_err_head[0] || s_ap_down || s_net_none || s_net_storage_fail) && s_net_set &&
+                   s_qr_size > 0;
     (void)draw_line(Y_TITLE, TITLE_SCALE, COL_TITLE, COL_BG, "RECOVERY MODE");
     (void)draw_line(Y_SUB, TEXT_SCALE, COL_DIM, COL_BG, "KilnFW recovery image");
 
@@ -438,6 +468,10 @@ static void draw_status(void)
         (void)draw_line(Y_IP, NET_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_URL, TEXT_SCALE, COL_BG, COL_BG, "");
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
+    }
+
+    if (draw_qr_area(show_qr) != ESP_OK) {
+        s_line_errs++;
     }
 
     if (s_warn[0]) {
@@ -633,6 +667,7 @@ void recovery_lcd_set_ap(const char *ssid, const char *passphrase, const char *i
     snprintf(s_net_pass, sizeof(s_net_pass), "%s", passphrase ? passphrase : "");
     snprintf(s_net_ip, sizeof(s_net_ip), "%s", ip ? ip : "?");
     s_net_set = true;
+    s_qr_size = rqr_encode(s_net_name, s_net_pass, s_qr, s_qr_tmp); // 0 = text only
     s_net_none = false;
     s_net_storage_fail = false;
     if (s_ready) {
