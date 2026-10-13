@@ -43,6 +43,7 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                     ota_pico_corrupt_image_path: Optional[str] = None,
                     update_downgrade_repo: Optional[str] = None,
                     update_wrong_repo: Optional[str] = None,
+                    target: str = "bench", ota_install: bool = False,
                     confirm: bool = False) -> str:
     """Run a standardized bench-test suite against this board
     (docs/BENCH_TEST_SYSTEM_PLAN.md). `suite` is one of `smoke`, `static`,
@@ -119,7 +120,13 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     a dry run makes. The report always names the resolved host and how it
     was resolved (`explicit`/`STA IP`/`default`), since the `default`
     fallback is a possibly-stale cached address, not necessarily the board
-    actually on the bench right now."""
+    actually on the bench right now.
+
+    Suite `release` (the unattended release test set, plan section "Release
+    suite"): `target="bench"` (default) or `"kiln"` picks the heat profile and
+    timeouts; heat phase needs `allow_heat=True`; `ota_install=True` also lets
+    the OTA phase install the staged release (needs `confirm=True`, and the
+    `update_install_staged` tool; absent it that step SKIPs)."""
     from .mcp_server_ota import _ota_resolve_host_with_source  # local import: avoids a circular import with mcp_server_ota.py
 
     resolved_host, host_source = _ota_resolve_host_with_source(host)
@@ -140,6 +147,14 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
                        ("update_wrong_repo", update_wrong_repo)):
         if value is not None:
             ctx[key] = value
+    # Suite `release` inputs: `target` picks the heat profile ("bench" or "kiln");
+    # `ota_install=True` lets RL-D01 install the staged image, so it is OTA-gated
+    # like the image paths (only put in ctx when set).
+    if target not in ("bench", "kiln"):
+        return f"error: target must be 'bench' or 'kiln', got {target!r}"
+    ctx["target"] = target
+    if ota_install is True:
+        ctx["ota_install"] = True
     if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
         if confirm is not True:
             return _OTA_CONFIRM_REFUSAL
@@ -282,6 +297,7 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                       ota_pico_corrupt_image_path: Optional[str] = None,
                       update_downgrade_repo: Optional[str] = None,
                       update_wrong_repo: Optional[str] = None,
+                      target: str = "bench", ota_install: bool = False,
                       confirm: bool = False) -> str:
     """Start `bench_test_run` in the background and return a job id at once.
 
@@ -299,11 +315,11 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     still going (check logs/bench_test/<run>/runner.log)."""
     # An unconfirmed OTA/update run is refused here, synchronously, before any job exists
     # (same as ota_matrix_start); bench_test_run re-checks inside the job.
-    if not dry_run and confirm is not True and any(
+    if not dry_run and confirm is not True and (any(
             v is not None for v in (ota_image_path, ota_corrupt_image_path, ota_truncated_image_path,
                                     ota_wrong_build_image_path, ota_image_build, ota_pico_image_path,
                                     ota_pico_image_commit, ota_pico_corrupt_image_path,
-                                    update_downgrade_repo, update_wrong_repo)):
+                                    update_downgrade_repo, update_wrong_repo)) or ota_install is True):
         return _OTA_CONFIRM_REFUSAL
     started = time.time()
     job_id = build_jobs.start_job(
@@ -321,7 +337,8 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
                                ota_pico_image_commit=ota_pico_image_commit,
                                ota_pico_corrupt_image_path=ota_pico_corrupt_image_path,
                                update_downgrade_repo=update_downgrade_repo,
-                               update_wrong_repo=update_wrong_repo, confirm=confirm),
+                               update_wrong_repo=update_wrong_repo, target=target,
+                               ota_install=ota_install, confirm=confirm),
         {"suite": suite, "cases": cases, "dry_run": dry_run, "allow_heat": allow_heat,
          "tag": tag},
         classify=classify_bench_report,

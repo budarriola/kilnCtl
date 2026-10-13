@@ -185,6 +185,24 @@ class BenchTestStartTest(_Base):
                 sj.assert_not_called()
         self.assertEqual(_FakeRunner.instances, [])
 
+    def test_release_target_reaches_ctx_and_default_is_bench(self):
+        self.finish(BT.bench_test_start(suite="release"))
+        self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "bench")
+        self.assertNotIn("ota_install", _FakeRunner.instances[-1].ctx)
+        self.finish(BT.bench_test_start(suite="release", target="kiln"))
+        self.assertEqual(_FakeRunner.instances[-1].ctx["target"], "kiln")
+        self.assertIn("target must be", BT.bench_test_run(suite="release", target="oven"))
+
+    def test_release_ota_install_is_ota_gated(self):
+        with mock.patch.object(build_jobs, "start_job") as sj:
+            out = BT.bench_test_start(suite="release", ota_install=True)
+        self.assertTrue(out.startswith("error: refused"), out)
+        sj.assert_not_called()
+        out = BT.bench_test_run(suite="release", ota_install=True)
+        self.assertIn("refused", out)
+        self.finish(BT.bench_test_start(suite="release", ota_install=True, confirm=True))
+        self.assertIs(_FakeRunner.instances[-1].ctx["ota_install"], True)
+
     def test_start_dry_run_with_image_args_is_not_refused(self):
         out = BT.bench_test_start(suite="ota", dry_run=True, ota_image_path="C:/img/a.bin",
                                   update_wrong_repo="o/w")

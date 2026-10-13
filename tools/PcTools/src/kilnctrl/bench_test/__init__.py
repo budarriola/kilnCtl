@@ -36,6 +36,7 @@ from . import cases_aux as _cases_aux  # noqa: F401 - import wires AX-C01..R01 j
 from . import cases_totp as _cases_totp  # noqa: F401 - import wires TP-R01..M01 judge functions into REGISTRY
 from . import cases_static as _cases_static  # noqa: F401 - import wires ST-01..04 judge functions into REGISTRY
 from . import cases_web_prof as _cases_web_prof  # noqa: F401 - import wires WEB-PROF/STIM/ZONE judge functions into REGISTRY
+from . import cases_release as _cases_release  # noqa: F401 - RL release suite
 from .runner import BenchTestRunner, run_suite
 
 __all__ = [

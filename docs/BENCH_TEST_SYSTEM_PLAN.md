@@ -325,6 +325,28 @@ case in the same run.
 | AX-T02 | Trip drops relay 4 | rule held ON, operator causes the bench trip | relay 4 OFF, trip reason/mask consistent, cleared | 150 s | yes (operator) |
 | AX-R01 | Restore | delete stray slots, disable relay 4 if AX-C01 enabled it | `enabled_mask` equals the recorded original | 5 s | no |
 
+### 3.12 Release suite (RL)
+
+`cases_release.py`, unit-tested against a fake board only (`tests/test_bench_test_cases_release.py`). One unattended pass for a release image, on the bench fixture or a real kiln, with nobody present. It composes existing cases by id (WEB-*, LCD-*) and adds a case only where none exists. Phases run in order; a FAIL in phase A (health) latches `ctx["_release_abort"]` and every later case returns NOT_RUN, so a sick board never reaches heat or OTA. Phase B and later never call `estop_verify` and never disable a guard. New ctx parameter `target` ("bench" default, or "kiln") picks the heat profile; `ota_install` (default False) requests the install step.
+
+| id | case | steps | judged by | dur | heat |
+|---|---|---|---|---|---|
+| RL-A01 | Health (read-only) | identity, running partition, crash report, readiness, safety state and trip, link error counters, task liveness, stack margins, heap, boot_guard persisted_count, thermocouples, Wi-Fi; records the baseline for RL-F01 | running partition `app`; no unacknowledged crash; readiness all ok except `estop_verified`; ARMED, no trip; heap_internal min_free >= 8192 B; persisted_count 0; every other probe clean. FAIL aborts the run; an unreadable probe is INCONCLUSIVE | 60 s | no |
+| RL-B01 | Safety test trip | `safety_test_trip(confirm=True)`, `safety_clear_trip`, confirm the clear, read readiness | trip reason 4 and mask 0x0008 (or the TRIP_EVENT-confirmed form with reason 4); trip cleared; heat permitted again. The trip is always cleared, even on FAIL | 30 s | no |
+| RL-C01 | Short heat profile | bench: ambient + 12 C, 3 min; kiln: 100 C, 300 C/h, 5 min hold; teardown always stops the firing and deletes the profile | reaches target within the window; holds within 8 C; heap floor holds during the firing; ends done. SKIP without `allow_heat=True`. A teardown that cannot confirm a stop taints the run and aborts it | 10-45 min | yes |
+| RL-D01 | OTA stage | `update_check(allow_prerelease=True)`, `update_fetch_status`, `update_stage_release`, then `update_stage_clear`; with `ota_install=True` the stage is kept and installed through `update_install_staged` | stage claimed only with a sha256 read-back; stage cleared afterwards; SKIP when an update tool (or `update_install_staged` for an install) is absent. Existing releases only | 120 s | no |
+| RL-E01 | Web and LCD smoke | composes WEB-DASH-01, WEB-PROF-01, WEB-ZONE-01, WEB-SAF-01, WEB-DIAG-01, WEB-OTA-01 and, on the bench with a camera, LCD-07 and LCD-15 | every composed case PASS; read-only | 60 s | no |
+| RL-F01 | Final health | reruns the RL-A01 probes and compares with its baseline | no new crash, no trip, heap and stack margins not worse than the tolerance (512 B heap, 64 B stack), link error counters not increased | 60 s | no |
+| RL-V01 | Release verdict | reads the other cases' verdicts | one line per phase (`RELEASE VERDICT: RL-A01=PASS ...`); FAIL if any phase FAILs, INCONCLUSIVE if any is not PASS, else PASS. Sorts last | 1 s | no |
+
+Invocations (confirm and the heat/OTA gates as usual):
+
+    bench_test_run(suite="release", confirm=True, allow_heat=True, target="bench")
+    bench_test_run(suite="release", confirm=True, allow_heat=True, target="kiln")
+    bench_test_start(suite="release", confirm=True, allow_heat=True, target="kiln", ota_install=True)
+
+Omit `allow_heat` to skip phase C; leave `ota_install` False to stage and clear only.
+
 ## 4. Case counts
 
 | suite | cases | of which heat | of which operator-only / blocked |
@@ -340,6 +362,7 @@ case in the same run.
 | SP | 11 | 1 (SP-09) | SP-08/09 operator; SP-10 INCONCLUSIVE by design |
 | TP | 4 | 0 | TP-M01 opt-in via env credentials |
 | AX | 7 | 3 | AX-T02 operator; all writes opt-in via `KILNCTL_AUX_BENCH_CONFIRM=1` |
+| RL | 7 | 1 (RL-C01) | RL-C01 needs `allow_heat`; RL-D01 install needs `ota_install` and `update_install_staged` |
 | **total** | **220** | **16 heat-originating** | |
 
 ## 5. Routine subsets, ordering, interdependence

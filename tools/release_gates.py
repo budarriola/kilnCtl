@@ -18,7 +18,7 @@ Commands (stdlib only):
                                print open gates; exit 1 if the tag is a stable tag
                                (no -suffix) with open gates and --allow-open is absent.
                                A pre-release tag (v1.0.0-pre.1) never refuses.
-  bench-evidence --fw-build B [--logs-dir D] [--max-age-days 7] [--suites ota,lcd,safety]
+  bench-evidence --fw-build B [--logs-dir D] [--max-age-days 7] [--suites ota,lcd,safety,release]
                                release gate bench-pass-7d: newest qualifying summary.json per suite
                                (full suite case list, all PASS bar designed-INCONCLUSIVE, see EXPECTED_INCONCLUSIVE);
                                exit 1 if any suite has none (names the nearest miss). Read-only.
@@ -356,7 +356,7 @@ def main(argv=None):
     b.add_argument("--app-bin", help="derive --fw-build from this KilnCtrl.bin's esp_app_desc_t")
     b.add_argument("--logs-dir", default="logs/bench_test")
     b.add_argument("--max-age-days", type=float, default=7)
-    b.add_argument("--suites", default="ota,lcd,safety")
+    b.add_argument("--suites", default="ota,lcd,safety,release")
     a = ap.parse_args(argv)
     if a.cmd == "bench-evidence":
         if bool(a.fw_build) == bool(a.app_bin):
