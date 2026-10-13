@@ -197,14 +197,16 @@ static const char *heap_admit(const work_t *w)
 {
     uint32_t f = free_internal();
     uint32_t l = largest_internal_block();
-    if (update_fetch_heap_admit(f, l, w->p.kind == KIND_DOWNLOAD) == FETCH_HEAP_OK) {
+    const fetch_heap_verdict_t hv = update_fetch_heap_admit(f, l, w->p.kind == KIND_DOWNLOAD);
+    if (hv == FETCH_HEAP_OK) {
         return NULL;
     }
     const bool dl = w->p.kind == KIND_DOWNLOAD;
     ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s", (unsigned)f,
              (unsigned)(dl ? FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH : FETCH_CHECK_HEAP_MIN), (unsigned)l,
              (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check");
-    return "low_heap";
+    // Distinct strings per cause (UPDFX1): free-heap shortfall, fragmentation, and mid-body abort differ.
+    return hv == FETCH_HEAP_LOW_BLOCK ? "low_heap_block" : "low_heap_free";
 }
 
 // The start-time mode gate and the heat-side fetch_busy refusal read each other's state without a
@@ -603,7 +605,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
                     break;
                 }
                 if (update_fetch_heap_abort(free_internal())) {
-                    fail = "low_heap";
+                    fail = "low_heap_midrun";
                     break;
                 }
                 int n = esp_http_client_read(c, (char *)w->chunk, FETCH_CHUNK_LEN);
