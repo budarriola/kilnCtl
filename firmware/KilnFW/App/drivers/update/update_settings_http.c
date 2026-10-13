@@ -12,6 +12,7 @@
 #include "relay_authority.h" /* relay_authority_heat_run_active() */
 #include "system_mode_gate.h"
 #include "system_mode_gate_http.h"
+#include "update_fetch.h" /* update_fetch_backoff_clear() */
 #include "update_settings.h"
 #include "wifi_provision_http.h"
 
@@ -105,6 +106,7 @@ static esp_err_t settings_post_handler(httpd_req_t *req)
         // Applied in RAM, not persisted: report it as a failure, never as success.
         return cfg_fs_http_persist_failed_for(req, UPDATE_SETTINGS_FILE_PATH, err);
     }
+    update_fetch_backoff_clear(); // a different repo is not covered by the old rate-limit answer
     return send_settings(req);
 }
 

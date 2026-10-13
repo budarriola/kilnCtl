@@ -22,6 +22,8 @@ typedef struct {
     const char *location;     // Location header (redirects)
     const char *retry_after;  // Retry-After header value
     const char *ratelimit_reset; // X-RateLimit-Reset header value
+    const char *ratelimit_remaining; // X-RateLimit-Remaining header value
+    int stall_per_chunk;      // >0: this many EAGAIN reads (each read_stall_ms, default 5 ms) before every delivered chunk
     long read_stall_ms;       // nonzero: each read sleeps this long (<0: the client slice) then reports EAGAIN until stall_reads exhausted
     int stall_reads;          // number of stalled reads (0 with read_stall_ms = stall forever)
     bool open_fail;           // esp_http_client_open() fails
@@ -59,6 +61,7 @@ extern bool g_fr_heat_profile, g_fr_heat_autotune;
 extern bool g_fr_clock_synced;
 extern long long g_fr_now_epoch;
 extern long long g_fr_tick_skew_ms;       // added to the fake tick count (lets a test outwait a backoff)
+extern volatile long g_fr_hdr_eagain_n; // EAGAIN results handed out by header reads
 extern volatile long g_fr_eagain_n;  // EAGAIN results handed out
 extern char g_fr_repo[96];
 extern size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;

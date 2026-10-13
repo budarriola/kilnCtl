@@ -61,6 +61,7 @@ int g_fr_interlock_result;
 bool g_fr_heat_profile, g_fr_heat_autotune;
 bool g_fr_clock_synced;
 long long g_fr_now_epoch;
+volatile long g_fr_hdr_eagain_n;
 volatile long g_fr_eagain_n;
 char g_fr_repo[96];
 size_t g_fake_heap_free_internal, g_fake_heap_largest_internal;
@@ -125,6 +126,7 @@ void fr_reset(void)
     g_fr_clock_synced = true;
     g_fr_now_epoch = 1800000000LL;
     g_fr_eagain_n = 0;
+    g_fr_hdr_eagain_n = 0;
     strcpy(g_fr_repo, "budarriola/kilnCtl");
     g_fake_heap_free_internal = 200000;
     g_fake_heap_largest_internal = 100000;
@@ -526,6 +528,7 @@ struct esp_http_client {
     size_t pos;
     bool read_once;
     int stalled;
+    int since_chunk;
 };
 
 static const fr_route_t *route_for(const char *url)
@@ -604,11 +607,22 @@ int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c)
         ev.user_data = c->cfg.user_data;
         c->cfg.event_handler(&ev);
     }
+    if (r->ratelimit_remaining != NULL && c->cfg.event_handler != NULL) {
+        esp_http_client_event_t ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.event_id = HTTP_EVENT_ON_HEADER;
+        ev.header_key = (char *)"X-RateLimit-Remaining";
+        ev.header_value = (char *)r->ratelimit_remaining;
+        ev.user_data = c->cfg.user_data;
+        c->cfg.event_handler(&ev);
+    }
     if (r->advertised == -6) {
         Sleep((DWORD)c->cfg.timeout_ms); // header read blocks for the whole slice, like the real client
+        g_fr_hdr_eagain_n++;
         return -ESP_ERR_HTTP_EAGAIN;
     }
     if (r->advertised == -5) {
+        g_fr_hdr_eagain_n++;
         return -ESP_ERR_HTTP_EAGAIN; // header read timeout
     }
     if (r->advertised == -4) {
@@ -643,9 +657,17 @@ int esp_http_client_read(esp_http_client_handle_t c, char *buf, int len)
         g_fake_heap_dma_free_internal = g_fr_dma_seq_i < g_fr_dma_seq_n ? g_fr_dma_seq[g_fr_dma_seq_i] : 100000;
         g_fr_dma_seq_i++;
     }
+    if (c->route->stall_per_chunk > 0 && c->since_chunk < c->route->stall_per_chunk &&
+        deliverable(c->route) > c->pos) {
+        c->since_chunk++;
+        Sleep((DWORD)(c->route->read_stall_ms > 0 ? c->route->read_stall_ms : 5));
+        g_fr_eagain_n++;
+        return -ESP_ERR_HTTP_EAGAIN;
+    }
     size_t avail = deliverable(c->route) - c->pos;
     size_t n = avail < (size_t)len ? avail : (size_t)len;
     if (n > 0) {
+        c->since_chunk = 0;
         memcpy(buf, c->route->body + c->pos, n);
         c->pos += n;
     }

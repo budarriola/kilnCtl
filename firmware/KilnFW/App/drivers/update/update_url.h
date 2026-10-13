@@ -121,6 +121,8 @@ typedef struct {
     uint32_t retry_after_s;
     bool have_reset;
     int64_t reset_epoch;
+    bool have_remaining;
+    uint32_t remaining; // X-RateLimit-Remaining
 } update_rate_capture_t;
 
 void update_rate_capture_init(update_rate_capture_t *c);
@@ -131,6 +133,9 @@ void update_rate_capture_feed(update_rate_capture_t *c, const char *key, const c
 uint32_t update_rate_backoff_s(const update_rate_capture_t *c, int status, int64_t now_epoch);
 // True for the statuses that mean "slow down": 403, 429 and 5xx.
 bool update_status_is_rate_or_server(int status);
+// UPDLOW MED-1: true only for a real rate limit: 429, or 403 carrying Retry-After or X-RateLimit-Remaining: 0.
+// Any other 403 is an access error (private repo, bad path), not a rate limit.
+bool update_status_is_rate_limited(const update_rate_capture_t *c, int status);
 
 #ifdef __cplusplus
 }

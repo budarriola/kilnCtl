@@ -422,6 +422,12 @@ void update_rate_capture_feed(update_rate_capture_t *c, const char *key, const c
             c->retry_after_s = v > UPDATE_BACKOFF_MAX_S ? UPDATE_BACKOFF_MAX_S : (uint32_t)v;
         }
     }
+    if (strlen(key) == 21 && ieq_n(key, "X-RateLimit-Remaining", 21)) {
+        if (parse_u64(value, &v)) {
+            c->have_remaining = true;
+            c->remaining = v > 0xFFFFFFFFll ? 0xFFFFFFFFu : (uint32_t)v;
+        }
+    }
     if (strlen(key) == 17 && ieq_n(key, "X-RateLimit-Reset", 17)) {
         if (parse_u64(value, &v)) {
             c->have_reset = true;
@@ -435,16 +441,31 @@ bool update_status_is_rate_or_server(int status)
     return status == 403 || status == 429 || (status >= 500 && status <= 599);
 }
 
+bool update_status_is_rate_limited(const update_rate_capture_t *c, int status)
+{
+    if (status == 429) {
+        return true;
+    }
+    if (status == 403 && c != NULL) {
+        return c->have_retry_after || (c->have_remaining && c->remaining == 0);
+    }
+    return false;
+}
+
 uint32_t update_rate_backoff_s(const update_rate_capture_t *c, int status, int64_t now_epoch)
 {
     int64_t s;
-    bool rate = (status == 403 || status == 429);
+    const bool limited = update_status_is_rate_limited(c, status);
+    // Reset is the window end of a real limit only: with Remaining > 0 it says nothing about this answer,
+    // and a 5xx must never inherit it.
+    const bool reset_ok = limited && c != NULL && c->have_reset && now_epoch > 0 &&
+                          (!c->have_remaining || c->remaining == 0);
     if (c != NULL && c->have_retry_after) {
         s = c->retry_after_s;
-    } else if (c != NULL && c->have_reset && now_epoch > 0) {
+    } else if (reset_ok) {
         s = c->reset_epoch - now_epoch;
     } else {
-        s = rate ? UPDATE_BACKOFF_DEFAULT_RATE_S : UPDATE_BACKOFF_DEFAULT_SERVER_S;
+        s = limited ? UPDATE_BACKOFF_DEFAULT_RATE_S : UPDATE_BACKOFF_DEFAULT_SERVER_S;
     }
     if (s < (int64_t)UPDATE_BACKOFF_MIN_S) {
         s = UPDATE_BACKOFF_MIN_S;

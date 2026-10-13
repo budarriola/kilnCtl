@@ -164,6 +164,20 @@ static void test_settings_http(void)
     CHECK(post_settings("repo=alice%2Fproj", 0) == 200, "settings POST: valid repo -> 200");
     CHECK(strcmp(g_set_last, "alice/proj") == 0 && g_set_calls == 1, "decoded repo passed to update_settings_set once");
     CHECK(resp_has("\"repo\":\"alice/proj\"") && resp_has("\"is_default\":false"), "success body is the new setting");
+    // UPDLOW MED-1: a backoff earned against the OLD repo is cleared by a successful repo change only.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "300";
+    run_job_and_result("/api/update/check");
+    CHECK(POST("/api/update/check", NULL) == 429 && resp_has("\"error\":\"backoff\""), "backoff active before settings change");
+    g_set_result = ESP_FAIL;
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 500, "failed settings POST");
+    CHECK(POST("/api/update/check", NULL) == 429, "failed settings POST leaves the backoff in place");
+    g_set_result = ESP_OK;
+    CHECK(post_settings("repo=bob%2Fproj", 0) == 200, "successful settings POST");
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(POST("/api/update/check", NULL) == 202, "repo change cleared the backoff");
+    wait_idle();
     strcpy(g_fr_repo, "budarriola/kilnCtl");
 }
 
@@ -305,7 +319,7 @@ static void test_stage_routes_extra(void)
     CHECK(!stage_staged() && stage_phase() == UPDATE_STAGE_IDLE, "refused downgrade staged nothing");
     (void)e0;
     expect_claim_balanced("downgrade upload");
-    // STAGEVERFX2 LOW-2: a -dirty descriptor (upgrade, so only the dirty rule can refuse) reaches the policy
+    // STAGEVERFX LOW-2: a -dirty descriptor (upgrade, so only the dirty rule can refuse) reaches the policy
     // through update_http's gate as dirty=true and is answered refuse_dirty, forced or not.
     {
         static uint8_t dirty_img[IMG_LEN];

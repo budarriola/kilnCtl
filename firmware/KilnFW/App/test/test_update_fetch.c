@@ -726,9 +726,43 @@ static void test_updlow(void)
     g_fr_routes[0].status = 403;
     g_fr_routes[0].ratelimit_reset = reset;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "rate_limited") == 0, "403 -> rate_limited");
-    CHECK(status_retry_after() >= 250 && status_retry_after() <= 300, "X-RateLimit-Reset sets the backoff");
+    CHECK(strcmp(g_error, "access_denied") == 0, "403 with only a reset header is an access error, not rate_limited");
+    CHECK(status_retry_after() >= 50 && status_retry_after() <= 60, "non-rate 403 gets the normal backoff, not the reset window");
     outwait_backoff();
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 403;
+    g_fr_routes[0].ratelimit_reset = reset;
+    g_fr_routes[0].ratelimit_remaining = "0";
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "rate_limited") == 0, "403 with Remaining 0 -> rate_limited");
+    CHECK(status_retry_after() >= 250 && status_retry_after() <= 300, "X-RateLimit-Reset sets the backoff when Remaining is 0");
+    outwait_backoff();
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 403;
+    g_fr_routes[0].ratelimit_reset = reset;
+    g_fr_routes[0].ratelimit_remaining = "7";
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "access_denied") == 0 && status_retry_after() <= 60, "403 with Remaining 7 ignores the reset window");
+    outwait_backoff();
+
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 503;
+    g_fr_routes[0].ratelimit_reset = reset;
+    run_job_and_result("/api/update/check");
+    CHECK(strcmp(g_error, "server_error") == 0 && status_retry_after() <= 60, "5xx never inherits a reset-window backoff");
+    outwait_backoff();
+
+    // LOW-3: tick-difference wrap. Backoff set, then the tick counter jumps past 2^31 ticks: expired, not active.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fr_routes[0].status = 429;
+    g_fr_routes[0].retry_after = "300";
+    run_job_and_result("/api/update/check");
+    CHECK(status_retry_after() > 0, "wrap test: backoff active");
+    g_fr_tick_skew_ms += 2147483648LL + 1000000LL;
+    job_result();
+    CHECK(status_retry_after() == 0, "backoff expired across a >2^31 tick jump (unsigned elapsed)");
 
     fixture(g_sha_hex, IMG_LEN);
     g_fr_routes[0].status = 503;
@@ -750,6 +784,7 @@ static void test_updlow(void)
     g_fr_routes[0].advertised = -5;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "timeout") == 0, "header timeout labelled timeout");
+    CHECK(g_fr_hdr_eagain_n == 10, "header stall patience is exactly 10 slices");
     expect_claim_balanced("header timeout");
 
     // LOW-4/8: a read that never delivers fails as timeout after the stall budget
@@ -758,6 +793,14 @@ static void test_updlow(void)
     g_fr_routes[0].stall_reads = 0;
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "timeout") == 0, "stalled read labelled timeout");
+    CHECK(g_fr_eagain_n == 10, "body stall patience is exactly 10 slices");
+
+    // LOW-4/M10: progress resets the stall count -- 9 stalled reads before every chunk still completes
+    fixture(g_sha_hex, IMG_LEN);
+    g_app_route->stall_per_chunk = 9;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_error, "timeout") != 0, "trickling body with progress is not a stall");
+    CHECK(g_fr_eagain_n >= 18, "trickle test really stalled across several chunks");
 
     // LOW-8: cancel lands within a slice while a read is stalled
     for (int hdr = 0; hdr < 2; hdr++) {

@@ -152,7 +152,7 @@ typedef struct {
     bool force;
     bool allow_downgrade;
     const char *confirm;   // typed confirm text, NULL/"" = none
-    bool dirty;            // the image descriptor said "-dirty" (undeclared upload): the dirty rule refuses it
+    bool dirty;            // the image descriptor said "-dirty" (declared or undeclared upload): the dirty rule refuses it
 } update_upload_request_t;
 
 // An image without the record has an unknown schema: it needs force AND the typed confirm, on top of

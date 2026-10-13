@@ -38,6 +38,9 @@ extern "C" {
 // stager exists. Returns an error if a route cannot be registered.
 esp_err_t update_fetch_start(httpd_handle_t server);
 
+// UPDLOW MED-1: drop the rate/server-error backoff (a repo change makes the old answer irrelevant).
+void update_fetch_backoff_clear(void);
+
 #ifdef __cplusplus
 }
 #endif

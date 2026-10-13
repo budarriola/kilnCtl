@@ -38,6 +38,36 @@ if(DEFINED ENV{KILNCTL_RELEASE_VERSION} AND NOT "$ENV{KILNCTL_RELEASE_VERSION}" 
     set(KILN_CONFIGURED_RELEASE_VERSION "$ENV{KILNCTL_RELEASE_VERSION}")
 else()
     set(KILN_CONFIGURED_RELEASE_VERSION "")
+    # Dev build: ESP-IDF would use `git describe --always --dirty`, which esp_app_desc_t.version cuts to
+    # 31 chars -- a long describe loses its trailing "-dirty" and the image would stage as a clean upgrade
+    # (REVIEW_STAGEVERFX2 MED-1). Compose the string here so "-dirty" always survives within 31 chars.
+    find_package(Git QUIET)
+    if(GIT_FOUND)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" describe --always --tags --abbrev=7
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" OUTPUT_VARIABLE _kiln_gd
+                        OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _kiln_gd_rc ERROR_QUIET)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" diff-index --quiet HEAD --
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" RESULT_VARIABLE _kiln_dirty_rc ERROR_QUIET)
+        if(_kiln_gd_rc EQUAL 0 AND NOT "${_kiln_gd}" STREQUAL "")
+            set(_kiln_dsfx "")
+            if(NOT _kiln_dirty_rc EQUAL 0)
+                set(_kiln_dsfx "-dirty")
+            endif()
+            string(LENGTH "${_kiln_gd}${_kiln_dsfx}" _kiln_vl)
+            if(_kiln_vl GREATER 31)
+                # Too long (tag-N-gHASH): fall back to the bare short hash, which always fits with "-dirty".
+                execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short=7 HEAD
+                                WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}" OUTPUT_VARIABLE _kiln_gd
+                                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+                string(LENGTH "${_kiln_gd}${_kiln_dsfx}" _kiln_vl)
+            endif()
+            if(_kiln_vl GREATER 31 OR "${_kiln_gd}" STREQUAL "")
+                message(FATAL_ERROR "dev PROJECT_VER '${_kiln_gd}${_kiln_dsfx}' is ${_kiln_vl} characters; "
+                                    "esp_app_desc_t.version holds at most 31 and must keep '-dirty'.")
+            endif()
+            set(PROJECT_VER "${_kiln_gd}${_kiln_dsfx}")
+        endif()
+    endif()
 endif()
 # Remembered in the cache so a reused build dir shows what it was configured with. The env var does
 # not trigger a reconfigure by itself, so gen_build_info.cmake (run every build) compares the env

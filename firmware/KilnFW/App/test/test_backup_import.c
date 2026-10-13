@@ -147,6 +147,7 @@ static bool test_backup_import_apply(const char *body, char *err_msg, size_t err
 // below can call its static POST/GET handlers directly (its other two symbols resolve against
 // the real http_auth_http.c / the NULL wifi_provision_http_get_server() fake in this executable).
 esp_err_t httpd_resp_send_500(httpd_req_t *r); // defined below with the other httpd stubs
+void update_fetch_backoff_clear(void) {} /* UPDLOW MED-1: update_fetch.c is not linked here */
 #include "../drivers/update/update_settings_http.c"
 
 // LIVE_EDIT_WORKING_SLOT_ID (== PROFILES_MAX_COUNT) -- used by the

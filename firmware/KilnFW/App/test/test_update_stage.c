@@ -943,7 +943,7 @@ static void test_install_gate(void)
                    r.dirty,
                "undeclared V...-dirty: stripped and dirty");
     {
-        static const char *const refused[] = {"-dirty", "v-dirty", "v1.0.0-DIRTY", "V1.0.0-pre.3-DIRTY"};
+        static const char *const refused[] = {"-dirty", "v-dirty", "-DIRTY", "v1.0.0-DIRTY", "V1.0.0-pre.3-DIRTY"};
         for (size_t i = 0; i < sizeof(refused) / sizeof(refused[0]); i++) {
             reset_board();
             memset(&r, 0, sizeof(r));
@@ -958,7 +958,7 @@ static void test_install_gate(void)
     make_image(30000, "v1.0.0-pre.3");
     TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty && strcmp(r.semver, "1.0.0-pre.3") == 0,
                "undeclared clean descriptor: not dirty");
-    // STAGEVERFX2 LOW-1: a DECLARED version derives dirty from the descriptor too.
+    // STAGEVERFX LOW-1: a DECLARED version derives dirty from the descriptor too.
     reset_board();
     memset(&r, 0, sizeof(r));
     make_image(30000, "v1.0.0-pre.3-dirty");
@@ -971,6 +971,23 @@ static void test_install_gate(void)
     make_image(30000, "v1.0.0-pre.3");
     TEST_CHECK(upload_gated(30000, 4096, "1.0.0-pre.3", rec_gate, &r) == UPDATE_STAGE_OK && !r.dirty,
                "declared, clean descriptor: not dirty");
+    // REVIEW_STAGEVERFX2 LOW-1: the smallest case-variant suffix (dn is exactly "-DIRTY", dl == 6) is refused when declared too.
+    reset_board();
+    memset(&r, 0, sizeof(r));
+    make_image(30000, "-DIRTY");
+    TEST_CHECK(upload_gated(30000, 4096, "1.0.0", rec_gate, &r) == UPDATE_STAGE_ERR_BAD_VERSION && r.calls == 0 && !is_staged(),
+               "declared, exactly -DIRTY descriptor: refused");
+    // MED-1: a dev version composed by CMake to exactly fill the 31-char descriptor still ends in "-dirty": stripped and dirty.
+    {
+        const char *full = "v1.0.0-pre.3-123-gabcdef0-dirty";
+        TEST_CHECK(strlen(full) == 31, "fixture is exactly 31 chars");
+        reset_board();
+        memset(&r, 0, sizeof(r));
+        make_image(30000, full);
+        TEST_CHECK(upload_gated(30000, 4096, NULL, rec_gate, &r) == UPDATE_STAGE_OK && r.dirty &&
+                       strcmp(r.semver, "1.0.0-pre.3-123-gabcdef0") == 0,
+                   "31-char dev version keeps -dirty: stripped and flagged dirty");
+    }
     reset_board();
     memset(&r, 0, sizeof(r));
     make_image(30000, "v1.0.0-pre.3-DIRTY");

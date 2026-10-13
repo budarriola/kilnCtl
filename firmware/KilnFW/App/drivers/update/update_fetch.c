@@ -81,9 +81,10 @@ static const char *TAG = "update_fetch";
 // cancel flag is checked between slices, so a cancel takes effect within about 1 s there.
 #define FETCH_HTTP_TIMEOUT_MS 5000
 #define FETCH_SLICE_MS 1000
-// A header or body read that times out FETCH_STALL_SLICES slices in a row (5 s without a byte) is a
-// "timeout" failure, same total patience as the former 5 s socket timeout.
-#define FETCH_STALL_SLICES 5u
+// A header or body read that times out FETCH_STALL_SLICES slices in a row (10 s without a byte) is a
+// "timeout" failure (UPDLOW LOW-2: the pre-slicing patience was about 10 s, 5 s was too eager on a
+// slow GitHub CDN hop).
+#define FETCH_STALL_SLICES 10u
 // Stack sizes are still the WP7 spike's numbers. OWED ON THE BENCH: measure the production
 // high-water marks (stack_margin reports "update_fetch" and "update_fetch_wr") over a full
 // download that includes the redirect hop with a JWT-sized URL, and adjust. Not measured here.
@@ -291,12 +292,20 @@ static int64_t now_epoch(void)
 // handlers refuse with 429 until the "not before" tick passes, so a retrying UI or script cannot hammer
 // GitHub. RAM only (a reboot clears it); duration comes from Retry-After / X-RateLimit-Reset, clamped.
 static volatile bool s_backoff_valid;
-static volatile uint32_t s_backoff_until;
+static volatile uint32_t s_backoff_start; // tick at note time
+static volatile uint32_t s_backoff_ticks; // duration; elapsed = unsigned tick difference (wrap-safe)
 
 static void backoff_note(uint32_t secs)
 {
-    s_backoff_until = xTaskGetTickCount() + pdMS_TO_TICKS(secs * 1000u);
+    s_backoff_start = xTaskGetTickCount();
+    s_backoff_ticks = pdMS_TO_TICKS(secs * 1000u);
     s_backoff_valid = true;
+}
+
+// A repo change makes the old answer irrelevant (it was about a different repository).
+void update_fetch_backoff_clear(void)
+{
+    s_backoff_valid = false;
 }
 
 static uint32_t backoff_remaining_s(void)
@@ -304,12 +313,12 @@ static uint32_t backoff_remaining_s(void)
     if (!s_backoff_valid) {
         return 0;
     }
-    const int32_t left = (int32_t)(s_backoff_until - xTaskGetTickCount());
-    if (left <= 0) {
+    const uint32_t elapsed = (uint32_t)(xTaskGetTickCount() - s_backoff_start);
+    if (elapsed >= s_backoff_ticks) {
         s_backoff_valid = false;
         return 0;
     }
-    return ((uint32_t)left * portTICK_PERIOD_MS + 999u) / 1000u;
+    return ((s_backoff_ticks - elapsed) * portTICK_PERIOD_MS + 999u) / 1000u;
 }
 
 static bool deadline_passed(const work_t *w)
@@ -566,6 +575,11 @@ static update_stage_err_t wr_call(wr_cmd_id_t cmd, const uint8_t *data, size_t l
         if (xSemaphoreTake(s_c->wr_done, pdMS_TO_TICKS(1000)) != pdTRUE) {
             // The give never came: treat as a wedge so a stray later give cannot put ops out of step.
             s_c->wr_wedged = true;
+            // LOW-1: the writer already finished this op (arb said so), so it will never hand off again:
+            // tell fetch_task to free the job buffers itself instead of leaking them to a writer that is gone.
+            portENTER_CRITICAL(&s_wr_mux);
+            s_c->wr_late_exited = true;
+            portEXIT_CRITICAL(&s_wr_mux);
             ESP_LOGE(TAG, "flash writer op %d: completion give missing after finishing in the timeout instant", (int)cmd);
             // No flash access here (the writer may still own the scratch): say from the op alone whether
             // an installable stage can exist. Only a completed WR_FINISH leaves a verified, installable stage.
@@ -664,7 +678,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         unsigned hslices = 0;
         for (;;) {
             clen = esp_http_client_fetch_headers(c);
-            if (clen != -ESP_ERR_HTTP_EAGAIN || s_c->cancel || ++hslices >= FETCH_STALL_SLICES) {
+            if (clen != -ESP_ERR_HTTP_EAGAIN || s_c->cancel || deadline_passed(w) || ++hslices >= FETCH_STALL_SLICES) {
                 break;
             }
         }
@@ -699,7 +713,10 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
             }
         } else if (update_status_is_rate_or_server(status)) {
             // LOW-2: rate limit / server error get their own reasons and a backoff the POST handlers honour.
-            fail = (status == 403 || status == 429) ? "rate_limited" : "server_error";
+            // UPDLOW MED-1: only a real limit is "rate_limited"; a plain 403 is an access error.
+            fail = update_status_is_rate_limited(&w->rate_cap, status) ? "rate_limited"
+                   : (status == 403)                                   ? "access_denied"
+                                                                        : "server_error";
             backoff_note(update_rate_backoff_s(&w->rate_cap, status, now_epoch()));
         } else if (status != 200) {
             fail = "http_status";
