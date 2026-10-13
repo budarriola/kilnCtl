@@ -25,6 +25,7 @@ typedef struct {
     int write_calls;
     int clear_calls;
     int apply_calls;
+    int apply_attempts_seen;
 } fake_t;
 
 enum { EV_READ = 1, EV_CLEAR, EV_STAGE, EV_APPLY, EV_RES, EV_WRITE };
@@ -99,6 +100,10 @@ static int f_apply(void *c)
     fake_t *f = c;
     ev(f, EV_APPLY);
     f->apply_calls++;
+    {
+        update_install_req_t seen;
+        f->apply_attempts_seen = update_install_req_decode(f->req, f->req_len, &seen) ? (int)seen.attempts : -1;
+    }
     return f->apply_rc;
 }
 
@@ -204,6 +209,7 @@ static void test_boot_logic(void)
     TEST_CHECK(update_install_req_decode(f.req, f.req_len, &r) && r.attempts == 1, "attempt counter raised to 1");
     TEST_CHECK(index_of(&f, EV_WRITE) >= 0 && index_of(&f, EV_WRITE) < index_of(&f, EV_APPLY),
                "attempt counter written BEFORE the apply starts");
+    TEST_CHECK(f.apply_attempts_seen == 1, "stored counter already raised when the apply starts");
     TEST_CHECK(strcmp(res.semver, "1.0.0-pre.3") == 0, "started outcome carries the target version");
 
     // Idempotent re-run after a simulated power cut mid-copy: request still there.
