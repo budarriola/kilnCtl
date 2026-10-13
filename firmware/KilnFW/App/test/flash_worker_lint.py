@@ -118,6 +118,11 @@ from pathlib import Path
 # above. Say which pattern and why in the comment, the same way every
 # existing entry does.
 ALLOWLIST = {
+    # Pattern 3 (internal-SRAM-stack caller): the unattended-install request
+    # record (kiln_nvs / upd_inst) is written and erased only from
+    # update_install_http.c's POST handler, on the httpd task's internal-SRAM
+    # stack -- never the flash worker, never a PSRAM stack.
+    "update_install_http.c",
     # Pattern 1 (worker dispatch): save_kibase_job() runs via
     # uart_bridge_ext_run_on_flash_worker(), checking
     # uart_bridge_ext_is_on_flash_worker() first for the re-entrant case
