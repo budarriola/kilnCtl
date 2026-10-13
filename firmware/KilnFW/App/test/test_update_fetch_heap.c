@@ -85,7 +85,7 @@ static void test_hop(void)
 static void test_dma(void)
 {
     TEST_SECTION("update_fetch_heap -- DMA-capable free (UPDFX5 derived floor)");
-    TEST_CHECK(FETCH_DMA_FREE_MIN == 2452u, "DMA floor is abort level 10240 minus the 7788 B idle offset");
+    TEST_CHECK(FETCH_DMA_FREE_MIN == 2048u, "DMA floor is abort level 10240 minus the 8192 B floor, under the 2291 B healthy bench low-water");
     TEST_CHECK(FETCH_DMA_FREE_MIN + FETCH_DMA_IDLE_OFFSET_BYTES == FETCH_HEAP_ABORT_BELOW,
                "DMA floor corresponds to the internal abort level");
     TEST_CHECK(update_fetch_heap_dma_ok(6351u), "bench idle min_free 6351 passes");

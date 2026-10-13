@@ -234,9 +234,6 @@ static const char *heap_admit(const work_t *w, bool hop)
         if (hv != FETCH_HEAP_LOW_FREE || tries >= FETCH_HEAP_SETTLE_TRIES) {
             break;
         }
-        if (s_c->cancel) {
-            return "cancelled";
-        }
         vTaskDelay(pdMS_TO_TICKS(FETCH_HEAP_SETTLE_MS));
         // UPDFX5 LOW-2: every tick re-checks cancel, the job deadline (once armed) and a firing start, and
         // reports them as themselves, not as a heap refusal.

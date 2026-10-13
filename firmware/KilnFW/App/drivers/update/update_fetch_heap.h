@@ -84,9 +84,10 @@
 //   ONLY guard for the TLS handshake, the hop's esp_http_client_open and anything inside a single
 //   esp_http_client_read: the mid-body abort (FETCH_HEAP_ABORT_BELOW) runs only BETWEEN body reads, so it covers
 //   the body phase only and cannot see a dip in those other phases (UPDFX4 MED-1). The floor is NOT guaranteed
-//   there; the admission value is left unchanged pending bench data. At the idle minimum the measured draw leaves 28623 - 20936 = 7687 B, 505 B under the floor, if
-//   httpd polling coincides with the handshake: a documented residual hazard, closed only by the per-phase
-//   bench measurement in REVIEW_UPDFX3 Fix status (MED-1/MED-2), not by a larger constant.
+//   there; the admission value is unchanged (UPDFX5 MED-1).
+//   Margin, bench-measured draw (v1.0.0-pre.3 fetch on c549a144c: internal draw from idle 20240 B, an earlier run 20936 B;
+//   the worse figure is used): idle minimum 29647 - 20936 = 8711 B, 519 B ABOVE the 8192 B floor. The 1024 B stager
+//   scratch is part of that draw measurement, not extra. The internal largest-block low-water was 7680 B.
 //   The older 28532 B / 29556 B / 3931 B / 31123 figures in the UPDFX1..3 paragraphs above are superseded by
 //   28623 / 29647 and the measured 20936 B draw.
 //   DMA (MED-3, reworked by UPDFX5): see FETCH_DMA_FREE_MIN below; the 551 B benchupd2 figure is a low-water over
@@ -149,12 +150,12 @@ extern "C" {
 // A LOW_FREE verdict is re-sampled this many times, this far apart, before the request is refused.
 #define FETCH_HEAP_SETTLE_TRIES 12u
 #define FETCH_HEAP_SETTLE_MS 250u
-// DMA-capable internal free. UPDFX5 (REVIEW_UPDFX4 MED-2): the floor is DERIVED, not a fixed 4096 B. Idle DMA-capable
-// free sits about 7788 B below internal free (22511 vs 30299 B, benchupd2), so the DMA level equivalent to the
-// FETCH_HEAP_ABORT_BELOW internal abort (10240 B) is 10240 - 7788 = 2452 B. A fixed 4096 B corresponded to about
-// 11.9 KB internal free, above the internal abort, and would have aborted a healthy body phase the internal rule
-// lets finish. At 2452 B the DMA guard fires no earlier than the internal one for the same pressure.
-#define FETCH_DMA_IDLE_OFFSET_BYTES 7788u
+// DMA-capable internal free. UPDFX5 (REVIEW_UPDFX4 MED-2): the floor is DERIVED from bench data, not a fixed 4096 B.
+// Bench (v1.0.0-pre.3 fetch, verified OK on c549a144c): DMA min_free fell 6767 -> 2291 B on a HEALTHY download, i.e.
+// below the old 4096 B floor, and also below the 2452 B (10240 - 7788) first derived from idle offsets. So the floor is
+// FETCH_HEAP_ABORT_BELOW - FETCH_HEAP_FLOOR_BYTES = 2048 B: 243 B under the healthy low-water, and it only fires on a
+// sustained run/window of low reads (below), never on one momentary dip.
+#define FETCH_DMA_IDLE_OFFSET_BYTES FETCH_HEAP_FLOOR_BYTES
 #define FETCH_DMA_FREE_MIN (FETCH_HEAP_ABORT_BELOW - FETCH_DMA_IDLE_OFFSET_BYTES)
 // Mid-body: the sample is taken only AFTER a read that returned data (a stalled EAGAIN slice is not a read and
 // is never sampled). Abort on FETCH_DMA_LOW_READS consecutive low samples, or FETCH_DMA_WINDOW_LOW low samples

@@ -322,7 +322,7 @@ static void test_claim_released_on_failures(void)
 
 static void drop_heap_low(void) { g_fake_heap_free_internal = 9000; }
 static void set_heap_hop_ok(void) { g_fake_heap_free_internal = 27855; g_fake_heap_largest_internal = 7680; }
-static void set_heap_hop_low(void) { g_fake_heap_free_internal = 26000; }
+static void set_heap_hop_low(void) { g_fake_heap_free_internal = 22910; }
 
 static void run_job_and_result(const char *uri)
 {
@@ -333,11 +333,11 @@ static void run_job_and_result(const char *uri)
 
 static void test_heap_admission_updfx2(void)
 {
-    // MED-1: 26000 B free admits neither kind (check needs the download need).
+    // MED-1: 22910 B free admits neither kind (check needs the download need).
     fixture(g_sha_hex, IMG_LEN);
-    g_fake_heap_free_internal = 26000;
+    g_fake_heap_free_internal = 22910;
     run_job_and_result("/api/update/check");
-    CHECK(strcmp(g_error, "low_heap_free") == 0, "26000 B refuses a check");
+    CHECK(strcmp(g_error, "low_heap_free") == 0, "22910 B refuses a check");
     expect_claim_balanced("check low free");
 
     // check admitted with a 4096 B block; download refused LOW_BLOCK
@@ -504,17 +504,17 @@ static void test_heap_admission_updfx3(void)
     CHECK(g_fr_live_clients == 0, "mid-body DMA abort cleans the client up");
     expect_claim_balanced("mid-body dma");
 
-    // UPDFX5 MED-2: steady between-read samples above the derived floor (2452 B) but under the old fixed 4096 B
+    // UPDFX5 MED-2: steady between-read samples above the derived floor (2048 B) but under the old fixed 4096 B
     // one (a healthy body phase) do not abort.
     fixture(g_sha_hex, IMG_LEN);
     g_fake_heap_free_internal = 30311;
     for (int i = 0; i < 8; i++) {
-        g_fr_dma_seq[i] = 2600;
+        g_fr_dma_seq[i] = 2291;
     }
     g_fr_dma_seq_n = 8;
     g_app_route->on_read = arm_dma_seq;
     run_job_and_result("/api/update/download");
-    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA at 2600 B (above the derived floor) completes");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA at 2291 B (the bench healthy low-water, above the derived floor) completes");
     expect_claim_balanced("steady dma above floor");
 
     // A transient dip under the floor (two between-read samples) that recovers does not abort.
