@@ -168,3 +168,21 @@ so no CAUGHT comes from a compile failure.
 
 M7 is caught only because the fake returns a separate DMA value. On target,
 the two pools nearly coincide (LOW-3).
+
+## Fix status (UPDFX3)
+
+Fixed: MED-1 (redirect-hop slack restored to 3840 B), LOW-1..5, settle-wait on
+low free before refusing, 404 mapped to `no_stable_release`, and a mid-body
+DMA abort (`low_heap_dma`). DMA 551 B investigation: the DMA-capable margin
+is checked on its own pool at every hop and mid-body; the fake returns a
+separate DMA value so the check is exercised, while on target the pools nearly
+coincide.
+
+| Mutation | Result | Evidence |
+|---|---|---|
+| hop slack reduced | CAUGHT | test_update_fetch_heap.c:58 |
+| mid-body DMA abort removed | CAUGHT | test_update_fetch.c:467 |
+| settle-wait removed | CAUGHT | test_update_fetch.c:437/438 |
+| 404 not mapped to no_stable_release | CAUGHT | test_update_fetch.c:474 |
+| M8 scratch allocated for all kinds | CAUGHT | test_update_fetch.c:445 |
+| M12 DMA check skipped at hops | CAUGHT | test_update_fetch.c:461 "low DMA at a redirect hop refused" (assertion failure, mutant compiled) |
