@@ -19,6 +19,7 @@ static const char *TAG = "recovery_apply";
 
 #define APPLY_TASK_STACK 8192
 #define APPLY_TASK_PRIO 4
+#define APPLY_POLL_STACK 3072 // recovery_install.c poll task stack (internal RAM)
 #define STAGE_LABEL "stage"
 // Same floor as the Pico relay (recovery_pico.c): free internal RAM that must
 // remain after the task stack is allocated.
@@ -194,13 +195,18 @@ esp_err_t recovery_apply_esp_start(const esp_partition_t *app, int (*pre_boot)(v
     if (!stage) {
         return ESP_ERR_NOT_FOUND;
     }
-    if (s_running) {
+    // Atomic claim: the main task (unattended install) and an httpd handler can race here.
+    bool expected = false;
+    if (!__atomic_compare_exchange_n(&s_running, &expected, true, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) < APPLY_INTERNAL_FLOOR + APPLY_TASK_STACK + 1024u) {
+    // The unattended-install poll task (recovery_install.c, APPLY_POLL_STACK) is created after this
+    // check, so its internal stack is counted here to keep the 8192 B floor.
+    if (heap_caps_get_free_size(MALLOC_CAP_INTERNAL) <
+        APPLY_INTERNAL_FLOOR + APPLY_TASK_STACK + APPLY_POLL_STACK + 1024u) {
+        __atomic_store_n(&s_running, false, __ATOMIC_SEQ_CST);
         return ESP_ERR_NO_MEM; // nothing touched; the caller reports it
     }
-    s_running = true;
     s_stack_free = 0;
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.stage = stage;

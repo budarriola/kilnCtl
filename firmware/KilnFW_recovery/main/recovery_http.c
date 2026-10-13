@@ -753,6 +753,7 @@ static esp_err_t recovery_exit_post(httpd_req_t *req)
         httpd_resp_set_status(req, "500 Internal Server Error");
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
+    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     esp_err_t serr = recovery_boot_partition_set_and_verify(app);
     if (serr == ESP_ERR_OTA_VALIDATE_FAILED) {
         app_verify_invalidate();
@@ -1041,6 +1042,16 @@ static int apply_pre_boot(void)
     return boot_guard_clear_or_na(msg, sizeof(msg)) ? 0 : -1;
 }
 
+// Manual apply: boot_guard clear, then drop any leftover auto-install request and stale result.
+static int manual_apply_pre_boot(void)
+{
+    int rc = apply_pre_boot();
+    if (rc == 0) {
+        (void)recovery_install_supersede();
+    }
+    return rc;
+}
+
 // Same clear for the unattended-install pre-boot hook (recovery_install.c).
 int recovery_http_boot_guard_clear(void)
 {
@@ -1100,7 +1111,7 @@ static esp_err_t apply_staged_post(httpd_req_t *req)
         return httpd_resp_send(req, bg_msg, HTTPD_RESP_USE_STRLEN);
     }
     app_verify_invalidate(); // `app` is about to be erased
-    esp_err_t e = recovery_apply_esp_start(app, apply_pre_boot);
+    esp_err_t e = recovery_apply_esp_start(app, manual_apply_pre_boot);
     if (e != ESP_OK) {
         httpd_resp_set_status(req, e == ESP_ERR_INVALID_STATE ? "409 Conflict" : "500 Internal Server Error");
         return httpd_resp_send(req, "could not start the apply", HTTPD_RESP_USE_STRLEN);

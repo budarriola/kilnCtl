@@ -19,6 +19,9 @@ void recovery_install_boot(void);
 
 // Snapshot of the persisted result taken at boot and refreshed when this boot
 // records one. Returns true when a result exists.
+// Clears a leftover install request and result (operator exit / manual apply). 0 = request gone.
+int recovery_install_supersede(void);
+
 bool recovery_install_last_result(update_install_res_t *out);
 
 #ifdef __cplusplus

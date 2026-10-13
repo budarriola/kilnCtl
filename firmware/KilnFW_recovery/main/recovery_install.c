@@ -17,7 +17,7 @@
 static const char *TAG = "rec_install";
 
 #define KILN_NVS_PART "kiln_nvs"
-#define POLL_TASK_STACK 3072 // internal RAM: this task writes NVS
+#define POLL_TASK_STACK 3072 // internal RAM: this task writes NVS; mirrored as APPLY_POLL_STACK in recovery_apply_esp.c
 #define POLL_TASK_PRIO 3
 
 static update_install_res_t s_last;
@@ -241,7 +241,17 @@ void recovery_install_boot(void)
     } else if (o == UPD_INST_BOOT_STARTED) {
         ESP_LOGW(TAG, "install request found; apply started");
         if (xTaskCreate(poll_task, "rec_inst_poll", POLL_TASK_STACK, NULL, POLL_TASK_PRIO, NULL) != pdPASS) {
+            // Nobody would record an apply failure: surface it now (status + LCD), not only in the log.
             ESP_LOGE(TAG, "poll task create failed");
+            update_install_record_result(&s_ops, UPD_INST_RES_FAIL, UPD_INST_REASON_APPLY_FAILED, s_semver);
+            load_last();
+            if (!s_have_last) {
+                memset(&s_last, 0, sizeof(s_last));
+                s_last.code = UPD_INST_RES_FAIL;
+                s_last.reason = UPD_INST_REASON_APPLY_FAILED;
+                s_have_last = true;
+            }
+            show_failure(UPD_INST_REASON_APPLY_FAILED);
         }
     }
 }
@@ -253,4 +263,19 @@ bool recovery_install_last_result(update_install_res_t *out)
     }
     *out = s_last;
     return true;
+}
+
+// A request/result left from an earlier recovery entry must not outlive an operator action
+// (recovery_exit, manual apply). Drops both, so no later entry re-applies and status shows none.
+int recovery_install_supersede(void)
+{
+    int rq = kv_clear(UPD_INST_KEY_REQ);
+    int rs = kv_clear(UPD_INST_KEY_RES);
+    if (rs == 0) {
+        s_have_last = false;
+    }
+    if (rq != 0) {
+        ESP_LOGE(TAG, "could not clear leftover install request");
+    }
+    return rq;
 }

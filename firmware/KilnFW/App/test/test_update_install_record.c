@@ -179,6 +179,19 @@ static void test_codec(void)
     TEST_CHECK(update_install_res_decode(rb, sizeof(rb), &d) && d.code == UPD_INST_RES_FAIL &&
                    d.reason == UPD_INST_REASON_SHA_MISMATCH && strcmp(d.semver, "1.0.0") == 0,
                "result round trips");
+    {
+        update_install_res_t o2 = s;
+        uint8_t ob[UPD_INST_RES_SIZE];
+        o2.code = (uint8_t)(UPD_INST_RES_FAIL + 1);
+        TEST_CHECK(update_install_res_encode(&o2, ob) == UPD_INST_RES_SIZE &&
+                       !update_install_res_decode(ob, sizeof(ob), &d),
+                   "valid-CRC result with out-of-range code refused");
+        o2 = s;
+        o2.reason = UPD_INST_REASON_COUNT;
+        TEST_CHECK(update_install_res_encode(&o2, ob) == UPD_INST_RES_SIZE &&
+                       !update_install_res_decode(ob, sizeof(ob), &d),
+                   "valid-CRC result with out-of-range reason refused");
+    }
     rb[5] = 9;
     TEST_CHECK(!update_install_res_decode(rb, sizeof(rb), &d), "tampered result refused (CRC)");
     TEST_CHECK(strcmp(update_install_reason_name(UPD_INST_REASON_SHA_MISMATCH), "sha_mismatch") == 0,
@@ -351,6 +364,8 @@ typedef struct {
     bool safe, busy, verified;
     int erase_rc, write_rc;
     int writes;
+    bool zero_len;
+    bool empty_semver;
     uint8_t blob[UPD_INST_REQ_SIZE];
 } app_t;
 
@@ -360,9 +375,9 @@ static bool a_stage(void *c, bool *busy, uint32_t *len, uint8_t sha[UPD_INST_SHA
 {
     app_t *a = c;
     *busy = a->busy;
-    *len = 1234;
+    *len = a->zero_len ? 0 : 1234;
     memset(sha, 0x5A, UPD_INST_SHA_LEN);
-    strcpy(sv, "1.0.0-pre.3");
+    strcpy(sv, a->empty_semver ? "" : "1.0.0-pre.3");
     return a->verified;
 }
 static int a_erase(void *c) { app_t *a = c; aev(a, 1); return a->erase_rc; }
