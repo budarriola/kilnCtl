@@ -3259,3 +3259,5 @@ Board dev firmware d93cf774a, MCP server fresh at 129586d4f with KILNCTL_AUX_BEN
 - AX-R01 PASS (restore)
 
 Plan step 9 (convert ON_OFF zones to aux) is a one-way owner-offered conversion, not a bench step; not run. End state: idle, link up, armed, no trip; no BENCH_AUX_RULE slot (profiles_list shows only M18C_TEST, B1_THROWAWAY); aux enabled_mask 0.
+- `20261009T215021Z_web_benchweb` suite=`web` exit_code=1 PASS=78 FAIL=24 INCONCLUSIVE=3 NOT_RUN=13 SKIP=2 esp_fw=Oct  9 2026 14:44:39 pico_fw=Pico build: 405d3c54 built 2026-09-25 22:44:34Z log=`logs/bench_test/20261009T215021Z_web_benchweb/`
+- `20261010T180128Z_aux_bench1` suite=`aux` exit_code=3 PASS=0 FAIL=0 INCONCLUSIVE=0 NOT_RUN=5 SKIP=2 esp_fw=Oct 10 2026 10:11:00 pico_fw=Pico build: e6a0ff34 built 2026-10-10 04:59:54Z log=`logs/bench_test/20261010T180128Z_aux_bench1/`
