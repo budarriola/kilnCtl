@@ -166,7 +166,7 @@ assertion (`FAIL test_*.c:<line>`); none was a compile failure.
 
 ## Fix status
 
-Fixed in 48010bf4a and d884f482c (rebased onto origin/dev; landed SHAs recorded below once pushed). Targeted host tests (`update_*`, `backup_import`) pass.
+Fixed in c06550dcc and 457ebc80b ( landed as c06550dcc and 457ebc80b). Targeted host tests (`update_*`, `backup_import`) pass.
 
 | Finding | Status |
 |---|---|
