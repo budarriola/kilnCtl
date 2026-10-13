@@ -239,11 +239,16 @@ class RebootEvidenceTests(_Base):
 class SlowReadTests(_Base):
     """Request latency on the uptime reads must not look like a reboot."""
 
-    def _run(self, delay, reboot):
+    def _run(self, delays, reboot):
+        """delays: per uptime read, (seconds before sampling, seconds before the answer returns)."""
+        calls = {"n": 0}
+
         def status(host, timeout=8.0):
-            self.clock.t += delay
+            pre, post = delays[min(calls["n"], len(delays) - 1)]
+            calls["n"] += 1
+            self.clock.t += pre
             up = int(self.clock.t - self.boot_t)
-            self.clock.t += delay
+            self.clock.t += post
             return {"uptime_s": up}
         stale = _ok()
         seq = [stale, uhc.UpdateHttpError("down")] + [stale] * 200
@@ -255,18 +260,24 @@ class SlowReadTests(_Base):
                     self.reboot()
                 raise v
             return v
-        with mock.patch.object(dhc, "get_status", side_effect=status),              mock.patch.object(uhc, "get_install_status", side_effect=get),              mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+        with mock.patch.object(dhc, "get_status", side_effect=status), \
+             mock.patch.object(uhc, "get_install_status", side_effect=get), \
+             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
             return msu.update_install_staged(confirm=True, wait_s=60)
 
     def test_slow_reads_without_reboot_are_not_ok(self):
-        for d in (1.0, 1.5, 3.0):
-            with self.subTest(delay=d):
+        cases = {"slow before-read request": [(3.0, 0.0), (0.0, 0.0)],
+                 "slow after-read answer": [(0.0, 0.0), (0.0, 3.0)],
+                 "slow both, 1 s each": [(1.0, 1.0), (1.0, 1.0)],
+                 "slow both, 3 s each": [(3.0, 3.0), (3.0, 3.0)]}
+        for name, d in cases.items():
+            with self.subTest(case=name):
                 msu._PENDING_INSTALL.clear()
                 self.boot_t = self.clock.t - 600.0
                 self.assertTrue(self._run(d, False).startswith("UNKNOWN"))
 
     def test_slow_reads_with_real_reboot_are_ok(self):
-        self.assertTrue(self._run(1.0, True).startswith("ok"))
+        self.assertTrue(self._run([(1.0, 1.0)], True).startswith("ok"))
 
 
 class FollowUpTests(_Base):
