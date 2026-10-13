@@ -32,7 +32,7 @@ _RELEASE_CONFIRM_REFUSAL = ("error: refused -- suite 'release' trips the safety 
 
 @_core._tool()
 def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                    allow_heat: bool = True, lcd_stop_heat: bool = False,
+                    allow_heat: Optional[bool] = None, lcd_stop_heat: bool = False,
                     lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                     tag: Optional[str] = None, host: Optional[str] = None,
                     attended: bool = False, allow_flash: bool = False,
@@ -126,7 +126,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
 
     Suite `release` (the unattended release test set, plan section "Release
     suite"): `target="bench"` (default) or `"kiln"` picks the heat profile and
-    timeouts; heat phase needs `allow_heat=True`; `ota_install=True` also lets
+    timeouts; `allow_heat` defaults to False for this suite (True for every other),
+    so the heat phase needs an explicit `allow_heat=True`; `ota_install=True` also lets
     the OTA phase install the staged release (needs `confirm=True`, and the
     `update_install_staged` tool; absent it that step SKIPs)."""
     from .mcp_server_ota import _ota_resolve_host_with_source  # local import: avoids a circular import with mcp_server_ota.py
@@ -157,6 +158,9 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     ctx["target"] = target
     if ota_install is True:
         ctx["ota_install"] = True
+    # INFO-2: heat is opt-in for the release suite, default-on for every other.
+    if allow_heat is None:
+        allow_heat = suite != "release"
     if suite == "release" and not dry_run and confirm is not True:
         return _RELEASE_CONFIRM_REFUSAL
     if not dry_run and any(k.startswith(("ota_", "update_")) and k not in ("ota_allow_heat",) for k in ctx):
@@ -170,7 +174,8 @@ def bench_test_run(suite: str, cases: Optional[str] = None, dry_run: bool = Fals
     try:
         outcome = runner.run(suite=suite, cases=case_list, dry_run=dry_run,
                               allow_heat=allow_heat, lcd_stop_heat=lcd_stop_heat,
-                              lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag)
+                              lcd_edit_heat=lcd_edit_heat, ota_allow_heat=ota_allow_heat, tag=tag,
+                              confirm=confirm is True)
     except (KeyError, ValueError) as exc:
         return f"error: {exc}"
     except bt_board_lock.BoardLockHeld as exc:
@@ -288,7 +293,7 @@ def _runner_log_progress(started: float, suite: str, logs_root: Optional[str] = 
 
 @_core._tool()
 def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = False,
-                      allow_heat: bool = True, lcd_stop_heat: bool = False,
+                      allow_heat: Optional[bool] = None, lcd_stop_heat: bool = False,
                       lcd_edit_heat: bool = False, ota_allow_heat: bool = False,
                       tag: Optional[str] = None, host: Optional[str] = None,
                       attended: bool = False, allow_flash: bool = False,
@@ -306,7 +311,7 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     """Start `bench_test_run` in the background and return a job id at once.
 
     Same arguments, same meaning, same gating as `bench_test_run` (read its
-    docstring): the job runs that very tool function, so the board lock,
+    docstring; `allow_heat=None` means False for suite release, True otherwise): the job runs that very tool function, so the board lock,
     preflight and every opt-in flag (`allow_heat`, `lcd_stop_heat`,
     `lcd_edit_heat`, `ota_allow_heat`, `allow_flash`) apply unchanged, and a
     board-side refusal (`error: refused -- ...`) comes back as the job's FAILED
@@ -319,6 +324,9 @@ def bench_test_start(suite: str, cases: Optional[str] = None, dry_run: bool = Fa
     still going (check logs/bench_test/<run>/runner.log)."""
     # An unconfirmed OTA/update run is refused here, synchronously, before any job exists
     # (same as ota_matrix_start); bench_test_run re-checks inside the job.
+    # INFO-2: heat is opt-in for the release suite, default-on for every other.
+    if allow_heat is None:
+        allow_heat = suite != "release"
     if suite == "release" and not dry_run and confirm is not True:
         return _RELEASE_CONFIRM_REFUSAL
     if not dry_run and confirm is not True and (any(

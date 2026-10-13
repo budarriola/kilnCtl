@@ -279,6 +279,7 @@ def _heat_ctx(profiles, heap=20000, **extra):
         _profiles=profiles,
         _thermo=types.SimpleNamespace(read=lambda: [types.SimpleNamespace(channel=0, temperature_c=24.0, valid=True)]))
     extra.setdefault("_get_zones_config", lambda host: {"zones": [{"max_temp_c": 150.0}]})
+    extra.setdefault("_board_identity_fn", lambda host: (None, "10.0.0.5"))
     return ctx_with(snap(), srv=srv, allow_heat=True, _rl_heap_fn=lambda _c: heap,
                     _now=lambda: t["v"], _sleep=lambda s: t.__setitem__("v", t["v"] + s), **extra)
 
@@ -508,3 +509,215 @@ def test_verdict_line_one_per_phase():
     assert get_case("RL-V01").judge(c).verdict == Verdict.INCONCLUSIVE
     rows["RL-B01"] = types.SimpleNamespace(verdict=Verdict.FAIL)
     assert get_case("RL-V01").judge(c).verdict == Verdict.FAIL
+
+
+# -- REVIEW_RELSUITEFX fixes -------------------------------------------------
+
+
+class _Cancel:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, confirm=False):
+        self.calls.append(confirm)
+        return "ok cancelled"
+
+
+DIRTY = "ok - phase=downloading, busy=True, staged=False, header=none"
+
+
+def _dirty_after_stage(**over):
+    """update_status: empty before the stage call, dirty afterwards."""
+    state = {"n": 0}
+    cancel = _Cancel()
+
+    def status(host=None):
+        state["n"] += 1
+        return "ok - phase=idle, busy=False, staged=False, header=none" if state["n"] == 1 else DIRTY
+
+    s = _ota_srv(update_status=status, update_fetch_cancel=cancel, **over)
+    s.cancel = cancel
+    return s
+
+
+def _raise_stage(confirm=False, allow_prerelease=False):
+    raise OSError("link dropped mid download")
+
+
+@pytest.mark.parametrize("stage", [
+    _raise_stage,
+    lambda confirm=False, allow_prerelease=False: "FAILED: sha mismatch",
+    lambda confirm=False, allow_prerelease=False: "UNKNOWN",
+])
+def test_ota_stage_any_bad_outcome_cancels_then_clears(stage):
+    s = _dirty_after_stage(update_stage_release=stage)
+    c = ctx_with(snap(), srv=s)
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL
+    assert s.cancel.calls == [True] and s.cleared == [True]
+    assert not c.get("_tainted")
+
+
+def test_ota_stage_raise_clear_failure_taints():
+    s = _dirty_after_stage(update_stage_release=_raise_stage,
+                           update_stage_clear=lambda confirm=False: "FAILED: busy")
+    c = ctx_with(snap(), srv=s)
+    r = get_case("RL-D01").judge(c)
+    assert r.verdict == Verdict.FAIL and c.get("_tainted") is True
+
+
+def test_ota_stage_raise_with_clean_reread_does_not_clear():
+    s = _ota_srv(update_stage_release=_raise_stage)
+    assert get_case("RL-D01").judge(ctx_with(snap(), srv=s)).verdict == Verdict.FAIL
+    assert s.cleared == []
+
+
+@pytest.mark.parametrize("status", [
+    "ok - phase=idle, busy=True, staged=False, header=none",
+    "ok - phase=idle, busy=False, staged=False, header=abc123",
+])
+def test_ota_precheck_requires_not_busy_and_no_header(status):
+    s = _ota_srv(update_status=lambda host=None, st=status: st)
+    r = get_case("RL-D01").judge(ctx_with(snap(), srv=s))
+    assert r.verdict == Verdict.INCONCLUSIVE and s.cleared == []
+
+
+def _install_ctx(snapfn, t):
+    return {"_rl_snapshot_fn": snapfn, "host": "h", "ota_install": True, "_rl_baseline": snap(heap_min_free=30000),
+            "srv": _ota_srv(update_install_staged=lambda confirm=False: "ok installed"),
+            "_now": lambda: t["v"], "_sleep": lambda s: t.__setitem__("v", t["v"] + s)}
+
+
+def test_ota_install_rebaselines_for_final_rerun():
+    state = {"n": 0}
+
+    def snapfn(_c):
+        state["n"] += 1
+        return snap(identity={"fw_build": "b1" if state["n"] == 1 else "b2", "fw_version": "1.0.1"},
+                    heap_min_free=30000 if state["n"] == 1 else 20000)
+
+    c = _install_ctx(snapfn, {"v": 0.0})
+    assert get_case("RL-D01").judge(c).verdict == Verdict.PASS
+    assert c["_rl_baseline"]["heap_min_free"] == 20000
+    assert not R.compare_final_to_baseline(c["_rl_baseline"], snap(heap_min_free=20000))
+
+
+def test_ota_install_board_gone_clears_baseline():
+    t = {"v": 0.0}
+    calls = {"n": 0}
+
+    def snapfn(_c):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("down")
+        return snap()
+
+    c = _install_ctx(snapfn, t)
+    get_case("RL-D01").judge(c)
+    assert c["_rl_baseline"] is None
+
+
+def test_link_timeout_growth_bound():
+    b = R.LINK_TIMEOUT_GROWTH_BOUND
+    base = snap(link_timeouts=5)
+    assert not [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=5 + b)) if "timeout" in x]
+    assert [x for x in R.compare_final_to_baseline(base, snap(link_timeouts=6 + b)) if "timeout" in x]
+
+
+def test_unreadable_link_counter_is_inconclusive():
+    s = snap(link_crc_errors=None, _unreadable={"link_crc_errors": "OSError: x"})
+    v, fails, inc = R.judge_snapshot(s)
+    assert v == Verdict.INCONCLUSIVE and not fails and any("link counters" in i for i in inc)
+
+
+def _id_ctx(ceilings, **extra):
+    return _heat_ctx(_Profiles([_Status("idle")]),
+                     _get_zones_config=lambda h: {"zones": [{"max_temp_c": v} for v in ceilings]}, **extra)
+
+
+def test_identity_ceiling_boundary_200_vs_just_over():
+    assert R._board_identity_problem(_id_ctx([200.0]), False, 1) is None
+    assert R._board_identity_problem(_id_ctx([200.1]), False, 1) is not None
+    assert R._board_identity_problem(_id_ctx([200.0]), True, 1) is not None
+    assert R._board_identity_problem(_id_ctx([200.1]), True, 1) is None
+
+
+def test_identity_only_heated_zones_count():
+    c = _id_ctx([150.0, 1300.0, 150.0])
+    assert R._board_identity_problem(c, False, 0b101) is None      # kiln-class zone 1 not heated
+    assert R._board_identity_problem(c, False, 0b011) is not None  # zone 1 heated
+    assert R._board_identity_problem(c, False, 0b1000) is not None  # heated zone has no ceiling
+
+
+def test_identity_uart_http_mismatch_refuses():
+    c = _id_ctx([150.0], _board_identity_fn=lambda h: ("different board", "1.2.3.4"))
+    assert "mismatch" in R._board_identity_problem(c, False, 1)
+
+    def boom(h):
+        raise OSError("unreadable")
+    c = _id_ctx([150.0], _board_identity_fn=boom)
+    assert R._board_identity_problem(c, False, 1) is not None
+
+
+def test_heat_uart_http_mismatch_is_inconclusive_and_writes_nothing(monkeypatch):
+    calls = []
+    monkeypatch.setattr(H, "_start_bench_profile", lambda *a, **k: calls.append(1) or (True, "", 24.0))
+    c = _heat_ctx(_Profiles([_Status("idle")]), _board_identity_fn=lambda h: ("other board", None))
+    assert get_case("RL-C01").judge(c).verdict == Verdict.INCONCLUSIVE and calls == []
+
+
+@pytest.mark.parametrize("diag", [
+    "trip_reason: 4 | trip_mask: 0x0020",   # reason right, mask wrong
+    "trip_reason: 6 | trip_mask: 0x0008",   # reason wrong, mask right
+])
+def test_b01_partial_match_trip_is_not_cleared(diag):
+    srv = _Srv()
+    srv.diag = diag
+    c = ctx_with(snap(), srv=srv)
+    _readiness(c)
+    r = get_case("RL-B01").judge(c)
+    assert r.verdict == Verdict.FAIL and srv.clears == 0 and c.get("_release_abort")
+
+
+def test_b01_no_trip_latched_still_clears_and_passes():
+    srv = _Srv()
+    srv.diag = "trip_reason: 0 | trip_mask: 0x0000"
+    c = ctx_with(snap(), srv=srv)
+    _readiness(c)
+    r = get_case("RL-B01").judge(c)
+    assert r.verdict == Verdict.PASS, r.reason
+    assert r.observed["trip_before_clear"]["reason"] == 0 and srv.clears >= 1
+
+
+def test_rl_ids_only_in_release_suite():
+    from kilnctrl.bench_test.registry import suite_case_ids
+    for suite in ("smoke", "flash", "stack", "ota", "autotune", "heat", "web", "lcd", "safety", "nightly", "full"):
+        assert not [c for c in suite_case_ids(suite) if c.startswith("RL-")], suite
+    assert [c for c in suite_case_ids("release") if c.startswith("RL-")]
+
+
+def test_runner_refuses_release_without_confirm():
+    from kilnctrl.bench_test.runner import BenchTestRunner
+    for conf in (False, 1, "yes"):
+        with pytest.raises(ValueError):
+            BenchTestRunner({}).run(suite="release", confirm=conf)
+
+
+def test_allow_heat_defaults_off_for_release(monkeypatch):
+    from kilnctrl import mcp_server_bench_test as M
+    seen = {}
+
+    class FakeRunner:
+        def __init__(self, ctx):
+            pass
+
+        def run(self, **kw):
+            seen.update(kw)
+            raise ValueError("stop")
+
+    monkeypatch.setattr(M, "BenchTestRunner", FakeRunner)
+    M.bench_test_run(suite="release", confirm=True)
+    assert seen["allow_heat"] is False and seen["confirm"] is True
+    seen.clear()
+    M.bench_test_run(suite="smoke")
+    assert seen["allow_heat"] is True

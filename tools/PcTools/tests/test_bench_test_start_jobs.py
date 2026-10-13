@@ -51,10 +51,10 @@ class _FakeRunner:
         _FakeRunner.instances.append(self)
 
     def run(self, suite, cases=None, dry_run=False, allow_heat=True, tag=None,
-            lcd_stop_heat=False, lcd_edit_heat=False, ota_allow_heat=False):
+            lcd_stop_heat=False, lcd_edit_heat=False, ota_allow_heat=False, confirm=False):
         self.run_kwargs = dict(suite=suite, cases=cases, dry_run=dry_run, allow_heat=allow_heat,
                                tag=tag, lcd_stop_heat=lcd_stop_heat, lcd_edit_heat=lcd_edit_heat,
-                               ota_allow_heat=ota_allow_heat)
+                               ota_allow_heat=ota_allow_heat, confirm=confirm)
         if _FakeRunner.release is not None:
             _FakeRunner.release.wait(5)
         if _FakeRunner.raise_exc is not None:
@@ -138,7 +138,7 @@ class BenchTestStartTest(_Base):
         runner = _FakeRunner.instances[-1]
         self.assertEqual(runner.run_kwargs, dict(
             suite="lcd", cases=["LCD-19", "LCD-22"], dry_run=False, allow_heat=False, tag="t1",
-            lcd_stop_heat=True, lcd_edit_heat=True, ota_allow_heat=True))
+            lcd_stop_heat=True, lcd_edit_heat=True, ota_allow_heat=True, confirm=False))
         self.assertEqual(runner.ctx["host"], "10.9.9.9")
         self.assertIs(runner.ctx["attended"], True)
         self.assertIs(runner.ctx["allow_flash"], True)

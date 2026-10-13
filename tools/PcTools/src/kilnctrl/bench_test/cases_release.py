@@ -186,6 +186,11 @@ def judge_test_trip_text(text: str) -> CaseResult:
     return CaseResult(Verdict.PASS, observed=obs, expected={"trip_reason": 4, "trip_mask": 8})
 
 
+#: Timeouts may grow by this many over a run (trip, OTA and reset phases cause a
+#: few legitimately); more than this is a regression. Chosen, not measured.
+LINK_TIMEOUT_GROWTH_BOUND = 20
+
+
 def compare_final_to_baseline(base: dict, final: dict) -> List[str]:
     """Regressions of the final snapshot against the baseline (empty = none)."""
     out: List[str] = []
@@ -202,6 +207,11 @@ def compare_final_to_baseline(base: dict, final: dict) -> List[str]:
     be, fe = base.get("link_crc_errors"), final.get("link_crc_errors")
     if isinstance(be, int) and isinstance(fe, int) and fe > be:
         out.append(f"safety link CRC errors grew {be} -> {fe}")
+    # Timeouts grow legitimately across the deliberate trip/OTA/reset phases,
+    # so only growth beyond LINK_TIMEOUT_GROWTH_BOUND counts (REVIEW LOW-3).
+    bt, ft = base.get("link_timeouts"), final.get("link_timeouts")
+    if isinstance(bt, int) and isinstance(ft, int) and ft - bt > LINK_TIMEOUT_GROWTH_BOUND:
+        out.append(f"safety link timeouts grew {bt} -> {ft} (bound {LINK_TIMEOUT_GROWTH_BOUND})")
     return out
 
 
@@ -274,12 +284,16 @@ def _read_snapshot(ctx: dict) -> dict:
     _try(snap, "diag", diag)
     _try(snap, "trip_reason", lambda: J.parse_trip_reason(srv.safety_get_diag()))
 
-    def link():
-        s = srv._safety.get_link_stats()
-        return (getattr(s, "crc_errors", 0) or 0) + (getattr(s, "timeouts", 0) or 0)
+    def _counter(name):
+        v = getattr(srv._safety.get_link_stats(), name, None)
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise RuntimeError(f"link counter {name} unreadable ({v!r})")
+        return v
 
-    _try(snap, "link_errors", link)
-    _try(snap, "link_crc_errors", lambda: getattr(srv._safety.get_link_stats(), "crc_errors", 0) or 0)
+    # An unreadable counter is None + _unreadable (INCONCLUSIVE), never 0.
+    _try(snap, "link_crc_errors", lambda: _counter("crc_errors"))
+    _try(snap, "link_timeouts", lambda: _counter("timeouts"))
+    _try(snap, "link_errors", lambda: _counter("crc_errors") + _counter("timeouts"))
     _try(snap, "liveness", lambda: srv.check_task_liveness())
 
     def stacks():
@@ -387,6 +401,10 @@ def judge_snapshot(snap: dict) -> "Tuple[Verdict, List[str], List[str]]":
         inc.append("Wi-Fi status unreadable")
     elif not w.get("connected"):
         inc.append("Wi-Fi not connected as a station (AP-only is fine on the bench)")
+    unread = snap.get("_unreadable") or {}
+    bad_link = sorted(k for k in unread if k.startswith("link_"))
+    if bad_link:
+        inc.append("safety link counters unreadable: " + ", ".join(bad_link))
     verdict = Verdict.FAIL if fails else (Verdict.INCONCLUSIVE if inc else Verdict.PASS)
     return verdict, fails, inc
 
@@ -543,7 +561,7 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
         mask = 0
         for z in temps:
             mask |= 1 << z
-        idp = _board_identity_problem(ctx, kiln)
+        idp = _board_identity_problem(ctx, kiln, mask)
         if idp:
             return CaseResult(Verdict.INCONCLUSIVE, reason=f"heat refused: {idp}")
         if kiln:
@@ -618,7 +636,7 @@ def _case_rl_c01(ctx: dict) -> CaseResult:
 BENCH_CEILING_MAX_C = 200.0
 
 
-def _board_identity_problem(ctx: dict, kiln: bool) -> Optional[str]:
+def _board_identity_problem(ctx: dict, kiln: bool, mask: int) -> Optional[str]:
     """Cross-check the named target against the board's own zone ceilings.
     Fail closed: no host, unreadable config, or a mismatch returns a reason."""
     host = ctx.get("host")
@@ -626,15 +644,36 @@ def _board_identity_problem(ctx: dict, kiln: bool) -> Optional[str]:
         return "no host to verify the board identity against the target"
     from .. import zones_http_client
 
+    # Heat runs over UART, ceilings are read over HTTP: both must be the same board.
+    idfn = ctx.get("_board_identity_fn")
+    if idfn is None:
+        from .. import mcp_server_aux
+
+        idfn = mcp_server_aux._board_identity_check
+    try:
+        mism = idfn(host)[0]
+    except Exception as exc:  # noqa: BLE001
+        return f"could not tie the UART link to the HTTP host: {exc}"
+    if mism:
+        return f"UART/HTTP board mismatch: {mism}"
+
     get_zones = ctx.get("_get_zones_config", zones_http_client.get_zones)
     try:
         snap = get_zones(host)
     except Exception as exc:  # noqa: BLE001
         return f"zones config unreadable, cannot verify target {_target(ctx)!r}: {exc}"
-    ceilings = [z.get("max_temp_c") for z in (snap.get("zones") or []) if isinstance(z, dict)]
-    ceilings = [c for c in ceilings if isinstance(c, (int, float)) and c > 0]
+    # Only the zones that will be heated count (bit z of mask).
+    zl = [z for z in (snap.get("zones") or []) if isinstance(z, dict)]
+    ceilings = []
+    for i in range(16):
+        if (mask >> i) & 1:
+            c = zl[i].get("max_temp_c") if i < len(zl) else None
+            if isinstance(c, (int, float)) and not isinstance(c, bool) and c > 0:
+                ceilings.append(c)
+            else:
+                return f"zone {i} (to be heated) has no readable ceiling, cannot verify the target"
     if not ceilings:
-        return "no zone ceilings reported, cannot verify the target"
+        return "no zone ceilings reported for the heated zones, cannot verify the target"
     top = max(ceilings)
     if kiln and top <= BENCH_CEILING_MAX_C:
         return f"target=kiln but highest zone ceiling is {top:.0f}C (looks like the bench fixture)"
@@ -689,7 +728,8 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
     # A stage the operator filled before the run is theirs: never overwrite or erase it.
     pre = str(srv.update_status())
     obs["stage_before"] = pre[:300]
-    if not pre.startswith("ok") or "staged=True" in pre or "staged=False" not in pre:
+    if (not pre.startswith("ok") or "staged=False" not in pre or "busy=False" not in pre
+            or "header=none" not in pre):
         return CaseResult(Verdict.INCONCLUSIVE,
                           reason=f"stage not provably empty before the run (clear or install it first): {pre[:160]}",
                           observed=obs)
@@ -701,13 +741,15 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
     obs["fetch_status"] = str(srv.update_fetch_status())[:300]
     staged = False
     install_ok = False
+    stage_ok = False
     try:
+        staged = True  # once invoked, a download may be in flight whatever it returns
         stg = srv.update_stage_release(confirm=True, allow_prerelease=True)
         obs["stage"] = str(stg)[:400]
         if not str(stg).startswith("ok"):
             res = CaseResult(Verdict.FAIL, reason=f"update_stage_release: {str(stg)[:200]}", observed=obs)
         else:
-            staged = True
+            stage_ok = True
             if "verified by read-back" not in str(stg):
                 res = CaseResult(Verdict.FAIL, reason="stage result does not claim read-back verification", observed=obs)
             elif want_install:
@@ -716,16 +758,31 @@ def _case_rl_d01(ctx: dict) -> CaseResult:
                 res = CaseResult(Verdict.PASS, observed=obs)
     except Exception as exc:  # noqa: BLE001
         res = CaseResult(Verdict.FAIL, reason=f"stage raised {type(exc).__name__}: {exc}", observed=obs)
-        staged = True  # may be half-staged: clear below
     if staged and not install_ok:
+        # Re-read the stage: after a non-ok or raising stage call the download may
+        # still be running or half written. Cancel, then clear.
         try:
-            clr = str(srv.update_stage_clear(confirm=True))
+            post = str(srv.update_status())
         except Exception as exc:  # noqa: BLE001
-            clr = f"FAILED: raised {type(exc).__name__}: {exc}"
-        obs["stage_clear"] = clr[:300]
-        if not clr.startswith("ok"):
-            ctx["_tainted"] = True
-            return CaseResult(Verdict.FAIL, reason=f"stage clear failed, image left in stage: {clr[:160]}", observed=obs)
+            post = f"error: {type(exc).__name__}: {exc}"
+        obs["stage_after"] = post[:300]
+        dirty = (stage_ok or not post.startswith("ok") or "staged=False" not in post or "busy=False" not in post
+                 or "header=none" not in post)
+        if dirty:
+            cancel = getattr(srv, "update_fetch_cancel", None)
+            if cancel is not None:
+                try:
+                    obs["fetch_cancel"] = str(cancel(confirm=True))[:200]
+                except Exception as exc:  # noqa: BLE001
+                    obs["fetch_cancel"] = f"raised {type(exc).__name__}: {exc}"
+            try:
+                clr = str(srv.update_stage_clear(confirm=True))
+            except Exception as exc:  # noqa: BLE001
+                clr = f"FAILED: raised {type(exc).__name__}: {exc}"
+            obs["stage_clear"] = clr[:300]
+            if not clr.startswith("ok"):
+                ctx["_tainted"] = True
+                return CaseResult(Verdict.FAIL, reason=f"stage clear failed, image left in stage: {clr[:160]}", observed=obs)
     return res
 
 
@@ -754,7 +811,11 @@ def _install_and_verify(ctx: dict, install, obs: dict) -> Tuple[CaseResult, bool
             after = cand
             break
     if after is None:
+        ctx["_rl_baseline"] = None  # since-boot watermarks are gone; F01 cannot compare
         return CaseResult(Verdict.FAIL, reason="board did not come back with a fw_build after install", observed=obs), True
+    # The reboot reset every since-boot watermark (heap min_free, stack hwm, link
+    # counters): re-baseline so RL-F01 does not compare across the reboot.
+    ctx["_rl_baseline"] = after
     obs["version_before"] = (before.get("identity") or {}).get("fw_version")
     obs["version_after"] = (after.get("identity") or {}).get("fw_version")
     obs["build_before"] = before_build
