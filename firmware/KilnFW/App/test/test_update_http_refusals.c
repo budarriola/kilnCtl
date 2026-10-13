@@ -11,6 +11,7 @@
 #define main uf_main
 #define UF_EXTRA_TESTS 1
 static void extra_tests(void);
+static void extra_final_wedge_test(void);
 #include "test_update_fetch.c"
 #undef main
 
@@ -359,6 +360,32 @@ static void test_stage_routes_extra(void)
     g_fr_flash_write_fail = false;
     expect_claim_balanced("clear failure");
     CHECK(POST("/api/update/stage/clear", NULL) == 200, "clear retry succeeds (claim was released)");
+}
+
+// REVIEW_UPDLOW LOW-1: the writer finishes its op in the instant the caller's wait times out (arb DONE, so
+// update_wr_arb_caller_timeout() says not wedged) but its completion give never arrives. wr_call() latches the
+// wedge and must set wr_late_exited, because that writer already passed its hand-off point and will never
+// reclaim leak_*: fetch_task has to free the job buffers itself. Without it they leak until reboot.
+static void extra_final_wedge_test(void)
+{
+    fixture(g_sha_hex, IMG_LEN);
+    CHECK(!update_fetch_writer_wedged(), "missed give: writer not wedged before the case");
+    const long heap_pre = g_fr_heap_live;
+    g_fr_wr_missed_give = true;
+    CHECK(POST("/api/update/download", NULL) == 202, "missed give: download accepted");
+    WAIT_FOR_MS((job_result(), strcmp(g_state, "failed") == 0), 30000);
+    CHECK(g_fr_wr_give_dropped == 1, "missed give: the writer finished its op and its completion give was dropped");
+    CHECK(update_fetch_writer_wedged(), "missed give: wr_call latches the wedge");
+    CHECK(strcmp(g_state, "failed") == 0, "missed give: job failed");
+    CHECK(strcmp(g_error, "writer_wedged_reboot_required") == 0, "missed give: names writer_wedged_reboot_required");
+    WAIT_FOR(!g_fr_claim_held);
+    expect_claim_balanced("missed give");
+    // the writer is back at its idle command wait and will never run again (nobody gives wr_req after a wedge)
+    WAIT_FOR_MS(g_fr_sem_idle_waiters >= 1, 30000);
+    CHECK(g_fr_sem_idle_waiters >= 1, "missed give: writer parked at its idle wait");
+    WAIT_FOR(g_fr_heap_live == heap_pre);
+    CHECK(g_fr_heap_live == heap_pre, "missed give: fetch_task freed the job buffers itself (wr_late_exited)");
+    g_fr_wr_missed_give = false;
 }
 
 static void extra_tests(void)

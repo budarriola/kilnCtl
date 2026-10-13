@@ -53,6 +53,10 @@ volatile long g_fr_wr_wait_after_wedge;
 volatile long g_fr_flash_blocked_n;
 int g_fr_flash_erase_n, g_fr_flash_write_n;
 static HANDLE s_flash_ev;
+bool g_fr_wr_missed_give;
+volatile long g_fr_wr_give_dropped;
+static HANDLE s_give_dropped_ev;
+static volatile DWORD s_wr_tid; // thread id of the most recently created update_fetch_wr task
 
 bool g_fr_claim_deny;
 bool g_fr_claim_held;
@@ -118,6 +122,12 @@ void fr_reset(void)
         s_flash_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
     }
     ResetEvent(s_flash_ev);
+    g_fr_wr_missed_give = false;
+    g_fr_wr_give_dropped = 0;
+    if (s_give_dropped_ev == NULL) {
+        s_give_dropped_ev = CreateEvent(NULL, TRUE, FALSE, NULL);
+    }
+    ResetEvent(s_give_dropped_ev);
     g_fr_claim_deny = false;
     g_fr_claim_held = false;
     g_fr_claim_begin_n = g_fr_claim_end_n = 0;
@@ -238,7 +248,11 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
     t->fn = fn;
     t->arg = arg;
     InterlockedIncrement(&g_fr_live_tasks);
-    uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, NULL);
+    unsigned tid = 0;
+    uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, &tid);
+    if (h != 0 && name != NULL && strcmp(name, "update_fetch_wr") == 0) {
+        s_wr_tid = tid;
+    }
     if (h == 0) {
         InterlockedDecrement(&g_fr_live_tasks);
         free(t);
@@ -350,6 +364,12 @@ BaseType_t xSemaphoreTake(SemaphoreHandle_t s, TickType_t ticks)
     if (sem_is_bad(s)) {
         return pdFALSE;
     }
+    if (g_fr_wr_missed_give && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS)) {
+        // Missed-give mode: the writer-op wait times out only once the writer has finished its op (arb DONE)
+        // and its completion give was dropped, so wr_call()'s second, short take is the one that fails.
+        WaitForSingleObject(s_give_dropped_ev, 30000);
+        return WaitForSingleObject((HANDLE)s, 0) == WAIT_OBJECT_0 ? pdTRUE : pdFALSE;
+    }
     if (g_fr_time_div > 1 && ticks != portMAX_DELAY && ticks >= pdMS_TO_TICKS(FETCH_WR_TIMEOUT_MS) && g_fr_flash_write_block) {
         if (update_fetch_writer_wedged()) {
             g_fr_wr_wait_after_wedge++; // a writer-op wait begun after the wedge latched: wr_call guard missing
@@ -387,6 +407,11 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
 {
     if (sem_is_bad(s)) {
         return pdFALSE;
+    }
+    if (g_fr_wr_missed_give && s_wr_tid != 0 && GetCurrentThreadId() == s_wr_tid &&
+        InterlockedCompareExchange(&g_fr_wr_give_dropped, 1, 0) == 0) {
+        SetEvent(s_give_dropped_ev); // the writer's first completion give is lost
+        return pdTRUE;
     }
     return ReleaseSemaphore((HANDLE)s, 1, NULL) ? pdTRUE : pdFALSE;
 }

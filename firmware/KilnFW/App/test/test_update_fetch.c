@@ -935,8 +935,13 @@ int main(void)
     test_stage_upload_and_clear();
 #ifdef UF_EXTRA_TESTS
     extra_tests(); // test_update_http_refusals.c: runs before the permanent writer wedge
-#endif
+    // A wedge is permanent per process, so this exe wedges the other way (writer finished, completion give
+    // missed); test_writer_wedge runs in kilnctl_host_tests_update_fetch.exe.
+    extra_final_wedge_test();
+    (void)test_writer_wedge;
+#else
     test_writer_wedge();
+#endif
 
     printf("test_update_fetch: %d checks, %d failed\n", g_checks, g_fail);
     if (g_fail != 0) {

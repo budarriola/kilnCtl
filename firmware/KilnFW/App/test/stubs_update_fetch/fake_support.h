@@ -49,6 +49,8 @@ extern volatile long g_fr_flash_blocked_n; // writers currently parked
 extern volatile long g_fr_sem_idle_waiters; // tasks currently blocked in an unbounded (portMAX_DELAY) take
 extern volatile long g_fr_sem_bad_n; // take/give on a NULL or deleted semaphore
 extern volatile long g_fr_wr_wait_after_wedge; // writer-op waits begun after the wedge latched
+extern bool g_fr_wr_missed_give;            // the writer's next completion give is dropped (LOW-1 case)
+extern volatile long g_fr_wr_give_dropped;  // 1 once that give was dropped
 extern int g_fr_flash_erase_n, g_fr_flash_write_n;
 void fr_flash_release(void);
 
