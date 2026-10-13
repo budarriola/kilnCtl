@@ -769,6 +769,23 @@ static void test_heap_status_json_updfx7(void)
           "heap.min_dma is a real low-water");
     expect_claim_balanced("heap json plain");
 
+    // The low-waters track the read loop, not just admission: a mid-body dip to the abort level and a DMA
+    // reading above the DMA floor are both reported exactly.
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH);
+    g_app_route->on_read = dip_heap_bottom;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "dip to the abort level completes");
+    CHECK(json_heap_num("min_free") == (long)FETCH_HEAP_ABORT_BELOW, "heap.min_free tracks the read-loop low-water");
+    fixture(g_sha_hex, IMG_LEN);
+    heap_idle_pair(BENCH_IDLE_FREE);
+    g_fr_dma_seq[0] = T_DMA_FLOOR + 500;
+    g_fr_dma_seq_n = 1;
+    g_app_route->on_read = arm_dma_seq;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0, "one DMA reading above the floor completes");
+    CHECK(json_heap_num("min_dma") == (long)(T_DMA_FLOOR + 500), "heap.min_dma tracks the body-read low-water");
+
     // A hop that recovers while the job settles: hop admitted, tries > 0, free at the admitting sample.
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(BENCH_IDLE_FREE);
