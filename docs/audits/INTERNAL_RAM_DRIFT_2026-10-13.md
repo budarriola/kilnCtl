@@ -92,3 +92,8 @@ change) was reverted for exactly this unknowable-consumer reason. Recommend: onl
 after the allowlist above is fully triaged and a bench run (heap_internal low-water
 plus a full OTA, backup import, TLS fetch) at 4096; keep `RESERVE_INTERNAL`
 32768.
+
+## Negative-test results (2026-10-13)
+
+- `check_internal_alloc_allowlist.ps1`, `negtest -Preset check`: a new `malloc(64)` in an unlisted-count file and a new `calloc(1, 64)` in an allowlisted file were both CAUGHT (exit 1, NEW site named), baseline PASS.
+- `check_kilnfw_dram_bss_budget.py`: the large-static-array case was run as a ceiling-override stand-in (bss ceiling 79728 B and data ceiling 23503 B, i.e. 1000 B below the measured 80728 B / 24503 B), not a recompile; both FAIL naming the section, the unmutated run PASSes. The bss ceiling is now 81500 B (772 B headroom), the data ceiling 25000 B.
