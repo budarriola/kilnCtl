@@ -3,7 +3,12 @@
 Used by ``tools/PcTools/scripts/join_board_ap.ps1``. Two screens are handled:
 
 * ``recovery`` -- the KilnFW recovery image's status screen
-  (``firmware/KilnFW_recovery/main/recovery_lcd.c``). Every line is drawn
+  (``firmware/KilnFW_recovery/main/recovery_lcd.c``). The screen draws a
+  ``WIFI:T:WPA;S:<ssid>;P:<pass>;;`` QR code at the top right
+  (``recovery_wifi_qr.c``); it is decoded first (``zxing-cpp``) and its
+  passphrase must be 12 characters of the alphabet below. If the QR is
+  missing or undecodable (older recovery image, glare, no network yet) the
+  read falls back to glyph segmentation, with a warning. Every line is drawn
   left-aligned from panel x=0 in the 5x7 font of ``recovery_text.c``; the
   SSID is at y=144 (scale 3, or scale 2 above 26 chars) and the 12-character
   passphrase at y=188, scale 6, drawn from the alphabet
@@ -17,7 +22,7 @@ Used by ``tools/PcTools/scripts/join_board_ap.ps1``. Two screens are handled:
   (``firmware/KilnFW/App/drivers/ui/ui_page_network.c``). The password there
   is user-set from an arbitrary charset and drawn in an antialiased font, so
   it is never OCR'd; the card's ``WIFI:T:WPA;S:<ssid>;P:<pass>;;`` QR code is
-  decoded instead (optional ``zxing-cpp`` wheel). The QR and the password are
+  decoded instead, with no fallback. The QR and the password are
   only shown with an ADMIN LCD session, or with LCD auth off.
 
 The passphrase never goes to stdout, stderr or a log. stdout carries one JSON
@@ -883,17 +888,48 @@ def parse_wifi_qr(text: str) -> Tuple[str, str]:
     return fields["S"], fields["P"]
 
 
-def read_normal(image_path: str) -> ApRead:
+def _wifi_qr_payloads(img) -> List[str]:
+    """Every ``WIFI:`` QR payload in ``img`` (PIL image or HxWx3 array)."""
     try:
-        import zxingcpp  # optional; see join_board_ap.ps1 for the install line
-    except ImportError as exc:
-        raise ReadError("normal mode needs the zxing-cpp wheel to decode the AP QR code "
-                        "(uv pip install zxing-cpp); the password is never OCR'd") from exc
+        import zxingcpp
+    except ImportError as exc:  # declared dependency; a broken install only
+        raise ReadError("the zxing-cpp wheel is missing (uv sync in tools/PcTools)") from exc
+    if isinstance(img, np.ndarray):
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    results = zxingcpp.read_barcodes(img)
+    return [r.text for r in results if r.text.startswith("WIFI:")]
+
+
+def read_recovery_qr(img: np.ndarray) -> ApRead:
+    """Recovery credentials from the screen's own Wi-Fi QR; ReadError if unusable."""
+    payloads = _wifi_qr_payloads(img)
+    if not payloads:
+        raise ReadError("no WIFI: QR code found on the recovery screen")
+    if len(set(payloads)) > 1:
+        raise ReadError("more than one distinct WIFI: QR code in the frame")
+    ssid, password = parse_wifi_qr(payloads[0])
+    if not ssid:
+        raise ReadError("recovery QR has an empty SSID")
+    if len(password) != PASS_LEN or any(ch not in PASS_ALPHABET for ch in password):
+        raise ReadError("recovery QR passphrase is not 12 characters of the recovery alphabet")
+    return ApRead("recovery", ssid, len(password), [password])
+
+
+def read_recovery_auto(img: np.ndarray, font: Optional[Dict[str, Tuple[int, ...]]] = None) -> ApRead:
+    """QR first, glyph segmentation as the fallback (recovery mode only)."""
+    try:
+        return read_recovery_qr(img)
+    except ReadError as qr_err:
+        read = read_recovery(img, font)
+        read.warnings.append(f"QR not used ({qr_err}); passphrase read by glyph segmentation")
+        return read
+
+
+def read_normal(image_path: str) -> ApRead:
     from PIL import Image
 
     with Image.open(image_path) as im:
-        results = zxingcpp.read_barcodes(im.convert("RGB"))
-    payloads = [r.text for r in results if r.text.startswith("WIFI:")]
+        payloads = _wifi_qr_payloads(im.convert("RGB"))
     if not payloads:
         raise ReadError("no WIFI: QR code found -- open Settings > Network with an ADMIN LCD "
                         "session (the QR and password are hidden without one)")
@@ -917,7 +953,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     result: Dict[str, object] = {"mode": args.mode}
     try:
         if args.mode == "recovery":
-            read = read_recovery(load_image(args.image))
+            read = read_recovery_auto(load_image(args.image))
         else:
             read = read_normal(args.image)
     except ReadError as exc:

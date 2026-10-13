@@ -8,13 +8,19 @@
   network with kilnctrl.lcd_ap_reader:
 
     -Mode recovery  The recovery image's SoftAP. The SSID and the 12-character
-                    random per-boot passphrase are read by glyph segmentation
-                    against the firmware's 5x7 font (never guessed). 5 and S
-                    render near-identically, so the reader may return several
-                    candidates; each is tried in turn.
+                    random per-boot passphrase are decoded from the WIFI: QR
+                    code the recovery screen draws at the top right. If the
+                    QR is missing or undecodable (older recovery image, glare,
+                    no network yet) they are read by glyph segmentation
+                    against the firmware's 5x7 font instead (never guessed; a
+                    warning says so). 5 and S render near-identically, so
+                    that fallback may return several candidates; each is
+                    tried in turn. A QR read yields exactly one.
     -Mode normal    The normal firmware's AP fallback. SSID and password are
-                    decoded from the WIFI: QR code on the Network page
-                    (needs the optional zxing-cpp package).
+                    decoded from the WIFI: QR code on the Network page (QR
+                    only, no fallback; needs an ADMIN LCD session).
+                    The decoder is the zxing-cpp package, a declared PcTools
+                    dependency (uv sync in tools/PcTools).
 
   Each candidate is tried through a temporary netsh WLAN profile (WPA2PSK/AES)
   whose XML is written to %TEMP% and deleted right after `netsh wlan add

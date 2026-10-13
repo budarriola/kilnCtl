@@ -30,6 +30,11 @@ dependencies = [
     # tree's venv runs 2.5.2; the floor is kept at 2.0 so the declared
     # requires-python >=3.10 stays resolvable.
     "numpy>=2.0",
+    # lcd_ap_reader.py (join_board_ap.ps1) decodes the Wi-Fi join QR the
+    # recovery image and the application's AP card draw on the LCD. Imported
+    # lazily: a missing wheel degrades the recovery read to glyph segmentation
+    # and fails the normal-mode read with an install hint.
+    "zxing-cpp>=2.2",
 ]
 
 [dependency-groups]

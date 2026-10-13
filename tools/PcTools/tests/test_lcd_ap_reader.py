@@ -36,13 +36,37 @@ def _draw(panel, font, y, scale, text):
         panel[y:y + h, x:x + w] = np.maximum(panel[y:y + h, x:x + w], bm[:h, :w])
 
 
-def render_screen(font, passphrase, ssid=SSID, corners=TRUE_CORNERS):
-    """RGB camera frame of the recovery screen with the panel at ``corners``."""
+def _draw_qr(panel, payload, module=3, quiet=4, area=124):
+    """recovery_wifi_qr.c layout: light quiet zone, top-right of the panel."""
+    import zxingcpp
+
+    bc = zxingcpp.create_barcode(payload, zxingcpp.BarcodeFormat.QRCode, ec_level="L")
+    mods = np.asarray(zxingcpp.write_barcode_to_image(bc, add_quiet_zones=False)) > 127  # True = light
+    n = mods.shape[0]
+    full = np.ones((n + 2 * quiet, n + 2 * quiet), dtype=bool)
+    full[quiet:quiet + n, quiet:quiet + n] = mods
+    px = np.kron(full, np.ones((module, module))).astype(float)
+    ext = px.shape[0]
+    assert ext <= area
+    panel[0:ext, r.PANEL_W - ext:r.PANEL_W] = px
+
+
+def wifi_payload(ssid, passphrase):
+    return f"WIFI:T:WPA;S:{ssid};P:{passphrase};;"
+
+
+def render_screen(font, passphrase, ssid=SSID, corners=TRUE_CORNERS, qr=None):
+    """RGB camera frame of the recovery screen with the panel at ``corners``.
+
+    ``qr`` is the text of a QR drawn top-right as the recovery firmware does.
+    """
     panel = np.zeros((r.PANEL_H, r.PANEL_W))
     for y, s, text in r.ANCHOR_LINES:
         _draw(panel, font, y, s, text)
     _draw(panel, font, r.Y_SSID, 3 if len(ssid) <= 26 else 2, ssid)
     _draw(panel, font, r.Y_PASS, r.PASS_SCALE, passphrase)
+    if qr is not None:
+        _draw_qr(panel, qr)
     # Camera pixel centre -> panel coordinate.
     h = r.homography(np.asarray(corners), r.PANEL_CORNERS)
     v, u = np.mgrid[0:FRAME_H, 0:FRAME_W].astype(np.float64) + 0.5
@@ -173,7 +197,7 @@ def test_cli_never_prints_the_passphrase(font, tmp_path, capsys):
     orig = r.read_recovery
     rc = None
     try:
-        r.read_recovery = lambda img: orig(img, corners=TRUE_CORNERS)
+        r.read_recovery = lambda img, font=None: orig(img, font, corners=TRUE_CORNERS)
         rc = r.main(rc_args)
     finally:
         r.read_recovery = orig
@@ -212,3 +236,107 @@ def test_low_blue_margin_panel_is_detected(font):
     img[..., 1] = np.where(inside, img[..., 0] + 6.0, 5.0)
     c = r.detect_panel(img)
     assert np.abs(c - TRUE_CORNERS).max() <= 6.0
+
+
+# --- QR-first recovery read (recovery_wifi_qr.c draws the QR) -----------------
+
+def _qr_read(font, pw, qr, ssid=SSID, monkeypatch=None):
+    """read_recovery_auto on a frame; glyph reader pinned to the true corners."""
+    img = render_screen(font, pw, ssid=ssid, qr=qr)
+    orig = r.read_recovery
+    r.read_recovery = lambda im, f=None: orig(im, f, corners=TRUE_CORNERS)
+    try:
+        return r.read_recovery_auto(img, font)
+    finally:
+        r.read_recovery = orig
+
+
+def test_recovery_prefers_the_qr(font, monkeypatch):
+    pw = "23456789ABCD"
+
+    def no_glyphs(*_a, **_k):
+        raise AssertionError("glyph segmentation ran although the QR decoded")
+
+    img = render_screen(font, pw, qr=wifi_payload(SSID, pw))
+    monkeypatch.setattr(r, "read_recovery", no_glyphs)
+    read = r.read_recovery_auto(img, font)
+    assert read.ssid == SSID
+    assert read.passphrases == [pw]
+    assert read.glyph_count == r.PASS_LEN
+    assert read.warnings == []
+
+
+def test_recovery_qr_resolves_the_5_s_ambiguity(font):
+    # The glyph reader would offer both spellings; the QR yields exactly one.
+    pw = "5S5S5S5S5S5S"
+    read = _qr_read(font, pw, wifi_payload(SSID, pw))
+    assert read.passphrases == [pw]
+
+
+def test_recovery_without_qr_falls_back_to_glyphs(font):
+    pw = "23456789ABCD"
+    read = _qr_read(font, pw, None)
+    assert read.passphrases[0] == pw
+    assert read.ssid == SSID
+    assert len(read.warnings) == 1 and "glyph segmentation" in read.warnings[0]
+    assert pw not in read.warnings[0]
+
+
+def test_recovery_bad_qr_passphrase_falls_back_to_glyphs(font):
+    pw = "23456789ABCD"
+    # QR present but its passphrase is not a recovery passphrase (length, alphabet).
+    for bad in ("short", "0OIl0OIl0OIl", pw + "E"):
+        read = _qr_read(font, pw, wifi_payload(SSID, bad))
+        assert read.passphrases[0] == pw, bad
+        assert read.warnings and "glyph segmentation" in read.warnings[0]
+        assert bad not in read.warnings[0]
+
+
+def test_recovery_non_wifi_qr_falls_back(font):
+    pw = "23456789ABCD"
+    read = _qr_read(font, pw, "https://example.invalid/x")
+    assert read.passphrases[0] == pw and read.warnings
+
+
+def test_recovery_qr_with_escaped_ssid(font):
+    pw = "HJKLMNPQRSTU"
+    ssid = r"kiln;ap"
+    payload = r"WIFI:T:WPA;S:kiln\;ap;P:" + pw + ";;"
+    img = render_screen(font, pw, qr=payload)
+    read = r.read_recovery_qr(img)
+    assert read.ssid == ssid and read.passphrases == [pw]
+
+
+ESCAPED_NORMAL_QR = "WIFI:T:WPA;S:kiln-ap;P:any pass" + "\\:word\\;with\\,specials;;"
+
+
+def test_normal_mode_reads_the_qr_only(font, tmp_path):
+    from PIL import Image
+
+    pw = "any pass:word;with,specials"
+    img = render_screen(font, "23456789ABCD",
+                        qr=ESCAPED_NORMAL_QR)
+    path = tmp_path / "frame.png"
+    Image.fromarray(img.astype(np.uint8)).save(path)
+    read = r.read_normal(str(path))
+    assert read.mode == "normal" and read.ssid == "kiln-ap"
+    assert read.passphrases == [pw]
+    # No QR: normal mode never falls back to OCR.
+    Image.fromarray(render_screen(font, "23456789ABCD").astype(np.uint8)).save(path)
+    with pytest.raises(r.ReadError):
+        r.read_normal(str(path))
+
+
+def test_cli_recovery_qr_never_prints_the_passphrase(font, tmp_path, capsys):
+    from PIL import Image
+
+    pw = "QRSTUVWXYZ23"
+    path = tmp_path / "frame.png"
+    Image.fromarray(render_screen(font, pw, qr=wifi_payload(SSID, pw)).astype(np.uint8)).save(path)
+    cand = tmp_path / "cand.txt"
+    rc = r.main(["--image", str(path), "--candidates-out", str(cand)])
+    out = capsys.readouterr().out
+    assert rc == 0 and pw not in out
+    res = json.loads(out.strip().splitlines()[-1])
+    assert res["ok"] and res["candidate_count"] == 1 and res["warnings"] == []
+    assert cand.read_text(encoding="utf-8").splitlines() == [pw]
