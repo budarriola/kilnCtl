@@ -29,7 +29,7 @@ Gate rows: 206.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 193 |
+| NEGATIVE-TESTED | 194 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
