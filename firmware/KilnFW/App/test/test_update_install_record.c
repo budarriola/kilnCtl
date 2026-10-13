@@ -421,6 +421,20 @@ static void test_prepare(void)
                "busy stage refused 409");
 
     memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    a.empty_semver = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0 && a.n == 0,
+               "verified stage with empty version refused 409, nothing erased or written");
+
+    memset(&a, 0, sizeof(a));
+    a.safe = true;
+    a.verified = true;
+    a.zero_len = true;
+    TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 409 && a.writes == 0 && a.n == 0,
+               "verified stage with image length 0 refused 409, nothing erased or written");
+
+    memset(&a, 0, sizeof(a));
     a.verified = true;
     TEST_CHECK(!update_install_prepare(&o, msg, sizeof(msg), &st) && st == 500 && a.writes == 0,
                "NVS not writable refused 500");
