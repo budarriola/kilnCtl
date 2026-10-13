@@ -266,3 +266,30 @@ brick the board: the boot path re-checks size and sha against the stage.
    out-of-range code/reason, and prepare with an empty semver or length 0.
 6. Consider auto-selecting an intact, unmodified app after a refusal so an
    unattended install never leaves the board in recovery (INFO-1).
+
+## Fix status (2026-10-13)
+
+Commits (worktree autoapplyfx1, branch from origin/dev): `0388de1f0` (firmware
+recovery glue + codec tests), `f8bc24c62` (prepare tests), `92dea4204` (MCP).
+
+| Finding | Status |
+|---|---|
+| LOW-1 stale request re-applied | Fixed: `recovery_install_supersede()` clears req and res on `recovery_exit_post` and before a manual apply. Target-only, no host test. |
+| LOW-2 stale failure result | Fixed: same supersede call. Target-only, no host test. |
+| LOW-3 `s_running` test-and-set | Fixed: `__atomic_compare_exchange_n` claim, released on start failure. Target-only. |
+| LOW-4 poll stack / create failure | Fixed: `APPLY_POLL_STACK` counted in the internal-heap start check; poll-task create failure records FAIL/APPLY_FAILED and shows it. Stack-margin registration kept; `check_stack_margin_registration.ps1` passes. Target-only. |
+| LOW-5 MCP over 300 s | Fixed: deadline 270 s from entry (GET, POST, settle sleep and polls all inside it); message says still in progress, poll with `update_install_staged(confirm=False)`. |
+| LOW-6 POST timeout reported FAILED | Fixed: transport failure (no HTTP status) is UNKNOWN/possibly applied and polling continues; a board refusal still FAILED. |
+| Test gaps M1-M4 | Fixed in `test_update_install_record.c`. |
+
+Negtest (LOW-1..4 recovery glue has no host harness, so none was run for it):
+
+| Mutant | Result |
+|---|---|
+| M1 drop result code range check | CAUGHT (`:188`) |
+| M2 drop result reason range check | CAUGHT (`:193`) |
+| M3 drop empty-semver refusal in prepare | CAUGHT (`:428`) |
+| M4 drop zero-length refusal in prepare | CAUGHT (`:435`) |
+| M5 POST transport error treated as refusal | CAUGHT (pytest) |
+| M6 wait cap 270 -> 2700 | CAUGHT (pytest) |
+| M7 deadline measured after the POST | CAUGHT (pytest) |
