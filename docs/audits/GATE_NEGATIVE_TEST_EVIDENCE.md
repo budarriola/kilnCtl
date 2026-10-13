@@ -25,11 +25,11 @@ Not exercisable via a plain local mutation, by design: `check_01_kilnfw_pushed_b
 
 ## Counts
 
-Gate rows: 206.
+Gate rows: 207.
 
 | Status | Rows |
 |---|---|
-| NEGATIVE-TESTED | 194 |
+| NEGATIVE-TESTED | 195 |
 | PARTIAL | 0 |
 | REVIEWED, NOT MUTATED | 12 |
 | NOT AUDITED | 0 |
