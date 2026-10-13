@@ -80,3 +80,38 @@ class InstallTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InstallBudgetTests(unittest.TestCase):
+    def setUp(self):
+        for p in (mock.patch.object(msu, "_resolve_host", return_value="h"),
+                  mock.patch.object(msu.time, "sleep", return_value=None)):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_post_timeout_is_unknown_then_follow_up_decides(self):
+        err = uhc.UpdateHttpError("timed out")  # status None: transport failure
+        seq = [_st(), _st(running="1.0.1", state="recorded", code="ok")]
+        with mock.patch.object(uhc, "get_install_status", side_effect=seq),              mock.patch.object(uhc, "start_install", side_effect=err):
+            self.assertTrue(msu.update_install_staged(confirm=True).startswith("ok"))
+
+    def test_post_timeout_never_confirmed_is_unknown_not_failed(self):
+        err = uhc.UpdateHttpError("timed out")
+        clock = iter([0.0, 1.0, 400.0, 400.0, 400.0, 400.0])
+        with mock.patch.object(uhc, "get_install_status", return_value=_st()),              mock.patch.object(uhc, "start_install", side_effect=err),              mock.patch.object(msu.time, "monotonic", side_effect=lambda: next(clock)):
+            out = msu.update_install_staged(confirm=True, wait_s=9999)
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.assertIn("possibly applied", out)
+        self.assertIn("poll with", out)
+
+    def test_wait_is_capped_below_client_limit(self):
+        # deadline = t0 + 270 even for a huge wait_s: a poll at t=271 must not happen.
+        times = iter([0.0, 5.0, 271.0, 271.0, 271.0])
+        with mock.patch.object(uhc, "get_install_status", return_value=_st()) as g,              mock.patch.object(uhc, "start_install"),              mock.patch.object(msu.time, "monotonic", side_effect=lambda: next(times)):
+            out = msu.update_install_staged(confirm=True, wait_s=9999)
+        self.assertTrue(out.startswith("UNKNOWN"))
+        self.assertEqual(g.call_count, 1)  # only the initial GET
+
+    def test_refusal_with_status_still_failed(self):
+        with mock.patch.object(uhc, "get_install_status", return_value=_st()),              mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("x", 409, "busy")):
+            self.assertTrue(msu.update_install_staged(confirm=True).startswith("FAILED"))

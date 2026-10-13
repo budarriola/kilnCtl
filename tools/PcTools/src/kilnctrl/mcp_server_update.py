@@ -568,12 +568,16 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
     Without ``confirm=True`` (exactly) it only reads GET /api/update/status
     (including the last install result) and sends nothing. Refuses unless the
     stage reads staged. A firing or autotune makes the board answer 409.
-    After the POST it waits up to ``wait_s`` (clamped to 280) for the board
+    After the POST it waits up to ``wait_s`` (clamped to 270, total call under 280 s) for the board
     to answer again in the application with running_version equal to the staged
     version, then reports ok only if that matches and last_install is ok. A
     failed install (recovery stays up) or a board not back in time is reported
     as FAILED or UNKNOWN with the recorded reason; re-run this tool with
     confirm=False later to read it."""
+    t0 = time.monotonic()
+    # Whole call (initial GET, POST, settle sleep and polling) stays under the
+    # client's 300 s silence limit: deadline 270 s from entry, last poll <= 5 s.
+    deadline = t0 + max(10.0, min(float(wait_s), 270.0))
     resolved = _resolve_host(host)
     try:
         before = uhc.get_install_status(resolved)
@@ -584,18 +588,22 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
     if not before.get("staged") or before.get("stage_busy"):
         return f"REFUSED: no verified stage ready (staged={before.get('staged')}, stage_busy={before.get('stage_busy')}) (host={resolved})"
     want = before.get("staged_version")
+    post_unknown = False
     try:
         uhc.start_install(resolved)
     except uhc.UpdateHttpError as exc:
-        return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
-    deadline = time.monotonic() + max(10.0, min(float(wait_s), 280.0))
-    time.sleep(15.0)  # let the board go down before polling
+        if exc.status is not None:
+            return f"FAILED: install refused or lost: {_refusal_text(exc)} (host={resolved})"
+        # Transport failure/timeout: the board may have accepted the request and
+        # rebooted. Do not call it failed; let the follow-up reads decide.
+        post_unknown = True
+    time.sleep(min(15.0, max(0.0, deadline - time.monotonic())))  # let the board go down before polling
     last = None
     while time.monotonic() < deadline:
         try:
             st = uhc.get_install_status(resolved, timeout=5.0)
         except uhc.UpdateHttpError:
-            time.sleep(5.0)
+            time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
             continue
         last = st
         li = st.get("last_install") or {}
@@ -603,7 +611,9 @@ def update_install_staged(confirm: bool = False, wait_s: float = 240.0, host: Op
             return f"ok - installed {want!r} and running in the application: {_install_line(st)} (host={resolved})"
         if li.get("state") == "recorded" and li.get("code") not in ("ok", None):
             return f"FAILED: install recorded a failure: {_install_line(st)} (host={resolved})"
-        time.sleep(5.0)
+        time.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
     tail = _install_line(last) if last else "board never answered the application API"
-    return (f"UNKNOWN: board not confirmed on {want!r} within the wait ({tail}); the recovery image may still be "
-            f"applying or may have failed; re-run with confirm=False to read the result (host={resolved})")
+    note = " The install POST got no HTTP answer (possibly applied)." if post_unknown else ""
+    return (f"UNKNOWN: still in progress or unconfirmed: board not confirmed on {want!r} within the wait ({tail});{note} "
+            f"the recovery image may still be applying or may have failed; poll with "
+            f"update_install_staged(confirm=False) (host={resolved})")
