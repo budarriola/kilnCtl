@@ -193,15 +193,17 @@ static uint32_t largest_internal_block(void)
 }
 
 // Full start/hop admission; logs the numbers on refusal. NULL when admitted, else the error name.
-static const char *heap_admit(void)
+static const char *heap_admit(const work_t *w)
 {
     uint32_t f = free_internal();
     uint32_t l = largest_internal_block();
-    if (update_fetch_heap_admit(f, l) == FETCH_HEAP_OK) {
+    if (update_fetch_heap_admit(f, l, w->p.kind == KIND_DOWNLOAD) == FETCH_HEAP_OK) {
         return NULL;
     }
-    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u)", (unsigned)f,
-             (unsigned)FETCH_HEAP_PRECHECK_MIN, (unsigned)l, (unsigned)FETCH_LARGEST_BLOCK_MIN);
+    const bool dl = w->p.kind == KIND_DOWNLOAD;
+    ESP_LOGW(TAG, "refused: internal free %u (need %u), largest block %u (need %u), %s", (unsigned)f,
+             (unsigned)(dl ? FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH : FETCH_CHECK_HEAP_MIN), (unsigned)l,
+             (unsigned)(dl ? FETCH_LARGEST_BLOCK_MIN : FETCH_CHECK_BLOCK_MIN), dl ? "download" : "check");
     return "low_heap";
 }
 
@@ -530,7 +532,7 @@ static const char *http_get(work_t *w, const char *url, const char *accept, cons
         // Every hop opens a fresh TLS session: a handshake costs about 8-11 KB of internal heap, so
         // gating on the mid-body abort floor alone could dip under the owner's 8192 B internal
         // floor. Gate each esp_http_client_init on the full start threshold instead.
-        const char *adm = heap_admit();
+        const char *adm = heap_admit(w);
         if (adm != NULL) {
             return adm;
         }
@@ -723,7 +725,7 @@ static const char *run_job(work_t *w)
     if (!clock_synced()) {
         return "clock_not_synced";
     }
-    const char *adm = heap_admit();
+    const char *adm = heap_admit(w);
     if (adm != NULL) {
         return adm;
     }

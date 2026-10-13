@@ -15,21 +15,36 @@ static void test_admit(void)
     TEST_CHECK(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_WORST_DRAW_BYTES >= FETCH_HEAP_FLOOR_BYTES,
                "admitted free minus worst draw stays at or above 8192");
     // Idle bench numbers (logs/sk04_sampling/2026-10-06.tsv) must pass.
-    TEST_CHECK(update_fetch_heap_admit(29647u, 9728u) == FETCH_HEAP_OK, "idle minimum admitted");
-    TEST_CHECK(update_fetch_heap_admit(29815u, 9728u) == FETCH_HEAP_OK, "bench idle 29815 B admitted");
+    TEST_CHECK(update_fetch_heap_admit(29647u, 9728u, true) == FETCH_HEAP_OK, "idle minimum admitted");
+    // UPDFX1 bench: admission runs after the 1024 B scratch is held. 30311 free was read as ~29287.
+    TEST_CHECK(update_fetch_heap_admit(30311u - FETCH_HEAP_SCRATCH_BYTES, 10752u, false) == FETCH_HEAP_OK,
+               "UPDFX1 check admitted at 30.3 KB free, 10.7 KB block");
+    TEST_CHECK(update_fetch_heap_admit(30311u - FETCH_HEAP_SCRATCH_BYTES, 10752u, true) == FETCH_HEAP_OK,
+               "UPDFX1 download admitted at 30.3 KB free (scratch already held)");
+    TEST_CHECK(FETCH_CHECK_HEAP_MIN == 24100u, "check need is 8192+12068+3840");
+    TEST_CHECK(FETCH_CHECK_HEAP_MIN - FETCH_CHECK_DRAW_BYTES >= FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_SLACK_BYTES,
+               "after the check draw floor plus margin remain");
+    TEST_CHECK(update_fetch_heap_admit(FETCH_CHECK_HEAP_MIN - 1u, 10752u, false) == FETCH_HEAP_LOW_FREE,
+               "check one byte under its need refused");
+    TEST_CHECK(update_fetch_heap_admit(FETCH_CHECK_HEAP_MIN, FETCH_CHECK_BLOCK_MIN - 1u, false) == FETCH_HEAP_LOW_BLOCK,
+               "check small block refused");
+    TEST_CHECK(update_fetch_heap_admit(12000u, 10752u, false) == FETCH_HEAP_LOW_FREE, "check below floor+draw refused");
+    TEST_CHECK(update_fetch_heap_admit(FETCH_CHECK_HEAP_MIN, 10752u, true) == FETCH_HEAP_LOW_FREE,
+               "a download still needs more than a check");
+    TEST_CHECK(update_fetch_heap_admit(29815u, 9728u, true) == FETCH_HEAP_OK, "bench idle 29815 B admitted");
     TEST_CHECK(29647u - FETCH_HEAP_WORST_DRAW_BYTES - FETCH_HEAP_FLOOR_BYTES == 3931u, "idle-min margin over floor is 3931 B");
-    TEST_CHECK(update_fetch_heap_admit(31123u, 9728u) == FETCH_HEAP_OK, "idle maximum admitted");
-    TEST_CHECK(update_fetch_heap_admit(FETCH_HEAP_PRECHECK_MIN, FETCH_LARGEST_BLOCK_MIN) == FETCH_HEAP_OK,
+    TEST_CHECK(update_fetch_heap_admit(31123u, 9728u, true) == FETCH_HEAP_OK, "idle maximum admitted");
+    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH, FETCH_LARGEST_BLOCK_MIN, true) == FETCH_HEAP_OK,
                "exact thresholds admitted");
     // Negative: one byte under each limit refuses with the right reason.
-    TEST_CHECK(update_fetch_heap_admit(FETCH_HEAP_PRECHECK_MIN - 1u, 9728u) == FETCH_HEAP_LOW_FREE,
+    TEST_CHECK(update_fetch_heap_admit(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - 1u, 9728u, true) == FETCH_HEAP_LOW_FREE,
                "free one byte short refused");
-    TEST_CHECK(update_fetch_heap_admit(31123u, FETCH_LARGEST_BLOCK_MIN - 1u) == FETCH_HEAP_LOW_BLOCK,
+    TEST_CHECK(update_fetch_heap_admit(31123u, FETCH_LARGEST_BLOCK_MIN - 1u, true) == FETCH_HEAP_LOW_BLOCK,
                "largest block one byte short refused");
-    TEST_CHECK(update_fetch_heap_admit(28672u, 9728u) == FETCH_HEAP_LOW_FREE,
-               "the old 28672 B threshold no longer admits");
-    TEST_CHECK(update_fetch_heap_admit(8295u, 4096u) == FETCH_HEAP_LOW_FREE, "post-stage dip refused");
-    TEST_CHECK(update_fetch_heap_admit(0u, 0u) == FETCH_HEAP_LOW_FREE, "zero refused");
+    TEST_CHECK(update_fetch_heap_admit(28000u, 9728u, true) == FETCH_HEAP_LOW_FREE,
+               "28000 B (below the 28532 B download need) refused");
+    TEST_CHECK(update_fetch_heap_admit(8295u, 4096u, true) == FETCH_HEAP_LOW_FREE, "post-stage dip refused");
+    TEST_CHECK(update_fetch_heap_admit(0u, 0u, true) == FETCH_HEAP_LOW_FREE, "zero refused");
 }
 
 static void test_abort(void)

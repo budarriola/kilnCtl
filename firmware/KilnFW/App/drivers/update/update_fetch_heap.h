@@ -22,7 +22,7 @@
 //    so worst draw = 18548 B and slack = 1932 B; the PRECHECK sum is unchanged)
 //   slack, concurrent httpd / login KDF   3980 B (1932 B after the scratch)
 //   REVISED (review 3 LOW-5): worst draw 18548 B, floor 8192 B, concurrent KDF/httpd margin 4096 B
-//   -> FETCH_HEAP_PRECHECK_MIN           30836 B   (8192 + 18548 + 4096). The idle board sits at
+//   -> (historic, superseded) PRECHECK_MIN 30836 B   (8192 + 18548 + 4096). The idle board sits at
 //      29647-31123 B free, so an idle-minimum board is now REFUSED (retry later) rather than admitted
 //      with only 1932 B of margin; the older 28672 B figure above is superseded.
 // REVISED AGAIN (bench finding, origin/dev 8fcd3237: update_check refused at idle, 29815 B free < 30836 B):
@@ -38,6 +38,17 @@
 //      at the idle minimum the post-draw margin over the floor is 29647 - 17524 - 8192 = 3931 B.
 //      (old: 8192 + 18548 + 4096 = 30836 B, above idle.) Estimate, not a measurement: the WP8 gate
 //      (b) bench run must confirm min_free >= 8192 B with scratch 1024.
+// UPDFX1 (bench 2026-10-12, main 5098a1316: update_check -> low_heap at 30.3 KB free, 10.7 KB block):
+//   Root cause: admission ran in run_job(), AFTER fetch_task had already allocated the 1024 B internal
+//   stager scratch, so the live reading had that scratch taken out while the threshold counted it again
+//   (30311 - 1024 = 29287 < 29556). Also a CHECK (releases/latest only, memory sink, no writer task, no
+//   stager) was held to the full DOWNLOAD draw. Fix: admission is per kind and compares against the
+//   draw still to come with the scratch already held:
+//     download need = PRECHECK_MIN - SCRATCH = 28532 B   (floor + 16500 + slack; writer stack + TLS)
+//     check    need = 8192 + CHECK_DRAW 12068 + 3840 = 24100 B
+//   CHECK_DRAW = WP7 measured handshake draw 11044 B (2 KB rx, 1 KB tx) + 1024 B (2 KB tx here); no
+//   4096 B writer stack (wr_start only runs for the stage sink). The 8192 B owner floor and the 3840 B
+//   concurrent margin are unchanged; the mid-body abort (12288 B) is unchanged.
 //   Margin: 29556 B sits only 91 B below the 29647 B measured idle minimum (logs/sk04_sampling); a bench
 //   re-measure of the idle minimum is PENDING, so treat the value as provisional.
 // The slack is deliberately NOT larger: the board idles at 29647-31123 B free
@@ -79,6 +90,12 @@ extern "C" {
 #define FETCH_HEAP_SLACK_BYTES 3840u
 #define FETCH_HEAP_PRECHECK_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_HEAP_WORST_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
 #define FETCH_LARGEST_BLOCK_MIN 6144u
+// Check job (UPDFX1): TLS handshake only, no writer task. Needs the 2 KB client buffers as the biggest block.
+#define FETCH_CHECK_DRAW_BYTES (11044u + 1024u)
+#define FETCH_CHECK_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_CHECK_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
+#define FETCH_CHECK_BLOCK_MIN 3072u
+// Download need once the job's own scratch is already allocated (the live reading excludes it).
+#define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES)
 // Mid-body abort (read loop only, session already built): floor plus 4 KB of transient room.
 #define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 4096u)
 
@@ -88,8 +105,10 @@ typedef enum {
     FETCH_HEAP_LOW_BLOCK,  // largest free internal block below FETCH_LARGEST_BLOCK_MIN
 } fetch_heap_verdict_t;
 
-// Admission at a job or redirect-hop start (every fresh TLS session).
-fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block);
+// Admission at a job or redirect-hop start (every fresh TLS session). The caller reads the heap AFTER
+// the job's stager scratch is allocated, so the scratch is not charged again. is_download selects the
+// download (writer task + stager) or check (TLS + JSON only) draw.
+fetch_heap_verdict_t update_fetch_heap_admit(uint32_t free_internal, uint32_t largest_internal_block, bool is_download);
 
 // Mid-body: true when the job must give up.
 bool update_fetch_heap_abort(uint32_t free_internal);
