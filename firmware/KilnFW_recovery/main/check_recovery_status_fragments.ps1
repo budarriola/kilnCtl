@@ -9,6 +9,8 @@
 # 2. ota_esp_post must call recovery_install_supersede() BEFORE it sets the
 #    boot partition, like recovery_exit_post (REVIEW_AUTOFX2 LOW-3), and must
 #    report the supersede result.
+# 3. Both images report last_install.id (the install identity mcp_server_update.py
+#    matches), built from the loaded record (REVIEW_AUTOFX5 LOW).
 #
 # Contract (tools/run_all_checks.ps1): exit 0 PASS, anything else FAIL.
 $ErrorActionPreference = "Stop"
@@ -71,9 +73,32 @@ elseif ($iSet -lt 0) { throw "ota_esp_post: boot partition set not found" }
 elseif ($iSup -gt $iSet) { $fails += "ota_esp_post supersedes AFTER setting the boot partition" }
 if ($body -notmatch 'supersede_rc == 0') { $fails += "ota_esp_post does not report a failed supersede in its response" }
 
+# --- 3. install identity is reported (REVIEW_AUTOFX5) ----------------------
+# mcp_server_update.py matches last_install.id against the staged sha256 prefix. Both the recovery
+# status fragment and the application's GET /api/update/status must emit it, filled from the record
+# (an all-zero id silently disables the match, so a dropped or hard-zeroed field would pass every
+# size check above). The recovery fragment must take its id from the record when one is loaded.
+foreach ($lit in $lastInstall) {
+    if ($lit -notmatch '\\"id\\":\\"%s\\"') { $fails += "the recovery last_install fragment does not carry `"id`":`"%s`"" }
+}
+$mFrag = [regex]::Match($http, 'send_frag\(req,\s*"\\"last_install\\"[^;]*;', 'Singleline')
+if (-not $mFrag.Success -or $mFrag.Value -notmatch ',\s*ir_id\s*\)\s*;') {
+    $fails += "the recovery last_install fragment does not pass ir_id as its id argument"
+}
+if ($http -notmatch 'update_install_id_hex\(\s*have_ir\s*\?\s*ir\.id\s*:\s*no_id\s*,\s*ir_id\s*\)') {
+    $fails += "recovery ir_id is not built from the loaded record's id (update_install_id_hex(have_ir ? ir.id : no_id, ir_id))"
+}
+$app = Get-Content -Raw -LiteralPath (Join-Path $here "..\..\KilnFW\App\drivers\update\update_install_http.c")
+$mSt = [regex]::Match($app, 'static esp_err_t status_get_handler\(.*?\n\}', 'Singleline')
+if (-not $mSt.Success) { throw "update_install_http.c status_get_handler not found" }
+$st = $mSt.Value
+if ($st -notmatch '\\"version\\":\\"%s\\",\\"id\\":\\"%s\\"\}\}') { $fails += "app /api/update/status last_install lacks `"id`":`"%s`"" }
+if ($st -notmatch 'update_install_id_hex\(\s*res\.id\s*,\s*lid\s*\)') { $fails += "app lid is not built from the read record (update_install_id_hex(res.id, lid))" }
+if ($st -notmatch ',\s*lv\s*,\s*lid\s*\)\s*;') { $fails += "app status snprintf does not pass lid after lv" }
+
 if ($fails.Count) {
     $fails | ForEach-Object { Write-Host "FAIL: $_" }
     exit 1
 }
-Write-Host "PASS: recovery status fragments fit, ota_esp_post supersedes first"
+Write-Host "PASS: recovery status fragments fit, ota_esp_post supersedes first, install id reported by both images"
 exit 0

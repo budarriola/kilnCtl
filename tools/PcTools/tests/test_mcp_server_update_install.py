@@ -587,6 +587,22 @@ class InstallStartTests(_Base):
         self.assertEqual(classify(out), "ok")
         self.assertGreater(self.clock.t - t0, 235.0)
 
+    def test_pending_record_outlives_the_background_wait(self):
+        # REVIEW_AUTOFX5: the job may give up after its full 600 s; a follow-up read shortly after
+        # must still find the pending record (TTL longer than the job's wait), not "cannot confirm".
+        runner, _ = self._runner()
+        with mock.patch.object(uhc, "get_install_status", side_effect=[_st()] + [uhc.UpdateHttpError("down")] * 500), \
+             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+            out = runner()
+        self.assertTrue(out.startswith("UNKNOWN"), out)
+        self.clock.sleep(30.0)
+        self.reboot()
+        with mock.patch.object(uhc, "get_install_status", return_value=_ok(rid=STAGED_ID)), \
+             mock.patch.object(uhc, "start_install") as post:
+            out = msu.update_install_staged(confirm=False)
+        post.assert_not_called()
+        self.assertTrue(out.startswith("ok"), out)
+
     def test_classification(self):
         _, classify = self._runner()
         self.assertEqual(classify("ok - installed"), "ok")
