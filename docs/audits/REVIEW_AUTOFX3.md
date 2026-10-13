@@ -193,3 +193,15 @@ Commands (from the worktree):
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset pytest -PresetArg tests/test_mcp_server_update_install.py -Mutations py3.json
 powershell -ExecutionPolicy Bypass -File tools\negtest.ps1 -Preset check -PresetArg firmware/KilnFW_recovery/main/check_recovery_status_fragments.ps1 -Mutations rec3.json
 ```
+
+## Fix status (2026-10-13)
+
+Fixed in `75ff29b39` (code, check) with test follow-ups in the two commits after it on the same push:
+
+- MED-1: `t_pre` is taken after the `before_up` read returns; `elapsed` is taken before the after-read is sent, so request latency can only under-count. `SlowReadTests` (virtual clock, slow before-read, slow after-read, slow both) must not return ok; a real reboot with slow reads still does.
+- LOW-1: pending records expire 600 s after `t_pre` (`_PENDING_TTL_S`, past the 270 s poll cap) and are dropped on expiry. Not done: the `last_install.state == "none"` proof that the POST arrived.
+- LOW-2: the unproven follow-up answers `UNKNOWN: ... still pending ... poll again with update_install_staged(confirm=False)`, no REFUSED, no confirm=True.
+- LOW-3: reason names are parsed with `"([^"\]*)"` and the check fails unless the count equals the `UPD_INST_REASON_*` enum size.
+- INFO-1: the supersede call must be a top-level statement of `ota_esp_post` (4-space indent), so `if (0) { ... }` fails. A deeper dead-code guard would need a C parser and is not attempted.
+
+Negtest: pytest preset 4/4 CAUGHT (t_pre before read, elapsed after read, no TTL, REFUSED wording); check preset 3/3 CAUGHT (digit-bearing long name, old narrow regex plus that name, dead supersede).
