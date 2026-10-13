@@ -614,3 +614,11 @@ CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
 # firmware-wide TLS behaviour change that cannot be proven here without a board (crt_bundle
 # against github.com with a synced clock, and every other TLS client). See
 # docs/GITHUB_RELEASE_UPDATE_PLAN.md WP8 status, "Clock".
+
+# UART ISR in IRAM (2026-10-13, docs/audits/LINK_CRC_DURING_FETCH.md). A flash erase/write
+# (update stage: 64 KB erase-ahead blocks, ~150-400 ms with the cache off) otherwise holds off
+# the non-IRAM UART1 ISR (kilnlink to the Pico, 230400 baud) longer than the 128-byte HW RX FIFO
+# lasts (~5.5 ms), so bytes are lost mid-frame: crc/length mismatches and reply timeouts. With
+# this the ISR keeps draining the FIFO into the driver ring while the cache is disabled. COST: the IDF then allocates the UART
+# rings MALLOC_CAP_INTERNAL (were PSRAM), so hal_uart_esp.c's rings were cut 4096/4096 -> 2048/1024.
+CONFIG_UART_ISR_IN_IRAM=y

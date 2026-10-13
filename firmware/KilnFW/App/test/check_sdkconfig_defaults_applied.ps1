@@ -70,7 +70,8 @@ $watchedKeys = @(
     'CONFIG_LWIP_TCP_OOSEQ_MAX_PBUFS',      # 2026-09-23: bench-proven 4 vs. IDF's regenerated 0
     'CONFIG_KILNCTL_ENABLE_GPIO_PROBE',     # 2026-09-23: pinned y so a clean worktree keeps gpio_probe
     'CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC',    # 2026-10-05 WP8: TLS option D; a stale sdkconfig keeps option B (does not fit)
-    'CONFIG_MBEDTLS_DYNAMIC_BUFFER'         # 2026-10-05 WP8: TLS option D, same reason
+    'CONFIG_MBEDTLS_DYNAMIC_BUFFER',        # 2026-10-05 WP8: TLS option D, same reason
+    'CONFIG_UART_ISR_IN_IRAM'               # 2026-10-13: kilnlink RX survives flash erase/write (LINK_CRC_DURING_FETCH.md)
 )
 
 function Get-ConfigValue {

@@ -61,8 +61,19 @@ static const char *TAG = "hal_uart_esp";
  * generous headroom over one worst-case stuffed frame so a burst can't
  * overrun the ring before the event task/hal_uart_recv's caller drains it.
  * See that file's header comment for the full derivation -- unchanged here. */
-#define HAL_UART_ESP_RX_RING_BUF_SIZE 4096
-#define HAL_UART_ESP_TX_RING_BUF_SIZE 4096
+/* 2026-10-13 (docs/audits/LINK_CRC_DURING_FETCH.md): 4096 -> 2048 RX / 1024 TX.
+ * CONFIG_UART_ISR_IN_IRAM=y (sdkconfig.defaults) makes the IDF driver allocate
+ * these rings MALLOC_CAP_INTERNAL (an IRAM-resident ISR cannot touch PSRAM),
+ * where they used to be taken from PSRAM; at 2 x (4096+4096) that was ~22 KB
+ * of internal heap and starved the TLS fetch (low_heap_free). One worst-case
+ * stuffed kilnlink frame is KILNLINK_FRAME_STUFFED_MAX (528 B), so 2048 RX holds
+ * 3+ frames and a 1024 TX ring holds one (plus the 8 B ring item header). */
+#define HAL_UART_ESP_RX_RING_BUF_SIZE 2048
+#define HAL_UART_ESP_TX_RING_BUF_SIZE 1024
+_Static_assert(HAL_UART_ESP_RX_RING_BUF_SIZE >= 3 * 528,
+               "RX ring must hold several worst-case stuffed kilnlink frames");
+_Static_assert(HAL_UART_ESP_TX_RING_BUF_SIZE >= 528 + 64,
+               "TX ring must hold one worst-case stuffed frame plus ring item overhead");
 #define HAL_UART_ESP_EVENT_QUEUE_LEN  16
 
 /* Floor for hal_uart_send_blocking()'s final uart_wait_tx_done() wait -- see
@@ -333,9 +344,10 @@ hal_status_t hal_uart_send_blocking(hal_uart_t *u, const uint8_t *data, size_t l
     size_t total_written = 0;
     while (total_written < len) {
         size_t remaining = len - total_written;
-        size_t chunk_target = (remaining < HAL_UART_ESP_TX_RING_BUF_SIZE)
-                                   ? remaining
-                                   : HAL_UART_ESP_TX_RING_BUF_SIZE;
+        /* A NOSPLIT ring item carries a header, so a chunk of exactly the ring
+         * size can never fit: leave 64 B of slack. */
+        size_t chunk_max = HAL_UART_ESP_TX_RING_BUF_SIZE - 64;
+        size_t chunk_target = (remaining < chunk_max) ? remaining : chunk_max;
 
         for (;;) {
             size_t free_bytes = 0;
