@@ -49,11 +49,11 @@ class _Base(unittest.TestCase):
         self.addCleanup(msu._PENDING_INSTALL.clear)
         self.addCleanup(msu._EXPIRED_INSTALL.clear)
         self.staged_sha = STAGED_SHA
-        for p in (mock.patch.object(msu, "_resolve_host", return_value="h"),
-                  mock.patch.object(msu.time, "sleep", side_effect=self.clock.sleep),
-                  mock.patch.object(msu.time, "monotonic", side_effect=self.clock.monotonic),
-                  mock.patch.object(dhc, "get_status", side_effect=self._status),
-                  mock.patch.object(uhc, "get_stage_status", side_effect=lambda h, timeout=8.0: {"sha256": self.staged_sha})):
+        for p in (mock.patch.object(msu, "_resolve_host", return_value="h"), \
+                     mock.patch.object(msu.time, "sleep", side_effect=self.clock.sleep), \
+                     mock.patch.object(msu.time, "monotonic", side_effect=self.clock.monotonic), \
+                     mock.patch.object(dhc, "get_status", side_effect=self._status), \
+                     mock.patch.object(uhc, "get_stage_status", side_effect=lambda h, timeout=8.0: {"sha256": self.staged_sha})):
             p.start()
             self.addCleanup(p.stop)
 
@@ -489,18 +489,26 @@ class DeadlineChargeTests(_Base):
     """INFO-2: the in-loop uptime read is charged to the call's deadline."""
 
     def test_slow_uptime_reads_do_not_push_the_call_past_the_deadline(self):
-        t0 = self.clock.t
+        # Vary the budget so some poll always starts within 5 s of the deadline, whatever the poll phase.
+        for wait_s in range(50, 66):  # no subTest: negtest needs a plain FAILED line
+            if True:
+                msu._PENDING_INSTALL.clear()
+                t0 = self.clock.t
 
-        def slow_status(host, timeout=8.0):
-            self.clock.t += timeout  # the read takes as long as its timeout allows
-            raise dhc.DashboardHttpError("timed out")
-        stale = _ok()
-        with mock.patch.object(dhc, "get_status", side_effect=slow_status), \
-             mock.patch.object(uhc, "get_install_status", return_value=stale), \
-             mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
-            out = msu.update_install_staged(confirm=True, wait_s=60)
-        self.assertTrue(out.startswith("UNKNOWN"), out)
-        self.assertLess(self.clock.t - t0, 60.5)
+                reads = {"n": 0}
+
+                def slow_status(host, timeout=8.0):
+                    reads["n"] += 1
+                    if reads["n"] == 1:  # the before-POST read works, so later reads are needed for proof
+                        return {"uptime_s": 500}
+                    self.clock.t += timeout  # the read takes as long as its timeout allows
+                    raise dhc.DashboardHttpError("timed out")
+                with mock.patch.object(dhc, "get_status", side_effect=slow_status), \
+                     mock.patch.object(uhc, "get_install_status", return_value=_ok()), \
+                     mock.patch.object(uhc, "start_install", side_effect=uhc.UpdateHttpError("lost")):
+                    out = msu.update_install_staged(confirm=True, wait_s=wait_s)
+                self.assertTrue(out.startswith("UNKNOWN"), f"wait_s={wait_s}: {out}")
+                self.assertLess(self.clock.t - t0, wait_s + 0.5, f"wait_s={wait_s}")
 
 
 class RecoveryApplyingTests(_Base):
