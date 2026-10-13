@@ -57,6 +57,8 @@ bool g_fr_wr_missed_give;
 volatile long g_fr_wr_give_dropped;
 static HANDLE s_give_dropped_ev;
 static volatile DWORD s_wr_tid; // thread id of the most recently created update_fetch_wr task
+static HANDLE s_last_binary;    // most recently created binary semaphore
+static volatile HANDLE s_wr_done_h; // wr_done: the last binary semaphore created before the writer task
 
 bool g_fr_claim_deny;
 bool g_fr_claim_held;
@@ -252,6 +254,7 @@ static BaseType_t task_create(TaskFunction_t fn, const char *name, void *arg, Ta
     uintptr_t h = _beginthreadex(NULL, 0, thr_main, t, 0, &tid);
     if (h != 0 && name != NULL && strcmp(name, "update_fetch_wr") == 0) {
         s_wr_tid = tid;
+        s_wr_done_h = s_last_binary; // wr_start() creates wr_req, then wr_done, then this task
     }
     if (h == 0) {
         InterlockedDecrement(&g_fr_live_tasks);
@@ -351,6 +354,7 @@ SemaphoreHandle_t xSemaphoreCreateBinary(void)
 {
     HANDLE h = CreateSemaphore(NULL, 0, 1, NULL);
     sem_note_live(h);
+    s_last_binary = h;
     return h;
 }
 SemaphoreHandle_t xSemaphoreCreateMutex(void)
@@ -408,7 +412,9 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t s)
     if (sem_is_bad(s)) {
         return pdFALSE;
     }
-    if (g_fr_wr_missed_give && s_wr_tid != 0 && GetCurrentThreadId() == s_wr_tid &&
+    // Only the writer's give of wr_done is dropped: a give of any other semaphore on the writer thread (the
+    // stage lock inside an op) would wedge the op itself and never reach the missed-give path.
+    if (g_fr_wr_missed_give && s_wr_tid != 0 && GetCurrentThreadId() == s_wr_tid && (HANDLE)s == s_wr_done_h &&
         InterlockedCompareExchange(&g_fr_wr_give_dropped, 1, 0) == 0) {
         SetEvent(s_give_dropped_ev); // the writer's first completion give is lost
         return pdTRUE;
