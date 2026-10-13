@@ -269,8 +269,10 @@ brick the board: the boot path re-checks size and sha against the stage.
 
 ## Fix status (2026-10-13)
 
-Commits (worktree autoapplyfx1, branch from origin/dev): `0388de1f0` (firmware
-recovery glue + codec tests), `f8bc24c62` (prepare tests), `92dea4204` (MCP).
+Commits as landed on origin/dev: `14ff316e0` (firmware recovery glue + codec
+tests), `d26785f9a` (prepare tests), `9241f5362` (MCP), `8e0a53497` (this fix
+status), `d43ef4b4a` (check_recovery_wifi_policy mutation anchor). Review of
+these fixes: `REVIEW_AUTOFX.md`.
 
 | Finding | Status |
 |---|---|
