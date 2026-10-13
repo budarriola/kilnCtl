@@ -69,7 +69,7 @@ static const char *TAG = "update_fetch";
 // (8192 B) is INTERNAL heap, so it is charged to the precheck below, not to PSRAM.
 #define FETCH_TX_BUF_BYTES 2048u
 // Admission and mid-body abort thresholds (FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH on current free
-// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 10240 B)
+// internal heap, FETCH_LARGEST_BLOCK_MIN on the largest internal block, FETCH_HEAP_ABORT_BELOW 8704 B)
 // live in update_fetch_heap.h with their derivation and are host-tested. The job start uses the full
 // admission rule, redirect hops after the first the hop rule (same need as a start, UPDFX4), and the
 // read loop only the abort floor plus the consecutive-sample DMA check.

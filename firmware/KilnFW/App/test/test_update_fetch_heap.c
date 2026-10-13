@@ -85,9 +85,7 @@ static void test_hop(void)
 static void test_dma(void)
 {
     TEST_SECTION("update_fetch_heap -- DMA-capable free (UPDFX5 derived floor)");
-    TEST_CHECK(FETCH_DMA_FREE_MIN == 2048u, "DMA floor is abort level 10240 minus the 8192 B floor, under the 2291 B healthy bench low-water");
-    TEST_CHECK(FETCH_DMA_FREE_MIN + FETCH_DMA_IDLE_OFFSET_BYTES == FETCH_HEAP_ABORT_BELOW,
-               "DMA floor corresponds to the internal abort level");
+    TEST_CHECK(FETCH_DMA_FREE_MIN == 2048u && FETCH_DMA_FREE_MIN < 2291u, "DMA floor is an explicit 2048 B, under the 2291 B healthy bench low-water");
     TEST_CHECK(update_fetch_heap_dma_ok(6351u), "bench idle min_free 6351 passes");
     TEST_CHECK(update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN), "exact floor passes");
     TEST_CHECK(!update_fetch_heap_dma_ok(FETCH_DMA_FREE_MIN - 1u), "one under refused");
@@ -140,14 +138,16 @@ static void test_dma(void)
 static void test_abort(void)
 {
     TEST_SECTION("update_fetch_heap -- mid-body abort");
-    TEST_CHECK(FETCH_HEAP_ABORT_BELOW == FETCH_HEAP_FLOOR_BYTES + 2048u && FETCH_HEAP_ABORT_BELOW == 10240u,
-               "abort threshold is floor + 2048");
+    TEST_CHECK(FETCH_HEAP_ABORT_BELOW == FETCH_HEAP_FLOOR_BYTES + 512u && FETCH_HEAP_ABORT_BELOW == 8704u,
+               "abort threshold is floor + 512");
+    TEST_CHECK(FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_MEASURED_DRAW_BYTES >= FETCH_HEAP_ABORT_BELOW,
+               "admission minus measured draw (8711 B) clears the abort level");
     // LOW-1: an admitted download must not self-abort at once.
     TEST_CHECK(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - 16500u >= FETCH_HEAP_ABORT_BELOW + 1024u,
                "post-draw level of a start admission clears the abort level with margin");
     TEST_CHECK(!update_fetch_heap_abort(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH - 16500u), "admitted download does not abort at once");
-    TEST_CHECK(!update_fetch_heap_abort(10240u), "at threshold continues");
-    TEST_CHECK(update_fetch_heap_abort(10239u), "one byte under aborts");
+    TEST_CHECK(!update_fetch_heap_abort(8704u), "at threshold continues");
+    TEST_CHECK(update_fetch_heap_abort(8703u), "one byte under aborts");
     TEST_CHECK(update_fetch_heap_abort(8192u), "at the owner floor aborts");
 }
 

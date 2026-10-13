@@ -320,7 +320,7 @@ static void test_claim_released_on_failures(void)
     g_fr_flash_write_fail = false;
 }
 
-static void drop_heap_low(void) { g_fake_heap_free_internal = 9000; }
+static void drop_heap_low(void) { g_fake_heap_free_internal = 8000; }
 static void set_heap_hop_ok(void) { g_fake_heap_free_internal = 27855; g_fake_heap_largest_internal = 7680; }
 static void set_heap_hop_low(void) { g_fake_heap_free_internal = 22910; }
 
@@ -407,6 +407,7 @@ static void set_heap_28000(void) { g_fake_heap_free_internal = 28000; }
 static void set_heap_25000(void) { g_fake_heap_free_internal = 25000; }
 static void set_heap_30311(void) { g_fake_heap_free_internal = 30311; }
 // Arms the scripted per-read DMA sequence (fake_support) when the asset body starts.
+static void dip_heap_8711(void) { g_fake_heap_free_internal = 8711; }
 static void arm_dma_seq(void) { g_fr_dma_seq_armed = true; }
 static void set_dma_low_and_arm(void)
 {
@@ -516,6 +517,15 @@ static void test_heap_admission_updfx3(void)
     run_job_and_result("/api/update/download");
     CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "steady DMA at 2291 B (the bench healthy low-water, above the derived floor) completes");
     expect_claim_balanced("steady dma above floor");
+
+    // UPDFX5 round 2: admitted at exactly the admission need (live 28623 B + 1024 B scratch = 29647 B) and the
+    // internal free dips to 8711 B (admission minus the measured 20936 B draw) mid-body: completes, no abort.
+    fixture(g_sha_hex, IMG_LEN);
+    g_fake_heap_free_internal = FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH;
+    g_app_route->on_read = dip_heap_8711;
+    run_job_and_result("/api/update/download");
+    CHECK(strcmp(g_state, "done") == 0 && stage_staged(), "fetch admitted at the threshold dipping to 8711 B completes without an abort");
+    expect_claim_balanced("admission-edge dip");
 
     // A transient dip under the floor (two between-read samples) that recovers does not abort.
     fixture(g_sha_hex, IMG_LEN);

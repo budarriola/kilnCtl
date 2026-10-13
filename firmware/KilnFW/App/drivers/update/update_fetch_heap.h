@@ -41,7 +41,7 @@
 //     check    need = 8192 + CHECK_DRAW 12068 + 3840 = 24100 B
 //   CHECK_DRAW = WP7 measured handshake draw 11044 B (2 KB rx, 1 KB tx) + 1024 B (2 KB tx here); no
 //   4096 B writer stack (wr_start only runs for the stage sink). The 8192 B owner floor and the 3840 B
-//   concurrent margin are unchanged. (The mid-body abort was 12288 B here; UPDFX2 below moved it to 10240 B.)
+//   concurrent margin are unchanged. (The mid-body abort was 12288 B here; UPDFX2 moved it to 10240 B and UPDFX5 round 2 to 8704 B, see FETCH_HEAP_ABORT_BELOW.)
 //   UPDFX2 (MED-1, LOW-1): a check is admitted at the SAME 28532 B need as a download (a check that
 //   starts is a precursor to a download; the bench board idles at 29.6-31.1 KB so both pass). The
 //   check keeps its own 3072 B largest-block need (client buffers only). The mid-body abort is now
@@ -85,6 +85,8 @@
 //   esp_http_client_read: the mid-body abort (FETCH_HEAP_ABORT_BELOW) runs only BETWEEN body reads, so it covers
 //   the body phase only and cannot see a dip in those other phases (UPDFX4 MED-1). The floor is NOT guaranteed
 //   there; the admission value is unchanged (UPDFX5 MED-1).
+//   Abort/admission consistency (UPDFX5 round 2): admission at 29647 B ends the body phase near 8711 B, so the abort
+//   is FLOOR + 512 = 8704 B and a static assert requires PRECHECK_MIN >= ABORT_BELOW + MEASURED_DRAW (29647 >= 29640).
 //   Margin, bench-measured draw (v1.0.0-pre.3 fetch on c549a144c: internal draw from idle 20240 B, an earlier run 20936 B;
 //   the worse figure is used): idle minimum 29647 - 20936 = 8711 B, 519 B ABOVE the 8192 B floor. The 1024 B stager
 //   scratch is part of that draw measurement, not extra. The internal largest-block low-water was 7680 B.
@@ -142,8 +144,12 @@ extern "C" {
 // Start need (both kinds). Download jobs hold the scratch already (the live reading excludes it); a check
 // allocates none, so its live reading is 1024 B higher and the same number is slightly more lenient.
 #define FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH (FETCH_HEAP_PRECHECK_MIN - FETCH_HEAP_SCRATCH_BYTES)
-// Mid-body abort (read loop only, session already built): floor plus 2 KB of transient room.
-#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 2048u)
+// Mid-body abort (read loop only, session already built): floor plus 512 B (UPDFX5 round 2). A fetch admitted at
+// the idle minimum bottoms out at 29647 - 20936 = 8711 B, so the abort must sit at or under that; the bench healthy
+// low-water of 10079 B is also above it. The old FLOOR + 2048 = 10240 B aborted every admitted fetch.
+#define FETCH_HEAP_ABORT_BELOW (FETCH_HEAP_FLOOR_BYTES + 512u)
+_Static_assert(FETCH_HEAP_PRECHECK_MIN >= FETCH_HEAP_ABORT_BELOW + FETCH_HEAP_MEASURED_DRAW_BYTES,
+               "a fetch admitted at the admission threshold must not self-abort: PRECHECK_MIN >= ABORT_BELOW + measured draw");
 // Redirect hops after the first: same value as a start, the idle minimum minus the held scratch (UPDFX4).
 #define FETCH_HOP_DOWNLOAD_HEAP_MIN FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH
 #define FETCH_HOP_CHECK_HEAP_MIN (FETCH_HEAP_FLOOR_BYTES + FETCH_CHECK_DRAW_BYTES + FETCH_HEAP_SLACK_BYTES)
@@ -152,11 +158,9 @@ extern "C" {
 #define FETCH_HEAP_SETTLE_MS 250u
 // DMA-capable internal free. UPDFX5 (REVIEW_UPDFX4 MED-2): the floor is DERIVED from bench data, not a fixed 4096 B.
 // Bench (v1.0.0-pre.3 fetch, verified OK on c549a144c): DMA min_free fell 6767 -> 2291 B on a HEALTHY download, i.e.
-// below the old 4096 B floor, and also below the 2452 B (10240 - 7788) first derived from idle offsets. So the floor is
-// FETCH_HEAP_ABORT_BELOW - FETCH_HEAP_FLOOR_BYTES = 2048 B: 243 B under the healthy low-water, and it only fires on a
-// sustained run/window of low reads (below), never on one momentary dip.
-#define FETCH_DMA_IDLE_OFFSET_BYTES FETCH_HEAP_FLOOR_BYTES
-#define FETCH_DMA_FREE_MIN (FETCH_HEAP_ABORT_BELOW - FETCH_DMA_IDLE_OFFSET_BYTES)
+// below the old 4096 B floor. The floor is an explicit 2048 B, 243 B under that healthy low-water; it is NOT derived
+// from FETCH_HEAP_ABORT_BELOW. It only fires on a sustained run/window of low reads (below), never on one dip.
+#define FETCH_DMA_FREE_MIN 2048u
 // Mid-body: the sample is taken only AFTER a read that returned data (a stalled EAGAIN slice is not a read and
 // is never sampled). Abort on FETCH_DMA_LOW_READS consecutive low samples, or FETCH_DMA_WINDOW_LOW low samples
 // among the last FETCH_DMA_WINDOW (UPDFX5 LOW-1: low,low,ok repeating), or one sample under FETCH_DMA_HARD_MIN.
