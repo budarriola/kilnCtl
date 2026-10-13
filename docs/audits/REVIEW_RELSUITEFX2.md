@@ -167,3 +167,29 @@ pytest assertion failure (no collection or import errors).
 | M25 | cancel `confirm=False` | CAUGHT |
 | M26 | post re-read `startswith("ok")` dropped | MISSED (equivalent, INFO-3) |
 | M27 | runner confirm not passed | CAUGHT |
+
+## Fix status
+
+Fixed in dedebcf8f (`tools/PcTools/src/kilnctrl/bench_test/cases_release.py`, tests in `tools/PcTools/tests/test_bench_test_cases_release.py`).
+
+- MED-1 fixed: B01 and every D01 update call pass the pinned host. A UART-vs-HTTP identity check runs before the trip, before the stage and again before the install; a mismatch or unreadable value is INCONCLUSIVE and nothing is called.
+- LOW-1 fixed: the resolved IP from the identity check is written to `ctx["host"]` and used for all later calls.
+- LOW-2 fixed: B01 requires the UART diag to show trip_reason 4 and mask 0x0008, otherwise it aborts and FAILs without clearing.
+- LOW-3 fixed: a missing, failed or raising cancel taints the run; the stage is read back after the clear and anything staged or busy FAILs and taints the run.
+- LOW-4 fixed: an exception from update_install_staged has its own `RAISED` label and FAIL result; cancel and clear are skipped when an install may be running, and the poll waits for the board.
+- LOW-5 fixed: the post-install poll accepts a snapshot only after a confirmed reboot (link down then up, fw_build change, or uptime drop) and a validated baseline; an unreadable field is INCONCLUSIVE.
+- INFO-2 fixed: bool link counters are rejected (test pins it).
+
+Negative tests (`tools\negtest.ps1 -Preset pytest`, all CAUGHT by assertion FAILED lines, real tree unchanged):
+
+| Mutation | Verdict |
+|---|---|
+| B01 trip call drops host | CAUGHT |
+| stage_release drops host | CAUGHT |
+| stage_clear drops host | CAUGHT |
+| B01 reason check relaxed to allow 0 | CAUGHT |
+| clear read-back no longer taints | CAUGHT |
+| bool counter accepted | CAUGHT |
+| reboot always considered confirmed | CAUGHT |
+| B01 identity check skipped | CAUGHT |
+| install identity re-check skipped | CAUGHT |
