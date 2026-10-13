@@ -126,6 +126,10 @@ static bool s_net_storage_fail = false; // driver not RAM-only: AP refused
 static int s_ap_down = 0;       // SoftAP stopped: do not show its credentials
 static char s_err_head[24];   // generic fatal error (e.g. "HTTP FAILED"), "" = none
 static char s_err_detail[28];
+// Warning line drawn IN ADDITION to the network section (SSID/passphrase stay visible), cleared by the
+// 1 Hz task once s_warn_active() reports false. Never carries a credential.
+static char s_warn[28];
+static bool (*s_warn_active)(void);
 static bool s_drawn_relay_fault = false; // what the last draw_status() showed
 
 // Panel health, reported read-only through GET /api/recovery/status.
@@ -436,6 +440,10 @@ static void draw_status(void)
         (void)draw_line(Y_NOTE, TEXT_SCALE, COL_BG, COL_BG, "");
     }
 
+    if (s_warn[0]) {
+        (void)draw_line(Y_NOTE, TEXT_SCALE, COL_FAULT, COL_FAULT_BG, s_warn);
+    }
+
     if (!rlcd_draw_ok(s_line_errs)) {
         // A dropped line may be the passphrase: not ready, so the 1 Hz task
         // re-inits and redraws the whole screen.
@@ -558,6 +566,13 @@ static void lcd_task(void *arg)
     for (;;) {
         vTaskDelay(pdMS_TO_TICKS(LCD_TASK_PERIOD_MS));
         xSemaphoreTake(s_lock, portMAX_DELAY);
+        if (s_warn[0] && s_warn_active && !s_warn_active()) {
+            s_warn[0] = 0; // the condition behind the warning is over: stop showing it
+            s_warn_active = NULL;
+            if (s_ready) {
+                draw_status();
+            }
+        }
         if (rlcd_tick_action(s_ready) == RLCD_TICK_WARN_AND_RETRY) {
             ESP_LOGE(TAG, RLCD_NOT_READY_MSG); // never the passphrase itself
             if (lcd_bring_up_burst()) {
@@ -660,6 +675,20 @@ void recovery_lcd_set_error(const char *headline, const char *detail)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     snprintf(s_err_head, sizeof(s_err_head), "%s", headline && headline[0] ? headline : "ERROR");
     snprintf(s_err_detail, sizeof(s_err_detail), "%s", detail ? detail : "");
+    if (s_ready) {
+        draw_status();
+    }
+    xSemaphoreGive(s_lock);
+}
+
+void recovery_lcd_set_warning(const char *line, bool (*still_active)(void))
+{
+    if (!s_lock) {
+        s_lock = xSemaphoreCreateMutexStatic(&s_lock_buf);
+    }
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    snprintf(s_warn, sizeof(s_warn), "%s", line ? line : "");
+    s_warn_active = still_active;
     if (s_ready) {
         draw_status();
     }

@@ -75,6 +75,12 @@ void recovery_lcd_set_wifi_storage_fail(void);
 // for a FINAL failure. Same safety rules.
 void recovery_lcd_set_error(const char *headline, const char *detail);
 
+// Shows a one-line warning on the bottom note line IN ADDITION to the network
+// section: the SSID and passphrase stay visible. The 1 Hz LCD task removes it
+// once still_active() returns false (NULL = until recovery_lcd_set_warning("", NULL)).
+// Never pass a credential.
+void recovery_lcd_set_warning(const char *line, bool (*still_active)(void));
+
 // Removes the banner set by recovery_lcd_set_error() and redraws.
 void recovery_lcd_clear_error(void);
 

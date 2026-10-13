@@ -253,7 +253,8 @@ void recovery_install_boot(void)
                 s_last.reason = UPD_INST_REASON_OUTCOME_UNKNOWN;
                 s_have_last = true;
             }
-            recovery_lcd_set_error("INSTALL UNMONITORED", "DO NOT POWER-CYCLE");
+            // Warning only: keep the SoftAP SSID and passphrase on screen. The LCD task drops it when the apply ends.
+            recovery_lcd_set_warning("DO NOT POWER-CYCLE", recovery_apply_busy);
         }
     }
 }

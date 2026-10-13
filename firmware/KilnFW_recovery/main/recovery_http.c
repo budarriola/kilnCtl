@@ -234,6 +234,10 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return recovery_upload_send_error(req, http_status, msg);
     }
 
+    // Before the boot target is set (as recovery_exit_post does): a power loss between the two must not
+    // leave a pending auto-install request that replays over the image just pushed at the next entry.
+    int supersede_rc = recovery_install_supersede();
+
     esp_err_t err = recovery_boot_partition_set_and_verify(target);
     if (err != ESP_OK) {
         httpd_resp_set_status(req, "500 Internal Server Error");
@@ -242,15 +246,15 @@ static esp_err_t ota_esp_post(httpd_req_t *req)
         return ESP_FAIL;
     }
 
-    (void)recovery_install_supersede(); // a leftover auto-install request must not replay at a later entry
     // L3: a staged image of a different version must not stay installable
     // behind the image just pushed. Best effort: reported, never fatal.
     esp_err_t stage_err = stage_clear_after_upload();
-    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s)",
-             bg_msg, esp_err_to_name(stage_err));
-    char body[224];
-    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s", bg_msg,
-             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)");
+    ESP_LOGI(TAG, "application image accepted and written -- rebooting into it (%s; stage clear: %s; install request clear rc=%d)",
+             bg_msg, esp_err_to_name(stage_err), supersede_rc);
+    char body[320];
+    snprintf(body, sizeof(body), "ok, rebooting into new application image; %s; stage %s; install request %s", bg_msg,
+             stage_err == ESP_OK ? "cleared" : "clear FAILED (staged image may still be installable)",
+             supersede_rc == 0 ? "cleared" : "clear FAILED (a pending auto-install may replay at the next recovery entry)");
     esp_err_t sent = httpd_resp_sendstr(req, body);
     restart_soon(500);
     return sent;
@@ -607,13 +611,17 @@ static esp_err_t recovery_status_get(httpd_req_t *req)
         }
         ir_ver[sizeof(ir_ver) - 1] = '\0';
         e = send_frag(req, "\"nvs_unavailable\":%s,\"nvs_failed_mask\":%u,"
-                           "\"heap_internal_min_free\":%u,\"free_heap\":%u,"
-                           "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\"}}",
+                           "\"heap_internal_min_free\":%u,\"free_heap\":%u,",
                       nvs_failed ? "true" : "false", nvs_failed,
                       (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                      (unsigned)esp_get_free_heap_size(),
-                      have_ir ? update_install_code_name(ir.code) : "none",
-                      have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver);
+                      (unsigned)esp_get_free_heap_size());
+        // last_install goes out as its own fragment: the longest reason name (34 chars) plus a 31-char version
+        // is ~125 B and must never share a 200 B fragment with the numeric fields (it was cut short at 14-char versions).
+        if (e == ESP_OK) {
+            e = send_frag(req, "\"last_install\":{\"code\":\"%s\",\"reason\":\"%s\",\"version\":\"%s\"}}",
+                          have_ir ? update_install_code_name(ir.code) : "none",
+                          have_ir ? update_install_reason_name(ir.reason) : "none", ir_ver);
+        }
     }
     if (e != ESP_OK) {
         return ESP_FAIL; // truncated stream: close the connection
