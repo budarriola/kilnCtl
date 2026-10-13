@@ -320,3 +320,5 @@ them together.
 
 Trade-off: the older idle levels (29.6-31.1 KB, 29815 B) are now refused; the
 current firmware idles at 47191 B and is admitted.
+
+Negtest (kilnfw-host): baseline passed; 4 of 4 mutants caught by assertion failures, each compiled first. M1 admission back to the pre-scratch check (28623 B), M2 DMA precheck dropped, M3 margin cut to 512 B, M4 FETCH_HEAP_MAX_STEP_BYTES 4096 -> 2048 (caught by the pinned-value assertions in test_update_fetch_heap.c, not by the static assert). Real tree unchanged.
