@@ -215,3 +215,62 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
     }
     return UPD_INST_BOOT_STARTED;
 }
+
+static void set_msg(char *msg, size_t cap, const char *text)
+{
+    if (msg != NULL && cap > 0) {
+        strncpy(msg, text, cap - 1);
+        msg[cap - 1] = '\0';
+    }
+}
+
+bool update_install_prepare(const update_install_app_ops_t *ops, char *msg, size_t cap, int *http_status)
+{
+    int dummy = 0;
+    if (http_status == NULL) {
+        http_status = &dummy;
+    }
+    *http_status = 409;
+    if (ops == NULL || ops->kv_write_safe == NULL || ops->stage_info == NULL || ops->res_erase == NULL ||
+        ops->req_write == NULL) {
+        *http_status = 500;
+        set_msg(msg, cap, "install not available");
+        return false;
+    }
+    bool busy = false;
+    update_install_req_t req;
+    memset(&req, 0, sizeof(req));
+    bool verified = ops->stage_info(ops->ctx, &busy, &req.image_length, req.sha256, req.semver);
+    if (busy) {
+        set_msg(msg, cap, "stage busy (upload or fetch in progress)");
+        return false;
+    }
+    if (!verified || req.image_length == 0 || req.semver[0] == '\0') {
+        set_msg(msg, cap, "no verified staged image");
+        return false;
+    }
+    if (!ops->kv_write_safe(ops->ctx)) {
+        *http_status = 500;
+        set_msg(msg, cap, "storage not writable from this task");
+        return false;
+    }
+    req.semver[UPD_INST_SEMVER_LEN - 1] = '\0';
+    uint8_t blob[UPD_INST_REQ_SIZE];
+    if (update_install_req_encode(&req, blob) == 0) {
+        *http_status = 500;
+        set_msg(msg, cap, "install request encode failed");
+        return false;
+    }
+    // Old result first: if the request write then fails, the stale result is gone, never mistaken for this install's.
+    if (ops->res_erase(ops->ctx) != 0) {
+        *http_status = 500;
+        set_msg(msg, cap, "could not clear previous install result");
+        return false;
+    }
+    if (ops->req_write(ops->ctx, blob, UPD_INST_REQ_SIZE) != 0) {
+        *http_status = 500;
+        set_msg(msg, cap, "could not store install request");
+        return false;
+    }
+    return true;
+}

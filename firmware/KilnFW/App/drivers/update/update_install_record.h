@@ -118,6 +118,26 @@ update_install_boot_outcome_t update_install_boot_run(const update_install_ops_t
 int update_install_record_result(const update_install_ops_t *ops, uint8_t code, uint8_t reason,
                                  const char *semver);
 
+
+// ---- Application side: write the request before the reboot into recovery ----
+// Injected IO for update_install_prepare (the install route's prepare hook).
+typedef struct {
+    void *ctx;
+    bool (*kv_write_safe)(void *ctx); // NVS may be written from this task
+    // Stage as the stage header describes it. Returns true only for a stage that
+    // reads back VERIFIED (sha re-hashed from flash); *busy is true while an
+    // upload or fetch owns the stage.
+    bool (*stage_info)(void *ctx, bool *busy, uint32_t *image_length, uint8_t sha256[UPD_INST_SHA_LEN],
+                       char semver[UPD_INST_SEMVER_LEN]);
+    int (*res_erase)(void *ctx);                             // erase old result, read back gone
+    int (*req_write)(void *ctx, const uint8_t *buf, size_t len); // write request, read back equal
+} update_install_app_ops_t;
+
+// Returns true when a fresh request (attempts 0) is stored and read back. On false
+// msg holds the refusal text and *http_status is 409 (state refuses) or 500
+// (storage failed; the partially written request has been left for the undo hook).
+bool update_install_prepare(const update_install_app_ops_t *ops, char *msg, size_t cap, int *http_status);
+
 #ifdef __cplusplus
 }
 #endif

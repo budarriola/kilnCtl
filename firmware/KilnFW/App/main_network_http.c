@@ -40,6 +40,7 @@
 #include "settings_http.h"
 #include "cfg_fs_format_http.h"
 #include "update_http.h"
+#include "update_install_http.h"
 #include "update_settings.h"
 #include "update_settings_http.h"
 #include "factory_reset.h"
@@ -502,6 +503,14 @@ void main_network_http_bringup(main_boot_ctx_t *ctx)
     } else if (update_http_err != ESP_OK) {
         ESP_LOGW(MAIN_TAG, "update_http_start failed: %s -- no update-stage endpoints this boot",
                  esp_err_to_name(update_http_err));
+        startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
+    }
+
+    // Unattended install of the staged update (POST /api/update/install, GET /api/update/status).
+    esp_err_t update_install_http_err = update_install_http_start();
+    if (update_install_http_err != ESP_OK) {
+        ESP_LOGW(MAIN_TAG, "update_install_http_start failed: %s -- no install endpoint this boot",
+                 esp_err_to_name(update_install_http_err));
         startup_fault_note(STARTUP_FAULT_HTTP_ROUTES);
     }
 
