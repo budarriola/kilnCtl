@@ -265,6 +265,12 @@ static void heap_note(uint32_t f, uint32_t dma, uint32_t blk)
     st_unlock();
 }
 
+// A low-water that was never read (UINT32_MAX: e.g. a job refused before its first DMA reading) reports 0.
+static uint32_t heap_low_water(bool sampled, uint32_t v)
+{
+    return (sampled && v != UINT32_MAX) ? v : 0u;
+}
+
 static const char *heap_admit(const work_t *w, bool hop)
 {
     const bool dl = w->p.kind == KIND_DOWNLOAD;
@@ -1380,8 +1386,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
              "\"min_free\":%u,\"min_dma\":%u,\"min_block\":%u}}",
              jh->sampled ? "true" : "false", (unsigned)jh->rtc_free, (unsigned)jh->start_free, (unsigned)jh->start_dma,
              jh->hop_result == HOP_ADMITTED ? "admitted" : jh->hop_result == HOP_REFUSED ? "refused" : "none",
-             (unsigned)jh->hop_free, (unsigned)jh->hop_tries, (unsigned)(jh->sampled ? jh->min_free : 0u),
-             (unsigned)(jh->sampled ? jh->min_dma : 0u), (unsigned)(jh->sampled ? jh->min_block : 0u));
+             (unsigned)jh->hop_free, (unsigned)jh->hop_tries, (unsigned)heap_low_water(jh->sampled, jh->min_free),
+             (unsigned)heap_low_water(jh->sampled, jh->min_dma), (unsigned)heap_low_water(jh->sampled, jh->min_block));
     st_unlock();
     // Before any job has run the repo is the configured setting.
     if (bf->repo_now[0] == '\0') {

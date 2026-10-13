@@ -806,6 +806,8 @@ static void test_check_start_between_needs_updfx7(void)
     run_job_and_result("/api/update/check");
     CHECK(strcmp(g_error, "low_heap_free") == 0, "check start between the hop and start needs is refused");
     CHECK(g_fr_delay_calls == (int)FETCH_HEAP_SETTLE_TRIES, "the refused start waited the full settle");
+    CHECK(json_heap_num("min_dma") == 0, "a job refused before any DMA reading reports min_dma 0, not UINT32_MAX");
+    CHECK(json_heap_num("min_free") == (long)between, "min_free is the refused reading");
     expect_claim_balanced("check between needs");
     fixture(g_sha_hex, IMG_LEN);
     heap_idle_pair(FETCH_DOWNLOAD_HEAP_MIN_AFTER_SCRATCH);
